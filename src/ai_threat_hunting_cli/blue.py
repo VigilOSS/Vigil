@@ -775,6 +775,7 @@ def _default_task_for_role(role: str) -> str:
 
 def _cmd_tier(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
+    _read_scope(eng_dir / "scope.json", require_blue=True)
     details: dict[str, object] = {"tier": args.tier}
     if args.notes:
         details["tier_notes"] = args.notes
@@ -802,6 +803,7 @@ def _cmd_tier(args: argparse.Namespace, install_root: Path) -> None:
 
 def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
+    _read_scope(eng_dir / "scope.json", require_blue=True)
     blue_disp = args.disposition
     cli_disp = BLUE_TO_CLI_DISPOSITION[blue_disp]
 
@@ -954,6 +956,29 @@ def _fetch_command_run(install_root: Path, eng_dir: Path, command_run_id: int) -
     return row if isinstance(row, dict) else None
 
 
+def _require_containment_command_run(command_row: dict, command_run_id: int) -> None:
+    failures: list[str] = []
+    route = str(command_row.get("route") or "").strip()
+    if route != "host_exec":
+        failures.append(f"route={route!r}; expected 'host_exec'")
+    phase = str(command_row.get("phase") or "").strip().lower()
+    if phase != "respond":
+        failures.append(f"phase={phase!r}; expected 'respond'")
+    technique = str(command_row.get("technique") or "").strip().upper()
+    if technique != "CONTAINMENT":
+        failures.append(f"technique={technique!r}; expected 'CONTAINMENT'")
+    if command_row.get("success") is not True:
+        failures.append(f"success={command_row.get('success')!r}; expected true")
+    if failures:
+        raise SystemExit(
+            f"aith blue contain: command run id {command_run_id} is not valid containment proof: "
+            + "; ".join(failures)
+            + ". Execute the approved action through "
+            "`aith assess host-exec --require-audit --phase respond --technique CONTAINMENT ...` "
+            "and pass that run id."
+        )
+
+
 # ---------------------------------------------------------------------------
 # propose-contain
 # ---------------------------------------------------------------------------
@@ -961,6 +986,7 @@ def _fetch_command_run(install_root: Path, eng_dir: Path, command_run_id: int) -
 
 def _cmd_propose_contain(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
+    _read_scope(eng_dir / "scope.json", require_blue=True)
     if args.blast_radius not in CONTAINMENT_BLAST_RADII:
         raise SystemExit(f"--blast-radius must be one of {sorted(CONTAINMENT_BLAST_RADII)}")
 
@@ -1035,6 +1061,7 @@ def _cmd_propose_contain(args: argparse.Namespace, install_root: Path) -> None:
 
 def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
+    _read_scope(eng_dir / "scope.json", require_blue=True)
 
     # Approval gate: refuse unless the decision row referenced by --proposal
     # is resolved (`resolved=1`). Approval lands via
@@ -1097,6 +1124,7 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
                 f"aith blue contain: command run id {args.command_run_id} not found in this engagement. "
                 "Pass the id printed by `aith assess host-exec --require-audit ...` or use --proof-artifact."
             )
+        _require_containment_command_run(command_row, int(args.command_run_id))
 
     if args.proof_artifact:
         proof_path = Path(args.proof_artifact)
@@ -1206,6 +1234,7 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
 
 def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
+    _read_scope(eng_dir / "scope.json", require_blue=True)
     # Pre-flight: emit the gathered report-findings table so the operator sees
     # the input set before report-writer is dispatched.
     preflight_rc = _run_assess(install_root, eng_dir, ["list-report-findings", "--mode", "final"], check=False)
@@ -1256,6 +1285,7 @@ def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
 
 def _cmd_closeout(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
+    _read_scope(eng_dir / "scope.json", require_blue=True)
     preflight_rc = _run_assess(install_root, eng_dir, ["list-report-findings", "--mode", "final"], check=False)
     if preflight_rc != 0:
         raise SystemExit(preflight_rc)

@@ -2550,6 +2550,47 @@ def test_blue_verify_requires_verifier_dispatch_unless_forced(
     assert calls == []
 
 
+def test_blue_verify_rejects_non_blue_engagement_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    eng_dir.mkdir(parents=True)
+    (eng_dir / "scope.json").write_text(
+        json.dumps({"engagement_type": "web", "current_phase": "verify"}),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(blue_module, "_has_verifier_dispatch_for", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+
+    with pytest.raises(SystemExit, match="only works on blue engagements"):
+        blue_module._cmd_verify(
+            SimpleNamespace(
+                finding_slug="FIND-001",
+                disposition="verified",
+                reason="verified from tenant evidence",
+                kill_check=None,
+                kill_reason=None,
+                evidence_refs=None,
+                new_severity=None,
+                force=False,
+                engagement_key=None,
+                select=False,
+            ),
+            tmp_path,
+        )
+
+    assert calls == []
+
+
 def test_blue_verify_force_bypasses_missing_verifier_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2772,7 +2813,13 @@ def test_blue_contain_accepts_command_run_id_as_execution_proof(
     monkeypatch.setattr(
         blue_module,
         "_fetch_command_run",
-        lambda *_args, **_kwargs: {"id": 42, "route": "host_exec"},
+        lambda *_args, **_kwargs: {
+            "id": 42,
+            "route": "host_exec",
+            "phase": "respond",
+            "technique": "CONTAINMENT",
+            "success": True,
+        },
     )
     monkeypatch.setattr(
         blue_module,
@@ -2838,6 +2885,103 @@ def test_blue_contain_rejects_unknown_command_run_id(
                 proposal="7",
                 proof_artifact=None,
                 command_run_id=999999,
+                action=None,
+                target=None,
+                engagement_key=None,
+                select=False,
+            ),
+            tmp_path,
+        )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("command_row", "message"),
+    [
+        (
+            {
+                "id": 42,
+                "route": "kali",
+                "phase": "respond",
+                "technique": "CONTAINMENT",
+                "success": True,
+            },
+            "route='kali'",
+        ),
+        (
+            {
+                "id": 42,
+                "route": "host_exec",
+                "phase": "investigate",
+                "technique": "CONTAINMENT",
+                "success": True,
+            },
+            "phase='investigate'",
+        ),
+        (
+            {
+                "id": 42,
+                "route": "host_exec",
+                "phase": "respond",
+                "technique": "AUDIT-PULL",
+                "success": True,
+            },
+            "technique='AUDIT-PULL'",
+        ),
+        (
+            {
+                "id": 42,
+                "route": "host_exec",
+                "phase": "respond",
+                "technique": "CONTAINMENT",
+                "success": False,
+            },
+            "success=False",
+        ),
+    ],
+)
+def test_blue_contain_rejects_non_containment_command_run_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_row: dict,
+    message: str,
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(
+        blue_module,
+        "_fetch_containment_decision",
+        lambda *_args, **_kwargs: {
+            "id": 7,
+            "resolved": True,
+            "payload": {
+                "finding_slug": "FIND-001",
+                "action": "revoke_session",
+                "target": "alex@example.com",
+                "platform": "gws",
+            },
+        },
+    )
+    monkeypatch.setattr(blue_module, "_fetch_command_run", lambda *_args, **_kwargs: command_row)
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+
+    with pytest.raises(SystemExit, match=message):
+        blue_module._cmd_contain(
+            SimpleNamespace(
+                finding_slug="FIND-001",
+                proposal="7",
+                proof_artifact=None,
+                command_run_id=42,
                 action=None,
                 target=None,
                 engagement_key=None,
@@ -3746,7 +3890,7 @@ def test_blue_respond_gate_does_not_treat_approval_as_containment() -> None:
                         "payload": {"finding_slug": "FIND-001"},
                     }
                 ]
-            if endpoint == "artifacts/search?finding=FIND-001&limit=200":
+            if endpoint == "artifacts/search?finding=FIND-001&limit=1000&offset=0":
                 return []
             return []
 
@@ -3759,6 +3903,29 @@ def test_blue_respond_gate_does_not_treat_approval_as_containment() -> None:
     assert any(blocker["kind"] == "missing_containment_closure" for blocker in blockers)
 
 
+def test_blue_phase_gate_pages_activity_entries() -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_blue_activity_paging",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    calls: list[str] = []
+
+    class _Client:
+        def get_engagement(self, endpoint: str, query: str = ""):
+            assert endpoint == "activity-entries"
+            calls.append(query)
+            if query == "limit=1000&offset=0":
+                return {"items": [{"action": "old"} for _index in range(1000)]}
+            if query == "limit=1000&offset=1000":
+                return {"items": [{"action": "alert_intake"}]}
+            return {"items": []}
+
+    rows = module._blue_list_activity_entries(_Client())
+
+    assert rows[-1]["action"] == "alert_intake"
+    assert calls == ["limit=1000&offset=0", "limit=1000&offset=1000"]
+
+
 def test_blue_complete_gate_accepts_closeout_artifact() -> None:
     module = _load_assess_module(
         "transition_phase_command_module_closeout_gate",
@@ -3767,7 +3934,7 @@ def test_blue_complete_gate_accepts_closeout_artifact() -> None:
 
     class _Client:
         def get(self, endpoint: str):
-            if endpoint == "artifacts/search?limit=1000":
+            if endpoint == "artifacts/search?limit=1000&offset=0":
                 return [{"kind": "ir_closeout", "relative_path": "closeout.md"}]
             if endpoint == "findings":
                 return [{"slug": "FIND-001", "workflow_status": "false_positive"}]
@@ -3776,6 +3943,36 @@ def test_blue_complete_gate_accepts_closeout_artifact() -> None:
     blockers = module._blue_check_report_to_complete(_Client())
 
     assert blockers == []
+
+
+def test_blue_complete_gate_pages_until_closeout_artifact() -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_closeout_artifact_paging",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    calls: list[str] = []
+
+    class _Client:
+        def get(self, endpoint: str):
+            calls.append(endpoint)
+            if endpoint == "artifacts/search?limit=1000&offset=0":
+                return [
+                    {"kind": "ir_evidence", "relative_path": f"evidence-{index}.json"}
+                    for index in range(1000)
+                ]
+            if endpoint == "artifacts/search?limit=1000&offset=1000":
+                return [{"kind": "ir_closeout", "relative_path": "closeout.md"}]
+            if endpoint == "findings":
+                return [{"slug": "FIND-001", "workflow_status": "false_positive"}]
+            return []
+
+    blockers = module._blue_check_report_to_complete(_Client())
+
+    assert blockers == []
+    assert calls[:2] == [
+        "artifacts/search?limit=1000&offset=0",
+        "artifacts/search?limit=1000&offset=1000",
+    ]
 
 
 def test_blue_direct_phase_jump_runs_intermediate_gates(
@@ -3846,7 +4043,7 @@ def test_transition_phase_complete_marks_blue_scope_completed(
             pass
 
         def get(self, endpoint: str):
-            if endpoint == "artifacts/search?limit=1000":
+            if endpoint == "artifacts/search?limit=1000&offset=0":
                 return [{"kind": "ir_closeout", "relative_path": "closeout.md"}]
             if endpoint == "findings":
                 return [{"slug": "FIND-001", "workflow_status": "false_positive"}]
