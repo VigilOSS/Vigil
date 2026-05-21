@@ -108,11 +108,8 @@ aith assess artifact register <path> \
   [--scratch]
 ```
 
-Or auto-discover with:
-
-```bash
-aith assess artifact sync
-```
+Register each durable output explicitly — explicit registration preserves the
+producer, command-run, and finding linkage that report-readiness relies on.
 
 The backend computes SHA-256, FTS-indexes a preview, and links the artifact to
 its producer agent (`producer_agent_id`, `producer_agent_role`), the originating
@@ -127,7 +124,7 @@ hash + linkage remain auditable. Use `--scratch` (or
 transient working notes that should not appear in resume briefs or reports.
 
 **Manual `shasum -a 256 ... > SHA256SUMS.txt` is deprecated.** The backend
-computes SHA-256 on register/sync into `assessment_artifacts.sha256`. The
+computes SHA-256 on register/refresh into `assessment_artifacts.sha256`. The
 legacy `ir/reports/SHA256SUMS.txt` pattern is superseded by the artifact
 index.
 
@@ -379,14 +376,9 @@ agents cannot query unindexed local files.
      [--sensitive]
    ```
 
-   Or, when many artifacts were produced in one dispatch:
-
-   ```bash
-   aith assess artifact sync
-   ```
-
-   which walks `ir/reports/` and `ir/evidence/` and auto-registers anything
-   new with the calling agent as the producer.
+   When many artifacts were produced in one dispatch, register each durable
+   output separately so every row carries the correct producer, command-run,
+   and finding linkage.
 
 2. **Mark transient working notes as scratch.** Anything under `notes/scratch/`,
    ephemeral CSV slices, intermediate `.jq` filter outputs, throw-away

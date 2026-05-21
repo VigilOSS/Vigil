@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import time
 from dataclasses import dataclass
@@ -179,7 +180,8 @@ def proxy_status_payload(
     engagements_root = engagements_root.expanduser().resolve()
     container = _docker_inspect_summary(container_name, runner=runner)
     running = container.get("running") is True
-    port_reachable = _port_open("127.0.0.1", port)
+    status_port = _container_host_port(container) or port
+    port_reachable = _port_open("127.0.0.1", status_port)
     routes_snapshot = read_proxy_routes(engagements_root)
     if running:
         state = "running" if port_reachable else "starting"
@@ -201,7 +203,7 @@ def proxy_status_payload(
         "finished_at": container.get("finished_at"),
         "image": image,
         "image_present": docker.image_exists(image, runner=runner),
-        "port": port,
+        "port": status_port,
         "port_reachable": port_reachable,
         "cert_volume": volume_name,
         "cert_volume_present": docker.volume_exists(volume_name, runner=runner),
@@ -216,26 +218,51 @@ def proxy_status_payload(
 
 def _docker_inspect_summary(container_name: str, *, runner: docker.Runner) -> dict:
     """Single docker inspect call returns the fields proxy_status_payload needs."""
-    fmt = (
-        "{{.Id}}|{{.State.Running}}|{{.State.ExitCode}}|"
-        "{{.State.StartedAt}}|{{.State.FinishedAt}}"
-    )
+    fmt = "{{json .}}"
     result = runner(["docker", "inspect", "--format", fmt, container_name])
     if result.returncode != 0:
         return {"exists": False}
     line = (result.stdout or "").strip().splitlines()[0] if result.stdout else ""
-    parts = line.split("|")
-    if len(parts) < 5:
+    try:
+        doc = json.loads(line)
+    except json.JSONDecodeError:
         return {"exists": False}
-    cid, running, exit_code, started, finished = parts[0], parts[1], parts[2], parts[3], parts[4]
+    if not isinstance(doc, dict):
+        return {"exists": False}
+    state = doc.get("State") if isinstance(doc.get("State"), dict) else {}
+    cid = str(doc.get("Id") or "")
+    exit_code = state.get("ExitCode")
     return {
         "exists": True,
         "id": cid[:12],
-        "running": running.lower() == "true",
-        "exit_code": int(exit_code) if exit_code.lstrip("-").isdigit() else None,
-        "started_at": started or None,
-        "finished_at": finished or None,
+        "running": state.get("Running") is True,
+        "exit_code": exit_code if isinstance(exit_code, int) else None,
+        "started_at": state.get("StartedAt") or None,
+        "finished_at": state.get("FinishedAt") or None,
+        "host_port": _published_host_port(doc),
     }
+
+
+def _container_host_port(container: dict) -> int | None:
+    value = container.get("host_port")
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def _published_host_port(inspect_doc: dict) -> int | None:
+    network = inspect_doc.get("NetworkSettings") if isinstance(inspect_doc.get("NetworkSettings"), dict) else {}
+    ports = network.get("Ports") if isinstance(network.get("Ports"), dict) else {}
+    bindings = ports.get("8080/tcp")
+    if not isinstance(bindings, list):
+        return None
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            continue
+        raw_port = str(binding.get("HostPort") or "").strip()
+        if raw_port.isdigit():
+            port = int(raw_port)
+            if port > 0:
+                return port
+    return None
 
 
 def _container_log_tail(container_name: str, *, runner: docker.Runner, lines: int = 12) -> str:
