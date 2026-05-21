@@ -147,6 +147,7 @@ export type FindingDetails = {
 export type AssessmentFindingDetail = AssessmentFinding & {
   id: number;
   evidence_ref: string;
+  evidence_artifact_id?: number | null;
   notes: string;
   defect_family: string;
   root_cause_key: string;
@@ -294,6 +295,7 @@ export type AssessmentAttackChain = {
 export type AssessmentAttackChainDetail = AssessmentAttackChain & {
   id: number;
   evidence_ref: string;
+  evidence_artifact_id?: number | null;
 };
 
 export type AssessmentAttackChainLink = {

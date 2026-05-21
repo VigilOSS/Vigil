@@ -126,7 +126,7 @@ def test_artifact_register_search_and_get(client, isolate_settings) -> None:
     assert by_finding.json()[0]["relative_path"] == "notes/VA-047-note.md"
 
 
-def test_artifact_sync_discovers_blue_ir_artifact_roots(client, isolate_settings) -> None:
+def test_artifact_register_supports_blue_ir_artifact_roots(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     evidence_path = eng / "ir" / "evidence" / "network" / "beacons.tsv"
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -138,16 +138,52 @@ def test_artifact_sync_discovers_blue_ir_artifact_roots(client, isolate_settings
     alert_path.parent.mkdir(parents=True, exist_ok=True)
     alert_path.write_text("Suspicious sign-in\n", encoding="utf-8")
 
-    sync = client.post(f"{BASE}/artifacts/sync")
+    for relative_path in (
+        "ir/evidence/network/beacons.tsv",
+        "ir/reports/incident.md",
+        "ir/alerts/raw-alert.txt",
+    ):
+        registered = client.post(f"{BASE}/artifacts", json={"path": relative_path})
+        assert registered.status_code == 201, registered.text
 
-    assert sync.status_code == 200, sync.text
     search = client.get(f"{BASE}/artifacts/search", params={"q": "beacons"})
     assert search.status_code == 200, search.text
     paths = {row["relative_path"] for row in search.json()}
     assert "ir/evidence/network/beacons.tsv" in paths
     all_rows = client.get(f"{BASE}/artifacts/search", params={"limit": 1000})
-    indexed = {row["relative_path"] for row in all_rows.json()}
-    assert {"ir/reports/incident.md", "ir/alerts/raw-alert.txt"} <= indexed
+    indexed = {row["relative_path"]: row["kind"] for row in all_rows.json()}
+    assert {
+        "ir/evidence/network/beacons.tsv": "ir-evidence",
+        "ir/reports/incident.md": "ir-report",
+        "ir/alerts/raw-alert.txt": "ir-alert",
+    }.items() <= indexed.items()
+
+
+def test_artifact_refresh_updates_missing_registered_files(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+
+    search = client.get(f"{BASE}/artifacts/search", params={"q": "OIDC"})
+    artifact_id = next(row["id"] for row in search.json() if row["relative_path"] == "notes/VA-047-note.md")
+    (eng / "notes" / "VA-047-note.md").unlink()
+
+    readiness_before = client.get(f"{BASE}/report-readiness")
+    assert readiness_before.status_code == 200, readiness_before.text
+    assert readiness_before.json()["ready"] is True, readiness_before.json()
+
+    refresh = client.post(f"{BASE}/artifacts/refresh")
+    assert refresh.status_code == 200, refresh.text
+    assert refresh.json()["missing"] >= 1
+
+    detail = client.get(f"{BASE}/artifacts/{artifact_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["present"] is False
+    readiness_after = client.get(f"{BASE}/report-readiness")
+    assert any(
+        blocker["kind"] == "finding_evidence_missing_artifact" and blocker["slug"] == "VA-047"
+        for blocker in readiness_after.json()["blockers"]
+    )
 
 
 def test_artifact_register_preserves_existing_legacy_finding_slug(client, isolate_settings) -> None:
@@ -319,6 +355,32 @@ def test_report_readiness_normalizes_absolute_evidence_ref(client, isolate_setti
         blocker["kind"] == "finding_evidence_unindexed" and blocker["slug"] == "VA-048"
         for blocker in blockers
     )
+
+
+def test_report_readiness_validates_evidence_ref_when_artifact_id_is_present(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    replacement = eng / "notes" / "replacement-evidence.md"
+    replacement.write_text("replacement evidence file", encoding="utf-8")
+    _register_note(client, "notes/replacement-evidence.md", related_finding_slug="VA-047")
+
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET evidence_ref = ? WHERE slug = ?",
+            ("notes/replacement-evidence.md", "VA-047"),
+        )
+        connection.commit()
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    blockers = readiness.json()["blockers"]
+    mismatch = next(
+        blocker
+        for blocker in blockers
+        if blocker["kind"] == "finding_evidence_artifact_mismatch" and blocker["slug"] == "VA-047"
+    )
+    assert "aith assess update-finding VA-047 --evidence-ref notes/replacement-evidence.md" in mismatch["detail"]
 
 
 def test_mark_scratch_clears_unlinked_markdown_blocker(client, isolate_settings) -> None:
@@ -497,5 +559,3 @@ def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:
     assert len(actions) == 8
     assert "aith assess agent render-handoff va-memory" in commands
     assert "aith assess agent reconcile-stale --dry-run" in commands
-
-

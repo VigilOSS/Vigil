@@ -50,6 +50,7 @@ def start_oob(
         f"python3 {OOB_ROOT}/oob_server_watch.py 2>&1 | tee -a {OOB_ROOT}/watch.log",
         runner=runner,
     )
+    _reset_frpc_log(options.container_name, runner=runner)
     frpc_cmd = (
         f"while true; do "
         f"frpc -c {OOB_ROOT}/frpc.toml 2>&1 | tee {OOB_ROOT}/frpc.log; "
@@ -168,6 +169,10 @@ def _kill_stale_oob_processes(container_name: str, *, runner: docker.Runner) -> 
         _run_exec(container_name, f"pkill -f {shlex.quote(proc)} 2>/dev/null || true", runner=runner, check=False)
 
 
+def _reset_frpc_log(container_name: str, *, runner: docker.Runner) -> None:
+    _run_exec(container_name, f"mkdir -p {OOB_ROOT} && : > {OOB_ROOT}/frpc.log", runner=runner)
+
+
 def _require_runtime(container_name: str, *, runner: docker.Runner) -> None:
     if not docker.container_running(container_name, runner=runner):
         raise SystemExit("Kali runtime is not running. Start it with `aith runtime start`.")
@@ -189,6 +194,12 @@ _FRPC_SUCCESS_PATTERNS = (
     "start proxy success",
     "new proxy [",
 )
+_FRPC_EXPECTED_PROXY_LABELS = frozenset(("dns", "http", "reverse"))
+_FRPC_PROXY_LABEL_HINTS = {
+    "dns": "*-oob-dns",
+    "http": "*-oob",
+    "reverse": "*-oob-rev",
+}
 
 
 def _check_frpc_for_conflicts(
@@ -234,13 +245,32 @@ def _check_frpc_for_conflicts(
                 f"  docker exec {options.container_name} tail -n 200 {OOB_ROOT}/frpc.log\n"
                 "(See README §Callback, Listener & Tunnel Handling — TODO: per-tenant OOB.)"
             )
-        if any(pat in last_log for pat in _FRPC_SUCCESS_PATTERNS):
+        registered = _frpc_registered_proxy_labels(last_log)
+        if registered >= _FRPC_EXPECTED_PROXY_LABELS:
             return
         sleep(1.0)
+    missing = sorted(_FRPC_EXPECTED_PROXY_LABELS - _frpc_registered_proxy_labels(last_log))
+    missing_hint = ", ".join(_FRPC_PROXY_LABEL_HINTS[label] for label in missing)
+    target_hint = f" for {missing_hint}" if missing_hint else ""
     print(
-        f"oob check\tfrpc did not confirm proxy registration within {int(timeout)}s; "
+        f"oob check\tfrpc did not confirm proxy registration{target_hint} within {int(timeout)}s; "
         f"if callbacks do not land, run `docker exec {options.container_name} tail -n 200 {OOB_ROOT}/frpc.log`"
     )
+
+
+def _frpc_registered_proxy_labels(log_text: str) -> set[str]:
+    labels: set[str] = set()
+    for line in log_text.splitlines():
+        if not any(pat in line for pat in _FRPC_SUCCESS_PATTERNS):
+            continue
+        for token in re.findall(r"\[([^\]]+)\]", line):
+            if token.endswith("-oob-dns"):
+                labels.add("dns")
+            elif token.endswith("-oob-rev"):
+                labels.add("reverse")
+            elif token.endswith("-oob"):
+                labels.add("http")
+    return labels
 
 
 def _kill_oob_sessions(container_name: str, *, runner: docker.Runner) -> None:
