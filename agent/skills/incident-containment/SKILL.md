@@ -204,8 +204,8 @@ aith blue propose-contain <finding-slug> \
 #
 # IMPORTANT: when dispatching containment commands through
 # `aith assess host-exec`, argv containing `delete`, `--force`, `rm -r`,
-# `dd of=/dev/`, or `format` will be blocked by the default
-# destructive-token gate (see `_DESTRUCTIVE_TOKENS` in
+# `dd of=/dev/`, or the `format` command will be blocked by the default
+# destructive-token gate (see the destructive gate constants in
 # `agent/scripts/assess/commands/host_exec.py`). Common containment
 # operations — `aws iam delete-access-key`, `aws iam delete-user`,
 # `gcloud iam service-accounts delete`, anything with `--force` —

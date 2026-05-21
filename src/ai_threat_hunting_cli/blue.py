@@ -1111,20 +1111,21 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
     action = args.action or proposal_action or "contain"
     target = args.target or proposal_target or "-"
 
-    if not args.proof_artifact and getattr(args, "command_run_id", None) is None:
+    command_run_id = getattr(args, "command_run_id", None)
+    if not args.proof_artifact and command_run_id is None:
         raise SystemExit(
             "aith blue contain requires --proof-artifact or --command-run-id. "
             "Execute the approved action through `aith assess host-exec --require-audit ...` "
             "and pass the command run id, or register the captured stdout/screenshot as proof."
         )
-    if getattr(args, "command_run_id", None) is not None:
-        command_row = _fetch_command_run(install_root, eng_dir, int(args.command_run_id))
+    if command_run_id is not None:
+        command_row = _fetch_command_run(install_root, eng_dir, int(command_run_id))
         if command_row is None:
             raise SystemExit(
-                f"aith blue contain: command run id {args.command_run_id} not found in this engagement. "
+                f"aith blue contain: command run id {command_run_id} not found in this engagement. "
                 "Pass the id printed by `aith assess host-exec --require-audit ...` or use --proof-artifact."
             )
-        _require_containment_command_run(command_row, int(args.command_run_id))
+        _require_containment_command_run(command_row, int(command_run_id))
 
     if args.proof_artifact:
         proof_path = Path(args.proof_artifact)
@@ -1167,6 +1168,8 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
                 f"{proof_path} not in artifact index yet.",
                 file=sys.stderr,
             )
+            if command_run_id is None:
+                raise SystemExit(rc)
 
     metadata = {
         "containment_action": action,
