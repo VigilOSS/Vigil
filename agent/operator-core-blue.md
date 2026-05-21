@@ -249,7 +249,7 @@ Template: `agent/references/tenants/acme-workspace.md` is the canonical example.
 Every durable IR pull (raw log dump, evidence markdown, exported timeline,
 screenshot, IOC list, containment proof) registers to `assessment_artifacts`.
 Manual `SHA256SUMS.txt` is deprecated; the backend computes SHA-256 on
-register/sync into `assessment_artifacts.sha256`.
+register/refresh into `assessment_artifacts.sha256`.
 
 ```bash
 aith assess artifact register <path> \

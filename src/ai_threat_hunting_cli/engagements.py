@@ -779,7 +779,8 @@ def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *,
 - Agent workspace root: {agent_root}
 - Scripts: {agent_root / "scripts"}
 
-Artifact sync:
+Artifacts:
+- Use `aith assess artifact register <path>` to index engagement files explicitly
 - Use `aith assess ...` for assessment operations from any directory
 - Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported automatically
 - The local .orchestrator.env provides this engagement's orchestrator base URL; install-root env files are only fallbacks

@@ -285,11 +285,13 @@ transcript pasting:
   — bounded JSON+markdown operating picture (finding queues, recent decisions, stale
   dispatches, handoff gaps, top command-history matches, indexed artifacts, and
   one-shot drill-down commands keyed by id).
-- `aith assess artifact sync|search|get|register|mark-scratch`
-  — engagement-local file index. `sync` scans the default roots (`notes/`,
-  `findings_payloads/`, `tools/exploit-state/`, `scans/reports/`, `downloads/`) and
-  marks missing files. `search` is FTS over previews + paths + linked finding slugs.
-  `mark-scratch <path-or-id>` dismisses a markdown note as scratch so
+- `aith assess artifact search|get|register|refresh|mark-scratch`
+  — engagement-local file index. Agents/operators register heavy raw files
+  explicitly with `register <path> [--finding <slug>] [--agent-id <id>]
+  [--command-run-id <n>]`; the backend computes SHA-256, indexes preview text
+  for FTS, and links to a finding/chain/surface/request-variant/command-run.
+  `search` is FTS over previews + paths + linked finding slugs.
+  `mark-scratch <path-or-id>` dismisses a registered note as scratch so
   `check-report-readiness` no longer blocks on it (the escape valve for operator or
   specialist working notes that are not durable engagement memory).
 - `aith assess agent close <agent-id>`
@@ -471,7 +473,7 @@ aith oob test
 - **Tunnel setup, OOB callbacks, interactsh, frpc config:** `agent/references/offensive-tactics/frp-tunneling.md`
 - **Shell listeners, pwncat-vl, reverse shell payloads:** `agent/references/offensive-tactics/shell-handling.md`
 
-### OOB is single-tenant by design (pre-flight conflict check)
+### OOB is single-tenant by design (post-flight conflict check)
 
 `aith oob start` registers proxies on frps with hardcoded server-side resources:
 `remotePort = 53` (UDP), `remotePort = 8443` (TCP), and
@@ -480,19 +482,20 @@ only one client at a time can own the OOB profile. The hostname-derived prefix
 (`<container-id>-oob-*`) only avoids proxy *name* collisions; it does not
 namespace the underlying ports/domains.
 
-Before rendering frpc config, `start_oob` queries the frps dashboard at
-`AI_THREAT_HUNTING_FRP_DASHBOARD_URL` (default `http://127.0.0.1:7500`) and
-aborts with a clear error if another clientID owns those resources. Open the
-dashboard tunnel first so the check can run:
+After spawning the `frpc` tmux session, `start_oob` tails
+`/data/oob/frpc.log` for up to ~15s looking for success lines for all three
+rendered proxies (`*-oob-dns`, `*-oob`, and `*-oob-rev`) or `port already
+used` / `router config conflict` / `proxy name [...] already exists` from
+frps. If a conflict is reported, the tmux sessions are torn down and the
+command exits with the offending log lines verbatim. The check rides the
+existing frp control connection — no extra channel (SSH forward, dashboard
+tunnel, etc.) is required.
 
-```bash
-infra/frp/dashboard.sh   # in another terminal — leaves a port-forward to 7500
-```
-
-If unreachable, the check is skipped with a warning — frpc will still log
-`port already used` / `router config conflict` silently in
-`/data/oob/frpc.log` if a conflict exists. Dashboard credentials and URL can
-be overridden via `AI_THREAT_HUNTING_FRP_DASHBOARD_{URL,USER,PASSWORD}`.
+If the log shows neither outcome within the timeout, the command prints a
+non-fatal hint pointing at `docker exec security-research tail -n 200
+/data/oob/frpc.log` so the operator can inspect what frpc and frps are
+actually saying. Override the wait via the `frpc_ready_timeout` argument to
+`start_oob` (pass `0` to skip the scan entirely; tests do this).
 
 #### TODO — per-tenant OOB (multi-host concurrency)
 
@@ -514,8 +517,8 @@ the OOB profile multi-tenant, refactor `src/ai_threat_hunting_cli/oob.py
    convention only documents proxy-name uniqueness; the per-tenant model
    needs to replace it.
 
-Until that lands, the pre-flight check above is the unblocker: stop the
-conflicting host, then `aith oob start`.
+Once per-tenant OOB lands, the post-flight conflict scan above becomes a
+no-op and can be deleted.
 
 ## Multi-Agent Workflow
 

@@ -38,6 +38,17 @@ _WORK_ITEMS_PRIORITY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("selected_by", "TEXT"),
     ("triage_rationale", "TEXT"),
     ("live_status", "TEXT"),
+    # Truncation flags. The producer (mitmproxy addon, kali wrapper, etc.)
+    # writes 1 when `content_length > saved body size` or `response_size >
+    # response_snippet size`. NULL on rows from older DBs is interpreted
+    # as "unknown" by consumers; rows from current producers always have
+    # an explicit 0/1.
+    ("request_body_truncated", "INTEGER NOT NULL DEFAULT 0"),
+    ("response_truncated", "INTEGER NOT NULL DEFAULT 0"),
+)
+_CASES_TRUNCATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("request_body_truncated", "INTEGER NOT NULL DEFAULT 0"),
+    ("response_truncated", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -65,6 +76,7 @@ def db_init(db_path: str) -> None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         _apply_work_items_priority_migration(conn)
+        _apply_cases_truncation_migration(conn)
         schema_sql = _SCHEMA_FILE.read_text(encoding="utf-8")
         conn.executescript(schema_sql)
         _apply_work_items_per_host_view(conn)
@@ -146,6 +158,23 @@ def _apply_work_items_priority_migration(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE work_items ADD COLUMN {name} {decl}")
 
 
+def _apply_cases_truncation_migration(conn: sqlite3.Connection) -> None:
+    """Add truncation flag columns to `cases` for legacy engagement DBs.
+
+    Same PRAGMA-table_info pattern as the work_items migration. Without
+    this, an existing engagement that captured before the schema change
+    would still report old rows but silently drop the new columns from
+    inserts (because `db_insert_work_item` only writes to columns it
+    declares).
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
+    if not existing:
+        return
+    for name, decl in _CASES_TRUNCATION_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE cases ADD COLUMN {name} {decl}")
+
+
 def db_query(db_path: str, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
     """Execute a query and return results as list of dicts."""
     conn = sqlite3.connect(db_path, timeout=5.0)
@@ -185,10 +214,12 @@ def db_insert_work_item(
     body: str | None = "",
     content_type: str = "",
     content_length: int = 0,
+    request_body_truncated: bool = False,
     response_status: int = 0,
     response_headers: str = "",
     response_size: int = 0,
     response_snippet: str | None = "",
+    response_truncated: bool = False,
     case_type: str = "unknown",
     source: str = "",
     params_key_sig: str = "",
@@ -287,10 +318,12 @@ def db_insert_work_item(
                         body = ?,
                         content_type = ?,
                         content_length = ?,
+                        request_body_truncated = ?,
                         response_status = ?,
                         response_headers = ?,
                         response_size = ?,
                         response_snippet = ?,
+                        response_truncated = ?,
                         type = ?,
                         source = ?,
                         params_key_sig = ?
@@ -300,7 +333,9 @@ def db_insert_work_item(
                         method, url, url_path,
                         query_params, body_params, path_params, cookie_params,
                         headers, body, content_type, content_length,
+                        1 if request_body_truncated else 0,
                         response_status, response_headers, response_size, response_snippet,
+                        1 if response_truncated else 0,
                         case_type, source, params_key_sig,
                         existing_id,
                     ),
@@ -311,23 +346,23 @@ def db_insert_work_item(
                     queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
                     method, url, url_path,
                     query_params, body_params, path_params, cookie_params,
-                    headers, body, content_type, content_length,
-                    response_status, response_headers, response_size, response_snippet,
+                    headers, body, content_type, content_length, request_body_truncated,
+                    response_status, response_headers, response_size, response_snippet, response_truncated,
                     type, source, status, params_key_sig
                 ) VALUES (
                     ?, ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?,
                     ?, ?, ?, ?
                 )""",
                 (
                     queue_key, request_variant_id, service_id, coverage_item_id, auth_context,
                     method, url, url_path,
                     query_params, body_params, path_params, cookie_params,
-                    headers, body, content_type, content_length,
-                    response_status, response_headers, response_size, response_snippet,
+                    headers, body, content_type, content_length, 1 if request_body_truncated else 0,
+                    response_status, response_headers, response_size, response_snippet, 1 if response_truncated else 0,
                     case_type, source, status, params_key_sig,
                 ),
             )
