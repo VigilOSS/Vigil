@@ -32,6 +32,10 @@ class EngagementView:
     created_at: str
     updated_at: str
     session_count: int
+    engagement_type: str | None = None
+    customer: str | None = None
+    platforms: list[str] | None = None
+    tenant_reference_paths: list[str] | None = None
 
 
 _sync_lock = Lock()
@@ -166,10 +170,16 @@ def _manifest_for(engagement_dir: Path) -> dict[str, Any]:
     key = engagement_dir.name
     target = str(manifest.get("target") or manifest.get("hostname") or scope.get("hostname") or key)
     status = str(scope.get("status") or "in_progress")
+    # ``engagement_type`` comes from scope.json (preferred) with a fallback to
+    # engagement.json. None means "leave whatever the DB had", which preserves
+    # the DEFAULT 'red' for fresh rows without overriding existing values.
+    raw_type = scope.get("engagement_type") or manifest.get("engagement_type")
+    engagement_type: str | None = str(raw_type) if raw_type else None
     return {
         "key": key,
         "target": target,
         "status": status,
+        "engagement_type": engagement_type,
         "scope": scope,
     }
 
@@ -260,6 +270,7 @@ def sync_engagements() -> None:
                     manifest["target"],
                     manifest["status"],
                     str(engagement_dir),
+                    engagement_type=manifest.get("engagement_type"),
                 )
             else:
                 db.update_engagement_identity(
@@ -267,6 +278,7 @@ def sync_engagements() -> None:
                     manifest["target"],
                     manifest["status"],
                     str(engagement_dir),
+                    engagement_type=manifest.get("engagement_type"),
                 )
                 engagement = db.get_engagement_by_id(engagement.id)
                 assert engagement is not None
@@ -330,12 +342,12 @@ def maybe_sync_engagements(force: bool = False) -> None:
 
 def _scope_details(
     engagement_root: Path,
-) -> tuple[str, str, str, list[str], list[str], int]:
+) -> tuple[str, str, str, list[str], list[str], int, str | None, list[str], list[str]]:
     try:
         scope = _migrate_scope_file(engagement_root / "scope.json")
     except RuntimeError as exc:
         _logger.warning("Using persisted engagement identity for invalid scope at %s: %s", engagement_root, exc)
-        return "unknown", "pause", "pending", [], [], 0
+        return "unknown", "pause", "pending", [], [], 0, None, [], []
     current_phase = str(scope.get("current_phase") or "unknown")
     exploit_policy = str(scope.get("exploit_policy") or "pause")
     exploit_review_state = str(scope.get("exploit_review_state") or "pending")
@@ -348,6 +360,12 @@ def _scope_details(
         scope_priority = int(raw_priority) if raw_priority is not None else 0
     except (TypeError, ValueError):
         scope_priority = 0
+    raw_customer = scope.get("customer")
+    customer = str(raw_customer) if isinstance(raw_customer, str) and raw_customer.strip() else None
+    raw_platforms = scope.get("platforms")
+    platforms = [str(item) for item in raw_platforms] if isinstance(raw_platforms, list) else []
+    raw_tenant_refs = scope.get("tenant_reference_paths")
+    tenant_reference_paths = [str(item) for item in raw_tenant_refs] if isinstance(raw_tenant_refs, list) else []
     return (
         current_phase,
         exploit_policy,
@@ -355,6 +373,9 @@ def _scope_details(
         [str(item) for item in approved_targets],
         scope_hosts,
         scope_priority,
+        customer,
+        platforms,
+        tenant_reference_paths,
     )
 
 
@@ -395,6 +416,9 @@ def _view_for(engagement: Engagement) -> EngagementView:
         approved_targets,
         scope_hosts,
         scope_priority,
+        customer,
+        platforms,
+        tenant_reference_paths,
     ) = _scope_details(Path(engagement.engagement_root))
     return EngagementView(
         id=engagement.id,
@@ -411,6 +435,10 @@ def _view_for(engagement: Engagement) -> EngagementView:
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         session_count=len(db.list_engagement_sessions_for_engagement(engagement.id)),
+        engagement_type=engagement.engagement_type,
+        customer=customer,
+        platforms=platforms,
+        tenant_reference_paths=tenant_reference_paths,
     )
 
 

@@ -157,6 +157,52 @@ def test_list_engagements_filters_by_status(client, isolate_settings):
     assert completed_dir.name not in active_only
 
 
+def test_list_engagements_surfaces_and_filters_blue_customer_platform(client, isolate_settings):
+    engagements_dir = isolate_settings["engagements_dir"]
+    blue_dir = engagements_dir / "2026-05-20-120000-acme-corp-gws"
+    other_dir = engagements_dir / "2026-05-20-121000-acme-aws"
+    for path, customer, platforms in (
+        (blue_dir, "acme-corp", ["gws", "m365"]),
+        (other_dir, "acme", ["aws"]),
+    ):
+        (path / "sessions").mkdir(parents=True)
+        (path / "engagement.json").write_text(
+            json.dumps(
+                {
+                    "key": path.name,
+                    "target": f"{customer}:{','.join(platforms)}",
+                    "created_at": "2026-05-20T12:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (path / "scope.json").write_text(
+            json.dumps(
+                {
+                    "engagement_type": "blue",
+                    "customer": customer,
+                    "platforms": platforms,
+                    "tenant_reference_paths": [
+                        f"agent/references/tenants/{customer}-{platforms[0]}.md"
+                    ],
+                    "status": "in_progress",
+                    "current_phase": "intake",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (path / "sessions" / "index.json").write_text("[]", encoding="utf-8")
+
+    rows = client.get("/engagements?engagement_type=blue&customer=acme-corp").json()
+    assert [row["key"] for row in rows] == [blue_dir.name]
+    assert rows[0]["customer"] == "acme-corp"
+    assert rows[0]["platforms"] == ["gws", "m365"]
+    assert rows[0]["tenant_reference_paths"] == ["agent/references/tenants/acme-corp-gws.md"]
+
+    platform_rows = client.get("/engagements?engagement_type=blue&platform=m365").json()
+    assert [row["key"] for row in platform_rows] == [blue_dir.name]
+
+
 def test_maybe_sync_engagements_skips_repeated_resync_without_filesystem_changes(isolate_settings, monkeypatch):
     write_engagement(isolate_settings["engagements_dir"])
     db_module.init_db()
@@ -695,7 +741,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
 
     report_readiness = client.get("/engagements/2026-03-30-120000-example/assessment/report-readiness")
     assert report_readiness.status_code == 200
-    assert report_readiness.json()["ready"] is True
+    assert report_readiness.json()["ready"] is True, report_readiness.json()
     assert report_readiness.json()["blocker_count"] == 0
 
     final_report = client.get(
@@ -937,6 +983,95 @@ def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate
         blocker["kind"] == "finding_verification_state"
         for blocker in final_report.json()["detail"]["blockers"]
     )
+
+
+def test_final_report_includes_verified_contained_blue_finding(client, isolate_settings):
+    engagement_dir = write_engagement(isolate_settings["engagements_dir"])
+    scope_path = engagement_dir / "scope.json"
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope.update(
+        {
+            "engagement_type": "blue",
+            "customer": "acme-corp",
+            "platforms": ["gws"],
+            "tenant_reference_paths": ["agent/references/tenants/acme-corp-workspace.md"],
+            "current_phase": "report",
+        }
+    )
+    scope_path.write_text(json.dumps(scope), encoding="utf-8")
+
+    create_surface = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/surfaces",
+        json={
+            "surface_type": "object_reference",
+            "target_descriptor": "acme-corp:gws:user@acme-corp.example",
+            "source_name": "investigator",
+            "status": "covered",
+        },
+    )
+    assert create_surface.status_code == 201
+
+    create_finding = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "IR-001",
+            "title": "Compromised mailbox session contained",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "defect_family": "account-compromise",
+            "root_cause_key": "gws-compromised-session",
+            "auth_context": "tenant",
+            "canonical_location": "acme-corp:gws:user@acme-corp.example",
+            "summary": "Attacker held a valid mailbox session before revocation.",
+            "evidence_ref": "ir/evidence/session.md",
+            "notes": "Contained via session revoke.",
+            "source_name": "investigator",
+            "details": {
+                "impact": "mailbox session access",
+                "evidence": "Artifact 12 confirms login and Artifact 19 confirms revocation.",
+                "mitre_techniques": ["T1078.004"],
+            },
+            "provenance": {"agent_name": "investigator"},
+            "links": [],
+        },
+    )
+    assert create_finding.status_code == 201
+
+    evidence_path = engagement_dir / "ir" / "evidence" / "session.md"
+    evidence_path.parent.mkdir(parents=True)
+    evidence_path.write_text("session evidence\n", encoding="utf-8")
+    register_artifact = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/artifacts",
+        json={
+            "path": "ir/evidence/session.md",
+            "kind": "ir_evidence",
+            "related_finding_slug": "IR-001",
+        },
+    )
+    assert register_artifact.status_code == 201
+
+    patch_finding = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/IR-001",
+        json={
+            "workflow_status": "contained",
+            "source_name": "ir-lead",
+            "reason_code": "containment_recorded",
+            "reason_text": "blue contain recorded approved action",
+        },
+    )
+    assert patch_finding.status_code == 200
+
+    report_readiness = client.get("/engagements/2026-03-30-120000-example/assessment/report-readiness")
+    assert report_readiness.status_code == 200
+    assert report_readiness.json()["ready"] is True, report_readiness.json()
+
+    final_report = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/report-findings?mode=final"
+    )
+    assert final_report.status_code == 200
+    assert [row["slug"] for row in final_report.json()["standalone"]] == ["IR-001"]
 
 
 def test_coverage_patch_normalizes_tested_to_covered_and_refreshes_service_status(client, isolate_settings):

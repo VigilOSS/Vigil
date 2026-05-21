@@ -20,6 +20,7 @@ import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 
 
 def register(subparsers) -> None:
@@ -44,6 +45,8 @@ def register(subparsers) -> None:
             "`aith assess --actor-kind operator log ...`."
         ),
     )
+    p.add_argument("--metadata-inline", help="Inline JSON object stored on activity_entries.metadata")
+    p.add_argument("--metadata-file", help="Path to a JSON object stored on activity_entries.metadata")
     p.set_defaults(func=run)
 
 
@@ -66,6 +69,31 @@ def run(args) -> None:
     action = args.action
     result = args.result
 
+    metadata_inline = getattr(args, "metadata_inline", None)
+    metadata_file = getattr(args, "metadata_file", None)
+    if metadata_inline and metadata_file:
+        print("pass only one of --metadata-inline or --metadata-file", file=sys.stderr)
+        sys.exit(1)
+    try:
+        if metadata_file:
+            metadata, _ = parse_json_argument(
+                metadata_file,
+                inline=False,
+                description="activity metadata JSON",
+            )
+        else:
+            metadata = parse_optional_inline_json(
+                metadata_inline,
+                default=None,
+                description="activity metadata JSON",
+            )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    if metadata is not None and not isinstance(metadata, dict):
+        print("activity metadata JSON must be an object", file=sys.stderr)
+        sys.exit(1)
+
     cfg = load_config(eng_dir)
 
     # Normalise length to match the backend pydantic caps (see
@@ -79,6 +107,8 @@ def run(args) -> None:
         "action": _truncate(action, 3800),
         "result": _truncate(result, 3800),
     }
+    if metadata is not None:
+        payload["metadata"] = metadata
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:

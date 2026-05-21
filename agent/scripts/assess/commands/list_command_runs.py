@@ -53,7 +53,13 @@ def register(subparsers) -> None:
             "store an empty value; use --q for substring search on those rows."
         ),
     )
-    p.add_argument("--audit-source", dest="audit_source", default="", choices=["", "header", "env_fallback", "mixed"], help="Filter by attribution provenance")
+    p.add_argument(
+        "--audit-source",
+        dest="audit_source",
+        default="",
+        choices=["", "header", "env_fallback", "mixed", "stdin", "argv"],
+        help="Filter by attribution provenance",
+    )
     p.add_argument(
         "--technique",
         dest="technique",

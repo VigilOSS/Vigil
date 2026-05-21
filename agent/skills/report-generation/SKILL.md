@@ -203,7 +203,7 @@ Only proceed to report generation after validation passes or the operator resolv
 3. **Fix report-local failures before returning to the operator**
 4. **Return the completed checklist and current QA status**
 
-Do not emit `report.generated` or mark findings `reported` during draft generation. Publication belongs after the operator dispatches a fresh report-writer in review-and-fix QA mode and receives `QA PASS`, because lifecycle transitions before QA make an unreviewed report look final.
+Do not emit `report.generated`, `closeout.generated`, or mark findings `reported` during draft generation. Publication belongs after the operator dispatches a fresh report-writer in review-and-fix QA mode and receives `QA PASS`, because lifecycle transitions before QA make an unreviewed report look final.
 
 ## Post-Generation Self-Review
 
@@ -263,7 +263,8 @@ The field name on `update-finding --inline` is `details` (dict), not `details_js
 
 Run these publication steps only after the operator confirms the report QA gate passed:
 
-1. **Emit a runtime event** so the orchestrator and UI know the report exists:
+1. **Emit a runtime event** so the orchestrator and UI know the artifact exists.
+   For red engagements and blue verified-incident reports:
    ```bash
    aith assess emit-event \
        "report.generated" \
@@ -271,6 +272,15 @@ Run these publication steps only after the operator confirms the report QA gate 
        "report.md" \
        "report-writer" \
        "Report generated with N findings"
+   ```
+   For blue closeout artifacts (false-positive, benign, no-impact, or inconclusive):
+   ```bash
+   aith assess emit-event \
+       "closeout.generated" \
+       "report" \
+       "closeout.md" \
+       "report-writer" \
+       "Closeout generated"
    ```
 2. **Update finding workflow status to `reported`** for all findings included in the report:
    ```bash
@@ -305,9 +315,73 @@ Load before writing:
 - `agent/references/bugbounty-submission-format.md` — authoritative spec (structure, rules)
 - `agent/references/examples/bugbounty-submission-ldap-injection.md` — working example with POC
 
+## Blue Mode
+
+When the active engagement is `engagement_type=blue`, the report-writer loads the
+template at `agent/skills/report-generation/templates/blue.md` instead of the default
+red template above. Red template behavior is unchanged — the blue template is a
+parallel file the dispatch points at by name, not a fork of this skill.
+
+Differences from red mode:
+
+- **Disposition vocabulary** — blue uses `verified | false_positive | downgraded | escalated`
+  (the canonical four-value vocab written verbatim to `details_json.disposition`). Findings
+  with `false_positive` are excluded from the report body but appear in Appendix B's audit
+  trail; their artifacts remain in the index marked scratch.
+- **Citation vocabulary** — MITRE ATT&CK technique IDs (e.g., `T1078.004`, `T1098.002`)
+  replace CWE / OWASP / CVSS. Severity is set from MITRE impact + proved blast radius
+  per `agent/rules/triage.md` §2, not from CVSS vectors.
+- **Scope unit** — tenant, not host. Pull `scope.json:tenant_reference_paths[]` for the
+  tenant-ref citations the report cross-references; never cite cross-tenant artifacts.
+- **PII handling** — sections 1–10 carry no PII. PII references (UPN-to-human mappings,
+  message bodies, credential fragments, IP/UPN combinations) live in Appendix B, which
+  is delivered separately on an encrypted channel.
+- **Forbidden vocabulary** — no "PoC", "exploit chain", "weaponized", "Steps to
+  Reproduce" (red framing). Blue uses "evidence reproduction" (artifact-id-cited
+  command), "kill-chain stage", "adversary capability".
+- **Closeout artifact** — every blue engagement ends with a customer-facing
+  artifact. False-positive, benign, no-impact, or inconclusive outcomes use
+  `closeout.md`; verified incidents use `report.md`.
+- **Closing sequence** — after the rendered closeout/report passes the same post-generation
+  self-review checks listed above, register the rendered file as an artifact:
+  ```bash
+  aith assess artifact register closeout.md \
+    --kind ir_closeout \
+    --agent-id <report-writer-agent-id>
+
+  aith assess artifact register report.md \
+    --kind ir_evidence \
+    --finding <slug-list-or-engagement-ref> \
+    --agent-id <report-writer-agent-id>
+  ```
+  Then run the existing `Publish After QA Pass` steps. Emit `closeout.generated`
+  for `closeout.md` or `report.generated` for `report.md`, mark findings terminal,
+  and transition phase to `complete`.
+
+Dispatch invocation (worked example):
+
+```bash
+aith blue report --engagement-key <key>
+aith blue closeout --engagement-key <key>
+# internally dispatches:
+# aith assess agent start \
+#   --role report-writer \
+#   --skills report-generation \
+#   --task "Render blue incident report from durable backend state. Load
+#           template at agent/skills/report-generation/templates/blue.md.
+#           Pull findings, timeline, artifacts, containment actions per the
+#           template's macros."
+```
+
+The macros section at the bottom of `templates/blue.md` lists the exact backend queries
+(`list-report-findings`, `fetch activity-entries`, `artifact search`,
+`list-command-runs --phase respond`, `agent list`, `agent render-handoff`,
+`check-report-readiness`) the writer runs to populate each template section.
+
 ## Extended Resources
 
 - `agent/references/runtime-guides/engagement-methodology.md` — methodology narrative source
 - `agent/references/disclosure-email-format.md` — email disclosure format and rules
 - `agent/references/bugbounty-submission-format.md` — bug bounty submission format
 - `agent/references/examples/` — working examples for both output modes
+- `agent/skills/report-generation/templates/blue.md` — blue incident report template

@@ -17,13 +17,16 @@ Do not churn it for:
 
 # Operator prompt regeneration
 
-`agent/operator-core.md` is the source for the rendered operator prompts. When you change
-`agent/operator-core.md` or `agent/scripts/render-operator-prompts.sh`, rerender the tracked
-artifacts before handing off:
+`agent/operator-core.md` is the source for the rendered red operator prompts.
+`agent/operator-core-blue.md` is the source for blue per-engagement operator prompts. When you change
+`agent/operator-core.md`, `agent/operator-core-blue.md`, `agent/agents/*.md`, or
+`agent/scripts/render-operator-prompts.sh`, rerender the affected tracked artifacts before handing off:
 
 ```bash
 cd agent
 ./scripts/render-operator-prompts.sh repo
+# If blue prompt sources or shared blue-role prompts changed:
+./scripts/render-operator-prompts.sh repo --type blue
 ```
 
 After rerendering, review the generated prompt diffs directly. The repository does not
@@ -57,12 +60,15 @@ so edits land in the right place and do not create drift.
   It defines phase flow, dispatch rules, recording rules, and backend-vs-artifact truth boundaries.
 - `agent/operator-core-code.md` is a mode overlay for white-box code analysis. It reuses the same
   backend and CLI, but changes phases, dispatch context, and specialist responsibilities.
+- `agent/operator-core-blue.md` is the source-of-truth operator loop for blue-team incident
+  engagements. It defines intake/triage/investigate/verify/respond/report flow, tenant-reference
+  injection, and containment proposal/approval/recording boundaries.
 - `agent/AGENTS.md` and `agent/CLAUDE.md` are generated operator wrappers. They are committed outputs,
   not authoring surfaces. If they need semantic changes, edit the source prompt and rerender.
 - `agent/agents/*.md` are role prompts. They define agent identity, responsibilities, handoffs,
   and examples for a specific specialist. They should not become an independent source of backend
   contract truth.
-- `agent/shared-constraints.md` and `agent/shared-constraints-code.md` are the first-load
+- `agent/shared-constraints.md`, `agent/shared-constraints-code.md`, and `agent/shared-constraints-blue.md` are the first-load
   specialist contract layer. Rules that must hold across many specialists belong here or in the
   CLI, not in only one role prompt.
 - `agent/rules/*.md` are always-active behavioral rules. They shape methodology and writing style;
@@ -73,7 +79,7 @@ so edits land in the right place and do not create drift.
 
 ## Editing rules
 
-- Put workflow and orchestration changes in `operator-core.md` or `operator-core-code.md`,
+- Put workflow and orchestration changes in `operator-core.md`, `operator-core-code.md`, or `operator-core-blue.md`,
   because those files define how the system moves between phases and specialists.
 - Put cross-specialist constraints in `shared-constraints*.md`, because that is where subagents
   load durable recording and scope rules before role-specific instructions.
@@ -92,10 +98,11 @@ editing so the change stays coherent across layers:
 
 1. `agent/operator-core.md`
 2. `agent/operator-core-code.md` if code analysis is involved
-3. Relevant `agent/agents/*.md` role prompts
-4. `agent/shared-constraints.md` or `agent/shared-constraints-code.md`
-5. The owning `aith assess` helper command and its tests
-6. Generated operator wrappers after rerendering
+3. `agent/operator-core-blue.md` if blue incident response is involved
+4. Relevant `agent/agents/*.md` role prompts
+5. `agent/shared-constraints.md`, `agent/shared-constraints-code.md`, or `agent/shared-constraints-blue.md`
+6. The owning `aith assess` / `aith blue` helper command and its tests
+7. Generated operator wrappers after rerendering
 
 If a change affects prompt generation, rerender and review the generated wrapper diffs.
 If a change affects CLI ownership or lifecycle behavior, run the relevant backend CLI and API tests,

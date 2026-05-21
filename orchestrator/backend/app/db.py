@@ -551,10 +551,27 @@ def init_db() -> None:
                 target TEXT NOT NULL,
                 status TEXT NOT NULL,
                 engagement_root TEXT NOT NULL,
+                engagement_type TEXT NULL DEFAULT 'red',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
+        )
+        # Additive migration for pre-existing DBs created before the
+        # ``engagement_type`` column was introduced. New schema gets it via
+        # CREATE TABLE above; existing rows stay NULL (no DEFAULT backfill —
+        # the DEFAULT only applies on INSERT of new rows). Allowed values are
+        # enforced in the Pydantic layer ('red' | 'web' | 'code' | 'both' |
+        # 'android' | 'blue'); the schema stays free-form TEXT so the enum can
+        # evolve without a rebuild.
+        engagement_columns = _table_columns(connection, "engagements")
+        if engagement_columns and "engagement_type" not in engagement_columns:
+            connection.execute(
+                "ALTER TABLE engagements ADD COLUMN engagement_type TEXT NULL DEFAULT 'red'"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_engagements_engagement_type "
+            "ON engagements(engagement_type)"
         )
         # NOTE: Older dev databases may carry an ``engagement_token`` column
         # left over from a previous experiment. SQLite < 3.35 cannot DROP
@@ -2154,6 +2171,7 @@ def init_db() -> None:
                 dispatch_mode TEXT,
                 finding_slugs_json TEXT,
                 skills TEXT,
+                tier TEXT,
                 UNIQUE(engagement_id, agent_id)
             )
             """
@@ -2173,6 +2191,11 @@ def init_db() -> None:
             connection.execute("UPDATE assessment_dispatches SET requested_reasoning = reasoning WHERE requested_reasoning IS NULL")
         if dispatch_columns and "actual_reasoning" not in dispatch_columns:
             connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN actual_reasoning TEXT")
+        # Blue-engagement tier tag ('L1' | 'L2' | 'L3' | 'L4'). Enforced in
+        # the Pydantic layer; stored as free-form TEXT so the enum can evolve
+        # without a schema rebuild. Existing rows stay NULL.
+        if dispatch_columns and "tier" not in dispatch_columns:
+            connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN tier TEXT")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_at "
             "ON assessment_dispatches(engagement_id, dispatched_at DESC)"
@@ -2184,6 +2207,10 @@ def init_db() -> None:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_status "
             "ON assessment_dispatches(engagement_id, status)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_tier "
+            "ON assessment_dispatches(engagement_id, tier)"
         )
 
         connection.execute(
@@ -2497,18 +2524,28 @@ def create_engagement(
     target: str,
     status: str,
     engagement_root: str,
+    engagement_type: str | None = None,
 ) -> Engagement:
     with get_connection() as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO engagements (key, target, status, engagement_root)
-            VALUES (?, ?, ?, ?)
-            """,
-            (key, target, status, engagement_root),
-        )
+        if engagement_type is None:
+            cursor = connection.execute(
+                """
+                INSERT INTO engagements (key, target, status, engagement_root)
+                VALUES (?, ?, ?, ?)
+                """,
+                (key, target, status, engagement_root),
+            )
+        else:
+            cursor = connection.execute(
+                """
+                INSERT INTO engagements (key, target, status, engagement_root, engagement_type)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (key, target, status, engagement_root, engagement_type),
+            )
         row = connection.execute(
             """
-            SELECT id, key, target, status, engagement_root, created_at, updated_at
+            SELECT id, key, target, status, engagement_root, engagement_type, created_at, updated_at
             FROM engagements
             WHERE id = ?
             """,
@@ -2530,7 +2567,7 @@ def update_engagement_root(engagement_id: int, engagement_root: str) -> Engageme
         )
         row = connection.execute(
             """
-            SELECT id, key, target, status, engagement_root, created_at, updated_at
+            SELECT id, key, target, status, engagement_root, engagement_type, created_at, updated_at
             FROM engagements
             WHERE id = ?
             """,
@@ -2540,20 +2577,64 @@ def update_engagement_root(engagement_id: int, engagement_root: str) -> Engageme
         return Engagement.from_row(row)
 
 
-def update_engagement_identity(engagement_id: int, target: str, status: str, engagement_root: str) -> Engagement:
+def update_engagement_identity(
+    engagement_id: int,
+    target: str,
+    status: str,
+    engagement_root: str,
+    *,
+    engagement_type: str | None = None,
+) -> Engagement:
+    """Update the mutable identity columns on an engagement row.
+
+    ``engagement_type`` is opt-in: callers that don't have a manifest value
+    handy (e.g. legacy sync paths) skip it and the column is left untouched.
+    When passed, it joins the existing target/status/engagement_root diff
+    guard so a no-op call still avoids bumping ``updated_at``.
+    """
     with get_connection() as connection:
-        connection.execute(
-            """
-            UPDATE engagements
-            SET target = ?, status = ?, engagement_root = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-              AND (target != ? OR status != ? OR engagement_root != ?)
-            """,
-            (target, status, engagement_root, engagement_id, target, status, engagement_root),
-        )
+        if engagement_type is None:
+            connection.execute(
+                """
+                UPDATE engagements
+                SET target = ?, status = ?, engagement_root = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND (target != ? OR status != ? OR engagement_root != ?)
+                """,
+                (target, status, engagement_root, engagement_id, target, status, engagement_root),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE engagements
+                SET target = ?,
+                    status = ?,
+                    engagement_root = ?,
+                    engagement_type = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND (
+                      target != ?
+                      OR status != ?
+                      OR engagement_root != ?
+                      OR COALESCE(engagement_type, '') != ?
+                  )
+                """,
+                (
+                    target,
+                    status,
+                    engagement_root,
+                    engagement_type,
+                    engagement_id,
+                    target,
+                    status,
+                    engagement_root,
+                    engagement_type,
+                ),
+            )
         row = connection.execute(
             """
-            SELECT id, key, target, status, engagement_root, created_at, updated_at
+            SELECT id, key, target, status, engagement_root, engagement_type, created_at, updated_at
             FROM engagements
             WHERE id = ?
             """,
@@ -2567,7 +2648,7 @@ def list_engagements() -> list[Engagement]:
     with get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT id, key, target, status, engagement_root, created_at, updated_at
+            SELECT id, key, target, status, engagement_root, engagement_type, created_at, updated_at
             FROM engagements
             ORDER BY id ASC
             """,
@@ -2579,7 +2660,7 @@ def get_engagement_by_id(engagement_id: int) -> Engagement | None:
     with get_connection() as connection:
         row = connection.execute(
             """
-            SELECT id, key, target, status, engagement_root, created_at, updated_at
+            SELECT id, key, target, status, engagement_root, engagement_type, created_at, updated_at
             FROM engagements
             WHERE id = ?
             """,
@@ -2592,7 +2673,7 @@ def get_engagement_by_key(key: str) -> Engagement | None:
     with get_connection() as connection:
         row = connection.execute(
             """
-            SELECT id, key, target, status, engagement_root, created_at, updated_at
+            SELECT id, key, target, status, engagement_root, engagement_type, created_at, updated_at
             FROM engagements
             WHERE key = ?
             """,

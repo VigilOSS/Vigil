@@ -109,6 +109,30 @@ def test_artifact_sync_search_get_and_missing_state(client, isolate_settings) ->
     assert missing.json()["present"] is False
 
 
+def test_artifact_sync_discovers_blue_ir_artifact_roots(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    evidence_path = eng / "ir" / "evidence" / "network" / "beacons.tsv"
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text("src\tdest\tscore\n10.0.0.8\tc2.example\t0.98\n", encoding="utf-8")
+    report_path = eng / "ir" / "reports" / "incident.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("# Incident Report\n", encoding="utf-8")
+    alert_path = eng / "ir" / "alerts" / "raw-alert.txt"
+    alert_path.parent.mkdir(parents=True, exist_ok=True)
+    alert_path.write_text("Suspicious sign-in\n", encoding="utf-8")
+
+    sync = client.post(f"{BASE}/artifacts/sync")
+
+    assert sync.status_code == 200, sync.text
+    search = client.get(f"{BASE}/artifacts/search", params={"q": "beacons"})
+    assert search.status_code == 200, search.text
+    paths = {row["relative_path"] for row in search.json()}
+    assert "ir/evidence/network/beacons.tsv" in paths
+    all_rows = client.get(f"{BASE}/artifacts/search", params={"limit": 1000})
+    indexed = {row["relative_path"] for row in all_rows.json()}
+    assert {"ir/reports/incident.md", "ir/alerts/raw-alert.txt"} <= indexed
+
+
 def test_artifact_register_preserves_existing_legacy_finding_slug(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     (eng / "notes").mkdir(parents=True, exist_ok=True)
