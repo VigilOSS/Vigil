@@ -14,7 +14,7 @@ from assess.lib.json_inputs import parse_optional_inline_json
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "link-finding",
-        help="Link a finding to a root-cause finding, or clear that link",
+        help="Link a finding to a root-cause finding, attach intel rows, or clear the root-cause link",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=render_contract_epilog("link-finding"),
     )
@@ -32,16 +32,98 @@ def register(subparsers) -> None:
     p.add_argument("--source-name", default="operator")
     p.add_argument("--provenance-inline", help="Inline JSON object merged into link provenance")
     p.add_argument("--clear-root-cause", action="store_true", help="Remove the root-cause link from this finding")
+    p.add_argument(
+        "--intel",
+        dest="intel_ids",
+        action="append",
+        default=None,
+        help=(
+            "Intel row id to attach to this finding "
+            "(`details.related_intel_ids[]`). May be specified multiple times. "
+            "Merges with any existing related_intel_ids on the finding — "
+            "duplicates are dropped, order is preserved."
+        ),
+    )
     p.set_defaults(func=run)
 
 
+def _link_intel(client, finding_slug: str, raw_intel_ids: list[str], note: str) -> dict:
+    """Merge ``--intel`` values into ``details.related_intel_ids[]`` on the finding.
+
+    Reads the existing finding to preserve any prior intel ids; PATCHes back
+    with the union (dedupe-preserve-order). Intel ids are coerced to ints
+    when they parse cleanly; otherwise kept as-is so callers can pass either
+    int rows (the common case) or string keys (legacy intel sources).
+    """
+    cleaned: list[object] = []
+    for raw in raw_intel_ids:
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            cleaned.append(int(text))
+        except ValueError:
+            cleaned.append(text)
+    if not cleaned:
+        raise ValueError("link-finding --intel requires at least one non-empty id")
+
+    existing = client.get(f"findings/{finding_slug}")
+    if not isinstance(existing, dict):
+        raise ValueError(f"link-finding --intel: finding {finding_slug} not found")
+    details = existing.get("details") if isinstance(existing.get("details"), dict) else None
+    if details is None:
+        details = existing.get("details_json")
+        if isinstance(details, str):
+            try:
+                details = json.loads(details)
+            except json.JSONDecodeError:
+                details = {}
+    if not isinstance(details, dict):
+        details = {}
+    prior_raw = details.get("related_intel_ids") if isinstance(details, dict) else None
+    prior_list = list(prior_raw) if isinstance(prior_raw, list) else []
+
+    merged: list[object] = []
+    seen: set[str] = set()
+    for value in [*prior_list, *cleaned]:
+        key = json.dumps(value, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(value)
+
+    payload = {"details": {"related_intel_ids": merged}}
+    if note:
+        payload["reason_text"] = note
+    return client.patch(f"findings/{finding_slug}", payload)
+
+
 def run(args) -> None:
+    intel_ids = list(args.intel_ids or [])
+
     if args.clear_root_cause and args.root_cause_slug:
         print("link-finding: --clear-root-cause cannot be combined with --root-cause", file=sys.stderr)
         sys.exit(1)
-    if not args.clear_root_cause and not args.root_cause_slug:
-        print("link-finding requires --root-cause <slug> or --clear-root-cause", file=sys.stderr)
+    if args.clear_root_cause and intel_ids:
+        print("link-finding: --clear-root-cause cannot be combined with --intel", file=sys.stderr)
         sys.exit(1)
+    if args.root_cause_slug and intel_ids:
+        print(
+            "link-finding: --root-cause and --intel cannot be combined in a single call; "
+            "run them as two separate invocations",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not args.clear_root_cause and not args.root_cause_slug and not intel_ids:
+        print(
+            "link-finding requires --root-cause <slug>, --intel <id> (one or more), "
+            "or --clear-root-cause",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     try:
         provenance = parse_optional_inline_json(
             args.provenance_inline,
@@ -58,7 +140,13 @@ def run(args) -> None:
     cfg = load_config(args.engagement_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
-        if args.clear_root_cause:
+        if intel_ids:
+            try:
+                result = _link_intel(client, args.finding_slug, intel_ids, args.note)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                sys.exit(1)
+        elif args.clear_root_cause:
             result = client.delete(f"findings/{args.finding_slug}/root-cause")
         else:
             payload = {

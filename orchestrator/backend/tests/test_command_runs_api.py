@@ -606,6 +606,28 @@ def test_audit_source_stored_and_filterable(client, isolate_settings):
     assert env_fallback[0]["audit_source"] == "env_fallback"
 
 
+@pytest.mark.parametrize("audit_source", ["header", "stdin", "argv"])
+def test_host_exec_accepts_cli_audit_source_values(client, isolate_settings, audit_source: str):
+    _write_engagement(isolate_settings["engagements_dir"])
+
+    response = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
+        json=_base_payload(
+            command=f"echo {audit_source}",
+            argv=["echo", audit_source],
+            tool_name="host-exec",
+            route="/ignored-by-server",
+            audit_source=audit_source,
+            status="completed",
+        ),
+    )
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["route"] == "host_exec"
+    assert created["audit_source"] == audit_source
+
+
 def test_artifact_dir_defaults_to_engagement_root_when_omitted(client, isolate_settings):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     big = ("X" * 1024) * 200  # 200 KiB — over the 64 KiB cap

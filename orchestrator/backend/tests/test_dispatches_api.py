@@ -3,7 +3,7 @@
 POST + GET + LIST + PATCH coverage. The sibling tables
 (``assessment_dispatch_handoffs`` and ``assessment_dispatch_decisions``) have
 their own files. UNIQUE(engagement_id, agent_id) enforcement → 409 on dup.
-404 on missing agent_id. List filters: role, status, since, task_q, limit.
+404 on missing agent_id. List filters: role, status, since, task_q, limit, offset.
 """
 from __future__ import annotations
 
@@ -191,6 +191,10 @@ def test_dispatch_list_filters(client, isolate_settings) -> None:
     # limit
     resp = client.get(f"{BASE}/dispatches", params={"limit": 2})
     assert len(resp.json()) == 2
+
+    # offset
+    resp = client.get(f"{BASE}/dispatches", params={"limit": 1, "offset": 1})
+    assert [r["agent_id"] for r in resp.json()] == ["F2"]
 
 
 def test_dispatch_validation_rejects_bad_status_and_unknown_fields(client, isolate_settings) -> None:

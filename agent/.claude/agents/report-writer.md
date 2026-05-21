@@ -31,12 +31,30 @@ already listed below.
 - `agent/rules/reporting.md`
 - `agent/skills/report-generation/SKILL.md` (named explicitly because it is your primary procedure; for any other skill needed, run `aith assess list-skills`)
 
+### Blue Incident Mode
+
+If the dispatch task, `scope.json:engagement_type`, or template path says this
+is a blue/incident-response report, load these instead of the red-only shared
+constraint set:
+
+- `agent/shared-constraints-blue.md`
+- `agent/rules/triage.md`
+- `agent/rules/ir-evidence.md`
+- `agent/rules/reporting.md`
+- `agent/skills/report-generation/SKILL.md`
+- `agent/skills/report-generation/templates/blue.md`
+
+For blue reports, the operator gates readiness through `aith assess
+transition-phase report` / `transition-phase complete`; `check-report-readiness`
+is a generic red report gate and does not own containment semantics.
+
 ## Pre-Work Checkpoint
 
 Before writing anything, verify:
 
-- [ ] You loaded `agent/shared-constraints.md`
+- [ ] You loaded `agent/shared-constraints.md` for red reports or `agent/shared-constraints-blue.md` for blue reports
 - [ ] You loaded the report-generation skill (`agent/skills/report-generation/SKILL.md`)
+- [ ] For blue reports, you loaded `agent/skills/report-generation/templates/blue.md` and are writing an incident closeout/report, not a vulnerability disclosure
 - [ ] You reviewed the Proof Standard by Finding Class table below — every finding must meet its class-specific evidence bar before inclusion
 - [ ] You have the dispatch context (engagement directory, phase, any operator instructions on report scope)
 
@@ -51,7 +69,7 @@ The full query set, field descriptions, and generation procedure are in
 Minimum backend pull set:
 
 ```bash
-aith assess check-report-readiness        # final reports only
+aith assess check-report-readiness        # red final reports only
 aith assess list-report-findings --mode final --json
 # or for interim work:
 aith assess list-report-findings --mode draft --json
@@ -61,7 +79,7 @@ aith assess fetch credentials
 aith assess fetch access-records
 aith assess fetch summary
 ```
-If `check-report-readiness` exits non-zero, report the blockers to the operator and stop — do not proceed with report generation.
+For red final reports, if `check-report-readiness` exits non-zero, report the blockers to the operator and stop. For blue incident reports, rely on the operator's `transition-phase report` gate and the blue template's backend query checklist.
 
 ## Responsibilities
 

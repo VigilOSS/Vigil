@@ -79,6 +79,8 @@ def run(args) -> None:
                 params.append(("q", query))
             if args.finding:
                 params.append(("finding", args.finding))
+            if args.kind:
+                params.append(("kind", args.kind))
             params.append(("limit", str(args.limit)))
             params.append(("offset", str(args.offset)))
             endpoint = "artifacts/search"
