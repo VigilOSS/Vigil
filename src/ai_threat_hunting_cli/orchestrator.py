@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
 import subprocess
 import time
 import urllib.request
@@ -40,6 +41,8 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
             return
         raise SystemExit(_already_running_message(pid_file, pid, options.host, options.port))
 
+    _check_port_available(options.host, options.port)
+
     env = {
         **os.environ,
         "AI_THREAT_HUNTING_INSTALL_DIR": str(install_root),
@@ -59,6 +62,7 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
     if options.foreground:
         os.chdir(install_root)
         os.execvpe("uv", argv, env)
+    print(f"orchestrator\tstarting\thost={options.host}\tport={options.port}")
     with log_file.open("ab") as log, open(os.devnull, "rb") as stdin:
         process = subprocess.Popen(
             argv,
@@ -73,35 +77,75 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
     if not _wait_for_health(options.host, options.port, process=process):
         _terminate_process(process)
         pid_file.unlink(missing_ok=True)
-        raise SystemExit(f"Orchestrator did not become healthy on http://{options.host}:{options.port}/healthz")
+        raise SystemExit(
+            f"Orchestrator did not become healthy on http://{options.host}:{options.port}/healthz "
+            f"(see {log_file} for uvicorn errors)"
+        )
     if not _wait_for_readiness(options.host, options.port, process=process):
         _terminate_process(process)
         pid_file.unlink(missing_ok=True)
-        raise SystemExit(f"Orchestrator did not become ready on http://{options.host}:{options.port}/readyz")
+        raise SystemExit(
+            f"Orchestrator did not become ready on http://{options.host}:{options.port}/readyz "
+            f"(see {log_file} for uvicorn errors)"
+        )
+    print(
+        f"orchestrator\trunning\thealthy=True\tpid={process.pid}\t"
+        f"url=http://{options.host}:{options.port}"
+    )
 
 
-def stop_orchestrator(install_root: Path) -> None:
+def stop_orchestrator(install_root: Path, *, host: str = "127.0.0.1", port: int = 18000) -> None:
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
     if not pid_file.exists():
         return
-    try:
-        pid = int(pid_file.read_text(encoding="utf-8").strip())
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            os.kill(pid, signal.SIGTERM)
-        for _ in range(20):
-            if not _pid_alive(pid):
-                break
-            time.sleep(0.1)
-    except (OSError, ValueError):
-        pass
+    pid = _read_pid(pid_file)
     pid_file.unlink(missing_ok=True)
+    if pid is None or not _pid_alive(pid):
+        return
+    print(f"orchestrator\tstopping\tpid={pid}")
+    _signal_process_group(pid, signal.SIGTERM)
+    if not _wait_for_pid_exit(pid, timeout=2.0):
+        # SIGTERM was not enough: the worker is hung or its lifespan shutdown
+        # is taking longer than the next `start` can tolerate. Escalating to
+        # SIGKILL is the only thing that reliably frees port 18000 before the
+        # follow-up start races into EADDRINUSE.
+        _signal_process_group(pid, signal.SIGKILL)
+        _wait_for_pid_exit(pid, timeout=1.0)
+    # Even after the parent PID is gone, the kernel may hold the listening
+    # socket briefly while child sockets close. Wait for the port to release
+    # so `start_orchestrator`'s pre-check (and uvicorn's bind) see a clean
+    # state.
+    if not _wait_for_port_release(host, port, timeout=3.0):
+        holder = _port_listener_pid(host, port)
+        holder_str = f" (PID {holder})" if holder is not None else ""
+        print(
+            f"orchestrator\twarn\t{host}:{port} still held{holder_str} "
+            f"after stop; `aith orchestrator start` will surface the conflict"
+        )
+        return
+    print("orchestrator\tstopped")
 
 
 def orchestrator_status(install_root: Path) -> str:
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
     return "running" if _pid_running(pid_file) else "stopped"
+
+
+def orchestrator_status_payload(install_root: Path, *, host: str = "127.0.0.1", port: int = 18000) -> dict[str, object]:
+    """Structured status — backs `aith orchestrator status --json`."""
+    install_root = install_root.expanduser().resolve()
+    pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
+    pid = _read_pid(pid_file)
+    alive = pid is not None and _pid_alive(pid)
+    return {
+        "state": "running" if alive else "stopped",
+        "pid": pid if alive else None,
+        "pid_file": str(pid_file),
+        "host": host,
+        "port": port,
+        "url": f"http://{host}:{port}",
+        "port_in_use": _port_in_use(host, port),
+    }
 
 
 def _already_running_message(pid_file: Path, pid: str, host: str, port: int) -> str:
@@ -212,6 +256,102 @@ def _pid_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def _read_pid(pid_file: Path) -> int | None:
+    try:
+        return int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _signal_process_group(pid: int, sig: signal.Signals) -> None:
+    try:
+        os.killpg(pid, sig)
+        return
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        pass
+    try:
+        os.kill(pid, sig)
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _wait_for_pid_exit(pid: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return not _pid_alive(pid)
+
+
+def _port_in_use(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        try:
+            sock.connect((host, port))
+            return True
+        except ConnectionRefusedError:
+            return False
+        except OSError:
+            # Timeout or unreachable — for 127.0.0.1 this realistically means
+            # the port is free, since the loopback stack does not drop SYNs.
+            return False
+
+
+def _wait_for_port_release(host: str, port: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _port_in_use(host, port):
+            return True
+        time.sleep(0.1)
+    return not _port_in_use(host, port)
+
+
+def _port_listener_pid(host: str, port: int) -> int | None:
+    """Return the PID holding host:port via lsof, or None if lsof isn't usable."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP@{host}:{port}", "-sTCP:LISTEN", "-t"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=2,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    for line in result.stdout.splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        try:
+            return int(candidate)
+        except ValueError:
+            continue
+    return None
+
+
+def _check_port_available(host: str, port: int) -> None:
+    """Pre-flight: refuse to spawn uvicorn if something is already on host:port.
+
+    The previous implementation relied on uvicorn discovering EADDRINUSE on
+    bind and crashing seconds later. With the pid file already written, the
+    operator would see `aith orchestrator status` flip running → stopped
+    and have no obvious cue that the port was the problem. Catching it here
+    turns that into a clear SystemExit naming the holding PID.
+    """
+    if not _port_in_use(host, port):
+        return
+    holder = _port_listener_pid(host, port)
+    holder_str = f" (PID {holder})" if holder is not None else ""
+    raise SystemExit(
+        f"Cannot start orchestrator: {host}:{port} is already in use{holder_str}.\n"
+        f"Inspect with `lsof -nP -iTCP:{port} -sTCP:LISTEN`, stop the holder, then retry.\n"
+        "If this is a stale aith instance, run `aith orchestrator stop` first."
+    )
 
 
 def _wait_for_health(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None) -> bool:

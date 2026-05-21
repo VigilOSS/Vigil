@@ -18,17 +18,24 @@ CREATE TABLE IF NOT EXISTS cases (
     path_params TEXT,
     cookie_params TEXT,
 
-    -- Request content
+    -- Request content. `request_body_truncated`=1 means the on-the-wire
+    -- request was larger than the producer's body cap and `body` only
+    -- holds the leading bytes — consumers must re-execute via kali to
+    -- replay the full request.
     headers TEXT,
     body TEXT,
     content_type TEXT,
     content_length INTEGER,
+    request_body_truncated INTEGER NOT NULL DEFAULT 0,
 
-    -- Response summary
+    -- Response summary. `response_truncated`=1 means the on-the-wire
+    -- response was larger than the snippet cap; `response_size` is the
+    -- true on-the-wire size, `response_snippet` only the prefix.
     response_status INTEGER,
     response_headers TEXT,
     response_size INTEGER,
     response_snippet TEXT,
+    response_truncated INTEGER NOT NULL DEFAULT 0,
 
     -- Classification and routing
     type TEXT NOT NULL DEFAULT 'unknown',
@@ -74,17 +81,19 @@ CREATE TABLE IF NOT EXISTS work_items (
     path_params TEXT,
     cookie_params TEXT,
 
-    -- Request content
+    -- Request content. See `cases` table for the truncation semantics.
     headers TEXT,
     body TEXT,
     content_type TEXT,
     content_length INTEGER,
+    request_body_truncated INTEGER NOT NULL DEFAULT 0,
 
-    -- Response summary
+    -- Response summary. See `cases` table for the truncation semantics.
     response_status INTEGER,
     response_headers TEXT,
     response_size INTEGER,
     response_snippet TEXT,
+    response_truncated INTEGER NOT NULL DEFAULT 0,
 
     -- Classification and routing
     type TEXT NOT NULL DEFAULT 'unknown',
