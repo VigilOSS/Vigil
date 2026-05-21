@@ -12,7 +12,7 @@ from assess.lib.config import load_config
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "artifact",
-        help="Search, get, and register indexed engagement artifacts.",
+        help="Search, get, register, and refresh indexed engagement artifacts.",
     )
     action_sub = p.add_subparsers(dest="action")
     action_sub.required = True
@@ -45,6 +45,14 @@ def register(subparsers) -> None:
     sp_register.add_argument("--sensitive", action="store_true")
     sp_register.add_argument("--json", dest="as_json", action="store_true")
     sp_register.set_defaults(func=_run_register)
+
+    # -- refresh --------------------------------------------------------------
+    sp_refresh = action_sub.add_parser(
+        "refresh",
+        help="Refresh presence/hash metadata for already registered artifacts.",
+    )
+    sp_refresh.add_argument("--json", dest="as_json", action="store_true")
+    sp_refresh.set_defaults(func=_run_refresh)
 
     # -- mark-scratch ---------------------------------------------------------
     sp_scratch = action_sub.add_parser("mark-scratch", help="Mark an artifact as scratch (excluded from report-readiness).")
@@ -150,6 +158,15 @@ def _run_register(args) -> None:
         client.close()
 
 
+def _run_refresh(args) -> None:
+    client = _client(args)
+    try:
+        result = client.post("artifacts/refresh", {})
+        print(json.dumps(result, indent=2, ensure_ascii=False) if args.as_json else _refresh_text(result))
+    finally:
+        client.close()
+
+
 def _run_scratch(args) -> None:
     scratch = args.scratch
     action_label = "mark-scratch" if scratch else "unmark-scratch"
@@ -212,3 +229,11 @@ def _artifact_text(row: dict) -> str:
     elif row.get("content_truncated"):
         lines.append("content: (too large; use the engagement-local path)")
     return "\n".join(lines)
+
+
+def _refresh_text(result: dict) -> str:
+    return (
+        f"refreshed={result.get('refreshed', 0)} "
+        f"present={result.get('present', 0)} "
+        f"missing={result.get('missing', 0)}"
+    )

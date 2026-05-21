@@ -285,7 +285,7 @@ transcript pasting:
   — bounded JSON+markdown operating picture (finding queues, recent decisions, stale
   dispatches, handoff gaps, top command-history matches, indexed artifacts, and
   one-shot drill-down commands keyed by id).
-- `aith assess artifact search|get|register|mark-scratch`
+- `aith assess artifact search|get|register|refresh|mark-scratch`
   — engagement-local file index. Agents/operators register heavy raw files
   explicitly with `register <path> [--finding <slug>] [--agent-id <id>]
   [--command-run-id <n>]`; the backend computes SHA-256, indexes preview text
@@ -483,12 +483,13 @@ only one client at a time can own the OOB profile. The hostname-derived prefix
 namespace the underlying ports/domains.
 
 After spawning the `frpc` tmux session, `start_oob` tails
-`/data/oob/frpc.log` for up to ~15s looking for either `start proxy success`
-(happy path) or `port already used` / `router config conflict` / `proxy name
-[...] already exists` from frps. If a conflict is reported, the tmux sessions
-are torn down and the command exits with the offending log lines verbatim. The
-check rides the existing frp control connection — no extra channel (SSH
-forward, dashboard tunnel, etc.) is required.
+`/data/oob/frpc.log` for up to ~15s looking for success lines for all three
+rendered proxies (`*-oob-dns`, `*-oob`, and `*-oob-rev`) or `port already
+used` / `router config conflict` / `proxy name [...] already exists` from
+frps. If a conflict is reported, the tmux sessions are torn down and the
+command exits with the offending log lines verbatim. The check rides the
+existing frp control connection — no extra channel (SSH forward, dashboard
+tunnel, etc.) is required.
 
 If the log shows neither outcome within the timeout, the command prints a
 non-fatal hint pointing at `docker exec security-research tail -n 200

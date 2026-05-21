@@ -3391,12 +3391,11 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             slug = str(row.get("slug", ""))
             evidence_ref = str(row.get("evidence_ref", "") or "").strip()
             evidence_artifact_id = row.get("evidence_artifact_id")
+            linked_evidence_artifact = None
 
             if evidence_artifact_id is not None:
-                artifact = artifact_rows_by_id.get(int(evidence_artifact_id))
-                if artifact is not None and bool(artifact.get("present")):
-                    continue
-                if artifact is not None and not bool(artifact.get("present")):
+                linked_evidence_artifact = artifact_rows_by_id.get(int(evidence_artifact_id))
+                if linked_evidence_artifact is not None and not bool(linked_evidence_artifact.get("present")):
                     blockers.append(
                         {
                             "kind": "finding_evidence_missing_artifact",
@@ -3405,7 +3404,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                             "detail": (
                                 f"finding {slug} evidence artifact id={evidence_artifact_id} is indexed "
                                 f"but the file is missing on disk. Restore the file and re-register with "
-                                f"`aith assess artifact register {artifact.get('relative_path', '')} --finding {slug}`, "
+                                f"`aith assess artifact register {linked_evidence_artifact.get('relative_path', '')} --finding {slug}`, "
                                 f"or repoint the finding via "
                                 f"`aith assess update-finding {slug} --evidence-ref <relative-path>`."
                             ),
@@ -3453,6 +3452,24 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                             f"`aith assess artifact register {indexed_evidence_ref} --finding {slug}`, "
                             f"or repoint the finding via "
                             f"`aith assess update-finding {slug} --evidence-ref <relative-path>`."
+                        ),
+                    }
+                )
+            elif (
+                linked_evidence_artifact is not None
+                and int(linked_evidence_artifact.get("id") or 0) != int(artifact.get("id") or 0)
+            ):
+                blockers.append(
+                    {
+                        "kind": "finding_evidence_artifact_mismatch",
+                        "slug": slug,
+                        "title": row.get("title", ""),
+                        "detail": (
+                            f"finding {slug} evidence_ref={evidence_ref!r} resolves to artifact "
+                            f"id={artifact.get('id')}, but evidence_artifact_id points to "
+                            f"id={evidence_artifact_id} ({linked_evidence_artifact.get('relative_path', '')!r}). "
+                            f"Refresh the finding link with "
+                            f"`aith assess update-finding {slug} --evidence-ref {indexed_evidence_ref}`."
                         ),
                     }
                 )

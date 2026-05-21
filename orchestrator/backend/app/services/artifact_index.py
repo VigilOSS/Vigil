@@ -290,6 +290,57 @@ def register_artifact(
     return _serialize_artifact(row)
 
 
+def refresh_artifacts(engagement_id: int) -> dict[str, Any]:
+    """Refresh on-disk presence/hash metadata for existing artifact rows only.
+
+    This intentionally does not walk directories or discover new files. It keeps
+    explicit registration as the only way a path enters the index while letting
+    report-readiness see deleted or restored files without per-path re-registers.
+    """
+    _engagement, root = _engagement_root(engagement_id)
+    now = _utcnow_iso()
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT id, relative_path, media_type FROM assessment_artifacts WHERE engagement_id = ?",
+            (engagement_id,),
+        ).fetchall()
+        present = 0
+        missing = 0
+        for row in rows:
+            relative_path = str(row["relative_path"])
+            media_type_value = _media_type(relative_path, str(row["media_type"] or ""))
+            file_data = _file_payload(root, relative_path, media_type_value)
+            if bool(file_data["present"]):
+                present += 1
+            else:
+                missing += 1
+            connection.execute(
+                """
+                UPDATE assessment_artifacts
+                SET media_type = ?, size_bytes = ?, sha256 = ?, preview_text = ?,
+                    indexed_text = ?, present = ?, updated_at = ?, last_indexed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    media_type_value,
+                    int(file_data["size_bytes"]),
+                    str(file_data["sha256"]),
+                    str(file_data["preview_text"]),
+                    str(file_data["indexed_text"]),
+                    1 if file_data["present"] else 0,
+                    now,
+                    now,
+                    int(row["id"]),
+                ),
+            )
+        connection.commit()
+    return {
+        "refreshed": len(rows),
+        "present": present,
+        "missing": missing,
+    }
+
+
 def _path_ref(value: Any) -> str | None:
     """Return *value* when it looks like a plausible engagement-local path.
 

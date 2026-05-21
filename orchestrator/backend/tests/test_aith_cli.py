@@ -712,6 +712,61 @@ def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pyt
     assert attempts == [("127.0.0.1", 9090)] * 3
 
 
+def test_mitmproxy_status_uses_published_host_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai_threat_hunting_cli import mitmproxy as mitmproxy_module
+    from ai_threat_hunting_cli.docker import DockerResult
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    engagements_root = install_root / "agent" / "engagements"
+    engagements_root.mkdir(parents=True)
+    inspect_doc = {
+        "Id": "abcdef1234567890",
+        "State": {
+            "Running": True,
+            "ExitCode": 0,
+            "StartedAt": "2026-05-21T14:00:00Z",
+            "FinishedAt": "0001-01-01T00:00:00Z",
+        },
+        "NetworkSettings": {
+            "Ports": {
+                "8080/tcp": [
+                    {
+                        "HostIp": "127.0.0.1",
+                        "HostPort": "9090",
+                    }
+                ]
+            }
+        },
+    }
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "inspect", "--format"]:
+            return DockerResult(0, json.dumps(inspect_doc), "")
+        return DockerResult(0, "", "")
+
+    attempts: list[tuple[str, int]] = []
+
+    def fake_port_open(host: str, port: int) -> bool:
+        attempts.append((host, port))
+        return True
+
+    monkeypatch.setattr(mitmproxy_module, "_port_open", fake_port_open)
+    monkeypatch.setattr(mitmproxy_module.docker, "image_exists", lambda *_, **__: True)
+    monkeypatch.setattr(mitmproxy_module.docker, "volume_exists", lambda *_, **__: True)
+
+    payload = mitmproxy_module.proxy_status_payload(
+        install_root,
+        engagements_root,
+        port=8080,
+        runner=runner,
+    )
+
+    assert payload["port"] == 9090
+    assert payload["port_reachable"] is True
+    assert attempts == [("127.0.0.1", 9090)]
+
+
 def test_mitmproxy_start_uses_install_engagements_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`aith mitmproxy start` now mounts the whole engagements tree — no
     per-engagement context required, the addon routes each captured flow to
@@ -1986,8 +2041,10 @@ def test_oob_start_post_flight_returns_on_success(tmp_path: Path) -> None:
     from ai_threat_hunting_cli.oob import OobOptions, start_oob
 
     success_log = (
-        "2026-05-19 10:00:00 [I] [proxy_manager.go:144] [xyz] proxy added: [host-oob host-oob-dns]\n"
+        "2026-05-19 10:00:00 [I] [proxy_manager.go:144] [xyz] proxy added: [host-oob host-oob-dns host-oob-rev]\n"
+        "2026-05-19 10:00:01 [I] [control.go:172] [xyz] [host-oob-dns] start proxy success\n"
         "2026-05-19 10:00:01 [I] [control.go:172] [xyz] [host-oob] start proxy success\n"
+        "2026-05-19 10:00:01 [I] [control.go:172] [xyz] [host-oob-rev] start proxy success\n"
     )
     tail_calls = 0
 
@@ -2014,8 +2071,97 @@ def test_oob_start_post_flight_returns_on_success(tmp_path: Path) -> None:
         runner=runner,
         frpc_ready_timeout=5.0,
     )
-    # Reaching here without hitting the 5s timeout means the scan saw the
-    # success line on the first poll and returned immediately.
+    # Reaching here without hitting the 5s timeout means the scan saw success
+    # for all rendered proxies on the first poll and returned immediately.
+    assert tail_calls == 1
+
+
+def test_oob_start_post_flight_waits_for_all_frpc_proxy_successes(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.oob import OobOptions, _check_frpc_for_conflicts
+
+    partial_success_log = "2026-05-19 10:00:01 [I] [control.go:172] [xyz] [host-oob] start proxy success\n"
+    mixed_failure_log = (
+        partial_success_log
+        + "2026-05-19 10:00:02 [W] [control.go:148] [xyz] [host-oob-dns] start error: "
+        "port already used: listen udp :53: bind: address already in use\n"
+    )
+    tail_calls = 0
+    kill_commands: list[str] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        nonlocal tail_calls
+        cmd = argv[-1] if len(argv) >= 5 else ""
+        if "tail -n 200 /data/oob/frpc.log" in cmd:
+            tail_calls += 1
+            return DockerResult(0, partial_success_log if tail_calls == 1 else mixed_failure_log, "")
+        if "tmux kill-session" in cmd:
+            kill_commands.append(cmd)
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
+
+    with pytest.raises(SystemExit) as excinfo:
+        _check_frpc_for_conflicts(
+            OobOptions(
+                install_root=tmp_path,
+                frp_host="cal.example.test",
+                frp_port=7000,
+                frp_token="secret",
+                oob_domain="oob.example.test",
+            ),
+            runner=runner,
+            timeout=5.0,
+            sleep=lambda _seconds: None,
+        )
+
+    message = str(excinfo.value)
+    assert "OOB resources are already held" in message
+    assert "port already used" in message
+    assert tail_calls == 2
+    assert any("tmux kill-session -t frpc" in c for c in kill_commands)
+
+
+def test_oob_start_post_flight_resets_frpc_log_before_scan(tmp_path: Path) -> None:
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.oob import OobOptions, start_oob
+
+    log_reset = False
+    tail_calls = 0
+    stale_conflict_log = "2026-05-19 [W] start error: port already used: listen udp :53\n"
+    current_success_log = (
+        "2026-05-21 [I] [host-oob-dns] start proxy success\n"
+        "2026-05-21 [I] [host-oob] start proxy success\n"
+        "2026-05-21 [I] [host-oob-rev] start proxy success\n"
+    )
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        nonlocal log_reset, tail_calls
+        cmd = argv[-1] if len(argv) >= 5 else ""
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "security-research\n", "")
+        if "tmux has-session" in cmd and "tmux new-session" not in cmd:
+            return DockerResult(1, "", "")
+        if ": > /data/oob/frpc.log" in cmd:
+            log_reset = True
+            return DockerResult(0, "", "")
+        if "tail -n 200 /data/oob/frpc.log" in cmd:
+            tail_calls += 1
+            return DockerResult(0, current_success_log if log_reset else stale_conflict_log, "")
+        return DockerResult(0, "", "")
+
+    start_oob(
+        OobOptions(
+            install_root=tmp_path,
+            frp_host="cal.example.test",
+            frp_port=7000,
+            frp_token="secret",
+            oob_domain="oob.example.test",
+        ),
+        runner=runner,
+        frpc_ready_timeout=5.0,
+    )
+
+    assert log_reset is True
     assert tail_calls == 1
 
 
@@ -5354,6 +5500,40 @@ def test_artifact_cli_registers_payload(
         )
     ]
     assert json.loads(capsys.readouterr().out)["id"] == 7
+
+
+def test_artifact_cli_refresh_posts_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "artifact_command_module_refresh",
+        "agent/scripts/assess/commands/artifact.py",
+    )
+    posts: list[tuple[str, dict]] = []
+
+    class _Client:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict):
+            posts.append((endpoint, payload))
+            return {"refreshed": 3, "present": 2, "missing": 1}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    module._run_refresh(SimpleNamespace(engagement_dir="/tmp/eng", as_json=False))
+
+    assert posts == [("artifacts/refresh", {})]
+    assert capsys.readouterr().out.strip() == "refreshed=3 present=2 missing=1"
 
 
 def test_list_command_runs_cli_sends_fuzzy_search_flags(

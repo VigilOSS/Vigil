@@ -221,11 +221,8 @@ Before your dispatch returns, run in this order:
      [--sensitive]
    ```
 
-   Or for bulk discovery:
-
-   ```bash
-   aith assess artifact sync
-   ```
+   Register each durable output explicitly so the backend records the correct
+   producer, command-run, and finding linkage.
 
    Mark `--sensitive` on PII-bearing exports (mailbox content, full sign-in history, IAM principal listings).
 
