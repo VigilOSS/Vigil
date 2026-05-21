@@ -14,32 +14,6 @@ from ..db import get_connection
 from .events import _engagement_or_404
 from .search import canonical_finding_alias, expanded_fts_query
 
-DEFAULT_ROOTS = (
-    "notes",
-    "findings_payloads",
-    "tools/exploit-state",
-    "scans/reports",
-    "downloads",
-    "ir/alerts",
-    "ir/evidence",
-    "ir/reports",
-)
-# Engagement-root files (not directories) that sync should also pick up so the
-# deliverable lands in `artifact search` without an explicit register call.
-DEFAULT_ROOT_FILES = ("report.md",)
-EXCLUDED_DIR_NAMES = frozenset({
-    ".git",
-    ".hg",
-    ".svn",
-    ".jj",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".tox",
-    ".mypy_cache",
-    ".pytest_cache",
-})
 PREVIEW_BYTES = 4096
 INDEXED_TEXT_BYTES = 16384
 GET_CONTENT_BYTES = 65536
@@ -182,8 +156,8 @@ def _file_payload_if_changed(
 
     Compares the on-disk (size, mtime) against the stored row's
     (size_bytes, last_indexed_at). When both match and the row already has a
-    sha256, return the cached payload — saves a full re-read for files that
-    haven't changed since the last sync.
+    sha256, return the cached payload — saves a full re-read on
+    re-registration of files that haven't changed since the last index.
     """
     path = root / relative_path
     if not path.is_file():
@@ -316,215 +290,81 @@ def register_artifact(
     return _serialize_artifact(row)
 
 
-def _iter_default_files(root: Path, walk_errors: list[str] | None = None) -> set[str]:
-    paths: set[str] = set()
-    for root_name in DEFAULT_ROOTS:
-        base = root / root_name
-        if not base.exists():
-            continue
-        if base.is_file():
-            paths.add(base.relative_to(root).as_posix())
-            continue
-        for path in _walk_tracked(base, root=root, walk_errors=walk_errors):
-            paths.add(path.relative_to(root).as_posix())
-    for name in DEFAULT_ROOT_FILES:
-        candidate = root / name
-        if candidate.is_file():
-            paths.add(candidate.relative_to(root).as_posix())
-    return paths
+def refresh_artifacts(engagement_id: int) -> dict[str, Any]:
+    """Refresh on-disk presence/hash metadata for existing artifact rows only.
 
-
-_WALK_ERRORS_CAP = 50
-
-
-def _walk_tracked(base: Path, *, root: Path | None = None, walk_errors: list[str] | None = None):
-    """Yield files under ``base`` while pruning version-control and build dirs.
-
-    `Path.rglob` cannot prune, so a large `.git` or `node_modules` would hash
-    thousands of irrelevant files on every sync. OSError/PermissionError on a
-    subdirectory becomes a structured entry on ``walk_errors`` so the sync
-    caller can surface "permission denied at notes/private/" instead of
-    quietly missing files. The error list is capped to keep the sync
-    response from ballooning when a denied directory has many siblings; the
-    last slot is reserved for a "... and N more" sentinel.
+    This intentionally does not walk directories or discover new files. It keeps
+    explicit registration as the only way a path enters the index while letting
+    report-readiness see deleted or restored files without per-path re-registers.
     """
-    stack = [base]
-    while stack:
-        current = stack.pop()
-        try:
-            entries = list(current.iterdir())
-        except (OSError, PermissionError) as exc:
-            if walk_errors is not None and len(walk_errors) < _WALK_ERRORS_CAP - 1:
-                try:
-                    rel = current.relative_to(root) if root else current
-                except ValueError:
-                    rel = current
-                walk_errors.append(f"{rel}: {exc.__class__.__name__}: {exc}")
-            elif walk_errors is not None and len(walk_errors) == _WALK_ERRORS_CAP - 1:
-                walk_errors.append(f"... walk error cap ({_WALK_ERRORS_CAP - 1}) reached; further entries suppressed")
-            continue
-        for entry in entries:
-            if entry.is_symlink():
-                continue
-            if entry.is_dir():
-                if entry.name in EXCLUDED_DIR_NAMES:
-                    continue
-                stack.append(entry)
-            elif entry.is_file():
-                yield entry
+    _engagement, root = _engagement_root(engagement_id)
+    now = _utcnow_iso()
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT id, relative_path, media_type FROM assessment_artifacts WHERE engagement_id = ?",
+            (engagement_id,),
+        ).fetchall()
+        present = 0
+        missing = 0
+        for row in rows:
+            relative_path = str(row["relative_path"])
+            media_type_value = _media_type(relative_path, str(row["media_type"] or ""))
+            file_data = _file_payload(root, relative_path, media_type_value)
+            if bool(file_data["present"]):
+                present += 1
+            else:
+                missing += 1
+            connection.execute(
+                """
+                UPDATE assessment_artifacts
+                SET media_type = ?, size_bytes = ?, sha256 = ?, preview_text = ?,
+                    indexed_text = ?, present = ?, updated_at = ?, last_indexed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    media_type_value,
+                    int(file_data["size_bytes"]),
+                    str(file_data["sha256"]),
+                    str(file_data["preview_text"]),
+                    str(file_data["indexed_text"]),
+                    1 if file_data["present"] else 0,
+                    now,
+                    now,
+                    int(row["id"]),
+                ),
+            )
+        connection.commit()
+    return {
+        "refreshed": len(rows),
+        "present": present,
+        "missing": missing,
+    }
 
 
 def _path_ref(value: Any) -> str | None:
+    """Return *value* when it looks like a plausible engagement-local path.
+
+    Used by ``register_reference_if_local`` so a finding/transition/chain
+    write with ``evidence_ref`` set automatically lands an artifact row when
+    the value is a file path.  Rejects obvious sentence-text so callers don't
+    silently create ghost artifact rows for prose descriptions.
+
+    Heuristics (any match → reject):
+    - contains ``://`` (URL)
+    - empty or whitespace-only
+    - no ``/`` or ``.`` (real paths have at least an extension or a directory)
+    - two or more consecutive spaces (natural language, not a path)
+    """
     if not isinstance(value, str):
         return None
     stripped = value.strip()
     if not stripped or "://" in stripped:
         return None
+    if "/" not in stripped and "." not in stripped:
+        return None
+    if "  " in stripped:
+        return None
     return stripped
-
-
-def _referenced_artifacts(engagement_id: int, root: Path) -> list[dict[str, Any]]:
-    refs: list[dict[str, Any]] = []
-    with get_connection() as connection:
-        for row in connection.execute(
-            """
-            SELECT slug, evidence_ref, details_json, provenance_json
-            FROM assessment_findings
-            WHERE engagement_id = ?
-            """,
-            (engagement_id,),
-        ).fetchall():
-            for value in (row["evidence_ref"],):
-                if path_ref := _path_ref(value):
-                    refs.append({"path": path_ref, "related_finding_slug": row["slug"], "kind": "evidence"})
-        for row in connection.execute(
-            """
-            SELECT finding_id, artifact_ref
-            FROM assessment_finding_transitions
-            WHERE engagement_id = ? AND artifact_ref != ''
-            """,
-            (engagement_id,),
-        ).fetchall():
-            if path_ref := _path_ref(row["artifact_ref"]):
-                finding = connection.execute(
-                    "SELECT slug FROM assessment_findings WHERE id = ?",
-                    (row["finding_id"],),
-                ).fetchone()
-                refs.append({
-                    "path": path_ref,
-                    "related_finding_slug": finding["slug"] if finding else None,
-                    "kind": "evidence",
-                })
-        for row in connection.execute(
-            """
-            SELECT id, agent_name, stdout_artifact_ref, stderr_artifact_ref, stdout_path, stderr_path
-            FROM assessment_command_runs
-            WHERE engagement_id = ?
-            """,
-            (engagement_id,),
-        ).fetchall():
-            for value in (row["stdout_artifact_ref"], row["stderr_artifact_ref"], row["stdout_path"], row["stderr_path"]):
-                if path_ref := _path_ref(value):
-                    try:
-                        _normalize_relative_path(root, path_ref)
-                    except HTTPException:
-                        continue
-                    refs.append({
-                        "path": path_ref,
-                        "kind": "command-run-output",
-                        "producer_agent_role": row["agent_name"],
-                        "producer_command_run_id": int(row["id"]),
-                    })
-        for row in connection.execute(
-            """
-            SELECT agent_id, agent_role, finding_slugs_json, working_artifacts_json
-            FROM assessment_dispatch_handoffs
-            WHERE engagement_id = ?
-            """,
-            (engagement_id,),
-        ).fetchall():
-            finding_slug = None
-            try:
-                slugs = json.loads(row["finding_slugs_json"] or "[]")
-                if isinstance(slugs, list) and slugs:
-                    finding_slug = str(slugs[0])
-            except json.JSONDecodeError:
-                finding_slug = None
-            try:
-                artifacts = json.loads(row["working_artifacts_json"] or "[]")
-            except json.JSONDecodeError:
-                artifacts = []
-            if isinstance(artifacts, list):
-                for item in artifacts:
-                    if isinstance(item, dict) and (path_ref := _path_ref(item.get("path"))):
-                        refs.append({
-                            "path": path_ref,
-                            "kind": str(item.get("kind") or "handoff-artifact"),
-                            "producer_agent_id": row["agent_id"],
-                            "producer_agent_role": row["agent_role"],
-                            "related_finding_slug": finding_slug,
-                        })
-        for row in connection.execute(
-            """
-            SELECT chain_key, evidence_ref
-            FROM assessment_attack_chains
-            WHERE engagement_id = ? AND evidence_ref != ''
-            """,
-            (engagement_id,),
-        ).fetchall():
-            if path_ref := _path_ref(row["evidence_ref"]):
-                refs.append({"path": path_ref, "related_chain_key": row["chain_key"], "kind": "chain-evidence"})
-    return refs
-
-
-def sync_artifacts(engagement_id: int) -> dict[str, Any]:
-    _engagement, root = _engagement_root(engagement_id)
-    with get_connection() as connection:
-        existing_paths = {
-            str(row["relative_path"])
-            for row in connection.execute(
-                "SELECT relative_path FROM assessment_artifacts WHERE engagement_id = ?",
-                (engagement_id,),
-            ).fetchall()
-        }
-    walk_errors: list[str] = []
-    discovered = _iter_default_files(root, walk_errors=walk_errors) | existing_paths
-    touched_paths: set[str] = set()
-    registered = 0
-    for relative_path in sorted(discovered):
-        row = register_artifact(engagement_id, path=relative_path)
-        touched_paths.add(str(row.get("relative_path") or relative_path))
-        registered += 1
-    for ref in _referenced_artifacts(engagement_id, root):
-        row = register_artifact(engagement_id, **ref)
-        touched_paths.add(str(row.get("relative_path") or ref.get("path", "")))
-        registered += 1
-    # Rows that existed before sync but were not touched (and their file is now
-    # gone) get marked missing in a single closing transaction so a mid-sync
-    # crash never leaves the whole table flagged present=0.
-    untouched = existing_paths - touched_paths
-    with get_connection() as connection:
-        if untouched:
-            placeholders = ",".join("?" for _ in untouched)
-            connection.execute(
-                f"UPDATE assessment_artifacts SET present = 0, updated_at = ? "
-                f"WHERE engagement_id = ? AND relative_path IN ({placeholders})",
-                (_utcnow_iso(), engagement_id, *sorted(untouched)),
-            )
-        present = connection.execute(
-            "SELECT COUNT(*) FROM assessment_artifacts WHERE engagement_id = ? AND present = 1",
-            (engagement_id,),
-        ).fetchone()[0]
-        missing = connection.execute(
-            "SELECT COUNT(*) FROM assessment_artifacts WHERE engagement_id = ? AND present = 0",
-            (engagement_id,),
-        ).fetchone()[0]
-    return {
-        "registered": registered,
-        "present": int(present),
-        "missing": int(missing),
-        "walk_errors": walk_errors,
-    }
 
 
 def search_artifacts(
@@ -698,9 +538,9 @@ def set_scratch_flag(
     A scratch artifact stays in the FTS index — search and resume-brief still
     surface it — but report-readiness ignores it. When called by path against
     an engagement-local file that has not yet been indexed (e.g., a freshly
-    written `notes/triage.md` before the next `artifact sync`), this registers
-    the row inline so the operator does not need to run sync first. Called by
-    id requires the row to exist.
+    written `notes/triage.md` that hasn't been explicitly registered yet),
+    this registers the row inline so the caller doesn't need a separate
+    register step. Called by id requires the row to exist.
     """
     _engagement, root = _engagement_root(engagement_id)
     with get_connection() as connection:
@@ -733,7 +573,7 @@ def set_scratch_flag(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=(
                     f"artifact not found for path={path!r} and the file does not exist on disk. "
-                    "Run `aith assess artifact sync` first or check the path."
+                    "Register the file with `aith assess artifact register <path>` first, or check the path."
                 ),
             )
         row_dict = register_artifact(engagement_id, path=path)

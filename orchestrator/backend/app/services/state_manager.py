@@ -1989,13 +1989,22 @@ def create_finding(
                 metadata=transition_metadata,
             )
     if evidence_ref:
-        _register_artifact_reference(
+        artifact_id = _register_artifact_reference(
             engagement.id,
             evidence_ref,
             kind="evidence",
             producer_agent_role=source_name or None,
             related_finding_slug=str(finding["slug"]),
         )
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE assessment_findings SET evidence_artifact_id = ? WHERE id = ?",
+                (artifact_id, int(finding["id"])),
+            )
+            finding = connection.execute(
+                "SELECT * FROM assessment_findings WHERE id = ?",
+                (int(finding["id"]),),
+            ).fetchone()
     for link in finding_links:
         if str(link.get("target_kind") or "") in {"evidence_artifact", "artifact"} and link.get("target_ref"):
             _register_artifact_reference(
@@ -3372,15 +3381,37 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "detail": (
                             f"markdown note '{artifact_path}' is indexed but not linked to a finding, chain, "
                             "surface, request_variant, command_run, or producing agent. Fix with one of: "
-                            f"`aith assess artifact register {artifact_path} --finding <slug>` to link, "
-                            f"`aith assess artifact mark-scratch {artifact_path}` to dismiss as scratch, "
-                            f"or delete the file and re-run `aith assess artifact sync`."
+                            f"`aith assess artifact register {artifact_path} --finding <slug>` to link, or "
+                            f"`aith assess artifact mark-scratch {artifact_path}` to dismiss as scratch."
                         ),
                     }
                 )
+        artifact_rows_by_id = {int(a["id"]): a for a in artifact_rows.values() if a.get("id")}
         for row in candidates:
             slug = str(row.get("slug", ""))
             evidence_ref = str(row.get("evidence_ref", "") or "").strip()
+            evidence_artifact_id = row.get("evidence_artifact_id")
+            linked_evidence_artifact = None
+
+            if evidence_artifact_id is not None:
+                linked_evidence_artifact = artifact_rows_by_id.get(int(evidence_artifact_id))
+                if linked_evidence_artifact is not None and not bool(linked_evidence_artifact.get("present")):
+                    blockers.append(
+                        {
+                            "kind": "finding_evidence_missing_artifact",
+                            "slug": slug,
+                            "title": row.get("title", ""),
+                            "detail": (
+                                f"finding {slug} evidence artifact id={evidence_artifact_id} is indexed "
+                                f"but the file is missing on disk. Restore the file and re-register with "
+                                f"`aith assess artifact register {linked_evidence_artifact.get('relative_path', '')} --finding {slug}`, "
+                                f"or repoint the finding via "
+                                f"`aith assess update-finding {slug} --evidence-ref <relative-path>`."
+                            ),
+                        }
+                    )
+                    continue
+
             if not evidence_ref:
                 blockers.append(
                     {
@@ -3405,8 +3436,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "title": row.get("title", ""),
                         "detail": (
                             f"finding {slug} evidence_ref={evidence_ref!r} is not in the artifact index. "
-                            f"Fix with `aith assess artifact register {indexed_evidence_ref} --finding {slug}` "
-                            "or `aith assess artifact sync` if the path is under a default sync root."
+                            f"Fix with `aith assess artifact register {indexed_evidence_ref} --finding {slug}`."
                         ),
                     }
                 )
@@ -3418,9 +3448,28 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "title": row.get("title", ""),
                         "detail": (
                             f"finding {slug} evidence_ref={evidence_ref!r} is indexed but the file is "
-                            "missing on disk. Restore the file and run `aith assess artifact sync`, or "
-                            f"update the finding to point at a present artifact with "
+                            f"missing on disk. Restore the file and re-register with "
+                            f"`aith assess artifact register {indexed_evidence_ref} --finding {slug}`, "
+                            f"or repoint the finding via "
                             f"`aith assess update-finding {slug} --evidence-ref <relative-path>`."
+                        ),
+                    }
+                )
+            elif (
+                linked_evidence_artifact is not None
+                and int(linked_evidence_artifact.get("id") or 0) != int(artifact.get("id") or 0)
+            ):
+                blockers.append(
+                    {
+                        "kind": "finding_evidence_artifact_mismatch",
+                        "slug": slug,
+                        "title": row.get("title", ""),
+                        "detail": (
+                            f"finding {slug} evidence_ref={evidence_ref!r} resolves to artifact "
+                            f"id={artifact.get('id')}, but evidence_artifact_id points to "
+                            f"id={evidence_artifact_id} ({linked_evidence_artifact.get('relative_path', '')!r}). "
+                            f"Refresh the finding link with "
+                            f"`aith assess update-finding {slug} --evidence-ref {indexed_evidence_ref}`."
                         ),
                     }
                 )
@@ -4095,12 +4144,21 @@ def create_attack_chain(
             for item in (links or [])
         ]
     if evidence_ref:
-        _register_artifact_reference(
+        artifact_id = _register_artifact_reference(
             engagement.id,
             evidence_ref,
             kind="chain-evidence",
             related_chain_key=str(chain["chain_key"]),
         )
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE assessment_attack_chains SET evidence_artifact_id = ? WHERE id = ?",
+                (artifact_id, int(chain["id"])),
+            )
+            chain = dict(connection.execute(
+                "SELECT * FROM assessment_attack_chains WHERE id = ?",
+                (int(chain["id"]),),
+            ).fetchone())
     return {"chain": chain, "links": chain_links}
 
 
@@ -4971,12 +5029,16 @@ def _raise_duplicate_command_run_uuid() -> None:
     )
 
 
-def _register_artifact_reference(engagement_id: int, path: str, **metadata: Any) -> None:
+def _register_artifact_reference(engagement_id: int, path: str, **metadata: Any) -> int | None:
+    """Register an artifact reference and return the artifact id (or None)."""
     if not path:
-        return
+        return None
     from .artifact_index import register_reference_if_local
 
-    register_reference_if_local(engagement_id, path=path, **metadata)
+    result = register_reference_if_local(engagement_id, path=path, **metadata)
+    if result and result.get("id"):
+        return int(result["id"])
+    return None
 
 
 def _remove_written_command_run_artifacts(*artifact_refs: str) -> None:
