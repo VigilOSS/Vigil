@@ -1534,6 +1534,7 @@ def _build_register_payload(args) -> dict:
         "requested_reasoning": getattr(args, "reasoning", None),
         "dispatch_mode": getattr(args, "dispatch_mode_arg", None),
         "skills": getattr(args, "skills", None),
+        "tier": getattr(args, "tier", None),
     }
     for k, v in cli_fields.items():
         if v is not None:
