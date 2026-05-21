@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
@@ -25,15 +25,15 @@ from assess.lib.config import load_config
 
 # Conservative destructive-token list. Operators must pass --allow-destructive
 # to bypass. Tokens are matched as substrings in the joined argv after stripping
-# leading/trailing whitespace per arg — intentionally narrow to limit false
-# positives.
+# leading/trailing whitespace per arg, except command names which match only
+# argv[0] so read-only flags such as --format do not trip the gate.
 _DESTRUCTIVE_TOKENS: tuple[str, ...] = (
     "rm -r",
     "dd of=/dev/",
-    "format",
     "delete",
     "--force",
 )
+_DESTRUCTIVE_COMMANDS: tuple[str, ...] = ("format",)
 
 _AUDIT_SOURCE_CHOICES = ("header", "stdin", "argv")
 _DEFAULT_TIMEOUT_SECONDS = 600
@@ -128,7 +128,7 @@ def register(subparsers) -> None:
         "--allow-destructive",
         dest="allow_destructive",
         action="store_true",
-        help="Explicit opt-in for destructive operations (rm -r, dd of=/dev/, format, delete, --force).",
+        help="Explicit opt-in for destructive operations (rm -r, dd of=/dev/, format command, delete, --force).",
     )
     p.add_argument(
         "--require-audit",
@@ -150,7 +150,18 @@ def _sha256_str(text: str) -> str:
 
 
 def _contains_destructive_token(argv: list[str]) -> str | None:
-    joined = " ".join(argv)
+    normalized = [str(arg).strip() for arg in argv if str(arg).strip()]
+    if normalized:
+        command_name = PureWindowsPath(Path(normalized[0]).name).name.lower()
+        for command in _DESTRUCTIVE_COMMANDS:
+            if command_name == command or command_name in (
+                f"{command}.bat",
+                f"{command}.cmd",
+                f"{command}.com",
+                f"{command}.exe",
+            ):
+                return command
+    joined = " ".join(normalized)
     for token in _DESTRUCTIVE_TOKENS:
         if token in joined:
             return token

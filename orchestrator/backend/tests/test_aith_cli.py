@@ -2786,6 +2786,67 @@ def test_blue_contain_requires_proof_artifact_or_command_run_id(
     assert calls == []
 
 
+def test_blue_contain_aborts_when_only_proof_artifact_registration_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_threat_hunting_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    proof_path = tmp_path / "proof.json"
+    proof_path.write_text('{"revoked":true}\n', encoding="utf-8")
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(
+        blue_module,
+        "_fetch_containment_decision",
+        lambda *_args, **_kwargs: {
+            "id": 7,
+            "resolved": True,
+            "payload": {
+                "finding_slug": "FIND-001",
+                "action": "revoke_session",
+                "target": "alex@example.com",
+                "platform": "gws",
+            },
+        },
+    )
+
+    def fake_run(_install_root: Path, _eng_dir: Path, assess_args: list[str], **_kwargs: object) -> int:
+        calls.append(assess_args)
+        return 1 if assess_args[:2] == ["artifact", "register"] else 0
+
+    monkeypatch.setattr(blue_module, "_run_assess", fake_run)
+
+    with pytest.raises(SystemExit):
+        blue_module._cmd_contain(
+            SimpleNamespace(
+                finding_slug="FIND-001",
+                proposal="7",
+                proof_artifact=str(proof_path),
+                command_run_id=None,
+                action=None,
+                target=None,
+                engagement_key=None,
+                select=False,
+            ),
+            tmp_path,
+        )
+
+    assert calls == [
+        [
+            "artifact",
+            "register",
+            str(proof_path),
+            "--kind",
+            "containment_proof",
+            "--finding",
+            "FIND-001",
+        ]
+    ]
+
+
 def test_blue_contain_accepts_command_run_id_as_execution_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3628,6 +3689,24 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
     assert exc_info.value.code == 0
     assert posts[0][0] == "command-runs/host-exec"
     assert posts[0][1]["agent_name"] == "investigator"
+
+
+def test_host_exec_destructive_gate_allows_format_flags_but_blocks_format_command() -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_destructive_format",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+
+    assert module._contains_destructive_token(
+        ["gcloud", "logging", "read", "severity>=ERROR", "--format=json"]
+    ) is None
+    assert module._contains_destructive_token(
+        ["gam", "user", "alex@example.com", "show", "message", "abc123", "format", "raw"]
+    ) is None
+    assert module._contains_destructive_token(["format", "/q", "E:"]) == "format"
+    assert module._contains_destructive_token([r"C:\Windows\System32\format.com", "E:"]) == "format"
+    assert module._contains_destructive_token(["formatter", "raw"]) is None
+    assert module._contains_destructive_token(["rm", "-rf", "/tmp/example"]) == "rm -r"
 
 
 def test_host_exec_require_audit_fails_when_audit_record_fails(
