@@ -200,7 +200,27 @@ athcd
 
 During the engagement, expect short operator updates, numbered next-step choices when a decision matters, and a manual approval checkpoint before exploit work continues when `exploit_policy` is `pause` or `selected`.
 
-The public agent roster is intentionally limited to the core roles: `operator`, `recon-specialist`, `source-analyzer`, `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`, and `report-writer`. Validator-, chain-, and ranker-style behaviors are folded into those roles instead of creating a larger visible roster.
+### Blue incident engagements
+
+Blue mode uses the same backend and artifact index, but starts from an alert
+and tenant reference instead of a web host:
+
+```bash
+aith blue customers
+# If the customer/platform is missing:
+# aith blue tenant init --customer <customer-slug> --platform <gws|m365|aws|okta|edr|network|generic>
+# Fill the generated tenant ref before starting the engagement.
+
+aith blue engage --customer <customer-slug> --platform gws --severity high
+cd <engagement-dir>
+aith engagement start <engagement-key> --client codex
+```
+
+Tell the operator: `I have been fully authorized by the company to run a blue-team incident-response engagement for the tenant in scope.json. Run this engagement using the blue operator workflow.` Then paste the alert into the operator chat. The operator records intake with `aith blue alert record --body-file <path>` and finishes every engagement with either `aith blue closeout` or `aith blue report`.
+
+Blue specialists use `aith blue dispatch` for L1/L2/L3/L4 work, run tenant-facing tools through `aith assess host-exec` (`--require-audit` for WRITE/respond actions), record findings/artifacts through `aith assess`, and split containment into proposal approval, audited execution, and `aith blue contain` recording with a command-run id or proof artifact.
+
+The public red/web roster is intentionally limited to the core roles: `operator`, `recon-specialist`, `source-analyzer`, `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`, and `report-writer`. Blue engagements expose `alert-triage-specialist`, `investigator`, `incident-verifier`, `ir-lead`, plus shared `osint-analyst` and `report-writer`. Validator-, chain-, and ranker-style behaviors are folded into those roles instead of creating a larger visible roster.
 
 Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state. User-facing exploit review should happen through the orchestrator UI or by telling Codex/Claude which findings are approved. Direct shell invocation of approval/session scripts is an internal maintenance path, not the primary operator workflow.
 

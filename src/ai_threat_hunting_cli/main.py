@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import auth as auth_module
 from . import backup as backup_module
+from . import blue as blue_module
 from . import config as config_module
 from .docker import run_command as docker_run_command
 from .engagements import (
@@ -188,6 +189,8 @@ def main(argv: list[str] | None = None) -> None:
         help="Emit migrated entries as JSON.",
     )
 
+    blue_module.register_blue_parser(sub)
+
     orch_p = sub.add_parser("orchestrator")
     orch_sub = orch_p.add_subparsers(dest="orchestrator_command", required=True)
     orch_start = orch_sub.add_parser("start")
@@ -333,6 +336,8 @@ def main(argv: list[str] | None = None) -> None:
         _config(args)
     elif args.command == "engagement":
         _engagement(args, install_root)
+    elif args.command == "blue":
+        blue_module.run_blue(args, install_root)
     elif args.command == "orchestrator":
         _orchestrator(args, install_root)
     elif args.command == "runtime":

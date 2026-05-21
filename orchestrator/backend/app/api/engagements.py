@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import db
 from ..services.engagements import (
@@ -33,6 +33,10 @@ class EngagementResponse(BaseModel):
     created_at: str
     updated_at: str
     session_count: int
+    engagement_type: str | None = None
+    customer: str | None = None
+    platforms: list[str] = Field(default_factory=list)
+    tenant_reference_paths: list[str] = Field(default_factory=list)
 
 
 class SessionResponse(BaseModel):
@@ -63,6 +67,10 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
         session_count=engagement.session_count,
+        engagement_type=engagement.engagement_type,
+        customer=engagement.customer,
+        platforms=list(engagement.platforms or []),
+        tenant_reference_paths=list(engagement.tenant_reference_paths or []),
     )
 
 
@@ -73,10 +81,40 @@ def get_engagements(
         alias="status",
         description="Filter by engagement status (e.g. in_progress).",
     ),
+    engagement_type: str | None = Query(
+        default=None,
+        description="Filter by engagement_type (case-sensitive, e.g. 'red' | 'blue' | 'web' | 'code').",
+    ),
+    customer: str | None = Query(
+        default=None,
+        description="Filter blue engagements by customer slug.",
+    ),
+    platform: str | None = Query(
+        default=None,
+        description="Filter blue engagements by platform tag.",
+    ),
 ) -> list[EngagementResponse]:
     engagements = list_engagements()
     if status_filter:
         engagements = [engagement for engagement in engagements if engagement.status == status_filter]
+    if engagement_type:
+        engagements = [
+            engagement
+            for engagement in engagements
+            if engagement.engagement_type == engagement_type
+        ]
+    if customer:
+        engagements = [
+            engagement
+            for engagement in engagements
+            if engagement.customer == customer
+        ]
+    if platform:
+        engagements = [
+            engagement
+            for engagement in engagements
+            if platform in (engagement.platforms or [])
+        ]
     return [_engagement_response(engagement) for engagement in engagements]
 
 
