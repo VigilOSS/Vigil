@@ -29,8 +29,7 @@ evidence set the verifier can rule on without re-pulling.
   inbound SAML chain and the Entra-side direct sign-in becomes the new
   hypothesis.
 
-Do not activate this skill for L1 dispatch decisions (alert-triage owns
-that), for verification (alert-fp-verification owns that), or for
+This skill is for L2/L3 investigation of M365 sign-in anomalies. L1 dispatch decisions belong to alert-triage, verification belongs to alert-fp-verification, and
 post-incident reporting (report-generation owns that).
 
 ## Operating Rules

@@ -162,7 +162,7 @@ auto-close path fired.
 - Normalize before classifying. A finding that says "suspicious sign-in" is incomplete — name actor, target, action, time window, source signal, suspected MITRE technique
 - Cite the tenant ref before any auto-close. No citation, no auto-close — escalate to L2 with that same coverage gap named
 - Disposition vocabulary is `verified | false_positive | downgraded | escalated` (see `agent/rules/triage.md` §3); L1 emits only `null` or `false_positive`
-- Do not pull telemetry. L1 reads the alert payload + the tenant ref. Telemetry pulls are L2's job through `aith assess host-exec`; L1 invoking GAM/gcloud/az/splunk directly corrupts the audit trail
+- L1 reads the alert payload + the tenant ref only. Telemetry pulls belong to L2 through `aith assess host-exec` — L1 invoking GAM/gcloud/az/splunk directly corrupts the audit trail
 - Set severity from the MITRE technique and the alert's described impact per `agent/rules/triage.md` §2 — NOT from the alert source's `severity_hint`. L2 may revise; L3 finalizes
 - Confidence at L1 is `low` by definition (single-signal). The L2 handoff names the second signal L2 must find for `medium` and the reproduction L2 must build for `high`
 - Stay UTC. Time-window fields in the normalized alert and in the draft finding's `details_json.timeline` carry explicit `Z` or `+00:00`
@@ -240,10 +240,10 @@ carries the routing decision and the evidence-bar hint; the activity entry
 records the tier-and-disposition state change. Use the response to explain
 why this alert routed to L2 (or auto-closed), not to restate canonical state.
 
-## Banned Phrases
+## Phrases That Undermine Triage Quality
 
-Never appear in an L1 finding's `summary`, `details`, `kill_reason`, or handoff
-`next_steps` — they turn triage into a guess the verifier cannot evaluate:
+These turn triage into a guess the verifier cannot evaluate — replace them with
+cited observations in an L1 finding's `summary`, `details`, `kill_reason`, or handoff `next_steps`:
 
 - "Likely benign" / "probably malicious" — without a tenant-ref cite this is a
   guess; with a cite the wording is "matches known-benign pattern: `<verbatim>`"

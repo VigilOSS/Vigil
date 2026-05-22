@@ -25,8 +25,8 @@ escalated`), and the evidence sources are telemetry instead of source code.
   contradicts the prior verdict (the `reset-finding` lifecycle transition
   routes through this skill again).
 
-Do not activate this skill during initial triage (that is L1's
-`alert-triage`) or during investigation (that is L2's platform skill, e.g.,
+This skill is for L3 verification only. Initial triage belongs to L1's
+`alert-triage`; investigation belongs to L2's platform skill (e.g.,
 `google-workspaces`). The verifier is independent of both — the
 investigator's annotations are inputs, never trusted on their own.
 

@@ -194,7 +194,7 @@ Finding JSON must include:
 
 ## Finding Prefix: CF
 
-Do not put a `slug` field in new fuzz finding JSON. `aith assess
+Omit the `slug` field from new fuzz finding JSON. `aith assess
 record-finding code-fuzz-engineer <finding-json>` allocates the next `CF-*`
 slug under a lock and prints the canonical slug.
 

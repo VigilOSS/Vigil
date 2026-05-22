@@ -115,7 +115,7 @@ Verified hits (TruffleHog confirms the secret is live against its provider) esca
 | Verified live credentials (TruffleHog verification or successful replay against the live provider) | CRITICAL |
 | Verified live credentials AND target-proven access to a real account or resource via `exploit-developer` | CRITICAL with confirmed impact |
 
-Do not record CRITICAL until exploit-developer proves the keys work against the live provider. The TruffleHog `verified=true` flag is necessary but not sufficient — the `verified` API check only confirms the credential format is live, not that it grants useful access.
+CRITICAL requires exploit-developer proving the keys work against the live provider. The TruffleHog `verified=true` flag is necessary but not sufficient — the `verified` API check only confirms the credential format is live, not that it grants useful access.
 
 ---
 

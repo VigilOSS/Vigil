@@ -21,7 +21,7 @@ Read `scope.json` before making target-facing decisions. Confirm:
 - `exploit_policy` value (`pause` | `selected` | `full_send`)
 - Auth state from `auth.json` — use credentials only when the file is populated and marked active
 
-Do not test hosts not listed in scope. Do not exceed the exploit policy without operator approval.
+All testing stays within listed scope hosts. Exploit policy escalation requires operator approval.
 
 ---
 
@@ -63,11 +63,11 @@ If a required target-facing tool is missing from the runtime image, rebuild the
 image rather than falling back to host or Docker-side execution paths — the
 runtime image is the single source of truth for the tool surface.
 
-**Do not `echo` as commentary, section headers, or breadcrumbs inside
-`aith assess kali` commands.** Stdout is captured to the audit log, not shown to
-the user, and commentary-echoes bloat the preview and pollute FTS search without
-adding retrievable signal. Use `--intent` for a one-line purpose annotation.
-`echo` is only legitimate when its output is the command's real purpose — writing
+**Reserve `echo` inside `aith assess kali` commands for functional output only.**
+Stdout is captured to the audit log, not shown to the user, and commentary-echoes
+bloat the preview and pollute FTS search without adding retrievable signal. Use
+`--intent` for a one-line purpose annotation. `echo` is legitimate when its output
+is the command's real purpose — writing
 to a file (`echo X > file`), piping into another tool, or generating a payload.
 
 ### Process cleanup — no broad `pkill`/`killall` by binary name
@@ -333,7 +333,7 @@ discovery is fast (~200 tokens) and usually faster than guessing.
 **Step 2 — Read `agent/references/INDEX.md`** after loading the skill. Identify the paired
 payload files, tool cheatsheets, and OWASP checklists that apply to your task and load them.
 
-**Do not begin target-facing work until both reads are complete.** Improvising a technique that
+**Complete both reads before target-facing work begins.** Improvising a technique that
 already exists in the skill/reference set wastes tokens, produces inconsistent results, and
 misses methodology that the skill encodes (e.g., mitmproxy setup, payload libraries, tool flags).
 
@@ -390,10 +390,9 @@ Record every finding with:
 aith assess record-finding <agent-name> <finding-json-file>
 ```
 
-The JSON payload must match `schemas/finding-record.schema.json`.
-Do not produce markdown findings — convert to JSON before recording.
-If you need the canonical field list or examples, run `aith assess contract record-finding`.
-Do not invent lifecycle fields from memory — `record-finding` fills the initial finding lifecycle defaults.
+The JSON payload must match `schemas/finding-record.schema.json`. Findings are always JSON — convert from markdown before recording.
+Run `aith assess contract record-finding` for the canonical field list and examples.
+`record-finding` fills the initial finding lifecycle defaults — use those rather than setting lifecycle fields manually.
 
 **CVSS and remediation** go in `details` as structured fields:
 ```json
@@ -505,7 +504,7 @@ API security: `agent/references/api-security/`
 All assessment operations use `aith assess <subcommand>` resolved from the agent workspace
 root after `cd agent`. JSON payloads are always in files, never inline shell arguments.
 
-Do not hardcode absolute paths. Set `ENGAGEMENT_DIR` before calling aith assess, or pass `--engagement-dir`.
+Use `ENGAGEMENT_DIR` or `--engagement-dir` for path resolution — hardcoded absolute paths break across environments.
 
 ---
 

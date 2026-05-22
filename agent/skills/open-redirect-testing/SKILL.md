@@ -52,7 +52,7 @@ for param in redirect url next return return_to returnTo returnUrl continue dest
 done
 ```
 
-**Do not stop at the homepage.** Redirect parameters appear most often on:
+**Test beyond the homepage.** Redirect parameters appear most often on:
 - `/login?next=`, `/login?returnTo=`
 - `/logout?redirect=`
 - `/oauth/authorize?redirect_uri=`
