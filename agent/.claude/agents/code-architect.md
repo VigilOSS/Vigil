@@ -240,8 +240,8 @@ the hunter provides unconstrained analysis first, then checks hypotheses. The qu
 `batch_theme` (logical module) so the hunter can reason across related files in the same dispatch.
 Map Step 9 `analysis_priority` to queue `priority` so dispatch order remains consistent.
 
-Emit one queue object per concrete file. Every queue object must include concrete `file_id` and `file_path`. Do not emit nested batch wrappers, and do not use globs in `file_path` or `related_files`.
-Do not emit `context_id` in the broad-hunt queue artifact. The queue is file-level and carries `file_id` plus metadata such as `batch_theme`, `slot_types`, and `guidance_hypotheses`. `repo_id` is only a path-disambiguation helper during queue normalization; it is not a queue field.
+Emit one queue object per concrete file. Every queue object must include concrete `file_id` and `file_path` — nested batch wrappers and globs in `file_path` or `related_files` break downstream dispatch.
+The queue is file-level: omit `context_id` from the broad-hunt queue artifact. Each object carries `file_id` plus metadata such as `batch_theme`, `slot_types`, and `guidance_hypotheses`. `repo_id` is only a path-disambiguation helper during queue normalization; it is not a queue field.
 
 ### `#### Coverage Gaps`
 REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."

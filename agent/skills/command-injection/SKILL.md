@@ -64,7 +64,7 @@ This matters more than most testers realize:
 
 ### Separator Selection
 
-Do not spray all separators blindly. Choose based on context:
+Choose separators based on context:
 
 | Separator | When to Use | Notes |
 |-----------|-------------|-------|

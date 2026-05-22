@@ -60,7 +60,7 @@ verifier must not act on.
 - Set the disposition: `verified` | `false_positive` | `downgraded` | `escalated`
 - Record the disposition through the correct backend verb (see "State Writes" below)
 - Flag missing cross-platform correlation, missing tenant-ref consultation, and missing evidence-ladder rungs as `coverage_gaps[]` on the verifier handoff
-- Never delete artifacts. `false_positive` findings keep their artifacts; investigation-irrelevant artifacts get `mark-scratch`, not `rm`
+- Artifacts are permanent. `false_positive` findings keep their artifacts; investigation-irrelevant artifacts get `mark-scratch`, not `rm`
 
 ## Dispositions — Four Values, No Others
 
@@ -235,7 +235,7 @@ Categories of verifier-surfaced gaps:
 - Enumerate the devil's-advocate hypothesis explicitly in `devils_advocate[]` with the counter-evidence artifact ID. Discharged (proven benign or proven adversarial with citation) goes in with `discharged=true`; unresolved goes in with `discharged=false` and the disposition becomes `escalated`
 - Symmetric-bar verbiage in `verification_reason` and `kill_reason`: cite the artifact ID, the source feed, and the verbatim line carrying the evidence. "Looks legitimate" is not a `kill_reason`; "Tenant ref `<path>#known-benign-patterns`: '<verbatim>' — actor matches on ip_range=<x>, user_agent=<y>, action=<z>" is
 - Stay UTC. Convert to local only for the report's executive summary
-- Never delete artifacts. `false_positive` findings keep their artifacts; mark investigation-irrelevant artifacts via `aith assess artifact mark-scratch <id>`
+- Artifacts are permanent. `false_positive` findings keep their artifacts; mark investigation-irrelevant artifacts via `aith assess artifact mark-scratch <id>`
 - Severity ↔ technique alignment audit (`agent/rules/triage.md` §16) runs on `verified` and `downgraded` dispositions. A `verified` finding with a detection-only technique (e.g., `T1078` "Valid Accounts" without a chained `T1114` / `T1567` / `T1490`) cannot carry `critical` severity without a separate chained-impact finding linked via `details.chain_required=true`
 
 ## Mandatory Closing Sequence

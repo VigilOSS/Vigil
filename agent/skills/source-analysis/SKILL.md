@@ -32,7 +32,7 @@ origin: AI Threat Hunting
 
 ## Methodology
 
-Do not stop at inventory. Convert routes, config fragments, and client logic into hypotheses
+Go beyond inventory. Convert routes, config fragments, and client logic into hypotheses
 about backend behavior, trust boundaries, auth assumptions, and reachable follow-on attack paths.
 
 ### 1. Identify Source Files

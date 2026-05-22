@@ -165,7 +165,7 @@ containment actions land harder than intended.
 - `verification_state=verified` gate — L4 only acts on verified findings. `false_positive`, `downgraded` (below high), and `escalated` do not enter respond
 - Stay UTC. Timestamps in proposal `note` and post-execution `activity_entries` carry explicit `Z` or `+00:00`
 - Cross-tenant containment is forbidden. A proposal affecting a target outside `customer` / `platforms` scope returns `blocked`; open a separate engagement
-- Never DELETE artifacts (`agent/rules/triage.md` §19). Even when a proposal removes a malicious mailbox rule, the pre-removal pull's artifact stays. `mark-scratch` only on investigation-irrelevant artifacts
+- Artifacts are permanent (`agent/rules/triage.md` §19). Even when a proposal removes a malicious mailbox rule, the pre-removal pull's artifact stays. `mark-scratch` applies only to investigation-irrelevant artifacts
 
 ## Recovery and Eradication Proposals
 
@@ -238,10 +238,10 @@ execution results; the handoff carries proposal IDs and coverage gaps. Use
 the response to explain why this decomposition, why this scope, and why this
 rollback plan.
 
-## Banned Phrases
+## Phrases That Undermine the Approval Contract
 
-Never appear in a proposal `note`, L4 finding update, or L4 handoff — they
-undermine the operator's per-action approval contract:
+These undermine the operator's per-action approval contract and signal a discipline
+violation when they appear in a proposal `note`, L4 finding update, or L4 handoff:
 
 - "Auto-approving" / "I'll go ahead and" / "executing now" — L4 does NOT
   execute; this phrasing in the response indicates a discipline violation in

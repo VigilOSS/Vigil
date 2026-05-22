@@ -169,7 +169,7 @@ canonical state.
 
 ## Finding Prefix: CV
 
-Do not put a `slug` field in new variant finding JSON. `aith assess
+Omit the `slug` field from new variant finding JSON. `aith assess
 record-finding code-variant-hunter <finding-json>` allocates the next `CV-*`
 slug under a lock and prints the canonical slug; use that returned value in
 handoffs and verifier follow-up.

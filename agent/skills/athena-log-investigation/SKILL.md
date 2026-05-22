@@ -73,9 +73,9 @@ For each meaningful result, record:
 
 ## Reporting Guidance
 
-Do not overstate certainty.
+Match certainty to evidence strength.
 
-Use this phrasing:
+Preferred phrasing:
 - `Confirmed in logs` when exploitation evidence is strong and attributable
 - `Likely seen in logs` when behavior strongly matches but proof is partial
 - `No evidence observed in available Athena logs` when nothing surfaced in the searched window
