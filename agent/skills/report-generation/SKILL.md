@@ -55,7 +55,7 @@ Sibling rows include
 to keep one root-cause narrative while still naming downstream outcomes and residual
 standalone paths.
 
-Use these structured fields directly. Do not re-derive CVSS or remediation unless the
+Use these structured fields directly. Recalculate CVSS or remediation only when the
 proved impact at report time materially differs from what was recorded at validation.
 
 ## Severity Definitions
@@ -73,7 +73,7 @@ proved impact at report time materially differs from what was recorded at valida
 Follow `agent/rules/reporting.md` for all writing rules — banned language, active voice,
 evidence formatting, remediation specificity, filler/padding, and section length limits.
 
-**Audience:** Technical reader who knows vulnerability classes. Do not define standard terms.
+**Audience:** Technical reader who knows vulnerability classes. Assume familiarity with standard terms (XSS, SQLi, IDOR, SSRF, etc.).
 
 **Executive summary exception:** The executive summary is for non-technical stakeholders.
 Use business language there. "An attacker can download all customer records" not "IDOR on /api/users."
@@ -122,8 +122,7 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 | Section | Limit | Rule |
 |---------|-------|------|
 | Description | 2-4 sentences | First sentence = attacker outcome. No class definitions. No restating the title. |
-| Steps to Reproduce | Numbered, 1 action per step | No narrative between steps. Copy-pasteable commands where possible. |
-| Evidence | 1 request/response per proof point | Response truncated to 5-15 relevant lines. Bold/annotate the proof line. |
+| Steps to Reproduce | Numbered, 1 action per step | No narrative between steps. Each step includes request block + response excerpt (5-15 lines, proof line bolded/annotated) inline. Copy-pasteable commands where possible. |
 | Impact | 1-2 sentences | Quantified. What the attacker gets, how many records/users/systems affected. |
 | Remediation | 1-2 sentences | Names the technology and the specific fix. No generic advice. |
 
@@ -135,11 +134,7 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 [2-4 sentences. First sentence: what the attacker gains. Remaining: how, where, auth context.]
 
 #### Steps to Reproduce
-1. [Single action — e.g., "Send the following request:"]
-2. [Next action]
-
-#### Evidence
-**Request:**
+1. Send the following request:
 ```http
 [Full HTTP request, payload annotated if not obvious]
 ```
@@ -147,6 +142,7 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 ```http
 [5-15 lines. **Bold the proof line** or annotate with ← leaked data / ← unauthorized]
 ```
+2. [Next action with its own request/response if applicable]
 
 #### Impact
 [1-2 sentences. Quantified attacker outcome.]
@@ -203,7 +199,7 @@ Only proceed to report generation after validation passes or the operator resolv
 3. **Fix report-local failures before returning to the operator**
 4. **Return the completed checklist and current QA status**
 
-Do not emit `report.generated`, `closeout.generated`, or mark findings `reported` during draft generation. Publication belongs after the operator dispatches a fresh report-writer in review-and-fix QA mode and receives `QA PASS`, because lifecycle transitions before QA make an unreviewed report look final.
+Publication (`report.generated`, `closeout.generated`, marking findings `reported`) belongs after the operator dispatches a fresh report-writer in review-and-fix QA mode and receives `QA PASS` — lifecycle transitions before QA make an unreviewed report look final.
 
 ## Post-Generation Self-Review
 
@@ -214,7 +210,7 @@ After writing the report, verify every finding against `agent/rules/reporting.md
 3. No vulnerability class definitions (Rule 11)
 4. No banned filler phrases (Rule 11)
 5. Active voice throughout (Rule 12)
-6. Evidence blocks ≤ 15 lines with annotated proof (Rule 13)
+6. Inline response blocks ≤ 15 lines with annotated proof (Rule 13)
 7. Remediation names specific technology (Rule 14)
 8. Every sentence is load-bearing (Rule 15)
 9. Steps to reproduce: one action per step, copy-pasteable (Rule 10)

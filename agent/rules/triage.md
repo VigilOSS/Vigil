@@ -66,8 +66,7 @@ finding linked from `details.chain_required=true`.
   Multi-Perspective Voting Protocol section of `alert-fp-verification` or to
   external escalation (vendor, on-call, legal)
 
-Do not invent `partially_verified`, `pending`, `unknown`, `under_review`, or any
-other value. `unreviewed` is the lifecycle default, not a disposition.
+The four values above are exhaustive. `unreviewed` is the lifecycle default, not a disposition — custom values like `partially_verified`, `pending`, or `under_review` break downstream queries.
 
 ## 4. Symmetric evidence bar — verify and FP are the same cost
 

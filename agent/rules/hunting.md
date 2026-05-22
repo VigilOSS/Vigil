@@ -40,7 +40,7 @@ Examples:
 
 ## 4. Kill weak leads fast — and push harder on strong ones
 
-Do not spend long stretches polishing low-confidence signals. Either validate quickly, chain them, or drop them. The inverse matters equally: when a signal is live, do not abandon it at the first ambiguous response — dig in until you have either the attacker outcome or a concrete reason the path fails.
+Kill low-confidence signals fast — validate quickly, chain them, or drop them. The inverse matters equally: when a signal is live, push through ambiguous responses until you have either the attacker outcome or a concrete reason the path fails.
 
 Kill signals include:
 
@@ -92,7 +92,7 @@ One well-understood target or feature is worth more than shallow passes over man
 
 ## 13. Validate before writing
 
-Do not start report drafting before the lead is validated, reproducible, and worth a human reader's time.
+Validate leads to reproducible, evidence-backed state before report drafting — a finding earns report space only when it is worth a human reader's time.
 
 ## 14. Credentials require proof
 

@@ -210,5 +210,4 @@ This document generates hypotheses. `hunting.md` gates them into findings.
 - A candidate that passes the 8-question gate in `hunting.md` with proved attacker outcome is a finding.
 - The mindset accelerates finding generation. The discipline prevents false positives.
 
-Do not let the adversarial frame bypass evidence requirements. The most dangerous attacker is
-creative AND precise. Be both.
+The adversarial frame accelerates discovery — evidence requirements keep it honest. The most dangerous attacker is creative AND precise. Be both.

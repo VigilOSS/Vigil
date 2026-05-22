@@ -154,8 +154,7 @@ For each finding, prefer:
 
 - `Summary`: impact-first paragraph
 - `Vulnerability Details`: bug class, endpoint, auth context, severity/CVSS if used
-- `Steps to Reproduce`: numbered steps with exact request or sequence
-- `Evidence`: exact response, artifact reference, or replayable proof
+- `Steps to Reproduce`: numbered steps with exact request and inline response proof (request block + truncated response with annotated proof line per step)
 - `Impact`: concrete attacker outcome and affected scope
 - `Recommended Fix`: one or two precise remediation sentences
 

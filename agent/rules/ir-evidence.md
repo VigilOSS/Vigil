@@ -37,9 +37,9 @@ agent must separate the three layers cleanly:
 | **Attribution** | "The attacker sent this email" — supported by: IP matches the persistent attacker node across 15 days, IP is not in the user's baseline, action occurred during an active attacker session window | Evidence files with explicit reasoning |
 | **Interpretation** | "The attacker was attempting bank account manipulation" — supported by: subject is a reply into a financial thread, content unknown without body inspection, classification is SUSPICIOUS until body/recipient confirmation | Report sections, clearly marked as inference |
 
-Never collapse these layers. "The attacker sent a fraudulent email to CFG Bank" packs
+Keep these layers separate. "The attacker sent a fraudulent email to CFG Bank" packs
 a fact, an attribution, and an interpretation into one sentence — and the interpretation
-(fraudulent) is unverified. Write: "IP 80.94.92.234 sent a reply on the existing
+(fraudulent) is unverified. Better: "IP 80.94.92.234 sent a reply on the existing
 'Commercial Deposit Rates' thread to payments@bank.example at 06:02:22Z. Content
 classification requires body inspection and recipient confirmation."
 
@@ -189,9 +189,9 @@ authenticated identity. The entire point of the investigation is to separate "fi
 performed action X" (system fact) from "the attacker performed action X using
 financegg@'s stolen session" (attributed conclusion).
 
-Never write "financegg@ sent the fraud email" as though the mailbox owner sent it.
-Write "a delivery event from financegg@'s session, IP 80.94.92.234 (attacker node),
-sent [subject] to [recipients]."
+Attribute to the session, not the mailbox owner: "a delivery event from financegg@'s
+session, IP 80.94.92.234 (attacker node), sent [subject] to [recipients]" — not
+"financegg@ sent the fraud email" (which implies the owner acted).
 
 ## 13. Evidence files are derived analysis, not raw data
 
