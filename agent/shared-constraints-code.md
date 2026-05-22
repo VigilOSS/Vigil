@@ -147,9 +147,7 @@ Severity must follow that access path:
 - `medium` or lower when the finding is primarily defense-in-depth/source hygiene, requires
   privileged repository/filesystem access, or cannot be tied to a realistic attacker read path.
 
-Do not use `AV:N` in CVSS solely because the reviewed application is network-facing. If the
-missing step is "attacker must first read a private repository or server filesystem path", model
-that prerequisite honestly or downgrade.
+Use `AV:N` only when the attacker's access path is genuinely network-direct. If the missing step is "attacker must first read a private repository or server filesystem path", model that prerequisite honestly or downgrade.
 
 **Code finding conventions:**
 - `canonical_location` format: `file:<relative-path>:<line-number>` (e.g., `file:lib/url.c:547`)
@@ -276,8 +274,7 @@ All assessment operations use `aith assess <subcommand>` resolved from the agent
 root after `cd agent`. JSON payloads belong in files, not inline shell arguments, because payload
 files are auditable and avoid shell escaping damage.
 
-Do not hardcode absolute paths. Set `ENGAGEMENT_DIR` before calling assess helpers, or pass
-`--engagement-dir` when the helper supports it.
+Use `ENGAGEMENT_DIR` or `--engagement-dir` for path resolution — hardcoded absolute paths break across environments.
 
 Shell-quote Java and Kotlin identifiers that contain `$` (anonymous classes, lambda
 names, generated accessors — e.g. `com.example.Auth$$Lambda$1`): wrap in single quotes
@@ -301,9 +298,7 @@ Use the helper contracts as the canonical shape source before authoring durable 
 `aith assess contract record-finding` for finding payloads and
 `aith assess contract code-record-analysis` for analysis-result payloads; this keeps agent output
 aligned with backend validation instead of relying on copied prompt snippets.
-Do not invent lifecycle fields from memory — `record-finding` fills the initial lifecycle defaults
-(`workflow_status=active`, `verification_state=unreviewed`, `verification_disposition=none`) when
-omitted.
+`record-finding` fills the initial lifecycle defaults (`workflow_status=active`, `verification_state=unreviewed`, `verification_disposition=none`) when omitted — use those rather than setting lifecycle fields manually.
 For later finding lifecycle changes, use the dedicated helpers instead of raw `post` or `patch`:
 `verify-finding` for confirm/downgrade/dispute decisions, `kill-finding` for false-positive
 verification with kill metadata, `reset-finding` to reopen a previously verified or false-positive

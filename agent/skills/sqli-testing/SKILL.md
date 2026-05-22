@@ -36,7 +36,7 @@ Modern frameworks auto-parameterize by default. Django's ORM, Rails ActiveRecord
 
 ## Detection Decision Tree
 
-Do not spray payloads. Think in stages.
+Think in stages, not spray patterns.
 
 ```
 START

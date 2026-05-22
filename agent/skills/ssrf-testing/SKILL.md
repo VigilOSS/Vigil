@@ -31,7 +31,7 @@ origin: AI Threat Hunting
 
 ### Step 1: Identify SSRF-Susceptible Parameters
 
-Do not limit yourself to `url=`. The following parameter names and functional patterns are all SSRF vectors in real engagements:
+Test beyond `url=`. The following parameter names and functional patterns are all SSRF vectors in real engagements:
 
 **Obvious parameters:** `url=`, `uri=`, `src=`, `dest=`, `redirect=`, `feed=`, `link=`, `target=`, `proxy=`, `fetch=`, `load=`, `resource=`
 

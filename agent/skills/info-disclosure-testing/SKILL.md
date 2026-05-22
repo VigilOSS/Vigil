@@ -93,7 +93,7 @@ Generic stack traces, verbose 404 pages, "null pointer at line 42" without file 
 
 ## Active Disclosure Techniques
 
-Do not passively wait for errors. Actively trigger them — different error handlers expose different information.
+Actively trigger errors — different error handlers expose different information, and passive observation misses the valuable ones.
 
 All target-facing curl commands below must run via `aith assess kali exec --technique INFO-DISCLOSURE --intent "<purpose>" --probe-kind fingerprint --phase consume-test --timeout 30 -- curl ...`. The curl examples show the command body only; always prepend the full audit-flag set when running against a scoped target.
 

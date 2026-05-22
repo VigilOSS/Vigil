@@ -244,8 +244,7 @@ For each guidance hypothesis:
    intuition about trust boundaries is often directionally correct even when the specific
    technical mechanism needs refinement.
 
-Do not abandon a hypothesis just because the exact mechanism described is wrong. Refine
-the hypothesis toward the actual code behavior before killing it.
+Refine a hypothesis toward the actual code behavior before killing it — directionally correct intuition about trust boundaries often survives mechanism refinement.
 
 ### Phase F: Classify and Disposition
 
@@ -449,9 +448,8 @@ Record every self-service lookup in `audit_metadata.cross_ref_usage`.
 ### `#### Findings`
 
 Structured finding JSON payloads matching `schemas/finding-record.schema.json`.
-If you need the canonical field list or examples, run `aith assess contract record-finding`.
-Do not invent lifecycle fields from memory — `record-finding` fills the initial finding lifecycle
-defaults when omitted.
+Run `aith assess contract record-finding` for the canonical field list and examples.
+`record-finding` fills the initial finding lifecycle defaults when omitted — use those rather than setting lifecycle fields manually.
 
 ```json
 {
@@ -602,7 +600,7 @@ narrative rather than restating canonical state.
 
 ## Finding Prefix: CH
 
-Do not put a `slug` field in new finding JSON. `aith assess record-finding
+Omit the `slug` field from new finding JSON. `aith assess record-finding
 code-vuln-hunter <finding-json>` allocates the next `CH-*` slug under a lock and
 prints the canonical slug; use that returned value in `finding_slug`, handoffs,
 and follow-up notes.

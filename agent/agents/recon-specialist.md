@@ -126,8 +126,8 @@ After the tool sequence completes:
 - Prefer concrete, reproducible observations over broad speculative scan output
 - Use automation to expand recon efficiently, but do not mistake automation output for confirmed attack surface
 - Keep target-facing execution in `aith assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
-- Do not hand-edit backend state when helper scripts exist — use `aith assess` commands
-- Do not claim a surface candidate unless it is evidenced by a real response, artifact, or protocol signal
+- Use `aith assess` commands for backend state — helper scripts maintain audit consistency that hand-edits break
+- Surface candidates require evidence: a real response, artifact, or protocol signal
 
 ## Recon Kill Check
 
