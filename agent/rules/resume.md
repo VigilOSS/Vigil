@@ -48,18 +48,12 @@ Treat unlinked markdown notes as scratch, not engagement memory. State that must
 survive resume goes into backend rows or into an indexed artifact linked to a
 finding, chain, dispatch/agent, surface, request variant, or command run.
 
-### Do not, during resume
+### Keep resume bounded
 
-- Do not fetch `coverage-items`, `request-variants`, or full work-buffer dumps —
-  they are not part of the resume picture. The brief already names the surfaces
-  and command runs you need; drill down by id with `get-command-run`,
-  `artifact get`, or `fetch findings/<slug>`.
-- Do not read unindexed `.md` files under the engagement directory. A note that
-  is not in `artifact search` is scratch and is not part of engagement memory.
-- Do not paste prior dispatch transcripts. Use
-  `aith assess agent render-handoff <agent-id>` so the next prompt stays bounded.
-- Do not re-run a probe just because it is faster than reading prior coverage.
-  The command history is canonical; rerun only when the variant differs.
+- Drill down by id (`get-command-run`, `artifact get`, `fetch findings/<slug>`) — the brief already names the surfaces and command runs you need. `coverage-items`, `request-variants`, and full work-buffer dumps are operational detail, not the resume picture.
+- Treat `artifact search` as the engagement memory index — `.md` files under the engagement directory that are not in the index are scratch.
+- Use `aith assess agent render-handoff <agent-id>` for prior dispatch context — it stays bounded where raw transcripts grow linearly.
+- Read command history before re-running probes — the history is canonical, and rerunning is warranted only when the variant differs.
 
 After hydration, summarize the resume state in one compact operator note:
 - confirmed, suspicious, killed, and open findings

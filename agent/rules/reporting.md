@@ -6,7 +6,11 @@ These rules keep reports human-first, evidence-backed, and severity-disciplined.
 
 State what the attacker can do — hedge language like "could potentially" or "may allow" signals that the finding has not been validated to the point of actionable certainty. If certainty is missing, validate further before reporting.
 
-Banned phrases:
+Preferred pattern:
+
+- `An attacker can [exact action] by [exact method].`
+
+Phrases that signal unvalidated findings (replace with the pattern above):
 
 - `could potentially`
 - `may allow`
@@ -14,17 +18,13 @@ Banned phrases:
 - `could lead to`
 - `could be chained with ...`
 
-Preferred pattern:
-
-- `An attacker can [exact action] by [exact method].`
-
 ## 2. Proof is mandatory
 
 Show exact impact, not just status codes or tool noise. The report should make the failure obvious to a reviewer.
 
 ## 3. Severity follows proven impact
 
-Do not let recon hints, CVEs, or intuition inflate severity beyond what the evidence proves.
+Severity reflects what the evidence proves — recon hints, CVEs, and intuition are signals to investigate, not grounds for inflation.
 
 If you use CVSS, make it match the proved attack path, not the imagined best case for the attacker.
 
@@ -58,7 +58,7 @@ satisfy independently.
 
 **Code-only without runtime proof:** A vulnerability pattern confirmed in source code but never demonstrated against a running instance is less certain than one with a captured request/response. Code paths may be dead, gated by middleware not visible in the snippet, or patched at deploy time. Drop severity at least one tier from what a dynamically-proved equivalent would earn.
 
-**Missing headers, stack traces, error messages, schema exposure, and configuration observations** are informational unless they directly enable a higher-impact attack. Do not inflate these to medium or above on the theory that they "could help an attacker" — that is speculative chaining, not proved impact.
+**Missing headers, stack traces, error messages, schema exposure, and configuration observations** are informational unless they directly enable a higher-impact attack. Rate these as informational — the theory that they "could help an attacker" is speculative chaining, not proved impact.
 
 **Timing side-channels** are real but low-impact in practice. Rate as low unless the timing oracle directly leaks a high-value secret (e.g., full API key byte-by-byte extraction proved in evidence).
 
@@ -95,15 +95,15 @@ A strong report should be fast to scan without losing exact technical proof.
 
 Prefer: `[Bug Class] in [exact endpoint or feature] allows [attacker role] to [impact] [scope]`
 
-Avoid vague titles like:
+Vague titles that fail this formula:
 
-- `IDOR vulnerability found`
-- `Security issue in API`
-- `XSS in user input`
+- `IDOR vulnerability found` — missing endpoint, role, and impact
+- `Security issue in API` — missing bug class, endpoint, and impact
+- `XSS in user input` — missing exact feature and attacker outcome
 
 ## 9. Use durable finding state as the source
 
-Do not invent details that are not present in recorded findings, backend state, or confirmed evidence references.
+Every claim in the report traces back to a recorded finding, backend state, or confirmed evidence reference — the report reflects proved state, not memory or inference.
 
 ## 10. Section length limits
 
@@ -112,8 +112,7 @@ Reports are for humans who scan fast. Enforce these ceilings per finding:
 | Section | Maximum |
 |---------|---------|
 | Description | 2-4 sentences |
-| Steps to Reproduce | Numbered steps, one action per step, no narrative between steps |
-| Evidence | One request/response pair per proof point, response truncated to relevant 5-15 lines |
+| Steps to Reproduce | Numbered steps, one action per step, no narrative between steps. Each step that sends a request includes the request block and the relevant response excerpt (truncated to 5-15 lines) inline — proof lives inside the step that produces it. |
 | Impact | 1-2 sentences |
 | Remediation | 1-2 sentences |
 
@@ -121,45 +120,50 @@ If you need more space, the finding is probably two findings. Split it.
 
 The executive summary is one page maximum. If it does not fit on one page, cut words.
 
-## 11. Expanded banned language
+## 11. Language that signals confidence and precision
 
-In addition to Rule 1 hedge phrases, these patterns are banned:
+In addition to Rule 1 hedge phrases, replace these filler patterns with their tighter alternatives:
 
-**Filler transitions:**
-- `Furthermore` · `Additionally` · `Moreover`
-- `It is worth noting that` · `It should be noted that`
-- `As demonstrated above` · `As mentioned earlier`
-- `During the course of our assessment` · `Upon further investigation`
-- `In conclusion` · `To summarize` · `with a one-minute proof-of-concept`
+**Transitions → lead with proof.**
 
-Preferred alternatives:
-- Start with the proof or outcome sentence immediately
-- Use a short transition only when it adds meaning: `The same request also`, `The response then`, `A second request confirms`
+| Instead of | Write |
+|---|---|
+| `Furthermore` · `Additionally` · `Moreover` | Start with the proof or outcome sentence immediately |
+| `It is worth noting that` · `It should be noted that` | State the fact |
+| `As demonstrated above` · `As mentioned earlier` | `The same request also` · `The response then` · `A second request confirms` |
+| `During the course of our assessment` · `Upon further investigation` | (delete — add nothing) |
+| `In conclusion` · `To summarize` · `with a one-minute proof-of-concept` | (delete — add nothing) |
 
-**Redundant structure:**
-- Restating the finding title in the first sentence of the description
-- Opening with `This finding describes...` or `This vulnerability allows...` — the finding *is* the description
-- Explaining what the vulnerability class is to the reader — the audience knows XSS, SQLi, IDOR, SSRF, and other standard classes; definitions waste space and patronize the reader
-- Closing paragraphs that restate what was just said
+**Descriptions → add new information per sentence.**
 
-Preferred alternatives:
-- Let the first sentence add the new proof, victim scope, or attacker outcome that the title does not carry
-- Move background that materially matters into `Vulnerability Details`, not the opener
+| Instead of | Write |
+|---|---|
+| Restating the finding title in the first sentence | First sentence adds the proof, victim scope, or attacker outcome the title does not carry |
+| `This finding describes...` · `This vulnerability allows...` | The finding *is* the description — open with the new fact |
+| Defining the vulnerability class for the reader | The audience knows XSS, SQLi, IDOR, SSRF — jump to the specifics |
+| Closing paragraphs that restate prior sentences | (delete — the reader just read it) |
 
-**Passive voice that hides the actor:**
-- `It was discovered that...` → name the endpoint and what it does
-- `The application was found to be vulnerable to...` → state what is vulnerable and how
-- `Testing revealed that...` → state the fact directly
+Background that materially matters goes into `Vulnerability Details`, not the opener.
+
+**Voice → name the actor and the action.**
+
+| Instead of | Write |
+|---|---|
+| `It was discovered that...` | Name the endpoint and what it does |
+| `The application was found to be vulnerable to...` | State what is vulnerable and how |
+| `Testing revealed that...` | State the fact directly |
 
 Preferred pattern: subject-verb-object. The endpoint does X. The attacker sends Y. The response contains Z.
 
-**Baseline-conduct disclaimers (external submissions):**
-- Scope assertions enumerating what was *not* touched
-- Request-volume or rate pledges (`10 calls at ~3 req/s`, `We limited testing to...`)
-- Future-conduct pledges (`Researcher will not contact customers`, `will not be used to...`)
-- "I respected the program rules" framing
+**External submissions → focus on the finding, not the researcher.**
 
-External submissions are about the finding, not the researcher. Program rules already require in-scope, rate-limited, non-impersonating testing — restating compliance implies you might have violated it. Write as if professional conduct is assumed.
+Compliance is assumed. Restating it implies uncertainty:
+- Scope assertions enumerating what was *not* touched → (omit)
+- Request-volume or rate pledges (`10 calls at ~3 req/s`, `We limited testing to...`) → (omit)
+- Future-conduct pledges (`Researcher will not contact customers`) → (omit)
+- "I respected the program rules" framing → (omit)
+
+Program rules already require in-scope, rate-limited, non-impersonating testing. Write as if professional conduct is the baseline.
 
 ## 12. Active voice by default
 
@@ -172,35 +176,33 @@ Write in active voice. The subject acts.
 
 Passive voice is acceptable only when the actor is genuinely unknown or irrelevant.
 
-## 13. Evidence formatting standard
+## 13. Inline evidence formatting
 
-Evidence must show the exact proof, not raw tool dumps.
+Evidence lives inside the Steps to Reproduce step that produces it — not in a separate section. Format proof inline with each reproduction step.
 
-**Request block:** Full HTTP request in a fenced code block. Annotate injected payloads or manipulated parameters with inline comments if the critical part is not obvious.
+**Request block:** Full HTTP request in a fenced code block immediately after the step instruction. Annotate injected payloads or manipulated parameters with inline comments if the critical part is not obvious.
 
-**Response block:** Truncate to the 5-15 lines that prove the finding. Bold or annotate the specific data that constitutes the proof — the leaked PII field, the unauthorized record, the injected output. Never paste a full response when 10 lines suffice.
+**Response block:** Immediately below the request, truncate to the 5-15 lines that prove the finding. Bold or annotate the specific data that constitutes the proof — the leaked PII field, the unauthorized record, the injected output. 10 lines that show the proof beat 200 lines that bury it.
 
-**Highlighting:** Use `**bold**` or `← proof` annotations to draw the eye to the critical line in evidence blocks. A reviewer should find the proof in under 3 seconds.
+**Highlighting:** Use `**bold**` or `← proof` annotations to draw the eye to the critical line in response blocks. A reviewer should find the proof in under 3 seconds.
 
-**Raw tool output is not evidence.** Do not paste Nmap scans, Nuclei JSON, or sqlmap logs as evidence. Extract the specific proof from tool output and present it as a request/response pair or a targeted excerpt.
+**Raw tool output is not evidence.** Extract the specific proof from tool output and present it as a request/response pair or a targeted excerpt — the reader needs the proof line, not the full Nmap scan, Nuclei JSON, or sqlmap log.
 
 ## 14. Remediation must be specific
 
-Generic advice is not remediation.
+Remediation names the technology, the control, and the fix:
+- `Use parameterized queries via PDO::prepare() for all SQL queries in the search controller.`
+- `Add server-side ownership check on /api/orders/{id}: verify order.user_id matches the authenticated session before returning data.`
+- `Set HttpOnly and Secure flags on the PHPSESSID cookie in php.ini or via session_set_cookie_params().`
 
-Banned remediation patterns:
+Generic advice fails this bar because it tells the developer nothing actionable:
 - `Implement proper input validation`
 - `Use appropriate access controls`
 - `Follow security best practices`
 - `Sanitize user input`
 - `Implement proper authentication`
 
-Remediation must name the technology, the control, and the fix:
-- `Use parameterized queries via PDO::prepare() for all SQL queries in the search controller.`
-- `Add server-side ownership check on /api/orders/{id}: verify order.user_id matches the authenticated session before returning data.`
-- `Set HttpOnly and Secure flags on the PHPSESSID cookie in php.ini or via session_set_cookie_params().`
-
-If you do not know the server-side technology, state the control that failed and the class of fix required, not a platitude.
+When the server-side technology is unknown, state the control that failed and the class of fix required.
 
 ## 15. Keep every sentence load-bearing
 
@@ -212,22 +214,21 @@ Common padding to avoid:
 - Listing theoretical secondary impacts that were not proved
 - Adding "defense in depth" remediation items beyond the primary fix
 
-## 16. No severity labels in titles
+## 16. Severity lives in the CVSS line, not the title
 
-Finding titles communicate the bug class, location, attacker role, and impact. Severity belongs in the CVSS metadata line, not the title.
+Finding titles communicate the bug class, location, attacker role, and impact. The CVSS metadata line carries score and vector.
 
-Banned patterns: `[CRITICAL] Unauthenticated RCE in /api/upload` · `IDOR in /api/orders/{id} [HIGH]`
+`[CRITICAL] Unauthenticated RCE in /api/upload` → `Unauthenticated RCE in /api/upload`
+`IDOR in /api/orders/{id} [HIGH]` → `IDOR in /api/orders/{id} allows authenticated user to read other users' orders`
 
-Correct pattern: the title carries no severity badge. The CVSS line carries score and vector.
+## 17. External deliverables contain only client-meaningful content
 
-## 17. No internal identifiers or tooling references in external deliverables
-
-External-facing reports must not include:
+Strip before external delivery:
 - Internal backend tracking IDs (slugs such as `VA-003`, `EX-032`, `RE-010`) in any field
 - References to internal tooling, scan file paths, or orchestrator state
 - Operational status annotations: "Reported to X on date", "Duplicative", "Already sent"
 
-These are internal-only metadata with no meaning to the client. Remove Slug/Slugs fields from all finding sections before external delivery.
+These are internal-only metadata with no meaning to the client — the reader sees noise where they expect findings.
 
 ## 18. Consolidate findings to root cause
 
@@ -239,34 +240,34 @@ Common patterns that require consolidation:
 - Credential exposure as a direct consequence of an auth bypass on the same system
 - Multiple unauthenticated routes on the same API when the root cause is a single missing-auth control
 
-## 19. No internal-only sections in external reports
+## 19. Keep internal sections out of external reports
 
-The following are internal-only and must not appear in client-facing deliverables:
+These sections are engagement-internal — strip them from client-facing deliverables:
 
-- **Coverage Summary** — operational metrics (targets, services, probe counts) are engagement-internal and have no meaning to the client
-- **Finding Cross-Reference** — maps report IDs to backend slugs; internal traceability only, exclude from external reports
-- **Tested by / tester attribution** — not required in client deliverables
+- **Coverage Summary** — operational metrics (targets, services, probe counts) have no meaning to the client
+- **Finding Cross-Reference** — maps report IDs to backend slugs; internal traceability only
+- **Tested by / tester attribution** — operational, not part of the deliverable
 
-## 20. Do not write like an AI in external submissions
+## 20. Write like a human in external submissions
 
 External submissions (bug bounty, disclosure email) are read by humans. The patterns below signal automated authorship and undermine credibility. The full gate checklist lives in `agent/references/bugbounty-submission-format.md`.
 
-**Do not document what you ruled out.** Sections titled "Defender-positive", "Dead ends", "Negative findings", or any section cataloguing failed attack variants do not belong in a submission. If a negative result is genuinely material, state it in one sentence without a probe count.
+**Report what you found, not what you ruled out.** The submission covers the vulnerability. If a negative result is genuinely material, state it in one sentence without a probe count — sections cataloguing failed attack variants ("Defender-positive", "Dead ends", "Negative findings") signal automated enumeration.
 
-**No probe counts or telemetry.** Request volumes, per-phase timing, percentile latencies, and per-node distribution are internal state. One UTC date range covers the time window if the reviewer needs it.
+**Keep telemetry internal.** Request volumes, per-phase timing, percentile latencies, and per-node distribution are operational state. One UTC date range covers the time window if the reviewer needs it.
 
-**Deconfliction: three lines only.** Researcher ID, source IP, UTC time window (single range, not per-phase). Omit if the program does not require it. No marker string lists, no rate assertions, no cleanup claims.
+**Deconfliction: three lines only.** Researcher ID, source IP, UTC time window (single range, not per-phase). Omit if the program does not require it.
 
-**Attack scenarios: realistic adversary, not a character.** Name the adversary class, starting access, action, and outcome in 2-3 sentences. Banned: cartoonish personas ("a first-year student in a dorm room"), romantic framing ("from a public Wi-Fi network with a copy of curl").
+**Attack scenarios: realistic adversary, not a character.** Name the adversary class, starting access, action, and outcome in 2-3 sentences — cartoonish personas ("a first-year student in a dorm room") and romantic framing ("from a public Wi-Fi network with a copy of curl") undermine credibility.
 
-**Do not instruct the reviewer.** Phrases like `please do not treat it as one in triage` or `recorded so triage does not re-investigate` are condescending. State what you found. Stop.
+**State the finding, let the reviewer draw conclusions.** Phrases like `please do not treat it as one in triage` or `recorded so triage does not re-investigate` assume the reviewer needs instruction — present the evidence and stop.
 
-**CVSS must match proved impact.** If writes returned HTTP 200 but were rejected at the application layer with zero state mutated, `I` is not `H`. Do not assign an optimistic score and hedge it in body prose — that is Rule 3 applied to external submissions.
+**CVSS must match proved impact.** If writes returned HTTP 200 but were rejected at the application layer with zero state mutated, `I` is not `H`. Score from the proved outcome, then let the body prose support it — hedging a score in body text is Rule 3 applied to external submissions.
 
-**Titles: ≤12 words, one clause.** No parenthetical product aliases, no architectural sub-clauses. Bad: `Unauthenticated SOAP execution on production CA Identity Governance (Eurekify) bypasses the portal.cms.gov SSN/Experian RIDP gate on the federal role-request workflow plane`. Good: `Unauthenticated SOAP access to CA IGA workflow engine bypasses EUA RIDP gate`.
+**Titles: ≤12 words, one clause.** Bad: `Unauthenticated SOAP execution on production CA Identity Governance (Eurekify) bypasses the portal.cms.gov SSN/Experian RIDP gate on the federal role-request workflow plane`. Good: `Unauthenticated SOAP access to CA IGA workflow engine bypasses EUA RIDP gate`.
 
-**Remediation: ≤3 items.** Primary fix, optional defense-in-depth, optional audit step. No "validate the fix" item.
+**Remediation: ≤3 items.** Primary fix, optional defense-in-depth, optional audit step.
 
-**Do not restate header metadata in prose.** CWE, CVSS, and VRT declared in header fields need no in-body explanation. One field, one place.
+**Header metadata lives in the header.** CWE, CVSS, and VRT declared in header fields need no in-body explanation. One field, one place.
 
-**Banned phrase:** `this submission` → say `this finding`.
+**Preferred phrase:** `this finding` (not `this submission`).
