@@ -75,8 +75,7 @@ or `aith blue contain <finding-slug> --proposal <id> --proof-artifact <path>`,
 which logs structured metadata to `activity_entries` and bumps the finding's
 workflow status.
 
-Do not run a WRITE-class platform command directly even when you "know" it
-will be approved — the proposal record is the audit gate.
+WRITE-class platform commands go through the proposal flow even when approval is expected — the proposal record is the audit gate.
 
 ---
 
@@ -454,21 +453,21 @@ aith assess agent render-handoff <agent-id>
 aith assess fetch findings/<slug>
 ```
 
-Do not reconstruct state from unindexed local files first. A note not in
-`aith assess artifact search` is scratch and is not engagement memory.
-Reading `ir/reports/*.json` directly is fine when the artifact index points
-to a specific file — the index is the entry point.
+Use `aith assess artifact search` as the engagement memory index. A note not in
+the index is scratch and is not engagement memory. Reading `ir/reports/*.json`
+directly is fine when the artifact index points to a specific file — the index
+is the entry point.
 
-**Do not paste prior dispatch transcripts.** Use `aith assess agent
-render-handoff <agent-id>` so the next prompt stays bounded.
+**Use `aith assess agent render-handoff <agent-id>` for prior dispatch context** —
+it stays bounded where raw transcript pastes grow linearly.
 
 ---
 
-## Echo-Banner Prohibition
+## Runtime Identity Banner — Write Once
 
-Do not re-emit the Runtime Identity banner in your handoff or response. The
-banner is a binding agreement on `agent_id`, `agent_role`, `phase`; echoing
-it wastes context, pollutes FTS preview, and adds no signal.
+The Runtime Identity banner is a binding agreement on `agent_id`, `agent_role`,
+`phase`. It appears once at dispatch time — echoing it in the handoff or response
+wastes context, pollutes FTS preview, and adds no signal.
 
 This is parity with red mode (`agent/shared-constraints.md` banner-policing).
 The handoff JSON is the durable record; the response is reflection.

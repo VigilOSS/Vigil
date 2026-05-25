@@ -338,7 +338,7 @@ report. They are not optional. The report template
 (`agent/skills/report-generation/templates/blue.md`) cross-references this
 section for the operative banned-phrase lists.
 
-### Banned hedge phrases
+### Hedge phrases that signal unvalidated findings
 
 Hedge phrases signal that the finding has not been validated to the point of
 actionable certainty. If certainty is missing, the disposition is `escalated`
@@ -360,7 +360,7 @@ or `unreviewed` — not a hedged `verified`.
 Preferred pattern: `<actor> performed <action verb> on <target> at <UTC>,
 observed via <evidence_ref>.`
 
-### Banned filler / transitional phrases
+### Filler phrases to replace with direct statements
 
 - `Furthermore` · `Additionally` · `Moreover` · `In conclusion` · `To summarize`
 - `It is worth noting that` · `It should be noted that` · `It is important to note that`
@@ -373,9 +373,9 @@ If a sentence starts with one of these, delete the lead and state the fact.
 Short transitions that carry meaning (`The same session also`, `A second feed
 confirms`) are fine.
 
-### Banned remediation patterns
+### Generic remediation that fails the specificity bar
 
-Generic advice is not a recommendation. The following are banned standalone:
+Generic advice is not a recommendation. These fail standalone:
 
 - `Improve detection coverage`
 - `Enhance MFA posture`

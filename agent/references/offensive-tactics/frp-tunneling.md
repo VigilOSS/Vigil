@@ -33,7 +33,7 @@ DNS and the frp server are outside the local CLI:
 - Allow the frps bind port, OOB DNS UDP 53, HTTP/HTTPS, and any listener ports on the server
   security group.
 
-Do not store the frp token in tracked docs. Put local values in `aith config`.
+Store the frp token in `aith config`, not tracked docs — secrets in version control are a leak vector.
 
 ## Local Configuration
 

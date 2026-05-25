@@ -302,7 +302,7 @@ render_claude() {
 
 Read `AGENTS.md` (in this same directory) for the complete operator prompt.
 
-Do not load this file AND `AGENTS.md` — they would otherwise be identical.
+Load `AGENTS.md` OR this file, not both — they would otherwise be identical.
 `AGENTS.md` is canonical.
 EOF
 }
