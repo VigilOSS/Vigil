@@ -167,8 +167,7 @@ runtime's standard `HTTPS_PROXY` / `HTTP_PROXY` env vars. Verify the egress
 IP shifted before re-running the egress reputation script. Document the
 proxy provider, the egress IP range, and the engagement-side authorization
 via `aith assess agent decision --kind egress_decision --choice residential-proxy --payload-json '{"provider": "...", "egress_range": "..."}'`.
-Do not route exploitation traffic through a
-proxy without explicit operator and program approval — proxy logs are
+Exploitation traffic through a proxy requires explicit operator and program approval — proxy logs are
 out-of-pipeline and complicate the audit trail.
 
 **Audit-pipeline considerations.** The audit row records `aith assess kali`

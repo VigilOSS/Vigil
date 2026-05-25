@@ -261,7 +261,7 @@ correlation on the handoff. Use the response to explain the path walked, the
 hypotheses ruled in or out, and where evidence is thin enough that L3 may
 escalate.
 
-## Banned Phrases
+## Phrases That Undermine Investigation Quality
 
 The following turn an L2 finding into a guess the verifier cannot evaluate:
 

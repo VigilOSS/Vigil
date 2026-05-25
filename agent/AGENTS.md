@@ -655,7 +655,7 @@ Recovery branch:
 4. **Re-dispatch only on success.** Re-dispatch the affected specialist (typically `vulnerability-analyst` or `exploit-developer`) with a dispatch-context note: "Auth refreshed at <iso>; the previous handoff's runtime_issues about 401/403 are stale — re-run from the same task objective with fresh credentials in `auth.json`."
 5. **Fallback to anonymous.** When the auth cannot be refreshed in-session (MFA challenge, human-in-the-loop required, credentials genuinely expired by the program), record the gap with `aith assess agent decision --kind dispatch_blocked --reason "auth expired; awaiting human refresh" --surfaced-to-user` and let the dispatch continue against anonymous scope. Do not silently retry against expired material — every retry burns a context window and the failure is deterministic.
 
-Do not loop step 4 indefinitely. If the refreshed auth fails the validation in step 3 twice, treat it as a genuine credential issue (not an in-session expiry) and switch to the fallback branch in step 5.
+Limit step 4 to two attempts. If the refreshed auth fails validation in step 3 twice, treat it as a genuine credential issue (not an in-session expiry) and switch to the fallback branch in step 5.
 
 ## Kali Execution
 
@@ -742,7 +742,7 @@ If logs are available, run the optional Athena/log-investigation phase before cl
 
 ## Definition of Done
 
-Do not declare the engagement complete or dispatch the final report-writer pass until every gate below holds. If you think you're done earlier, walk back through this list and name which gate is satisfied and how, before claiming completion.
+Every gate below must hold before declaring the engagement complete or dispatching the final report-writer pass. If you think you're done earlier, walk back through this list and name which gate is satisfied and how, before claiming completion.
 
 - [ ] **Phase 4 verification queue cleared.** `aith assess list-findings --verification-state unreviewed` returns empty (or every entry has a recorded kill rationale via `aith assess kill-finding`).
 - [ ] **Phase 4 workflow queue cleared.** `aith assess list-findings --workflow-status pending` returns empty.
