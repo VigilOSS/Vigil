@@ -55,11 +55,11 @@ When a finding or chain is material, note:
 - what stage of the chain it supports
 - what telemetry would have shown it
 
-Do not force ATT&CK language onto every low-signal issue. Use it where it clarifies attacker behavior.
+Use ATT&CK language where it clarifies attacker behavior — low-signal issues that gain nothing from a technique ID are clearer without one.
 
 ## Coverage Expectations
 
-### Do Not Pin-Hole Into Web Only
+### Cover Beyond Web
 
 Web is often the largest surface, but not the only one.
 
@@ -81,7 +81,7 @@ If credentials are found or provided:
 
 ### Auth-Blocked Findings Are Still Real
 
-Do not dismiss a finding because it needs a session first.
+Auth-gated findings are valid — needing a session is a precondition, not a disqualifier.
 
 Document:
 - what access is needed
@@ -90,7 +90,7 @@ Document:
 
 ## Depth and Escalation
 
-### Never Stop at the First Finding
+### Push Past the First Finding
 
 For each real issue, ask:
 - can this be chained with another issue

@@ -900,8 +900,7 @@ the rendered report, and publication plus `reported` lifecycle transitions wait 
 | code-fuzz-engineer | CF | CF-001 |
 
 These examples describe the prefixes allocated by `aith assess record-finding`.
-Do not ask parallel specialists to hand-author `slug` values; new finding JSON
-omits `slug`, and the helper prints the canonical slug to reuse in handoffs and
+Parallel specialists omit the `slug` field from new finding JSON; the helper allocates and prints the canonical slug to reuse in handoffs and
 analysis rows.
 
 ## Dispatch Context Template

@@ -551,8 +551,8 @@ Phases: [x] Intake  [x] Triage  [>] Investigate  [ ] Verify  [ ] Respond  [ ] Re
 
 ## Definition of Done (engagement closeout)
 
-Do not declare the engagement complete or dispatch final report-writer until
-every gate below holds. If you think you're done earlier, walk through this
+Every gate below must hold before declaring the engagement complete or dispatching
+final report-writer. If you think you're done earlier, walk through this
 list and name which gate is satisfied before claiming completion.
 
 - [ ] **Every finding has a verifier disposition.** `aith assess list-findings --verification-state unreviewed` returns empty.

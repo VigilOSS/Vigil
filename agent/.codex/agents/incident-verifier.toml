@@ -300,10 +300,10 @@ verification payload's `checks[]` and `devils_advocate[]` arrays; coverage
 gaps live on the handoff. Use the response to explain the path, not to
 restate canonical state.
 
-## Banned Phrases
+## Phrases That Undermine Verification Quality
 
 The verifier's `verification_reason` / `kill_reason` lands verbatim in the
-report. These phrases must never appear:
+report. Replace these with cited observations:
 
 - "Likely / probably / appears / seems to be" — replace with cited evidence; if too weak for a definitive verb, the disposition is `escalated`, not "probably verified"
 - "Could be benign" / "could be malicious" — `escalated`

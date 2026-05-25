@@ -360,8 +360,8 @@ Imperative voice. Every recommendation names control + exact fix + owner team
 Good: "Reduce session-token lifetime to 60 min (currently 24h) — Entra Sign-In
 Frequency policy ID <id> — Identity team, by 2026-06-19."
 
-Banned standalone remediation patterns: see `agent/rules/triage.md` §21 (and
-the FORBIDDEN VOCABULARY block at the top of this file).
+Remediation patterns that fail the specificity bar: see `agent/rules/triage.md` §21
+(and the FORBIDDEN VOCABULARY block at the top of this file).
 -->
 
 | Horizon | Recommendation | Owner | Tracker | Due (UTC) |
