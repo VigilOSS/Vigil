@@ -641,6 +641,7 @@ def get_command_runs(
     tool_bin: str = "",
     target_host: str = "",
     audit_source: str = "",
+    route: str = "",
     success: bool | None = Query(default=None),
     timed_out: bool | None = Query(default=None),
     # Command-metadata filter axes. Technique + probe_kind are plain str
@@ -674,6 +675,7 @@ def get_command_runs(
         tool_bin=tool_bin,
         target_host=target_host,
         audit_source=audit_source,
+        route=route,
         success=success,
         timed_out=timed_out,
         technique=technique or "",

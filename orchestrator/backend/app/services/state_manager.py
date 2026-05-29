@@ -6030,6 +6030,7 @@ def list_command_runs(
     tool_bin: str = "",
     target_host: str = "",
     audit_source: str = "",
+    route: str = "",
     success: bool | None = None,
     timed_out: bool | None = None,
     technique: str = "",
@@ -6090,6 +6091,16 @@ def list_command_runs(
         filters.append(("LOWER(r.target_host) = ?", [target_host.strip().lower()]))
     if audit_source:
         filters.append(("r.audit_source = ?", [audit_source]))
+    if route:
+        # Provenance-lane filter so host-side katana/httpx coverage is visible.
+        # host-exec rows are stamped route='host_exec'; container/kali typed-verb
+        # rows are stamped route='aith assess kali/<tool>'. 'kali' is therefore a
+        # prefix match, 'host_exec' an exact match, and any other value an exact
+        # match against the stored route string.
+        if route == "kali":
+            filters.append(("r.route LIKE 'aith assess kali/%'", []))
+        else:
+            filters.append(("r.route = ?", [route]))
     if success is not None:
         filters.append(("r.success = ?", [1 if success else 0]))
     if timed_out is not None:
