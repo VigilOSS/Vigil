@@ -112,13 +112,12 @@ def _to_row(obj: dict, source: str, run_id, run_uuid: str) -> dict | None:
     }
 
 
-def run(args) -> None:
-    cfg = load_config(args.engagement_dir)
-    results_path = Path(anchor_engagement_relative(args.results_file, args.engagement_dir))
-    if not results_path.is_file():
-        print(f"ingest-httpx: results file not found: {results_path}", file=sys.stderr)
-        sys.exit(1)
+def parse_httpx_rows(results_path: Path, *, source: str, run_id=None, run_uuid: str = "") -> tuple[list[dict], int]:
+    """Parse an httpx -json file into classified host-liveness rows.
 
+    Returns (rows, parse_errors). Pure of network/CLI concerns so both the verb
+    and the web-discovery pipeline can reuse it.
+    """
     rows: list[dict] = []
     parse_errors = 0
     with results_path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -133,25 +132,60 @@ def run(args) -> None:
                 continue
             if not isinstance(obj, dict):
                 continue
-            row = _to_row(obj, args.source, args.run_id, args.run_uuid)
+            row = _to_row(obj, source, run_id, run_uuid)
             if row is not None:
                 rows.append(row)
+    return rows, parse_errors
 
-    if not rows:
-        print(f"ingest-httpx: no usable httpx records in {results_path} "
-              f"({parse_errors} unparseable line(s)).", file=sys.stderr)
-        sys.exit(0)
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
-        result = client.post("host-liveness", {"rows": rows})
-    finally:
-        client.close()
+def ingest_httpx_results(
+    results_path: Path,
+    *,
+    cfg,
+    source: str = "httpx",
+    run_id=None,
+    run_uuid: str = "",
+    client: AssessmentClient | None = None,
+) -> dict:
+    """Parse + upsert an httpx -json file into the backend host-liveness ledger.
 
-    upserted = result.get("upserted", 0) if isinstance(result, dict) else 0
+    Returns a summary dict ``{upserted, rows, by_class, parse_errors}``. Callers
+    may pass an existing ``client`` (the web-discovery pipeline reuses one); when
+    omitted a client is opened and closed here.
+    """
+    rows, parse_errors = parse_httpx_rows(results_path, source=source, run_id=run_id, run_uuid=run_uuid)
     by_class: dict[str, int] = {}
     for r in rows:
         by_class[r["reachability_class"]] = by_class.get(r["reachability_class"], 0) + 1
-    summary = " ".join(f"{k}={v}" for k, v in sorted(by_class.items()))
-    print(f"[ingest-httpx] upserted {upserted} host-liveness rows from "
-          f"{results_path.name} ({summary})", file=sys.stderr)
+    if not rows:
+        return {"upserted": 0, "rows": 0, "by_class": by_class, "parse_errors": parse_errors}
+
+    owns_client = client is None
+    if owns_client:
+        client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    try:
+        result = client.post("host-liveness", {"rows": rows})
+    finally:
+        if owns_client:
+            client.close()
+    upserted = result.get("upserted", 0) if isinstance(result, dict) else 0
+    return {"upserted": int(upserted), "rows": len(rows), "by_class": by_class, "parse_errors": parse_errors}
+
+
+def run(args) -> None:
+    cfg = load_config(args.engagement_dir)
+    results_path = Path(anchor_engagement_relative(args.results_file, args.engagement_dir))
+    if not results_path.is_file():
+        print(f"ingest-httpx: results file not found: {results_path}", file=sys.stderr)
+        sys.exit(1)
+
+    summary = ingest_httpx_results(
+        results_path, cfg=cfg, source=args.source, run_id=args.run_id, run_uuid=args.run_uuid,
+    )
+    if summary["rows"] == 0:
+        print(f"ingest-httpx: no usable httpx records in {results_path} "
+              f"({summary['parse_errors']} unparseable line(s)).", file=sys.stderr)
+        sys.exit(0)
+    by_class = " ".join(f"{k}={v}" for k, v in sorted(summary["by_class"].items()))
+    print(f"[ingest-httpx] upserted {summary['upserted']} host-liveness rows from "
+          f"{results_path.name} ({by_class})", file=sys.stderr)
