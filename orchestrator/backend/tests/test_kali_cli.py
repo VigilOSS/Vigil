@@ -134,7 +134,29 @@ def test_required_flag_messages_name_missing_flags(capsys):
                 "--timeout",
                 "600",
             ],
-            ["nmap", "-sV", "--top-ports", "100", "10.0.0.1"],
+            # No --scan-type given → defaults to -sT (TCP connect), NAT-safe.
+            ["nmap", "-sT", "-sV", "--top-ports", "100", "10.0.0.1"],
+        ),
+        (
+            # Explicit --scan-type sS overrides the -sT default.
+            "nmap-scan",
+            [
+                "--target",
+                "10.0.0.1",
+                "--scan-type",
+                "sS",
+                "--technique",
+                "RECON",
+                "--intent",
+                "explicit syn scan on bridged runtime",
+                "--probe-kind",
+                "fingerprint",
+                "--phase",
+                "recon",
+                "--timeout",
+                "600",
+            ],
+            ["nmap", "-sS", "10.0.0.1"],
         ),
         (
             "nuclei",
@@ -2825,6 +2847,7 @@ def test_nmap_accepts_input_list_without_target(monkeypatch):
 
     assert captured["cmd"] == [
         "nmap",
+        "-sT",
         "-iL",
         "/engagements/x/scans/hosts.txt",
         "--top-ports",

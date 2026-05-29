@@ -1233,11 +1233,12 @@ def _schema_required_names(schema_name: str) -> list[str]:
 _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     "nmap-scan": (
         "Top-1000 ports is the default; use --ports full for `-p-`, or pass an explicit list (e.g. 22,80,443).",
-        "--scripts default,vuln triggers heavy NSE — set a high --timeout (1800+) or dispatch via `aith assess kali job start`.",
+        "Defaults to `-sT` (TCP connect). Do NOT use `-sS` in this runtime — raw SYN probes are dropped by Docker's userland NAT (esp. Docker Desktop/macOS) and silently return 0-open on live hosts. Pass `--scan-type sS` only on a bridged-network Linux runtime.",
+        "--scripts default,vuln triggers heavy NSE — run it synchronously with a high --timeout (1800+); a long budget is killed cleanly on expiry.",
     ),
     "nuclei": (
         "Pass either -u or -l. Severity filters and `-as` (automatic) shape the run.",
-        "Long sweeps belong in `aith assess kali job start nuclei ...`.",
+        "Long sweeps run synchronously with a generous --timeout; `aith assess kali job start` is operator-only (specialists never background — see kali-exec skill).",
     ),
     "sqlmap": (
         "sqlmap's own `--technique` is exposed as `--sql-technique` so it doesn't collide with the audit `--technique` flag.",

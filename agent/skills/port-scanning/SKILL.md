@@ -60,8 +60,10 @@ aith assess kali nmap-scan --target TARGET --ports full \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_full_tcp \
   --technique RECON --intent "full-port TCP at cautious rate (CDN/WAF-fronted)" \
   --probe-kind fingerprint --phase recon --timeout 1800
-# Speed optimization: discover ports first, then deep scan
-aith assess kali nmap-scan --target TARGET --ports full --scan-type sS \
+# Speed optimization: discover ports first, then deep scan.
+# Uses the default -sT (TCP connect) scan — do NOT switch to -sS here: raw SYN
+# probes are dropped by Docker's userland NAT and silently return 0-open.
+aith assess kali nmap-scan --target TARGET --ports full \
   --extra-args "-Pn -T3 --min-rate 500" \
   -oA /engagements/$ENGAGEMENT_KEY/scans/ports_only \
   --technique RECON --intent "ports-only sweep before targeted -sV" \
