@@ -117,6 +117,7 @@ def main(argv: list[str] | None = None) -> None:
         check_scope_coverage,
         classify_work,
         contract,
+        dns_discovery,
         code_classify,
         code_coverage,
         code_dispatch,
@@ -191,6 +192,7 @@ def main(argv: list[str] | None = None) -> None:
         transition_phase,
         validate_dispatch_contract,
         verify_finding,
+        web_discovery,
         work_buffer,
     )
 
@@ -229,6 +231,8 @@ def main(argv: list[str] | None = None) -> None:
         ingest_endpoints,
         ingest_httpx,
         ingest_spec,
+        dns_discovery,
+        web_discovery,
         gau_endpoints,
         gau_secrets,
         gau_js_endpoints,
