@@ -508,7 +508,7 @@ DB="$DIR/cases.db"
    - **Vendor-SaaS scope checkpoint.** When the first Phase 1 recon dispatch returns wafw00f / nmap rDNS / httpx fingerprint output that flags a host's underlying application as vendor-managed SaaS (strict-subdomain match on CNAME or rDNS), warn once per host and record the flag via `aith assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user`. The detection requires recon output, so the checkpoint fires AFTER the first recon dispatch returns, not before — surfacing it pre-dispatch is circular (vendor-SaaS detection needs the dispatch's output). The default policy is permissive: warn and continue. The checkpoint blocks Phase 1 advance only when the operator opts in via `aith assess check-scope-coverage --require-stage enum --strict-vendor-saas`. The flagged options for the user are: (1) in-scope per VDP — proceed with recon; (2) out-of-scope per VDP — skip and exclude from buffer; (3) partial scope — test the asset's surface but not the underlying vendor platform. Hosts authored as an explicit literal in `scope.json` (bare host or URL entry, NOT wildcard expansion) skip the gate entirely — the literal is already the operator's in-scope decision.
    - **Egress reputation checkpoint.** Phase 1 Step 0b in recon-specialist owns the egress check (procedure in `agent/references/runtime-guides/cdn-ip-blocking.md`). The check runs INSIDE the recon-specialist dispatch, AFTER subdomain-enum + httpx have populated `live_hosts.txt` (the input the script reads). When `egress_block_pct > 50`, recon-specialist pauses, re-samples after five minutes, and only surfaces the four-option checkpoint when the second sample stays >50%. Most >50% block-rate is transient rate-limit shape, not IP reputation; the re-sample loop catches the false-positive case. The four mitigation options: (1) request IP allowlisting from the target program (standard for authorized VDP); (2) route through a residential proxy or clean-IP VPS; (3) use a browser-based tool inside the runtime (presents a legitimate JA3/JA4 TLS fingerprint); (4) accept the limited coverage and document the gap as a Phase-3 blocker. Record the choice via `aith assess agent decision --kind egress_decision --choice <option> --payload-json '{"blocked_pct": N}'`. Hosts identified by the check feed into `aith assess ingest-endpoints --egress-blocked-hosts <file>` so URLs to them defer with `cluster_key=deferred:egress-blocked` instead of polluting the work buffer.
 
-   **1b. Parallel recon + source analysis** — dispatch `recon-specialist` + `source-analyzer` in parallel because their work is independent and sequential dispatch doubles wall time for no coverage gain. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 — leaving non-web triage on the operator loses the skill's methodology depth.
+   **1b. Recon + source analysis** — dispatch `recon-specialist` + `source-analyzer`. On a **dedicated** runtime run them in parallel (their work is independent and sequential dispatch doubles wall time for no coverage gain). On a **shared / Standard-tier** runtime, default to the sequential monitored pipeline instead (see "Recon Dispatch Resource Policy → Phase-1 dispatch shape"): N concurrent heavy-enum agents on a shared VM is what caused the load-36 near-crash. `recon-specialist` owns the initial host/service pass across web and non-web ports, using `agent/skills/web-recon/SKILL.md` for web fingerprinting and continuing non-web triage when a meaningful service is exposed. `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 — leaving non-web triage on the operator loses the skill's methodology depth.
 
    **1c. Reactive nuclei sweep against Phase 1 URL delta** — before leaving Phase 1, fire a reactive nuclei sweep via `aith assess kali nuclei` against the URL delta produced by 1a and 1b (methodology + dedup in `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Running it in-phase — instead of holding every URL until Phase 3 — turns template hits into `record-intel` / `record-finding` writes *before* Phase 3 specialists dispatch, so specialists inherit the signal as intel and findings. The dedup pattern (`list-command-runs` + jq) ensures this pass and the Phase-2 reactive pass below do not re-scan the same host+template combo.
 
@@ -642,6 +642,39 @@ profiles have crashed Docker on standard laptop hardware. The runtime-tier matri
 what gates the `bursty-OK` profile: Standard tier never picks `bursty-OK`; Heavy tier may
 opt in via `--intent`; Comfortable tier may use it by default for trait rows that allow it.
 When in doubt, default to `polite-residential` for puredns/shuffledns and let the trait row pick the tier. For dnsx, the typed wrapper (`aith assess kali dnsx`) defaults to `--dnsx-profile polite-cdn --resolver-profile public-tcp`; step up only after assessing the target.
+
+### Aggregate concurrency + shared-VM ceiling
+
+The per-target rate calibration above bounds a *single* probe. It does NOT bound the
+*aggregate* load of several heavy operations running at once — which is what actually
+crashed the runtime in past engagements (host load 36 on a 12-core host; 4 parallel recon
+agents each running `subfinder -all -recursive` + `amass`). On a shared runtime, enforce
+these aggregate limits in addition to per-target rates:
+
+- **One heavy enum op at a time (engagement-wide).** "Heavy" = DNS brute
+  (puredns/shuffledns/massdns), bulk `httpx`/`dnsx` liveness over large lists, full-template
+  `nuclei` sweeps, and large-wordlist fuzzing. Serialize these — never run two concurrently
+  on a Standard-tier (shared) runtime.
+- **Concurrent-heavy-agent cap = 1 on Standard tier.** At most one specialist runs a heavy
+  enum op at a time; additional recon agents are dispatched sequentially or restricted to
+  light/passive work. (The per-tool `Concurrent nmap procs cap` in
+  `agent/references/recon/rate-calibration.md` is the narrower in-tool limit; this is the
+  cross-agent limit.)
+- **Shared-VM memory ceiling.** Before launching heavy enum, confirm the runtime is not
+  co-tenant-starved: a shared Docker VM hosting other (especially production) containers must
+  stay well under its `MemTotal`. Do not launch heavy enum when the shared VM is near its
+  memory ceiling — prefer a dedicated runtime. (`aith runtime start` performs a code-side
+  shared-VM preflight; this policy is the human-judgment companion to it.)
+
+### Phase-1 dispatch shape: sequential on shared runtimes
+
+The default "fan out `recon-specialist` + `source-analyzer` (+ OSINT) in parallel" shape is
+correct only on a **dedicated** runtime (Heavy/Comfortable tier or a single-engagement VM).
+On a shared/constrained **Standard-tier** runtime, default to a **sequential, monitored recon
+pipeline**: run one heavy enum op, watch host load and the daemon health-check, then start the
+next. Fan out only once you have confirmed the runtime can absorb concurrent heavy work. This
+preserves the parallel-throughput win where the box can take it without reproducing the
+load-36 near-crash on a shared box.
 
 ## Credential Auto-Use
 
