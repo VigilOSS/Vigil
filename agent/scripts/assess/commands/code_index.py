@@ -12,6 +12,7 @@ from assess.commands.code_ingest import (
     SKIP_DIRS,
     SKIP_EXTENSIONS,
     _is_regular_file,
+    _repo_key_for_path,
     _should_skip_file,
 )
 from assess.lib.config import resolve_engagement_dir
@@ -31,7 +32,20 @@ def register(subparsers) -> None:
     p.add_argument(
         "--repo-id",
         default=None,
-        help="Repository ID (used in output directory naming)",
+        help="Repository ID (numeric, used in output directory naming)",
+    )
+    p.add_argument(
+        "--repo-key",
+        default=None,
+        help="Stable repository key (default: derived from repo name + canonical path "
+             "via the same scheme as code-ingest). Used to name the per-repo index "
+             "directory and manifest so multiple repos don't collide.",
+    )
+    p.add_argument(
+        "--repo-name",
+        default=None,
+        help="Repository name (default: directory basename). Used only for "
+             "repo_key derivation and human-readable manifest labeling.",
     )
     p.add_argument(
         "--output-dir",
@@ -74,9 +88,106 @@ def _walk_repo(repo_path: str) -> list[dict[str, str]]:
     return files
 
 
-def _file_id(rel_path: str) -> str:
-    """Produce a short deterministic identifier for a file path."""
-    return hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:16]
+def _file_id(repo_key: str, rel_path: str) -> str:
+    """Produce a short deterministic identifier for a (repo, file_path) pair.
+
+    Includes ``repo_key`` in the hash so the same relative path across repos
+    (e.g. ``test/common.js`` in vast-service and beacon-processor) doesn't collide.
+    """
+    composite = f"{repo_key}::{rel_path}"
+    return hashlib.sha256(composite.encode("utf-8")).hexdigest()[:16]
+
+
+def _merge_languages(dst: dict[str, int], src: dict[str, int]) -> None:
+    for k, v in src.items():
+        dst[k] = dst.get(k, 0) + int(v)
+
+
+def _update_aggregate_manifest(
+    aggregate_path: Path,
+    repo_key: str,
+    per_repo_entry: dict,
+) -> dict:
+    """Load (or initialize) the engagement aggregate manifest, set the entry for
+    *repo_key*, recompute aggregate totals, and write it back.
+
+    The aggregate file lists every repo indexed in this engagement; its shape is::
+
+        {
+          "schema": "structural-index-aggregate/v1",
+          "updated_at": "...",
+          "repos": {"<repo_key>": { ... per-repo summary ... }, ...},
+          "aggregate": { totals over all repos }
+        }
+
+    A legacy single-repo manifest (with top-level ``path_to_index``) is treated
+    as one entry and folded in on first write so older engagements upgrade
+    cleanly.
+    """
+    if aggregate_path.is_file():
+        try:
+            existing = json.loads(aggregate_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+    else:
+        existing = {}
+
+    repos: dict[str, dict] = existing.get("repos") if isinstance(existing.get("repos"), dict) else {}
+
+    # Migrate legacy single-repo shape: fold its summary into ``repos`` under a
+    # synthetic key derived from its repo_path, then overwrite below if it
+    # matches the repo we're writing now.
+    if not repos and existing.get("path_to_index"):
+        legacy_repo_path = existing.get("repo_path", "")
+        legacy_name = Path(legacy_repo_path).name or "legacy"
+        try:
+            legacy_key = _repo_key_for_path(legacy_name, legacy_repo_path) if legacy_repo_path else "legacy"
+        except Exception:
+            legacy_key = "legacy"
+        repos[legacy_key] = {
+            **{k: v for k, v in existing.items() if k != "path_to_index"},
+            "manifest_path": None,  # legacy manifest was the file itself; no per-repo file exists
+            "index_dir": None,
+            "is_legacy": True,
+        }
+
+    repos[repo_key] = per_repo_entry
+
+    # Recompute aggregate totals across all repos.
+    aggregate = {
+        "total_files": 0,
+        "indexed_files": 0,
+        "skipped_unsupported": 0,
+        "languages": {},
+        "total_functions": 0,
+        "total_entry_points": 0,
+        "total_security_sinks": 0,
+        "total_exports": 0,
+        "sinks_by_category": {},
+        "repo_count": len(repos),
+    }
+    for entry in repos.values():
+        aggregate["total_files"] += int(entry.get("total_files", 0) or 0)
+        aggregate["indexed_files"] += int(entry.get("indexed_files", 0) or 0)
+        aggregate["skipped_unsupported"] += int(entry.get("skipped_unsupported", 0) or 0)
+        aggregate["total_functions"] += int(entry.get("total_functions", 0) or 0)
+        aggregate["total_entry_points"] += int(entry.get("total_entry_points", 0) or 0)
+        aggregate["total_security_sinks"] += int(entry.get("total_security_sinks", 0) or 0)
+        aggregate["total_exports"] += int(entry.get("total_exports", 0) or 0)
+        _merge_languages(aggregate["languages"], entry.get("languages", {}) or {})
+        _merge_languages(aggregate["sinks_by_category"], entry.get("sinks_by_category", {}) or {})
+
+    payload = {
+        "schema": "structural-index-aggregate/v1",
+        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "repos": repos,
+        "aggregate": aggregate,
+    }
+    aggregate_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return payload
 
 
 def run(args) -> None:
@@ -132,7 +243,13 @@ def run(args) -> None:
             sys.exit(1)
         out_base = Path(eng_dir) / "tools" / "analysis-state"
 
-    idx_dir = out_base / "structural-index"
+    # --- Derive repo identity ------------------------------------------------
+    repo_name = getattr(args, "repo_name", None) or os.path.basename(repo_path.rstrip(os.sep)) or "repo"
+    repo_key = getattr(args, "repo_key", None) or _repo_key_for_path(repo_name, repo_path)
+
+    structural_root = out_base / "structural-index"
+    structural_root.mkdir(parents=True, exist_ok=True)
+    idx_dir = structural_root / repo_key
     idx_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Index each file -----------------------------------------------------
@@ -156,15 +273,18 @@ def run(args) -> None:
         abs_path = os.path.join(repo_path, rel_path)
         idx = index_file(abs_path, lang)
         idx["file_path"] = rel_path  # store relative path
+        idx["repo_key"] = repo_key   # tag the per-file index so it stays self-describing if relocated
 
-        # Write per-file JSON
-        fid = _file_id(rel_path)
+        # Write per-file JSON under the per-repo subdirectory.
+        fid = _file_id(repo_key, rel_path)
         out_path = idx_dir / f"{fid}.json"
         out_path.write_text(
             json.dumps(idx, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        path_to_index[rel_path] = f"{fid}.json"
+        # Manifest path is relative to the structural-index root so consumers
+        # can resolve it without knowing the repo_key.
+        path_to_index[rel_path] = f"{repo_key}/{fid}.json"
 
         # Accumulate stats
         indexed += 1
@@ -177,8 +297,11 @@ def run(args) -> None:
             kind = sink["kind"]
             sinks_by_cat[kind] = sinks_by_cat.get(kind, 0) + 1
 
-    # --- Write manifest ------------------------------------------------------
-    manifest = {
+    # --- Write per-repo manifest --------------------------------------------
+    per_repo_manifest = {
+        "schema": "structural-index/v2",
+        "repo_key": repo_key,
+        "repo_name": repo_name,
         "repo_path": repo_path,
         "indexed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "total_files": len(file_list),
@@ -193,20 +316,30 @@ def run(args) -> None:
         "path_to_index": path_to_index,
     }
 
-    manifest_path = out_base / "structural-index-manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+    per_repo_manifest_path = structural_root / f"{repo_key}-manifest.json"
+    per_repo_manifest_path.write_text(
+        json.dumps(per_repo_manifest, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
 
+    # --- Update aggregate manifest ------------------------------------------
+    aggregate_path = out_base / "structural-index-manifest.json"
+    aggregate_entry = {
+        k: v for k, v in per_repo_manifest.items() if k != "path_to_index"
+    }
+    aggregate_entry["manifest_path"] = f"structural-index/{repo_key}-manifest.json"
+    aggregate_entry["index_dir"] = f"structural-index/{repo_key}/"
+    _update_aggregate_manifest(aggregate_path, repo_key, aggregate_entry)
+
     # --- Print summary -------------------------------------------------------
     print(f"\n=== Structural Index Summary ===", file=sys.stderr)
-    print(f"Repository: {repo_path}", file=sys.stderr)
+    print(f"Repository: {repo_name} ({repo_key})  path: {repo_path}", file=sys.stderr)
     print(f"Total files: {len(file_list)}  |  Indexed: {indexed}  |  Skipped (unsupported): {skipped_unsupported}", file=sys.stderr)
     print(f"Languages: {json.dumps(lang_counts)}", file=sys.stderr)
     print(f"Functions: {total_functions}  |  Entry points: {total_entry_points}  |  Security sinks: {total_sinks}  |  Exports: {total_exports}", file=sys.stderr)
     if sinks_by_cat:
         print(f"Sinks by category: {json.dumps(sinks_by_cat)}", file=sys.stderr)
-    print(f"\nIndex written to: {idx_dir}", file=sys.stderr)
-    print(f"Manifest written to: {manifest_path}", file=sys.stderr)
+    print(f"\nPer-file indexes: {idx_dir}", file=sys.stderr)
+    print(f"Per-repo manifest: {per_repo_manifest_path}", file=sys.stderr)
+    print(f"Aggregate manifest: {aggregate_path}", file=sys.stderr)
     print(f"\nRun 'code-index-sync' to push structural metadata to the backend.", file=sys.stderr)
