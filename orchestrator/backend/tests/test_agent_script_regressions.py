@@ -1800,6 +1800,9 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
     # exercise the real payload-construction path.
     items_path = tmp_path / "items.txt"
     items_path.write_text("\n".join(f"file_{i}.js" for i in range(1, 13)), encoding="utf-8")
+    # tmp_path stands in for the engagement dir; a real one always has scope.json
+    # (the resolver requires it so a scope-less subdir can't masquerade as the root).
+    (tmp_path / "scope.json").write_text("{}", encoding="utf-8")
 
     args = SimpleNamespace(
         action="start-swarm",
@@ -2078,3 +2081,54 @@ def test_resume_brief_dict_body_still_renders(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Resume Brief: eng" in out
     assert "phase: recon" in out
+
+
+# ---------------------------------------------------------------------------
+# Engagement-dir / key resolution hardening + relative cases.db anchoring.
+# Regression for: `cd scans/ ; ENGAGEMENT_DIR=$(pwd)` deriving key="scans", and
+# a bare relative cases.db opening the wrong (empty) DB from a drifted cwd.
+# ---------------------------------------------------------------------------
+
+def _import_assess_config():
+    root = str(_scripts_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import assess.lib.config as config
+    return config
+
+
+def test_resolve_engagement_dir_rejects_scopeless_subdir(monkeypatch, tmp_path):
+    config = _import_assess_config()
+    eng = tmp_path / "2026-05-29-eng"
+    (eng / "scans").mkdir(parents=True)
+    (eng / "scope.json").write_text("{}", encoding="utf-8")
+    monkeypatch.delenv("ENGAGEMENT_DIR", raising=False)
+
+    # The engagement root (has scope.json) resolves and the key is its basename.
+    assert config.resolve_engagement_dir(str(eng)) == str(eng.resolve())
+
+    # A scope-less subdir via --engagement-dir fails loud (the cd-into-subdir trap).
+    with pytest.raises(SystemExit):
+        config.resolve_engagement_dir(str(eng / "scans"))
+
+    # Same trap via $ENGAGEMENT_DIR=$(pwd)-from-scans.
+    monkeypatch.setenv("ENGAGEMENT_DIR", str(eng / "scans"))
+    with pytest.raises(SystemExit):
+        config.resolve_engagement_dir(None)
+
+
+def test_anchor_engagement_relative_uses_engagement_dir(monkeypatch, tmp_path):
+    config = _import_assess_config()
+    eng = tmp_path / "2026-05-29-eng2"
+    eng.mkdir()
+    (eng / "scope.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ENGAGEMENT_DIR", str(eng))
+
+    # Relative cases.db anchors to the engagement dir even when cwd is elsewhere.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    assert config.anchor_engagement_relative("cases.db", None) == str(eng.resolve() / "cases.db")
+
+    # Absolute paths are returned unchanged.
+    assert config.anchor_engagement_relative("/abs/cases.db", None) == "/abs/cases.db"

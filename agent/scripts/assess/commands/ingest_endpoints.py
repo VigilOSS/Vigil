@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 from assess.lib.auth import auth_active_context
 from assess.lib.classify import classify_type
 from assess.lib.client import AssessmentClient
-from assess.lib.config import load_config
+from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.db import db_init, db_insert_work_item
 from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
 
@@ -65,7 +65,12 @@ def _load_egress_blocked_hosts(path: str | None) -> set[str]:
 
 
 def run(args) -> None:
-    db_path = args.db_path
+    # Anchor a relative cases.db to the engagement dir (not the cwd) so the
+    # is_file() check and db_init() operate on the engagement's database even
+    # when invoked from a drifted cwd.
+    db_path = anchor_engagement_relative(args.db_path, args.engagement_dir)
+    if db_path != args.db_path:
+        print(f"ingest-endpoints: anchored relative db path '{args.db_path}' -> '{db_path}'", file=sys.stderr)
     source = args.source
 
     if not Path(db_path).is_file():
