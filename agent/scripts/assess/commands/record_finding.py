@@ -25,6 +25,15 @@ def register(subparsers) -> None:
     )
     p.add_argument("agent_name", help="Agent name (e.g. vulnerability-analyst)")
     p.add_argument("json_file", help="Path to finding JSON file")
+    p.add_argument(
+        "--allow-unindexed-evidence",
+        dest="allow_unindexed_evidence",
+        action="store_true",
+        help="Record even when evidence_ref is prose or a non-existent path. By default "
+             "record-finding rejects evidence that won't resolve to a registered artifact, "
+             "so the gap is caught now (while you still have the evidence) instead of at "
+             "check-report-readiness. Use for theoretical/code-inferred findings with no file.",
+    )
     p.set_defaults(func=run)
 
 
@@ -61,6 +70,55 @@ def _normalize_payload(payload: dict, *, agent_name: str, candidate_slug: str) -
 
     normalized.setdefault("links", [])
     return normalized
+
+
+def _evidence_file_exists(ref: str, eng_dir: str, engagement_key: str) -> bool:
+    """True when evidence_ref resolves to a real file (so the backend will
+    auto-register it). Checks the ref as-is, relative to the engagement dir, and
+    the container-path form ``/engagements/<key>/...`` mapped back to the host."""
+    candidates = [Path(ref)]
+    if not Path(ref).is_absolute():
+        candidates.append(Path(eng_dir) / ref)
+    prefix = f"/engagements/{engagement_key}/"
+    if ref.startswith(prefix):
+        candidates.append(Path(eng_dir) / ref[len(prefix):])
+    return any(c.is_file() for c in candidates)
+
+
+def _validate_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str, allow_unindexed: bool) -> None:
+    """Reject evidence_ref that cannot resolve to a registered artifact, at
+    record time — while the capturing agent still has the evidence in hand —
+    instead of surfacing ~24 blockers at the very end via check-report-readiness.
+
+    Accepts: an existing on-disk file (auto-registered by the backend) or an
+    http(s) URL pointer. Rejects: prose, or a path-shaped ref with no file.
+    Empty is a warning, not an error (evidence may be attached on a later update).
+    """
+    if allow_unindexed:
+        return
+    ref = (payload.get("evidence_ref") or "").strip()
+    if not ref:
+        print(
+            "record-finding: warning — no evidence_ref set; check-report-readiness will flag "
+            "this finding as missing evidence. Set evidence_ref to a captured artifact path or "
+            "URL, or pass --allow-unindexed-evidence to silence.",
+            file=sys.stderr,
+        )
+        return
+    if "://" in ref:
+        return  # URL evidence pointer — a valid reference, not a file.
+    if _evidence_file_exists(ref, eng_dir, engagement_key):
+        return  # existing artifact — the backend registers + links it on record.
+    looks_like_path = ("/" in ref or "." in ref) and "  " not in ref
+    if looks_like_path:
+        print(f"record-finding: evidence_ref '{ref}' looks like a path but no file exists there.", file=sys.stderr)
+    else:
+        print(f"record-finding: evidence_ref '{ref}' is free-text prose, not an artifact path or URL.", file=sys.stderr)
+    print("  Evidence must resolve to a real artifact so report-readiness can index it. Fix one of:", file=sys.stderr)
+    print("    - point evidence_ref at an existing file (auto-registered on record),", file=sys.stderr)
+    print("    - use an http(s) URL evidence pointer, or", file=sys.stderr)
+    print("    - pass --allow-unindexed-evidence to record anyway (accepting a report blocker).", file=sys.stderr)
+    sys.exit(1)
 
 
 def _report_validation_errors(payload: dict, errors: list[str]) -> None:
@@ -107,6 +165,13 @@ def run(args) -> None:
         validation_errors = collect_validation_errors(payload, _FINDING_SCHEMA)
         if validation_errors:
             _report_validation_errors(payload, validation_errors)
+
+        _validate_evidence_ref(
+            payload,
+            eng_dir=eng_dir,
+            engagement_key=cfg.engagement_key,
+            allow_unindexed=getattr(args, "allow_unindexed_evidence", False),
+        )
 
         client = AssessmentClient(cfg.base_url, cfg.engagement_key)
         try:
