@@ -7066,3 +7066,107 @@ def test_scope_rejection_writes_dispatch_decision_row(
     assert payload["role"] == "vulnerability-analyst"
     assert payload["scope_entries"] == ["app.example.test"]
     assert "not in scope.json" in payload["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Shared-VM preflight: refuse/warn when the runtime tier oversubscribes the VM.
+# ---------------------------------------------------------------------------
+
+def _gib(n: float) -> int:
+    return int(n * (1024 ** 3))
+
+
+def _preflight_runner(commands, *, info_stdout: str, install_root: Path, cotenants=()):
+    from ai_threat_hunting_cli.docker import DockerResult
+
+    mounts = (
+        f"{install_root / '.runtime-data'} -> /data\n"
+        f"{install_root / 'agent' / 'engagements'} -> /engagements\n"
+    )
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "info", "--format"]:
+            return DockerResult(0, info_stdout, "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "\n".join(cotenants), "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, mounts, "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
+
+    return runner
+
+
+def _preflight_install_root(tmp_path: Path) -> Path:
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+    return install_root
+
+
+def test_runtime_start_refuses_when_tier_exceeds_vm(tmp_path, monkeypatch):
+    import json as _json
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    install_root = _preflight_install_root(tmp_path)
+    commands: list[list[str]] = []
+    # 8 GB VM, 8 GB tier => 100% => refuse.
+    runner = _preflight_runner(commands, info_stdout=_json.dumps({"MemTotal": _gib(8), "NCPU": 4}), install_root=install_root)
+
+    with pytest.raises(SystemExit) as exc:
+        start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
+    assert "oversubscribe" in str(exc.value).lower() or "Refusing" in str(exc.value)
+    # No container was started.
+    assert not any(c[:3] == ["docker", "run", "-d"] for c in commands)
+
+
+def test_runtime_start_allow_oversubscribe_bypasses_refusal(tmp_path, monkeypatch):
+    import json as _json
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    install_root = _preflight_install_root(tmp_path)
+    commands: list[list[str]] = []
+    runner = _preflight_runner(commands, info_stdout=_json.dumps({"MemTotal": _gib(8), "NCPU": 4}), install_root=install_root)
+
+    start_runtime(
+        RuntimeOptions(install_root=install_root, allow_oversubscribe=True),
+        runner=runner,
+        validate_tools=False,
+    )
+    assert any(c[:3] == ["docker", "run", "-d"] for c in commands)
+
+
+def test_runtime_start_warns_with_cotenants_but_proceeds(tmp_path, monkeypatch, capsys):
+    import json as _json
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    install_root = _preflight_install_root(tmp_path)
+    commands: list[list[str]] = []
+    # Ample 64 GB VM (frac 0.125) but co-tenant containers present => warn, proceed.
+    runner = _preflight_runner(
+        commands,
+        info_stdout=_json.dumps({"MemTotal": _gib(64), "NCPU": 12}),
+        install_root=install_root,
+        cotenants=["bigcapital-local-mysql", "database-mssql-1"],
+    )
+    start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
+    assert any(c[:3] == ["docker", "run", "-d"] for c in commands)
+    assert "co-tenant" in capsys.readouterr().out
+
+
+def test_runtime_start_proceeds_when_docker_info_unparseable(tmp_path, monkeypatch):
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    install_root = _preflight_install_root(tmp_path)
+    commands: list[list[str]] = []
+    runner = _preflight_runner(commands, info_stdout="not-json-garbage", install_root=install_root)
+    start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
+    # Unreadable capacity => fail open => container still started.
+    assert any(c[:3] == ["docker", "run", "-d"] for c in commands)
