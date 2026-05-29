@@ -1257,6 +1257,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     "asnmap": (
         "ASN/domain/org to CIDR mapper. Use it to feed owned CIDR ranges into `cero` for TLS SAN discovery that CT logs miss.",
         "Pass at least one of -d, -l, -asn, or -org. The wrapper rejects empty invocations before running the tool.",
+        "Requires PDCP_API_KEY in the runtime — without it asnmap exits 0 with EMPTY output. The wrapper detects the missing key and fails loud; pass --allow-no-key to override, or use the whois.cymru.com / RADB / RDAP fallback (see references/tools/recon/asnmap.md).",
     ),
     "bbot": (
         "Multi-module recon scanner. Canonical passive subdomain invocation: `bbot -t <target> -p subdomain-enum -rf passive`. Add modules with -m or presets with -p; gate active modules behind --allow-deadly + --destructive.",
