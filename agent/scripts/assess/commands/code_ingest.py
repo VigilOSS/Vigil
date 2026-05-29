@@ -20,8 +20,12 @@ LANG_MAP = {
     '.js': 'javascript', '.jsx': 'javascript', '.ts': 'typescript', '.tsx': 'typescript',
     '.go': 'go', '.rs': 'rust', '.java': 'java', '.kt': 'kotlin',
     '.rb': 'ruby', '.php': 'php', '.swift': 'swift', '.m': 'objectivec',
-    '.sh': 'shell', '.bash': 'shell', '.zsh': 'shell',
-    '.sql': 'sql', '.html': 'html', '.css': 'css', '.xml': 'xml',
+    '.sh': 'shell', '.bash': 'shell', '.zsh': 'shell', '.lua': 'lua',
+    # Keep these aligned with treesitter_index.EXTENSION_LANG_MAP so a file the
+    # structural indexer recognizes is also stamped with a language at ingest
+    # (otherwise it gets an index but a language-less code_files row).
+    '.sql': 'sql', '.html': 'html', '.htm': 'html', '.tpl': 'html', '.twig': 'html',
+    '.css': 'css', '.scss': 'css', '.xml': 'xml',
     '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'toml',
     '.md': 'markdown', '.txt': 'text', '.rst': 'rst',
     'Makefile': 'makefile', 'CMakeLists.txt': 'cmake', 'Dockerfile': 'dockerfile',
@@ -369,6 +373,11 @@ def _detect_language(filename: str) -> str | None:
     # Check full filename first (Makefile, Dockerfile, CMakeLists.txt)
     if filename in LANG_MAP:
         return LANG_MAP[filename]
+    # Dockerfile variants (Dockerfile.dev, Dockerfile.prod) — match the basename
+    # rule used by treesitter_index.language_for_file so ingest and index agree.
+    base = os.path.basename(filename)
+    if base == "Dockerfile" or base.startswith("Dockerfile."):
+        return "dockerfile"
     ext = Path(filename).suffix.lower()
     return LANG_MAP.get(ext)
 
