@@ -37,20 +37,69 @@ def _read_env_file(path: str) -> dict[str, str]:
     return result
 
 
+def _is_engagement_root(path: Path) -> bool:
+    """An engagement root is a directory containing scope.json.
+
+    scope.json is the canonical marker the engagement key is derived from, so a
+    dir without it is not an engagement root — accepting one silently derives a
+    bogus key from the basename (e.g. ``scans``) and routes backend writes to a
+    404'd engagement.
+    """
+    return path.is_dir() and (path / "scope.json").is_file()
+
+
 def resolve_engagement_dir(cli_flag: str | None = None) -> str:
-    """Resolve engagement directory: CLI flag > $ENGAGEMENT_DIR > cwd if scope.json exists."""
-    if cli_flag and Path(cli_flag).is_dir():
-        return str(Path(cli_flag).resolve())
+    """Resolve engagement directory: CLI flag > $ENGAGEMENT_DIR > cwd.
+
+    The engagement key is the basename of whatever directory this returns, so
+    every branch now requires a real engagement root (a dir with scope.json). A
+    flag/env that points at a real directory WITHOUT scope.json fails loud and
+    names the bad path, rather than silently deriving a key from a subdirectory
+    basename — the `cd scans/ ; ENGAGEMENT_DIR=$(pwd)` → key="scans" trap.
+    """
+    if cli_flag:
+        if _is_engagement_root(Path(cli_flag)):
+            return str(Path(cli_flag).resolve())
+        if Path(cli_flag).is_dir():
+            raise SystemExit(
+                f"--engagement-dir '{cli_flag}' has no scope.json — it is not an "
+                "engagement root. Point it at the engagement directory itself, not "
+                "a subdirectory (e.g. scans/)."
+            )
+        # Non-existent path: fall through to env/cwd (preserves prior behavior).
 
     env_dir = os.environ.get("ENGAGEMENT_DIR", "")
-    if env_dir and Path(env_dir).is_dir():
-        return str(Path(env_dir).resolve())
+    if env_dir:
+        if _is_engagement_root(Path(env_dir)):
+            return str(Path(env_dir).resolve())
+        if Path(env_dir).is_dir():
+            raise SystemExit(
+                f"$ENGAGEMENT_DIR '{env_dir}' has no scope.json — it is not an "
+                "engagement root. Did you `cd` into a subdirectory (e.g. scans/) "
+                "before setting ENGAGEMENT_DIR=$(pwd)? Point it at the engagement dir."
+            )
 
     cwd = Path.cwd()
     if (cwd / "scope.json").is_file():
         return str(cwd.resolve())
 
     raise SystemExit("Cannot resolve engagement directory. Set --engagement-dir, $ENGAGEMENT_DIR, or run from a dir with scope.json.")
+
+
+def anchor_engagement_relative(path: str, engagement_dir_flag: str | None = None) -> str:
+    """Resolve a relative path against the engagement dir, not the process cwd.
+
+    Absolute paths are returned unchanged. Relative paths (notably a bare
+    ``cases.db``) are joined onto the resolved engagement root so a subagent
+    whose cwd drifted between bash calls can't open or create a different,
+    empty database. Raises (via :func:`resolve_engagement_dir`) when the
+    engagement dir cannot be resolved, rather than silently guessing the cwd.
+    """
+    p = Path(path)
+    if p.is_absolute():
+        return path
+    eng_dir = resolve_engagement_dir(engagement_dir_flag)
+    return str(Path(eng_dir) / path)
 
 
 def _candidate_env_files(engagement_dir: str, agent_root: str) -> list[str]:
