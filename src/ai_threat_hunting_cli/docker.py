@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,6 +74,23 @@ def image_exists(image: str, *, runner: Runner = run_command) -> bool:
             return True
     result = runner(["docker", "images", "-q", image])
     return bool(result.stdout.strip())
+
+
+def docker_info(*, runner: Runner = run_command) -> dict:
+    """Return parsed ``docker info`` as a dict, or {} when unavailable/unparseable.
+
+    On Docker Desktop (macOS/Windows) the ``MemTotal`` (bytes) and ``NCPU`` fields
+    report the *VM's* capacity — the shared allocation the runtime actually
+    competes for — which is the correct number for a shared-VM sizing preflight.
+    """
+    result = runner(["docker", "info", "--format", "{{json .}}"])
+    if result.returncode != 0 or not result.stdout.strip():
+        return {}
+    try:
+        data = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def container_names(*, all_containers: bool = False, runner: Runner = run_command) -> set[str]:
