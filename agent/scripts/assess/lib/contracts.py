@@ -364,9 +364,11 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Use details.references for CVE links, advisory URLs, or related documentation (array of strings).",
             "Use details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete and worth tracking, but only becomes exploitation-worthy as part of a larger chain. Specialists set or refine these fields through record-finding or update-finding; verification reviews them but does not own them.",
             "Do not put `link_kind=root_cause` in the finding `links` array. Record the finding first, then use `aith assess link-finding` after verification so root/sibling grouping stays an explicit lifecycle action.",
+            "evidence_ref must resolve to a real artifact: an existing engagement file (auto-registered + linked on record) or an http(s) URL. record-finding REJECTS prose refs and path-shaped refs with no file (the failure that produced ~24 report-readiness blockers at engagement end). For a theoretical/code-inferred finding with no file, pass --allow-unindexed-evidence.",
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
+            ("evidence_ref free-text prose", "point it at an existing artifact file or an http(s) URL; prose is rejected — use --allow-unindexed-evidence only for findings with genuinely no artifact"),
             ("confidence", "confidence belongs in code-record-analysis output, not finding records"),
             ("cwe", "use details.cwe_id"),
             ("description", "use summary for the short finding statement or notes for replayable proof"),
