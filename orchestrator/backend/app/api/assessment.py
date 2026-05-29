@@ -607,6 +607,56 @@ def get_services(engagement_key: str) -> list[dict[str, Any]]:
     return state_manager.list_services(engagement.id)
 
 
+class HostLivenessRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = Field(min_length=1, max_length=512)
+    status_code: int | None = None
+    scheme: str = Field(default="", max_length=16)
+    final_url: str = Field(default="", max_length=2048)
+    host_ip: str = Field(default="", max_length=256)
+    tech: str = Field(default="", max_length=4096)
+    title: str = Field(default="", max_length=1024)
+    webserver: str = Field(default="", max_length=256)
+    tls: str = Field(default="", max_length=8192)
+    failed: bool = False
+    # The caller (ingest-httpx) supplies an already-classified stored verdict.
+    # 'stale' is NOT accepted here — it is a read-time overlay, never stored.
+    reachability_class: Literal["live", "dead", "blackholed", "unknown"] = "unknown"
+    probed_at: str | None = Field(default=None, max_length=64)
+    source: str = Field(default="httpx", max_length=64)
+    source_run_id: int | None = None
+    source_run_uuid: str = Field(default="", max_length=128)
+
+
+class HostLivenessUpsertRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rows: list[HostLivenessRow] = Field(default_factory=list)
+
+
+@router.get("/host-liveness")
+def get_host_liveness(
+    engagement_key: str,
+    host: str = "",
+    fresh_only: bool = False,
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    hosts = [h.strip() for h in host.split(",") if h.strip()] if host else None
+    return state_manager.host_liveness(engagement.id, hosts=hosts, fresh_only=fresh_only)
+
+
+@router.post("/host-liveness")
+def post_host_liveness(
+    engagement_key: str,
+    request: HostLivenessUpsertRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.upsert_host_liveness(
+        engagement.id, [row.model_dump() for row in request.rows]
+    )
+
+
 @router.get("/request-variants")
 def get_request_variants(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
