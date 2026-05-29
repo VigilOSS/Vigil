@@ -99,12 +99,34 @@ EXTENSION_LANG_MAP: dict[str, str] = {
     ".go": "go",
     ".rb": "ruby",
     ".php": "php",
+    # Lightweight (regex-based) extractors -- not tree-sitter
+    ".sh": "shell",
+    ".bash": "shell",
+    ".zsh": "shell",
+    ".lua": "lua",
+    ".html": "html",
+    ".htm": "html",
+    ".tpl": "html",
+    ".twig": "html",
+    ".css": "css",
+    ".scss": "css",
 }
 
-SUPPORTED_LANGUAGES = frozenset({
+# Tree-sitter backed languages (full structural parsing)
+_TS_SUPPORTED_LANGUAGES = frozenset({
     "java", "c", "cpp", "python", "javascript", "typescript",
     "go", "ruby", "php",
 })
+
+# Lightweight regex/line-based extractors (pure-python, no tree-sitter grammar)
+LIGHTWEIGHT_LANGUAGES = frozenset({
+    "dockerfile", "shell", "lua", "html", "css",
+})
+
+# Combined set used by consumers (code_index.py / code_index_sync.py / assess
+# backend) to gate which files are indexed. Anything not in this set is
+# skipped silently with skipped_unsupported++.
+SUPPORTED_LANGUAGES = _TS_SUPPORTED_LANGUAGES | LIGHTWEIGHT_LANGUAGES
 
 
 # ---------------------------------------------------------------------------
@@ -1310,11 +1332,677 @@ def _detect_arrow_functions(source_lines: list[str]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Lightweight regex-based extractors
+#
+# These cover security-relevant file families that the tree-sitter pipeline
+# ignores (Dockerfile, shell, Lua, HTML/templates, CSS). They return the same
+# dict shape as the tree-sitter path so downstream consumers keep working.
+# ---------------------------------------------------------------------------
+
+
+def _snippet(line: str, limit: int = 120) -> str:
+    s = line.strip()
+    if len(s) > limit:
+        s = s[: limit - 3] + "..."
+    return s
+
+
+def _empty_func(name: str, line_start: int, line_end: int) -> dict[str, Any]:
+    return {
+        "name": name,
+        "qualified_name": name,
+        "line_start": line_start,
+        "line_end": line_end,
+        "params": [],
+        "modifiers": [],
+        "annotations": [],
+        "is_entry_point": False,
+    }
+
+
+def _index_lightweight(
+    file_path: str,
+    language: str,
+    source_lines: list[str],
+    total_lines: int,
+) -> dict[str, Any]:
+    """Dispatch helper for lightweight extractors."""
+    dispatch = {
+        "dockerfile": _extract_dockerfile,
+        "shell": _extract_shell,
+        "lua": _extract_lua,
+        "html": _extract_html,
+        "css": _extract_css,
+    }
+    fn = dispatch.get(language)
+    if fn is None:
+        return _empty_index(file_path, language, total_lines=total_lines)
+    funcs, entry_points, sinks, exports, imports = fn(source_lines)
+    return {
+        "file_path": file_path,
+        "language": language,
+        "total_functions": len(funcs),
+        "total_lines": total_lines,
+        "functions": funcs,
+        "entry_points": entry_points,
+        "security_sinks": sinks,
+        "call_sites": [],
+        "imports": imports,
+        "import_targets": [{"raw": i, "resolved": ""} for i in imports],
+        "exports": exports,
+        "classes": [],
+    }
+
+
+# --- Dockerfile -------------------------------------------------------------
+
+_DOCKER_INSTR_RE = re.compile(r"^\s*([A-Z]+)\s+(.*)$")
+_DOCKER_SECRET_NAMES = re.compile(r"\b(TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|AUTH)\b", re.IGNORECASE)
+_DOCKER_URL_RE = re.compile(r"https?://\S+")
+
+
+def _extract_dockerfile(
+    source_lines: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    funcs: list[dict[str, Any]] = []
+    entry_points: list[dict[str, Any]] = []
+    sinks: list[dict[str, Any]] = []
+    exports: list[dict[str, Any]] = []
+    imports: list[str] = []
+    has_user_directive = False
+
+    # Logical blocks: collect contiguous lines that belong to the same instruction
+    # (handle backslash continuations).
+    i = 0
+    n = len(source_lines)
+    while i < n:
+        raw = source_lines[i]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        m = _DOCKER_INSTR_RE.match(raw)
+        if not m:
+            i += 1
+            continue
+        instr = m.group(1).upper()
+        block_start = i + 1
+        block_text_parts = [m.group(2)]
+        # Consume continuation lines
+        while raw.rstrip().endswith("\\") and i + 1 < n:
+            i += 1
+            raw = source_lines[i]
+            block_text_parts.append(raw.rstrip("\\").strip())
+        block_end = i + 1
+        block_text = " ".join(block_text_parts)
+        i += 1
+
+        if instr in {"RUN", "COPY", "ADD", "CMD", "ENTRYPOINT", "USER", "EXPOSE", "HEALTHCHECK", "ENV", "FROM", "ARG", "WORKDIR", "VOLUME", "LABEL"}:
+            funcs.append(_empty_func(instr, block_start, block_end))
+
+        if instr == "USER":
+            has_user_directive = True
+            if re.match(r"\s*(0|root)\b", block_text):
+                sinks.append({
+                    "kind": "container_runs_as_root",
+                    "line": block_start,
+                    "function": instr,
+                    "snippet": _snippet(stripped),
+                    "vuln_classes": ["privilege-escalation"],
+                })
+
+        if instr in {"CMD", "ENTRYPOINT"}:
+            entry_points.append({
+                "name": instr,
+                "line": block_start,
+                "kind": "container_" + instr.lower(),
+                "annotation": "",
+            })
+            exports.append({"name": instr, "kind": "container_entrypoint", "line": block_start})
+
+        if instr == "EXPOSE":
+            for port in re.findall(r"\b(\d+)(?:/\w+)?\b", block_text):
+                sinks.append({
+                    "kind": "exposed_port",
+                    "line": block_start,
+                    "function": instr,
+                    "snippet": _snippet(f"EXPOSE {port}"),
+                    "vuln_classes": ["network-exposure"],
+                })
+
+        if instr == "RUN":
+            if re.search(r"\b(curl|wget)\b[^|;]*\|\s*(sh|bash|zsh)\b", block_text):
+                sinks.append({
+                    "kind": "remote_pipe_to_shell",
+                    "line": block_start,
+                    "function": instr,
+                    "snippet": _snippet(block_text),
+                    "vuln_classes": ["supply-chain", "injection"],
+                })
+            elif re.search(r"\b(curl|wget)\b", block_text):
+                sinks.append({
+                    "kind": "external_fetch",
+                    "line": block_start,
+                    "function": instr,
+                    "snippet": _snippet(block_text),
+                    "vuln_classes": ["supply-chain"],
+                })
+            if re.search(r"\bchmod\s+(?:-R\s+)?[0-7]*777\b", block_text):
+                sinks.append({
+                    "kind": "permissive_chmod",
+                    "line": block_start,
+                    "function": instr,
+                    "snippet": _snippet(block_text),
+                    "vuln_classes": ["privilege-escalation"],
+                })
+            if re.search(r"\bsudo\b", block_text):
+                sinks.append({
+                    "kind": "sudo_in_build",
+                    "line": block_start,
+                    "function": instr,
+                    "snippet": _snippet(block_text),
+                    "vuln_classes": ["privilege-escalation"],
+                })
+
+        if instr == "ENV" and _DOCKER_SECRET_NAMES.search(block_text):
+            sinks.append({
+                "kind": "embedded_secret_env",
+                "line": block_start,
+                "function": instr,
+                "snippet": _snippet(stripped),
+                "vuln_classes": ["secret-exposure"],
+            })
+
+        if instr == "ARG" and _DOCKER_SECRET_NAMES.search(block_text):
+            sinks.append({
+                "kind": "embedded_secret_arg",
+                "line": block_start,
+                "function": instr,
+                "snippet": _snippet(stripped),
+                "vuln_classes": ["secret-exposure"],
+            })
+
+        if instr == "ADD":
+            url_match = _DOCKER_URL_RE.search(block_text)
+            if url_match:
+                sinks.append({
+                    "kind": "add_external_url",
+                    "line": block_start,
+                    "function": instr,
+                    "snippet": _snippet(block_text),
+                    "vuln_classes": ["supply-chain"],
+                })
+                imports.append(url_match.group(0))
+
+        if instr == "FROM":
+            # FROM image[:tag][@digest] [AS name]
+            img = block_text.split(" AS ")[0].split(" as ")[0].strip()
+            if img:
+                imports.append(img)
+
+    if not has_user_directive and funcs:
+        sinks.append({
+            "kind": "missing_user_directive",
+            "line": 1,
+            "function": "FROM",
+            "snippet": "Dockerfile does not set USER -- container runs as root by default",
+            "vuln_classes": ["privilege-escalation"],
+        })
+
+    return funcs, entry_points, sinks, exports, imports
+
+
+# --- Shell ------------------------------------------------------------------
+
+_SHELL_FUNC_PAREN_RE = re.compile(r"^\s*([A-Za-z_][\w-]*)\s*\(\s*\)\s*\{?")
+_SHELL_FUNC_KW_RE = re.compile(r"^\s*function\s+([A-Za-z_][\w-]*)\s*(?:\(\s*\))?\s*\{?")
+_SHELL_SOURCE_RE = re.compile(r"^\s*(?:\.|source)\s+(\S+)")
+
+
+def _extract_shell(
+    source_lines: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    funcs: list[dict[str, Any]] = []
+    entry_points: list[dict[str, Any]] = []
+    sinks: list[dict[str, Any]] = []
+    exports: list[dict[str, Any]] = []
+    imports: list[str] = []
+
+    # First pass: find function starts and infer ends by brace matching (best-effort)
+    func_starts: list[tuple[str, int]] = []
+    for idx, line in enumerate(source_lines):
+        # Skip comment-only lines (but not lines with trailing comments)
+        if line.lstrip().startswith("#"):
+            continue
+        m = _SHELL_FUNC_KW_RE.match(line) or _SHELL_FUNC_PAREN_RE.match(line)
+        if m:
+            name = m.group(1)
+            func_starts.append((name, idx + 1))
+
+    # Compute approximate end lines by scanning braces from each start
+    for fi, (name, start_line) in enumerate(func_starts):
+        end_line = start_line
+        depth = 0
+        seen_brace = False
+        for j in range(start_line - 1, len(source_lines)):
+            for ch in source_lines[j]:
+                if ch == "{":
+                    depth += 1
+                    seen_brace = True
+                elif ch == "}":
+                    depth -= 1
+                    if seen_brace and depth <= 0:
+                        end_line = j + 1
+                        break
+            if seen_brace and depth <= 0:
+                break
+            end_line = j + 1
+        funcs.append(_empty_func(name, start_line, end_line))
+        exports.append({"name": name, "kind": "shell_function", "line": start_line})
+
+    for idx, line in enumerate(source_lines):
+        stripped = line.lstrip()
+        if stripped.startswith("#") and not stripped.startswith("#!"):
+            continue
+        line_no = idx + 1
+        # shebang as entry point
+        if idx == 0 and stripped.startswith("#!"):
+            entry_points.append({
+                "name": "script",
+                "line": 1,
+                "kind": "shell_script",
+                "annotation": stripped,
+            })
+        # source / dot includes
+        m = _SHELL_SOURCE_RE.match(line)
+        if m:
+            imports.append(m.group(1))
+        # Security sinks
+        if re.search(r"\beval\b", line):
+            sinks.append({
+                "kind": "shell_eval",
+                "line": line_no,
+                "function": _find_enclosing_shell_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["injection"],
+            })
+        if re.search(r"\b(curl|wget)\b[^|;]*\|\s*(sh|bash|zsh)\b", line):
+            sinks.append({
+                "kind": "remote_pipe_to_shell",
+                "line": line_no,
+                "function": _find_enclosing_shell_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["supply-chain", "injection"],
+            })
+        if re.search(r"\bchmod\s+(?:-R\s+)?[0-7]*777\b", line):
+            sinks.append({
+                "kind": "permissive_chmod",
+                "line": line_no,
+                "function": _find_enclosing_shell_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["privilege-escalation"],
+            })
+        if re.search(r"\bsudo\b", line):
+            sinks.append({
+                "kind": "sudo",
+                "line": line_no,
+                "function": _find_enclosing_shell_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["privilege-escalation"],
+            })
+        # Command substitution with $1/$@/$* (user-tainted) inside backticks or $(...)
+        if re.search(r"(?:`[^`]*\$[1-9@*][^`]*`|\$\([^)]*\$[1-9@*][^)]*\))", line):
+            sinks.append({
+                "kind": "tainted_command_substitution",
+                "line": line_no,
+                "function": _find_enclosing_shell_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["injection"],
+            })
+        # Hardcoded credentials: VAR=... where VAR name looks secret-y and value is a quoted literal
+        cred_m = re.match(r"\s*(?:export\s+)?([A-Za-z_][\w]*)\s*=\s*['\"]([^'\"]+)['\"]", line)
+        if cred_m and _DOCKER_SECRET_NAMES.search(cred_m.group(1)):
+            sinks.append({
+                "kind": "hardcoded_credential",
+                "line": line_no,
+                "function": _find_enclosing_shell_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["secret-exposure"],
+            })
+
+    return funcs, entry_points, sinks, exports, imports
+
+
+def _find_enclosing_shell_func(funcs: list[dict[str, Any]], line_no: int) -> str:
+    for f in funcs:
+        if f["line_start"] <= line_no <= f["line_end"]:
+            return f["name"]
+    return "<script>"
+
+
+# --- Lua --------------------------------------------------------------------
+
+_LUA_FUNC_RE = re.compile(
+    r"^\s*(?:local\s+)?function\s+([A-Za-z_][\w.:]*)\s*\(([^)]*)\)"
+)
+_LUA_LOCAL_FUNC_ASSIGN_RE = re.compile(
+    r"^\s*local\s+([A-Za-z_]\w*)\s*=\s*function\s*\(([^)]*)\)"
+)
+
+
+def _extract_lua(
+    source_lines: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    funcs: list[dict[str, Any]] = []
+    entry_points: list[dict[str, Any]] = []
+    sinks: list[dict[str, Any]] = []
+    exports: list[dict[str, Any]] = []
+    imports: list[str] = []
+
+    # Find function starts
+    starts: list[tuple[str, list[str], int]] = []
+    for idx, line in enumerate(source_lines):
+        stripped = line.lstrip()
+        if stripped.startswith("--"):
+            continue
+        m = _LUA_FUNC_RE.match(line) or _LUA_LOCAL_FUNC_ASSIGN_RE.match(line)
+        if m:
+            name = m.group(1)
+            params = [p.strip() for p in m.group(2).split(",") if p.strip()]
+            starts.append((name, params, idx + 1))
+
+    # Approximate function end by scanning for matching `end` at the same indent
+    for k, (name, params, start_line) in enumerate(starts):
+        next_start = starts[k + 1][2] - 1 if k + 1 < len(starts) else len(source_lines)
+        end_line = next_start
+        # Walk forward, counting block keywords vs `end`
+        depth = 1
+        for j in range(start_line, len(source_lines)):
+            line = source_lines[j]
+            # Strip line comments
+            code = re.sub(r"--.*$", "", line)
+            # Block-opening keywords that require an `end`
+            depth += len(re.findall(r"\b(?:function|if|for|while|do)\b", code))
+            depth -= len(re.findall(r"\bend\b", code))
+            if depth <= 0:
+                end_line = j + 1
+                break
+            end_line = j + 1
+        funcs.append({
+            "name": name,
+            "qualified_name": name,
+            "line_start": start_line,
+            "line_end": end_line,
+            "params": params,
+            "modifiers": [],
+            "annotations": [],
+            "is_entry_point": False,
+        })
+        exports.append({"name": name, "kind": "lua_function", "line": start_line})
+
+    for idx, line in enumerate(source_lines):
+        stripped = line.lstrip()
+        if stripped.startswith("--"):
+            continue
+        line_no = idx + 1
+        # require("...")
+        req_m = re.search(r"""require\s*\(?\s*['"]([^'"]+)['"]""", line)
+        if req_m:
+            imports.append(req_m.group(1))
+        if re.search(r"\bredis\.call\s*\(", line):
+            sinks.append({
+                "kind": "redis_call",
+                "line": line_no,
+                "function": _find_enclosing_lua_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["redis-injection"],
+            })
+        if re.search(r"\bredis\.pcall\s*\(", line):
+            sinks.append({
+                "kind": "redis_pcall",
+                "line": line_no,
+                "function": _find_enclosing_lua_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["redis-injection"],
+            })
+        if re.search(r"\bKEYS\s*\[", line):
+            sinks.append({
+                "kind": "redis_keys_input",
+                "line": line_no,
+                "function": _find_enclosing_lua_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["redis-injection"],
+            })
+        if re.search(r"\bARGV\s*\[", line):
+            sinks.append({
+                "kind": "redis_argv_input",
+                "line": line_no,
+                "function": _find_enclosing_lua_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["redis-injection"],
+            })
+        if re.search(r"\b(loadstring|load)\s*\(", line):
+            sinks.append({
+                "kind": "dynamic_code_load",
+                "line": line_no,
+                "function": _find_enclosing_lua_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["injection"],
+            })
+        if re.search(r"\bos\.execute\s*\(", line):
+            sinks.append({
+                "kind": "os_execute",
+                "line": line_no,
+                "function": _find_enclosing_lua_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["injection"],
+            })
+        if re.search(r"\bio\.popen\s*\(", line):
+            sinks.append({
+                "kind": "io_popen",
+                "line": line_no,
+                "function": _find_enclosing_lua_func(funcs, line_no),
+                "snippet": _snippet(line),
+                "vuln_classes": ["injection"],
+            })
+
+    return funcs, entry_points, sinks, exports, imports
+
+
+def _find_enclosing_lua_func(funcs: list[dict[str, Any]], line_no: int) -> str:
+    for f in funcs:
+        if f["line_start"] <= line_no <= f["line_end"]:
+            return f["name"]
+    return "<script>"
+
+
+# --- HTML / templates -------------------------------------------------------
+
+_HTML_FORM_RE = re.compile(r"<form\b[^>]*\baction\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
+_HTML_SCRIPT_SRC_RE = re.compile(r"<script\b[^>]*\bsrc\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
+_HTML_IFRAME_SRC_RE = re.compile(r"<iframe\b[^>]*\bsrc\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
+_HTML_INLINE_HANDLER_RE = re.compile(r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", re.IGNORECASE)
+_HTML_JS_URL_RE = re.compile(r"""=\s*['"]\s*javascript:""", re.IGNORECASE)
+_HTML_MUSTACHE_RE = re.compile(r"\{\{[^}]+\}\}")
+_HTML_ASP_RE = re.compile(r"<%[^%]+%>")
+_HTML_LINK_HREF_RE = re.compile(r"<link\b[^>]*\bhref\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE)
+
+
+def _extract_html(
+    source_lines: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    funcs: list[dict[str, Any]] = []
+    entry_points: list[dict[str, Any]] = []
+    sinks: list[dict[str, Any]] = []
+    exports: list[dict[str, Any]] = []
+    imports: list[str] = []
+
+    for idx, line in enumerate(source_lines):
+        line_no = idx + 1
+        # Forms -> entry points
+        for m in _HTML_FORM_RE.finditer(line):
+            action = m.group(1)
+            entry_points.append({
+                "name": "form",
+                "line": line_no,
+                "kind": "html_form",
+                "annotation": action,
+            })
+            funcs.append(_empty_func(f"form:{action}", line_no, line_no))
+        # External scripts -> imports + supply-chain sink if remote
+        for m in _HTML_SCRIPT_SRC_RE.finditer(line):
+            src = m.group(1)
+            imports.append(src)
+            if src.startswith(("http://", "//")):
+                sinks.append({
+                    "kind": "external_script_load",
+                    "line": line_no,
+                    "function": "<html>",
+                    "snippet": _snippet(line),
+                    "vuln_classes": ["supply-chain", "xss"],
+                })
+            elif src.startswith("https://"):
+                sinks.append({
+                    "kind": "external_script_load",
+                    "line": line_no,
+                    "function": "<html>",
+                    "snippet": _snippet(line),
+                    "vuln_classes": ["supply-chain"],
+                })
+        # link hrefs (stylesheets / preload)
+        for m in _HTML_LINK_HREF_RE.finditer(line):
+            imports.append(m.group(1))
+        # iframe srcs
+        for m in _HTML_IFRAME_SRC_RE.finditer(line):
+            imports.append(m.group(1))
+            sinks.append({
+                "kind": "iframe_embed",
+                "line": line_no,
+                "function": "<html>",
+                "snippet": _snippet(line),
+                "vuln_classes": ["clickjacking", "xss"],
+            })
+        # Inline event handlers
+        if _HTML_INLINE_HANDLER_RE.search(line):
+            sinks.append({
+                "kind": "inline_event_handler",
+                "line": line_no,
+                "function": "<html>",
+                "snippet": _snippet(line),
+                "vuln_classes": ["xss"],
+            })
+        # javascript: URLs
+        if _HTML_JS_URL_RE.search(line):
+            sinks.append({
+                "kind": "javascript_url",
+                "line": line_no,
+                "function": "<html>",
+                "snippet": _snippet(line),
+                "vuln_classes": ["xss"],
+            })
+        # Template interpolation
+        if _HTML_MUSTACHE_RE.search(line):
+            sinks.append({
+                "kind": "template_interpolation",
+                "line": line_no,
+                "function": "<template>",
+                "snippet": _snippet(line),
+                "vuln_classes": ["xss", "ssti"],
+            })
+        if _HTML_ASP_RE.search(line):
+            sinks.append({
+                "kind": "asp_interpolation",
+                "line": line_no,
+                "function": "<template>",
+                "snippet": _snippet(line),
+                "vuln_classes": ["xss", "ssti"],
+            })
+
+    return funcs, entry_points, sinks, exports, imports
+
+
+# --- CSS / SCSS -------------------------------------------------------------
+
+_CSS_IMPORT_RE = re.compile(r"@import\s+(?:url\()?\s*['\"]?([^'\"\s)]+)", re.IGNORECASE)
+_CSS_URL_RE = re.compile(r"\burl\(\s*['\"]?([^'\"\)]+)", re.IGNORECASE)
+_CSS_EXPRESSION_RE = re.compile(r"\bexpression\s*\(", re.IGNORECASE)
+_CSS_BEHAVIOR_RE = re.compile(r"\bbehavior\s*:", re.IGNORECASE)
+_CSS_BINDING_RE = re.compile(r"-moz-binding\s*:", re.IGNORECASE)
+
+
+def _extract_css(
+    source_lines: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    funcs: list[dict[str, Any]] = []
+    entry_points: list[dict[str, Any]] = []
+    sinks: list[dict[str, Any]] = []
+    exports: list[dict[str, Any]] = []
+    imports: list[str] = []
+
+    for idx, line in enumerate(source_lines):
+        line_no = idx + 1
+        stripped = line.lstrip()
+        if stripped.startswith("//") or stripped.startswith("/*"):
+            # Still scan for url() in comments? No -- skip pure comment lines.
+            continue
+        for m in _CSS_IMPORT_RE.finditer(line):
+            url = m.group(1)
+            imports.append(url)
+            if url.startswith(("http://", "//")):
+                sinks.append({
+                    "kind": "external_css_import",
+                    "line": line_no,
+                    "function": "<stylesheet>",
+                    "snippet": _snippet(line),
+                    "vuln_classes": ["supply-chain"],
+                })
+        for m in _CSS_URL_RE.finditer(line):
+            ref = m.group(1)
+            if ref.startswith(("http://", "//", "https://", "data:")):
+                imports.append(ref)
+        if _CSS_EXPRESSION_RE.search(line):
+            sinks.append({
+                "kind": "css_expression",
+                "line": line_no,
+                "function": "<stylesheet>",
+                "snippet": _snippet(line),
+                "vuln_classes": ["xss"],
+            })
+        if _CSS_BEHAVIOR_RE.search(line):
+            sinks.append({
+                "kind": "css_behavior",
+                "line": line_no,
+                "function": "<stylesheet>",
+                "snippet": _snippet(line),
+                "vuln_classes": ["xss"],
+            })
+        if _CSS_BINDING_RE.search(line):
+            sinks.append({
+                "kind": "css_moz_binding",
+                "line": line_no,
+                "function": "<stylesheet>",
+                "snippet": _snippet(line),
+                "vuln_classes": ["xss"],
+            })
+
+    return funcs, entry_points, sinks, exports, imports
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def language_for_file(file_path: str) -> str | None:
-    """Return the tree-sitter language key for a file, or None if unsupported."""
+    """Return the language key for a file, or None if unsupported.
+
+    Recognises both tree-sitter-backed languages (by extension) and the
+    lightweight regex-based extractors. Dockerfiles are matched by basename
+    (``Dockerfile`` or ``Dockerfile.<variant>``).
+    """
+    name = Path(file_path).name
+    # Dockerfile / Dockerfile.* (e.g. Dockerfile.dev, Dockerfile.prod)
+    if name == "Dockerfile" or name.startswith("Dockerfile."):
+        return "dockerfile"
     ext = Path(file_path).suffix.lower()
     return EXTENSION_LANG_MAP.get(ext)
 
@@ -1340,6 +2028,18 @@ def index_file(
     source_lines = source.decode("utf-8", errors="replace").splitlines()
     total_lines = len(source_lines)
 
+    # Lightweight regex-based extractors run regardless of tree-sitter availability
+    if language in LIGHTWEIGHT_LANGUAGES:
+        try:
+            return _index_lightweight(file_path, language, source_lines, total_lines)
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(
+                f"lightweight extractor for '{language}' on {file_path} failed: {exc}; "
+                "returning empty index.",
+                stacklevel=2,
+            )
+            return _empty_index(file_path, language, total_lines=total_lines)
+
     if not _TS_AVAILABLE:
         warnings.warn(
             "tree-sitter is not installed; returning degraded index without "
@@ -1349,7 +2049,7 @@ def index_file(
         )
         return _empty_index(file_path, language, total_lines=total_lines)
 
-    if language not in SUPPORTED_LANGUAGES:
+    if language not in _TS_SUPPORTED_LANGUAGES:
         return _empty_index(file_path, language, total_lines=total_lines)
 
     # For .tsx files, use the tsx parser variant

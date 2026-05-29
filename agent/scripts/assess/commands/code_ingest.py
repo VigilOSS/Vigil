@@ -151,7 +151,15 @@ def register(subparsers) -> None:
     p = subparsers.add_parser("code-ingest", help="Ingest a code repository for analysis")
     p.add_argument("repo_path", help="Path to the repository root")
     p.add_argument("--name", default=None, help="Repository name (default: directory basename)")
-    p.add_argument("--language", default=None, help="Override primary language detection")
+    p.add_argument("--language", default=None, help="Override repository primary language (does NOT auto-tag unknown files; use --default-language-for-unknown for that)")
+    p.add_argument(
+        "--default-language-for-unknown",
+        default=None,
+        help="Explicit language to stamp on files whose extension is unrecognized. "
+             "Opt-in replacement for the old --language fallback behavior. Use sparingly: "
+             "stamping unknown files with a wrong language pollutes coverage math and "
+             "structural indexing.",
+    )
     p.add_argument("--repo-key", default=None, help="Explicit repository key (default: stable name+path hash)")
     p.add_argument(
         "--include-minified",
@@ -291,6 +299,37 @@ def _skipped_record(repo_path: str, rel_path: str, reason: str, *, kind: str = '
         record['language'] = _detect_language(os.path.basename(filepath)) or ''
         record.update(_source_hints(rel_path))
     return record
+
+
+def _enumerate_skipped_dir(repo_path: str, rel_dir: str, dirname: str) -> list[dict[str, object]]:
+    """Walk inside a skipped directory and emit per-file skipped records.
+
+    The dir-level record alone hides large file counts (e.g. vendor/ with 378 PHP files
+    reads as a single skipped row). Returning per-file records makes the skipped surface
+    auditable from skipped-artifact manifests and code-coverage reports.
+    """
+    records: list[dict[str, object]] = []
+    dir_abs = os.path.join(repo_path, rel_dir)
+    if not os.path.isdir(dir_abs):
+        return records
+    reason = f'skipped_dir:{dirname}'
+    try:
+        for inner_dirpath, inner_dirnames, inner_filenames in os.walk(dir_abs):
+            # Don't follow symlinked dirs while accounting.
+            inner_dirnames[:] = [
+                d for d in inner_dirnames
+                if not os.path.islink(os.path.join(inner_dirpath, d))
+            ]
+            for fname in inner_filenames:
+                fpath = os.path.join(inner_dirpath, fname)
+                if not _is_regular_file(fpath):
+                    continue
+                inner_rel = os.path.relpath(fpath, repo_path)
+                records.append(_skipped_record(repo_path, inner_rel, reason))
+    except OSError:
+        # Best-effort accounting; partial enumeration is better than none.
+        pass
+    return records
 
 
 def _write_skipped_manifest(args, *, cfg, repo_key: str, repo_name: str, repo_path: str, records: list[dict[str, object]]) -> str | None:
@@ -549,6 +588,8 @@ def run(args) -> None:
             rel_dir = os.path.relpath(os.path.join(dirpath, dirname), repo_path)
             if dirname in SKIP_DIRS and not _should_descend_skipped_dir(rel_dir, dirname, args):
                 skipped_records.append(_skipped_record(repo_path, rel_dir, f'skipped_dir:{dirname}', kind='directory'))
+                # Also enumerate per-file accounting so the dir's contents are auditable.
+                skipped_records.extend(_enumerate_skipped_dir(repo_path, rel_dir, dirname))
                 continue
             kept_dirs.append(dirname)
         dirnames[:] = kept_dirs
@@ -588,8 +629,8 @@ def run(args) -> None:
                 included_skipped += 1
 
             lang = _detect_language(filename)
-            if args.language and lang is None:
-                lang = args.language
+            if lang is None and getattr(args, "default_language_for_unknown", None):
+                lang = args.default_language_for_unknown
 
             loc = _count_lines(filepath)
             total_loc += loc
@@ -678,7 +719,7 @@ def run(args) -> None:
                 print(f"Warning: could not update scope.json with source_repos: {e}", file=sys.stderr)
 
     # Print summary
-    analyzable = len([f for f in files if f['language'] is not None])
+    analyzable = len([f for f in files if f['language']])
     print(f"\n=== Code Ingest Summary ===")
     print(f"Repository: {repo_name} (id: {repo_id})")
     print(f"Total files: {len(files)} ({skipped} skipped)")

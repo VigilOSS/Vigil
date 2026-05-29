@@ -819,30 +819,33 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-index": CommandContract(
         name="code-index",
-        summary="Build the tree-sitter structural index under the engagement analysis-state directory.",
-        schema_name="structural-index manifest and per-file index JSON",
+        summary="Build the structural index under the engagement analysis-state directory.",
+        schema_name="structural-index aggregate manifest, per-repo manifest, and per-file index JSON",
         preferred_invocations=(
-            "aith assess code-index <repo-path> --repo-id <repo-id>",
+            "aith assess code-index <repo-path> --repo-key <repo-key>",
             "aith assess code-index <repo-path> --output-dir <engagement-dir>/tools/analysis-state",
-            "aith assess code-index-sync <repo-id>",
+            "aith assess code-index-sync --repo-key <repo-key>",
         ),
         author_supplied_fields=(
             "repo_path",
-            "repo_id when available",
+            "repo_key when available",
             "--output-dir only for intentional non-engagement output",
         ),
         helper_defaults=(
             ("output_dir", "<engagement_dir>/tools/analysis-state"),
-            ("manifest", "structural-index-manifest.json"),
-            ("per-file indexes", "structural-index/<sha16>.json"),
+            ("aggregate manifest", "structural-index-manifest.json"),
+            ("per-repo manifest", "structural-index/<repo_key>-manifest.json"),
+            ("per-file indexes", "structural-index/<repo_key>/<sha16>.json"),
         ),
         notes=(
+            "The aggregate manifest is keyed by repo_key so multiple source repos can share one engagement analysis-state tree without relative-path collisions.",
             "The default output directory is the same directory consumed by code-index-sync, so indexing and sync stay in one engagement-owned analysis-state tree.",
             "Pass --engagement-dir or set ENGAGEMENT_DIR when running outside an engagement directory. The helper fails closed instead of writing an unsynced .code-index tree into the source repo.",
         ),
         common_mistakes=(
             ("running outside engagement context", "pass --engagement-dir or --output-dir explicitly"),
             ("sync cannot find manifest", "use the default tools/analysis-state output or pass the same explicit output path consistently"),
+            ("legacy manifest with multiple repos", "pass --repo-id or rebuild the index so repo_key metadata is available"),
         ),
     ),
     "code-classify": CommandContract(
