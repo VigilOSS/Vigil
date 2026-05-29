@@ -654,6 +654,44 @@ def init_db() -> None:
             )
             """
         )
+        # Authoritative, freshness-aware host-liveness ledger. One row per
+        # (engagement, host); httpx probes upsert it via `aith assess ingest-httpx`.
+        # reachability_class is the stored verdict (live/dead/blackholed/unknown);
+        # the read projection degrades a stale verdict to 'stale' past the TTL so
+        # a 2-hour-old "live" forces a re-probe rather than being trusted across
+        # the shifting-egress boundary.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessment_host_liveness (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                host TEXT NOT NULL,
+                status_code INTEGER,
+                scheme TEXT NOT NULL DEFAULT '',
+                final_url TEXT NOT NULL DEFAULT '',
+                host_ip TEXT NOT NULL DEFAULT '',
+                tech TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                webserver TEXT NOT NULL DEFAULT '',
+                tls TEXT NOT NULL DEFAULT '',
+                failed INTEGER NOT NULL DEFAULT 0,
+                reachability_class TEXT NOT NULL DEFAULT 'unknown',
+                probed_at TEXT,
+                source TEXT NOT NULL DEFAULT '',
+                source_run_id INTEGER,
+                source_run_uuid TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, host),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(source_run_id) REFERENCES assessment_command_runs(id) ON DELETE SET NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assessment_host_liveness_class "
+            "ON assessment_host_liveness(engagement_id, reachability_class)"
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS assessment_request_variants (
