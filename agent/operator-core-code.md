@@ -103,8 +103,8 @@ The `code-index` command:
 - Runs through the `agent/scripts/assess.py` `uv` script entrypoint, which provides the
   bundled `tree-sitter` parser packages.
 - Uses tree-sitter to parse each source file
-- Produces per-file JSON in `tools/analysis-state/structural-index/` (filenames are `sha256(rel_path)[:16].json`) containing: function map (names, signatures, line ranges), entry points (main functions, request handlers, exported APIs), security sinks (memory operations, file I/O, command execution, crypto calls), and call sites
-- Writes a manifest at `tools/analysis-state/structural-index-manifest.json` with aggregate statistics and a `path_to_index` mapping (file relative path -> index filename) so consumers can look up index files by path
+- Produces per-file JSON under `tools/analysis-state/structural-index/<repo_key>/` (filenames are `sha256(repo_key::rel_path)[:16].json`, scoped per repo so the same relative path in different repos never collides) containing: function map (names, signatures, line ranges), entry points (main functions, request handlers, exported APIs), security sinks (memory operations, file I/O, command execution, crypto calls), and call sites
+- Writes a per-repo manifest at `tools/analysis-state/structural-index/<repo_key>-manifest.json` (its `path_to_index` maps repo-relative file path -> index filename relative to `structural-index/`, e.g. `<repo_key>/<fid>.json`) and updates an aggregate manifest at `tools/analysis-state/structural-index-manifest.json` (schema `structural-index-aggregate/v1`, top-level `repos` dict keyed by `repo_key` with `manifest_path` and `index_dir`, plus an `aggregate` totals block). Consumers resolve a per-repo index by: aggregate -> `repos[<repo_key>]` -> read `manifest_path` -> per-repo `path_to_index[<rel_path>]`
 - If tree-sitter is still unavailable, fix the local `uv` environment and rerun. Do not skip
   structural indexing for a fresh engagement.
 - The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map, export list, import dependency graph, and advisory sink annotations instead of requiring manual code triage. The function map is the primary completeness anchor -- every function must be accounted for. Sinks, exports, and import targets are advisory metadata that aids navigation but does not constrain the hunter's analysis scope
@@ -125,7 +125,7 @@ Provide:
 - Repo root path plus a file-list artifact or fetched JSON from `aith assess fetch "code/files?repo_id=<repo-id>&limit=5000"` -- do not paste thousands of rows inline
 - Project documentation paths (README, SECURITY.md, build files) so the architect can read the source material directly
 - Git churn data as a short summary or artifact path from `code_repos.git_churn_json`
-- Structural index manifest path (from `tools/analysis-state/structural-index-manifest.json`) -- if it is missing, run `aith assess code-index` before dispatching. The manifest gives the architect pre-computed function counts, entry points, and sink statistics per file
+- Structural index manifests (aggregate at `tools/analysis-state/structural-index-manifest.json`; per-repo at `tools/analysis-state/structural-index/<repo_key>-manifest.json`) -- if the aggregate is missing or only covers one repo, run `aith assess code-index` per repo (one invocation per source repo) before dispatching. The aggregate gives the architect pre-computed function counts, entry points, and sink statistics per file scoped to the right repo
 
 Phase 1 produces six deliverables. The call graph and attack hypotheses provide navigational guidance for hunters. The file analysis queue ensures every critical/high file is analyzed regardless of hypothesis coverage.
 
