@@ -82,6 +82,18 @@ When the runtime tier is tighter than Standard (e.g. `AITH_RUNTIME_MEMORY_GB=4`)
 
 ## Phase 0/1/2/3 staged composition
 
+> **Composed pipeline shortcut.** `aith assess dns-discovery <apex…>` runs the
+> Phase-0/0b/1 DNS methods (subfinder passive + CT/crt.sh + optional puredns brute)
+> → merge + de-noise → dnsx-resolve in one synchronous, audited command, and
+> `aith assess web-discovery <resolved_hosts.txt>` runs the Phase-3 web side
+> (de-noise → httpx liveness → auto-populate the `assessment_host_liveness` ledger
+> → katana crawl → optional work-buffer ingest). Both expose every knob as a flag
+> (`--recursive`, `--brute`, `--wordlist`, `--dnsx-profile`, `--ports`,
+> `--katana-depth`/`--katana-extra-args`, …) and bake in the safe defaults this
+> skill documents (non-recursive subfinder, de-noised inputs, status-only bulk
+> httpx, stdin-safe exec). Use them for the mechanical pipe; the manual stages
+> below remain the reference for tuning and for steps the verbs don't cover.
+
 Each phase compounds on the previous one. Stop at any phase when its bound rule fires (see "Bound rules" below). Cross-reference the verb invocations in `agent/skills/kali-exec/SKILL.md` "Subdomain enumeration: Phase A→D workflow" — this section describes operator-phase-flow ordering and resource shaping.
 
 ### Phase 0 — Passive enumeration (always-on)
