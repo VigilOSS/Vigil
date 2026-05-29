@@ -2010,3 +2010,71 @@ def test_render_check_flags_missing_wrapper_as_drift(tmp_path: Path) -> None:
     )
     assert "recon-specialist.md" in proc.stderr
     assert "missing" in proc.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# resume-brief: must not crash on a fresh/empty engagement when the backend
+# returns a non-dict body (empty string, or the SPA index.html for an unknown
+# route). Regression for AttributeError: 'str' object has no attribute 'get'.
+# ---------------------------------------------------------------------------
+
+def _run_resume_brief(monkeypatch, tmp_path, body, *, as_json):
+    module = _load_script_module(
+        "resume_brief_regression",
+        "agent/scripts/assess/commands/resume_brief.py",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            return body
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(
+        SimpleNamespace(
+            engagement_dir=tmp_path,
+            q="",
+            finding="",
+            agent_id="",
+            max_age_hours=None,
+            since="",
+            as_json=as_json,
+        )
+    )
+
+
+@pytest.mark.parametrize("body", ["", "<!doctype html><html>SPA</html>"])
+def test_resume_brief_handles_non_dict_body(monkeypatch, tmp_path, capsys, body):
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    assert "No prior state" in out  # no AttributeError, clean notice
+
+
+def test_resume_brief_non_dict_body_json_emits_valid_object(monkeypatch, tmp_path, capsys):
+    _run_resume_brief(monkeypatch, tmp_path, "", as_json=True)
+    payload = json.loads(capsys.readouterr().out)  # valid JSON object, not a bare string
+    assert isinstance(payload, dict)
+    assert payload["engagement"] == {}
+    assert "note" in payload
+
+
+def test_resume_brief_dict_body_still_renders(monkeypatch, tmp_path, capsys):
+    body = {"engagement": {"key": "eng", "current_phase": "recon", "host_count": 3}}
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    assert "Resume Brief: eng" in out
+    assert "phase: recon" in out
