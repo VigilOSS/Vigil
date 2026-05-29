@@ -165,5 +165,14 @@ def classify_type(method: str, url_path: str, content_type: str = "", body_snipp
     if _MANIFEST_CT.search(ct_lower):
         return "manifest"
 
-    # 17. unknown
+    # 17. host_root — a bare scheme://host[/] with no path, query, or content-type
+    # signal. These are live host landing URLs from host-level ingestion (e.g.
+    # `ingest-endpoints` of resolved live hosts) that carry no exploitable surface
+    # on their own; they are Phase-2 crawl seeds, not vuln-analyst work. Typing
+    # them distinctly (instead of "unknown") lets the dispatcher route/track them
+    # as "needs a crawl" rather than leaving them as unrouted unknowns forever.
+    if path_no_query in ("", "/") and "?" not in url_path and not ct_lower:
+        return "host_root"
+
+    # 18. unknown
     return "unknown"
