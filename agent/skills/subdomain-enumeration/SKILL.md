@@ -39,6 +39,14 @@ DNS resolution success-rate parallels the egress reputation problem: if every ho
 
 Subdomain enumeration is the highest-CPU-burst phase of recon. Docker's cgroup limits (`AITH_RUNTIME_MEMORY_GB` / `AITH_RUNTIME_CPUS` / `AITH_RUNTIME_PIDS_LIMIT` / `AITH_RUNTIME_SHM_SIZE` from `.env.example`) bound container userland, but a DNS-heavy profile against the wrong target tier can still saturate host-side Docker networking. Pick the profile by target shape, not by what the apex looks like — wildcards expand the surface and the rate calibration must match the surface, not the seed.
 
+> **Serialize heavy ops on a shared runtime.** Run DNS-heavy passes (puredns/dnsx) and bulk
+> `httpx` liveness **one at a time** — never stack a DNS brute and an httpx pass, or two httpx
+> passes, concurrently. Even individually-gentle passes compose into a SIGKILL (RC137) under
+> aggregate cgroup memory pressure (a solo httpx of 3,875 hosts ran clean; the same load with
+> two siblings was killed). This is the skill-level expression of the operator's
+> "one heavy enum op at a time" aggregate-concurrency rule (`agent/operator-core.md` → Recon
+> Dispatch Resource Policy → Aggregate concurrency).
+
 > **Host-CPU note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime. massdns and dnsx can send thousands of DNS packets per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive DNS profiles have crashed Docker on Standard-tier hardware. **The `aith assess kali dnsx` wrapper defaults to `--dnsx-profile polite-cdn --resolver-profile public-tcp`.** Step up to `polite-residential` only after assessing the target, and keep `bursty-OK` gated by runtime tier (see the matrix below). When in doubt, drop a tier.
 
 Profiles and full tier rationale live in `agent/references/tools/recon/subdomain-enumeration-tools.md`; the three operational tiers below are the load-bearing settings, listed from most cautious (default for any unknown target) down to opt-in only.
@@ -81,9 +89,13 @@ Each phase compounds on the previous one. Stop at any phase when its bound rule 
 `subfinder` aggregates 30+ public sources without sending traffic to the target. API keys lift coverage to ~90%+ — the worth-it free keys (SecurityTrails, Censys, VirusTotal, Shodan) are configured via `${SUBFINDER_*_API_KEY}` env vars in `.env.example`. Pair with chaos and github-subdomains (already wired into the bbot subdomain-enum preset) for the broadest passive sweep.
 
 ```bash
-aith assess kali subfinder -d target.example -all -recursive -t 30 \
+# NON-recursive by default. `-recursive` saturated the Docker daemon on large
+# apexes (army.mil: 4,289 subs → docker-ps health-checks timed out) and adds
+# little over `-all` on most targets. Reserve `-recursive` for a DEDICATED
+# runtime; on a shared/Standard runtime keep it off.
+aith assess kali subfinder -d target.example -all -t 20 -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
-  --technique RECON --intent "Phase 0 passive subdomain enum" \
+  --technique RECON --intent "Phase 0 passive subdomain enum (non-recursive)" \
   --probe-kind fingerprint --phase recon --timeout 600
 ```
 
@@ -96,7 +108,41 @@ aith assess kali bbot -t target.example -p subdomain-enum -rf passive \
   --probe-kind fingerprint --phase recon --timeout 1800
 ```
 
-### Phase 1 — Active brute (gated by Phase 0 size)
+### Phase 0b — Certificate Transparency (always-on, first-class)
+
+CT logs are a primary passive source, not an afterthought — in a real engagement CT
+harvest added **+1,758 net-new** `.mil` hostnames over subfinder/bbot alone, and on
+DNS-sink apexes (see Phase 1 wildcard gating) CT is the *only* source that cuts through the
+noise. Run it on every engagement, in parallel-conceptually-but-serialized-on-shared-runtime
+with Phase 0, before any active brute.
+
+```bash
+# Per-apex crt.sh query WITH backoff — crt.sh rate-limits aggressively and returns
+# empty 4-byte bodies under load, so retry with backoff rather than trusting a single
+# empty response. (Run via the audited host-exec / kali lane as configured.)
+for apex in $(cat /engagements/$ENGAGEMENT_KEY/scans/apexes.txt); do
+  for attempt in 1 2 3; do
+    out=$(curl -s "https://crt.sh/?q=%25.${apex}&output=json")
+    [ "$(printf '%s' "$out" | wc -c)" -gt 8 ] && break
+    sleep $((attempt * 5))   # backoff: 5s, 10s, 15s
+  done
+  printf '%s' "$out" | jq -r '.[].name_value' 2>/dev/null
+done | sed 's/^\*\.//' | sort -u >> /engagements/$ENGAGEMENT_KEY/scans/subs_ct.txt
+```
+
+**certspotter / alternate-CT fallback (when crt.sh blocks):** if crt.sh stays empty after
+backoff, fall back to certspotter (`https://api.certspotter.com/v1/issuances?domain=<apex>&include_subdomains=true&expand=dns_names`)
+or another CT aggregator. In the reference engagement this fallback recovered 1,916 CT hosts
+once crt.sh was rate-limited. Merge `subs_ct.txt` into the Phase 2.5 union like any other source.
+
+### Phase 1 — Active brute (gated by Phase 0 size, SKIP on DNS-sink apexes)
+
+> **Detect wildcard / DNS-sink apexes BEFORE bruteforcing.** Resolve a handful of random
+> nonexistent labels at the apex (e.g. `rande7x9.<apex>`); if they return a stable A/CNAME the
+> apex is a wildcard *sink* (e.g. `af.mil`, `africom.mil` returned 12,386 raw → 8 real;
+> MAC-shaped and `dhcp-*.rev` PTR floods). On a detected sink, **SKIP DNS brute and PTR
+> entirely** and rely on CT (Phase 0b) + TLS SAN (Phase 3) — DNS-based discovery there is pure
+> noise that burns the rate budget. Only bruteforce apexes that are NOT wildcard sinks.
 
 `puredns bruteforce` runs the active brute pass through massdns with wildcard filtering. Apply the tier profile. For wildcard-heavy targets (apex returns a wildcard answer for nonexistent labels), keep `--wildcard-tests` at 30 so the filter probes more candidates per wildcard cluster.
 
@@ -171,11 +217,14 @@ When a phase did not run (Phase 1 skipped, Phase 2 aborted), the missing file is
 2. **cero against asnmap-derived CIDR ranges** — TCP/TLS handshake on 443/8443/9443 across the target's owned CIDR. Catches subdomains that never appear in CT logs (private CAs, internal stages on internet-exposed IPs).
 
 ```bash
-# httpx feedback loop
+# httpx feedback loop — NO -tech-detect on this bulk pass. tech-detect amplifies
+# httpx memory under cgroup pressure and was a SIGKILL (RC137) trigger on large
+# merged lists. This pass only needs the SAN/TLS grab; tech-detect the confirmed-
+# live subset later (Phase: Filter/verify/ingest), not the full merged set.
 aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
-  -tls-grab -tls-probe -tech-detect -status-code -title -json \
+  -tls-grab -tls-probe -status-code -title -json \
   -o /engagements/$ENGAGEMENT_KEY/scans/httpx_tls.jsonl \
-  --technique DISCOVERY --intent "Phase 3 TLS SAN harvest via httpx -tls-grab" \
+  --technique DISCOVERY --intent "Phase 3 TLS SAN harvest via httpx -tls-grab (status-only, no tech-detect)" \
   --probe-kind fingerprint --phase recon --timeout 1200
 
 # asnmap → cero CIDR sweep
@@ -256,9 +305,9 @@ This section does NOT replace the Phase 3 TLS SAN feedback loop above; it sits a
 
 Stopping criteria are explicit because subdomain enumeration is the easiest place to burn a runtime budget on diminishing returns.
 
-- **Recursion depth ≤ 2.** subfinder `-recursive` plus a feedback pass on discovered subs is enough; further recursion produces marketing-tracker subs and stale CDN siblings that don't contribute to attack surface.
+- **subfinder is non-recursive by default; `-recursive` is dedicated-runtime-only.** On a shared/Standard runtime never pass `-recursive` — it saturated the Docker daemon on large apexes (army.mil, 4,289 subs). On a dedicated runtime, if you do opt into recursion, cap depth ≤ 2 plus one feedback pass on discovered subs; further recursion produces marketing-tracker subs and stale CDN siblings that don't contribute to attack surface.
 - **New-subdomain ratio < 5% of prior round.** When the marginal yield of a new round (additional permutations, deeper bbot modules, expanded wordlist) is under 5% of the cumulative count, stop. The remaining surface is below the cost-per-discovery threshold.
-- **Wildcard ratio > 30%.** When more than 30% of resolved hits land on the same wildcard answer (single A record, single CNAME), the apex is a wildcard sink and brute force is producing noise. Switch to the TLS SAN / asnmap path (Phase 3) — wildcard-fronted hosts still have unique certs.
+- **Wildcard ratio > 30% (detect EARLY, before brute).** When more than 30% of resolved hits land on the same wildcard answer (single A record, single CNAME), the apex is a wildcard sink and brute force is pure noise. Detect this up front with the random-label probe in Phase 1, not only mid-run. On a detected sink, route to **CT (Phase 0b) + TLS SAN / asnmap (Phase 3)** and skip DNS brute/PTR entirely — wildcard-fronted hosts still have unique certs, and CT/SAN are the sources that cut through the sink.
 - **Permutation estimate > 500k candidates.** Abort Phase 2 and narrow the input set before resolving. A 500k+ candidate run costs ~30+ minutes of runtime CPU at polite-residential rates and produces sub-1% live-host yield.
 
 When stopping early, record the rationale via `aith assess log operator "Subdomain enum bound rule fired" "<rule>" "<round-stats>" --actor-kind operator` so the audit trail explains the missing rounds instead of leaving an unexplained coverage gap.
@@ -281,19 +330,50 @@ The two are complementary, not exclusive. A common pattern is bbot first-pass fo
 
 ## Process-cleanup discipline
 
-When dispatching parallel subdomain scans, use `kali job start` lifecycle instead of background-and-pkill — broad pkill stomps on sibling agents in the shared runtime. See `agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for the full pattern.
+Run each subdomain scan **synchronously** (one blocking `aith assess kali <verb> … --timeout N`
+at a time) — specialists do not background target traffic or use `kali job start` (operator-only;
+see `agent/shared-constraints.md` §2). A long enum is handled by a generous `--timeout`, which
+cascades SIGTERM→SIGKILL into the in-container PID on expiry, so no manual cleanup is needed.
+Never use broad `pkill`/`killall` — it stomps sibling agents in the shared runtime. See
+`agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for the run-uuid
+PID-file pattern when a mid-run kill is genuinely required.
 
 ## Filter, verify, and ingest
 
 After staged enumeration, run the live-host filter pipeline before ingesting subdomains into the work buffer. Only verified live web entries enter the engagement pipeline.
 
 ```bash
-# Stage 1: HTTP probing with httpx
-aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
-  -status-code -title -tech-detect -server -content-length -follow-redirects -silent \
+# Stage 0: DE-NOISE before httpx. Passive/CT/PTR enumeration inflates the merged
+# list ~10x with non-host artifacts that each cost a full httpx timeout for ~0
+# yield. Drop DNS service records and PTR/workstation noise BEFORE probing, and
+# order real apexes ahead of CDN-wildcard blocks so they aren't starved behind a
+# tar-pit (e.g. a 13k Akamai-wildcard block timed out httpx before it reached
+# navy.mil's 4,818 real subs).
+grep -viE '(^|\.)(_dmarc|_dkim|_domainkey|_acme-challenge)\.' \
+     /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
+  | grep -viE '(^|\.)(dhcp-|dha-[0-9]+-[0-9]+|dhpcile[0-9]+)' \
+  | grep -viE '(-laptop|-kw|-desktop)(\.|$)' \
+  | grep -viE '^[0-9a-f]{2}-[0-9a-f]{2}-' \
+  | grep -viE '\.rev\.' \
+  | sort -u > /engagements/$ENGAGEMENT_KEY/scans/subs_denoised.txt
+
+# Stage 1: HTTP probing with httpx — status-only on the bulk pass. NO -tech-detect
+# here (it amplifies httpx memory under cgroup pressure → RC137 SIGKILL on large
+# lists). tech-detect the confirmed-live subset in Stage 1b only.
+aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_denoised.txt \
+  -status-code -title -server -content-length -follow-redirects -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/subdomains_live.txt \
-  --technique DISCOVERY --intent "live-host confirmation on merged sub list" \
+  --technique DISCOVERY --intent "live-host confirmation on de-noised sub list (status-only)" \
   --probe-kind fingerprint --phase recon --timeout 1200
+
+# Stage 1b: tech-detect ONLY the confirmed-live subset (small, safe).
+awk '{print $1}' /engagements/$ENGAGEMENT_KEY/scans/subdomains_live.txt | sort -u \
+  > /engagements/$ENGAGEMENT_KEY/scans/subs_live_only.txt
+aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_live_only.txt \
+  -tech-detect -json -silent \
+  -o /engagements/$ENGAGEMENT_KEY/scans/subdomains_tech.jsonl \
+  --technique DISCOVERY --intent "tech-detect on confirmed-live subset only" \
+  --probe-kind fingerprint --phase recon --timeout 600
 
 # Stage 2: ingest verified live subs into the work buffer
 awk '{print $1}' "$ENGAGEMENT_DIR/scans/subdomains_live.txt" | sort -u | while IFS= read -r sub; do
