@@ -1717,6 +1717,13 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
     dtach_argv = next(argv for argv in seen_argv if "dtach" in argv)
     assert "-w" in dtach_argv
     assert dtach_argv[dtach_argv.index("-w") + 1] == f"/engagements/{fake_engagement.name}"
+    # The backgrounded command's stdin is redirected from /dev/null so a
+    # ProjectDiscovery tool (httpx/katana/nuclei/dnsx/naabu) cannot block on an
+    # inherited non-EOF stdin — the in-container analogue of the sync path's
+    # stdin=DEVNULL. Tool-agnostic, so it also covers katana (which rejects
+    # -no-stdin).
+    wrapped_shell = dtach_argv[-1]
+    assert "</dev/null" in wrapped_shell
 
 
 def test_job_start_persists_paths_and_cleans_up_when_running_patch_fails(
