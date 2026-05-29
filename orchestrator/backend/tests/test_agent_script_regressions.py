@@ -2132,3 +2132,70 @@ def test_anchor_engagement_relative_uses_engagement_dir(monkeypatch, tmp_path):
 
     # Absolute paths are returned unchanged.
     assert config.anchor_engagement_relative("/abs/cases.db", None) == "/abs/cases.db"
+
+
+# ---------------------------------------------------------------------------
+# record-finding evidence_ref validation (catches the ~24 report-readiness
+# evidence blockers at record time instead of at the very end). §2.6.
+# ---------------------------------------------------------------------------
+
+def _load_record_finding_module():
+    return _load_script_module(
+        "record_finding_evidence_validation",
+        "agent/scripts/assess/commands/record_finding.py",
+    )
+
+
+def test_evidence_ref_accepts_existing_file(tmp_path):
+    mod = _load_record_finding_module()
+    (tmp_path / "scans").mkdir()
+    (tmp_path / "scans" / "proof.txt").write_text("evidence", encoding="utf-8")
+    # Relative to engagement dir, and the container-path form, both resolve.
+    for ref in ("scans/proof.txt", "/engagements/eng/scans/proof.txt"):
+        mod._validate_evidence_ref(
+            {"evidence_ref": ref}, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False
+        )  # no SystemExit
+
+
+def test_evidence_ref_accepts_url(tmp_path):
+    mod = _load_record_finding_module()
+    mod._validate_evidence_ref(
+        {"evidence_ref": "https://target.example/proof"},
+        eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+    )  # no SystemExit
+
+
+def test_evidence_ref_rejects_prose(tmp_path, capsys):
+    mod = _load_record_finding_module()
+    with pytest.raises(SystemExit):
+        mod._validate_evidence_ref(
+            {"evidence_ref": "kali run_id 13992 listMethods proved this"},
+            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+        )
+    assert "prose" in capsys.readouterr().err
+
+
+def test_evidence_ref_rejects_missing_path(tmp_path, capsys):
+    mod = _load_record_finding_module()
+    with pytest.raises(SystemExit):
+        mod._validate_evidence_ref(
+            {"evidence_ref": "scans/does-not-exist.txt"},
+            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+        )
+    assert "no file exists" in capsys.readouterr().err
+
+
+def test_evidence_ref_empty_warns_not_rejects(tmp_path, capsys):
+    mod = _load_record_finding_module()
+    mod._validate_evidence_ref(
+        {"evidence_ref": ""}, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False
+    )  # no SystemExit
+    assert "no evidence_ref set" in capsys.readouterr().err
+
+
+def test_evidence_ref_allow_unindexed_bypasses(tmp_path):
+    mod = _load_record_finding_module()
+    mod._validate_evidence_ref(
+        {"evidence_ref": "just prose here"},
+        eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=True,
+    )  # no SystemExit even though it is prose
