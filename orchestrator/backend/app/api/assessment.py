@@ -444,6 +444,9 @@ class FindingPatchRequest(BaseModel):
     summary: str | None = Field(default=None, max_length=4096)
     evidence_ref: str | None = Field(default=None, max_length=1024)
     notes: str | None = Field(default=None, max_length=20000)
+    # "append" (default) keeps the historical checkpoint behavior; "replace"
+    # overwrites notes so stale/contradicted internal text can be scrubbed.
+    notes_mode: Literal["append", "replace"] = "append"
     source_name: str | None = Field(default=None, max_length=128)
     details: dict[str, Any] | None = None
     provenance: dict[str, Any] | None = None
@@ -1279,6 +1282,7 @@ async def patch_finding(
         summary=request.summary,
         evidence_ref=request.evidence_ref,
         notes=request.notes,
+        notes_mode=request.notes_mode,
         source_name=request.source_name,
         details=request.details,
         provenance=request.provenance,

@@ -1827,6 +1827,7 @@ def create_finding(
     transition_artifact_ref: str = "",
     transition_metadata: dict[str, Any] | None = None,
     expected_updated_at: str | None = None,
+    notes_mode: str = "append",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if slug:
@@ -1937,7 +1938,9 @@ def create_finding(
                     summary,
                     summary,
                     evidence_ref,
-                    _append_notes(existing["notes"], notes),
+                    # Default appends (record-finding/verify-finding checkpoints);
+                    # notes_mode="replace" overwrites so stale text can be scrubbed.
+                    notes if notes_mode == "replace" else _append_notes(existing["notes"], notes),
                     _merge_object_text(existing["details_json"], details),
                     _merge_object_text(existing["provenance_json"], provenance),
                     evidence_type,
@@ -2101,6 +2104,7 @@ def patch_finding(
     transition_metadata: dict[str, Any] | None = None,
     allow_verification_mutation: bool = False,
     expected_updated_at: str | None = None,
+    notes_mode: str = "append",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
@@ -2169,6 +2173,7 @@ def patch_finding(
         transition_artifact_ref=transition_artifact_ref,
         transition_metadata=transition_metadata,
         expected_updated_at=expected_updated_at or current_updated_at,
+        notes_mode=notes_mode,
     )
 
 
