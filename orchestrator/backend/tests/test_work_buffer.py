@@ -515,6 +515,50 @@ def test_classify_type_marks_sourcemaps_before_generic_data_content_types() -> N
     )
 
 
+def test_classify_type_bare_host_root() -> None:
+    module = _load_classify_lib_module()
+
+    # Bare scheme://host[/] with no path/query/content-type → host_root.
+    assert module.classify_type("GET", "/", "", "") == "host_root"
+    assert module.classify_type("GET", "", "", "") == "host_root"
+    # A query gives param signal → not a bare host_root.
+    assert module.classify_type("GET", "/?next=x", "", "") != "host_root"
+    # A content-type means we know it's a rendered page, not a bare root.
+    assert module.classify_type("GET", "/", "text/html", "") == "page"
+    # Real paths are unaffected.
+    assert module.classify_type("GET", "/api/users", "", "") == "api"
+
+
+def test_classify_work_host_root_is_seed_not_skipped(tmp_path: Path) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="v:hr",
+        url_path="/",
+        case_type="host_root",
+        query_params={},
+    )
+
+    _run_classify(db_path)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT cluster_key, priority_score, terminal_reason, status "
+            "FROM work_items WHERE queue_key = ?",
+            ("v:hr",),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    # Stable, greppable cluster; zero priority; NOT terminal/skipped (it is a
+    # Phase-2 crawl seed, must stay pending to be crawled — not silently dropped).
+    assert row[0] == "type:host_root"
+    assert row[1] == 0
+    assert row[2] is None
+    assert row[3] == "pending"
+
+
 def test_classify_work_path_fallback(tmp_path: Path) -> None:
     db_path = _make_fresh_db(tmp_path)
     _insert_work_item(

@@ -246,6 +246,19 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
             "terminal_reason": "inert_type",
         }
 
+    if case_type == "host_root":
+        # A bare scheme://host[/] landing URL: no exploitable surface on its own,
+        # but a Phase-2 crawl seed. Stamp a stable, greppable cluster so the
+        # operator can see "N hosts await crawling" instead of it hiding among
+        # unrouted `unknown` / `path:/` rows. NOT inert — it must stay `pending`,
+        # not be skipped, so it is never silently dropped.
+        return {
+            "priority_score": 0,
+            "priority_reason": None,
+            "cluster_key": "type:host_root",
+            "terminal_reason": None,
+        }
+
     url_path = row["url_path"] or ""
     keys = collect_keys(row["query_params"], row["body_params"], row["path_params"])
     matches = bucket_matches(url_path.lower(), keys)
