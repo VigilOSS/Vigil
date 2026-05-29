@@ -49,11 +49,26 @@ against scoped targets, `docker run` / `docker exec` against the runtime, and
 ad-hoc curl/nmap/sqlmap/etc. from the host. The host boundary is for
 orchestration, not target traffic.
 
-Long-running probes (nmap+scripts, sqlmap, nuclei sweep, dirb, gobuster, ffuf
-large wordlists) MUST use `aith assess kali job start ...` because synchronous
-calls have a wall-clock budget and will be killed cleanly on timeout. The job
-worker is SQLite-backed and dtach-supervised, so it survives across calling-shell
-exit; synchronous calls do not.
+Target-facing dispatches run **synchronously by default**: one blocking
+`aith assess kali <verb> ... --timeout N` at a time — no `run_in_background`,
+no `aith assess kali job start`, no dtach, and no watcher/poll loop. A
+specialist must never background target traffic and then halt waiting for a
+completion notification: the harness auto-resumes the halted agent, which
+launches the next detached job and halts again, producing unbounded relaunch
+thrash and duplicate probes (the failure mode that stalled multiple recon
+dispatches — see the engagement post-mortem). A generous `--timeout` is the
+correct tool for a single long probe (`nmap+scripts`, `sqlmap`, `nuclei`
+sweep, `dirb`, `gobuster`, `ffuf` large wordlists): when it expires the audit
+pipeline cascades SIGTERM→SIGKILL into the in-container PID, so a synchronous
+call is killed cleanly and is never orphaned.
+
+`aith assess kali job start` — the SQLite-backed, dtach-supervised worker that
+survives calling-shell exit — is reserved for a **single** long-running sweep
+the **operator** explicitly launches and monitors directly. It is never a
+per-step pattern inside a specialist's agent loop and never a way to fan out
+parallel detached probes. If a dispatched specialist believes a probe must
+outlive its dispatch, it says so in its handoff and lets the operator own the
+job rather than backgrounding it itself.
 
 Host-side commands are limited to coordination and non-target support only:
 `jq`, `sqlite3`, `python3`, `grep` / `rg`, `sed`, `awk`, `base64`, `openssl`,
@@ -86,13 +101,16 @@ selector (`kill -TERM "$(cat /tmp/aith-pid-<run_uuid>)"`).
 What to do instead — track the lifecycle of every process you spawn and stop
 only the one you started:
 
-- **Long-running probes — use the job lifecycle.** `aith assess kali job
-  start --technique <enum> --intent "<text>" --probe-kind <kind> --phase
-  <phase> --timeout <seconds> -- <verb> ...` returns a job id and writes
-  an audit row. Stop it cleanly with `aith assess kali job stop <id>`.
-  The job worker SIGTERMs the in-container PID it owns; sibling jobs stay
-  alive.
-- **Synchronous `aith assess kali exec` runs — use the run-uuid PID file.**
+- **Synchronous runs (the specialist default) — let `--timeout` clean up.**
+  A blocking `aith assess kali <verb> ... --timeout N` cascades
+  SIGTERM→SIGKILL into the in-container PID when the budget expires, so no
+  manual cleanup is needed for the common case.
+- **Operator-owned long sweeps — use the job lifecycle.** When the operator
+  has launched a single authorized long sweep with `aith assess kali job
+  start ... -- <verb> ...`, stop it cleanly with `aith assess kali job stop
+  <id>`. The job worker SIGTERMs only the in-container PID it owns; sibling
+  jobs stay alive. (Specialists do not start jobs — see §2.)
+- **Mid-run synchronous cleanup — use the run-uuid PID file.**
   Every audit row carries a `run_uuid`. The runtime writes the
   in-container PID to `/tmp/aith-pid-<run_uuid>` for the duration of the
   run, so cleanup is `aith assess kali exec --technique META --intent
@@ -145,7 +163,9 @@ truthful instead of degrading to a stale env-var default.
   change, shell exec that modifies state). Off for read-only probes. Used by
   cleanup-tracking workflows.
 - **`--timeout <seconds>`** — wall-clock budget. Required. Synchronous calls hit
-  the timeout cleanly; longer budgets must use `aith assess kali job start`.
+  the timeout cleanly (SIGTERM→SIGKILL into the in-container PID), so raise the
+  budget for a heavy single probe rather than backgrounding it. A long budget is
+  not a reason to use `aith assess kali job start` — that is operator-only (§2).
 - **`--phase <enum>`** — REQUIRED on every call. Pass the phase the dispatch was
   authorized for, NOT `scope.json.current_phase`. The reason is that
   `scope.json.current_phase` is operator state and updates only on phase

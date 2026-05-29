@@ -124,6 +124,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
    - **Tier-pick smoke** — one `wafw00f` or `httpx` HEAD per host to pick the calibration row a specialist will dispatch under.
    - **Runtime health smoke** — `aith assess kali --help`, version probes, container-status checks.
    - **Backend-write helpers** — `record-finding`, `link-finding`, `supersede-intel`, `resolve-surface`, and other pure-write helpers.
+   - **Bulk mechanical probing on a fixed list** — DNS resolution (`dnsx`), HTTP liveness (`httpx`), and port scanning (`nmap`/`naabu`) over an already-enumerated host list, plus the matching ingestion (`ingest-endpoints`, `ingest-httpx`). This is mechanical pipeline throughput, not analysis: no hypothesis forming, no surface/finding/severity judgment, no per-host investigation. Run it synchronously through `aith assess kali` (one blocking call at a time) when deterministic pipeline progress matters more than per-host depth. Analysis, triage, vuln testing, and OSINT judgment still go to specialists — the operator produces the liveness/coverage substrate; specialists reason over it.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `aith assess record-finding` to write findings to the backend. The backend is the sole store.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. Record them via `aith assess record-intel cve <cve-json-file>` (intel_cves table), NOT `record-finding`. Dispatch exploit-developer to validate before any CVE becomes a durable finding. This reconciles "record immediately" with "no theoretical findings."
    **Phase 4 root-cause grouping pass:** after verification has produced stable findings, query `aith assess fetch findings` and group intentional root/sibling relationships with `aith assess link-finding`. Pick the root as the finding that describes the broadest attacker-controllable cause or missing control. Link downstream outcomes as siblings because developers and executives need to see blast radius without receiving duplicate tickets. Use `--effect eliminates_finding` when fixing the root resolves the sibling entirely; use `--effect eliminates_attack_path` when the sibling remains a standalone remediation item after the root is fixed. Confirm with `aith assess list-finding-group <root-slug>` and `aith assess check-report-readiness`.
@@ -190,6 +191,30 @@ Phase 3a (in the CONSUME & TEST step below) is a **coverage audit**, not a secon
 | fuzzer | High-volume testing (100+ payloads) | When FUZZER_NEEDED |
 | osint-analyst | CVE/breach/DNS/social research backed by backend intel tables | Phase 5 (parallel with exploit) |
 | report-writer | Final or interim report | Phase 7 |
+
+### Synchronous Target-Facing Dispatch (mandatory)
+
+Every target-facing dispatch runs **synchronously**: the specialist issues one
+blocking `aith assess kali <verb> ... --timeout N` at a time — no
+`run_in_background`, no `aith assess kali job start`, no dtach, no watcher/poll
+loop. This is not a style preference; it is the fix for a concrete failure mode.
+A subagent that backgrounds a detached job and then halts "waiting for a
+completion notification" is auto-resumed by the harness, launches the next
+detached job, and halts again — unbounded relaunch thrash that, in past
+engagements, burned 80–210 K tokens per agent and produced duplicate httpx
+passes with near-zero net coverage. Synchronous, in-band execution eliminates it
+at the source.
+
+Bake this into the dispatch prompt for any target-facing role (recon,
+surface-collector, vulnerability-analyst, fuzzer, exploit-developer): **"Run
+every probe synchronously with a single blocking `aith assess kali` call and an
+explicit `--timeout`. Do not use `run_in_background`, `kali job start`, dtach, or
+any poll/watch loop."** `kali job start` is operator-owned and reserved for a
+single authorized sweep that must outlive its dispatch (see
+`agent/shared-constraints.md §2` and `agent/skills/kali-exec/SKILL.md`). When a
+specialist proves unreliable for bulk mechanical probing, the operator's own
+bulk-probe carve-out (Core Loop step 7) — synchronous `dnsx`/`httpx`/`nmap` over
+a fixed list plus ingestion — is the deterministic fallback, not async dispatch.
 
 ### Runtime Dispatch Syntax
 
