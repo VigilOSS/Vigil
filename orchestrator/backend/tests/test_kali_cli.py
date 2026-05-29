@@ -2685,6 +2685,8 @@ def test_asnmap_translates_argv(monkeypatch):
 
     mod = _import("assess.commands.kali_asnmap")
     monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    # Key present → the run proceeds without the auth gate interfering.
+    monkeypatch.setattr(mod, "_runtime_has_pdcp_key", lambda *a, **k: True)
 
     cli.main(
         [
@@ -2713,6 +2715,84 @@ def test_asnmap_translates_argv(monkeypatch):
     assert "-silent" in cmd
     assert "-o" in cmd and "/engagements/x/scans/cidrs.txt" in cmd
     assert captured["kwargs"]["tool_name"] == "asnmap"
+
+
+def _asnmap_argv(*extra):
+    return [
+        "kali", "asnmap", "-d", "example.com",
+        "--technique", "OSINT", "--intent", "ASN map",
+        "--probe-kind", "fingerprint", "--phase", "recon", "--timeout", "300",
+        *extra,
+    ]
+
+
+def test_asnmap_fails_loud_when_pdcp_key_missing(monkeypatch, capsys):
+    """No PDCP_API_KEY in the runtime → fail loud (not silent-empty), kali_exec never runs."""
+    cli = _import("assess.cli")
+    mod = _import("assess.commands.kali_asnmap")
+
+    ran = {"called": False}
+    monkeypatch.setattr(mod, "kali_exec", lambda *a, **k: ran.__setitem__("called", True))
+    monkeypatch.setattr(mod, "_runtime_has_pdcp_key", lambda *a, **k: False)
+
+    # cli.main catches AssessError and exits non-zero (see test_asnmap_requires_target_or_list).
+    with pytest.raises(SystemExit) as exc:
+        cli.main(_asnmap_argv())
+    assert exc.value.code != 0
+    assert ran["called"] is False
+    err = capsys.readouterr().err
+    assert "PDCP_API_KEY" in err
+    assert "whois.cymru.com" in err  # fallback guidance surfaced
+
+
+def test_asnmap_allow_no_key_bypasses_gate(monkeypatch):
+    """--allow-no-key runs asnmap without consulting the key probe."""
+    cli = _import("assess.cli")
+    mod = _import("assess.commands.kali_asnmap")
+    kali = _import("assess.lib.kali")
+
+    captured = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return kali.KaliResult(
+            run_id=1, status="completed", return_code=0,
+            stdout_path="/tmp/x.out", stderr_path="/tmp/x.err",
+            duration_ms=10, peak_rss_bytes=None, stdout_preview="",
+            stderr_preview="", timed_out=False, partial_results=False,
+        )
+
+    def _boom(*a, **k):  # must NOT be consulted when --allow-no-key is set
+        raise AssertionError("key probe should be skipped with --allow-no-key")
+
+    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    monkeypatch.setattr(mod, "_runtime_has_pdcp_key", _boom)
+
+    cli.main(_asnmap_argv("--allow-no-key"))
+    assert captured["cmd"][0] == "asnmap"
+
+
+def test_asnmap_warns_but_proceeds_when_probe_inconclusive(monkeypatch, capsys):
+    """Probe can't run (docker down) → warn and proceed, don't block."""
+    cli = _import("assess.cli")
+    mod = _import("assess.commands.kali_asnmap")
+    kali = _import("assess.lib.kali")
+
+    captured = {}
+    monkeypatch.setattr(
+        mod, "kali_exec",
+        lambda cmd, **k: captured.__setitem__("cmd", list(cmd)) or kali.KaliResult(
+            run_id=1, status="completed", return_code=0,
+            stdout_path="/tmp/x.out", stderr_path="/tmp/x.err",
+            duration_ms=10, peak_rss_bytes=None, stdout_preview="",
+            stderr_preview="", timed_out=False, partial_results=False,
+        ),
+    )
+    monkeypatch.setattr(mod, "_runtime_has_pdcp_key", lambda *a, **k: None)
+
+    cli.main(_asnmap_argv())
+    assert captured["cmd"][0] == "asnmap"
+    assert "could not verify PDCP_API_KEY" in capsys.readouterr().err
 
 
 def test_asnmap_requires_target_or_list(capsys):
