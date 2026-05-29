@@ -38,6 +38,13 @@ def register(subparsers) -> None:
     p.add_argument("--details-inline", help="Inline JSON object for details")
     p.add_argument("--provenance-inline", help="Inline JSON object for provenance")
     p.add_argument(
+        "--notes-replace",
+        dest="notes_replace",
+        action="store_true",
+        help="Overwrite the notes field instead of appending. Use to scrub stale or "
+             "contradicted internal text (notes is append-only by default). Pair with --notes.",
+    )
+    p.add_argument(
         "--evidence-type",
         dest="evidence_type",
         default=None,
@@ -97,6 +104,7 @@ def run(args) -> None:
             "summary": args.summary,
             "evidence_ref": args.evidence_ref,
             "notes": args.notes,
+            "notes_mode": "replace" if getattr(args, "notes_replace", False) else None,
             "source_name": args.source_name,
             "details": details,
             "provenance": provenance,
