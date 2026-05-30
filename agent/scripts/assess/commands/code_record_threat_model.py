@@ -33,11 +33,8 @@ def run(args) -> None:
     }
 
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/threat-model', payload)
-    finally:
-        client.close()
 
     tm_id = result.get('id') or result.get('threat_model_id', '')
     print(f"Threat model recorded for repo {args.repo_id} (id: {tm_id})")

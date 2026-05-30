@@ -64,9 +64,7 @@ def run(args) -> None:
             sys.exit(1)
 
     session_index = load_session_index(eng_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         for proposal in proposals:
             ptype = proposal["type"]
             payload = proposal["payload"]
@@ -130,8 +128,6 @@ def run(args) -> None:
             else:
                 print(f"Unsupported proposal type: {ptype}", file=sys.stderr)
                 sys.exit(1)
-    finally:
-        client.close()
 
     if session_index:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

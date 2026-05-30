@@ -665,8 +665,7 @@ def run(args) -> None:
         sys.exit(1)
 
     # POST to backend
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         # Create the repo record
         repo_payload = {
             'repo_key': repo_key,
@@ -696,8 +695,6 @@ def run(args) -> None:
             resp = client.post('code/files', files_payload)
             created_count += resp.get('inserted', len(batch))
 
-    finally:
-        client.close()
 
     skipped_manifest = _write_skipped_manifest(
         args,

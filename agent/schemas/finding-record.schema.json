@@ -480,6 +480,14 @@
         "taint_path": "curl_url_set(CURLURLPART_URL, attacker_url) -> parseurl() -> memcpy(buf, scheme, schemelen)",
         "guards_evaluated": "No bounds check on schemelen before memcpy",
         "slot_type": "URL-COMPONENT",
+        "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "cvss_score": 8.1,
+        "remediation": "Add bounds check on schemelen before memcpy; reject URLs with scheme longer than 63 bytes",
+        "steps_to_reproduce": [
+          "Craft URL with scheme > 64 bytes",
+          "Pass to curl_url_set",
+          "Observe heap corruption under ASAN"
+        ],
         "chain_required": true,
         "chain_rationale": "The primitive is meaningful for exploitation, but final report impact depends on chaining it to a reachable crash or controlled allocation path.",
         "required_followup": [

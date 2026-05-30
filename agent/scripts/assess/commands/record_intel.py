@@ -101,11 +101,8 @@ def run(args) -> None:
         print(f"[dry-run] payload: {json.dumps(payload, ensure_ascii=False)}")
         return
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         response = client.post_engagement(endpoint, payload)
-    finally:
-        client.close()
 
     # Emit event — fire-and-forget, outside the main call.
     record_id = response.get("id") if isinstance(response, dict) else None
@@ -117,8 +114,7 @@ def run(args) -> None:
                 summary_title = str(value)
                 break
 
-    event_client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as event_client:
         event_client.post_event(
             {
                 "event_type": "intel.recorded",
@@ -130,8 +126,6 @@ def run(args) -> None:
                 "summary": summary_title or intel_type,
             }
         )
-    finally:
-        event_client.close()
 
     # Print a concise success marker — matches record-finding's style.
     if record_id is not None:

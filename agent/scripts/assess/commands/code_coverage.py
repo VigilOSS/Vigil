@@ -60,11 +60,8 @@ def run(args) -> None:
     if args.repo_id:
         endpoint = f'code/coverage?repo_id={args.repo_id}'
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.get(endpoint)
-    finally:
-        client.close()
 
     if not isinstance(result, dict):
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -87,11 +84,8 @@ def _run_cwe_matrix(cfg, args) -> None:
     if args.repo_id:
         endpoint = f'code/coverage?detail=cwe&repo_id={args.repo_id}'
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.get(endpoint)
-    finally:
-        client.close()
 
     if not isinstance(result, dict):
         print(json.dumps(result, indent=2, ensure_ascii=False))

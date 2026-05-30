@@ -1,0 +1,78 @@
+[
+  {
+    "title": "Heap buffer overflow in URL parser via overlong scheme",
+    "severity": "high",
+    "defect_family": "buffer-overflow",
+    "canonical_location": "file:lib/urlapi.c:342",
+    "summary": "Attacker-controlled URL scheme exceeding 64 bytes overflows heap buffer in parseurl()",
+    "evidence_ref": "",
+    "notes": "",
+    "details": {
+      "cwe_id": "CWE-122",
+      "impact": "Remote code execution via heap corruption",
+      "evidence": "memcpy(buf, scheme, schemelen) copies attacker-controlled bytes without a bounds check",
+      "entry_point": "curl_url_set(CURLURLPART_URL, attacker_url)",
+      "sink": "memcpy(buf, scheme, schemelen) at lib/urlapi.c:342",
+      "taint_path": "curl_url_set -> parseurl -> memcpy",
+      "guards_evaluated": "No bounds check on schemelen before memcpy",
+      "slot_type": "URL-COMPONENT",
+      "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "cvss_score": 8.1,
+      "remediation": "Add bounds check on schemelen before memcpy; reject URLs with scheme longer than 63 bytes",
+      "steps_to_reproduce": [
+        "Craft URL with scheme > 64 bytes",
+        "Pass to curl_url_set",
+        "Observe heap corruption under ASAN"
+      ],
+      "chain_required": true,
+      "chain_rationale": "Exploitation requires a reachable network caller to the URL parser",
+      "references": ["https://cwe.mitre.org/data/definitions/122.html"],
+      "discovered_by": "vulnerability-analyst"
+    },
+    "workflow_status": "active",
+    "verification_state": "unreviewed",
+    "verification_disposition": "none",
+    "root_cause_key": "",
+    "auth_context": "anonymous",
+    "source_name": "vulnerability-analyst",
+    "provenance": {"agent_name": "vulnerability-analyst"},
+    "links": []
+  },
+  {
+    "title": "Integer overflow in packet length calculation",
+    "severity": "critical",
+    "defect_family": "integer-overflow",
+    "canonical_location": "file:lib/net/packet.c:88",
+    "summary": "Attacker-supplied 32-bit length field wraps to small value, causing under-allocated buffer",
+    "evidence_ref": "scans/fuzzer_crash.txt",
+    "notes": "",
+    "details": {
+      "cwe_id": "CWE-190",
+      "impact": "Remote code execution via controlled heap underallocation and subsequent write",
+      "evidence": "AFL++ triggered crash in 4 minutes; stack trace in scans/fuzzer_crash.txt",
+      "entry_point": "recv_packet(fd)",
+      "sink": "malloc(total_len) where total_len = header_len + body_len overflows",
+      "taint_path": "recv_packet -> parse_header -> malloc(header_len + body_len)",
+      "guards_evaluated": "No overflow check before addition",
+      "slot_type": "NETWORK-INPUT",
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "cvss_score": 9.8,
+      "remediation": "Use checked arithmetic or ensure total_len is validated before malloc",
+      "steps_to_reproduce": [
+        "Send packet with body_len = 0xFFFFFFFF",
+        "Observe crash due to under-allocated buffer write"
+      ],
+      "chain_required": false,
+      "references": ["https://cwe.mitre.org/data/definitions/190.html"],
+      "discovered_by": "vulnerability-analyst"
+    },
+    "workflow_status": "active",
+    "verification_state": "unreviewed",
+    "verification_disposition": "none",
+    "root_cause_key": "",
+    "auth_context": "anonymous",
+    "source_name": "vulnerability-analyst",
+    "provenance": {"agent_name": "vulnerability-analyst"},
+    "links": []
+  }
+]

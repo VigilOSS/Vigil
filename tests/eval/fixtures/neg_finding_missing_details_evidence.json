@@ -1,0 +1,21 @@
+{
+  "title": "SQLi missing evidence in details",
+  "severity": "high",
+  "defect_family": "sql-injection",
+  "canonical_location": "https://target.example/search?q",
+  "summary": "SQLi finding with details.evidence omitted",
+  "evidence_ref": "",
+  "notes": "",
+  "workflow_status": "active",
+  "verification_state": "unreviewed",
+  "verification_disposition": "none",
+  "root_cause_key": "",
+  "auth_context": "anonymous",
+  "details": {
+    "impact": "Data exfiltration",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "cvss_score": 7.5,
+    "remediation": "Parameterized queries",
+    "steps_to_reproduce": ["Send crafted input"]
+  }
+}

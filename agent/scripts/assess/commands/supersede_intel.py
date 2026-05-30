@@ -174,8 +174,7 @@ def run(args) -> None:
         sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         from urllib.parse import quote
 
         path = (
@@ -194,8 +193,6 @@ def run(args) -> None:
             record = json.loads(resp_body)
         except json.JSONDecodeError:
             record = {"raw": resp_body}
-    finally:
-        client.close()
 
     print(json.dumps(record, indent=2, ensure_ascii=False))
 

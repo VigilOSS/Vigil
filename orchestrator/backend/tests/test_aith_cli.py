@@ -2443,6 +2443,11 @@ def test_resolve_surface_accepts_partially_covered_with_followup_condition(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -2496,6 +2501,11 @@ def test_transition_phase_resolves_engagement_dir_from_cwd(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.delenv("ENGAGEMENT_DIR", raising=False)
@@ -2534,6 +2544,11 @@ def test_transition_phase_backend_error_blocks_precondition_check(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -2589,6 +2604,11 @@ def test_transition_phase_both_engagement_advances_code_track_separately(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -2689,6 +2709,11 @@ def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -2753,6 +2778,11 @@ def test_check_coverage_reports_partially_covered_surfaces(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -2812,6 +2842,11 @@ def test_assess_log_accepts_structured_metadata_inline(monkeypatch: pytest.Monke
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -2873,6 +2908,11 @@ def test_assess_log_accepts_structured_metadata_file(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -3982,6 +4022,11 @@ def test_link_finding_intel_preserves_details_json_related_intel_ids(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -4034,6 +4079,11 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setenv("AGENT_NAME", "investigator")
     monkeypatch.delenv("AITH_AGENT_NAME", raising=False)
@@ -4113,6 +4163,11 @@ def test_host_exec_require_audit_fails_when_audit_record_fails(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -4179,6 +4234,11 @@ def test_approve_proposal_rejects_non_containment_decision(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -4226,6 +4286,11 @@ def test_approve_proposal_searches_all_decision_pages(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -4261,6 +4326,13 @@ def test_blue_phase_gate_requires_expected_role_for_completed_tier() -> None:
             if endpoint == "dispatches?status=completed&limit=1000&offset=0":
                 return [{"agent_role": "investigator", "tier": "L1", "status": "completed"}]
             return []
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     blockers = module._blue_check_triage_to_investigate(_Client())
 
@@ -4291,6 +4363,13 @@ def test_blue_phase_gate_pages_completed_dispatches() -> None:
                     }
                 ]
             return []
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     count = module._blue_count_completed_dispatches(_Client(), "L1", "alert-triage-specialist")
 
@@ -4321,6 +4400,13 @@ def test_blue_investigate_gate_skips_l2_dispatch_for_auto_closed_findings() -> N
                     }
                 ]
             return []
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     blockers = module._blue_check_investigate_to_verify(_Client())
 
@@ -4362,6 +4448,13 @@ def test_blue_respond_gate_does_not_treat_approval_as_containment() -> None:
         def get_engagement(self, endpoint: str, query: str = ""):
             assert endpoint == "activity-entries"
             return {"items": []}
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     blockers = module._blue_check_respond_to_report(_Client())
 
@@ -4384,6 +4477,13 @@ def test_blue_phase_gate_pages_activity_entries() -> None:
             if query == "limit=1000&offset=1000":
                 return {"items": [{"action": "alert_intake"}]}
             return {"items": []}
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     rows = module._blue_list_activity_entries(_Client())
 
@@ -4404,6 +4504,13 @@ def test_blue_complete_gate_accepts_closeout_artifact() -> None:
             if endpoint == "findings":
                 return [{"slug": "FIND-001", "workflow_status": "false_positive"}]
             return []
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     blockers = module._blue_check_report_to_complete(_Client())
 
@@ -4430,6 +4537,13 @@ def test_blue_complete_gate_pages_until_closeout_artifact() -> None:
             if endpoint == "findings":
                 return [{"slug": "FIND-001", "workflow_status": "false_positive"}]
             return []
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     blockers = module._blue_check_report_to_complete(_Client())
 
@@ -4469,6 +4583,11 @@ def test_blue_direct_phase_jump_runs_intermediate_gates(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -4516,6 +4635,11 @@ def test_transition_phase_complete_marks_blue_scope_completed(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -4823,6 +4947,11 @@ def test_supersede_intel_requires_natural_key_before_request(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(supersede_module, "AssessmentClient", _StubClient)
     monkeypatch.setattr(
@@ -5082,6 +5211,11 @@ def _stub_render_handoff_environment(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _StubClient)
     monkeypatch.setattr(
@@ -5405,6 +5539,11 @@ class _CapturingClient:
 
     def close(self) -> None:
         return None
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
 
 def test_resume_brief_cli_requests_targeted_json(
@@ -5427,6 +5566,11 @@ def test_resume_brief_cli_requests_targeted_json(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -5461,6 +5605,11 @@ def test_artifact_cli_registers_payload(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -5522,6 +5671,11 @@ def test_artifact_cli_refresh_posts_endpoint(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -5556,6 +5710,11 @@ def test_list_command_runs_cli_sends_fuzzy_search_flags(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -6077,6 +6236,11 @@ def test_dispatch_list_emits_jsonl(
                 {"id": 1, "agent_id": "L1", "agent_role": "recon-specialist"},
                 {"id": 2, "agent_id": "L2", "agent_role": "vulnerability-analyst"},
             ]
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake = _ListClient()
     monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
@@ -6759,6 +6923,11 @@ def test_auth_status_reports_bearer_token_and_recommends_refresh(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _FakeAuthClient)
 
@@ -6822,6 +6991,11 @@ def test_auth_status_flags_expired_token(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _NoProbeClient)
 
@@ -6902,6 +7076,11 @@ def test_auth_status_last_probe_uses_assessment_scoped_route(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _RouteAssertingClient)
 
@@ -7027,6 +7206,11 @@ def test_scope_rejection_writes_dispatch_decision_row(
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _DecisionCapturingClient)
     monkeypatch.setattr(

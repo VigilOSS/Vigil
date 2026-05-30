@@ -37,11 +37,8 @@ def run(args) -> None:
     chain["provenance"] = prov
 
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         response = client.post("attack-chains", chain)
-    finally:
-        client.close()
 
     chain_key = ""
     try:
@@ -54,8 +51,7 @@ def run(args) -> None:
         sys.exit(1)
 
     # Emit event
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         client.post_event({
             "event_type": "chain.created",
             "phase": os.environ.get("ORCHESTRATOR_PHASE", "unknown"),
@@ -63,7 +59,5 @@ def run(args) -> None:
             "agent_name": args.agent_name,
             "summary": f"Attack chain recorded: {chain_key}",
         })
-    finally:
-        client.close()
 
     print(chain_key)

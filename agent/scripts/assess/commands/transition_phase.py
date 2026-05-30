@@ -220,17 +220,13 @@ def _check_preconditions(
     blockers: list[dict[str, str]] = []
 
     cfg = cfg or load_config(engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         if track == "code":
             blockers.extend(_check_code_preconditions(target_phase, client))
         elif track == "blue":
             blockers.extend(_check_blue_preconditions(target_phase, client, engagement_dir))
         else:
             blockers.extend(_check_web_preconditions(target_phase, engagement_dir, client))
-    finally:
-        client.close()
 
     return blockers
 
