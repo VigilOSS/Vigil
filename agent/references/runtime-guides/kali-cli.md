@@ -30,9 +30,15 @@ is reachable by every other specialist's `pkill`/`killall` — broad signals by
 binary name kill sibling agents' work and produce hours of redo. Reach for the
 lifecycle that owns the PID instead of broad signals.
 
-### Long-running probes — `kali job` lifecycle
+### Long-running probes — `kali job` lifecycle (OPERATOR-ONLY)
 
-Use this for any probe whose wall clock would normally trigger `aith assess
+> **Specialists run synchronously and never use `kali job start`** — one blocking
+> `aith assess kali <verb> … --timeout N` at a time (see `agent/shared-constraints.md` §2).
+> A backgrounded job + a halted, auto-resumed agent produces relaunch thrash. The job
+> lifecycle below is for the **operator** launching a single authorized long sweep that must
+> outlive a shell; a long synchronous `--timeout` covers everything else.
+
+Operator use for a probe whose wall clock would normally trigger `aith assess
 kali job start`: nmap full-port sweeps, sqlmap deep crawls, large nuclei
 sweeps, ffuf with deep wordlists, multi-host puredns runs.
 

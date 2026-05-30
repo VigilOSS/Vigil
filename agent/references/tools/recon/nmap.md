@@ -153,8 +153,8 @@ The full mandatory assertion + intel-note recipe lives in
 
 Pass scan-type flags through `--extra-args` on the `aith assess kali nmap-scan` typed verb, or use `aith assess kali exec -- nmap ...` when building a complex pipeline not covered by the typed verb. Audit flags are required on both paths.
 
-**SYN scan (default, needs root):** `-sS` (stealthy, half-open)
-**TCP connect (no root):** `-sT` (full handshake, logged)
+**TCP connect (runtime default):** `-sT` (full handshake, logged) — the `nmap-scan` verb defaults to this. Required in the Docker runtime: raw SYN probes are not delivered through Docker's userland NAT (esp. Docker Desktop/macOS), so `-sS` silently returns 0-open on live hosts.
+**SYN scan (Linux bridged-network only, needs root):** `-sS` (stealthy, half-open) — opt in with `--scan-type sS` only on a runtime where raw packets traverse the network unchanged.
 **Version detection:** `-sV` with `--version-intensity 5` (0=light, 9=deep)
 **OS detection (needs root):** `-O`
 **Aggressive:** `-A` (combines -O, -sV, -sC, --traceroute)

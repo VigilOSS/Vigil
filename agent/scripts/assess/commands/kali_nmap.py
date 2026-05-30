@@ -28,8 +28,12 @@ def register(subparsers) -> None:
         "--scan-type",
         dest="scan_type",
         choices=["sS", "sT", "sU", "sV", "sn"],
-        default="",
-        help="nmap scan type flag (passed as -<scan-type>).",
+        default="sT",
+        help="nmap scan type flag (passed as -<scan-type>). Default sT (TCP connect). "
+             "Do NOT use -sS in this runtime: raw SYN probes are not delivered through "
+             "Docker's userland NAT (esp. Docker Desktop/macOS), so -sS silently returns "
+             "0-open on live hosts. Pass --scan-type sS only on a bridged-network Linux "
+             "runtime with NET_RAW/NET_ADMIN.",
     )
     p.add_argument("--service-detection", dest="service_detection", action="store_true", help="Enable -sV.")
     p.add_argument("--os-detection", dest="os_detection", action="store_true", help="Enable -O.")

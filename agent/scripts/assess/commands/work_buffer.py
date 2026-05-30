@@ -1,7 +1,11 @@
 """aith assess work-buffer — local cases.db work-buffer operations."""
 from __future__ import annotations
 
+import sys
+
 from assess.commands import dispatch
+from assess.lib.classify_buckets import SKIP_REASON_TAGS
+from assess.lib.config import anchor_engagement_relative
 
 
 def register(subparsers) -> None:
@@ -15,13 +19,28 @@ def register(subparsers) -> None:
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
     p.add_argument("--reason", default="", help="Reason for defer-cluster / defer-items.")
     p.add_argument(
+        "--reason-tag",
+        dest="reason_tag",
+        default="",
+        choices=("", *sorted(SKIP_REASON_TAGS)),
+        help="Structured reason tag for defer-cluster / defer-items. Stamps terminal_reason "
+        "as `skipped:<tag> | <--reason text>` so a query can tell a correct exclusion from a bare drop.",
+    )
+    p.add_argument(
         "--by",
         default="status",
-        choices=("status", "source", "cluster", "host"),
-        help="Group axis for stats.",
+        choices=("status", "source", "cluster", "host", "reason"),
+        help="Group axis for stats. 'reason' groups deferred/skipped rows by reason tag "
+        "(surfaces 'untagged' drops).",
     )
     p.set_defaults(func=run)
 
 
 def run(args) -> None:
+    # Anchor a relative cases.db to the engagement dir so a subagent whose cwd
+    # drifted between bash calls can't silently mutate the wrong (empty) DB.
+    anchored = anchor_engagement_relative(args.db_path, getattr(args, "engagement_dir", None))
+    if anchored != args.db_path:
+        print(f"work-buffer: anchored relative db path '{args.db_path}' -> '{anchored}'", file=sys.stderr)
+    args.db_path = anchored
     dispatch.run(args)

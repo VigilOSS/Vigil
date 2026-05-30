@@ -61,6 +61,14 @@ def register(subparsers) -> None:
         help="Filter by attribution provenance",
     )
     p.add_argument(
+        "--route",
+        dest="route",
+        default="",
+        choices=["", "kali", "host_exec"],
+        help="Filter by execution lane: host_exec = host-native recon recorded via "
+             "`aith assess host-exec`; kali = container-side. Empty = both.",
+    )
+    p.add_argument(
         "--technique",
         dest="technique",
         default="",
@@ -125,6 +133,8 @@ def _build_query(args) -> str:
         params.append(("target_host", args.target_host))
     if args.audit_source:
         params.append(("audit_source", args.audit_source))
+    if getattr(args, "route", ""):
+        params.append(("route", args.route))
     if getattr(args, "technique", ""):
         params.append(("technique", args.technique))
     if getattr(args, "probe_kind", ""):
@@ -167,6 +177,7 @@ def _render_table(rows: list[dict]) -> str:
         "phase",
         "agent_name",
         "tool",
+        "route",
         "tech",
         "kind",
         "dest",
@@ -191,6 +202,13 @@ def _render_table(rows: list[dict]) -> str:
         route_tool = str(row.get("tool_name") or "")
         if tool_display and route_tool and tool_display != route_tool:
             tool_display = f"{tool_display}({route_tool})"
+        route_raw = str(row.get("route") or "")
+        if route_raw == "host_exec":
+            route_display = "host"
+        elif route_raw.startswith("aith assess kali/"):
+            route_display = "kali"
+        else:
+            route_display = "-"
         destructive = row.get("destructive")
         if destructive is None:
             dest_str = "-"
@@ -202,6 +220,7 @@ def _render_table(rows: list[dict]) -> str:
             str(row.get("phase", "")),
             str(row.get("agent_name", "")),
             tool_display,
+            route_display,
             str(row.get("technique") or "-"),
             str(row.get("probe_kind") or "-"),
             dest_str,

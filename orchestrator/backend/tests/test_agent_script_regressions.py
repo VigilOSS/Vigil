@@ -994,6 +994,189 @@ def test_code_index_sync_requires_repo_id_for_multi_repo_engagement(monkeypatch,
     assert "--repo-id" in capsys.readouterr().err
 
 
+def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    module = _load_script_module(
+        "test_code_index_sync_repo_id_scopes_aggregate_module",
+        "agent/scripts/assess/commands/code_index_sync.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    manifest_dir = engagement_dir / "tools" / "analysis-state"
+    index_dir = manifest_dir / "structural-index"
+    (index_dir / "repo-a").mkdir(parents=True)
+    (index_dir / "repo-b").mkdir(parents=True)
+    (index_dir / "repo-a" / "a.json").write_text(
+        json.dumps(
+            {"total_functions": 99, "entry_points": [], "security_sinks": [], "exports": []}
+        ),
+        encoding="utf-8",
+    )
+    (index_dir / "repo-b" / "b.json").write_text(
+        json.dumps(
+            {"total_functions": 7, "entry_points": [], "security_sinks": [], "exports": []}
+        ),
+        encoding="utf-8",
+    )
+    (index_dir / "repo-a-manifest.json").write_text(
+        json.dumps({"repo_key": "repo-a", "path_to_index": {"shared.py": "repo-a/a.json"}}),
+        encoding="utf-8",
+    )
+    (index_dir / "repo-b-manifest.json").write_text(
+        json.dumps({"repo_key": "repo-b", "path_to_index": {"shared.py": "repo-b/b.json"}}),
+        encoding="utf-8",
+    )
+    (manifest_dir / "structural-index-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "structural-index-aggregate/v1",
+                "repos": {
+                    "repo-a": {"manifest_path": "structural-index/repo-a-manifest.json"},
+                    "repo-b": {"manifest_path": "structural-index/repo-b-manifest.json"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        posts: list[tuple[str, dict[str, object]]] = []
+        file_requests: list[str] = []
+
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            if endpoint == "code/repos":
+                return [
+                    {"id": 1, "repo_key": "repo-a", "name": "repo-a"},
+                    {"id": 2, "repo_key": "repo-b", "name": "repo-b"},
+                ]
+            self.file_requests.append(endpoint)
+            assert endpoint == "code/files?limit=5000&offset=0&repo_id=2"
+            return [{"id": 202, "file_path": "shared.py"}]
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            self.posts.append((endpoint, payload))
+            return {"updated": 1, "skipped": 0}
+
+        def close(self) -> None:
+            return None
+
+    FakeClient.posts = []
+    FakeClient.file_requests = []
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=engagement_dir,
+            manifest=None,
+            index_dir=None,
+            repo_id=2,
+            repo_key=None,
+        )
+    )
+
+    assert FakeClient.file_requests == ["code/files?limit=5000&offset=0&repo_id=2"]
+    assert len(FakeClient.posts) == 1
+    _, payload = FakeClient.posts[0]
+    assert payload["updates"] == [
+        {
+            "file_id": 202,
+            "total_functions": 7,
+            "total_entry_points": 0,
+            "total_sinks": 0,
+            "total_exports": 0,
+        }
+    ]
+    assert "across 1 repos" in capsys.readouterr().err
+
+
+def test_code_index_sync_rejects_mismatched_repo_id_and_repo_key(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    module = _load_script_module(
+        "test_code_index_sync_rejects_mismatched_repo_id_module",
+        "agent/scripts/assess/commands/code_index_sync.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    manifest_dir = engagement_dir / "tools" / "analysis-state"
+    index_dir = manifest_dir / "structural-index"
+    index_dir.mkdir(parents=True)
+    (index_dir / "repo-a-manifest.json").write_text(
+        json.dumps({"repo_key": "repo-a", "path_to_index": {"shared.py": "repo-a/a.json"}}),
+        encoding="utf-8",
+    )
+    (manifest_dir / "structural-index-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "structural-index-aggregate/v1",
+                "repos": {
+                    "repo-a": {"manifest_path": "structural-index/repo-a-manifest.json"},
+                    "repo-b": {"manifest_path": "structural-index/repo-b-manifest.json"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            assert endpoint == "code/repos"
+            return [
+                {"id": 1, "repo_key": "repo-a", "name": "repo-a"},
+                {"id": 2, "repo_key": "repo-b", "name": "repo-b"},
+            ]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=engagement_dir,
+                manifest=None,
+                index_dir=None,
+                repo_id=2,
+                repo_key="repo-a",
+            )
+        )
+
+    assert excinfo.value.code == 1
+    assert "does not match per-repo manifest repo-a" in capsys.readouterr().err
+
+
 def test_code_record_modules_rejects_auto_derived_key_collisions(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_code_record_modules_collision_module",
@@ -1800,6 +1983,9 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
     # exercise the real payload-construction path.
     items_path = tmp_path / "items.txt"
     items_path.write_text("\n".join(f"file_{i}.js" for i in range(1, 13)), encoding="utf-8")
+    # tmp_path stands in for the engagement dir; a real one always has scope.json
+    # (the resolver requires it so a scope-less subdir can't masquerade as the root).
+    (tmp_path / "scope.json").write_text("{}", encoding="utf-8")
 
     args = SimpleNamespace(
         action="start-swarm",
@@ -2010,3 +2196,210 @@ def test_render_check_flags_missing_wrapper_as_drift(tmp_path: Path) -> None:
     )
     assert "recon-specialist.md" in proc.stderr
     assert "missing" in proc.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# resume-brief: must not crash on a fresh/empty engagement when the backend
+# returns a non-dict body (empty string, or the SPA index.html for an unknown
+# route). Regression for AttributeError: 'str' object has no attribute 'get'.
+# ---------------------------------------------------------------------------
+
+def _run_resume_brief(monkeypatch, tmp_path, body, *, as_json):
+    module = _load_script_module(
+        "resume_brief_regression",
+        "agent/scripts/assess/commands/resume_brief.py",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            return body
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(
+        SimpleNamespace(
+            engagement_dir=tmp_path,
+            q="",
+            finding="",
+            agent_id="",
+            max_age_hours=None,
+            since="",
+            as_json=as_json,
+        )
+    )
+
+
+@pytest.mark.parametrize("body", ["", "<!doctype html><html>SPA</html>"])
+def test_resume_brief_handles_non_dict_body(monkeypatch, tmp_path, capsys, body):
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    assert "No prior state" in out  # no AttributeError, clean notice
+
+
+def test_resume_brief_non_dict_body_json_emits_valid_object(monkeypatch, tmp_path, capsys):
+    _run_resume_brief(monkeypatch, tmp_path, "", as_json=True)
+    payload = json.loads(capsys.readouterr().out)  # valid JSON object, not a bare string
+    assert isinstance(payload, dict)
+    assert payload["engagement"] == {}
+    assert "note" in payload
+
+
+def test_resume_brief_dict_body_still_renders(monkeypatch, tmp_path, capsys):
+    body = {"engagement": {"key": "eng", "current_phase": "recon", "host_count": 3}}
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    assert "Resume Brief: eng" in out
+    assert "phase: recon" in out
+
+
+# ---------------------------------------------------------------------------
+# Engagement-dir / key resolution hardening + relative cases.db anchoring.
+# Regression for: `cd scans/ ; ENGAGEMENT_DIR=$(pwd)` deriving key="scans", and
+# a bare relative cases.db opening the wrong (empty) DB from a drifted cwd.
+# ---------------------------------------------------------------------------
+
+def _import_assess_config():
+    root = str(_scripts_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import assess.lib.config as config
+    return config
+
+
+def test_resolve_engagement_dir_rejects_scopeless_subdir(monkeypatch, tmp_path):
+    config = _import_assess_config()
+    eng = tmp_path / "2026-05-29-eng"
+    (eng / "scans").mkdir(parents=True)
+    (eng / "scope.json").write_text("{}", encoding="utf-8")
+    monkeypatch.delenv("ENGAGEMENT_DIR", raising=False)
+
+    # The engagement root (has scope.json) resolves and the key is its basename.
+    assert config.resolve_engagement_dir(str(eng)) == str(eng.resolve())
+
+    # A scope-less subdir via --engagement-dir fails loud (the cd-into-subdir trap).
+    with pytest.raises(SystemExit):
+        config.resolve_engagement_dir(str(eng / "scans"))
+
+    # Same trap via $ENGAGEMENT_DIR=$(pwd)-from-scans.
+    monkeypatch.setenv("ENGAGEMENT_DIR", str(eng / "scans"))
+    with pytest.raises(SystemExit):
+        config.resolve_engagement_dir(None)
+
+
+def test_anchor_engagement_relative_uses_engagement_dir(monkeypatch, tmp_path):
+    config = _import_assess_config()
+    eng = tmp_path / "2026-05-29-eng2"
+    eng.mkdir()
+    (eng / "scope.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ENGAGEMENT_DIR", str(eng))
+
+    # Relative cases.db anchors to the engagement dir even when cwd is elsewhere.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    assert config.anchor_engagement_relative("cases.db", None) == str(eng.resolve() / "cases.db")
+
+    # Absolute paths are returned unchanged.
+    assert config.anchor_engagement_relative("/abs/cases.db", None) == "/abs/cases.db"
+
+
+# ---------------------------------------------------------------------------
+# record-finding evidence_ref validation (catches the ~24 report-readiness
+# evidence blockers at record time instead of at the very end). §2.6.
+# ---------------------------------------------------------------------------
+
+def _load_record_finding_module():
+    return _load_script_module(
+        "record_finding_evidence_validation",
+        "agent/scripts/assess/commands/record_finding.py",
+    )
+
+
+def test_evidence_ref_accepts_existing_file(tmp_path):
+    mod = _load_record_finding_module()
+    (tmp_path / "scans").mkdir()
+    (tmp_path / "scans" / "proof.txt").write_text("evidence", encoding="utf-8")
+    # Relative to engagement dir, and the container-path form, both resolve.
+    for ref in ("scans/proof.txt", "/engagements/eng/scans/proof.txt"):
+        mod._validate_evidence_ref(
+            {"evidence_ref": ref}, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False
+        )  # no SystemExit
+
+
+def test_evidence_ref_accepts_url(tmp_path):
+    mod = _load_record_finding_module()
+    mod._validate_evidence_ref(
+        {"evidence_ref": "https://target.example/proof"},
+        eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+    )  # no SystemExit
+
+
+def test_evidence_ref_rejects_prose(tmp_path, capsys):
+    mod = _load_record_finding_module()
+    with pytest.raises(SystemExit):
+        mod._validate_evidence_ref(
+            {"evidence_ref": "kali run_id 13992 listMethods proved this"},
+            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+        )
+    assert "prose" in capsys.readouterr().err
+
+
+def test_evidence_ref_rejects_missing_path(tmp_path, capsys):
+    mod = _load_record_finding_module()
+    with pytest.raises(SystemExit):
+        mod._validate_evidence_ref(
+            {"evidence_ref": "scans/does-not-exist.txt"},
+            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+        )
+    assert "no file exists" in capsys.readouterr().err
+
+
+def test_evidence_ref_empty_warns_not_rejects(tmp_path, capsys):
+    mod = _load_record_finding_module()
+    mod._validate_evidence_ref(
+        {"evidence_ref": ""}, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False
+    )  # no SystemExit
+    assert "no evidence_ref set" in capsys.readouterr().err
+
+
+def test_evidence_ref_allow_unindexed_bypasses(tmp_path):
+    mod = _load_record_finding_module()
+    mod._validate_evidence_ref(
+        {"evidence_ref": "just prose here"},
+        eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=True,
+    )  # no SystemExit even though it is prose
+
+
+def test_evidence_ref_rejects_prose_containing_scheme(tmp_path):
+    mod = _load_record_finding_module()
+    with pytest.raises(SystemExit):
+        mod._validate_evidence_ref(
+            {"evidence_ref": "attacker forces http:// downgrade then steals cookie"},
+            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+        )
+    # A real URL pointer is still accepted (no exit).
+    mod._validate_evidence_ref(
+        {"evidence_ref": "https://target.example/proof?id=1"},
+        eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+    )
+
+
+def test_update_finding_notes_replace_without_notes_errors():
+    from types import SimpleNamespace
+    mod = _load_script_module("update_finding_guard", "agent/scripts/assess/commands/update_finding.py")
+    with pytest.raises(SystemExit):
+        mod.run(SimpleNamespace(notes_replace=True, notes=None, inline_payload=None, payload=None))

@@ -688,9 +688,14 @@ def _load_work_items_by_host(db_path: Path) -> dict[str, dict[str, int]]:
             SELECT url, COUNT(*) AS total
             FROM work_items
             WHERE status = 'pending' AND (terminal_reason IS NULL OR terminal_reason = '')
+              AND type != 'host_root'
             GROUP BY url
             """
         )
+        # host_root rows are Phase-2 crawl SEEDS, not consumable work — web-discovery
+        # crawls those hosts and the resulting endpoint rows are the real work. They
+        # are intentionally pending with no terminal_reason, so excluding the seed
+        # type here keeps them from permanently blocking the consumption gate.
         rows_with_reason = [(str(r[0] or ""), "pending_without_terminal_reason", int(r[1] or 0)) for r in cursor.fetchall()]
     finally:
         conn.close()
