@@ -94,11 +94,12 @@ aith assess kali ffuf \
   --probe-kind payload --phase consume-test --timeout 1800
 ```
 
-When dispatching parallel directory-fuzz sweeps, use the `aith assess kali job start`
-lifecycle (and stop them with `kali job stop <id>`) instead of background-and-pkill — broad
-`pkill -f ffuf`/`pkill -f feroxbuster` stomps on sibling agents' processes in the shared
-runtime. See `agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for
-the full pattern.
+Run each directory-fuzz sweep synchronously — one blocking `aith assess kali <verb> …
+--timeout N` at a time. Specialists do NOT background target traffic or use `aith assess kali
+job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a
+generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f ffuf`) — it stomps
+sibling agents' processes in the shared runtime. See
+`agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for the full pattern.
 
 ### 6. Wordlist Escalation
 ```bash

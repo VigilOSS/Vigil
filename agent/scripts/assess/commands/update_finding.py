@@ -61,6 +61,12 @@ def register(subparsers) -> None:
 
 
 def run(args) -> None:
+    # --notes-replace overwrites the notes column; without --notes it would write
+    # an empty string over the existing notes (silent data loss). Reject that.
+    if getattr(args, "notes_replace", False) and args.notes is None:
+        print("update-finding: --notes-replace requires --notes <text> (it overwrites the "
+              "notes column; running it without --notes would wipe existing notes).", file=sys.stderr)
+        sys.exit(1)
     raw_payload = args.inline_payload if args.inline_payload is not None else args.payload
     if raw_payload is not None:
         try:

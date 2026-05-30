@@ -120,6 +120,10 @@ def parse_httpx_rows(results_path: Path, *, source: str, run_id=None, run_uuid: 
     """
     rows: list[dict] = []
     parse_errors = 0
+    # A tool that found nothing (e.g. httpx with zero live hosts) does not create
+    # its -o file. Treat a missing file as zero rows so pipeline callers don't crash.
+    if not results_path.is_file():
+        return rows, parse_errors
     with results_path.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()

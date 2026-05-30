@@ -231,7 +231,9 @@ aith assess kali sqlmap \
   --technique SQLI --intent "boolean+error+union+stacked SQLi on /search?q" \
   --probe-kind payload --phase consume-test --timeout 1800
 
-# Long sqlmap dump — switch to async because dump can run for hours.
+# Long sqlmap dump — a specialist runs this SYNCHRONOUSLY with a generous --timeout.
+# `kali job start` (shown) is OPERATOR-ONLY (see the sync-vs-async decision above);
+# a dispatched specialist uses `aith assess kali sqlmap ... --timeout 3600` instead.
 aith assess kali job start \
   --technique SQLI --intent "deep sqlmap dump on /api/users?id" \
   --probe-kind exploit --phase exploit --timeout 28800 --destructive \
@@ -386,7 +388,7 @@ When you know what you want to learn, this lookup gets you to the right verb wit
 - "Enumerate subdomains?" → `kali subfinder -d <domain> -all` then `kali puredns resolve` then `kali dnsx`.
 - "Inventory runtime tools or versions?" → `kali exec --technique HEALTH --intent "tooling inventory" --probe-kind fingerprint --phase <phase> --timeout 60 -- which <tool...>`.
 - "Run a tool not in the typed surface?" → `kali exec --technique <enum> --intent "<why>" --probe-kind <kind> --phase <phase> --timeout <seconds> -- <command...>`.
-- "Run something that needs to outlive my shell?" → `kali job start --technique <enum> --intent "<why>" --probe-kind <kind> --phase <phase> --timeout <seconds> -- <command...>`.
+- "Run a long probe?" → SYNCHRONOUSLY with a generous `--timeout` (specialists do not background). Only the **operator** uses `kali job start` for a single authorized sweep that must outlive a shell.
 
 ## Common Patterns
 

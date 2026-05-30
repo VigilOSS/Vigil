@@ -105,7 +105,7 @@ def _validate_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str, 
             file=sys.stderr,
         )
         return
-    if "://" in ref:
+    if ref.startswith(("http://", "https://")):
         return  # URL evidence pointer — a valid reference, not a file.
     if _evidence_file_exists(ref, eng_dir, engagement_key):
         return  # existing artifact — the backend registers + links it on record.

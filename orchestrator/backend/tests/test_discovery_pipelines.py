@@ -193,3 +193,28 @@ def test_dns_discovery_brute_opt_in(monkeypatch, tmp_path):
     puredns = [c for c in calls if c["tool"] == "puredns"]
     assert len(puredns) == 1
     assert "bruteforce" in puredns[0]["cmd"] and "/wl.txt" in puredns[0]["cmd"]
+
+
+def test_web_discovery_zero_live_hosts_does_not_crash(monkeypatch, tmp_path):
+    web = _load("web_discovery_ut3", "agent/scripts/assess/commands/web_discovery.py")
+    monkeypatch.setattr(web, "load_config", lambda flag: _cfg(tmp_path))
+    hosts = tmp_path / "hosts.txt"
+    hosts.write_text("a.example.com\n", encoding="utf-8")
+    # canned has NO 'httpx' entry → fake_exec writes no httpx_live.jsonl (httpx found nothing).
+    fake_exec, calls = _make_fake_exec(tmp_path, {})
+    monkeypatch.setattr(web, "kali_exec", fake_exec)
+    monkeypatch.setattr(web, "ingest_httpx_results",
+                        lambda path, **kw: {"upserted": 0, "rows": 0, "by_class": {}, "parse_errors": 0})
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        def close(self): pass
+    monkeypatch.setattr(web, "AssessmentClient", _Client)
+
+    # Must complete cleanly (no FileNotFoundError); no katana since no live URLs.
+    web.run(SimpleNamespace(
+        engagement_dir=str(tmp_path), hosts_file=str(hosts), ports="443",
+        httpx_threads="50", httpx_rate_limit="150", tech_detect=False,
+        no_crawl=False, katana_depth="2", katana_extra_args="", db_path="", stage_timeout=600,
+    ))
+    assert not any(c["tool"] == "katana" for c in calls)

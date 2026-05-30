@@ -42,3 +42,20 @@ def test_denoise_hosts_dedupes_normalizes_and_counts():
     kept, dropped = denoise_hosts(lines)
     assert kept == ["api.example.mil", "portal.navy.mil:8443"]
     assert dropped == 2
+
+
+def test_mac_ptr_regex_does_not_drop_real_hex_prefixed_hosts():
+    # Two leading hex pairs is too common in corporate naming — must be KEPT.
+    for h in ("ad-01-portal.example.mil", "fe-80-gw.example.mil", "ba-be-portal.example.mil", "ce-12-34.example.com"):
+        assert is_noise_host(h) is False, h
+    # Real MAC-octet PTR names (>=3 leading hex octets) are still dropped.
+    assert is_noise_host("00-08-74-ab-cd-ef.amc.af.mil") is True
+    assert is_noise_host("00-08-74-xx.amc.af.mil") is True   # 3 hex octets (00-08-74-) → MAC-noise
+
+
+def test_normalize_host_bare_ipv6_and_trailing_dot():
+    from assess.lib.discovery import normalize_host
+    assert normalize_host("2001:db8::1") == "2001:db8::1"      # bare IPv6 not truncated
+    assert normalize_host("[2001:db8::1]:443") == "[2001:db8::1]"
+    assert normalize_host("host.example.com.") == "host.example.com"  # trailing dot stripped
+    assert normalize_host("https://Host.Example.com:8443/x") == "host.example.com"

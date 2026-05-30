@@ -1575,3 +1575,80 @@ def test_stamp_liveness_best_effort_skips(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "AssessmentClient", _Boom)
     module._stamp_liveness(conn, result, SimpleNamespace(base_url="http://x", engagement_key="eng"))
     assert "live_status" not in result[0]   # swallowed, no raise
+
+
+def test_work_buffer_cli_wires_reason_tag_and_by_reason(tmp_path, capsys):
+    """Drive the REAL `aith assess work-buffer` argparse (not a hand-built
+    namespace) — proves --reason-tag and --by reason are wired into the
+    operator-facing verb, not just the legacy dispatch register."""
+    root = str(_scripts_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import assess.cli as cli
+
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(db_path, queue_key="x", url_path="/s", cluster_key="gf:sqli")
+
+    cli.main(["work-buffer", str(db_path), "defer-cluster", "gf:sqli",
+              "--reason", "akamai 403", "--reason-tag", "blackholed"])
+    conn = sqlite3.connect(str(db_path))
+    try:
+        tr = conn.execute(
+            "SELECT terminal_reason FROM work_items WHERE cluster_key='gf:sqli'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert tr == "skipped:blackholed | akamai 403"
+
+    cli.main(["work-buffer", str(db_path), "stats", "--by", "reason"])
+    assert "blackholed|1" in capsys.readouterr().out
+
+
+def test_work_buffer_cli_defer_items_reason_tag(tmp_path):
+    root = str(_scripts_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import assess.cli as cli
+    db_path = _make_fresh_db(tmp_path)
+    iid = _insert_work_item(db_path, queue_key="y", url_path="/y", cluster_key="gf:lfi")
+    cli.main(["work-buffer", str(db_path), "defer-items", str(iid),
+              "--reason", "dup", "--reason-tag", "duplicate"])
+    conn = sqlite3.connect(str(db_path))
+    try:
+        tr = conn.execute("SELECT terminal_reason FROM work_items WHERE id=?", (iid,)).fetchone()[0]
+    finally:
+        conn.close()
+    assert tr == "skipped:duplicate | dup"
+
+
+def test_host_root_seed_does_not_block_consumption_gate(tmp_path):
+    module = _load_script_module("test_scope_cov_module", "agent/scripts/assess/commands/check_scope_coverage.py")
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(db_path, queue_key="hr", url_path="/", url="https://seed.example.com/", case_type="host_root")
+    _insert_work_item(db_path, queue_key="api", url_path="/api/x", url="https://real.example.com/api/x", case_type="api")
+    by_host = module._load_work_items_by_host(Path(db_path))
+    seed = by_host.get("seed.example.com", {})
+    real = by_host.get("real.example.com", {})
+    assert seed.get("pending", 0) == 1
+    assert seed.get("pending_without_terminal_reason", 0) == 0   # seed excluded
+    assert real.get("pending_without_terminal_reason", 0) == 1
+    assert module._consumption_satisfied(seed, "active") is True     # gate passes for seed-only host
+    assert module._consumption_satisfied(real, "active") is False    # still fails for real uncovered work
+
+
+def test_stamp_liveness_clamps_negative_age(monkeypatch):
+    import sqlite3 as _sql
+    from types import SimpleNamespace
+    module = _load_dispatch_module()
+    conn = _sql.connect(":memory:")
+    conn.execute("CREATE TABLE work_items (id INTEGER PRIMARY KEY, url TEXT, live_status TEXT)")
+    result = [{"id": 1, "url": "https://a.example.com/x"}]
+
+    class _C:
+        def __init__(self, *a, **k): pass
+        def get(self, e): return [{"host": "a.example.com", "reachability_class": "live", "age_seconds": -999.0}]
+        def close(self): pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _C)
+    module._stamp_liveness(conn, result, SimpleNamespace(base_url="x", engagement_key="e"))
+    assert result[0]["live_status"] == "live"   # negative age → no nonsense @-NNNm suffix
