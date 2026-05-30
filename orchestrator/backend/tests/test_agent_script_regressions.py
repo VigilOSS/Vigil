@@ -994,6 +994,189 @@ def test_code_index_sync_requires_repo_id_for_multi_repo_engagement(monkeypatch,
     assert "--repo-id" in capsys.readouterr().err
 
 
+def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    module = _load_script_module(
+        "test_code_index_sync_repo_id_scopes_aggregate_module",
+        "agent/scripts/assess/commands/code_index_sync.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    manifest_dir = engagement_dir / "tools" / "analysis-state"
+    index_dir = manifest_dir / "structural-index"
+    (index_dir / "repo-a").mkdir(parents=True)
+    (index_dir / "repo-b").mkdir(parents=True)
+    (index_dir / "repo-a" / "a.json").write_text(
+        json.dumps(
+            {"total_functions": 99, "entry_points": [], "security_sinks": [], "exports": []}
+        ),
+        encoding="utf-8",
+    )
+    (index_dir / "repo-b" / "b.json").write_text(
+        json.dumps(
+            {"total_functions": 7, "entry_points": [], "security_sinks": [], "exports": []}
+        ),
+        encoding="utf-8",
+    )
+    (index_dir / "repo-a-manifest.json").write_text(
+        json.dumps({"repo_key": "repo-a", "path_to_index": {"shared.py": "repo-a/a.json"}}),
+        encoding="utf-8",
+    )
+    (index_dir / "repo-b-manifest.json").write_text(
+        json.dumps({"repo_key": "repo-b", "path_to_index": {"shared.py": "repo-b/b.json"}}),
+        encoding="utf-8",
+    )
+    (manifest_dir / "structural-index-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "structural-index-aggregate/v1",
+                "repos": {
+                    "repo-a": {"manifest_path": "structural-index/repo-a-manifest.json"},
+                    "repo-b": {"manifest_path": "structural-index/repo-b-manifest.json"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        posts: list[tuple[str, dict[str, object]]] = []
+        file_requests: list[str] = []
+
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            if endpoint == "code/repos":
+                return [
+                    {"id": 1, "repo_key": "repo-a", "name": "repo-a"},
+                    {"id": 2, "repo_key": "repo-b", "name": "repo-b"},
+                ]
+            self.file_requests.append(endpoint)
+            assert endpoint == "code/files?limit=5000&offset=0&repo_id=2"
+            return [{"id": 202, "file_path": "shared.py"}]
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            self.posts.append((endpoint, payload))
+            return {"updated": 1, "skipped": 0}
+
+        def close(self) -> None:
+            return None
+
+    FakeClient.posts = []
+    FakeClient.file_requests = []
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=engagement_dir,
+            manifest=None,
+            index_dir=None,
+            repo_id=2,
+            repo_key=None,
+        )
+    )
+
+    assert FakeClient.file_requests == ["code/files?limit=5000&offset=0&repo_id=2"]
+    assert len(FakeClient.posts) == 1
+    _, payload = FakeClient.posts[0]
+    assert payload["updates"] == [
+        {
+            "file_id": 202,
+            "total_functions": 7,
+            "total_entry_points": 0,
+            "total_sinks": 0,
+            "total_exports": 0,
+        }
+    ]
+    assert "across 1 repos" in capsys.readouterr().err
+
+
+def test_code_index_sync_rejects_mismatched_repo_id_and_repo_key(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    module = _load_script_module(
+        "test_code_index_sync_rejects_mismatched_repo_id_module",
+        "agent/scripts/assess/commands/code_index_sync.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    manifest_dir = engagement_dir / "tools" / "analysis-state"
+    index_dir = manifest_dir / "structural-index"
+    index_dir.mkdir(parents=True)
+    (index_dir / "repo-a-manifest.json").write_text(
+        json.dumps({"repo_key": "repo-a", "path_to_index": {"shared.py": "repo-a/a.json"}}),
+        encoding="utf-8",
+    )
+    (manifest_dir / "structural-index-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "structural-index-aggregate/v1",
+                "repos": {
+                    "repo-a": {"manifest_path": "structural-index/repo-a-manifest.json"},
+                    "repo-b": {"manifest_path": "structural-index/repo-b-manifest.json"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            assert endpoint == "code/repos"
+            return [
+                {"id": 1, "repo_key": "repo-a", "name": "repo-a"},
+                {"id": 2, "repo_key": "repo-b", "name": "repo-b"},
+            ]
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=engagement_dir,
+                manifest=None,
+                index_dir=None,
+                repo_id=2,
+                repo_key="repo-a",
+            )
+        )
+
+    assert excinfo.value.code == 1
+    assert "does not match per-repo manifest repo-a" in capsys.readouterr().err
+
+
 def test_code_record_modules_rejects_auto_derived_key_collisions(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_code_record_modules_collision_module",

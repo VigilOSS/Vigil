@@ -2106,6 +2106,12 @@ def patch_finding(
     expected_updated_at: str | None = None,
     notes_mode: str = "append",
 ) -> dict[str, Any]:
+    if notes_mode == "replace" and notes is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="notes_mode='replace' requires notes",
+        )
+
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         slug = _resolve_existing_finding_slug(connection, engagement.id, slug)

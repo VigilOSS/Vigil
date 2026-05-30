@@ -77,6 +77,21 @@ def test_patch_notes_replace_overwrites(client, isolate_settings):
     assert notes.strip() == "Disproven; see VA-001 verify handoff."
 
 
+def test_patch_notes_replace_requires_notes(client, isolate_settings):
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
+
+    resp = client.patch(
+        f"{_base()}/findings/VA-001",
+        json={"notes_mode": "replace"},
+    )
+    assert resp.status_code == 422
+
+    detail = client.get(f"{_base()}/findings/VA-001")
+    assert detail.status_code == 200
+    assert detail.json()["notes"] == "PROVEN by run 13691"
+
+
 def test_patch_notes_mode_rejects_unknown_value(client, isolate_settings):
     _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
