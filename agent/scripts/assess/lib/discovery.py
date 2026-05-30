@@ -25,6 +25,27 @@ _MAC_PTR_RE = re.compile(r"^[0-9a-f]{2}[-:][0-9a-f]{2}[-:]", re.IGNORECASE)
 _REV_RE = re.compile(r"(^|\.)rev\.", re.IGNORECASE)
 
 
+def normalize_host(value: str) -> str:
+    """Canonical host key: lowercased, scheme/path/port-stripped authority.
+
+    Mirrors the backend ``state_manager._normalize_liveness_host`` so a CLI-side
+    lookup matches the stored ``assessment_host_liveness.host`` key. (The two
+    live in different processes and cannot share an import, so they must agree by
+    algorithm — keep them in sync.)
+    """
+    h = (value or "").strip().lower()
+    if "://" in h:
+        h = h.split("://", 1)[1]
+    h = h.split("/", 1)[0]
+    if h.startswith("["):  # [ipv6](:port)?
+        end = h.find("]")
+        if end != -1:
+            h = h[: end + 1]
+    elif ":" in h:
+        h = h.split(":", 1)[0]
+    return h
+
+
 def is_noise_host(host: str) -> bool:
     """True when *host* matches a known non-origin noise pattern (§8)."""
     h = (host or "").strip().lower()
