@@ -115,3 +115,30 @@ def test_reachable_with_000_proxy_artifact(monkeypatch, tmp_path, capsys):
     assert "verdict=reachable" in out
     assert "egress_block_pct=0" in out
     assert "decision" not in recorded
+
+
+def test_garbled_sample_line_does_not_dilute_blocked_pct(monkeypatch, tmp_path, capsys):
+    mod = _load()
+    # 2 blackholed + 1 host with NO probe line. The unclassified host must be
+    # excluded from the denominator, so the block is still detected (not masked).
+    probe = (
+        "example.com 200 0.040000 1.2.3.4\n"   # control live
+        "a.example.com 000 0.000000 \n"        # blackholed
+        "b.example.com 000 0.000000 \n"        # blackholed
+        # c.example.com produced no line (timeout writing) → unclassified
+    )
+    recorded = _wire(monkeypatch, mod, tmp_path, probe)
+    mod.run(_args(tmp_path, hosts="a.example.com,b.example.com,c.example.com"))
+    out = capsys.readouterr().out
+    assert "egress_block_pct=100" in out          # 2/2 classified, not 2/3
+    assert "verdict=cluster_blackholed" in out
+    assert recorded["decision"]["payload"]["sampled"] == 3   # total sample still reported
+
+
+def test_no_record_skips_decision_but_writes_blocked_file(monkeypatch, tmp_path):
+    mod = _load()
+    probe = "example.com 200 0.04 1.2.3.4\na.example.com 000 0.0 \nb.example.com 000 0.0 \n"
+    recorded = _wire(monkeypatch, mod, tmp_path, probe)
+    mod.run(_args(tmp_path, no_record=True))
+    assert "decision" not in recorded                          # --no-record honored
+    assert (tmp_path / "blocked.txt").read_text().split() == ["a.example.com", "b.example.com"]

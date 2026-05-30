@@ -92,9 +92,7 @@ aith assess kali nmap-scan --target placeholder \
   --probe-kind fingerprint --phase recon --timeout 3600
 ```
 
-When dispatching parallel nmap sweeps, use the `aith assess kali job start` lifecycle (and
-stop them with `kali job stop <id>`) instead of background-and-pkill — broad `pkill -f nmap`
-stomps on sibling agents' processes in the shared runtime. See
+Run each sweep synchronously — one blocking `aith assess kali <verb> … --timeout N` at a time. Specialists do NOT background target traffic or use `aith assess kali job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f nmap`) — it stomps sibling agents' processes in the shared runtime. See
 `agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for the full
 pattern.
 

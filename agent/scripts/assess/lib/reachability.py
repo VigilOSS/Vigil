@@ -106,11 +106,14 @@ def classify_probe(
     tc = _to_float(time_connect)
     connected = tc > 0.0 or _has_ip(remote_ip)
 
-    # Positive reachability — any one is sufficient. A present remote IP or a
-    # non-zero connect time means the TCP path completed; an HTTP answer (even a
-    # 401/403/302 wall) means the full request/response cycle ran. httpx
-    # ``failed=False`` is an explicit success signal. Per §9, a wall is LIVE.
-    if failed is False or connected or (_answered(http_code) and failed is not True):
+    # Positive reachability — but an explicit ``failed=True`` always wins: httpx
+    # resolves DNS *before* the connect attempt, so a failed record routinely
+    # still carries a resolved IP. A present IP / non-zero connect time / HTTP
+    # answer (even a 401/403/302 wall) means LIVE ONLY when the probe was not
+    # explicitly marked failed. httpx ``failed=False`` is an explicit success.
+    # (The §9 CONNECT-proxy-artifact case — IP present, no ``failed`` flag — is
+    # still LIVE because ``failed`` is None there, not True.)
+    if failed is False or (failed is not True and (connected or _answered(http_code))):
         return LIVE
 
     # The connection did not complete past here.

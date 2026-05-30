@@ -1,5 +1,13 @@
 # CDN / Edge IP-Reputation Blocking — Detection and Mitigation
 
+> **Automated version:** `aith assess egress-check --hosts <hosts> --control example.com --emit-blocked-hosts <file>`
+> runs this detection robustly — it samples in-scope hosts + a known-good control, classifies each with the
+> shared `reachability.classify_probe` verdict (a bare `connect=000` is NOT treated as blocked unless there is
+> no TCP connect AND no resolved IP; a TLS-1.3 reset is retried with `--tls-max 1.2`), records an advisory
+> `egress_decision` only when controls connect but the sample is overwhelmingly blackholed, and writes the
+> blocked-hosts file for `ingest-endpoints --egress-blocked-hosts`. The manual script below is the reference it
+> implements — prefer the verb; reach for the script when you need to tune the probe by hand.
+
 When the runtime container's egress IP is on a CDN edge's reputation list,
 target-facing recon collapses into uninformative 403s and 000-status timeouts.
 This guide documents the detection signals, the egress reputation curl script,

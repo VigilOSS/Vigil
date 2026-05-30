@@ -109,3 +109,16 @@ def test_parse_then_classify_roundtrip():
     parsed = parse_curl_w("000 0.000 ")
     assert classify_probe(curl_exit=7, **parsed) == BLACKHOLED
     assert "%{http_code}" in CURL_WRITE_FORMAT
+
+
+def test_explicit_failed_true_with_resolved_ip_is_blackholed():
+    # httpx resolves DNS BEFORE the connect attempt, so a failed=true record
+    # routinely still carries a resolved IP. An explicit failure must win over a
+    # present IP — else dead hosts get stored as live (ledger corruption).
+    assert classify_probe(http_code="0", failed=True, remote_ip="5.6.7.8") == BLACKHOLED
+    assert classify_probe(http_code="0", failed=True, remote_ip="5.6.7.8", time_connect=0.0) == BLACKHOLED
+
+
+def test_connect_proxy_artifact_still_live_when_not_failed():
+    # The §9 CONNECT-proxy case: IP present, no `failed` flag (None) → still LIVE.
+    assert classify_probe(http_code="000", time_connect=0.0, remote_ip="9.9.9.9") == LIVE

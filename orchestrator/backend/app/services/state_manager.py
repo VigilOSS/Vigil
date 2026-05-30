@@ -2106,6 +2106,12 @@ def patch_finding(
     expected_updated_at: str | None = None,
     notes_mode: str = "append",
 ) -> dict[str, Any]:
+    if notes_mode == "replace" and notes is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="notes_mode='replace' requires notes",
+        )
+
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
@@ -6311,8 +6317,12 @@ _HOST_LIVENESS_DECAYS = frozenset({"live", "blackholed", "dead"})
 
 
 def _normalize_liveness_host(value: str) -> str:
-    """Canonical liveness key: lowercased, scheme- and port-stripped authority."""
-    h = (value or "").strip().lower()
+    """Canonical liveness key: lowercased, scheme- and port-stripped authority.
+
+    Must stay byte-for-byte in sync with ``discovery.normalize_host`` (CLI side)
+    so a GET ?host= lookup matches stored rows.
+    """
+    h = (value or "").strip().lower().rstrip(".")
     if "://" in h:
         h = h.split("://", 1)[1]
     h = h.split("/", 1)[0]
@@ -6320,12 +6330,14 @@ def _normalize_liveness_host(value: str) -> str:
         end = h.find("]")
         if end != -1:
             h = h[: end + 1]
-    elif ":" in h:
+    elif h.count(":") == 1:
+        # exactly one colon → host:port (a bare IPv6 has >=2 colons; leave it intact)
         h = h.split(":", 1)[0]
     return h
 
 
-def _liveness_age_seconds(probed_at) -> float | None:
+def _parse_probed_at(probed_at):
+    """Parse an ISO probed_at into an aware UTC datetime, or None."""
     import datetime as _dt
 
     if not probed_at:
@@ -6339,6 +6351,26 @@ def _liveness_age_seconds(probed_at) -> float | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def _canonical_probed_at(probed_at):
+    """Normalize probed_at to a single lexicographically-sortable UTC form so the
+    keep-newest TEXT comparison in the upsert is correct across mixed input
+    formats (fractional precision, ``+HH:MM`` offsets, naive). Returns None when
+    unparseable/empty (the upsert then treats it as "no probe time")."""
+    parsed = _parse_probed_at(probed_at)
+    if parsed is None:
+        return None
+    return parsed.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+
+def _liveness_age_seconds(probed_at) -> float | None:
+    import datetime as _dt
+
+    parsed = _parse_probed_at(probed_at)
+    if parsed is None:
+        return None
     return (_dt.datetime.now(_dt.timezone.utc) - parsed).total_seconds()
 
 
@@ -6381,9 +6413,14 @@ def upsert_host_liveness(engagement_id: int, rows: list[dict[str, Any]]) -> dict
                     source_run_id = excluded.source_run_id,
                     source_run_uuid = excluded.source_run_uuid,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                WHERE excluded.probed_at IS NULL
-                   OR assessment_host_liveness.probed_at IS NULL
-                   OR excluded.probed_at >= assessment_host_liveness.probed_at
+                -- Keep the newest probe: overwrite only when the existing row has
+                -- no probe time, or the incoming probe is at-or-after it. A NULL
+                -- incoming probed_at must NOT clobber a real timestamped verdict.
+                -- probed_at is canonicalized to one sortable UTC form on the way
+                -- in, so this TEXT comparison is correct across input formats.
+                WHERE assessment_host_liveness.probed_at IS NULL
+                   OR (excluded.probed_at IS NOT NULL
+                       AND excluded.probed_at >= assessment_host_liveness.probed_at)
                 """,
                 (
                     engagement_id,
@@ -6398,7 +6435,7 @@ def upsert_host_liveness(engagement_id: int, rows: list[dict[str, Any]]) -> dict
                     str(r.get("tls") or ""),
                     1 if r.get("failed") else 0,
                     str(r.get("reachability_class") or "unknown"),
-                    r.get("probed_at"),
+                    _canonical_probed_at(r.get("probed_at")),
                     str(r.get("source") or "httpx"),
                     r.get("source_run_id"),
                     str(r.get("source_run_uuid") or ""),

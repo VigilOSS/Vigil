@@ -458,6 +458,12 @@ class FindingPatchRequest(BaseModel):
     reason_text: str = Field(default="", max_length=4096)
     artifact_ref: str = Field(default="", max_length=1024)
 
+    @model_validator(mode="after")
+    def _require_notes_when_replacing(self) -> "FindingPatchRequest":
+        if self.notes_mode == "replace" and self.notes is None:
+            raise ValueError("notes_mode='replace' requires notes")
+        return self
+
 
 class FindingVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")

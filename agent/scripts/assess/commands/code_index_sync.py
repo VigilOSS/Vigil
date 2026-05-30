@@ -105,6 +105,26 @@ def _find_backend_repo(repos: list[dict], repo_key: str | None, repo_id: int | N
     return None
 
 
+def _per_repo_matches_backend(repo_key: str, per_repo: dict, backend_repo: dict) -> bool:
+    """Return whether a per-repo manifest identifies the selected backend repo."""
+    manifest_repo_key = per_repo.get("repo_key") or repo_key
+    backend_repo_key = backend_repo.get("repo_key")
+    if manifest_repo_key and manifest_repo_key != "_legacy" and backend_repo_key:
+        return manifest_repo_key == backend_repo_key
+
+    manifest_repo_path = per_repo.get("repo_path")
+    backend_repo_path = backend_repo.get("repo_path")
+    if manifest_repo_path and backend_repo_path:
+        return manifest_repo_path == backend_repo_path
+
+    return False
+
+
+def _per_repo_has_identity(repo_key: str, per_repo: dict) -> bool:
+    manifest_repo_key = per_repo.get("repo_key") or repo_key
+    return bool((manifest_repo_key and manifest_repo_key != "_legacy") or per_repo.get("repo_path"))
+
+
 def _sync_one_repo(client: AssessmentClient, backend_repo: dict, per_repo: dict,
                    index_root: Path) -> tuple[int, int]:
     """Sync structural metadata for one repo. Returns (updated, skipped)."""
@@ -200,6 +220,44 @@ def run(args) -> None:
         if not isinstance(repos, list):
             print(f"Unexpected backend response type for repos: {type(repos)}", file=sys.stderr)
             sys.exit(1)
+
+        requested_repo_id = getattr(args, "repo_id", None)
+        if requested_repo_id is not None:
+            requested_backend = _find_backend_repo(
+                repos,
+                repo_key=None,
+                repo_id=requested_repo_id,
+                repo_path=None,
+            )
+            if requested_backend is None:
+                print(f"No backend repo matched --repo-id {requested_repo_id}", file=sys.stderr)
+                sys.exit(1)
+            if len(per_repos) > 1:
+                per_repos = [
+                    (repo_key, per_repo)
+                    for repo_key, per_repo in per_repos
+                    if _per_repo_matches_backend(repo_key, per_repo, requested_backend)
+                ]
+                if not per_repos:
+                    print(
+                        f"--repo-id {requested_repo_id} did not match any per-repo manifest. "
+                        "Pass --repo-key with aggregate manifests or rebuild the index so "
+                        "repo_key/repo_path metadata matches the backend repo.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+            else:
+                repo_key, per_repo = per_repos[0]
+                if (
+                    _per_repo_has_identity(repo_key, per_repo)
+                    and not _per_repo_matches_backend(repo_key, per_repo, requested_backend)
+                ):
+                    print(
+                        f"--repo-id {requested_repo_id} does not match per-repo manifest {repo_key}. "
+                        "Use the matching --repo-key/--repo-id pair or omit --repo-id.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
 
         if (
             len(per_repos) == 1
