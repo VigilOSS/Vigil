@@ -1,0 +1,41 @@
+# Eval definition for golden_engagement_02.json
+# Code-audit engagement: 2 findings (high BOF, critical integer overflow)
+fixture: golden_engagement_02.json
+
+assertions:
+  # Finding count bounds
+  - kind: min_findings
+    value: 2
+    mode: strict
+
+  - kind: max_findings
+    value: 4
+    mode: strict
+
+  # Expected CWE coverage
+  - kind: expected_cwes
+    value:
+      - CWE-122
+      - CWE-190
+    mode: strict
+
+  # Must include at least one critical
+  - kind: severity_distribution
+    value:
+      critical:
+        min: 1
+      high:
+        min: 1
+    mode: strict
+
+  # Soft check: preferred to have both critical and high severity findings present.
+  # Marked soft because real agent output may consolidate or reclassify findings.
+  - kind: expected_severities
+    value:
+      - critical
+      - high
+    mode: soft
+
+  # Attacker-outcome discipline (strict)
+  - kind: attacker_outcome_present
+    mode: strict

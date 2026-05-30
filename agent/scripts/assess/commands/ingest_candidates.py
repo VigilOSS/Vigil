@@ -43,10 +43,9 @@ def run(args) -> None:
     cfg = load_config(args.engagement_dir)
     eng_dir = cfg.engagement_dir
     auth_context = auth_active_context(eng_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     count = 0
 
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         with open(records_file, "r", encoding="utf-8") as input_stream:
             for line in input_stream:
                 line = line.strip()
@@ -162,7 +161,5 @@ def run(args) -> None:
                     curated=True,
                 )
                 count += 1
-    finally:
-        client.close()
 
     print(f"[ingest] Ingested {count} candidate records from source '{source}'")

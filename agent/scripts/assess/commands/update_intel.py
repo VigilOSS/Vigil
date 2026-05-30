@@ -96,8 +96,7 @@ def run(args) -> None:
         sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         # Engagement-scoped patch: hand-craft the path because the
         # AssessmentClient.patch helper is hardwired to /assessment.
         from urllib.parse import quote
@@ -115,8 +114,6 @@ def run(args) -> None:
             record = json.loads(resp_body)
         except json.JSONDecodeError:
             record = {"raw": resp_body}
-    finally:
-        client.close()
 
     print(json.dumps(record, indent=2, ensure_ascii=False))
 

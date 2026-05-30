@@ -130,11 +130,8 @@ def run(args) -> None:
         print(f"web-discovery: httpx exited {res.return_code}; continuing with whatever it wrote.", file=sys.stderr)
 
     # --- Stage 2: ingest the liveness verdicts into the backend ledger -----
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         summary = ingest_httpx_results(live_host, cfg=cfg, source="web-discovery", client=client)
-    finally:
-        client.close()
     by_class = " ".join(f"{k}={v}" for k, v in sorted(summary["by_class"].items()))
     print(f"web-discovery: liveness ledger upserted {summary['upserted']} hosts ({by_class or 'none'})", file=sys.stderr)
 

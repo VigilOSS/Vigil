@@ -24,8 +24,7 @@ def run(args) -> None:
         # If we can't resolve config, silently exit (fire-and-forget)
         return
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         client.post_event({
             "event_type": args.event_type,
             "phase": args.phase,
@@ -33,5 +32,3 @@ def run(args) -> None:
             "agent_name": args.agent,
             "summary": args.summary,
         })
-    finally:
-        client.close()

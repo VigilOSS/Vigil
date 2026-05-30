@@ -181,11 +181,8 @@ def run(args) -> None:
             allow_unindexed=getattr(args, "allow_unindexed_evidence", False),
         )
 
-        client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-        try:
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
             response = client.post("findings", payload)
-        finally:
-            client.close()
 
         finding = response.get("finding", {})
         if not finding.get("slug") or not finding.get("title"):
@@ -195,8 +192,7 @@ def run(args) -> None:
         finding_slug = finding["slug"]
 
     # Emit event (outside lock)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         client.post_event({
             "event_type": "finding.created",
             "phase": os.environ.get("ORCHESTRATOR_PHASE", "unknown"),
@@ -204,7 +200,5 @@ def run(args) -> None:
             "agent_name": agent_name,
             "summary": f"Recorded {finding_slug}",
         })
-    finally:
-        client.close()
 
     print(finding_slug)

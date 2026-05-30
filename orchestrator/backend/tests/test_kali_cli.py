@@ -666,6 +666,11 @@ class _FakeClient:
 
     def close(self):
         return None
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
 
 def _setup_fake_config(monkeypatch, eng_dir):
@@ -1291,6 +1296,11 @@ def test_kali_exec_dedup_warns_and_returns_early_without_force(
         def post(self, endpoint, payload):
             self.posts.append((endpoint, payload))
             return {"id": 9, "superseded_by_id": 8}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1348,6 +1358,11 @@ def test_dedup_warns_and_continues_by_default(
             # the predecessor via superseded_by_id. Returned id is the NEW
             # row's id so the CLI's finalize PATCH lands on its own row.
             return {"id": NEW_ROW_ID, "superseded_by_id": PREDECESSOR_ID}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1416,6 +1431,11 @@ def test_dedup_force_does_not_set_superseded_by_id(monkeypatch, fake_engagement,
             # superseded_by_id=None even if a predecessor exists.
             sup = None if payload.get("force") else 40
             return {"id": 41, "superseded_by_id": sup}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _ForceClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1461,6 +1481,11 @@ def test_kali_exec_dedup_force_bypasses_check(monkeypatch, fake_engagement):
                 "id": 11,
                 "superseded_by_id": 10 if not payload.get("force") else None,
             }
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1631,6 +1656,11 @@ def test_kali_exec_audit_post_failure_writes_marker_and_continues(
             from assess.lib.client import AssessError
 
             raise AssessError("backend down")
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(
         kali, "AssessmentClient", lambda *a, **k: _BrokenClient("u", "k")
@@ -1696,6 +1726,11 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
             self.patches.append((endpoint, payload))
             self.row.update(payload)
             return self.row.copy()
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _JobClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1778,6 +1813,11 @@ def test_job_start_persists_paths_and_cleans_up_when_running_patch_fails(
             if payload.get("status") == "running":
                 raise AssessError("backend down during running patch")
             return {"id": 14, "status": "queued", **payload}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _FailRunningPatchClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1852,6 +1892,11 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
             return {"id": 22, "status": payload["status"]}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1892,6 +1937,11 @@ def test_job_stop_rejects_already_terminal_job(monkeypatch, fake_engagement):
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
             return {"id": 22, "status": payload["status"]}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1928,6 +1978,11 @@ def test_job_stop_records_stop_failed_when_pid_missing(monkeypatch, fake_engagem
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
             return {"id": 25, "status": payload["status"]}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1970,6 +2025,11 @@ def test_job_stop_records_lost_when_container_not_running(monkeypatch, fake_enga
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
             return {"id": 26, "status": payload["status"]}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -2360,6 +2420,11 @@ def test_kali_job_stop_terminates_with_sigterm_then_sigkill(
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
             return {"id": 22, "status": payload["status"]}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -2416,6 +2481,11 @@ def test_kali_job_stop_escalates_to_sigkill_when_sigterm_ignored(
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
             return {"id": 23, "status": payload["status"]}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -2474,6 +2544,11 @@ def test_kali_job_stop_records_stop_failed_when_sigkill_also_fails(
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
             return {"id": 24, "status": payload["status"]}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -3500,6 +3575,11 @@ class _FakeSweepClient:
 
     def close(self):
         return None
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
 
 def _orphan_row(

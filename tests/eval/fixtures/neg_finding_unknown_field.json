@@ -1,0 +1,23 @@
+{
+  "title": "XSS finding with typo in details",
+  "severity": "medium",
+  "defect_family": "xss",
+  "canonical_location": "https://target.example/profile",
+  "summary": "Stored XSS in bio field",
+  "evidence_ref": "",
+  "notes": "",
+  "workflow_status": "active",
+  "verification_state": "unreviewed",
+  "verification_disposition": "none",
+  "root_cause_key": "",
+  "auth_context": "authenticated",
+  "details": {
+    "evidnce": "Typo — should be 'evidence'",
+    "evidence": "XSS payload executed in victim session",
+    "impact": "Session hijacking",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N",
+    "cvss_score": 5.4,
+    "remediation": "HTML-encode output",
+    "steps_to_reproduce": ["Submit XSS payload in bio", "View profile as victim"]
+  }
+}
