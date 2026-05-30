@@ -7124,6 +7124,38 @@ def test_runtime_start_refuses_when_tier_exceeds_vm(tmp_path, monkeypatch):
     assert not any(c[:3] == ["docker", "run", "-d"] for c in commands)
 
 
+def test_runtime_start_preflights_before_removing_existing_container(tmp_path, monkeypatch):
+    import json as _json
+    from ai_threat_hunting_cli.docker import DockerResult
+    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+
+    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    install_root = _preflight_install_root(tmp_path)
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "info", "--format"]:
+            return DockerResult(0, _json.dumps({"MemTotal": _gib(8), "NCPU": 4}), "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "ps", "-a"]:
+            return DockerResult(0, "security-research\n", "")
+        return DockerResult(0, "", "")
+
+    with pytest.raises(SystemExit):
+        start_runtime(
+            RuntimeOptions(install_root=install_root, recreate=True),
+            runner=runner,
+            validate_tools=False,
+        )
+
+    assert not any(c[:3] == ["docker", "rm", "-f"] for c in commands)
+    assert not any(c[:3] == ["docker", "run", "-d"] for c in commands)
+
+
 def test_runtime_start_allow_oversubscribe_bypasses_refusal(tmp_path, monkeypatch):
     import json as _json
     from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
