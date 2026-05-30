@@ -4867,6 +4867,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         "coverage_blocker_count": int(coverage_gate["blocker_count"]),
         "report_blocker_count": int(report_gate["blocker_count"]),
         "coverage_statuses": {row["status"]: int(row["total"]) for row in coverage_rows},
+        "coverage_by_reachability": coverage_rollup(engagement.id),
         "finding_workflow_statuses": {row["status"]: int(row["total"]) for row in finding_rows},
         "finding_verification_states": {row["verification_state"]: int(row["total"]) for row in verification_state_rows},
         "finding_verification_dispositions": {
@@ -6453,6 +6454,51 @@ def host_liveness(
             continue
         out.append(data)
     return out
+
+
+def coverage_rollup(engagement_id: int) -> dict[str, Any]:
+    """Split the flat coverage-items count by host reachability.
+
+    The raw ``pending: N`` coverage number is permanently scary and hides the
+    truth (most items sit on blackholed/unprobed hosts). This joins each
+    coverage item to its host's verdict in the liveness ledger — via the
+    request-variant `host` or the service `endpoint` (port-stripped) — and
+    buckets the counts so the operator sees how many items are actually on
+    reachable hosts. Reports STORED verdicts (no freshness overlay) since it is
+    a coarse rollup, not a per-host dispatch decision. Observability only — no gate.
+    """
+    _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT COALESCE(hl.reachability_class, 'unprobed') AS klass, COUNT(*) AS count
+            FROM assessment_coverage_items ci
+            LEFT JOIN assessment_services s ON s.id = ci.service_id
+            LEFT JOIN assessment_request_variants rv ON rv.id = ci.request_variant_id
+            LEFT JOIN assessment_host_liveness hl
+                ON hl.engagement_id = ci.engagement_id
+               AND hl.host = LOWER(
+                     COALESCE(
+                       rv.host,
+                       CASE WHEN instr(s.endpoint, ':') > 0
+                            THEN substr(s.endpoint, 1, instr(s.endpoint, ':') - 1)
+                            ELSE s.endpoint END
+                     )
+                   )
+            WHERE ci.engagement_id = ?
+            GROUP BY klass
+            """,
+            (engagement_id,),
+        ).fetchall()
+    counts = {row["klass"]: int(row["count"]) for row in rows}
+    return {
+        "total": sum(counts.values()),
+        "reachable": counts.get("live", 0),
+        "blackholed": counts.get("blackholed", 0),
+        "dead": counts.get("dead", 0),
+        "unknown": counts.get("unknown", 0),
+        "unprobed": counts.get("unprobed", 0),
+    }
 
 
 def _utcnow_iso_dispatch() -> str:

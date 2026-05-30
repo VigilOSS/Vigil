@@ -11,8 +11,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from urllib.parse import quote
+
+from assess.lib.classify_buckets import SKIP_REASON_TAGS, reason_tag_of, tagged_terminal_reason
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
+from assess.lib.discovery import normalize_host
 from assess.lib.contracts import validate_specialist_dispatch_contract
 from assess.lib.db import db_init, db_query, db_exec, db_insert_work_item
 from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
@@ -129,11 +133,22 @@ def register(subparsers) -> None:
         "a cluster, item, duplicate dispatch, or operator decision was skipped/aborted/recorded.",
     )
     p.add_argument(
+        "--reason-tag",
+        dest="reason_tag",
+        default="",
+        choices=("", *sorted(SKIP_REASON_TAGS)),
+        help="Structured reason tag for defer-cluster / defer-items. Stamps "
+        "terminal_reason as `skipped:<tag> | <--reason text>` so a query can tell a "
+        "correct exclusion (blackholed/dead-host/low-signal-cluster/duplicate/egress-blocked) "
+        "from a bare drop. Optional; without it the raw --reason text is stored as before.",
+    )
+    p.add_argument(
         "--by",
         default="status",
-        choices=("status", "source", "cluster", "host"),
+        choices=("status", "source", "cluster", "host", "reason"),
         help="Group axis for `stats` (default: status). 'cluster' / 'host' / 'source' "
-        "let the operator slice the buffer along the axis that matters for the next dispatch.",
+        "let the operator slice the buffer along the axis that matters for the next dispatch; "
+        "'reason' groups deferred/skipped rows by reason tag (surfaces 'untagged' drops).",
     )
     p.add_argument(
         "--max-lines",
@@ -335,10 +350,17 @@ def run(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
+        # Best-effort backend config so claimed rows can carry the host's current
+        # liveness verdict into the dispatch context. None → stamping is skipped.
+        try:
+            liveness_cfg = load_config(getattr(args, "engagement_dir", None))
+        except SystemExit:
+            liveness_cfg = None
         _fetch_by_priority(
             db_path,
             _safe_int_arg(extra[0], "limit"),
             extra[1] if len(extra) > 1 else "auto",
+            cfg=liveness_cfg,
         )
     elif action == "defer-cluster":
         if not extra:
@@ -355,7 +377,9 @@ def run(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        _defer_cluster(db_path, extra[0], reason)
+        reason_tag = (getattr(args, "reason_tag", "") or "").strip()
+        stored = tagged_terminal_reason(reason_tag, reason) if reason_tag else reason
+        _defer_cluster(db_path, extra[0], stored)
     elif action == "defer-items":
         if not extra:
             print(
@@ -372,7 +396,9 @@ def run(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        _defer_items(db_path, extra, reason)
+        reason_tag = (getattr(args, "reason_tag", "") or "").strip()
+        stored = tagged_terminal_reason(reason_tag, reason) if reason_tag else reason
+        _defer_items(db_path, extra, stored)
     elif action == "done":
         if not extra:
             print("Usage: work-buffer <db> done <id> [<id> ...]", file=sys.stderr)
@@ -499,6 +525,27 @@ def _stats(db_path: str, *, by: str = "status") -> None:
         for row in rows:
             host = row["host"] or "(none)"
             print(f"{host}|{row['status']}|{row['count']}")
+        return
+
+    if by == "reason":
+        # Group skipped/deferred rows by their structured reason tag so a query
+        # can tell a correct exclusion from a bare, un-reasoned drop. The tag is
+        # derived in Python (classify_buckets.reason_tag_of) because terminal_reason
+        # is free-text; `untagged` is the state worth watching ("dropped without
+        # a machine-readable reason").
+        print("--- Work Buffer by Reason Tag (skipped/deferred) ---")
+        rows = db_query(
+            db_path,
+            "SELECT COALESCE(terminal_reason, '') AS terminal_reason, COUNT(*) AS count "
+            "FROM work_items WHERE status IN ('skipped', 'deferred') "
+            "GROUP BY terminal_reason",
+        )
+        by_tag: dict[str, int] = {}
+        for row in rows:
+            tag = reason_tag_of(row["terminal_reason"]) or "none"
+            by_tag[tag] = by_tag.get(tag, 0) + int(row["count"])
+        for tag in sorted(by_tag):
+            print(f"{tag}|{by_tag[tag]}")
         return
 
 
@@ -660,7 +707,54 @@ def _assigned_agent_for_row(row) -> str | None:
     return None
 
 
-def _fetch_by_priority(db_path: str, limit: int, agent: str) -> None:
+def _stamp_liveness(conn, result: list[dict], cfg) -> None:
+    """Best-effort: stamp each claimed row's ``live_status`` with the host's
+    current ledger verdict + age (e.g. ``live@9m``, ``blackholed@5m``), so the
+    dispatched specialist starts from "this host answered N minutes ago" instead
+    of re-probing or writing it off on a stale sample (§10.5, context-only —
+    informational, never blocks). Silently skips when there is no backend, no
+    rows, or no liveness data; the fetch always succeeds.
+    """
+    if not result or cfg is None:
+        return
+    hosts = sorted({normalize_host(r.get("url") or "") for r in result})
+    hosts = [h for h in hosts if h]
+    if not hosts:
+        return
+    try:
+        client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+        try:
+            rows = client.get("host-liveness?host=" + quote(",".join(hosts)))
+        finally:
+            client.close()
+    except Exception:
+        return
+    if not isinstance(rows, list):
+        return
+    by_host: dict[str, str] = {}
+    for lv in rows:
+        if not isinstance(lv, dict):
+            continue
+        host = (lv.get("host") or "").lower()
+        klass = lv.get("reachability_class") or "unknown"
+        age = lv.get("age_seconds")
+        age_str = f"@{int(age // 60)}m" if isinstance(age, (int, float)) else ""
+        by_host[host] = f"{klass}{age_str}"
+    stamped = False
+    for r in result:
+        stamp = by_host.get(normalize_host(r.get("url") or ""))
+        if stamp:
+            r["live_status"] = stamp
+            try:
+                conn.execute("UPDATE work_items SET live_status = ? WHERE id = ?", (stamp, r["id"]))
+                stamped = True
+            except Exception:
+                pass
+    if stamped:
+        conn.commit()
+
+
+def _fetch_by_priority(db_path: str, limit: int, agent: str, cfg=None) -> None:
     """Claim the top-K pending rows ranked by priority_score DESC.
 
     Priority mode still respects type-to-agent ownership. ``auto`` claims the
@@ -752,6 +846,7 @@ def _fetch_by_priority(db_path: str, limit: int, agent: str) -> None:
                     f"routable types are: {', '.join(allowed_types)}.",
                     file=sys.stderr,
                 )
+        _stamp_liveness(conn, result, cfg)
         print(json.dumps(result, indent=2, ensure_ascii=False))
     finally:
         conn.close()

@@ -196,6 +196,7 @@ def _run_dispatch(
     extra: list[str] | None = None,
     reason: str = "",
     by: str = "status",
+    reason_tag: str = "",
 ):
     module = _load_dispatch_module()
     module.run(
@@ -205,6 +206,7 @@ def _run_dispatch(
             extra=extra or [],
             reason=reason,
             by=by,
+            reason_tag=reason_tag,
         )
     )
 
@@ -995,6 +997,60 @@ def test_defer_cluster_rejects_empty_reason(tmp_path: Path, capsys) -> None:
     assert row == ("pending", None)
 
 
+def _classify_buckets():
+    root = str(_scripts_root()) if "_scripts_root" in globals() else None
+    import sys as _sys
+    from pathlib import Path as _Path
+    scripts = _Path(__file__).resolve().parents[3] / "agent" / "scripts"
+    if str(scripts) not in _sys.path:
+        _sys.path.insert(0, str(scripts))
+    import assess.lib.classify_buckets as cb
+    return cb
+
+
+def test_reason_tag_helpers_round_trip():
+    cb = _classify_buckets()
+    assert cb.tagged_terminal_reason("blackholed", "akamai 403") == "skipped:blackholed | akamai 403"
+    assert cb.tagged_terminal_reason("duplicate", "") == "skipped:duplicate"
+    assert cb.tagged_terminal_reason("", "plain text") == "plain text"
+    assert cb.reason_tag_of("skipped:blackholed | akamai 403") == "blackholed"
+    assert cb.reason_tag_of("inert_type") == "inert_type"
+    assert cb.reason_tag_of("") == ""
+    assert cb.reason_tag_of("egress-blocked: some prose") == "untagged"  # legacy free-text
+
+
+def test_defer_cluster_reason_tag_stamps_structured_reason(tmp_path: Path) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(db_path, queue_key="x:1", url_path="/s", cluster_key="gf:sqli")
+
+    _run_dispatch(db_path, "defer-cluster", ["gf:sqli"], reason="akamai 403 wall",
+                  reason_tag="blackholed")
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT status, terminal_reason FROM work_items WHERE cluster_key = ?",
+            ("gf:sqli",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == ("skipped", "skipped:blackholed | akamai 403 wall")
+
+
+def test_dispatch_stats_by_reason_surfaces_untagged(tmp_path: Path, capsys) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    # A tagged defer and an untagged (legacy free-text) defer.
+    _insert_work_item(db_path, queue_key="a", url_path="/a", cluster_key="gf:sqli")
+    _insert_work_item(db_path, queue_key="b", url_path="/b", cluster_key="gf:lfi")
+    _run_dispatch(db_path, "defer-cluster", ["gf:sqli"], reason="wall", reason_tag="blackholed")
+    _run_dispatch(db_path, "defer-cluster", ["gf:lfi"], reason="just dropped it")
+
+    _run_dispatch(db_path, "stats", by="reason")
+    out = capsys.readouterr().out
+    assert "blackholed|1" in out
+    assert "untagged|1" in out   # the un-reasoned drop is now visible
+
+
 def test_list_clusters_orders_by_max_priority(tmp_path: Path, capsys) -> None:
     db_path = _make_fresh_db(tmp_path)
     # gf:rce — single high-priority row
@@ -1467,3 +1523,55 @@ echo "egress_block_pct=$pct (blocked=$blocked alive=$total)"
     rc, out = run([])
     assert rc == 0
     assert "egress check skipped" in out
+
+
+def test_stamp_liveness_marks_claimed_rows(monkeypatch, tmp_path):
+    """_stamp_liveness stamps live_status (verdict@age) from the ledger onto
+    claimed rows, persists to cases.db, and is silent when there's no data."""
+    import sqlite3 as _sql
+    from types import SimpleNamespace
+    module = _load_dispatch_module()
+
+    conn = _sql.connect(":memory:")
+    conn.row_factory = _sql.Row
+    conn.execute("CREATE TABLE work_items (id INTEGER PRIMARY KEY, url TEXT, live_status TEXT)")
+    conn.execute("INSERT INTO work_items (id, url, live_status) VALUES (1, 'https://a.example.com/x', NULL)")
+    conn.execute("INSERT INTO work_items (id, url, live_status) VALUES (2, 'https://b.example.com/y', NULL)")
+    conn.commit()
+    result = [{"id": 1, "url": "https://a.example.com/x"}, {"id": 2, "url": "https://b.example.com/y"}]
+
+    class _FakeClient:
+        def __init__(self, *a, **k): pass
+        def get(self, endpoint):
+            assert endpoint.startswith("host-liveness?host=")
+            return [{"host": "a.example.com", "reachability_class": "live", "age_seconds": 540}]
+        def close(self): pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _FakeClient)
+    module._stamp_liveness(conn, result, SimpleNamespace(base_url="http://x", engagement_key="eng"))
+
+    # a got stamped (540s -> 9m); b had no ledger row -> untouched.
+    assert result[0]["live_status"] == "live@9m"
+    assert "live_status" not in result[1]
+    db_a = conn.execute("SELECT live_status FROM work_items WHERE id = 1").fetchone()[0]
+    db_b = conn.execute("SELECT live_status FROM work_items WHERE id = 2").fetchone()[0]
+    assert db_a == "live@9m" and db_b is None
+
+
+def test_stamp_liveness_best_effort_skips(monkeypatch, tmp_path):
+    """No cfg, or a backend error, must not raise (the fetch still succeeds)."""
+    import sqlite3 as _sql
+    from types import SimpleNamespace
+    module = _load_dispatch_module()
+    conn = _sql.connect(":memory:")
+    conn.execute("CREATE TABLE work_items (id INTEGER PRIMARY KEY, url TEXT, live_status TEXT)")
+    result = [{"id": 1, "url": "https://a.example.com/x"}]
+
+    module._stamp_liveness(conn, result, None)            # no cfg → no-op
+    assert "live_status" not in result[0]
+
+    class _Boom:
+        def __init__(self, *a, **k): raise RuntimeError("backend down")
+    monkeypatch.setattr(module, "AssessmentClient", _Boom)
+    module._stamp_liveness(conn, result, SimpleNamespace(base_url="http://x", engagement_key="eng"))
+    assert "live_status" not in result[0]   # swallowed, no raise
