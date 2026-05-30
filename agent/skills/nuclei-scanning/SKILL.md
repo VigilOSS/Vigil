@@ -123,9 +123,7 @@ Flags explained — each flag earns its place because removing it breaks an assu
 - `-stats -si 30` prints a 30-second stats tick so the operator sees progress without tailing the
   JSONL file — useful when the delta is large.
 
-When dispatching parallel nuclei sweeps, use the `aith assess kali job start` lifecycle (and
-stop them with `kali job stop <id>`) instead of background-and-pkill — broad `pkill -f nuclei`
-stomps on sibling agents' processes in the shared runtime. See
+Run each sweep synchronously — one blocking `aith assess kali <verb> … --timeout N` at a time. Specialists do NOT background target traffic or use `aith assess kali job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f nmap`) — it stomps sibling agents' processes in the shared runtime. See
 `agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for the full pattern.
 
 ### Template selection rationale

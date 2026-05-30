@@ -143,9 +143,17 @@ def start_job(
         # the process across the container PID namespace boundary. ``exec``
         # in POSIX shells reuses the calling shell's PID, so $$ is the PID
         # of the user command itself once exec runs.
+        # Redirect the user command's stdin from /dev/null. This is the
+        # in-container analogue of the synchronous exec path's
+        # ``stdin=subprocess.DEVNULL`` (kali.py). ProjectDiscovery tools
+        # (httpx/katana/nuclei/dnsx/naabu) read targets from stdin whenever
+        # fd 0 is not a TTY and block on EOF that never arrives — so a
+        # backgrounded probe hangs at 0% CPU even with ``-l <file>``. The
+        # ``</dev/null`` is tool-agnostic (no katana ``-no-stdin`` arg-parse
+        # problem) and harmless to a tool that reads its targets from a flag.
         wrapped_shell = (
             f"echo $$ > {shlex.quote(pid_file)}; "
-            f"exec sh -c {shlex.quote(f'{joined} >>{shlex.quote(container_stdout)} 2>>{shlex.quote(container_stderr)}')}"
+            f"exec sh -c {shlex.quote(f'{joined} >>{shlex.quote(container_stdout)} 2>>{shlex.quote(container_stderr)} </dev/null')}"
         )
         # ENGAGEMENT_KEY env mirrors the sync exec path in
         # ``kali_runtime_exec._build_docker_exec`` so skill commands launched as

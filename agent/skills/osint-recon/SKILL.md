@@ -13,8 +13,11 @@ origin: AI Threat Hunting
 
 ## Tools
 
-searchsploit, h8mail, theHarvester, bbot, amass, whois, dig,
+searchsploit, h8mail, theHarvester, bbot, subfinder, whois, dig,
 gau, curl, jq
+
+(amass v5 is intentionally dropped on shared runtimes — graph-DB OOM/RC137; use
+`subfinder -all` + `bbot` passive for the same source coverage.)
 
 Optional when installed: `waymore`
 
@@ -30,7 +33,7 @@ the container, because anything under `/tmp` disappears on container recreate.
 > **Audit envelope is mandatory.** Every command in sections 1–6 below is illustrative shell —
 > execution wraps each network probe in `aith assess kali exec --` with the audit envelope
 > (`--technique OSINT --intent "<purpose>" --probe-kind fingerprint --phase recon --timeout N`).
-> The bare `searchsploit`/`theHarvester`/`bbot`/`curl`/`whois`/`dig`/`amass`/`gau`/`waymore`
+> The bare `searchsploit`/`theHarvester`/`bbot`/`curl`/`whois`/`dig`/`subfinder`/`gau`/`waymore`
 > invocations shown without the wrap are *examples of the underlying tool argv*; running them
 > on the host bypasses the audit pipeline that downstream specialists rely on as a coverage map.
 > Use `--technique OSINT` for passive external-source lookups (CT logs, public APIs, registries),
@@ -136,8 +139,11 @@ aith assess kali exec \
       dig +short $type <domain>
     done | tee scans/osint_dns.txt
 
-    # Amass passive enum
-    amass enum -passive -d <domain> -o scans/osint_amass.txt
+    # Passive subdomain enum — use subfinder -all + bbot passive, NOT amass v5.
+    # amass v5 builds a memory-heavy graph DB that OOM-kills (RC137) under the
+    # shared cgroup and stalls at 0% with unconfigured datasources; subfinder -all
+    # + bbot cover the same passive sources. See agent/skills/subdomain-enumeration.
+    subfinder -d <domain> -all -t 20 -silent -o scans/osint_subs.txt
 
     # Historical URL discovery with gau (queries Wayback, AlienVault OTX, Common Crawl, URLScan)
     gau <domain> --threads 5 --o /tmp/osint_gau.txt

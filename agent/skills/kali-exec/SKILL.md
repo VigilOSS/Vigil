@@ -44,7 +44,7 @@ Skills should point you at `aith assess contract kali <verb>` for field tables i
 | `kali gau` | Historical URL collection (Wayback / OTX / Common Crawl / URLScan). | `references/tools/recon/gau.md` |
 | `kali whatweb` | Deep web technology fingerprinting. | `references/tools/recon/whatweb.md` |
 | `kali exec <cmd>` | Raw passthrough for tools not yet typed. Same audit metadata flags. | `references/runtime-guides/kali-cli.md` |
-| `kali job <start\|status\|tail\|stop\|list>` | Async-job lifecycle for long scans (nmap+scripts, sqlmap, nuclei sweep, dirb, gobuster, ffuf large wordlists). | `references/runtime-guides/kali-cli.md` |
+| `kali job <start\|status\|tail\|stop\|list>` | **Operator-only** async-job lifecycle for a single authorized long sweep that must outlive its dispatch. Specialists run synchronously instead — see the sync-vs-async decision below. | `references/runtime-guides/kali-cli.md` |
 | `kali sweep-orphans` | Host-side reconciler for `assessment_command_runs` rows stuck in `status=running` past `--max-age-seconds` (default 3600s). Probes the in-container PID via `kill -0`; finalizes dead rows to `status=lost`. No audit flags — it is maintenance, not a probe. | `references/runtime-guides/kali-cli.md` |
 
 `kali exec` is the escape hatch — use it for tools the typed surface does not yet model (dirb, gobuster, hydra, john, hashcat, custom scripts, etc.) and pass the same audit-metadata flags as a typed verb. `kali job` is the supervisor — see the sync-vs-async decision below.
@@ -64,12 +64,29 @@ aith assess kali httpx -u https://x -tech-detect \
 
 ## Synchronous vs. async decision
 
-| Mode | When | Mechanism |
-|------|------|-----------|
-| Synchronous (default) | Probes that fit inside `--timeout 1800` (~30 minutes). Most recon, fingerprinting, and small fuzz passes. | The CLI runs as a single process, blocks the calling shell, and finalizes the audit row on exit. |
-| Async (`kali job start ...`) | nmap+scripts on >10 hosts, nuclei sweeps with the full template tree, sqlmap with `--level 5 --risk 3`, dirb/gobuster on raft-large wordlists, ffuf on `directory-list-2.3-big.txt`. Also any case where the calling shell may exit (multi-hour sweeps, parallel batches). | `aith assess kali job start ...` returns a job-id immediately; the worker runs under `dtach` inside the container and survives calling-shell exit. Poll with `aith assess kali job status <id>` and read with `aith assess kali job tail <id>`. The job table is SQLite-backed (proven `plainjob`/`solid_queue` pattern). |
+**Specialists run synchronously — always.** One blocking `aith assess kali
+<verb> ... --timeout N` at a time. No `run_in_background`, no `kali job start`,
+no dtach, no watcher/poll loop. Even heavy probes (nmap+scripts, full-tree
+nuclei sweeps, `sqlmap --level 5 --risk 3`, dirb/gobuster on raft-large
+wordlists, ffuf on `directory-list-2.3-big.txt`) run as a single blocking call
+with a generous `--timeout`. A long synchronous call is killed cleanly on
+`--timeout` expiry — the CLI sends SIGTERM to the process group, then SIGKILL
+after 5 seconds, and the audit row records `timed_out=true`, so the row never
+disappears and nothing is orphaned.
 
-Long-running synchronous calls are killed cleanly on `--timeout` expiry — the CLI sends SIGTERM to the process group, then SIGKILL after 5 seconds. The audit row reflects `timed_out=true` so the row never disappears. Choose async when you need the work to outlive the calling agent, not just to extend the wall-clock budget.
+| Mode | Who | When | Mechanism |
+|------|-----|------|-----------|
+| Synchronous (the rule for specialists) | every dispatched specialist | all target-facing work, light or heavy | The CLI runs as a single process, blocks the calling shell, and finalizes the audit row on exit. |
+| Async (`kali job start ...`) | **operator only** | a single authorized sweep that must outlive its dispatch; never a per-step loop and never to fan out parallel probes | `aith assess kali job start ...` returns a job-id immediately; the worker runs under `dtach` inside the container and survives calling-shell exit. Poll with `kali job status <id>`, read with `kali job tail <id>`, stop with `kali job stop <id>`. |
+
+**Why specialists never background:** a subagent that launches a detached job
+and halts "waiting for a completion notification" gets auto-resumed by the
+harness, launches the *next* detached job, and halts again — unbounded relaunch
+thrash that produced duplicate httpx passes and zero net progress in past
+engagements. The fix is structural: keep target traffic synchronous and
+in-band. `--timeout` extends the wall-clock budget; it is **not** a reason to
+reach for `kali job start`. If a probe genuinely must outlive the dispatch, the
+specialist says so in its handoff and the operator owns the job.
 
 ## Audit-flag mapping (REQUIRED on every typed verb and `kali exec`)
 
@@ -81,7 +98,7 @@ The CLI fails closed when these are missing. Pass them explicitly — there is n
 | `--intent "<text>"` | ≤200-char one-liner of purpose. | Replaces the old `echo "=== label ==="` pattern. The intent is what makes `list-command-runs --q <keyword> --show-matches` searchable across an engagement. |
 | `--probe-kind <kind>` | What the command represents. | One of `fingerprint` (learning the target, no payload) / `baseline` (vanilla control request, for diff) / `payload` (crafted attack payload testing a hypothesis) / `exploit` (attacker-outcome proof) / `replay` (captured primitive on a new surface) / `cleanup` (undoing target-side changes). |
 | `--phase <enum>` | The phase the dispatch was authorized for. | REQUIRED. See "Phase tags" below — pass the dispatch phase, not `scope.json.current_phase`. |
-| `--timeout <seconds>` | Wall-clock budget. | Required. Default suggestion: 1800 for synchronous probes; longer budgets must use `kali job start`. |
+| `--timeout <seconds>` | Wall-clock budget. | Required. Default suggestion: 1800 for typical probes; raise it for a heavy single probe (the call still runs synchronously and is killed cleanly on expiry). A long budget is not a reason to use `kali job start` — that is operator-only (see the sync-vs-async decision). |
 | `--destructive` | Flag for writes/deletes. | Off by default. Set when the command does POST/PUT/PATCH/DELETE, file upload, account creation, config change, or any state-modifying shell exec on the target. |
 | `--force` | Suppress the dedup-warning log for an intentional retry. | The CLI hashes `(command, argv_json)` and warns when an identical command ran within `KALI_AUDIT_DEDUP_WINDOW_SECONDS` (default 30s), but the new command always executes — the backend records a fresh audit row regardless, with `superseded_by_id` linking it to the predecessor when applicable. `--force` suppresses only the warning text; it does not change run behavior or backend state. |
 
@@ -214,7 +231,9 @@ aith assess kali sqlmap \
   --technique SQLI --intent "boolean+error+union+stacked SQLi on /search?q" \
   --probe-kind payload --phase consume-test --timeout 1800
 
-# Long sqlmap dump — switch to async because dump can run for hours.
+# Long sqlmap dump — a specialist runs this SYNCHRONOUSLY with a generous --timeout.
+# `kali job start` (shown) is OPERATOR-ONLY (see the sync-vs-async decision above);
+# a dispatched specialist uses `aith assess kali sqlmap ... --timeout 3600` instead.
 aith assess kali job start \
   --technique SQLI --intent "deep sqlmap dump on /api/users?id" \
   --probe-kind exploit --phase exploit --timeout 28800 --destructive \
@@ -369,7 +388,7 @@ When you know what you want to learn, this lookup gets you to the right verb wit
 - "Enumerate subdomains?" → `kali subfinder -d <domain> -all` then `kali puredns resolve` then `kali dnsx`.
 - "Inventory runtime tools or versions?" → `kali exec --technique HEALTH --intent "tooling inventory" --probe-kind fingerprint --phase <phase> --timeout 60 -- which <tool...>`.
 - "Run a tool not in the typed surface?" → `kali exec --technique <enum> --intent "<why>" --probe-kind <kind> --phase <phase> --timeout <seconds> -- <command...>`.
-- "Run something that needs to outlive my shell?" → `kali job start --technique <enum> --intent "<why>" --probe-kind <kind> --phase <phase> --timeout <seconds> -- <command...>`.
+- "Run a long probe?" → SYNCHRONOUSLY with a generous `--timeout` (specialists do not background). Only the **operator** uses `kali job start` for a single authorized sweep that must outlive a shell.
 
 ## Common Patterns
 

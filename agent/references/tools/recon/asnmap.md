@@ -6,6 +6,16 @@ For live engagement targets, run asnmap via `aith assess kali asnmap` (typed ver
 
 **Where it lives:** `/usr/local/bin/asnmap` in `runtime-full` (`go install github.com/projectdiscovery/asnmap/cmd/asnmap@latest` — see `agent/docker/runtime-full/Dockerfile`).
 
+## Requires a PDCP API key (or it returns empty)
+
+asnmap's data path is gated behind a ProjectDiscovery Cloud (PDCP) API key. **Without `PDCP_API_KEY` configured in the runtime, asnmap exits 0 with empty output** — which looks identical to "this ASN announces no CIDRs" and silently poisons the cero TLS-SAN feed. The `aith assess kali asnmap` verb now detects the missing key and fails loud (pass `--allow-no-key` to override).
+
+- **Provision the key:** get a free key at `cloud.projectdiscovery.io`, set `PDCP_API_KEY=...` in `<install>/.env`, and re-run `aith runtime start` so the runtime container inherits it.
+- **Keyless fallbacks** (no PDCP account needed) — use these when the key is unavailable and you still need ASN→CIDR:
+  - **Team Cymru** (DNS/whois): `whois -h whois.cymru.com " -v <ip>"` maps IP→ASN→prefix.
+  - **RADB prefixes:** `whois -h whois.radb.net "!gAS<asn-number>"` expands an ASN to its announced prefixes.
+  - **ARIN/RIPE RDAP:** `curl https://rdap.arin.net/registry/ip/<ip>` for the registered CIDR.
+
 ## Resource-safe invocation
 
 asnmap is network-bound (queries ProjectDiscovery's ASN service) and very low CPU/RAM. No tier-specific tuning is needed.

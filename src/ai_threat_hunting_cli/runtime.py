@@ -24,6 +24,7 @@ class RuntimeOptions:
     image: str = "security-research:latest"
     container_name: str = "security-research"
     recreate: bool = False
+    allow_oversubscribe: bool = False
 
 
 def build_runtime(install_root: Path, *, variant: str = "full", dev: bool = False, runner: docker.Runner = docker.run_command_streaming) -> None:
@@ -72,7 +73,7 @@ def start_runtime(
     env_file = install_root / ".env"
     base_url = container_host_url(resolve_orchestrator_base_url(install_root))
     resources = runtime_resources()
-    _maybe_warn_tier_undersized(resources)
+    _preflight_shared_vm(resources, options, runner=runner)
     argv = [
         "docker",
         "run",
@@ -281,6 +282,70 @@ def _format_cpus(value: float) -> str:
     if value.is_integer():
         return str(int(value))
     return f"{value:g}"
+
+
+def _preflight_shared_vm(
+    resources: RuntimeResources,
+    options: RuntimeOptions,
+    *,
+    runner: docker.Runner,
+) -> None:
+    """Refuse/warn before starting when the requested tier oversubscribes the VM.
+
+    The runtime competes for one shared Docker VM (on Docker Desktop the VM is a
+    fixed allocation co-located with whatever else the user runs — including, in
+    one engagement, production databases). Reading actual VM capacity from
+    ``docker info`` lets us refuse a tier that would OOM-kill neighbors, instead
+    of trusting AITH_RUNTIME_* blindly. Fails OPEN: when capacity is unreadable we
+    fall back to the host-RAM undersizing hint and proceed (never hard-fail on an
+    unreadable probe).
+    """
+    info = docker.docker_info(runner=runner)
+    mem_total = info.get("MemTotal")
+    ncpu = info.get("NCPU")
+    if not isinstance(mem_total, (int, float)) or mem_total <= 0:
+        _maybe_warn_tier_undersized(resources)
+        return
+
+    vm_mem_gb = mem_total / (1024 ** 3)
+    frac = resources.memory_gb / vm_mem_gb if vm_mem_gb > 0 else 0.0
+    cotenants = sorted(docker.container_names(runner=runner) - {options.container_name})
+
+    if frac >= 0.85 and not options.allow_oversubscribe:
+        detail = (
+            f" and {len(cotenants)} other container(s) are running "
+            f"({', '.join(cotenants[:5])}{'…' if len(cotenants) > 5 else ''})"
+            if cotenants else ""
+        )
+        raise SystemExit(
+            f"Refusing to start runtime: memory tier {resources.memory_gb} GB is "
+            f"{frac:.0%} of the Docker VM's {vm_mem_gb:.1f} GB{detail}.\n"
+            "  This oversubscribes a shared VM and can OOM-kill co-located containers.\n"
+            "  Lower AITH_RUNTIME_MEMORY_GB / AITH_RUNTIME_CPUS, stop co-tenant containers,\n"
+            "  use a dedicated Docker context/VM, or pass --allow-oversubscribe to override."
+        )
+
+    if frac >= 0.6 or cotenants:
+        note = (
+            f"warning: runtime tier {resources.memory_gb} GB is {frac:.0%} of the "
+            f"{vm_mem_gb:.1f} GB Docker VM"
+        )
+        if cotenants:
+            note += (
+                f"; {len(cotenants)} co-tenant container(s) running "
+                f"({', '.join(cotenants[:5])}{'…' if len(cotenants) > 5 else ''})"
+            )
+        note += ". Heavy recon may contend with neighbors — prefer a dedicated runtime."
+        print(note)
+
+    if isinstance(ncpu, (int, float)) and ncpu > 0 and resources.cpus >= ncpu:
+        print(
+            f"warning: runtime --cpus={_format_cpus(resources.cpus)} claims the VM's entire "
+            f"CPU allocation (NCPU={int(ncpu)}); this can starve the Docker daemon and host."
+        )
+
+    # Also keep the host-RAM undersizing hint for dedicated boxes with headroom.
+    _maybe_warn_tier_undersized(resources)
 
 
 def _maybe_warn_tier_undersized(resources: RuntimeResources) -> None:

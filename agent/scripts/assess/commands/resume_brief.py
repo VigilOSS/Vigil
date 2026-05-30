@@ -63,6 +63,16 @@ def run(args) -> None:
         brief = client.get(endpoint)
     finally:
         client.close()
+    # A fresh/empty engagement (or a backend that served the SPA index.html for an
+    # unknown route) makes client.get return a raw string instead of a dict. Render
+    # a clean "no prior state" notice rather than crashing on brief.get(...).
+    if not isinstance(brief, dict):
+        note = "No prior state for this engagement (backend returned no resume brief)."
+        if args.as_json:
+            print(json.dumps({"engagement": {}, "note": note}, indent=2, ensure_ascii=False))
+        else:
+            print(f"# Resume Brief\n\n- {note}")
+        return
     if args.as_json:
         print(json.dumps(brief, indent=2, ensure_ascii=False))
         return
