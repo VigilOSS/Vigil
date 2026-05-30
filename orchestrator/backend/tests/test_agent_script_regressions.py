@@ -2340,12 +2340,14 @@ def test_evidence_ref_accepts_existing_file(tmp_path):
         )  # no SystemExit
 
 
-def test_evidence_ref_accepts_url(tmp_path):
+def test_evidence_ref_rejects_url(tmp_path, capsys):
     mod = _load_record_finding_module()
-    mod._validate_evidence_ref(
-        {"evidence_ref": "https://target.example/proof"},
-        eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
-    )  # no SystemExit
+    with pytest.raises(SystemExit):
+        mod._validate_evidence_ref(
+            {"evidence_ref": "https://target.example/proof"},
+            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+        )
+    assert "not a registered artifact path" in capsys.readouterr().err
 
 
 def test_evidence_ref_rejects_prose(tmp_path, capsys):
@@ -2391,11 +2393,11 @@ def test_evidence_ref_rejects_prose_containing_scheme(tmp_path):
             {"evidence_ref": "attacker forces http:// downgrade then steals cookie"},
             eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
         )
-    # A real URL pointer is still accepted (no exit).
-    mod._validate_evidence_ref(
-        {"evidence_ref": "https://target.example/proof?id=1"},
-        eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
-    )
+    with pytest.raises(SystemExit):
+        mod._validate_evidence_ref(
+            {"evidence_ref": "https://target.example/proof?id=1"},
+            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+        )
 
 
 def test_update_finding_notes_replace_without_notes_errors():
