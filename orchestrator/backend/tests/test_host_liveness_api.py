@@ -82,3 +82,41 @@ def test_rejects_stale_as_stored_class(client, isolate_settings):
     # 'stale' is a read-time overlay, never an accepted stored class.
     resp = _post(client, [{"host": "f.example.com", "reachability_class": "stale"}])
     assert resp.status_code == 422
+
+
+def _engagement_id(client) -> int:
+    return client.get(f"/engagements/{ENGAGEMENT_KEY}").json()["id"]
+
+
+def test_coverage_rollup_splits_by_reachability(client, isolate_settings):
+    _seed(client, isolate_settings)
+    from app.services import state_manager
+
+    eid = _engagement_id(client)
+    with state_manager.get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO assessment_services (engagement_id, endpoint, port, protocol) "
+            "VALUES (?, 'reachable.example.com:443', 443, 'tcp')", (eid,))
+        svc_live = cur.lastrowid
+        cur = conn.execute(
+            "INSERT INTO assessment_services (engagement_id, endpoint, port, protocol) "
+            "VALUES (?, 'black.example.com:443', 443, 'tcp')", (eid,))
+        svc_black = cur.lastrowid
+        # 2 coverage items on the reachable host, 1 on the blackholed host.
+        # Vary attack_family so each row is distinct under the natural-key index.
+        for i, svc in enumerate((svc_live, svc_live, svc_black)):
+            conn.execute(
+                "INSERT INTO assessment_coverage_items "
+                "(engagement_id, service_id, auth_context, input_slot, attack_family, status) "
+                "VALUES (?, ?, 'anonymous', 'service', ?, 'pending')", (eid, svc, f"fam{i}"))
+
+    _post(client, [
+        {"host": "reachable.example.com", "reachability_class": "live", "probed_at": "2999-01-01T00:00:00Z"},
+        {"host": "black.example.com", "reachability_class": "blackholed", "probed_at": "2999-01-01T00:00:00Z"},
+    ])
+
+    rollup = client.get(f"{BASE}/summary").json()["coverage_by_reachability"]
+    assert rollup["total"] == 3
+    assert rollup["reachable"] == 2
+    assert rollup["blackholed"] == 1
+    assert rollup["unprobed"] == 0
