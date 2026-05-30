@@ -19,8 +19,10 @@ _SERVICE_RECORD_RE = re.compile(r"(^|\.)(_dmarc|_dkim|_domainkey|_acme-challenge
 # DHCP / workstation / reverse-DNS noise (the bulk of resolved .mil names in §8).
 _DHCP_RE = re.compile(r"(^|\.)(dhcp[-.]|dha-\d+-\d+|dhpcile\d+)", re.IGNORECASE)
 _WORKSTATION_RE = re.compile(r"(-laptop|-desktop|-kw|-pc)(\.|$)", re.IGNORECASE)
-# Leading MAC-octet PTR names, e.g. 00-08-74-xx... or 00:08:74:...
-_MAC_PTR_RE = re.compile(r"^[0-9a-f]{2}[-:][0-9a-f]{2}[-:]", re.IGNORECASE)
+# Leading MAC-octet PTR names, e.g. 00-08-74-ab-... — require >=3 hex-octet
+# groups so real hosts like `ad-01-portal` / `fe-80-gw` are NOT dropped (a real
+# MAC PTR has 6 octets; two leading hex pairs is too common in corporate naming).
+_MAC_PTR_RE = re.compile(r"^([0-9a-f]{2}[-:]){3,}", re.IGNORECASE)
 # Generic reverse-DNS zone marker.
 _REV_RE = re.compile(r"(^|\.)rev\.", re.IGNORECASE)
 
@@ -33,7 +35,7 @@ def normalize_host(value: str) -> str:
     live in different processes and cannot share an import, so they must agree by
     algorithm — keep them in sync.)
     """
-    h = (value or "").strip().lower()
+    h = (value or "").strip().lower().rstrip(".")
     if "://" in h:
         h = h.split("://", 1)[1]
     h = h.split("/", 1)[0]
@@ -41,7 +43,8 @@ def normalize_host(value: str) -> str:
         end = h.find("]")
         if end != -1:
             h = h[: end + 1]
-    elif ":" in h:
+    elif h.count(":") == 1:
+        # exactly one colon → host:port (a bare IPv6 has >=2 colons; leave intact)
         h = h.split(":", 1)[0]
     return h
 

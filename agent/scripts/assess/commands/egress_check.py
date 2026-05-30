@@ -131,8 +131,13 @@ def run(args) -> None:
 
     controls_live = controls and all(verdicts.get(c) == reachability.LIVE for c in controls)
     blackholed = [h for h in sample if verdicts.get(h) == reachability.BLACKHOLED]
+    # Denominator is the hosts we actually got a verdict for — a host whose probe
+    # line was missing/garbled must not dilute the block percentage (which could
+    # mask a real blackhole by dropping it below the threshold).
+    classified = [h for h in sample if h in verdicts]
+    classified_n = len(classified)
     sampled_n = len(sample)
-    blocked_pct = round(100 * len(blackholed) / sampled_n) if sampled_n else 0
+    blocked_pct = round(100 * len(blackholed) / classified_n) if classified_n else 0
 
     if not controls_live:
         verdict = "control_failure"
@@ -143,7 +148,7 @@ def run(args) -> None:
 
     # Keep `egress_block_pct=N` in stdout for any consumer that greps for it.
     print(f"cluster={args.cluster or '-'} verdict={verdict} control={'live' if controls_live else 'fail'} "
-          f"blackholed={len(blackholed)}/{sampled_n} egress_block_pct={blocked_pct}")
+          f"blackholed={len(blackholed)}/{classified_n} (of {sampled_n} sampled) egress_block_pct={blocked_pct}")
 
     if verdict == "control_failure":
         print("egress-check: controls did NOT connect — likely a transient/global egress issue, "

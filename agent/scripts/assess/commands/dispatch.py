@@ -738,7 +738,9 @@ def _stamp_liveness(conn, result: list[dict], cfg) -> None:
         host = (lv.get("host") or "").lower()
         klass = lv.get("reachability_class") or "unknown"
         age = lv.get("age_seconds")
-        age_str = f"@{int(age // 60)}m" if isinstance(age, (int, float)) else ""
+        # Clamp to >=0: a future/skewed probed_at yields a negative age; a
+        # nonsense `@-NNNm` stamp is worse than omitting the age.
+        age_str = f"@{int(age // 60)}m" if isinstance(age, (int, float)) and age >= 0 else ""
         by_host[host] = f"{klass}{age_str}"
     stamped = False
     for r in result:

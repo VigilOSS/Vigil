@@ -2199,3 +2199,24 @@ def test_evidence_ref_allow_unindexed_bypasses(tmp_path):
         {"evidence_ref": "just prose here"},
         eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=True,
     )  # no SystemExit even though it is prose
+
+
+def test_evidence_ref_rejects_prose_containing_scheme(tmp_path):
+    mod = _load_record_finding_module()
+    with pytest.raises(SystemExit):
+        mod._validate_evidence_ref(
+            {"evidence_ref": "attacker forces http:// downgrade then steals cookie"},
+            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+        )
+    # A real URL pointer is still accepted (no exit).
+    mod._validate_evidence_ref(
+        {"evidence_ref": "https://target.example/proof?id=1"},
+        eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+    )
+
+
+def test_update_finding_notes_replace_without_notes_errors():
+    from types import SimpleNamespace
+    mod = _load_script_module("update_finding_guard", "agent/scripts/assess/commands/update_finding.py")
+    with pytest.raises(SystemExit):
+        mod.run(SimpleNamespace(notes_replace=True, notes=None, inline_payload=None, payload=None))
