@@ -138,8 +138,7 @@ def run(args) -> None:
         sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         if intel_ids:
             try:
                 result = _link_intel(client, args.finding_slug, intel_ids, args.note)
@@ -158,7 +157,5 @@ def run(args) -> None:
                 "provenance": provenance,
             }
             result = client.put(f"findings/{args.finding_slug}/root-cause", payload)
-    finally:
-        client.close()
 
     print(json.dumps(result, indent=2, ensure_ascii=False))

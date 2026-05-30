@@ -43,8 +43,7 @@ def _matches_search(finding: dict, search: str) -> bool:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         root_cause_slug = getattr(args, "root_cause_slug", None)
         if root_cause_slug:
             group = client.get(f"finding-groups/{root_cause_slug}")
@@ -57,8 +56,6 @@ def run(args) -> None:
                 findings.append(item)
         else:
             findings = client.get("findings")
-    finally:
-        client.close()
 
     if not isinstance(findings, list):
         print(json.dumps(findings, indent=2, ensure_ascii=False))

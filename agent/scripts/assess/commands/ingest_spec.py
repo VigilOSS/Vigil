@@ -67,10 +67,9 @@ def run(args) -> None:
     base_url = base_url.rstrip("/")
 
     paths = spec.get("paths") or {}
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     count = 0
 
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         for path_key, methods in paths.items():
             if not isinstance(methods, dict):
                 continue
@@ -197,7 +196,5 @@ def run(args) -> None:
                     auth_context=auth_context,
                 )
                 count += 1
-    finally:
-        client.close()
 
     print(f"[ingest] Ingested {count} endpoints from spec (version {spec_version})")

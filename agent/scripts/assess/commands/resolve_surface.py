@@ -93,11 +93,8 @@ def run(args) -> None:
         payload["followup_condition"] = args.followup_condition
 
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         record = client.patch(f"surfaces/{args.surface_id}", payload)
-    finally:
-        client.close()
 
     if not isinstance(record, dict) or "id" not in record:
         print("resolve-surface: backend returned an unexpected response", file=sys.stderr)

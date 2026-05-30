@@ -1,0 +1,45 @@
+{
+  "title": "Heap buffer overflow in URL parser via overlong scheme",
+  "severity": "high",
+  "defect_family": "buffer-overflow",
+  "canonical_location": "file:lib/urlapi.c:342",
+  "summary": "Attacker-controlled URL scheme exceeding 64 bytes overflows heap buffer in parseurl()",
+  "evidence_ref": "",
+  "notes": "",
+  "details": {
+    "cwe_id": "CWE-122",
+    "impact": "Remote code execution via heap corruption",
+    "evidence": "memcpy(buf, scheme, schemelen) copies attacker-controlled bytes without a bounds check",
+    "entry_point": "curl_url_set(CURLURLPART_URL, attacker_url)",
+    "sink": "memcpy(buf, scheme, schemelen) at lib/urlapi.c:342",
+    "taint_path": "curl_url_set(CURLURLPART_URL, attacker_url) -> parseurl() -> memcpy(buf, scheme, schemelen)",
+    "guards_evaluated": "No bounds check on schemelen before memcpy",
+    "slot_type": "URL-COMPONENT",
+    "chain_required": true,
+    "chain_rationale": "The primitive is meaningful for exploitation, but final report impact depends on chaining it to a reachable crash or controlled allocation path.",
+    "required_followup": [
+      "Exercise the URL parser through a network-reachable caller",
+      "Confirm whether the overflow produces controlled corruption under sanitizer instrumentation"
+    ],
+    "cvss_vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    "cvss_score": 8.1,
+    "remediation": "Add bounds check on schemelen before memcpy; reject URLs with scheme longer than 63 bytes",
+    "steps_to_reproduce": [
+      "Craft a URL with a scheme component exceeding 64 bytes",
+      "Pass to curl_url_set(CURLURLPART_URL, ...)",
+      "Observe heap corruption under AddressSanitizer"
+    ],
+    "references": ["https://cwe.mitre.org/data/definitions/122.html"],
+    "discovered_by": "vulnerability-analyst"
+  },
+  "workflow_status": "active",
+  "verification_state": "unreviewed",
+  "verification_disposition": "none",
+  "root_cause_key": "",
+  "auth_context": "anonymous",
+  "source_name": "vulnerability-analyst",
+  "provenance": {
+    "agent_name": "vulnerability-analyst"
+  },
+  "links": []
+}

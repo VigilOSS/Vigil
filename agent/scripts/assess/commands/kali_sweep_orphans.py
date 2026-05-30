@@ -258,9 +258,8 @@ def run(args) -> None:
     if max_age < 0:
         raise AssessError("--max-age-seconds must be >= 0")
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     summary = {"checked": 0, "still_running": 0, "finalized": 0, "skipped": 0}
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         rows = _list_running_rows(client)
         now = _dt.datetime.now(_dt.timezone.utc)
         now_iso = _utcnow_iso()
@@ -339,7 +338,5 @@ def run(args) -> None:
                 f"finalized id={row_id} previous_status=running new_status=lost "
                 f"age={int(age_seconds)}"
             )
-    finally:
-        client.close()
 
     print(json.dumps({"summary": summary, "dry_run": bool(args.dry_run)}, ensure_ascii=False))

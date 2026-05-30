@@ -108,8 +108,7 @@ def _apply_jq(expression: str, json_text: str, *, compact: bool = False) -> str:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         endpoint = args.endpoint.strip("/")
         if _is_engagement_scoped(endpoint):
             # Shorthand: `fetch intel` → `fetch intel/summary`. Users who want
@@ -119,8 +118,6 @@ def run(args) -> None:
             result = client.get_engagement(endpoint)
         else:
             result = client.get(endpoint)
-    finally:
-        client.close()
 
     if isinstance(result, str):
         if args.jq:

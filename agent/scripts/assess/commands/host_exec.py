@@ -379,8 +379,7 @@ def run(args) -> None:
 
     record_run_id: int | str = ""
     audit_record_failed = False
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         endpoint = f"command-runs/host-exec"
         try:
             response = client.post(endpoint, payload)
@@ -400,8 +399,6 @@ def run(args) -> None:
             response = None
         if isinstance(response, dict):
             record_run_id = response.get("run_id") or response.get("id") or ""
-    finally:
-        client.close()
 
     audit_line = (
         f"[host-exec] recorded run_uuid={run_uuid} "

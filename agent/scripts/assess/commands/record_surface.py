@@ -38,19 +38,15 @@ def run(args) -> None:
         "status": args.status,
     }
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         response = client.post("surfaces", payload)
-    finally:
-        client.close()
 
     if not response.get("surface_type") or not response.get("target_descriptor"):
         print("record-surface: orchestrator backend did not return a canonical surface record", file=sys.stderr)
         sys.exit(1)
 
     # Emit event
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         client.post_event({
             "event_type": "surface.updated",
             "phase": os.environ.get("ORCHESTRATOR_PHASE", "unknown"),
@@ -58,7 +54,5 @@ def run(args) -> None:
             "agent_name": args.source,
             "summary": f"{args.type} {args.status}: {args.target}",
         })
-    finally:
-        client.close()
 
     print(f"Recorded surface: {args.type} {args.target}")

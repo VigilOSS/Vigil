@@ -1,0 +1,22 @@
+{
+  "title": "Some finding",
+  "severity": 9,
+  "defect_family": "sql-injection",
+  "canonical_location": "https://target.example/search?q",
+  "summary": "A finding with severity as integer instead of string",
+  "evidence_ref": "",
+  "notes": "",
+  "workflow_status": "active",
+  "verification_state": "unreviewed",
+  "verification_disposition": "none",
+  "root_cause_key": "",
+  "auth_context": "anonymous",
+  "details": {
+    "evidence": "Confirmed",
+    "impact": "Attacker can read data",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+    "cvss_score": 7.5,
+    "remediation": "Fix it",
+    "steps_to_reproduce": ["Step 1"]
+  }
+}

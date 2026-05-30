@@ -181,6 +181,13 @@ class FakeClient:
     def close(self) -> None:
         return None
 
+    def __enter__(self) -> "FakeClient":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.close()
+        return False
+
 
 def _patch_client(
     monkeypatch,

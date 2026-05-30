@@ -134,10 +134,7 @@ def run(args) -> None:
         sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.patch(f"findings/{args.finding_slug}", payload)
-    finally:
-        client.close()
 
     print(json.dumps(result, indent=2, ensure_ascii=False))
