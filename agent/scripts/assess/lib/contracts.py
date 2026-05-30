@@ -364,9 +364,11 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Use details.references for CVE links, advisory URLs, or related documentation (array of strings).",
             "Use details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete and worth tracking, but only becomes exploitation-worthy as part of a larger chain. Specialists set or refine these fields through record-finding or update-finding; verification reviews them but does not own them.",
             "Do not put `link_kind=root_cause` in the finding `links` array. Record the finding first, then use `aith assess link-finding` after verification so root/sibling grouping stays an explicit lifecycle action.",
+            "evidence_ref must resolve to a real artifact: an existing engagement file (auto-registered + linked on record) or an http(s) URL. record-finding REJECTS prose refs and path-shaped refs with no file (the failure that produced ~24 report-readiness blockers at engagement end). For a theoretical/code-inferred finding with no file, pass --allow-unindexed-evidence.",
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
+            ("evidence_ref free-text prose", "point it at an existing artifact file or an http(s) URL; prose is rejected — use --allow-unindexed-evidence only for findings with genuinely no artifact"),
             ("confidence", "confidence belongs in code-record-analysis output, not finding records"),
             ("cwe", "use details.cwe_id"),
             ("description", "use summary for the short finding statement or notes for replayable proof"),
@@ -819,30 +821,33 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-index": CommandContract(
         name="code-index",
-        summary="Build the tree-sitter structural index under the engagement analysis-state directory.",
-        schema_name="structural-index manifest and per-file index JSON",
+        summary="Build the structural index under the engagement analysis-state directory.",
+        schema_name="structural-index aggregate manifest, per-repo manifest, and per-file index JSON",
         preferred_invocations=(
-            "aith assess code-index <repo-path> --repo-id <repo-id>",
+            "aith assess code-index <repo-path> --repo-key <repo-key>",
             "aith assess code-index <repo-path> --output-dir <engagement-dir>/tools/analysis-state",
-            "aith assess code-index-sync <repo-id>",
+            "aith assess code-index-sync --repo-key <repo-key>",
         ),
         author_supplied_fields=(
             "repo_path",
-            "repo_id when available",
+            "repo_key when available",
             "--output-dir only for intentional non-engagement output",
         ),
         helper_defaults=(
             ("output_dir", "<engagement_dir>/tools/analysis-state"),
-            ("manifest", "structural-index-manifest.json"),
-            ("per-file indexes", "structural-index/<sha16>.json"),
+            ("aggregate manifest", "structural-index-manifest.json"),
+            ("per-repo manifest", "structural-index/<repo_key>-manifest.json"),
+            ("per-file indexes", "structural-index/<repo_key>/<sha16>.json"),
         ),
         notes=(
+            "The aggregate manifest is keyed by repo_key so multiple source repos can share one engagement analysis-state tree without relative-path collisions.",
             "The default output directory is the same directory consumed by code-index-sync, so indexing and sync stay in one engagement-owned analysis-state tree.",
             "Pass --engagement-dir or set ENGAGEMENT_DIR when running outside an engagement directory. The helper fails closed instead of writing an unsynced .code-index tree into the source repo.",
         ),
         common_mistakes=(
             ("running outside engagement context", "pass --engagement-dir or --output-dir explicitly"),
             ("sync cannot find manifest", "use the default tools/analysis-state output or pass the same explicit output path consistently"),
+            ("legacy manifest with multiple repos", "pass --repo-id or rebuild the index so repo_key metadata is available"),
         ),
     ),
     "code-classify": CommandContract(
@@ -1230,11 +1235,12 @@ def _schema_required_names(schema_name: str) -> list[str]:
 _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     "nmap-scan": (
         "Top-1000 ports is the default; use --ports full for `-p-`, or pass an explicit list (e.g. 22,80,443).",
-        "--scripts default,vuln triggers heavy NSE — set a high --timeout (1800+) or dispatch via `aith assess kali job start`.",
+        "Defaults to `-sT` (TCP connect). Do NOT use `-sS` in this runtime — raw SYN probes are dropped by Docker's userland NAT (esp. Docker Desktop/macOS) and silently return 0-open on live hosts. Pass `--scan-type sS` only on a bridged-network Linux runtime.",
+        "--scripts default,vuln triggers heavy NSE — run it synchronously with a high --timeout (1800+); a long budget is killed cleanly on expiry.",
     ),
     "nuclei": (
         "Pass either -u or -l. Severity filters and `-as` (automatic) shape the run.",
-        "Long sweeps belong in `aith assess kali job start nuclei ...`.",
+        "Long sweeps run synchronously with a generous --timeout; `aith assess kali job start` is operator-only (specialists never background — see kali-exec skill).",
     ),
     "sqlmap": (
         "sqlmap's own `--technique` is exposed as `--sql-technique` so it doesn't collide with the audit `--technique` flag.",
@@ -1253,6 +1259,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     "asnmap": (
         "ASN/domain/org to CIDR mapper. Use it to feed owned CIDR ranges into `cero` for TLS SAN discovery that CT logs miss.",
         "Pass at least one of -d, -l, -asn, or -org. The wrapper rejects empty invocations before running the tool.",
+        "Requires PDCP_API_KEY in the runtime — without it asnmap exits 0 with EMPTY output. The wrapper detects the missing key and fails loud; pass --allow-no-key to override, or use the whois.cymru.com / RADB / RDAP fallback (see references/tools/recon/asnmap.md).",
     ),
     "bbot": (
         "Multi-module recon scanner. Canonical passive subdomain invocation: `bbot -t <target> -p subdomain-enum -rf passive`. Add modules with -m or presets with -p; gate active modules behind --allow-deadly + --destructive.",

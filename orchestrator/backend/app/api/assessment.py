@@ -444,6 +444,9 @@ class FindingPatchRequest(BaseModel):
     summary: str | None = Field(default=None, max_length=4096)
     evidence_ref: str | None = Field(default=None, max_length=1024)
     notes: str | None = Field(default=None, max_length=20000)
+    # "append" (default) keeps the historical checkpoint behavior; "replace"
+    # overwrites notes so stale/contradicted internal text can be scrubbed.
+    notes_mode: Literal["append", "replace"] = "append"
     source_name: str | None = Field(default=None, max_length=128)
     details: dict[str, Any] | None = None
     provenance: dict[str, Any] | None = None
@@ -454,6 +457,12 @@ class FindingPatchRequest(BaseModel):
     reason_code: str = Field(default="", max_length=128)
     reason_text: str = Field(default="", max_length=4096)
     artifact_ref: str = Field(default="", max_length=1024)
+
+    @model_validator(mode="after")
+    def _require_notes_when_replacing(self) -> "FindingPatchRequest":
+        if self.notes_mode == "replace" and self.notes is None:
+            raise ValueError("notes_mode='replace' requires notes")
+        return self
 
 
 class FindingVerifyRequest(BaseModel):
@@ -604,6 +613,56 @@ def get_services(engagement_key: str) -> list[dict[str, Any]]:
     return state_manager.list_services(engagement.id)
 
 
+class HostLivenessRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = Field(min_length=1, max_length=512)
+    status_code: int | None = None
+    scheme: str = Field(default="", max_length=16)
+    final_url: str = Field(default="", max_length=2048)
+    host_ip: str = Field(default="", max_length=256)
+    tech: str = Field(default="", max_length=4096)
+    title: str = Field(default="", max_length=1024)
+    webserver: str = Field(default="", max_length=256)
+    tls: str = Field(default="", max_length=8192)
+    failed: bool = False
+    # The caller (ingest-httpx) supplies an already-classified stored verdict.
+    # 'stale' is NOT accepted here — it is a read-time overlay, never stored.
+    reachability_class: Literal["live", "dead", "blackholed", "unknown"] = "unknown"
+    probed_at: str | None = Field(default=None, max_length=64)
+    source: str = Field(default="httpx", max_length=64)
+    source_run_id: int | None = None
+    source_run_uuid: str = Field(default="", max_length=128)
+
+
+class HostLivenessUpsertRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rows: list[HostLivenessRow] = Field(default_factory=list)
+
+
+@router.get("/host-liveness")
+def get_host_liveness(
+    engagement_key: str,
+    host: str = "",
+    fresh_only: bool = False,
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    hosts = [h.strip() for h in host.split(",") if h.strip()] if host else None
+    return state_manager.host_liveness(engagement.id, hosts=hosts, fresh_only=fresh_only)
+
+
+@router.post("/host-liveness")
+def post_host_liveness(
+    engagement_key: str,
+    request: HostLivenessUpsertRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.upsert_host_liveness(
+        engagement.id, [row.model_dump() for row in request.rows]
+    )
+
+
 @router.get("/request-variants")
 def get_request_variants(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
@@ -638,6 +697,7 @@ def get_command_runs(
     tool_bin: str = "",
     target_host: str = "",
     audit_source: str = "",
+    route: str = "",
     success: bool | None = Query(default=None),
     timed_out: bool | None = Query(default=None),
     # Command-metadata filter axes. Technique + probe_kind are plain str
@@ -671,6 +731,7 @@ def get_command_runs(
         tool_bin=tool_bin,
         target_host=target_host,
         audit_source=audit_source,
+        route=route,
         success=success,
         timed_out=timed_out,
         technique=technique or "",
@@ -1279,6 +1340,7 @@ async def patch_finding(
         summary=request.summary,
         evidence_ref=request.evidence_ref,
         notes=request.notes,
+        notes_mode=request.notes_mode,
         source_name=request.source_name,
         details=request.details,
         provenance=request.provenance,

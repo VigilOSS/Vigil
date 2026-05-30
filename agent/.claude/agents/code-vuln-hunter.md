@@ -105,9 +105,13 @@ For assumptions about inputs that are NOT enforced by the code itself, note them
 
 For each file in the batch, build the analysis plan before diving into deep analysis:
 
-1. **Read the structural index** for this file (if available). Look up the index filename in
-   `tools/analysis-state/structural-index-manifest.json`'s `path_to_index` mapping using the file's
-   relative path, then read the corresponding JSON from `tools/analysis-state/structural-index/`.
+1. **Read the structural index** for this file (if available). The structural-index layout is
+   per-repo: load the aggregate manifest at
+   `tools/analysis-state/structural-index-manifest.json`, find your repo under `repos.<repo_key>`,
+   read the per-repo manifest at the `manifest_path` it lists, then look up the index filename
+   in that per-repo manifest's `path_to_index` mapping using the file's repo-relative path.
+   Index files live under `tools/analysis-state/structural-index/<repo_key>/<fid>.json` (the
+   path_to_index value is the relpath inside `structural-index/`).
    The function map is the primary completeness anchor -- every listed function must receive
    a disposition. Sinks, exports, and import targets are advisory metadata that helps you
    navigate the file; they do not limit what you look for. Always look beyond the catalog

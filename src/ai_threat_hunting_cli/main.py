@@ -223,6 +223,12 @@ def main(argv: list[str] | None = None) -> None:
     runtime_build.add_argument("--dev", action="store_true")
     runtime_start = runtime_sub.add_parser("start")
     runtime_start.add_argument("--recreate", action="store_true")
+    runtime_start.add_argument(
+        "--allow-oversubscribe",
+        action="store_true",
+        help="Start even when the configured memory tier exceeds a safe fraction of the "
+             "shared Docker VM (bypasses the oversubscription refusal).",
+    )
     runtime_sub.add_parser("stop")
     runtime_sub.add_parser("restart")
     runtime_sub.add_parser("status")
@@ -636,7 +642,13 @@ def _runtime(args: argparse.Namespace, install_root: Path) -> None:
     if args.runtime_command == "build":
         build_runtime(install_root, variant=args.variant, dev=args.dev)
     elif args.runtime_command == "start":
-        start_runtime(RuntimeOptions(install_root=install_root, recreate=args.recreate))
+        start_runtime(
+            RuntimeOptions(
+                install_root=install_root,
+                recreate=args.recreate,
+                allow_oversubscribe=getattr(args, "allow_oversubscribe", False),
+            )
+        )
     elif args.runtime_command == "stop":
         stop_runtime()
     elif args.runtime_command == "restart":

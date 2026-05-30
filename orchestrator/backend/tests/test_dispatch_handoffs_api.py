@@ -246,3 +246,45 @@ def test_handoff_rejects_non_terminal_closed_dispatch_status(client, isolate_set
         json={"closed_dispatch_status": "in-progress"},
     )
     assert rejected_patch.status_code == 422, rejected_patch.text
+
+
+def test_handoff_status_accepted_on_post_and_patch(client, isolate_settings) -> None:
+    """Regression: handoff_status used to 422 'Extra inputs are not permitted' on
+    both POST and PATCH. All four enum values must round-trip on both verbs."""
+    _seed(client, isolate_settings)
+    for status_value in ("checkpointed", "ready", "blocked", "superseded"):
+        aid = f"HS-{status_value}"
+        _register_dispatch(client, agent_id=aid, agent_role="vulnerability-analyst")
+
+        posted = client.post(
+            f"{BASE}/dispatch-handoffs",
+            json=_full_payload(agent_id=aid, handoff_status=status_value),
+        )
+        assert posted.status_code == 201, posted.text
+        assert posted.json()["handoff_status"] == status_value
+
+        patched = client.patch(
+            f"{BASE}/dispatch-handoffs/{aid}",
+            json={"handoff_status": status_value},
+        )
+        assert patched.status_code == 200, patched.text
+        assert patched.json()["handoff_status"] == status_value
+
+
+def test_handoff_model_still_forbids_unknown_fields_and_bad_status(client, isolate_settings) -> None:
+    """The fix was 'declare handoff_status', NOT 'loosen the model' — an unknown
+    field and an out-of-enum status both still 422."""
+    _seed(client, isolate_settings)
+    _register_dispatch(client, agent_id="HS-BAD", agent_role="vulnerability-analyst")
+
+    unknown_field = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json=_full_payload(agent_id="HS-BAD", totally_bogus_field="x"),
+    )
+    assert unknown_field.status_code == 422
+
+    bad_status = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json=_full_payload(agent_id="HS-BAD", handoff_status="completed"),
+    )
+    assert bad_status.status_code == 422

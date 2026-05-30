@@ -225,6 +225,47 @@ INERT_TYPES: frozenset[str] = frozenset(
 # import the public `INERT_TYPES` symbol above.
 _INERT_TYPES = INERT_TYPES
 
+
+# Structured reason tags for deferred/skipped work items. SINGLE SOURCE OF TRUTH
+# for the skip vocabulary so `defer-cluster`/`defer-items`, `work-buffer stats
+# --by reason`, and any future gate read the same set. The stored value is
+# ``skipped:<tag> | <free text>`` (or just ``skipped:<tag>``), which de-overloads
+# the `skipped` terminal state: a query can now distinguish a correct exclusion
+# (blackholed/dead/low-signal/duplicate/egress) from a bare, un-reasoned drop.
+SKIP_REASON_TAGS: frozenset[str] = frozenset(
+    {"blackholed", "dead-host", "low-signal-cluster", "duplicate", "egress-blocked"}
+)
+
+
+def tagged_terminal_reason(tag: str, detail: str = "") -> str:
+    """Build a structured ``terminal_reason`` from a reason tag + free-text detail."""
+    tag = (tag or "").strip()
+    detail = (detail or "").strip()
+    prefix = f"skipped:{tag}" if tag else ""
+    if prefix and detail:
+        return f"{prefix} | {detail}"
+    return prefix or detail
+
+
+def reason_tag_of(terminal_reason: str | None) -> str:
+    """Return the structured reason tag from a terminal_reason value.
+
+    - ``inert_type`` → ``inert_type`` (auto-skipped at ingest).
+    - ``skipped:<tag> | ...`` → ``<tag>``.
+    - empty → ``""`` (no terminal reason).
+    - any other free text → ``"untagged"`` (a legacy/un-reasoned defer — the
+      exact state worth surfacing as "dropped without a machine-readable reason").
+    """
+    tr = (terminal_reason or "").strip()
+    if not tr:
+        return ""
+    if tr == "inert_type":
+        return "inert_type"
+    if tr.startswith("skipped:"):
+        head = tr.split("|", 1)[0].strip()
+        return head[len("skipped:"):].strip() or "untagged"
+    return "untagged"
+
 _UPLOAD_GENERIC_SHADOWS = frozenset({"lfi", "idor"})
 
 
@@ -244,6 +285,19 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
             "priority_reason": None,
             "cluster_key": f"type:{case_type}",
             "terminal_reason": "inert_type",
+        }
+
+    if case_type == "host_root":
+        # A bare scheme://host[/] landing URL: no exploitable surface on its own,
+        # but a Phase-2 crawl seed. Stamp a stable, greppable cluster so the
+        # operator can see "N hosts await crawling" instead of it hiding among
+        # unrouted `unknown` / `path:/` rows. NOT inert — it must stay `pending`,
+        # not be skipped, so it is never silently dropped.
+        return {
+            "priority_score": 0,
+            "priority_reason": None,
+            "cluster_key": "type:host_root",
+            "terminal_reason": None,
         }
 
     url_path = row["url_path"] or ""
