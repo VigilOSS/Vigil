@@ -67,13 +67,14 @@ def start_runtime(
             raise SystemExit(_already_running_message(options.container_name, install_root))
         return
 
-    if docker.container_exists(options.container_name, runner=runner):
-        runner(["docker", "rm", "-f", options.container_name])
-
     env_file = install_root / ".env"
     base_url = container_host_url(resolve_orchestrator_base_url(install_root))
     resources = runtime_resources()
     _preflight_shared_vm(resources, options, runner=runner)
+
+    if docker.container_exists(options.container_name, runner=runner):
+        runner(["docker", "rm", "-f", options.container_name])
+
     argv = [
         "docker",
         "run",
