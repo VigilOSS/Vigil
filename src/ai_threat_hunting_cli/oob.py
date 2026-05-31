@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import shlex
 import time
 from collections.abc import Callable
@@ -161,6 +162,255 @@ def sanitize_name(value: str) -> str:
     if not cleaned:
         raise SystemExit("OOB client name cannot be empty")
     return cleaned[:80]
+
+
+# ── OAST (out-of-band) nonce minting + correlation ───────────────────────
+#
+# A unique random subdomain label IS the correlation token. Minting returns
+# the callback URLs; correlation parses the SAME interactsh-client log that
+# `oob client logs` reads and extracts the nonce from each callback host.
+
+# DNS labels are case-insensitive and interactsh lowercases the host before
+# logging, so a lowercase token survives the round-trip unchanged. Length 16
+# of [a-z0-9] is ~82 bits — collision-safe and well under the 63-char DNS
+# label limit even with the engagement prefix.
+_NONCE_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+_DEFAULT_NONCE_LENGTH = 16
+
+# Picks the nonce subdomain label out of a callback host. interactsh hosts
+# look like ``<33-char-clientid><nonce>.oob.example.com`` when a tool
+# appends its own id, or just ``<nonce>.oob.example.com`` when we mint
+# the label directly. The parser keys correlation off the recorded nonce
+# set, so it extracts the FULL leftmost label and the matcher checks whether
+# any recorded nonce is a substring of it (handles both shapes).
+_INTERACTSH_VERBOSE_RE = re.compile(
+    r"Received\s+(?P<protocol>[A-Za-z0-9]+)\s+interaction"
+    r"(?:\s*\((?P<qtype>[^)]*)\))?"
+    r".*?\bfrom\s+(?P<remote>[0-9a-fA-F:.]+)"
+    r"(?:\s+at\s+(?P<observed>.+?))?\s*$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class OobInteraction:
+    """One parsed interactsh callback line.
+
+    ``full_host`` is the entire callback hostname as logged; ``label`` is its
+    leftmost DNS label (where the nonce lives). ``nonce`` is filled in by
+    :func:`match_interactions_to_nonces` once the recorded nonce set is known
+    — the pure parser cannot know it from the line alone.
+    """
+
+    protocol: str
+    full_host: str
+    label: str
+    remote_address: str
+    query_type: str
+    observed_at: str
+    raw_line: str
+    nonce: str = ""
+
+
+def mint_nonce(
+    *,
+    prefix: str = "",
+    length: int = _DEFAULT_NONCE_LENGTH,
+    token_factory: Callable[[int], str] | None = None,
+) -> str:
+    """Generate a unique URL-safe nonce subdomain label.
+
+    ``token_factory`` is injectable so tests can seed deterministic nonces;
+    it receives the requested label length and must return a string of
+    [a-z0-9] characters. The default draws from :mod:`secrets`.
+
+    An optional ``prefix`` (e.g. a sanitized engagement key) is prepended with
+    a ``-`` separator so callbacks are visually attributable in the raw log;
+    it does not affect correlation (matching is on the random token).
+    """
+    if token_factory is None:
+        token = "".join(secrets.choice(_NONCE_ALPHABET) for _ in range(length))
+    else:
+        token = token_factory(length)
+        token = re.sub(r"[^a-z0-9]+", "", token.lower())
+        if not token:
+            raise ValueError("token_factory produced an empty nonce after sanitization")
+    if prefix:
+        clean_prefix = re.sub(r"[^a-z0-9]+", "", prefix.lower())[:24]
+        if clean_prefix:
+            return f"{clean_prefix}-{token}"
+    return token
+
+
+def callback_urls(nonce: str, oob_domain: str = DEFAULT_OOB_DOMAIN) -> dict[str, str]:
+    """Build the callback URLs for a minted nonce.
+
+    ``http`` is the full HTTP callback URL; ``dns`` is the bare host (for
+    payloads that only trigger a DNS lookup); ``host`` is the canonical
+    ``<nonce>.<domain>`` form both share.
+    """
+    host = f"{nonce}.{oob_domain}"
+    return {
+        "host": host,
+        "http": f"http://{host}/",
+        "https": f"https://{host}/",
+        "dns": host,
+    }
+
+
+def parse_interactsh_log(log_text: str) -> list[OobInteraction]:
+    """Parse interactsh-client output into structured interactions (PURE).
+
+    Handles two line shapes the client can emit:
+
+    * ``-v`` verbose text, e.g.
+      ``[abc123.oob.example.com] Received HTTP interaction from 1.2.3.4 at 2026-05-30 12:00:00``
+      (the leading ``[host]`` bracket is interactsh's own prefix; the
+      retry/marker lines this module writes — ``[oob-client] ...`` — are
+      ignored because their bracket is not a callback host).
+    * JSON lines (``interactsh-client -json``), one object per line with
+      ``unique-id``/``full-id``/``protocol``/``remote-address`` fields.
+
+    Returns one :class:`OobInteraction` per recognised callback, in log
+    order. ``nonce`` is left blank; call :func:`match_interactions_to_nonces`
+    to bind each to a recorded probe. No network, no filesystem — unit-test
+    by feeding raw text.
+    """
+    interactions: list[OobInteraction] = []
+    for raw_line in log_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parsed = _parse_json_interaction(line) or _parse_verbose_interaction(line)
+        if parsed is not None:
+            interactions.append(parsed)
+    return interactions
+
+
+def _split_host_label(host: str) -> tuple[str, str]:
+    host = host.strip().rstrip(".").lower()
+    label = host.split(".", 1)[0] if host else ""
+    return host, label
+
+
+def _parse_json_interaction(line: str) -> OobInteraction | None:
+    if not (line.startswith("{") and line.endswith("}")):
+        return None
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    host = str(
+        payload.get("full-id")
+        or payload.get("full-domain")
+        or payload.get("unique-id")
+        or ""
+    )
+    if not host:
+        return None
+    full_host, label = _split_host_label(host)
+    if not full_host:
+        return None
+    return OobInteraction(
+        protocol=str(payload.get("protocol") or "").lower(),
+        full_host=full_host,
+        label=label,
+        remote_address=str(payload.get("remote-address") or payload.get("remote-addr") or ""),
+        query_type=str(payload.get("q-type") or payload.get("query-type") or ""),
+        observed_at=str(payload.get("timestamp") or ""),
+        raw_line=line,
+    )
+
+
+def _parse_verbose_interaction(line: str) -> OobInteraction | None:
+    bracket = re.match(r"^\[(?P<host>[^\]]+)\]\s*(?P<rest>.*)$", line)
+    if not bracket:
+        return None
+    host = bracket.group("host").strip()
+    rest = bracket.group("rest").strip()
+    # Ignore our own runtime markers — `[oob-client] exited, retrying...` —
+    # whose bracket holds a tag, not a callback host. A real callback host
+    # always contains a dot (it is an FQDN).
+    if "." not in host:
+        return None
+    match = _INTERACTSH_VERBOSE_RE.search(rest)
+    if not match:
+        return None
+    full_host, label = _split_host_label(host)
+    if not full_host:
+        return None
+    return OobInteraction(
+        protocol=match.group("protocol").lower(),
+        full_host=full_host,
+        label=label,
+        remote_address=match.group("remote") or "",
+        query_type=(match.group("qtype") or "").strip(),
+        observed_at=(match.group("observed") or "").strip(),
+        raw_line=line,
+    )
+
+
+def match_interactions_to_nonces(
+    interactions: list[OobInteraction],
+    nonces: list[str] | set[str],
+) -> tuple[list[OobInteraction], list[OobInteraction]]:
+    """Bind parsed interactions to recorded nonces (PURE).
+
+    Returns ``(matched, unmatched)``. A nonce matches when it equals the
+    callback's leftmost label OR appears as a substring of it (covering the
+    ``<clientid><nonce>`` shape some tools produce). Longer nonces are tried
+    first so a more specific token wins over a shorter accidental substring.
+    Matched interactions are returned as copies with ``nonce`` populated.
+    """
+    ordered = sorted({str(n).strip().lower() for n in nonces if str(n).strip()}, key=lambda n: (-len(n), n))
+    matched: list[OobInteraction] = []
+    unmatched: list[OobInteraction] = []
+    for interaction in interactions:
+        hit = ""
+        for nonce in ordered:
+            if nonce in interaction.label:
+                hit = nonce
+                break
+        if hit:
+            matched.append(_with_nonce(interaction, hit))
+        else:
+            unmatched.append(interaction)
+    return matched, unmatched
+
+
+def _with_nonce(interaction: OobInteraction, nonce: str) -> OobInteraction:
+    return OobInteraction(
+        protocol=interaction.protocol,
+        full_host=interaction.full_host,
+        label=interaction.label,
+        remote_address=interaction.remote_address,
+        query_type=interaction.query_type,
+        observed_at=interaction.observed_at,
+        raw_line=interaction.raw_line,
+        nonce=nonce,
+    )
+
+
+def read_client_log(
+    name: str,
+    container_name: str = "security-research",
+    *,
+    runner: docker.Runner = docker.run_command,
+    lines: int = 2000,
+) -> str:
+    """Read the interactsh-client interaction log — the SAME source
+    ``aith oob client logs`` reads (``/data/oob/clients/<name>.log``).
+
+    Returns the tail (default 2000 lines) as text for
+    :func:`parse_interactsh_log`. Best-effort: a missing log yields ``""``.
+    """
+    client = sanitize_name(name)
+    log_path = f"{OOB_ROOT}/clients/{shlex.quote(client)}.log"
+    command = f"tail -n {int(lines)} {log_path} 2>/dev/null || true"
+    result = _run_exec(container_name, command, runner=runner, check=False)
+    return result.stdout or ""
 
 
 def _kill_stale_oob_processes(container_name: str, *, runner: docker.Runner) -> None:
