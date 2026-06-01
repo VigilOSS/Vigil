@@ -176,9 +176,23 @@ def main(argv: list[str] | None = None) -> None:
     archive_p = engagement_sub.add_parser("archive")
     archive_p.add_argument("key", nargs="?")
     archive_p.add_argument("--select", action="store_true")
-    export_p = engagement_sub.add_parser("export")
+    export_p = engagement_sub.add_parser(
+        "export",
+        help=(
+            "Export an engagement. Default packs the engagement dir as a "
+            "tar.gz; --format markdown-tree writes a git-diff-able per-finding "
+            "tree (draft.md / debate.md / report.md) sourced from the backend."
+        ),
+    )
     export_p.add_argument("key", nargs="?")
     export_p.add_argument("--select", action="store_true")
+    export_p.add_argument(
+        "--format",
+        dest="export_format",
+        choices=["tar.gz", "markdown-tree"],
+        default="tar.gz",
+        help="Export format (default: tar.gz archive).",
+    )
     export_p.add_argument("--output")
     export_pdf_p = engagement_sub.add_parser("export-pdf", help="Export report.md as a PDF using pandoc + Chrome headless")
     export_pdf_p.add_argument("key", nargs="?")
@@ -606,11 +620,24 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         print(path)
     elif command == "export":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
-        output = Path(args.output).expanduser() if args.output else install_root / ".runtime-data" / "exports" / f"{path.name}.tar.gz"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(output, "w:gz") as tar:
-            tar.add(path, arcname=path.name)
-        print(output)
+        if getattr(args, "export_format", "tar.gz") == "markdown-tree":
+            from .engagements import export_engagement_tree
+
+            output = (
+                Path(args.output).expanduser()
+                if args.output
+                else install_root / ".runtime-data" / "exports" / f"{path.name}-findings"
+            )
+            with _build_assessment_client(install_root, path.name) as client:
+                result = export_engagement_tree(client, output, fmt="markdown-tree")
+            print(f"[aith] exported {result.finding_count} finding(s) to {result.output_root}", file=sys.stderr)
+            print(result.output_root)
+        else:
+            output = Path(args.output).expanduser() if args.output else install_root / ".runtime-data" / "exports" / f"{path.name}.tar.gz"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(output, "w:gz") as tar:
+                tar.add(path, arcname=path.name)
+            print(output)
     elif command == "export-pdf":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         output = Path(args.output).expanduser() if args.output else None
