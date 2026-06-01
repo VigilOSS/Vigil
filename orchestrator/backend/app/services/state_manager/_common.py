@@ -50,6 +50,7 @@ class VerificationDisposition(enum.StrEnum):
     """Finding verification disposition outcome."""
 
     NONE = "none"
+    PENDING_RUNTIME_PROOF = "pending_runtime_proof"
     CONFIRMED = "confirmed"
     DOWNGRADED = "downgraded"
     FALSE_POSITIVE = "false_positive"
@@ -90,8 +91,14 @@ VERIFICATION_DISPOSITIONS = frozenset(VerificationDisposition)
 
 VERIFICATION_DISPOSITION_RANK = {
     VerificationDisposition.NONE: 0,
-    VerificationDisposition.DOWNGRADED: 1,
-    VerificationDisposition.CONFIRMED: 2,
+    # "Strong but not yet runtime-proven": sticky vs none (0 >= 1 is False so a
+    # later bare none cannot clobber it) but yields to downgraded/confirmed,
+    # which rank higher. false_positive is handled by explicit early-returns in
+    # _coalesce_verification_disposition, so its -1 only matters for confidence
+    # ordering in _finding_confidence_tuple.
+    VerificationDisposition.PENDING_RUNTIME_PROOF: 1,
+    VerificationDisposition.DOWNGRADED: 2,
+    VerificationDisposition.CONFIRMED: 3,
     VerificationDisposition.FALSE_POSITIVE: -1,
 }
 

@@ -29,6 +29,15 @@ def register(subparsers) -> None:
     p.add_argument("--slug")
     p.add_argument("--root-cause", dest="root_cause_slug", help="Show the root finding and linked siblings")
     p.add_argument("--search", help="Case-insensitive search over slug, title, summary, and location")
+    p.add_argument(
+        "--holding",
+        action="store_true",
+        help=(
+            "Show only the theoretical holding area: findings with "
+            "evidence_type=theoretical OR verification_disposition="
+            "pending_runtime_proof (strong-but-unproven, awaiting runtime proof)."
+        ),
+    )
     p.add_argument("--json", action="store_true", help="Print filtered findings as JSON instead of a table")
     p.set_defaults(func=run)
 
@@ -87,6 +96,13 @@ def run(args) -> None:
     if args.search:
         needle = args.search.lower()
         filtered = [item for item in filtered if _matches_search(item, needle)]
+    if getattr(args, "holding", False):
+        filtered = [
+            item
+            for item in filtered
+            if str(item.get("evidence_type", "")).lower() == "theoretical"
+            or str(item.get("verification_disposition", "")).lower() == "pending_runtime_proof"
+        ]
 
     if args.json:
         print(json.dumps(filtered, indent=2, ensure_ascii=False))
