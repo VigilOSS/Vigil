@@ -112,7 +112,7 @@ START
 Mint a unique callback host per injection point and let the correlator bind the hit to the probe — never eyeball the listener log:
 
 ```bash
-aith oob mint --technique sqli --target-url "https://target/item?id=1" --param id --probe-kind dns --json
+aith oob mint --technique sqli --target-url "https://target/item?id=1" --param id --probe-kind dns
 # -> nonce  <prefix>-<token>
 #    dns    <prefix>-<token>.researcher.example   (use as <NONCE_HOST> above)
 ```

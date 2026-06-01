@@ -194,7 +194,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "consumption gap is data-driven off the host's untested pending "
             "work-item buckets; ambiguous buckets yield a low-confidence "
             "shortlist. Recommendations whose (role, scope-host) already has a "
-            "prior dispatch covering the gap are suppressed."
+            "prior dispatch covering the gap are suppressed (dedup checks the "
+            "most recent 1000 dispatches)."
         ),
     )
     p.add_argument(
@@ -793,10 +794,13 @@ def _build_recommendations(
         recommendations.append(rec)
 
     overflow = 0
-    if max_recommendations is not None and max_recommendations >= 0:
-        if len(recommendations) > max_recommendations:
-            overflow = len(recommendations) - max_recommendations
-            recommendations = recommendations[:max_recommendations]
+    if max_recommendations is not None:
+        # Clamp negatives to 0 so a negative cap means "show none" (overflow is
+        # still summarized) rather than silently disabling the cap.
+        cap = max(0, int(max_recommendations))
+        if len(recommendations) > cap:
+            overflow = len(recommendations) - cap
+            recommendations = recommendations[:cap]
 
     notes: list[str] = []
     if dedup_degraded:
@@ -807,7 +811,7 @@ def _build_recommendations(
     if overflow:
         notes.append(
             f"{overflow} more failing entr(y/ies) past --max-recommendations "
-            f"({max_recommendations}) not shown"
+            f"({cap}) not shown"
         )
     dropped_any = sorted(
         {s for rec in recommendations for s in rec.get("dropped_skills", [])}

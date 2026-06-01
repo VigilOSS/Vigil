@@ -22,6 +22,7 @@ origin: AI Threat Hunting
 - graphql-voyager (schema visualization — host-side analysis)
 - BatchQL (batch query testing)
 - CrackQL (brute-force via GraphQL)
+- `aith oob mint` / `aith oob poll` — when a resolver argument reaches a downstream SQL/NoSQL/OS/SSRF sink, mint a nonce-tagged callback host (`aith oob mint --technique <t> --target-url <graphql-url> --param <arg>`), embed its `http` host in the string argument, then `aith oob poll --client <name>` returns the matched probe<->callback pair (check readiness with `aith oob status --json`; `aith oob client logs` is raw infra debug, not correlation). Defer to the wired injection skills — `agent/skills/sqli-testing/SKILL.md`, `agent/skills/command-injection/SKILL.md`, `agent/skills/ssrf-testing/SKILL.md` — for the full mint→fire→poll loop on the matched sink.
 
 ## Methodology
 
