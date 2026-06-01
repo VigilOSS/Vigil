@@ -56,7 +56,7 @@ When the parser resolves entities but the result is not reflected, an external-D
 
 ```bash
 aith oob status --json   # confirm readiness
-aith oob mint --technique xxe --target-url "https://target/api/import" --param body --probe-kind http --json
+aith oob mint --technique xxe --target-url "https://target/api/import" --param body --probe-kind http
 # -> dns   <prefix>-<token>.researcher.example   (this is <NONCE_HOST> below)
 ```
 

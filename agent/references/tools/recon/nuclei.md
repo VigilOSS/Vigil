@@ -37,9 +37,9 @@ Note: Template paths use protocol prefix (e.g., `http/cves/`, `dns/`, `network/`
 
 OOB callbacks use the shared interactsh infrastructure — agents do not pass raw interactsh URLs directly. Instead:
 1. `aith oob status --json` — confirm `server=true`, `frpc=true`.
-2. `aith oob client start <name> --engagement <key> --agent <role>` — create a named client and get a unique correlated callback URL.
-3. Pass the URL from step 2 as `-interactsh-url <url>` in the nuclei invocation.
-4. `aith oob client logs <name> --lines 80` — read correlated hits after probes fire.
+2. `aith oob client start <name> --engagement <key> --agent <role>` — start the listener client.
+3. Pass the configured OOB server domain (`domain` from step 1, e.g. `researcher.example`) as `-interactsh-url <domain>` so nuclei's own per-template callbacks land on the shared listener. Nuclei appends its own unique id per probe; `aith oob poll` extracts that label.
+4. `aith oob poll --client <name>` — correlate probe<->callback after probes fire; a matched row is the confirmed hit. `aith oob client logs <name> --lines 80` is a raw listener tail for infra debugging only, not a correlation source.
 
 **Disable interactsh (when OOB unavailable):** `-no-interactsh`
 

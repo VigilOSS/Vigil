@@ -234,7 +234,7 @@ Confirm readiness with `aith oob status --json`, then **mint a nonce-tagged call
 
 ```bash
 # Mint one nonce per injection point; record the correlation context.
-aith oob mint --technique cmdi --target-url "https://target/convert" --param filename --probe-kind dns --json
+aith oob mint --technique cmdi --target-url "https://target/convert" --param filename --probe-kind dns
 # -> nonce  <prefix>-<token>
 #    http   http://<prefix>-<token>.researcher.example/
 #    dns    <prefix>-<token>.researcher.example

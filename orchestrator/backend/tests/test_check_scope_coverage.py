@@ -2175,3 +2175,105 @@ def test_auto_redispatch_human_output_is_recommendation_only(
     # The parallel-role note and the task skeleton are both present.
     assert "source-analyzer" in out
     assert "task:" in out
+
+
+def test_auto_redispatch_consumption_high_volume_swaps_to_fuzzer(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """A consumption gap with a high volume (>= 100) of untested pending items
+    concentrated on ONE dominant mapped bucket is fuzzing-shaped: the base
+    vulnerability-analyst is swapped for a fuzzer in variant-rotation mode at
+    confidence=high, and the vuln-class skills stay attached."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    # 120 untested pending IDOR-shaped items under a single host (the `user`
+    # param uniquely keys the idor bucket). 120 >= _FUZZER_VOLUME_THRESHOLD
+    # (100), so the single-dominant-bucket pick swaps va -> fuzzer.
+    for i in range(120):
+        _insert_work_item(
+            db,
+            queue_key=f"idor:{i}",
+            url=f"https://target.example/api/profile/{i}",
+            url_path="/api/profile",
+            status="pending",
+            query_params='{"user": "5"}',
+        )
+
+    # The audit fails the consumption gate -> SystemExit(1); the JSON report is
+    # printed before the exit so we read it after catching.
+    with pytest.raises(SystemExit) as excinfo:
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+        )
+    assert excinfo.value.code == 1
+
+    report = json.loads(capsys.readouterr().out)
+    rec = _rec_for_host(report, "target.example")
+    assert rec["stage"] == "consumption"
+    # High volume on one bucket -> fuzzer, not vulnerability-analyst.
+    assert rec["role"] == "fuzzer"
+    assert rec["dispatch_mode"] == "variant-rotation"
+    assert rec["confidence"] == "high"
+    assert rec["dominant_bucket"] == "idor"
+    assert rec["pending_count"] == 120
+    # The vuln-class skills for the dominant bucket are still attached.
+    assert rec["skills"] == ["idor-testing", "split-brain-idor"]
+    # The emitted command encodes the fuzzer role, variant-rotation, and skills.
+    assert "--role fuzzer" in rec["command"]
+    assert "--dispatch-mode variant-rotation" in rec["command"]
+    assert "--skills idor-testing,split-brain-idor" in rec["command"]
+
+
+def test_auto_redispatch_consumption_no_mapped_bucket_omits_skills(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """A consumption gap whose pending work has no mapped vuln-class bucket
+    (only generic/unbucketed params, e.g. an interestingparams token) yields a
+    vulnerability-analyst recommendation with EMPTY skills at confidence=low,
+    and the emitted command omits --skills entirely."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    # A `token` param classifies as the generic `interestingparams` bucket,
+    # which is intentionally NOT in BUCKET_SKILLS — so nothing maps to a
+    # testing skill and the recommendation must not guess one.
+    _insert_work_item(
+        db,
+        queue_key="ip:0",
+        url="https://target.example/g0",
+        url_path="/g0",
+        status="pending",
+        query_params='{"token": "x"}',
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/g0"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+        )
+    assert excinfo.value.code == 1
+
+    report = json.loads(capsys.readouterr().out)
+    rec = _rec_for_host(report, "target.example")
+    assert rec["stage"] == "consumption"
+    assert rec["role"] == "vulnerability-analyst"
+    assert rec["confidence"] == "low"
+    assert rec["dominant_bucket"] is None
+    # No bucketed pending maps to a vuln class -> empty skills (no guess).
+    assert rec["skills"] == []
+    # The command must omit --skills when there is nothing to recommend.
+    assert "--skills" not in rec["command"]
+    assert "--role vulnerability-analyst" in rec["command"]
+    assert "--scope-host target.example" in rec["command"]

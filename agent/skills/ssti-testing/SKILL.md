@@ -92,7 +92,7 @@ When `{{7*7}}` evaluates server-side but the result is not reflected back (rende
 - [ ] **Out-of-band (preferred):** mint a nonce-tagged callback, embed it in an engine-specific RCE gadget so template execution fires the callback, then poll for the correlated hit:
       ```bash
       aith oob status --json   # confirm readiness
-      aith oob mint --technique ssti --target-url "https://target/profile" --param bio --probe-kind http --json
+      aith oob mint --technique ssti --target-url "https://target/profile" --param bio --probe-kind http
       # -> http  http://<prefix>-<token>.researcher.example/
       ```
       Embed the minted host in the gadget for the fingerprinted engine and deliver via the kali exec wrapper:

@@ -18,7 +18,7 @@ origin: AI Threat Hunting
 
 - `aith assess kali exec -- curl ...` (manual CRLF injection probing with encoded payloads — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools (inspect injected response headers)
-- OOB callback: confirm readiness with `aith oob status --json`, get the unique callback URL and check correlated hits with `aith oob client logs <name> --lines 80`
+- `aith oob mint` / `aith oob poll` — when a CRLF injection lets you split the response and plant a redirecting `Location`, an injected `<script src>`/`<img>` into a poisoned body, or otherwise force a victim's browser to fetch attacker-controlled content, mint a nonce-tagged callback host (`aith oob mint --technique OTHER --target-url <url> --param <p>`), embed its `http` host in the split payload, then `aith oob poll --client <name>` returns the matched probe<->callback pair that proves the splice fired. Check readiness with `aith oob status --json`; if no named client is running, start one with `aith oob client start <name> --engagement <key> --agent <agent>`. (`aith oob client logs <name> --lines 80` is a raw listener tail for infra debugging only, not correlation.)
 
 ## Methodology
 

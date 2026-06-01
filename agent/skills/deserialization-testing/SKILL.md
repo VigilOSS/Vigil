@@ -124,7 +124,7 @@ Deserialization RCE is almost always blind — the gadget executes but stdout ne
 
 ```bash
 aith oob status --json
-aith oob mint --technique deserialization --target-url "https://target/api" --param session --probe-kind dns --json
+aith oob mint --technique deserialization --target-url "https://target/api" --param session --probe-kind dns
 # -> http  http://<prefix>-<token>.researcher.example/
 #    dns   <prefix>-<token>.researcher.example
 ```

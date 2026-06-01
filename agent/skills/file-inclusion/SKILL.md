@@ -174,7 +174,7 @@ Before serving a shell, confirm the server actually fetches an attacker URL — 
 
 ```bash
 aith oob status --json
-aith oob mint --technique rfi --target-url "https://target/index.php" --param page --probe-kind http --json
+aith oob mint --technique rfi --target-url "https://target/index.php" --param page --probe-kind http
 # -> http  http://<prefix>-<token>.researcher.example/
 ```
 
