@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import hashlib
 import json
 import re
@@ -15,23 +16,38 @@ from .dispatches import _serialize_decision
 
 
 
+class CoverageStatus(enum.StrEnum):
+    """Per-item coverage status. ``StrEnum`` so members serialize/compare as their
+    bare lowercase string identically to the prior raw-string constants."""
+
+    PENDING = "pending"
+    QUEUED = "queued"
+    DEFERRED = "deferred"
+    COVERED = "covered"
+    NOT_APPLICABLE = "not_applicable"
+    BLOCKED = "blocked"
+
+
+# Raw operator-input synonyms → canonical members. Keys stay plain strings
+# (e.g. "done", "n/a") because they are non-member inputs we accept on the wire.
 _COVERAGE_STATUS_SYNONYMS = {
-    "done": "covered",
-    "not-applicable": "not_applicable",
-    "n/a": "not_applicable",
-    "tested": "covered",
+    "done": CoverageStatus.COVERED,
+    "not-applicable": CoverageStatus.NOT_APPLICABLE,
+    "n/a": CoverageStatus.NOT_APPLICABLE,
+    "tested": CoverageStatus.COVERED,
 }
 
-COVERAGE_STATUSES = {"pending", "queued", "deferred", "covered", "not_applicable", "blocked"}
+# Derived membership set (frozenset of members, NOT an alias of the class).
+COVERAGE_STATUSES = frozenset(CoverageStatus)
 
-def _normalize_coverage_status(value: str) -> str:
+def _normalize_coverage_status(value: str) -> CoverageStatus:
     status_value = (value or "pending").strip().lower()
     status_value = _COVERAGE_STATUS_SYNONYMS.get(status_value, status_value)
     if status_value not in COVERAGE_STATUSES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid coverage status: {value}")
-    return status_value
+    return CoverageStatus(status_value)
 
-def _coalesce_coverage_status(existing: str, incoming: str, *, explicit_override: bool = False) -> str:
+def _coalesce_coverage_status(existing: str, incoming: str, *, explicit_override: bool = False) -> CoverageStatus:
     existing_normalized = _normalize_coverage_status(existing)
     incoming_normalized = _normalize_coverage_status(incoming)
     if explicit_override:

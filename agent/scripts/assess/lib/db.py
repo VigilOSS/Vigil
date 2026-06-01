@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 # Absolute import — every consumer of this module either runs through
 # `assess.cli` (which has the scripts dir on sys.path) or via the
@@ -195,6 +196,46 @@ def db_exec(db_path: str, sql: str, params: tuple = ()) -> int:
         cursor = conn.execute(sql, params)
         conn.commit()
         return cursor.rowcount
+    finally:
+        conn.close()
+
+
+def db_exec_returning(db_path: str, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
+    """Execute a write statement with a ``RETURNING`` clause and commit.
+
+    Used for ``UPDATE ... RETURNING *`` claims where the caller needs the
+    mutated rows as dicts. Opens a Row-factory connection, runs the statement,
+    commits, and returns ``[dict(row) ...]``. The commit happens before the
+    rows are read out of the cursor object, matching the prior inline
+    ``conn.execute(...).fetchall(); conn.commit()`` ordering.
+    """
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        rows = conn.execute(sql, params).fetchall()
+        conn.commit()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+@contextmanager
+def db_connect(db_path: str) -> Iterator[sqlite3.Connection]:
+    """Yield a Row-factory connection (busy_timeout=5000), closing it on exit.
+
+    For multi-statement transactions that must share one connection — e.g. a
+    ``BEGIN IMMEDIATE`` claim that interleaves SELECT / UPDATE ... RETURNING and
+    hands the live connection to a downstream stamping helper. The caller owns
+    the transaction (BEGIN / COMMIT); this manager only guarantees the
+    connection is configured identically to the other helpers and is always
+    closed.
+    """
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        yield conn
     finally:
         conn.close()
 

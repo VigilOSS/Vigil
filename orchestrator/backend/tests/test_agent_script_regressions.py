@@ -291,7 +291,7 @@ def test_ingest_candidates_preserve_metadata_and_route(
     )
     dispatch_module = _load_script_module(
         "test_ingest_candidate_dispatch_module",
-        "agent/scripts/assess/commands/dispatch.py",
+        "agent/scripts/assess/commands/dispatch/__init__.py",
     )
     db_module = _load_script_module(
         "test_ingest_candidate_db_module",
@@ -433,7 +433,7 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
     )
     dispatch_module = _load_script_module(
         "test_ingest_real_candidate_shapes_dispatch_module",
-        "agent/scripts/assess/commands/dispatch.py",
+        "agent/scripts/assess/commands/dispatch/__init__.py",
     )
     db_module = _load_script_module(
         "test_ingest_real_candidate_shapes_db_module",

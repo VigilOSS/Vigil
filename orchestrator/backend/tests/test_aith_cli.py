@@ -4662,7 +4662,7 @@ def test_transition_phase_complete_marks_blue_scope_completed(
 def _run_dispatch_action(db_path: Path, action: str, extra: list[str] | None = None, reason: str = "") -> None:
     module = _load_assess_module(
         "wave3_dispatch_module",
-        "agent/scripts/assess/commands/dispatch.py",
+        "agent/scripts/assess/commands/dispatch/__init__.py",
     )
     module.run(
         SimpleNamespace(
@@ -5217,9 +5217,9 @@ def _stub_render_handoff_environment(
             self.close()
             return False
 
-    monkeypatch.setattr(module, "AssessmentClient", _StubClient)
+    monkeypatch.setattr(module.handoff_renderer, "AssessmentClient", _StubClient)
     monkeypatch.setattr(
-        module,
+        module.handoff_renderer,
         "load_config",
         lambda *_args, **_kwargs: SimpleNamespace(
             base_url="http://example.test",
@@ -5238,7 +5238,7 @@ def _load_dispatch_module():
     """
     return _load_assess_module(
         "round9_dispatch_module",
-        "agent/scripts/assess/commands/dispatch.py",
+        "agent/scripts/assess/commands/dispatch/__init__.py",
     )
 
 
@@ -5835,9 +5835,9 @@ def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
     """Execute dispatch.run with a fake AssessmentClient injected."""
     module = _load_dispatch_module()
     fake = _CapturingClient()
-    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
     monkeypatch.setattr(
-        module,
+        module.agent,
         "load_config",
         lambda *_a, **_k: SimpleNamespace(
             base_url="http://example.test",
@@ -6058,9 +6058,9 @@ def test_dispatch_register_warns_on_structured_overlap(
         "finding_slugs": ["VA-001"],
         "task": "Older exploitation attempt",
     }
-    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
     monkeypatch.setattr(
-        module,
+        module.agent,
         "load_config",
         lambda *_a, **_k: SimpleNamespace(
             base_url="http://example.test",
@@ -6102,9 +6102,9 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
         "dispatch_mode": "hypothesis-driven",
         "task": "Review password reset flows",
     }
-    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
     monkeypatch.setattr(
-        module,
+        module.agent,
         "load_config",
         lambda *_a, **_k: SimpleNamespace(
             base_url="http://example.test",
@@ -6148,9 +6148,9 @@ def test_dispatch_abort_duplicate_marks_row_and_records_decision(
         "agent_role": "vulnerability-analyst",
         "status": "in-progress",
     }
-    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
     monkeypatch.setattr(
-        module,
+        module.agent,
         "load_config",
         lambda *_a, **_k: SimpleNamespace(
             base_url="http://example.test",
@@ -6243,9 +6243,9 @@ def test_dispatch_list_emits_jsonl(
             return False
 
     fake = _ListClient()
-    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
     monkeypatch.setattr(
-        module,
+        module.agent,
         "load_config",
         lambda *_a, **_k: SimpleNamespace(
             base_url="http://example.test",
@@ -6355,9 +6355,9 @@ def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
     module = _load_dispatch_module()
     # One fake shared across all three calls so handoffs_by_id persists.
     shared_fake = _CapturingClient()
-    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: shared_fake)
+    monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: shared_fake)
     monkeypatch.setattr(
-        module,
+        module.agent,
         "load_config",
         lambda *_a, **_k: SimpleNamespace(
             base_url="http://example.test",
@@ -7212,9 +7212,9 @@ def test_scope_rejection_writes_dispatch_decision_row(
             self.close()
             return False
 
-    monkeypatch.setattr(module, "AssessmentClient", _DecisionCapturingClient)
+    monkeypatch.setattr(module.agent, "AssessmentClient", _DecisionCapturingClient)
     monkeypatch.setattr(
-        module,
+        module.agent,
         "load_config",
         lambda *_a, **_k: SimpleNamespace(
             base_url="http://example.test",

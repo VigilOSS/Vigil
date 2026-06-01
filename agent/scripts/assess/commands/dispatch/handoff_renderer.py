@@ -1,0 +1,498 @@
+"""render-handoff — bounded handoff blob generator (Fix #7).
+
+Cross-Dispatch Continuity in operator-core.md tells the operator to keep
+handoff prompts bounded ("two or three excerpted lines + finding slugs +
+file paths"). Without a helper the operator's discretion was the only
+protection; under parallelism that degrades — operators paste full
+transcripts because it's fast and the dispatch prompt arrives bloated.
+
+render-handoff replaces that discretion with a deterministic emitter that
+pulls from durable state (the orchestrator's assessment_dispatches +
+assessment_dispatch_handoffs tables) and emits a markdown blob the operator
+pastes verbatim into the next dispatch prompt. The output is hard-capped at
+--max-lines (default 40); the findings list collapses to "... and N more"
+before any fixed sections drop.
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+from assess.lib.client import AssessmentClient, AssessError
+from assess.lib.config import load_config
+
+
+def _render_handoff(args, extra: list[str]) -> None:
+    """Emit a bounded markdown handoff blob for a prior dispatch.
+
+    Reads from the orchestrator backend (assessment_dispatches +
+    assessment_dispatch_handoffs). The handoff payload provides
+    summary / coverage gaps / next steps / runtime issues / working artifacts
+    / open questions / extras; the dispatch row provides metadata (role,
+    task, scope_host, dispatched_at, status). 404 on the
+    handoff exits 2; 404 on the dispatch row is non-fatal — the renderer
+    still produces output from the handoff.
+    """
+    if not extra:
+        print(
+            "Usage: aith assess agent render-handoff <agent-id> "
+            "[--max-lines N] [--include-evidence]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    agent_id = extra[0].strip()
+    if not agent_id:
+        print(
+            "render-handoff: agent-id must be a non-empty string",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    max_lines = max(1, int(getattr(args, "max_lines", 40) or 40))
+    include_evidence = bool(getattr(args, "include_evidence", False))
+
+    cfg = load_config(getattr(args, "engagement_dir", None))
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        handoff = client.get_handoff(agent_id)
+        if handoff is None:
+            print(
+                f"render-handoff: agent-id '{agent_id}' has no recorded handoff in the backend "
+                f"(GET dispatch-handoffs/{agent_id} -> 404). Specialist dispatches should call "
+                f"`aith assess agent handoff` before exiting; a missing handoff means "
+                f"the prior dispatch never wrote one (or the id was mistyped).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        dispatch = client.get_dispatch(agent_id)  # 404 -> None, render with handoff-only data
+        # ── Pull metadata from dispatch row when present, fall back to the
+        # handoff itself otherwise.
+        if dispatch is not None:
+            role = str(dispatch.get("agent_role") or handoff.get("agent_role") or "<unknown role>")
+            task = str(dispatch.get("task") or "<unrecorded task>")
+            scope_host = dispatch.get("scope_host") or ""
+            dispatched_at = dispatch.get("dispatched_at") or ""
+            dispatch_status = dispatch.get("status") or ""
+            skills = str(dispatch.get("skills") or "")
+        else:
+            role = str(handoff.get("agent_role") or "<unknown role>")
+            task = "<unrecorded task>"
+            scope_host = ""
+            dispatched_at = handoff.get("created_at") or ""
+            dispatch_status = "(dispatch row missing)"
+            skills = ""
+
+        # Handoff payload extraction. JSON columns deserialize to lists/dicts
+        # in the state-manager serializer; treat anything else defensively.
+        finding_slugs = handoff.get("finding_slugs") or []
+        if not isinstance(finding_slugs, list):
+            finding_slugs = []
+        finding_slugs = [str(s).strip() for s in finding_slugs if str(s).strip()]
+
+        next_steps = handoff.get("next_steps") or []
+        if not isinstance(next_steps, list):
+            next_steps = []
+        coverage_gaps = handoff.get("coverage_gaps") or []
+        if not isinstance(coverage_gaps, list):
+            coverage_gaps = []
+        runtime_issues = handoff.get("runtime_issues") or []
+        if not isinstance(runtime_issues, list):
+            runtime_issues = []
+        working_artifacts_payload = handoff.get("working_artifacts") or []
+        if not isinstance(working_artifacts_payload, list):
+            working_artifacts_payload = []
+        open_questions = handoff.get("open_questions") or []
+        if not isinstance(open_questions, list):
+            open_questions = []
+        recommended_next_agent = str(handoff.get("recommended_next_agent") or "")
+        summary = str(handoff.get("summary") or "")
+        confidence = str(handoff.get("confidence") or "")
+
+        # Per-slug enrichment from the backend. Tolerate 404s — the operator
+        # may have killed a finding between dispatch and handoff render.
+        # ISSUE-010 fix: the previous fallback emitted "non-dict response" when
+        # GET findings/{slug} responded with anything other than a dict, which
+        # confused operators because the same wording fired for both "slug
+        # missing" and "backend returned a list / unexpected payload". The
+        # 404 path now emits "slug missing in backend (deleted or never
+        # recorded)" explicitly, distinct from "fetch error: <reason>".
+        finding_rows: list[dict] = []
+        for slug in finding_slugs:
+            try:
+                row = client.get(f"findings/{slug}")
+            except AssessError as exc:
+                if "HTTP 404" in str(exc):
+                    finding_rows.append({"slug": slug, "_missing": True})
+                    continue
+                finding_rows.append({"slug": slug, "_error": str(exc).splitlines()[0]})
+                continue
+            if isinstance(row, dict):
+                row.setdefault("slug", slug)
+                finding_rows.append(row)
+            else:
+                finding_rows.append({"slug": slug, "_error": "non-dict response"})
+
+        credential_rows: list[dict] = []
+        if role in ("vulnerability-analyst", "exploit-developer"):
+            try:
+                creds = client.get("credentials")
+            except AssessError:
+                creds = []
+            if isinstance(creds, list):
+                credential_rows = [
+                    c for c in creds
+                    if isinstance(c, dict) and (c.get("source_name") or "") == role
+                ]
+
+    # Local-disk presence check for working artifacts. The new payload uses
+    # objects with a 'path' key; tolerate plain strings for forward-compat.
+    artifact_states: list[tuple[str, str]] = []
+    for entry in working_artifacts_payload:
+        if isinstance(entry, dict):
+            raw_path = str(entry.get("path") or "").strip()
+        else:
+            raw_path = str(entry).strip()
+        if not raw_path:
+            continue
+        full = raw_path if os.path.isabs(raw_path) else os.path.join(cfg.engagement_dir, raw_path)
+        artifact_states.append((raw_path, "present" if os.path.exists(full) else "missing"))
+
+    blob = _render_handoff_blob(
+        agent_id=agent_id,
+        role=role,
+        task=task,
+        scope_host=scope_host,
+        dispatched_at=dispatched_at,
+        status=dispatch_status,
+        skills=skills,
+        summary=summary,
+        confidence=confidence,
+        finding_rows=finding_rows,
+        coverage_gaps=coverage_gaps,
+        next_steps=next_steps,
+        open_questions=open_questions,
+        artifact_states=artifact_states,
+        runtime_issues=runtime_issues,
+        recommended_next_agent=recommended_next_agent,
+        credential_rows=credential_rows,
+        include_evidence=include_evidence,
+        max_lines=max_lines,
+    )
+    print(blob)
+
+
+def _render_handoff_blob(
+    *,
+    agent_id: str,
+    role: str,
+    task: str,
+    scope_host: str,
+    dispatched_at: str,
+    status: str,
+    skills: str,
+    summary: str,
+    confidence: str,
+    finding_rows: list[dict],
+    coverage_gaps: list[dict],
+    next_steps: list[dict],
+    open_questions: list,
+    artifact_states: list[tuple[str, str]],
+    runtime_issues: list[dict],
+    recommended_next_agent: str,
+    credential_rows: list[dict],
+    include_evidence: bool,
+    max_lines: int,
+) -> str:
+    """Build the markdown handoff blob with the documented section order.
+
+    Round 9 section order: header / summary / confidence / findings /
+    coverage gaps / next steps / open questions / working artifacts /
+    runtime issues / recommended next agent. Trim policy on overflow:
+    findings list collapses first ("... and N more"), then runtime_issues,
+    then working_artifacts. Summary, next_steps, coverage_gaps are NEVER
+    trimmed (they are the load-bearing handoff content).
+    """
+    head = [
+        f"#### Handoff from {role} dispatch {agent_id}",
+        f"- **Prior task:** {task}",
+        f"- **Scope host:** {scope_host or '(none recorded)'}",
+        f"- **Dispatched at:** {dispatched_at or '(unknown)'} (status: {status or 'unknown'})",
+    ]
+    # Skills loaded by the prior dispatch are part of the audit surface — the
+    # next dispatch should know which procedure context the previous agent
+    # carried so it can either continue with the same skills or change loadout
+    # deliberately. Operators are exempt from declaring skills, so an empty
+    # value is rendered as a clear marker rather than dropped silently.
+    if skills:
+        head.append(f"- **Skills loaded:** {skills}")
+    elif role and role != "operator":
+        head.append("- **Skills loaded:** (not recorded)")
+
+    summary_lines = _summary_section(summary, confidence)
+    finding_lines = _findings_section(finding_rows, include_evidence=include_evidence)
+    coverage_lines = _coverage_gaps_section(coverage_gaps)
+    next_steps_lines = _next_steps_section(next_steps)
+    open_questions_lines = _open_questions_section(open_questions)
+    recommended_line = _recommended_next_agent_section(recommended_next_agent)
+    credentials_line = _credentials_section(credential_rows)
+
+    # Compose the line list. Trim order: findings → runtime_issues →
+    # artifacts. Summary, coverage_gaps, next_steps stay intact.
+    def _compose(findings_kept: list[str], findings_dropped: int,
+                 artifacts_kept: list[tuple[str, str]],
+                 runtime_kept: list[dict], runtime_dropped: int,
+                 artifacts_dropped: int) -> list[str]:
+        out: list[str] = []
+        out.extend(head)
+        out.extend(summary_lines)
+        out.append("- **Findings recorded:**")
+        out.extend(findings_kept)
+        if findings_dropped > 0:
+            out.append(f"  - ... and {findings_dropped} more")
+        out.extend(coverage_lines)
+        out.extend(next_steps_lines)
+        out.extend(open_questions_lines)
+        artifacts_section_lines = _artifacts_section(artifacts_kept)
+        out.extend(artifacts_section_lines)
+        if artifacts_dropped > 0:
+            out.append(f"  - ... and {artifacts_dropped} more")
+        runtime_section_lines = _runtime_issues_section(runtime_kept)
+        out.extend(runtime_section_lines)
+        if runtime_dropped > 0:
+            out.append(f"  - ... and {runtime_dropped} more")
+        out.append(recommended_line)
+        out.append(credentials_line)
+        return out
+
+    composed = _compose(finding_lines, 0, artifact_states, runtime_issues, 0, 0)
+    if len(composed) <= max_lines:
+        return "\n".join(composed)
+
+    # First-pass trim: findings.
+    overhead_no_findings = len(_compose([], len(finding_lines), artifact_states, runtime_issues, 0, 0))
+    findings_budget = max(1, max_lines - (overhead_no_findings - 1))
+    findings_kept, findings_dropped = _truncate_findings(finding_lines, findings_budget)
+    composed = _compose(findings_kept, findings_dropped, artifact_states, runtime_issues, 0, 0)
+    if len(composed) <= max_lines:
+        return "\n".join(composed)
+
+    # Second-pass trim: runtime issues.
+    overhead_no_runtime = len(
+        _compose(findings_kept, findings_dropped, artifact_states, [], len(runtime_issues), 0)
+    )
+    runtime_budget = max(0, max_lines - overhead_no_runtime)
+    runtime_kept = runtime_issues[:runtime_budget]
+    runtime_dropped = max(0, len(runtime_issues) - runtime_budget)
+    composed = _compose(
+        findings_kept, findings_dropped, artifact_states, runtime_kept, runtime_dropped, 0
+    )
+    if len(composed) <= max_lines:
+        return "\n".join(composed)
+
+    # Third-pass trim: working artifacts.
+    overhead_no_artifacts = len(
+        _compose(findings_kept, findings_dropped, [], runtime_kept, runtime_dropped, len(artifact_states))
+    )
+    artifacts_budget = max(0, max_lines - overhead_no_artifacts)
+    artifacts_kept = artifact_states[:artifacts_budget]
+    artifacts_dropped = max(0, len(artifact_states) - artifacts_budget)
+    composed = _compose(
+        findings_kept,
+        findings_dropped,
+        artifacts_kept,
+        runtime_kept,
+        runtime_dropped,
+        artifacts_dropped,
+    )
+    return "\n".join(composed)
+
+
+def _summary_section(summary: str, confidence: str) -> list[str]:
+    text = summary.strip() if summary else ""
+    lines: list[str] = ["- **Summary:**"]
+    if not text:
+        lines.append("  - (none recorded)")
+    else:
+        for chunk in text.splitlines() or [text]:
+            chunk = chunk.rstrip()
+            if chunk:
+                lines.append(f"  {chunk}")
+    if confidence:
+        lines.append(f"- **Confidence:** {confidence}")
+    return lines
+
+
+def _coverage_gaps_section(rows: list) -> list[str]:
+    lines = ["- **Coverage gaps:**"]
+    if not rows:
+        lines.append("  - (none recorded)")
+        return lines
+    for row in rows:
+        if isinstance(row, dict):
+            area = str(row.get("area") or "<area>")
+            reason = str(row.get("reason") or "")
+            followup = str(row.get("recommended_followup") or row.get("followup") or "")
+            tail = f" — {reason}" if reason else ""
+            if followup:
+                tail += f" (next: {followup})"
+            lines.append(f"  - {area}{tail}")
+        else:
+            lines.append(f"  - {row}")
+    return lines
+
+
+def _next_steps_section(rows: list) -> list[str]:
+    lines = ["- **Next steps:**"]
+    if not rows:
+        lines.append("  - (none recorded — set explicitly in this dispatch)")
+        return lines
+    for row in rows:
+        if isinstance(row, dict):
+            action = str(row.get("action") or "<action>")
+            target = str(row.get("target") or "")
+            agent = str(row.get("recommended_agent") or "")
+            rationale = str(row.get("rationale") or "")
+            extras = []
+            if target:
+                extras.append(f"target={target}")
+            if agent:
+                extras.append(f"agent={agent}")
+            if rationale:
+                extras.append(rationale)
+            tail = f" ({'; '.join(extras)})" if extras else ""
+            lines.append(f"  - {action}{tail}")
+        else:
+            lines.append(f"  - {row}")
+    return lines
+
+
+def _open_questions_section(rows: list) -> list[str]:
+    if not rows:
+        return []
+    lines = ["- **Open questions:**"]
+    for row in rows:
+        lines.append(f"  - {row}")
+    return lines
+
+
+def _runtime_issues_section(rows: list) -> list[str]:
+    if not rows:
+        return []
+    lines = ["- **Runtime issues:**"]
+    for row in rows:
+        if isinstance(row, dict):
+            kind = str(row.get("kind") or "<kind>")
+            detail = str(row.get("detail") or "")
+            severity = str(row.get("severity") or "")
+            tail = f" — {detail}" if detail else ""
+            if severity:
+                tail += f" [severity={severity}]"
+            lines.append(f"  - {kind}{tail}")
+        else:
+            lines.append(f"  - {row}")
+    return lines
+
+
+def _recommended_next_agent_section(value: str) -> str:
+    if not value:
+        return "- **Recommended next agent:** (none recorded)"
+    return f"- **Recommended next agent:** {value}"
+
+
+def _findings_section(finding_rows: list[dict], *, include_evidence: bool) -> list[str]:
+    """One indented bullet per recorded slug; '(none recorded)' when empty."""
+    if not finding_rows:
+        return ["  - (none recorded)"]
+    lines: list[str] = []
+    for row in finding_rows:
+        slug = str(row.get("slug") or "<no-slug>")
+        if row.get("_missing"):
+            lines.append(f"  - `{slug}` — slug missing (deleted or never recorded)")
+            continue
+        if row.get("_error"):
+            lines.append(f"  - `{slug}` — fetch error: {row['_error']}")
+            continue
+        title = str(row.get("title") or "(untitled)")
+        severity = str(row.get("severity") or "unknown")
+        lines.append(f"  - `{slug}` — {title} [severity={severity}]")
+        if include_evidence:
+            details = row.get("details") if isinstance(row.get("details"), dict) else {}
+            evidence = ""
+            if isinstance(details, dict):
+                evidence = str(details.get("evidence") or "").strip()
+            if not evidence:
+                evidence = str(row.get("notes") or "").strip()
+            if evidence:
+                snippet = evidence.splitlines()[0][:160]
+                lines.append(f"    - evidence: {snippet}")
+    return lines
+
+
+def _artifacts_section(artifact_states: list[tuple[str, str]]) -> list[str]:
+    """Working-artifact bullets with on-disk present/missing state."""
+    lines = ["- **Working artifacts:**"]
+    if not artifact_states:
+        lines.append("  - (none recorded)")
+        return lines
+    for path, state in artifact_states:
+        lines.append(f"  - `{path}` (state: {state})")
+    return lines
+
+
+def _credentials_section(credential_rows: list[dict]) -> str:
+    """Single-line summary: count + comma-separated ids."""
+    count = len(credential_rows)
+    ids = ", ".join(
+        str(c.get("id"))
+        for c in credential_rows
+        if isinstance(c, dict) and c.get("id") is not None
+    )
+    if count == 0:
+        return "- **Credentials captured:** 0 rows"
+    return f"- **Credentials captured:** {count} rows (ids: {ids or 'unknown'})"
+
+
+def _truncate_findings(
+    lines: list[str], budget: int
+) -> tuple[list[str], int]:
+    """Trim the findings section to ``budget`` lines.
+
+    Returns ``(kept_lines, truncated_count)`` where ``truncated_count`` is the
+    number of finding bullets dropped from the tail. A finding bullet is any
+    line starting with ``  - `` (two spaces); evidence sub-lines (``    - ``)
+    are dropped together with their parent bullet so the output never shows
+    an orphaned evidence line.
+    """
+    if budget <= 0:
+        budget = 1
+    if len(lines) <= budget:
+        return lines, 0
+
+    kept: list[str] = []
+    truncated = 0
+    # Walk the input and group each top-level finding bullet with any of its
+    # evidence sub-lines (indented four spaces). When the group would push
+    # us past the budget, we drop the rest as a single "... and N more" tail.
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        group = [line]
+        j = i + 1
+        while j < len(lines) and lines[j].startswith("    - "):
+            group.append(lines[j])
+            j += 1
+        if len(kept) + len(group) <= budget:
+            kept.extend(group)
+            i = j
+            continue
+        # No room: count this and every later top-level bullet as truncated.
+        truncated = 1
+        i = j
+        while i < len(lines):
+            if lines[i].startswith("  - ") and not lines[i].startswith("    - "):
+                truncated += 1
+            i += 1
+        break
+    return kept, truncated
+
