@@ -1463,7 +1463,7 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
             connection.commit()
         return original_create_finding(*args, **kwargs)
 
-    monkeypatch.setattr(state_manager, "create_finding", race)
+    monkeypatch.setattr(state_manager.findings, "create_finding", race)
 
     patched = client.patch(
         "/engagements/2026-03-30-120000-example/assessment/findings/CH-012",
@@ -2069,7 +2069,7 @@ def test_findings_verify_rejects_records_merged_after_validation(client, isolate
             connection.commit()
         return original_patch_finding(*args, **kwargs)
 
-    monkeypatch.setattr(state_manager, "patch_finding", race)
+    monkeypatch.setattr(state_manager.findings, "patch_finding", race)
 
     verify = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/CH-042/verify",
@@ -2241,7 +2241,7 @@ def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_se
                 connection.commit()
         return original_append_notes(existing, incoming)
 
-    monkeypatch.setattr(state_manager, "_append_notes", race)
+    monkeypatch.setattr(state_manager._common, "_append_notes", race)
 
     merge = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/merge",

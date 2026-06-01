@@ -1,0 +1,1855 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from typing import Any
+from urllib.parse import urlparse
+from fastapi import HTTPException, status
+
+from ..events import _engagement_or_404
+
+from . import _common
+from ._common import _fetch_all, _hash_json, _json_text, _parse_url, _require_canonical_finding_slug, _scalar_row
+from .dispatches import _serialize_decision
+
+
+
+_COVERAGE_STATUS_SYNONYMS = {
+    "done": "covered",
+    "not-applicable": "not_applicable",
+    "n/a": "not_applicable",
+    "tested": "covered",
+}
+
+COVERAGE_STATUSES = {"pending", "queued", "deferred", "covered", "not_applicable", "blocked"}
+
+def _normalize_coverage_status(value: str) -> str:
+    status_value = (value or "pending").strip().lower()
+    status_value = _COVERAGE_STATUS_SYNONYMS.get(status_value, status_value)
+    if status_value not in COVERAGE_STATUSES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid coverage status: {value}")
+    return status_value
+
+def _coalesce_coverage_status(existing: str, incoming: str, *, explicit_override: bool = False) -> str:
+    existing_normalized = _normalize_coverage_status(existing)
+    incoming_normalized = _normalize_coverage_status(incoming)
+    if explicit_override:
+        return incoming_normalized
+    if incoming_normalized in {"pending", "queued"} and existing_normalized not in {"pending", "queued"}:
+        return existing_normalized
+    if existing_normalized == "queued" and incoming_normalized == "pending":
+        return existing_normalized
+    return incoming_normalized
+
+def _find_target_id(connection, engagement_id: int, identity: str | None) -> int | None:
+    if not identity:
+        return None
+    row = connection.execute(
+        "SELECT id FROM assessment_targets WHERE engagement_id = ? AND identity = ?",
+        (engagement_id, identity),
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+def _upsert_target(
+    connection,
+    engagement_id: int,
+    *,
+    identity: str,
+    kind: str,
+    host: str | None,
+    ip_address: str | None,
+    hostname: str | None,
+    notes: str,
+    discovered_by: str,
+) -> dict[str, Any]:
+    connection.execute(
+        """
+        INSERT INTO assessment_targets (engagement_id, identity, kind, host, ip_address, hostname, notes, discovered_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(engagement_id, identity) DO UPDATE SET
+            kind = excluded.kind,
+            host = COALESCE(excluded.host, assessment_targets.host),
+            ip_address = COALESCE(excluded.ip_address, assessment_targets.ip_address),
+            hostname = COALESCE(excluded.hostname, assessment_targets.hostname),
+            notes = CASE
+                WHEN excluded.notes = '' THEN assessment_targets.notes
+                WHEN assessment_targets.notes = '' THEN excluded.notes
+                ELSE assessment_targets.notes || char(10) || excluded.notes
+            END,
+            discovered_by = COALESCE(NULLIF(excluded.discovered_by, ''), assessment_targets.discovered_by),
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (engagement_id, identity, kind, host, ip_address, hostname, notes, discovered_by),
+    )
+    row = connection.execute(
+        """
+        SELECT id, engagement_id, identity, kind, host, ip_address, hostname, notes, discovered_by, created_at, updated_at
+        FROM assessment_targets
+        WHERE engagement_id = ? AND identity = ?
+        """,
+        (engagement_id, identity),
+    ).fetchone()
+    assert row is not None
+    return dict(row)
+
+def _upsert_service(
+    connection,
+    engagement_id: int,
+    *,
+    endpoint: str,
+    protocol: str,
+    port: int | None,
+    service: str,
+    state: str,
+    coverage_status: str,
+    banner: str,
+    notes: str,
+    discovered_by: str,
+    target_identity: str | None,
+) -> dict[str, Any]:
+    target_id = _find_target_id(connection, engagement_id, target_identity)
+    connection.execute(
+        """
+        INSERT INTO assessment_services (
+            engagement_id, target_id, endpoint, port, protocol, service, state, coverage_status, banner, notes, discovered_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(engagement_id, endpoint, protocol) DO UPDATE SET
+            target_id = COALESCE(excluded.target_id, assessment_services.target_id),
+            port = COALESCE(excluded.port, assessment_services.port),
+            service = COALESCE(NULLIF(excluded.service, ''), assessment_services.service),
+            state = excluded.state,
+            coverage_status = CASE
+                WHEN excluded.coverage_status = 'pending'
+                    AND assessment_services.coverage_status IN ('covered', 'partial', 'blocked')
+                THEN assessment_services.coverage_status
+                ELSE excluded.coverage_status
+            END,
+            banner = COALESCE(NULLIF(excluded.banner, ''), assessment_services.banner),
+            notes = CASE
+                WHEN excluded.notes = '' THEN assessment_services.notes
+                WHEN assessment_services.notes = '' THEN excluded.notes
+                ELSE assessment_services.notes || char(10) || excluded.notes
+            END,
+            discovered_by = COALESCE(NULLIF(excluded.discovered_by, ''), assessment_services.discovered_by),
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (engagement_id, target_id, endpoint, port, protocol, service, state, coverage_status, banner, notes, discovered_by),
+    )
+    row = connection.execute(
+        """
+        SELECT id, engagement_id, target_id, endpoint, port, protocol, service, state, coverage_status, banner, notes, discovered_by, created_at, updated_at
+        FROM assessment_services
+        WHERE engagement_id = ? AND endpoint = ? AND protocol = ?
+        """,
+        (engagement_id, endpoint, protocol),
+    ).fetchone()
+    assert row is not None
+    return dict(row)
+
+def _upsert_request_variant(
+    connection,
+    engagement_id: int,
+    *,
+    url: str,
+    method: str,
+    auth_context: str,
+    content_type_family: str,
+    query_schema: Any,
+    body_schema: Any,
+    path_schema: Any,
+    cookie_schema: Any,
+    header_schema: Any,
+    path_template: str,
+    discovery_source: str,
+    notes: str,
+) -> dict[str, Any]:
+    scheme, host, port, normalized_path = _parse_url(url)
+    params_schema_hash = _hash_json(
+        {
+            "query": query_schema or {},
+            "path": path_schema or {},
+            "cookie": cookie_schema or {},
+            "headers": header_schema or {},
+        }
+    )
+    body_schema_hash = _hash_json(body_schema or {})
+    connection.execute(
+        """
+        INSERT INTO assessment_request_variants (
+            engagement_id, auth_context, scheme, host, port, method, normalized_path, path_template,
+            canonical_url, content_type_family, query_schema_json, body_schema_json, path_schema_json,
+            cookie_schema_json, header_schema_json, params_schema_hash, body_schema_hash, discovery_source, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(
+            engagement_id, scheme, host, port, method, normalized_path, auth_context, params_schema_hash, body_schema_hash, content_type_family
+        ) DO UPDATE SET
+            path_template = COALESCE(NULLIF(excluded.path_template, ''), assessment_request_variants.path_template),
+            canonical_url = COALESCE(NULLIF(excluded.canonical_url, ''), assessment_request_variants.canonical_url),
+            query_schema_json = excluded.query_schema_json,
+            body_schema_json = excluded.body_schema_json,
+            path_schema_json = excluded.path_schema_json,
+            cookie_schema_json = excluded.cookie_schema_json,
+            header_schema_json = excluded.header_schema_json,
+            discovery_source = COALESCE(NULLIF(excluded.discovery_source, ''), assessment_request_variants.discovery_source),
+            notes = CASE
+                WHEN excluded.notes = '' THEN assessment_request_variants.notes
+                WHEN assessment_request_variants.notes = '' THEN excluded.notes
+                ELSE assessment_request_variants.notes || char(10) || excluded.notes
+            END,
+            last_seen_at = CURRENT_TIMESTAMP
+        """,
+        (
+            engagement_id,
+            auth_context,
+            scheme,
+            host,
+            port,
+            method.upper(),
+            normalized_path,
+            path_template,
+            url,
+            content_type_family,
+            _json_text(query_schema),
+            _json_text(body_schema),
+            _json_text(path_schema),
+            _json_text(cookie_schema),
+            _json_text(header_schema),
+            params_schema_hash,
+            body_schema_hash,
+            discovery_source,
+            notes,
+        ),
+    )
+    row = connection.execute(
+        """
+        SELECT *
+        FROM assessment_request_variants
+        WHERE engagement_id = ? AND scheme = ? AND host = ? AND port = ? AND method = ? AND normalized_path = ?
+          AND auth_context = ? AND params_schema_hash = ? AND body_schema_hash = ? AND content_type_family = ?
+        """,
+        (engagement_id, scheme, host, port, method.upper(), normalized_path, auth_context, params_schema_hash, body_schema_hash, content_type_family),
+    ).fetchone()
+    assert row is not None
+    return dict(row)
+
+def _insert_request_observation(
+    connection,
+    engagement_id: int,
+    *,
+    request_variant_id: int,
+    url: str,
+    discovery_source: str,
+    response_status: int | None,
+    evidence_ref: str,
+    observation_payload: Any,
+) -> dict[str, Any]:
+    cursor = connection.execute(
+        """
+        INSERT INTO assessment_request_observations (
+            engagement_id, request_variant_id, observed_url, source_name, response_status, evidence_ref, raw_payload
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (engagement_id, request_variant_id, url, discovery_source, response_status, evidence_ref, _json_text(observation_payload or {})),
+    )
+    row = connection.execute(
+        "SELECT * FROM assessment_request_observations WHERE id = ?",
+        (cursor.lastrowid,),
+    ).fetchone()
+    assert row is not None
+    return dict(row)
+
+def _upsert_coverage_item(
+    connection,
+    engagement_id: int,
+    *,
+    request_variant_id: int | None,
+    service_id: int | None,
+    auth_context: str,
+    input_slot: str,
+    attack_family: str,
+    status_value: str,
+    notes: str,
+    preserve_existing_status: bool = False,
+) -> dict[str, Any]:
+    normalized_status = _normalize_coverage_status(status_value)
+    cursor = connection.execute(
+        """
+        INSERT OR IGNORE INTO assessment_coverage_items (
+            engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, status, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family, normalized_status, notes),
+    )
+    row = connection.execute(
+        """
+        SELECT *
+        FROM assessment_coverage_items
+        WHERE engagement_id = ? AND request_variant_id IS ? AND service_id IS ? AND auth_context = ? AND input_slot = ? AND attack_family = ?
+        """,
+        (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family),
+    ).fetchone()
+    assert row is not None
+    if cursor.rowcount == 0:
+        resolved_status = (
+            _coalesce_coverage_status(row["status"], normalized_status)
+            if preserve_existing_status
+            else normalized_status
+        )
+        connection.execute(
+            """
+            UPDATE assessment_coverage_items
+            SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (resolved_status, _common._append_notes(row["notes"], notes), row["id"]),
+        )
+        row = connection.execute("SELECT * FROM assessment_coverage_items WHERE id = ?", (row["id"],)).fetchone()
+    assert row is not None
+    if row["service_id"] is not None:
+        _refresh_service_coverage_status(connection, engagement_id, int(row["service_id"]))
+    return dict(row)
+
+def _refresh_service_coverage_status(connection, engagement_id: int, service_id: int) -> None:
+    rows = connection.execute(
+        "SELECT status FROM assessment_coverage_items WHERE engagement_id = ? AND service_id = ?",
+        (engagement_id, service_id),
+    ).fetchall()
+    if not rows:
+        return
+    statuses = [_normalize_coverage_status(str(row["status"])) for row in rows]
+    if all(status_value in {"covered", "not_applicable"} for status_value in statuses):
+        coverage_status = "covered"
+    elif any(status_value == "blocked" for status_value in statuses):
+        coverage_status = "blocked"
+    elif any(status_value in {"covered", "not_applicable", "deferred"} for status_value in statuses):
+        coverage_status = "partial"
+    else:
+        coverage_status = "pending"
+    connection.execute(
+        """
+        UPDATE assessment_services
+        SET coverage_status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND engagement_id = ?
+        """,
+        (coverage_status, service_id, engagement_id),
+    )
+
+def _probe_key(
+    *,
+    request_variant_id: int | None,
+    service_id: int | None,
+    coverage_item_id: int | None,
+    auth_context: str,
+    input_slot: str,
+    attack_family: str,
+    payload_family: str,
+    payload_value: str,
+    tool_name: str,
+) -> tuple[str, str]:
+    payload_hash = hashlib.sha256(payload_value.encode("utf-8")).hexdigest() if payload_value else ""
+    probe_key = hashlib.sha256(
+        json.dumps(
+            {
+                "request_variant_id": request_variant_id,
+                "service_id": service_id,
+                "coverage_item_id": coverage_item_id,
+                "auth_context": auth_context,
+                "input_slot": input_slot,
+                "attack_family": attack_family,
+                "payload_family": payload_family,
+                "payload_hash": payload_hash,
+                "tool_name": tool_name,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return payload_hash, probe_key
+
+def _upsert_probe_run(
+    connection,
+    engagement_id: int,
+    *,
+    request_variant_id: int | None,
+    service_id: int | None,
+    coverage_item_id: int | None,
+    auth_context: str,
+    input_slot: str,
+    attack_family: str,
+    payload_family: str,
+    payload_value: str,
+    tool_name: str,
+    agent_name: str,
+    result_status: str,
+    observed_http_status: int | None,
+    signal_type: str,
+    evidence_ref: str,
+    notes: str,
+) -> dict[str, Any]:
+    payload_hash, probe_key = _probe_key(
+        request_variant_id=request_variant_id,
+        service_id=service_id,
+        coverage_item_id=coverage_item_id,
+        auth_context=auth_context,
+        input_slot=input_slot,
+        attack_family=attack_family,
+        payload_family=payload_family,
+        payload_value=payload_value,
+        tool_name=tool_name,
+    )
+    connection.execute(
+        """
+        INSERT INTO assessment_probe_runs (
+            engagement_id, request_variant_id, service_id, coverage_item_id, auth_context, input_slot, attack_family,
+            payload_family, payload_value_hash, probe_key, tool_name, agent_name, result_status,
+            observed_http_status, signal_type, evidence_ref, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(engagement_id, probe_key) DO UPDATE SET
+            agent_name = COALESCE(NULLIF(excluded.agent_name, ''), assessment_probe_runs.agent_name),
+            result_status = excluded.result_status,
+            observed_http_status = COALESCE(excluded.observed_http_status, assessment_probe_runs.observed_http_status),
+            signal_type = COALESCE(NULLIF(excluded.signal_type, ''), assessment_probe_runs.signal_type),
+            evidence_ref = COALESCE(NULLIF(excluded.evidence_ref, ''), assessment_probe_runs.evidence_ref),
+            notes = CASE
+                WHEN excluded.notes = '' THEN assessment_probe_runs.notes
+                WHEN assessment_probe_runs.notes = '' THEN excluded.notes
+                ELSE assessment_probe_runs.notes || char(10) || excluded.notes
+            END
+        """,
+        (
+            engagement_id,
+            request_variant_id,
+            service_id,
+            coverage_item_id,
+            auth_context,
+            input_slot,
+            attack_family,
+            payload_family,
+            payload_hash,
+            probe_key,
+            tool_name,
+            agent_name,
+            result_status,
+            observed_http_status,
+            signal_type,
+            evidence_ref,
+            notes,
+        ),
+    )
+    row = connection.execute(
+        "SELECT * FROM assessment_probe_runs WHERE engagement_id = ? AND probe_key = ?",
+        (engagement_id, probe_key),
+    ).fetchone()
+    assert row is not None
+    return dict(row)
+
+def _upsert_surface(
+    connection,
+    engagement_id: int,
+    *,
+    surface_type: str,
+    target_descriptor: str,
+    source_name: str,
+    rationale: str,
+    evidence_ref: str,
+    status_value: str,
+) -> dict[str, Any]:
+    connection.execute(
+        """
+        INSERT INTO assessment_surfaces (engagement_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(engagement_id, surface_type, target_descriptor) DO UPDATE SET
+            source_name = COALESCE(NULLIF(excluded.source_name, ''), assessment_surfaces.source_name),
+            rationale = CASE
+                WHEN excluded.rationale = '' THEN assessment_surfaces.rationale
+                WHEN assessment_surfaces.rationale = '' THEN excluded.rationale
+                ELSE assessment_surfaces.rationale || char(10) || excluded.rationale
+            END,
+            evidence_ref = COALESCE(NULLIF(excluded.evidence_ref, ''), assessment_surfaces.evidence_ref),
+            status = excluded.status,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (engagement_id, surface_type, target_descriptor, source_name, rationale, evidence_ref, status_value),
+    )
+    row = connection.execute(
+        """
+        SELECT *
+        FROM assessment_surfaces
+        WHERE engagement_id = ? AND surface_type = ? AND target_descriptor = ?
+        """,
+        (engagement_id, surface_type, target_descriptor),
+    ).fetchone()
+    assert row is not None
+    return dict(row)
+
+def _service_fields_from_url(url: str) -> tuple[str, str, int, str]:
+    scheme, host, port, _ = _parse_url(url)
+    endpoint = f"{host}:{port}"
+    service_name = "https" if scheme == "https" else "http"
+    return scheme, endpoint, port, service_name
+
+def _auto_request_coverage_candidates(
+    *,
+    query_schema: dict[str, Any],
+    body_schema: dict[str, Any],
+    path_schema: dict[str, Any],
+    cookie_schema: dict[str, Any],
+    header_schema: dict[str, Any],
+) -> list[dict[str, str]]:
+    candidates = [{"input_slot": "endpoint", "attack_family": "endpoint-review", "status": "pending", "notes": "Auto-generated from request observation"}]
+    if query_schema:
+        candidates.append({"input_slot": "query", "attack_family": "parameter-review", "status": "pending", "notes": "Auto-generated from request observation"})
+    if body_schema:
+        candidates.append({"input_slot": "body", "attack_family": "parameter-review", "status": "pending", "notes": "Auto-generated from request observation"})
+    if path_schema:
+        candidates.append({"input_slot": "path", "attack_family": "parameter-review", "status": "pending", "notes": "Auto-generated from request observation"})
+    if cookie_schema:
+        candidates.append({"input_slot": "cookie", "attack_family": "session-review", "status": "pending", "notes": "Auto-generated from request observation"})
+    if header_schema:
+        candidates.append({"input_slot": "header", "attack_family": "header-review", "status": "pending", "notes": "Auto-generated from request observation"})
+    return candidates
+
+def record_target(
+    engagement_id: int,
+    *,
+    identity: str,
+    kind: str,
+    host: str | None,
+    ip_address: str | None,
+    hostname: str | None,
+    notes: str,
+    discovered_by: str,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    source_slug = _require_canonical_finding_slug(source_slug, field="source_slug")
+    target_slug = _require_canonical_finding_slug(target_slug, field="target_slug")
+    with _common.get_connection() as connection:
+        return _upsert_target(
+            connection,
+            engagement.id,
+            identity=identity,
+            kind=kind,
+            host=host,
+            ip_address=ip_address,
+            hostname=hostname,
+            notes=notes,
+            discovered_by=discovered_by,
+        )
+
+def list_targets(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        return _fetch_all(connection, "SELECT * FROM assessment_targets WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+
+def record_service(
+    engagement_id: int,
+    *,
+    endpoint: str,
+    protocol: str,
+    port: int | None,
+    service: str,
+    state: str,
+    coverage_status: str,
+    banner: str,
+    notes: str,
+    discovered_by: str,
+    target_identity: str | None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        return _upsert_service(
+            connection,
+            engagement.id,
+            endpoint=endpoint,
+            protocol=protocol,
+            port=port,
+            service=service,
+            state=state,
+            coverage_status=coverage_status,
+            banner=banner,
+            notes=notes,
+            discovered_by=discovered_by,
+            target_identity=target_identity,
+        )
+
+def list_services(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        return _fetch_all(connection, "SELECT * FROM assessment_services WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+
+def record_request_variant(
+    engagement_id: int,
+    *,
+    url: str,
+    method: str,
+    auth_context: str,
+    content_type_family: str,
+    query_schema: Any,
+    body_schema: Any,
+    path_schema: Any,
+    cookie_schema: Any,
+    header_schema: Any,
+    path_template: str,
+    discovery_source: str,
+    notes: str,
+    response_status: int | None,
+    evidence_ref: str,
+    observation_payload: Any,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        variant = _upsert_request_variant(
+            connection,
+            engagement.id,
+            url=url,
+            method=method,
+            auth_context=auth_context,
+            content_type_family=content_type_family,
+            query_schema=query_schema,
+            body_schema=body_schema,
+            path_schema=path_schema,
+            cookie_schema=cookie_schema,
+            header_schema=header_schema,
+            path_template=path_template,
+            discovery_source=discovery_source,
+            notes=notes,
+        )
+        _insert_request_observation(
+            connection,
+            engagement.id,
+            request_variant_id=variant["id"],
+            url=url,
+            discovery_source=discovery_source,
+            response_status=response_status,
+            evidence_ref=evidence_ref,
+            observation_payload=observation_payload,
+        )
+        return variant
+
+def list_request_variants(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        return _fetch_all(
+            connection,
+            "SELECT * FROM assessment_request_variants WHERE engagement_id = ? ORDER BY last_seen_at DESC, id DESC",
+            (engagement.id,),
+        )
+
+def list_request_observations(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        return _fetch_all(
+            connection,
+            "SELECT * FROM assessment_request_observations WHERE engagement_id = ? ORDER BY created_at DESC, id DESC",
+            (engagement.id,),
+        )
+
+def ingest_request_observation(
+    engagement_id: int,
+    *,
+    url: str,
+    method: str,
+    auth_context: str,
+    content_type_family: str,
+    query_schema: dict[str, Any],
+    body_schema: dict[str, Any],
+    path_schema: dict[str, Any],
+    cookie_schema: dict[str, Any],
+    header_schema: dict[str, Any],
+    path_template: str,
+    discovery_source: str,
+    notes: str,
+    response_status: int | None,
+    evidence_ref: str,
+    observation_payload: dict[str, Any],
+    target_identity: str | None,
+    target_kind: str,
+    target_notes: str,
+    target_ip_address: str | None,
+    target_hostname: str | None,
+    banner: str,
+    coverage_candidates: list[dict[str, Any]] | None,
+    auto_generate_coverage: bool,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    scheme, host, _, _ = _parse_url(url)
+    _, endpoint, port, service_name = _service_fields_from_url(url)
+    identity = target_identity or host
+    discovered_by = discovery_source
+    with _common.get_connection() as connection:
+        target = _upsert_target(
+            connection,
+            engagement.id,
+            identity=identity,
+            kind=target_kind,
+            host=host,
+            ip_address=target_ip_address,
+            hostname=target_hostname or host,
+            notes=target_notes or notes,
+            discovered_by=discovered_by,
+        )
+        service = _upsert_service(
+            connection,
+            engagement.id,
+            endpoint=endpoint,
+            protocol=scheme,
+            port=port,
+            service=service_name,
+            state="discovered",
+            coverage_status="pending",
+            banner=banner,
+            notes=notes,
+            discovered_by=discovered_by,
+            target_identity=identity,
+        )
+        request_variant = _upsert_request_variant(
+            connection,
+            engagement.id,
+            url=url,
+            method=method,
+            auth_context=auth_context,
+            content_type_family=content_type_family,
+            query_schema=query_schema,
+            body_schema=body_schema,
+            path_schema=path_schema,
+            cookie_schema=cookie_schema,
+            header_schema=header_schema,
+            path_template=path_template,
+            discovery_source=discovery_source,
+            notes=notes,
+        )
+        observation = _insert_request_observation(
+            connection,
+            engagement.id,
+            request_variant_id=request_variant["id"],
+            url=url,
+            discovery_source=discovery_source,
+            response_status=response_status,
+            evidence_ref=evidence_ref,
+            observation_payload=observation_payload,
+        )
+        candidates = coverage_candidates or []
+        if auto_generate_coverage:
+            candidates = [
+                *candidates,
+                *_auto_request_coverage_candidates(
+                    query_schema=query_schema,
+                    body_schema=body_schema,
+                    path_schema=path_schema,
+                    cookie_schema=cookie_schema,
+                    header_schema=header_schema,
+                ),
+                {
+                    "input_slot": "service",
+                    "attack_family": "service-validation",
+                    "status": "pending",
+                    "notes": "Auto-generated from service observation",
+                },
+            ]
+        coverage_items: list[dict[str, Any]] = []
+        seen_keys: set[tuple[int | None, int | None, str, str, str]] = set()
+        for candidate in candidates:
+            key = (
+                request_variant["id"] if candidate.get("input_slot") != "service" else None,
+                service["id"] if candidate.get("input_slot") == "service" else None,
+                auth_context,
+                str(candidate.get("input_slot", "unknown")),
+                str(candidate.get("attack_family", "review")),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            coverage_items.append(
+                _upsert_coverage_item(
+                    connection,
+                    engagement.id,
+                    request_variant_id=key[0],
+                    service_id=key[1],
+                    auth_context=auth_context,
+                    input_slot=key[3],
+                    attack_family=key[4],
+                    status_value=str(candidate.get("status", "pending")),
+                    notes=str(candidate.get("notes", "")),
+                    preserve_existing_status=True,
+                )
+            )
+        return {
+            "target": target,
+            "service": service,
+            "request_variant": request_variant,
+            "request_observation": observation,
+            "coverage_items": coverage_items,
+        }
+
+def record_coverage_item(
+    engagement_id: int,
+    *,
+    request_variant_id: int | None,
+    service_id: int | None,
+    auth_context: str,
+    input_slot: str,
+    attack_family: str,
+    status_value: str,
+    notes: str,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        return _upsert_coverage_item(
+            connection,
+            engagement.id,
+            request_variant_id=request_variant_id,
+            service_id=service_id,
+            auth_context=auth_context,
+            input_slot=input_slot,
+            attack_family=attack_family,
+            status_value=status_value,
+            notes=notes,
+        )
+
+def list_coverage_items(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                coverage.*,
+                request_variants.method,
+                request_variants.canonical_url,
+                request_variants.normalized_path,
+                request_variants.host,
+                services.endpoint AS service_endpoint,
+                services.service AS service_name
+            FROM assessment_coverage_items AS coverage
+            LEFT JOIN assessment_request_variants AS request_variants ON request_variants.id = coverage.request_variant_id
+            LEFT JOIN assessment_services AS services ON services.id = coverage.service_id
+            WHERE coverage.engagement_id = ?
+            ORDER BY coverage.updated_at DESC, coverage.id DESC
+            """,
+            (engagement.id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+def record_probe_run(
+    engagement_id: int,
+    *,
+    request_variant_id: int | None,
+    service_id: int | None,
+    coverage_item_id: int | None,
+    auth_context: str,
+    input_slot: str,
+    attack_family: str,
+    payload_family: str,
+    payload_value: str,
+    tool_name: str,
+    agent_name: str,
+    result_status: str,
+    observed_http_status: int | None,
+    signal_type: str,
+    evidence_ref: str,
+    notes: str,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        return _upsert_probe_run(
+            connection,
+            engagement.id,
+            request_variant_id=request_variant_id,
+            service_id=service_id,
+            coverage_item_id=coverage_item_id,
+            auth_context=auth_context,
+            input_slot=input_slot,
+            attack_family=attack_family,
+            payload_family=payload_family,
+            payload_value=payload_value,
+            tool_name=tool_name,
+            agent_name=agent_name,
+            result_status=result_status,
+            observed_http_status=observed_http_status,
+            signal_type=signal_type,
+            evidence_ref=evidence_ref,
+            notes=notes,
+        )
+
+def list_probe_runs(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        return _fetch_all(connection, "SELECT * FROM assessment_probe_runs WHERE engagement_id = ? ORDER BY created_at DESC, id DESC", (engagement.id,))
+
+def record_surface(
+    engagement_id: int,
+    *,
+    surface_type: str,
+    target_descriptor: str,
+    source_name: str,
+    rationale: str,
+    evidence_ref: str,
+    status_value: str,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        return _upsert_surface(
+            connection,
+            engagement.id,
+            surface_type=surface_type,
+            target_descriptor=target_descriptor,
+            source_name=source_name,
+            rationale=rationale,
+            evidence_ref=evidence_ref,
+            status_value=status_value,
+        )
+
+def list_surfaces(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        return _fetch_all(connection, "SELECT * FROM assessment_surfaces WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+
+def update_surface(
+    engagement_id: int,
+    surface_id: int,
+    *,
+    status_value: str | None = None,
+    rationale: str | None = None,
+    source_name: str | None = None,
+    evidence_ref: str | None = None,
+    followup_condition: str | None = None,
+) -> dict[str, Any]:
+    """Patch an assessment_surfaces row by id.
+
+    Operators reach this through ``aith assess resolve-surface`` to mark
+    discovered surfaces ``covered``, ``not_applicable``, ``deferred``, or
+    ``partially-covered``. Unspecified fields stay untouched, but at least
+    one mutable field must be supplied so the call records something
+    durable. ``rationale`` is appended (mirrors the upsert behavior of
+    ``_upsert_surface``) so the audit trail accumulates context.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    valid_statuses = {"covered", "not_applicable", "deferred", "discovered", "partially-covered"}
+    if status_value is not None and status_value not in valid_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid surface status '{status_value}'; allowed: {sorted(valid_statuses)}",
+        )
+    # Empty strings for source_name / evidence_ref are not a valid clear
+    # signal: callers must pass null to leave the field untouched, or a
+    # real value to set it. The frontend and CLI strip empties before they
+    # reach this layer, so an empty here is a deliberate (but malformed)
+    # call.
+    if source_name is not None and source_name == "":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="source_name cannot be empty; use null to leave unchanged",
+        )
+    if evidence_ref is not None and evidence_ref == "":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="evidence_ref cannot be empty; use null to leave unchanged",
+        )
+    if all(
+        value is None
+        for value in (status_value, rationale, source_name, evidence_ref, followup_condition)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="update-surface requires at least one of status, rationale, source_name, evidence_ref, followup_condition",
+        )
+
+    with _common.get_connection() as connection:
+        existing = connection.execute(
+            "SELECT * FROM assessment_surfaces WHERE engagement_id = ? AND id = ?",
+            (engagement.id, surface_id),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"surface id={surface_id} not found",
+            )
+
+        current_status = str(existing["status"] or "")
+        # Lifecycle guard: regressions to ``discovered`` from a decided
+        # state (covered / not_applicable) erase audit context. Operators
+        # should mark the surface ``deferred`` to re-queue it instead. The
+        # same applies to ``partially-covered`` → ``discovered`` (audit
+        # context loss).
+        if (
+            status_value is not None
+            and status_value == "discovered"
+            and current_status in {"covered", "not_applicable", "partially-covered"}
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"cannot regress surface from '{current_status}' to "
+                    "'discovered'; use 'deferred' to re-queue"
+                ),
+            )
+
+        # When the operator changes status, rationale is mandatory: the
+        # audit trail must capture the WHY of every transition.
+        if (
+            status_value is not None
+            and status_value != current_status
+            and not (rationale and rationale.strip())
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="rationale required when changing surface status",
+            )
+
+        # ``partially-covered`` requires ``followup_condition`` so the
+        # audit trail names what the next coverage pass must satisfy.
+        if status_value == "partially-covered":
+            if not (followup_condition and followup_condition.strip()):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "followup_condition required when status='partially-covered'"
+                    ),
+                )
+
+        assignments: list[str] = []
+        params: list[Any] = []
+        if status_value is not None:
+            assignments.append("status = ?")
+            params.append(status_value)
+            # Transitioning OUT of partially-covered into ``covered`` clears
+            # the followup_condition because the follow-up has completed.
+            if (
+                current_status == "partially-covered"
+                and status_value == "covered"
+                and followup_condition is None
+            ):
+                assignments.append("followup_condition = ?")
+                params.append("")
+        if rationale is not None:
+            existing_rationale = str(existing["rationale"] or "")
+            new_rationale = rationale
+            if (
+                existing_rationale
+                and rationale
+                and rationale not in existing_rationale
+            ):
+                new_rationale = existing_rationale + "\n" + rationale
+            elif rationale == "" or rationale in existing_rationale:
+                new_rationale = existing_rationale
+            assignments.append("rationale = ?")
+            params.append(new_rationale)
+        if source_name is not None:
+            assignments.append("source_name = ?")
+            params.append(source_name)
+        if evidence_ref is not None:
+            assignments.append("evidence_ref = ?")
+            params.append(evidence_ref)
+        if followup_condition is not None:
+            assignments.append("followup_condition = ?")
+            params.append(followup_condition)
+
+        if not assignments:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="update-surface produced no effective changes",
+            )
+
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+        params.extend([engagement.id, surface_id])
+        connection.execute(
+            f"UPDATE assessment_surfaces SET {', '.join(assignments)} "
+            f"WHERE engagement_id = ? AND id = ?",
+            tuple(params),
+        )
+        row = connection.execute(
+            "SELECT * FROM assessment_surfaces WHERE engagement_id = ? AND id = ?",
+            (engagement.id, surface_id),
+        ).fetchone()
+        assert row is not None
+        return dict(row)
+
+def coverage_readiness(engagement_id: int) -> dict[str, Any]:
+    surfaces = list_surfaces(engagement_id)
+    unresolved = [row for row in surfaces if row.get("status") == "discovered"]
+    partially_covered = [
+        row for row in surfaces if row.get("status") == "partially-covered"
+    ]
+    high_risk_deferred = [
+        row
+        for row in surfaces
+        if row.get("status") == "deferred"
+        and row.get("surface_type") in {"account_recovery", "dynamic_render", "object_reference", "privileged_write"}
+    ]
+    blocker_count = len(unresolved) + len(partially_covered) + len(high_risk_deferred)
+    return {
+        "ready": blocker_count == 0,
+        "blocker_count": blocker_count,
+        "unresolved_surfaces": unresolved,
+        "partially_covered_surfaces": partially_covered,
+        "high_risk_deferred_surfaces": high_risk_deferred,
+    }
+
+# ---------------------------------------------------------------------------
+# C40 — outcome-based per-host coverage projection
+#
+# The five sub-objectives the recon phase nominally produces per host. None of
+# them check `assessment_command_runs` — every signal is a row in an outcome
+# table the specialists are already writing to. That is the contract: rename
+# wafw00f → wafw00f-ng tomorrow and the gate keeps working as long as the
+# tech-component row still gets recorded.
+# ---------------------------------------------------------------------------
+
+
+PER_HOST_OBJECTIVES: tuple[str, ...] = (
+    "waf_tier",
+    "service_inventory",
+    "directory_fuzz",
+    "nikto_trigger",
+    "osint",
+)
+
+# WAF families operators classify hosts into. Matched case-insensitively as a
+# substring of the `component` field on `intel_tech_components`. Extending this
+# tuple (e.g., new CDN entrant) is the canonical drift-prone seam — keep it
+# small and additive.
+_WAF_FAMILY_TOKENS: tuple[str, ...] = (
+    "cloudflare",
+    "akamai",
+    "f5",
+    "aws waf",
+    "awswaf",
+    "imperva",
+    "fastly",
+    "incapsula",
+    "sucuri",
+    "cloudfront",
+    "azure front door",
+    "barracuda",
+)
+
+# Tokens that suggest a tech-component row came from a "nikto-equivalent"
+# scanner (whatweb, httpx -tech-detect, wappalyzer, nuclei tech templates,
+# nmap http-* scripts, nikto itself). We do NOT hardcode tool names in the
+# CLI side of the gate — this list is the BACKEND'S read-only interpretation
+# of "scanner that produced a tech fingerprint". Operators recording intel
+# manually still satisfy the gate because they set `source_name` to their
+# agent identity.
+_TECH_SCAN_SOURCE_TOKENS: tuple[str, ...] = (
+    "whatweb",
+    "httpx",
+    "wappalyzer",
+    "nuclei",
+    "nikto",
+    "nmap",
+    "recon-specialist",
+    "wafw00f",
+    "wafw0of",
+    "source-analyzer",
+    "operator",
+)
+
+_NON_LIVE_SERVICE_STATES_FOR_INVENTORY: frozenset[str] = frozenset(
+    {"down", "filtered", "unreachable"}
+)
+
+def _coverage_endpoint_host(endpoint: str) -> str:
+    """Lowercased host portion of a service endpoint or surface descriptor.
+
+    Mirrors `_endpoint_host` in `check_scope_coverage.py` but the CLI version
+    cannot be imported here. Keep the two in sync — they extract the same
+    host string from the same shapes (bare host, host:port, full URL).
+    """
+    raw = (endpoint or "").strip().lower()
+    if not raw:
+        return ""
+    first = raw.split()[0]
+    if "://" in first:
+        parsed = urlparse(first)
+        return (parsed.hostname or "").strip("[]")
+    # Strip leading/trailing wrappers and trailing punctuation.
+    stripped = first.strip("'\"<>()").rstrip(",;").rstrip(".")
+    if stripped.startswith("[") and "]" in stripped:
+        # Bracketed IPv6 with optional :port suffix.
+        host = stripped[1 : stripped.find("]")]
+        return host
+    if stripped.count(":") >= 2:
+        # IPv6 literal without brackets (e.g., 2001:db8::1 or 2001:db8::1:443).
+        # Splitting on rpartition risks chopping the address; only strip a
+        # trailing port if the suffix is purely numeric AND the prefix parses
+        # as an IPv6 address.
+        host, _, port = stripped.rpartition(":")
+        if port.isdigit():
+            try:
+                import ipaddress
+
+                ipaddress.ip_address(host)
+                return host
+            except ValueError:
+                return stripped
+        return stripped
+    host, _, port = stripped.rpartition(":")
+    if port.isdigit() and host:
+        return host
+    return stripped
+
+def _string_contains_host(haystack: str, host: str) -> bool:
+    """True when `host` appears as a token in `haystack` (case-insensitive).
+
+    Avoids substring false positives like "evil.target.example" matching
+    "target.example" — we require the match to be on a word boundary so
+    `notes='banner=cf-cf'` does not falsely satisfy `host='cf'`.
+    """
+    if not haystack or not host:
+        return False
+    lower_hay = haystack.lower()
+    lower_host = host.lower()
+    if lower_host not in lower_hay:
+        return False
+    idx = 0
+    while True:
+        pos = lower_hay.find(lower_host, idx)
+        if pos == -1:
+            return False
+        left_ok = pos == 0 or not (lower_hay[pos - 1].isalnum() or lower_hay[pos - 1] in ".-")
+        end = pos + len(lower_host)
+        right_ok = end == len(lower_hay) or not (
+            lower_hay[end].isalnum() or lower_hay[end] in ".-"
+        )
+        if left_ok and right_ok:
+            return True
+        idx = pos + 1
+
+def _intel_row_references_host(row: dict[str, Any], host: str) -> bool:
+    """True when an intel row's evidence/notes/provenance mentions the host."""
+    if not host:
+        return False
+    for key in ("evidence_ref", "notes", "source_name"):
+        if _string_contains_host(str(row.get(key, "") or ""), host):
+            return True
+    raw_provenance = row.get("provenance_json", row.get("provenance"))
+    provenance: Any = raw_provenance
+    if isinstance(raw_provenance, str) and raw_provenance:
+        try:
+            provenance = json.loads(raw_provenance)
+        except (ValueError, TypeError):
+            return _string_contains_host(raw_provenance, host)
+    if isinstance(provenance, dict):
+        for k in ("host", "target", "url", "endpoint"):
+            val = provenance.get(k)
+            if isinstance(val, str) and _string_contains_host(val, host):
+                return True
+        return _string_contains_host(json.dumps(provenance, ensure_ascii=False), host)
+    return False
+
+def _row_is_waf_classification(row: dict[str, Any]) -> bool:
+    component = str(row.get("component", "") or "").lower()
+    if not component:
+        return False
+    for token in _WAF_FAMILY_TOKENS:
+        if token in component:
+            return True
+    return False
+
+def _row_is_tech_scan_evidence(row: dict[str, Any]) -> bool:
+    """True when a tech-component row plausibly came from a 'nikto-equivalent'
+    scanner — i.e., any active fingerprinting tool or operator recording."""
+    source = str(row.get("source_name", "") or "").lower()
+    if not source:
+        # An empty source_name is still a tech-component row that records a
+        # real classification — count it as satisfying the trigger.
+        return True
+    for token in _TECH_SCAN_SOURCE_TOKENS:
+        if token in source:
+            return True
+    return False
+
+def _coverage_deferral_payload_hosts(payload: dict[str, Any]) -> list[str]:
+    """Return host strings referenced by a coverage_deferral decision payload.
+
+    Normalizes each value through ``_coverage_endpoint_host`` so URL or
+    host:port shapes (``https://api.example.com/v1``, ``api.example.com:8443``)
+    collapse to the same bare-hostname key used by ``services_by_host`` /
+    ``surfaces_by_host``. Without this, an operator-recorded deferral with a
+    URL value silently fails to match and the gate stays unmet.
+    """
+    candidates: list[str] = []
+    for key in ("host", "target", "hostname"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            normalized = _coverage_endpoint_host(val) or val.strip().lower()
+            candidates.append(normalized)
+    hosts_field = payload.get("hosts")
+    if isinstance(hosts_field, list):
+        for entry in hosts_field:
+            if isinstance(entry, str) and entry.strip():
+                normalized = _coverage_endpoint_host(entry) or entry.strip().lower()
+                candidates.append(normalized)
+    return candidates
+
+def _coverage_deferral_objectives(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("deferred_objectives")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+    return out
+
+def _active_coverage_deferrals(engagement_id: int) -> list[dict[str, Any]]:
+    """Return every active (``resolved=0``) coverage_deferral decision row
+    for the engagement, ordered newest-first.
+
+    Reads directly through ``get_connection`` to avoid the public
+    ``list_decisions`` endpoint's ``limit`` cap — large wildcard engagements
+    can legitimately accumulate thousands of operator-approved deferrals,
+    and a silent truncation would let objectives reappear as unmet in the
+    per-host gate.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        cursor = connection.execute(
+            "SELECT * FROM assessment_dispatch_decisions "
+            "WHERE engagement_id = ? AND kind = ? AND resolved = 0 "
+            "ORDER BY created_at DESC, id DESC",
+            (engagement.id, "coverage_deferral"),
+        )
+        return [_serialize_decision(row) for row in cursor.fetchall()]
+
+def _coverage_engagement_wide_deferrals(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return active deferral rows tagged ``engagement_wide=true``.
+
+    These apply to EVERY host with signal — operators use them for objectives
+    that are not host-scoped (e.g., "OSINT is out of scope for this whole
+    engagement"). Validated at POST time to be mutually exclusive with host
+    fields, so a row is either engagement-wide or per-host but not both.
+    """
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        payload = row.get("payload") or {}
+        if isinstance(payload, dict) and payload.get("engagement_wide") is True:
+            out.append(row)
+    return out
+
+def per_host_coverage(engagement_id: int) -> dict[str, Any]:
+    """Outcome-based per-host coverage projection (C40).
+
+    Five sub-objectives per host, each evaluated against an outcome table:
+
+    1. ``waf_tier`` — an ``intel_tech_components`` row whose ``component`` matches
+       a known WAF family. Engagement-level WAF intel (no host evidence in
+       evidence_ref/notes/provenance) counts for every host: CDN-class WAFs
+       typically sit in front of an entire property, and demanding per-host
+       evidence would produce false negatives that don't reflect operator
+       reality.
+    2. ``service_inventory`` — at least one ``assessment_services`` row in a live
+       state for the host, OR at least one ``assessment_surfaces`` row.
+    3. ``directory_fuzz`` — at least one ``assessment_surfaces`` row for the host.
+       Specialists running ffuf / feroxbuster / dirsearch record their
+       findings as surfaces (via ``record-surface``) so the gate cares about
+       the surface row, not the binary that produced it.
+    4. ``nikto_trigger`` — at least one ``intel_tech_components`` row whose
+       ``source_name`` plausibly came from a fingerprinting scanner (whatweb,
+       httpx, wappalyzer, nuclei, nmap, nikto, recon-specialist, etc.). The
+       trigger is "did fingerprinting happen", which the operator can satisfy
+       with any of those tools — or by recording the row manually.
+    5. ``osint`` — engagement-level. ≥1 row in any of ``intel_tech_components``,
+       ``intel_people``, or ``intel_breach_records`` proves OSINT happened.
+       OSINT is not naturally host-keyed (people, breach corpora, org facts
+       are organization-level), so this objective is the same answer for
+       every host in the engagement.
+
+    A host with an active ``coverage_deferral`` decision row whose payload
+    lists an objective passes that objective regardless of the underlying
+    signal. The deferral is the operator's explicit "we decided not to do
+    this for this host" record; the gate trusts it.
+
+    NOTE: this function deliberately does NOT consult
+    ``assessment_command_runs``. The whole point of the C40 reframe is that
+    the gate reads outcomes, not tool runs. Adding a `command-runs` join
+    here is the regression we're trying to prevent — `test_check_scope_coverage`
+    asserts the CLI does not query it.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    eng_id = engagement.id
+
+    with _common.get_connection() as connection:
+        services = _fetch_all(
+            connection,
+            "SELECT endpoint, state FROM assessment_services WHERE engagement_id = ?",
+            (eng_id,),
+        )
+        surfaces = _fetch_all(
+            connection,
+            "SELECT surface_type, target_descriptor, status FROM assessment_surfaces "
+            "WHERE engagement_id = ?",
+            (eng_id,),
+        )
+        tech_components = _fetch_all(
+            connection,
+            "SELECT component, version, source_name, evidence_ref, notes, "
+            "provenance_json, superseded_by_id "
+            "FROM intel_tech_components WHERE engagement_id = ?",
+            (eng_id,),
+        )
+        people_count = _scalar_row(
+            connection,
+            "SELECT COUNT(*) FROM intel_people WHERE engagement_id = ? "
+            "AND superseded_by_id IS NULL",
+            (eng_id,),
+        )
+        breach_count = _scalar_row(
+            connection,
+            "SELECT COUNT(*) FROM intel_breach_records WHERE engagement_id = ? "
+            "AND superseded_by_id IS NULL",
+            (eng_id,),
+        )
+
+    # Filter out superseded tech-component rows from outcome consideration —
+    # the current row is the canonical answer.
+    live_tech_components = [
+        row for row in tech_components if row.get("superseded_by_id") is None
+    ]
+
+    # Discover every host the engagement actually has signal for.
+    hosts: set[str] = set()
+    services_by_host: dict[str, list[dict[str, Any]]] = {}
+    surfaces_by_host: dict[str, list[dict[str, Any]]] = {}
+    for row in services:
+        host = _coverage_endpoint_host(str(row.get("endpoint") or ""))
+        if not host:
+            continue
+        hosts.add(host)
+        services_by_host.setdefault(host, []).append(row)
+    for row in surfaces:
+        host = _coverage_endpoint_host(str(row.get("target_descriptor") or ""))
+        if not host:
+            continue
+        hosts.add(host)
+        surfaces_by_host.setdefault(host, []).append(row)
+
+    all_deferral_rows = _active_coverage_deferrals(eng_id)
+    deferrals_by_host: dict[str, list[dict[str, Any]]] = {}
+    for row in all_deferral_rows:
+        payload = row.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("engagement_wide") is True:
+            continue  # handled below — applies to every host with signal
+        row_hosts = _coverage_deferral_payload_hosts(payload)
+        if not row_hosts:
+            continue
+        for host in row_hosts:
+            deferrals_by_host.setdefault(host, []).append(row)
+    for host in deferrals_by_host.keys():
+        hosts.add(host)
+
+    engagement_wide_deferral_rows = _coverage_engagement_wide_deferrals(all_deferral_rows)
+    engagement_wide_deferred_objectives: set[str] = set()
+    for row in engagement_wide_deferral_rows:
+        for obj in _coverage_deferral_objectives(row.get("payload") or {}):
+            engagement_wide_deferred_objectives.add(obj)
+
+    # Engagement-level signals (apply to every host).
+    osint_met = (
+        len(live_tech_components) > 0 or people_count > 0 or breach_count > 0
+    )
+    osint_evidence: list[str] = []
+    if live_tech_components:
+        osint_evidence.append(f"tech_components:{len(live_tech_components)}")
+    if people_count:
+        osint_evidence.append(f"people:{int(people_count)}")
+    if breach_count:
+        osint_evidence.append(f"breach_records:{int(breach_count)}")
+
+    waf_rows = [row for row in live_tech_components if _row_is_waf_classification(row)]
+    engagement_has_waf_intel = bool(waf_rows)
+
+    nikto_trigger_rows = [row for row in live_tech_components if _row_is_tech_scan_evidence(row)]
+    engagement_has_nikto_trigger = bool(nikto_trigger_rows)
+
+    host_outcomes: list[dict[str, Any]] = []
+    for host in sorted(hosts):
+        host_services = services_by_host.get(host, [])
+        host_surfaces = surfaces_by_host.get(host, [])
+
+        # waf_tier — engagement-level WAF intel is sufficient; per-host
+        # specificity is a tighter signal when the evidence_ref/notes
+        # mention the host.
+        waf_host_specific = any(_intel_row_references_host(row, host) for row in waf_rows)
+        waf_met = waf_host_specific or engagement_has_waf_intel
+        waf_evidence: list[str] = []
+        for row in waf_rows:
+            label = str(row.get("component") or "").strip()
+            if not label:
+                continue
+            host_specific = _intel_row_references_host(row, host)
+            waf_evidence.append(f"{label}{'(host)' if host_specific else ''}")
+
+        # service_inventory — live service or surface row for the host
+        live_services = [
+            row
+            for row in host_services
+            if str(row.get("state") or "").lower() not in _NON_LIVE_SERVICE_STATES_FOR_INVENTORY
+        ]
+        service_met = bool(live_services) or bool(host_surfaces)
+        service_evidence: list[str] = []
+        if live_services:
+            service_evidence.append(f"services:{len(live_services)}")
+        if host_surfaces:
+            service_evidence.append(f"surfaces:{len(host_surfaces)}")
+
+        # directory_fuzz — surface presence proves URL-level discovery.
+        # Backend cannot see the local cases.db `work_items` count, so the
+        # CLI layer (`--by-host`) may upgrade this outcome based on the
+        # local work-buffer rollup. From the backend's perspective a
+        # surface is the durable proof.
+        dirfuzz_met = bool(host_surfaces)
+        dirfuzz_evidence: list[str] = []
+        if host_surfaces:
+            dirfuzz_evidence.append(f"surfaces:{len(host_surfaces)}")
+
+        # nikto_trigger — any fingerprinting-equivalent intel row, host-specific
+        # preferred but engagement-level acceptable.
+        nikto_host_specific = any(
+            _intel_row_references_host(row, host) for row in nikto_trigger_rows
+        )
+        nikto_met = nikto_host_specific or engagement_has_nikto_trigger
+        nikto_evidence: list[str] = []
+        for row in nikto_trigger_rows:
+            label = str(row.get("source_name") or "").strip() or "unknown"
+            host_specific = _intel_row_references_host(row, host)
+            nikto_evidence.append(f"{label}{'(host)' if host_specific else ''}")
+            if len(nikto_evidence) >= 5:
+                break
+
+        deferral_rows = deferrals_by_host.get(host, [])
+        deferred_objectives: set[str] = set(engagement_wide_deferred_objectives)
+        for row in deferral_rows:
+            for obj in _coverage_deferral_objectives(row.get("payload") or {}):
+                deferred_objectives.add(obj)
+        # Surface engagement-wide rows in the per-host audit list too so
+        # operators can see WHY an objective is marked deferred for this host.
+        deferral_rows = deferral_rows + engagement_wide_deferral_rows
+
+        outcomes: dict[str, dict[str, Any]] = {
+            "waf_tier": {
+                "met": waf_met,
+                "evidence": waf_evidence,
+                "deferred": "waf_tier" in deferred_objectives,
+            },
+            "service_inventory": {
+                "met": service_met,
+                "evidence": service_evidence,
+                "deferred": "service_inventory" in deferred_objectives,
+            },
+            "directory_fuzz": {
+                "met": dirfuzz_met,
+                "evidence": dirfuzz_evidence,
+                "deferred": "directory_fuzz" in deferred_objectives,
+            },
+            "nikto_trigger": {
+                "met": nikto_met,
+                "evidence": nikto_evidence,
+                "deferred": "nikto_trigger" in deferred_objectives,
+            },
+            "osint": {
+                "met": osint_met,
+                "evidence": osint_evidence,
+                "deferred": "osint" in deferred_objectives,
+            },
+        }
+
+        unmet = [
+            name
+            for name, info in outcomes.items()
+            if not info["met"] and not info["deferred"]
+        ]
+
+        host_outcomes.append(
+            {
+                "host": host,
+                "outcomes": outcomes,
+                "unmet_objectives": unmet,
+                "deferred_objectives": sorted(deferred_objectives),
+                "deferrals": [
+                    {
+                        "id": int(row.get("id", 0)),
+                        "kind": str(row.get("kind", "") or ""),
+                        "payload": row.get("payload") or {},
+                        "created_at": row.get("created_at"),
+                    }
+                    for row in deferral_rows
+                ],
+            }
+        )
+
+    return {
+        "objectives": list(PER_HOST_OBJECTIVES),
+        "hosts": host_outcomes,
+        "engagement_signals": {
+            "waf_intel_count": len(waf_rows),
+            "tech_scan_intel_count": len(nikto_trigger_rows),
+            "osint_intel_total": len(live_tech_components) + int(people_count) + int(breach_count),
+        },
+    }
+
+def update_coverage_item_status(
+    engagement_id: int,
+    *,
+    coverage_item_id: int,
+    status_value: str,
+    notes: str,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    normalized_status = _normalize_coverage_status(status_value)
+    with _common.get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_coverage_items WHERE id = ? AND engagement_id = ?",
+            (coverage_item_id, engagement.id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="coverage item not found")
+        connection.execute(
+            "UPDATE assessment_coverage_items SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND engagement_id = ?",
+            (normalized_status, _common._append_notes(row["notes"], notes), coverage_item_id, engagement.id),
+        )
+        if row["service_id"] is not None:
+            _refresh_service_coverage_status(connection, engagement.id, int(row["service_id"]))
+        updated = connection.execute(
+            "SELECT * FROM assessment_coverage_items WHERE id = ?", (coverage_item_id,)
+        ).fetchone()
+    assert updated is not None
+    return dict(updated)
+
+_VENDOR_SAAS_HOST_SUFFIXES: list[tuple[str, str]] = [
+    # Mirror of agent/scripts/assess/lib/scope.py:_VENDOR_SAAS_SUFFIXES so the
+    # backend projection can answer the "is this host vendor SaaS" question
+    # without spawning a Python subprocess. Keep the two lists in sync; the
+    # CLI is the source of truth for the operator-side checkpoint, this list
+    # exists only so the engagement summary projection can flag pending
+    # decisions for the frontend banner.
+    ("salesforce", ".salesforce.com"),
+    ("salesforce", ".lightning.force.com"),
+    ("salesforce", ".my.salesforce.com"),
+    ("salesforce", ".force.com"),
+    ("servicenow", ".service-now.com"),
+    ("servicenow", ".servicenowservices.com"),
+    ("statuspage", ".statuspage.io"),
+    ("statuspage", ".statuspage.amazon.com"),
+    ("govdelivery", ".govdelivery.com"),
+    ("awsconnect", ".awsconnect.com"),
+    ("awsconnect", ".amazonconnect.com"),
+    ("auth0", ".auth0.com"),
+    ("okta", ".okta.com"),
+    ("okta", ".oktapreview.com"),
+    ("zendesk", ".zendesk.com"),
+    ("freshdesk", ".freshdesk.com"),
+    ("intercom", ".intercom.io"),
+]
+
+def _host_is_vendor_saas(host: str | None) -> str | None:
+    if not host:
+        return None
+    normalized = host.strip().rstrip(".").lower()
+    if not normalized:
+        return None
+    for label, suffix in _VENDOR_SAAS_HOST_SUFFIXES:
+        bare = suffix.lstrip(".")
+        if normalized == bare or normalized.endswith(suffix):
+            return label
+    return None
+
+def _host_from_endpoint(endpoint: str | None) -> str:
+    raw = (endpoint or "").strip().lower()
+    if not raw:
+        return ""
+    first = raw.split()[0]
+    if "://" in first:
+        try:
+            host = urlparse(first).hostname or ""
+        except ValueError:
+            return ""
+        return host.rstrip(".").lower()
+    if first.startswith("["):
+        closing = first.find("]")
+        if closing > 1:
+            return first[1:closing]
+        return ""
+    return first.split(":", 1)[0].rstrip(".").lower()
+
+def vendor_saas_hosts_pending_decision(engagement_id: int) -> list[dict[str, str]]:
+    """Return vendor-SaaS-flagged hosts that have no scope_decision record.
+
+    A vendor-SaaS host is one whose recorded service endpoint or surface
+    target descriptor matches a vendor SaaS suffix (Salesforce, ServiceNow,
+    StatusPage, GovDelivery, AwsConnect, Auth0, Okta, Zendesk, Freshdesk,
+    Intercom). The Vendor-SaaS scope checkpoint records the operator's
+    choice as an ``assessment_dispatch_decisions`` row with
+    ``kind='scope_decision'`` and ``payload.host`` set to the vendor host.
+    Hosts that lack that record block the Phase 1 advance gate and surface
+    in the frontend overview banner.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    pending: dict[str, str] = {}
+    decided: set[str] = set()
+    with _common.get_connection() as connection:
+        service_rows = connection.execute(
+            "SELECT endpoint FROM assessment_services WHERE engagement_id = ?",
+            (engagement.id,),
+        ).fetchall()
+        surface_rows = connection.execute(
+            "SELECT target_descriptor FROM assessment_surfaces WHERE engagement_id = ?",
+            (engagement.id,),
+        ).fetchall()
+        decision_rows = connection.execute(
+            """
+            SELECT payload_json
+            FROM assessment_dispatch_decisions
+            WHERE engagement_id = ?
+              AND kind = 'scope_decision'
+            """,
+            (engagement.id,),
+        ).fetchall()
+    for row in decision_rows:
+        raw = row["payload_json"] if "payload_json" in row.keys() else row[0]
+        try:
+            payload = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        host = _host_from_endpoint(str(payload.get("host") or payload.get("target") or ""))
+        if _host_is_vendor_saas(host):
+            decided.add(host)
+    for row in service_rows:
+        host = _host_from_endpoint(str(row["endpoint"] if "endpoint" in row.keys() else row[0]))
+        vendor = _host_is_vendor_saas(host)
+        if vendor and host not in decided and host not in pending:
+            pending[host] = vendor
+    for row in surface_rows:
+        host = _host_from_endpoint(str(row["target_descriptor"] if "target_descriptor" in row.keys() else row[0]))
+        vendor = _host_is_vendor_saas(host)
+        if vendor and host not in decided and host not in pending:
+            pending[host] = vendor
+    return [{"host": host, "vendor": vendor} for host, vendor in sorted(pending.items())]
+
+_EGRESS_BLOCK_INTENT_PATTERNS = (
+    "egress reputation",
+    "egress-block",
+    "egress block",
+    "cdn-ip-block",
+    "ip-reputation",
+)
+
+def egress_block_status(engagement_id: int) -> dict[str, Any]:
+    """Return ``{blocked_pct, pattern, samples_total, samples_blocked}``.
+
+    Reads the most recent egress reputation check from
+    ``assessment_command_runs`` (matched by intent text) and parses the
+    ``egress_block_pct=N`` line out of stdout. When no recent run is
+    available the projection returns zeros so the frontend can show a
+    "not yet sampled" state instead of a stale percentage.
+
+    ``pattern`` is one of ``unknown`` / ``cdn-403`` / ``geoblock-reset`` /
+    ``mixed``, derived from the `403`/`000` ratio in the run output. The
+    pattern is informational; the operator confirms the cause via the
+    Egress reputation checkpoint.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT intent, stdout_preview, created_at
+            FROM assessment_command_runs
+            WHERE engagement_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 50
+            """,
+            (engagement.id,),
+        ).fetchall()
+    for row in rows:
+        intent = (row["intent"] if "intent" in row.keys() else "") or ""
+        if not isinstance(intent, str):
+            continue
+        intent_lower = intent.lower()
+        if not any(needle in intent_lower for needle in _EGRESS_BLOCK_INTENT_PATTERNS):
+            continue
+        stdout = row["stdout_preview"] if "stdout_preview" in row.keys() else ""
+        if not isinstance(stdout, str):
+            stdout = ""
+        match = re.search(r"egress_block_pct\s*=\s*(\d+)", stdout)
+        if not match:
+            continue
+        pct = int(match.group(1))
+        n_403 = len(re.findall(r"\b403\b", stdout))
+        n_000 = len(re.findall(r"\b000\b", stdout))
+        if n_403 and not n_000:
+            pattern = "cdn-403"
+        elif n_000 and not n_403:
+            pattern = "geoblock-reset"
+        elif n_403 and n_000:
+            pattern = "mixed"
+        else:
+            pattern = "unknown"
+        return {
+            "blocked_pct": pct,
+            "pattern": pattern,
+            "samples_total": n_403 + n_000,
+            "samples_blocked": n_403 + n_000,
+            "checked_at": row["created_at"] if "created_at" in row.keys() else None,
+        }
+    return {
+        "blocked_pct": 0,
+        "pattern": "unknown",
+        "samples_total": 0,
+        "samples_blocked": 0,
+        "checked_at": None,
+    }
+
+def coverage_rollup(engagement_id: int) -> dict[str, Any]:
+    """Split the flat coverage-items count by host reachability.
+
+    The raw ``pending: N`` coverage number is permanently scary and hides the
+    truth (most items sit on blackholed/unprobed hosts). This joins each
+    coverage item to its host's verdict in the liveness ledger — via the
+    request-variant `host` or the service `endpoint` (port-stripped) — and
+    buckets the counts so the operator sees how many items are actually on
+    reachable hosts. Reports STORED verdicts (no freshness overlay) since it is
+    a coarse rollup, not a per-host dispatch decision. Observability only — no gate.
+    """
+    _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT COALESCE(hl.reachability_class, 'unprobed') AS klass, COUNT(*) AS count
+            FROM assessment_coverage_items ci
+            LEFT JOIN assessment_services s ON s.id = ci.service_id
+            LEFT JOIN assessment_request_variants rv ON rv.id = ci.request_variant_id
+            LEFT JOIN assessment_host_liveness hl
+                ON hl.engagement_id = ci.engagement_id
+               AND hl.host = LOWER(
+                     COALESCE(
+                       rv.host,
+                       CASE WHEN instr(s.endpoint, ':') > 0
+                            THEN substr(s.endpoint, 1, instr(s.endpoint, ':') - 1)
+                            ELSE s.endpoint END
+                     )
+                   )
+            WHERE ci.engagement_id = ?
+            GROUP BY klass
+            """,
+            (engagement_id,),
+        ).fetchall()
+    counts = {row["klass"]: int(row["count"]) for row in rows}
+    return {
+        "total": sum(counts.values()),
+        "reachable": counts.get("live", 0),
+        "blackholed": counts.get("blackholed", 0),
+        "dead": counts.get("dead", 0),
+        "unknown": counts.get("unknown", 0),
+        "unprobed": counts.get("unprobed", 0),
+    }
