@@ -80,6 +80,8 @@ def _insert_work_item(
     status: str = "pending",
     case_type: str = "api",
     terminal_reason: str | None = None,
+    query_params: str = "{}",
+    cluster_key: str | None = None,
 ) -> None:
     conn = sqlite3.connect(str(db_path))
     try:
@@ -87,8 +89,8 @@ def _insert_work_item(
             """INSERT INTO work_items
             (queue_key, method, url, url_path, query_params, body_params,
              type, source, status, priority_score, cluster_key, terminal_reason)
-            VALUES (?, 'GET', ?, ?, '{}', '{}', ?, 'test', ?, 0, NULL, ?)""",
-            (queue_key, url, url_path, case_type, status, terminal_reason),
+            VALUES (?, 'GET', ?, ?, ?, '{}', ?, 'test', ?, 0, ?, ?)""",
+            (queue_key, url, url_path, query_params, case_type, status, cluster_key, terminal_reason),
         )
         conn.commit()
     finally:
@@ -131,12 +133,16 @@ class FakeClient:
         services: list[dict[str, Any]] | None = None,
         surfaces: list[dict[str, Any]] | None = None,
         decisions: list[dict[str, Any]] | None = None,
+        dispatches: list[dict[str, Any]] | None = None,
+        dispatches_error: bool = False,
         endpoint_handler=None,
         per_host_payload: dict[str, Any] | None = None,
     ) -> None:
         self._services = services or []
         self._surfaces = surfaces or []
         self._decisions = decisions or []
+        self._dispatches = dispatches or []
+        self._dispatches_error = dispatches_error
         self._endpoint_handler = endpoint_handler
         self._per_host_payload = per_host_payload
         self.calls: list[str] = []
@@ -178,6 +184,22 @@ class FakeClient:
         scoped = {k: v for k, v in filters.items() if k not in ("limit", "offset")}
         return self.list_decisions(**scoped)
 
+    def list_dispatches(self, **filters: Any) -> list[dict[str, Any]]:
+        # Stands in for assessment_dispatch_decisions' dispatch rows — the same
+        # method --auto-redispatch dedup reuses. `dispatches_error=True`
+        # simulates a backend failure so the graceful-degrade path can be
+        # exercised.
+        self.calls.append("dispatches")
+        if self._dispatches_error:
+            from assess.lib.client import AssessError
+
+            raise AssessError("HTTP 503:\nbackend down")
+        rows = list(self._dispatches)
+        role = filters.get("role")
+        if role:
+            rows = [r for r in rows if r.get("agent_role") == role or r.get("role") == role]
+        return rows
+
     def close(self) -> None:
         return None
 
@@ -196,12 +218,15 @@ def _patch_client(
     services=None,
     surfaces=None,
     decisions=None,
+    dispatches=None,
+    dispatches_error=False,
     endpoint_handler=None,
     per_host_payload=None,
 ) -> list[FakeClient]:
     fake_services = services or []
     fake_surfaces = surfaces or []
     fake_decisions = decisions or []
+    fake_dispatches = dispatches or []
     created: list[FakeClient] = []
 
     def _factory(base_url: str, engagement_key: str) -> FakeClient:
@@ -209,6 +234,8 @@ def _patch_client(
             services=fake_services,
             surfaces=fake_surfaces,
             decisions=fake_decisions,
+            dispatches=fake_dispatches,
+            dispatches_error=dispatches_error,
             endpoint_handler=endpoint_handler,
             per_host_payload=per_host_payload,
         )
@@ -239,6 +266,8 @@ def _run(
     services=None,
     surfaces=None,
     decisions=None,
+    dispatches=None,
+    dispatches_error=False,
     endpoint_handler=None,
     require_stage: str | None = None,
     as_json: bool = True,
@@ -246,6 +275,8 @@ def _run(
     strict_vendor_saas: bool = False,
     by_host: bool = False,
     include_discovered: bool = False,
+    auto_redispatch: bool = False,
+    max_recommendations: int = 10,
     per_host_payload=None,
 ) -> FakeClient | None:
     module = _load_module()
@@ -256,6 +287,8 @@ def _run(
         services=services,
         surfaces=surfaces,
         decisions=decisions,
+        dispatches=dispatches,
+        dispatches_error=dispatches_error,
         endpoint_handler=endpoint_handler,
         per_host_payload=per_host_payload,
     )
@@ -268,6 +301,8 @@ def _run(
             strict_vendor_saas=strict_vendor_saas,
             by_host=by_host,
             include_discovered=include_discovered,
+            auto_redispatch=auto_redispatch,
+            max_recommendations=max_recommendations,
         )
     )
     return clients[0] if clients else None
@@ -1628,3 +1663,515 @@ def test_specialist_roster_substituted_into_hints():
         assert "recon-specialist" in hints[objective], (
             f"objective={objective!r} missing recon-specialist reference"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — --auto-redispatch recommendations
+# ---------------------------------------------------------------------------
+
+
+def _redispatch(report: dict[str, Any]) -> dict[str, Any]:
+    assert "redispatch" in report, report
+    return report["redispatch"]
+
+
+def _recs(report: dict[str, Any]) -> list[dict[str, Any]]:
+    return _redispatch(report)["recommendations"]
+
+
+def _rec_for_host(report: dict[str, Any], host: str) -> dict[str, Any]:
+    matches = [r for r in _recs(report) if r["scope_host"] == host]
+    assert matches, (host, _recs(report))
+    return matches[0]
+
+
+def test_auto_redispatch_enum_gap_recommends_recon(monkeypatch, tmp_path: Path, capsys) -> None:
+    """An enum gap emits a recon-specialist recommendation: hypothesis-driven
+    mode, fixed recon skills, and source-analyzer named as the parallel role."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["*.target.example"])
+    _make_cases_db(eng)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(
+            monkeypatch,
+            eng,
+            services=[],
+            surfaces=[],
+            require_stage="enum",
+            auto_redispatch=True,
+        )
+    assert excinfo.value.code == 1
+
+    report = json.loads(capsys.readouterr().out)
+    rec = _rec_for_host(report, "target.example")
+    assert rec["stage"] == "enum"
+    assert rec["role"] == "recon-specialist"
+    assert rec["dispatch_mode"] == "hypothesis-driven"
+    assert rec["confidence"] == "high"
+    assert rec["skills"] == ["web-recon", "subdomain-enumeration"]
+    assert rec["parallel_role"] == "source-analyzer"
+    # The ready-to-run command line must encode the role/scope-host/mode/skills.
+    assert "aith assess agent start" in rec["command"]
+    assert "--role recon-specialist" in rec["command"]
+    assert "--scope-host target.example" in rec["command"]
+    assert "--dispatch-mode hypothesis-driven" in rec["command"]
+    assert "--skills web-recon,subdomain-enumeration" in rec["command"]
+    # Task skeleton names the host + stage.
+    assert "target.example" in rec["task_skeleton"]
+
+
+def test_auto_redispatch_collection_gap_recommends_surface_collector(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """A collection gap (live service, no surfaces/work) recommends the
+    surface-collector with item-iterating mode and the collection skills."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    _make_cases_db(eng)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[],
+            require_stage="collection",
+            auto_redispatch=True,
+        )
+    assert excinfo.value.code == 1
+
+    report = json.loads(capsys.readouterr().out)
+    rec = _rec_for_host(report, "target.example")
+    assert rec["stage"] == "collection"
+    assert rec["role"] == "surface-collector"
+    assert rec["dispatch_mode"] == "item-iterating"
+    assert rec["confidence"] == "high"
+    assert rec["skills"] == ["surface-collection", "gau-triage"]
+    assert rec["parallel_role"] is None
+    assert "--role surface-collector" in rec["command"]
+    assert "--dispatch-mode item-iterating" in rec["command"]
+
+
+def test_auto_redispatch_consumption_dominant_idor(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A consumption gap whose dominant pending bucket is idor recommends the
+    vulnerability-analyst + idor-testing(+split-brain-idor), correct scope-host,
+    and item-iterating mode, at confidence=high."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    # Three untested pending IDOR-shaped items (the `user` param uniquely keys
+    # the idor bucket; `id` would also hit the higher-weight sqli bucket).
+    for i in range(3):
+        _insert_work_item(
+            db,
+            queue_key=f"idor:{i}",
+            url=f"https://target.example/api/profile/{i}",
+            url_path="/api/profile",
+            status="pending",
+            query_params='{"user": "5"}',
+        )
+
+    # The audit fails the consumption gate -> SystemExit(1); the JSON report is
+    # printed before the exit so we read it after catching.
+    with pytest.raises(SystemExit):
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+        )
+    report = json.loads(capsys.readouterr().out)
+    rec = _rec_for_host(report, "target.example")
+    assert rec["stage"] == "consumption"
+    assert rec["role"] == "vulnerability-analyst"
+    assert rec["dispatch_mode"] == "item-iterating"
+    assert rec["confidence"] == "high"
+    assert rec["dominant_bucket"] == "idor"
+    assert rec["skills"] == ["idor-testing", "split-brain-idor"]
+    assert rec["scope_host"] == "target.example"
+    assert "--role vulnerability-analyst" in rec["command"]
+    assert "--scope-host target.example" in rec["command"]
+    assert "--skills idor-testing,split-brain-idor" in rec["command"]
+    # Task skeleton names host + dominant cluster + pending count.
+    assert "target.example" in rec["task_skeleton"]
+    assert "idor" in rec["task_skeleton"]
+    assert "3" in rec["task_skeleton"]
+
+
+def test_auto_redispatch_consumption_dominant_idor_exit_code(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """Companion to the idor test: the consumption gate still exits 1."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db,
+        queue_key="idor:0",
+        url="https://target.example/api/profile/0",
+        url_path="/api/profile",
+        status="pending",
+        query_params='{"user": "5"}',
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+        )
+    assert excinfo.value.code == 1
+    capsys.readouterr()
+
+
+def test_auto_redispatch_ambiguous_pending_emits_low_confidence_shortlist(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """Pending items split roughly evenly across >=3 mapped buckets yield a
+    low-confidence ranked shortlist, not a single forced guess."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    # One item each in three distinct mapped buckets: idor (user), xss (name),
+    # ssrf (url). No single dominant -> ambiguous.
+    _insert_work_item(
+        db, queue_key="a:1", url="https://target.example/p1", url_path="/p1",
+        status="pending", query_params='{"user": "1"}',
+    )
+    _insert_work_item(
+        db, queue_key="a:2", url="https://target.example/p2", url_path="/p2",
+        status="pending", query_params='{"name": "x"}',
+    )
+    _insert_work_item(
+        db, queue_key="a:3", url="https://target.example/p3", url_path="/p3",
+        status="pending", query_params='{"url": "http://x"}',
+    )
+
+    with pytest.raises(SystemExit):
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/p1"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+        )
+
+    report = json.loads(capsys.readouterr().out)
+    rec = _rec_for_host(report, "target.example")
+    assert rec["stage"] == "consumption"
+    assert rec["confidence"] == "low"
+    assert rec["dominant_bucket"] is None
+    # Shortlist contains one skill per present mapped bucket, ranked.
+    assert set(rec["skills"]) == {"idor-testing", "xss-testing", "ssrf-testing"}
+    # Still a vulnerability-analyst dispatch; the operator picks per surface.
+    assert rec["role"] == "vulnerability-analyst"
+
+
+def test_auto_redispatch_generic_dominant_bucket_is_low_confidence(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """When the most common pending bucket is generic/ambiguous
+    (interestingparams), the recommendation is a low-confidence shortlist even
+    though a smaller mapped bucket exists."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    # Three interestingparams (token) + one idor (user). Generic bucket
+    # dominates -> low confidence, shortlist of the mapped buckets present.
+    for i in range(3):
+        _insert_work_item(
+            db, queue_key=f"ip:{i}", url=f"https://target.example/g{i}", url_path=f"/g{i}",
+            status="pending", query_params='{"token": "x"}',
+        )
+    _insert_work_item(
+        db, queue_key="id:1", url="https://target.example/h1", url_path="/h1",
+        status="pending", query_params='{"user": "1"}',
+    )
+
+    with pytest.raises(SystemExit):
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/g0"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+        )
+
+    report = json.loads(capsys.readouterr().out)
+    rec = _rec_for_host(report, "target.example")
+    assert rec["confidence"] == "low"
+    assert rec["dominant_bucket"] is None
+    # idor-testing is the only mapped bucket present, surfaced as a shortlist.
+    assert "idor-testing" in rec["skills"]
+
+
+def test_auto_redispatch_dedup_suppresses_when_prior_dispatch_exists(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """A recommendation is suppressed when a prior dispatch already covers the
+    same (role, scope_host)."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db, queue_key="idor:0", url="https://target.example/api/profile/0",
+        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+    )
+
+    # Prior dispatch: a vulnerability-analyst already in flight against the host.
+    dispatches = [
+        {
+            "agent_id": "va-001",
+            "agent_role": "vulnerability-analyst",
+            "scope_host": "target.example",
+            "status": "in-progress",
+        }
+    ]
+
+    with pytest.raises(SystemExit):
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+            dispatches=dispatches,
+        )
+
+    report = json.loads(capsys.readouterr().out)
+    block = _redispatch(report)
+    # No live recommendation for target.example — it was suppressed.
+    assert not any(r["scope_host"] == "target.example" for r in block["recommendations"])
+    suppressed = block["suppressed"]
+    assert len(suppressed) == 1
+    assert suppressed[0]["scope_host"] == "target.example"
+    assert suppressed[0]["role"] == "vulnerability-analyst"
+    assert "va-001" in suppressed[0]["reason"]
+
+
+def test_auto_redispatch_dedup_degrades_gracefully_on_backend_error(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """A backend failure fetching prior dispatches must NOT crash the audit:
+    recommendations are emitted un-deduped with an explanatory note."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db, queue_key="idor:0", url="https://target.example/api/profile/0",
+        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+    )
+
+    with pytest.raises(SystemExit):
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+            dispatches_error=True,
+        )
+
+    report = json.loads(capsys.readouterr().out)
+    block = _redispatch(report)
+    # Recommendation still emitted (not deduped) ...
+    assert any(r["scope_host"] == "target.example" for r in block["recommendations"])
+    # ... with a note that dedup degraded.
+    assert any("dedup degraded" in note for note in block["notes"])
+
+
+def test_auto_redispatch_drops_non_resolving_skill(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A recommended skill with no SKILL.md on disk is dropped (never
+    recommended) and the drop is noted in the output."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db, queue_key="idor:0", url="https://target.example/api/profile/0",
+        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+    )
+
+    module = _load_module()
+    # Point idor at a real skill + a bogus one; the bogus name must be dropped.
+    monkeypatch.setattr(
+        module,
+        "BUCKET_SKILLS",
+        {**module.BUCKET_SKILLS, "idor": ("idor-testing", "does-not-exist-skill")},
+    )
+    _patch_config(monkeypatch, module, eng)
+    _patch_client(
+        monkeypatch,
+        module,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+    )
+
+    with pytest.raises(SystemExit):
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(eng),
+                require_stage="consumption",
+                as_json=True,
+                verbose=False,
+                strict_vendor_saas=False,
+                by_host=False,
+                include_discovered=False,
+                auto_redispatch=True,
+                max_recommendations=10,
+            )
+        )
+
+    report = json.loads(capsys.readouterr().out)
+    rec = _rec_for_host(report, "target.example")
+    assert rec["skills"] == ["idor-testing"]
+    assert "does-not-exist-skill" in rec["dropped_skills"]
+    block = _redispatch(report)
+    assert any("does-not-exist-skill" in note for note in block["notes"])
+
+
+def test_auto_redispatch_no_op_without_require_stage(monkeypatch, tmp_path: Path, capsys) -> None:
+    """--auto-redispatch without --require-stage emits an empty block with a
+    note (there are no stage gaps to recommend against)."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db, queue_key="p:0", url="https://target.example/api/profile/0",
+        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+        auto_redispatch=True,
+    )
+    report = json.loads(capsys.readouterr().out)
+    block = _redispatch(report)
+    assert block["recommendations"] == []
+    assert any("no-op without --require-stage" in note for note in block["notes"])
+
+
+def test_auto_redispatch_respects_max_recommendations(monkeypatch, tmp_path: Path, capsys) -> None:
+    """--max-recommendations caps the surfaced list; overflow is noted."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    # Three independent wildcard entries, all with an enum gap (no evidence).
+    # Wildcards (unlike bare hosts) do not satisfy the enum gate trivially.
+    _write_scope(eng, hosts=["*.a.example.test", "*.b.example.test", "*.c.example.test"])
+    _make_cases_db(eng)
+
+    with pytest.raises(SystemExit):
+        _run(
+            monkeypatch,
+            eng,
+            services=[],
+            surfaces=[],
+            require_stage="enum",
+            auto_redispatch=True,
+            max_recommendations=2,
+        )
+
+    report = json.loads(capsys.readouterr().out)
+    block = _redispatch(report)
+    assert len(block["recommendations"]) == 2
+    assert block["overflow"] == 1
+    assert any("more failing entr" in note for note in block["notes"])
+
+
+def test_auto_redispatch_clean_entries_emit_no_recommendations(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """A fully-covered scope with --auto-redispatch yields an empty
+    recommendation list (no gaps -> nothing to recommend)."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db, queue_key="d:1", url="https://target.example/a", url_path="/a", status="done"
+    )
+
+    _run(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/a"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is True
+    block = _redispatch(report)
+    assert block["recommendations"] == []
+    assert block["suppressed"] == []
+
+
+def test_bucket_skills_mapping_resolves_on_disk():
+    """Every skill named in classify_buckets.BUCKET_SKILLS must resolve to a
+    real agent/skills/<name>/SKILL.md. Catches a typo'd or stale skill name in
+    the single-source-of-truth mapping before it reaches an operator."""
+    scripts_root = _scripts_root()
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    import importlib
+
+    cb = importlib.import_module("assess.lib.classify_buckets")
+    repo_root = Path(__file__).resolve().parents[3]
+    skills_dir = repo_root / "agent" / "skills"
+    missing: list[str] = []
+    for bucket, skills in cb.BUCKET_SKILLS.items():
+        for skill in skills:
+            if not (skills_dir / skill / "SKILL.md").is_file():
+                missing.append(f"{bucket}->{skill}")
+    assert not missing, f"BUCKET_SKILLS references skills with no SKILL.md: {missing}"
+
+
+def test_auto_redispatch_human_output_is_recommendation_only(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """Human-readable output prints the ready-to-run command + task skeleton and
+    is explicitly RECOMMENDATION-ONLY (never fires a dispatch)."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["*.target.example"])
+    _make_cases_db(eng)
+
+    with pytest.raises(SystemExit):
+        _run(
+            monkeypatch,
+            eng,
+            services=[],
+            surfaces=[],
+            require_stage="enum",
+            auto_redispatch=True,
+            as_json=False,
+        )
+    out = capsys.readouterr().out
+    assert "RECOMMENDATION-ONLY" in out
+    assert "aith assess agent start --role recon-specialist" in out
+    assert "--scope-host target.example" in out
+    # The parallel-role note and the task skeleton are both present.
+    assert "source-analyzer" in out
+    assert "task:" in out
