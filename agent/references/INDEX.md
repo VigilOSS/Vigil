@@ -313,6 +313,20 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |
 | `recon/rate-calibration.md` | Per-target rate calibration table (Cloud-fronted / Origin / WAF-protected / High-friction / Vendor SaaS) plus the runtime-tier × DNS-profile matrix and the concurrent-nmap-procs cap. Recon-class roles load on first use; extracted from `shared-constraints.md` §14 to keep the every-specialist load lighter |
 
+## probe-scripts/ — Reusable Probe Examples
+
+Validated, copy-and-parametrize single-file Python probes for the
+`write-probe-script` capability. Used by: operator, vulnerability-analyst,
+exploit-developer, fuzzer. Paired with `agent/skills/write-probe-script/SKILL.md`
+(the authoring loop) and `agent/skills/kali-exec/SKILL.md` (probes run via
+`aith assess kali exec -- python3 <script>`). Scaffold a fresh probe into an
+engagement with `aith assess scaffold-probe <name>`.
+
+| File | Probe shape |
+|------|-------------|
+| `probe-scripts/http_differential.py` | Parametrized HTTP differential (control vs test request; decide on status / length / marker / latency delta) — the shape for IDOR boundaries, auth differentials, and any check that is inconclusive from one request. Stdlib-only; finding-return JSON verdict on the last stdout line. |
+| `probe-scripts/blind_callback_timing.py` | Blind OOB callback + timing fallback (carry a minted `aith oob mint` nonce host, measure baseline-vs-payload latency) — the shape for blind SSRF / XXE / command-injection / blind SQLi. Authoritative confirmation is `aith oob poll` on the nonce; timing is the egress-blocked fallback. |
+
 ## reporting/ — Disclosure & Reporting Formats
 
 | File | Purpose |
