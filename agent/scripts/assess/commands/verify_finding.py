@@ -23,7 +23,7 @@ def register(subparsers) -> None:
     p.add_argument("--inline", dest="inline_payload", help="Raw JSON verification payload")
     p.add_argument(
         "--disposition",
-        choices=("confirmed", "downgraded", "false_positive", "disputed"),
+        choices=("confirmed", "downgraded", "pending_runtime_proof", "false_positive", "disputed"),
         help="Verification disposition when building the payload from flags",
     )
     p.add_argument("--reason", dest="reason_text", help="Required verification rationale when building payload from flags")
@@ -31,6 +31,15 @@ def register(subparsers) -> None:
     p.add_argument("--new-severity", help="Required for downgraded verification")
     p.add_argument("--evidence-ref", default="", help="Optional evidence reference")
     p.add_argument("--artifact-ref", default="", help="Optional artifact reference")
+    p.add_argument(
+        "--narrative",
+        default="",
+        help=(
+            "Optional path to a verification/debate narrative (e.g. an "
+            "Ideator-vs-Tracer debate doc). Registered as a "
+            "kind=verification-narrative artifact linked to this finding."
+        ),
+    )
     p.add_argument("--notes", default="", help="Optional verification notes")
     p.add_argument("--source-name", default="", help="Optional source/agent name")
     p.add_argument("--details-inline", help="Inline JSON object merged into the details payload")
@@ -40,7 +49,7 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-_KNOWN_DISPOSITIONS = frozenset({"confirmed", "downgraded", "false_positive", "disputed"})
+_KNOWN_DISPOSITIONS = frozenset({"confirmed", "downgraded", "pending_runtime_proof", "false_positive", "disputed"})
 
 
 def run(args) -> None:
@@ -125,8 +134,20 @@ def run(args) -> None:
         print("downgraded verification requires new_severity", file=sys.stderr)
         sys.exit(1)
 
+    narrative_path = getattr(args, "narrative", "") or ""
+    producer_role = str(payload.get("source_name") or getattr(args, "source_name", "") or "")
+
     cfg = load_config(args.engagement_dir)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post(f"findings/{args.finding_slug}/verify", payload)
+        if narrative_path:
+            narrative_payload = {
+                "path": narrative_path,
+                "kind": "verification-narrative",
+                "related_finding_slug": args.finding_slug,
+            }
+            if producer_role:
+                narrative_payload["producer_agent_role"] = producer_role
+            result["narrative_artifact"] = client.post("artifacts", narrative_payload)
 
     print(json.dumps(result, indent=2, ensure_ascii=False))

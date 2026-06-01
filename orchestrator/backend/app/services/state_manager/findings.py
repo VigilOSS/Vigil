@@ -141,6 +141,11 @@ def _infer_transition_action(before: dict[str, str] | None, after: dict[str, str
         )
     ):
         return "verified_confirmed"
+    if (
+        after["verification_disposition"] == "pending_runtime_proof"
+        and before["verification_disposition"] != "pending_runtime_proof"
+    ):
+        return "verified_pending_runtime_proof"
     return "operator_override"
 
 def _default_transition_reason(action: str, after: dict[str, str]) -> str:
@@ -148,6 +153,8 @@ def _default_transition_reason(action: str, after: dict[str, str]) -> str:
         return "Finding created."
     if action == "verified_confirmed":
         return "Verification confirmed the finding."
+    if action == "verified_pending_runtime_proof":
+        return "Verification accepted static evidence; runtime proof outstanding."
     if action == "verified_downgraded":
         return "Verification downgraded the finding severity."
     if action == "verified_false_positive":
@@ -764,6 +771,13 @@ def verify_finding(
         transition_action = "verified_false_positive"
     elif normalized_disposition == "confirmed":
         transition_action = "verified_confirmed"
+    elif normalized_disposition == "pending_runtime_proof":
+        # Analyst accepted the static/code evidence; only runtime proof is
+        # outstanding. Mark verified so it leaves the unreviewed DoD queue while
+        # report-readiness still excludes it on disposition (pending != confirmed
+        # /downgraded), keeping it in the holding area until proven.
+        target_verification_state = "verified"
+        transition_action = "verified_pending_runtime_proof"
     else:
         target_verification_state = "disputed"
         normalized_disposition = "none"
