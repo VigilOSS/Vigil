@@ -61,6 +61,25 @@ checkPassword, skipValidation
 - [ ] Monitor for behavior changes: different data returned, different user context, different permissions
 - [ ] Use a second account's ID as the override value — if the response changes to show the second account's data, override is confirmed
 
+When you inject the **whole candidate-parameter wordlist** (from
+`agent/references/payloads/bff-override-params.md`) one parameter per request, do not eyeball each
+response for the one that took effect. Capture every response as a record and rank the divergence —
+the parameter the BFF actually honoured produces a response that breaks from the
+identical-to-baseline cluster:
+
+```bash
+# one {url,status,content_length,title} record per injected param → bff_inject.jsonl
+# (set url to the param name you injected so the ranking names the culprit), then:
+aith assess anomaly-score bff_inject.jsonl --top 5
+#   #1  score=4.17  status=200  len=2210  url=param:notAuthUserId   ← this override changed the response
+#       ^ length_bucket=...  ^ title='...'                          every ignored param matched baseline
+```
+
+The top-ranked record is the override candidate (its body/size/status diverged); the flat tail is
+the params the backend ignored. The oracle surfaces category-level breaks (size-class jump, status
+flip, title change), so confirm the winner with the pairwise baseline→override→revert protocol in
+Phase 3 before calling it.
+
 ---
 
 ## Phase 2: Override Testing
@@ -97,6 +116,16 @@ curl -H "Cookie: session=USER_A_TOKEN" \
 - [ ] JSON body field: `{"userId": "VICTIM_ID"}`, `{"$id$": "VICTIM_ID"}`
 - [ ] Custom header: `X-User-Id`, `X-Forwarded-User`, `X-Real-User-Id`
 - [ ] Cookie field: add `userId=VICTIM_ID` cookie alongside session cookie
+
+**No second account?** Generate the override value from your *own* identity. Classify your
+session-derived ID and use its `escalation`/`boundary`/`neighbor` variants as the `VICTIM_ID`
+candidates — these surface the first/admin object and adjacent records without needing a captured
+victim ID:
+```bash
+aith assess classify-payload "$MY_USER_ID" --mutations
+#   sequential_id → escalation '1' '0' 'admin' 'root';  neighbor ±1/±2;  boundary 0/-1/99999999
+#   uuid          → escalation 00000000-...-000000000000 / ...-000000000001 (likely first/admin user)
+```
 
 ### 2.2 Tenant/Organization Override (High — Cross-Tenant Access)
 

