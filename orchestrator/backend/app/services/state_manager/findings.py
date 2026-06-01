@@ -10,7 +10,7 @@ from ..search import (
 )
 
 from . import _common
-from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, VERIFICATION_DISPOSITION_RANK, VERIFICATION_STATE_RANK, WORKFLOW_STATUS_RANK, _finding_confidence_tuple, _finding_not_found, _json_object, _json_text, _merge_object_text, _normalize_severity, _normalize_verification_disposition, _normalize_verification_state, _normalize_workflow_status, _require_canonical_finding_slug, _resolve_existing_finding_slug, _row_verification_disposition, _row_verification_state, _row_workflow_status, _serialize_finding_record, _slugify, _stronger_severity
+from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, VERIFICATION_DISPOSITION_RANK, VERIFICATION_STATE_RANK, WORKFLOW_STATUS_RANK, VerificationDisposition, VerificationState, WorkflowStatus, _finding_confidence_tuple, _finding_not_found, _json_object, _json_text, _merge_object_text, _normalize_severity, _normalize_verification_disposition, _normalize_verification_state, _normalize_workflow_status, _require_canonical_finding_slug, _resolve_existing_finding_slug, _row_verification_disposition, _row_verification_state, _row_workflow_status, _serialize_finding_record, _slugify, _stronger_severity
 from .links import _is_root_cause_link, _upsert_finding_link
 
 
@@ -32,7 +32,7 @@ _FINDING_PREFIX_BY_SOURCE = {
     "operator-review": "OR",
 }
 
-def _coalesce_workflow_status(existing: str, incoming: str, *, explicit_workflow_override: bool = False) -> str:
+def _coalesce_workflow_status(existing: str, incoming: str, *, explicit_workflow_override: bool = False) -> WorkflowStatus:
     existing_normalized = _normalize_workflow_status(existing)
     incoming_normalized = _normalize_workflow_status(incoming)
     if existing_normalized == "merged":
@@ -53,7 +53,7 @@ def _coalesce_workflow_status(existing: str, incoming: str, *, explicit_workflow
         else existing_normalized
     )
 
-def _coalesce_verification_state(existing: str, incoming: str, *, explicit_override: bool = False) -> str:
+def _coalesce_verification_state(existing: str, incoming: str, *, explicit_override: bool = False) -> VerificationState:
     existing_normalized = _normalize_verification_state(existing)
     incoming_normalized = _normalize_verification_state(incoming)
     if explicit_override:
@@ -64,7 +64,7 @@ def _coalesce_verification_state(existing: str, incoming: str, *, explicit_overr
         else existing_normalized
     )
 
-def _coalesce_verification_disposition(existing: str, incoming: str, *, explicit_override: bool = False) -> str:
+def _coalesce_verification_disposition(existing: str, incoming: str, *, explicit_override: bool = False) -> VerificationDisposition:
     existing_normalized = _normalize_verification_disposition(existing)
     incoming_normalized = _normalize_verification_disposition(incoming)
     if incoming_normalized == "false_positive":

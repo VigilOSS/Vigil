@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import hashlib
 import json
 import re
@@ -20,52 +21,78 @@ from ..search import (
 
 SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
-WORKFLOW_STATUSES = {
-    "draft",
-    "active",
-    "blocked",
-    "exploited",
-    "contained",
-    "eradicated",
-    "recovered",
-    "false_positive",
-    "merged",
-    "reported",
-}
+class WorkflowStatus(enum.StrEnum):
+    """Finding workflow status. ``StrEnum`` so members serialize/compare as their
+    bare lowercase string (DB TEXT columns, JSON, f-strings) with no leak of the
+    ``WorkflowStatus.`` prefix."""
+
+    DRAFT = "draft"
+    ACTIVE = "active"
+    BLOCKED = "blocked"
+    EXPLOITED = "exploited"
+    CONTAINED = "contained"
+    ERADICATED = "eradicated"
+    RECOVERED = "recovered"
+    FALSE_POSITIVE = "false_positive"
+    MERGED = "merged"
+    REPORTED = "reported"
+
+
+class VerificationState(enum.StrEnum):
+    """Finding verification review state."""
+
+    UNREVIEWED = "unreviewed"
+    VERIFIED = "verified"
+    DISPUTED = "disputed"
+
+
+class VerificationDisposition(enum.StrEnum):
+    """Finding verification disposition outcome."""
+
+    NONE = "none"
+    CONFIRMED = "confirmed"
+    DOWNGRADED = "downgraded"
+    FALSE_POSITIVE = "false_positive"
+
+
+# Derived membership sets (frozenset of enum members, NOT aliases of the class).
+# Keeps the ``x not in WORKFLOW_STATUSES`` guards working and avoids the 3.11
+# ``str in EnumClass`` edge. Members compare/hash equal to their str value, so
+# ``"draft" in WORKFLOW_STATUSES`` stays True.
+WORKFLOW_STATUSES = frozenset(WorkflowStatus)
 
 WORKFLOW_STATUS_RANK = {
-    "draft": 0,
-    "active": 1,
-    "blocked": 2,
-    "exploited": 3,
+    WorkflowStatus.DRAFT: 0,
+    WorkflowStatus.ACTIVE: 1,
+    WorkflowStatus.BLOCKED: 2,
+    WorkflowStatus.EXPLOITED: 3,
     # Blue IR response phases sit between exploited and reported. They are
     # monotonically increasing (contained < eradicated < recovered) so the
-    # standard "incoming must not regress" guard at line 186 below blocks an
-    # accidental rollback (e.g., eradicated → contained) without an operator
-    # reset.
-    "contained": 4,
-    "eradicated": 5,
-    "recovered": 6,
-    "reported": 7,
-    "false_positive": -2,
-    "merged": -1,
+    # standard "incoming must not regress" guard blocks an accidental rollback
+    # (e.g., eradicated → contained) without an operator reset.
+    WorkflowStatus.CONTAINED: 4,
+    WorkflowStatus.ERADICATED: 5,
+    WorkflowStatus.RECOVERED: 6,
+    WorkflowStatus.REPORTED: 7,
+    WorkflowStatus.FALSE_POSITIVE: -2,
+    WorkflowStatus.MERGED: -1,
 }
 
-VERIFICATION_STATES = {"unreviewed", "verified", "disputed"}
+VERIFICATION_STATES = frozenset(VerificationState)
 
 VERIFICATION_STATE_RANK = {
-    "unreviewed": 0,
-    "disputed": 1,
-    "verified": 2,
+    VerificationState.UNREVIEWED: 0,
+    VerificationState.DISPUTED: 1,
+    VerificationState.VERIFIED: 2,
 }
 
-VERIFICATION_DISPOSITIONS = {"none", "confirmed", "downgraded", "false_positive"}
+VERIFICATION_DISPOSITIONS = frozenset(VerificationDisposition)
 
 VERIFICATION_DISPOSITION_RANK = {
-    "none": 0,
-    "downgraded": 1,
-    "confirmed": 2,
-    "false_positive": -1,
+    VerificationDisposition.NONE: 0,
+    VerificationDisposition.DOWNGRADED: 1,
+    VerificationDisposition.CONFIRMED: 2,
+    VerificationDisposition.FALSE_POSITIVE: -1,
 }
 
 ROOT_CAUSE_LINK_KIND = "root_cause"
@@ -114,40 +141,40 @@ def _stronger_severity(existing: str, incoming: str) -> str:
         return incoming_normalized
     return existing_normalized
 
-def _normalize_workflow_status(value: str) -> str:
+def _normalize_workflow_status(value: str) -> WorkflowStatus:
     status_value = (value or "draft").strip().lower()
     if status_value not in WORKFLOW_STATUSES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid workflow status: {value}")
-    return status_value
+    return WorkflowStatus(status_value)
 
-def _normalize_verification_state(value: str) -> str:
+def _normalize_verification_state(value: str) -> VerificationState:
     state_value = (value or "unreviewed").strip().lower()
     if state_value not in VERIFICATION_STATES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid verification state: {value}")
-    return state_value
+    return VerificationState(state_value)
 
-def _normalize_verification_disposition(value: str) -> str:
+def _normalize_verification_disposition(value: str) -> VerificationDisposition:
     disposition_value = (value or "none").strip().lower()
     if disposition_value not in VERIFICATION_DISPOSITIONS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid verification disposition: {value}")
-    return disposition_value
+    return VerificationDisposition(disposition_value)
 
-def _legacy_verification_defaults(workflow_status: str) -> tuple[str, str]:
+def _legacy_verification_defaults(workflow_status: str) -> tuple[VerificationState, VerificationDisposition]:
     normalized_workflow = _normalize_workflow_status(workflow_status)
     if normalized_workflow == "false_positive":
-        return ("verified", "false_positive")
+        return (VerificationState.VERIFIED, VerificationDisposition.FALSE_POSITIVE)
     if normalized_workflow in {"blocked", "exploited", "reported"}:
-        return ("verified", "confirmed")
+        return (VerificationState.VERIFIED, VerificationDisposition.CONFIRMED)
     if normalized_workflow == "active":
-        return ("unreviewed", "none")
-    return ("unreviewed", "none")
+        return (VerificationState.UNREVIEWED, VerificationDisposition.NONE)
+    return (VerificationState.UNREVIEWED, VerificationDisposition.NONE)
 
-def _row_workflow_status(row: dict[str, Any] | Any) -> str:
+def _row_workflow_status(row: dict[str, Any] | Any) -> WorkflowStatus:
     if isinstance(row, dict):
         return _normalize_workflow_status(str(row.get("status", "draft")))
     return _normalize_workflow_status(str(row["status"]))
 
-def _row_verification_state(row: dict[str, Any] | Any) -> str:
+def _row_verification_state(row: dict[str, Any] | Any) -> VerificationState:
     if isinstance(row, dict):
         value = str(row.get("verification_state", "") or "")
         if value:
@@ -158,7 +185,7 @@ def _row_verification_state(row: dict[str, Any] | Any) -> str:
         return _normalize_verification_state(value)
     return _legacy_verification_defaults(_row_workflow_status(row))[0]
 
-def _row_verification_disposition(row: dict[str, Any] | Any) -> str:
+def _row_verification_disposition(row: dict[str, Any] | Any) -> VerificationDisposition:
     if isinstance(row, dict):
         value = str(row.get("verification_disposition", "") or "")
         if value:
