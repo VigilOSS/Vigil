@@ -7386,3 +7386,221 @@ def test_runtime_start_proceeds_when_docker_info_unparseable(tmp_path, monkeypat
     start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
     # Unreadable capacity => fail open => container still started.
     assert any(c[:3] == ["docker", "run", "-d"] for c in commands)
+
+
+# ── Phase 6c: `aith engagement export --format markdown-tree` ──────────────
+#
+# Deterministic, no live LLM: seed an engagement + findings + a
+# verification-narrative artifact through the FastAPI TestClient (the same
+# read API the production CLI hits over a socket), wrap that TestClient in a
+# tiny `.get(endpoint)` adapter, and drive `export_engagement_tree` straight
+# through. Asserts the per-finding directory tree and the draft/debate/report
+# file contents so an engagement review is git-diff-able without the backend
+# running.
+
+_EXPORT_ENGAGEMENT_KEY = "2026-05-30-100000-export"
+_EXPORT_BASE = f"/engagements/{_EXPORT_ENGAGEMENT_KEY}/assessment"
+
+
+class _TestClientGetAdapter:
+    """Adapt a FastAPI TestClient to the `AssessmentClient.get` read surface.
+
+    `export_engagement_tree` only consumes `client.get(endpoint)` where
+    `endpoint` is relative to the assessment prefix; this mirrors how the real
+    `AssessmentClient.get` builds `/engagements/{key}/assessment/{endpoint}`,
+    so the exporter runs against the real backend read path with zero sockets.
+    """
+
+    def __init__(self, test_client, engagement_key: str) -> None:
+        self._client = test_client
+        self._prefix = f"/engagements/{engagement_key}/assessment"
+
+    def get(self, endpoint: str):
+        response = self._client.get(f"{self._prefix}/{endpoint}")
+        assert response.status_code == 200, (endpoint, response.text)
+        return response.json()
+
+
+def _seed_export_engagement(client, isolate_settings) -> Path:
+    engagements_dir = isolate_settings["engagements_dir"]
+    eng = engagements_dir / _EXPORT_ENGAGEMENT_KEY
+    (eng / "sessions").mkdir(parents=True, exist_ok=True)
+    (eng / "notes").mkdir(parents=True, exist_ok=True)
+    (eng / "engagement.json").write_text(
+        json.dumps(
+            {
+                "key": _EXPORT_ENGAGEMENT_KEY,
+                "target": "https://example.com",
+                "hostname": "example.com",
+                "created_at": "2026-05-30T10:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (eng / "scope.json").write_text(
+        json.dumps(
+            {
+                "hostname": "example.com",
+                "hosts": ["example.com"],
+                "status": "in_progress",
+                "current_phase": "recon",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (eng / "findings.md").write_text("# Findings\n", encoding="utf-8")
+
+    # Force the backend to pick up the on-disk engagement.
+    assert client.get(f"/engagements/{_EXPORT_ENGAGEMENT_KEY}").status_code == 200
+
+    # Finding A: high severity, with structured details + a linked debate doc.
+    created = client.post(
+        f"{_EXPORT_BASE}/findings",
+        json={
+            "slug": "VA-001",
+            "title": "SQL injection in login",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "defect_family": "sqli",
+            "canonical_location": "https://example.com/login",
+            "summary": "Auth bypass via UNION-based SQLi",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+            "details": {
+                "cwe_id": "CWE-89",
+                "owasp_category": "A03:2021",
+                "remediation": "Use parameterized queries.",
+                "steps_to_reproduce": ["POST /login", "Inject ' OR 1=1 --"],
+                "impact": "Full authentication bypass.",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    # Finding B: low severity, NO linked narrative → debate.md placeholder.
+    created_b = client.post(
+        f"{_EXPORT_BASE}/findings",
+        json={
+            "slug": "VA-002",
+            "title": "Verbose error messages",
+            "severity": "low",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "info-leak",
+            "canonical_location": "https://example.com/debug",
+            "summary": "Stack traces leak in 500 responses.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert created_b.status_code == 201, created_b.text
+
+    # Register the Phase-3 verification-narrative artifact for VA-001.
+    (eng / "notes" / "VA-001-debate.md").write_text(
+        "# VA-001 Ideator-vs-Tracer debate\n\nClaim -> causal challenge -> evidence -> verdict.\n",
+        encoding="utf-8",
+    )
+    registered = client.post(
+        f"{_EXPORT_BASE}/artifacts",
+        json={
+            "path": "notes/VA-001-debate.md",
+            "kind": "verification-narrative",
+            "related_finding_slug": "VA-001",
+            "producer_agent_role": "vulnerability-analyst",
+        },
+    )
+    assert registered.status_code == 201, registered.text
+    return eng
+
+
+def test_engagement_export_markdown_tree_writes_per_finding_dirs(
+    client, isolate_settings, tmp_path: Path
+) -> None:
+    from ai_threat_hunting_cli.engagements import export_engagement_tree
+
+    _seed_export_engagement(client, isolate_settings)
+    adapter = _TestClientGetAdapter(client, _EXPORT_ENGAGEMENT_KEY)
+    out_root = tmp_path / "export-tree"
+
+    result = export_engagement_tree(adapter, out_root, fmt="markdown-tree")
+
+    # One directory per finding, named by canonical slug, each with the three
+    # review files.
+    assert result.finding_count == 2
+    assert {d.name for d in result.finding_dirs} == {"VA-001", "VA-002"}
+    for finding_dir in result.finding_dirs:
+        assert {p.name for p in finding_dir.iterdir()} == {"draft.md", "debate.md", "report.md"}
+
+    va001 = out_root / "VA-001"
+
+    # draft.md = raw finding rendering (flattened details from the backend).
+    draft = (va001 / "draft.md").read_text(encoding="utf-8")
+    assert "## [VA-001] SQL injection in login" in draft
+    assert "- **Severity**: HIGH" in draft
+    assert "- **CWE**: CWE-89" in draft
+    assert "- **Remediation**: Use parameterized queries." in draft
+    assert "1. POST /login" in draft
+
+    # debate.md = the linked verification-narrative artifact content.
+    debate = (va001 / "debate.md").read_text(encoding="utf-8")
+    assert "VA-001 Ideator-vs-Tracer debate" in debate
+    assert "causal challenge -> evidence -> verdict" in debate
+    assert "notes/VA-001-debate.md" in debate  # source provenance comment
+
+    # report.md = report-ready rendering with the sequential report_id.
+    report = (va001 / "report.md").read_text(encoding="utf-8")
+    assert report.startswith("# 001 — SQL injection in login")
+    assert "(`VA-001`)" in report
+    assert "## Remediation" in report
+    assert "Use parameterized queries." in report
+
+    # VA-002 has no narrative → placeholder debate.md (still git-diff-able).
+    va002_debate = (out_root / "VA-002" / "debate.md").read_text(encoding="utf-8")
+    assert "No verification-narrative artifact" in va002_debate
+    assert "aith assess verify-finding VA-002" in va002_debate
+
+
+def test_engagement_export_markdown_tree_is_idempotent(
+    client, isolate_settings, tmp_path: Path
+) -> None:
+    """Re-exporting into the same root reproduces identical files.
+
+    Stable paths + stable content are the whole point — a second pass with no
+    backend changes must leave the tree byte-for-byte identical so git shows
+    an empty diff.
+    """
+    from ai_threat_hunting_cli.engagements import export_engagement_tree
+
+    _seed_export_engagement(client, isolate_settings)
+    adapter = _TestClientGetAdapter(client, _EXPORT_ENGAGEMENT_KEY)
+    out_root = tmp_path / "export-tree"
+
+    first = export_engagement_tree(adapter, out_root, fmt="markdown-tree")
+    snapshot = {
+        path.relative_to(out_root).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(out_root.rglob("*.md"))
+    }
+
+    second = export_engagement_tree(adapter, out_root, fmt="markdown-tree")
+    after = {
+        path.relative_to(out_root).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(out_root.rglob("*.md"))
+    }
+
+    assert first.finding_count == second.finding_count == 2
+    assert snapshot == after
+
+
+def test_engagement_export_markdown_tree_rejects_unknown_format(
+    client, isolate_settings, tmp_path: Path
+) -> None:
+    from ai_threat_hunting_cli.engagements import export_engagement_tree
+
+    _seed_export_engagement(client, isolate_settings)
+    adapter = _TestClientGetAdapter(client, _EXPORT_ENGAGEMENT_KEY)
+
+    with pytest.raises(SystemExit):
+        export_engagement_tree(adapter, tmp_path / "x", fmt="pdf")

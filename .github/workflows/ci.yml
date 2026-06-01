@@ -1,0 +1,124 @@
+name: ci
+
+# PR gate for the orchestrator backend + deterministic evals.
+#
+# BLOCKING jobs (must be green to merge):
+#   - backend-tests : `uv run --directory orchestrator/backend pytest`
+#                     (the full backend suite, which includes the
+#                      markdown-vs-CLI sync-lint test_skill_cli_sync.py)
+#   - eval          : the deterministic eval harness under tests/eval, run
+#                     with an ABSOLUTE path. A *relative* path under
+#                     `--directory orchestrator/backend` resolves against the
+#                     backend cwd, collects zero tests, and pytest exits 0 —
+#                     a false green. The absolute path is load-bearing.
+#
+# NON-BLOCKING jobs (informational; continue-on-error):
+#   - ruff / mypy   : the tree currently carries lint/type findings that are
+#                     out of scope for this gate. They run for visibility but
+#                     do not block the PR. Tighten + promote to blocking in a
+#                     dedicated cleanup pass.
+#
+# OFF the PR path:
+#   - nightly-live-eval-capture : a scheduled stub for the live
+#                     eval-capture e2e (needs a running runtime/orchestrator).
+#                     Guarded behind a repo secret so forks/PRs never trip it.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Nightly at 07:00 UTC — drives the opt-in live eval-capture e2e only.
+    - cron: "0 7 * * *"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-tests:
+    name: backend pytest (blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Run backend test suite
+        run: uv run --directory orchestrator/backend pytest
+
+  sync-lint:
+    name: markdown-vs-CLI sync-lint (blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      # Explicit, isolated run of the sync-lint so a failure points straight
+      # at doc/CLI drift. It is also exercised by the full backend-tests job.
+      - name: Run markdown-vs-CLI sync-lint
+        run: uv run --directory orchestrator/backend pytest tests/test_skill_cli_sync.py -q
+
+  eval:
+    name: deterministic eval (blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      # ABSOLUTE path on purpose — see header note about the false-green trap
+      # when a relative path is resolved against --directory's cwd.
+      - name: Run deterministic eval harness
+        run: uv run --directory orchestrator/backend pytest "${GITHUB_WORKSPACE}/tests/eval" -q
+
+  ruff:
+    name: ruff (non-blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      # Informational only until the existing findings are cleaned up; do not
+      # block the PR on style/lint. Remove continue-on-error to promote.
+      - name: ruff check
+        continue-on-error: true
+        run: uvx ruff check .
+
+  mypy:
+    name: mypy (non-blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      # Informational only — the tree is not yet type-clean. Remove
+      # continue-on-error to promote to a blocking gate.
+      - name: mypy
+        continue-on-error: true
+        run: uvx --with-editable . mypy src/ai_threat_hunting_cli
+
+  nightly-live-eval-capture:
+    name: nightly live eval-capture e2e (opt-in)
+    # OFF the PR path: scheduled runs only. Scheduled workflows execute on the
+    # default branch of the base repo, so forks and PRs never trigger this.
+    # The opt-in secret is checked inside the step (env guard) rather than in a
+    # job-level `if`, which keeps the gate unambiguous and lint-clean. The body
+    # is a stub until the live capture harness has a CI-runnable entrypoint (it
+    # needs a runtime + orchestrator stack and a captured golden engagement).
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Live eval-capture e2e (stub)
+        env:
+          ENABLE_LIVE_EVAL_CAPTURE: ${{ secrets.ENABLE_LIVE_EVAL_CAPTURE }}
+        run: |
+          if [ -z "${ENABLE_LIVE_EVAL_CAPTURE}" ]; then
+            echo "ENABLE_LIVE_EVAL_CAPTURE secret not set — skipping live eval-capture e2e."
+            exit 0
+          fi
+          echo "Live eval-capture e2e is not yet wired for CI."
+          echo "It requires a running runtime + orchestrator stack and a"
+          echo "captured golden engagement. Tracked separately; this job is"
+          echo "a scheduled placeholder kept off the PR path."

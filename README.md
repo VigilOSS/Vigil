@@ -568,7 +568,9 @@ The queue in `agent/scripts/schema.sql` is a transient work buffer and is not pa
 
 ## Development
 
-For repo-local development conventions used by Codex, see the root `AGENTS.md`.
+For repo-local development conventions used by Codex, see the root `AGENTS.md` — it carries the
+clone-to-first-dispatch newcomer walkthrough and step-by-step recipes for adding a skill, an
+`aith assess` verb, a deterministic oracle, or an eval case.
 
 ## TODO
 
