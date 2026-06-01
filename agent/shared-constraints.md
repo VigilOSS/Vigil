@@ -615,8 +615,10 @@ OOB callback domains are not engagement files. Get readiness and the configured
 base domain from `aith oob status --json`; create or reuse a named correlation
 client with `aith oob client start <name> --engagement <key> --agent <agent>`;
 read the unique callback URL and hits with `aith oob client logs <name> --lines
-80`. If OOB is unavailable, fall back to time-based detection and note the
-substitution in your output.
+80`. For per-payload nonce correlation, mint a nonce-tagged URL with `aith oob
+mint` and correlate hits to it with `aith oob poll --client <name>` rather than
+eyeballing the log. If OOB is unavailable, fall back to time-based detection and
+note the substitution in your output.
 
 Hit-checking is handled through the CLI surfaces that own those logs:
 - OOB client evidence: `aith oob client logs <name> --lines 80`
@@ -734,6 +736,11 @@ from lifecycle closure.
 
 `agent handoff` is idempotent — call it as a checkpoint after each major step, not
 only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md` "Checkpointing".
+
+On long runs, at each handoff checkpoint also re-emit a compact plan-state digest in
+your response — objective / done so far / still pending / immediate next step (~3-5
+lines) — so the objective does not drift to the bottom of a long context. This is
+additive to the handoff write, not a separate ceremony.
 
 ### Reasoning quality > response brevity
 
