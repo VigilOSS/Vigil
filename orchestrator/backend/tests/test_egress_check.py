@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 
 
 def _scripts_root() -> Path:
@@ -51,7 +50,9 @@ def _wire(monkeypatch, mod, tmp_path, probe_lines: str):
 
     class _Client:
         def __init__(self, *a, **k): pass
-        def record_decision(self, payload): recorded["decision"] = payload; return {"id": 1}
+        def record_decision(self, payload):
+            recorded["decision"] = payload
+            return {"id": 1}
         def close(self): pass
         def __enter__(self):
             return self

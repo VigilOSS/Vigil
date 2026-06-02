@@ -17,10 +17,13 @@ sys.path.insert(0, str(backend_root))
 # sqlite3 handles across fixtures.
 os.environ.setdefault("VIGIL_BACKUP_DISABLED", "1")
 
-from app.config import settings
-from app import db as db_module
-from app.main import app
-from app.services import engagements as engagement_service
+# E402: these imports must follow the sys.path.insert + VIGIL_BACKUP_DISABLED
+# setup above — importing app.main triggers the backup timer, so the env var
+# has to be set first. Reordering to the top would change runtime behavior.
+from app.config import settings  # noqa: E402
+from app import db as db_module  # noqa: E402
+from app.main import app  # noqa: E402
+from app.services import engagements as engagement_service  # noqa: E402
 
 
 @pytest.fixture(scope="session")

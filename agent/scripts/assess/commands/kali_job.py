@@ -14,7 +14,7 @@ import sys
 
 from pathlib import Path
 
-from assess.lib.client import AssessError
+from assess.lib.client import AssessError, default_runtime_container
 from assess.lib.config import load_config
 from assess.lib.kali import (
     ALLOWED_PHASES,
@@ -70,7 +70,7 @@ def register(subparsers) -> None:
     )
     start.add_argument("--destructive", action="store_true")
     start.add_argument("--agent-name", dest="agent_name", required=False, default=None)
-    start.add_argument("--container-name", dest="container_name", default="vigil")
+    start.add_argument("--container-name", dest="container_name", default=default_runtime_container())
     start.add_argument(
         "--parent-command-run-id",
         dest="parent_command_run_id",
@@ -98,7 +98,7 @@ def register(subparsers) -> None:
         help="Terminate the recorded PID and PATCH killed/stop_failed/lost.",
     )
     stop_p.add_argument("job_id", type=int)
-    stop_p.add_argument("--container-name", dest="container_name", default="vigil")
+    stop_p.add_argument("--container-name", dest="container_name", default=default_runtime_container())
     stop_p.set_defaults(func=_run_stop)
 
     list_p = job_sub.add_parser("list", help="List jobs.")

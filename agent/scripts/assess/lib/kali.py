@@ -36,7 +36,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .client import AssessError, AssessmentClient
+from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
 
 # Re-exports — keep this block ordered by source module so the public surface
@@ -458,6 +458,7 @@ __all__ = [
     "_split_inner_pipeline_stages",
     # Re-export AssessmentClient + audit enums for tests that patch them
     "AssessmentClient",
+    "default_runtime_container",
     "PROBE_KIND_ENUM",
     "TECHNIQUE_ENUM",
     # Public surface

@@ -10,6 +10,16 @@ from .config import get_config_value
 DEFAULT_INSTALL_ROOT = Path.home() / "vigil"
 CONFIG_DIR = Path.home() / ".config" / "vigil"
 DEFAULT_SOURCE_REPO = "https://github.com/vigil-oss/vigil.git"
+
+
+def default_runtime_container() -> str:
+    """Shared source of truth for the runtime container name on the CLI side.
+
+    Mirrors ``assess.lib.client.default_runtime_container`` so vigil_cli and the
+    assess lib resolve the same ``VIGIL_RUNTIME_CONTAINER`` env override and can
+    no longer silently drift. Default stays ``"vigil"``.
+    """
+    return os.environ.get("VIGIL_RUNTIME_CONTAINER", "vigil")
 # Hardcoded fallback for ``ORCHESTRATOR_BASE_URL`` — last layer of the
 # resolution chain in ``resolve_orchestrator_base_url`` and the value the
 # engagement-creation flow compares against to decide whether
@@ -83,7 +93,7 @@ def _ensure_cached_source() -> Path | None:
     if not shutil_which("git"):
         return None
     source_dir = CONFIG_DIR / "source"
-    repo_url = os.environ.get("VIGIL_SOURCE_REPO") or get_config_value("source.repo", DEFAULT_SOURCE_REPO)
+    repo_url = os.environ.get("VIGIL_SOURCE_REPO") or get_config_value("source.repo", DEFAULT_SOURCE_REPO) or DEFAULT_SOURCE_REPO
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if source_dir.exists():
         subprocess.run(["git", "-C", str(source_dir), "pull", "--ff-only"], text=True, capture_output=True, check=False)

@@ -9,12 +9,10 @@ Two rules must hold:
 """
 from __future__ import annotations
 
-import json
 import shutil
 import sqlite3
 from pathlib import Path
 
-import pytest
 
 from app import db as db_module
 from app.services import engagements as engagement_service

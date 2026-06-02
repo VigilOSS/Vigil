@@ -225,8 +225,8 @@ def run(args) -> None:
         tier = item.get('classification', 'unknown')
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
 
-    print(f"=== Code Classification Summary ===")
+    print("=== Code Classification Summary ===")
     print(f"Total classified: {classified_count}")
-    print(f"\nBreakdown by tier:")
+    print("\nBreakdown by tier:")
     for tier in sorted(tier_counts.keys()):
         print(f"  {tier}: {tier_counts[tier]}")

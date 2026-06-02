@@ -4,7 +4,6 @@ Regression for the append-only `notes` column that made stale/contradicted
 internal text impossible to scrub via the CLI (`update-finding`).
 """
 import json
-from pathlib import Path
 
 ENGAGEMENT_KEY = "2026-05-29-120000-notes-mode"
 

@@ -579,4 +579,3 @@ def test_ingest_idn_apex_a_label_url_admitted_under_u_label_wildcard(
 
 
 # Pytest is referenced by the new tests above.
-import pytest  # noqa: E402  (kept at bottom to mirror the local test style)

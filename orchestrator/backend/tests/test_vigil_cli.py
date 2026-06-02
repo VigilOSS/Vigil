@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import signal
 import shutil
 import sqlite3
@@ -1595,7 +1594,6 @@ def test_doctor_skips_docker_checks_when_docker_cli_missing(
 
 def test_status_json_reports_runtime_mount_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     from vigil_cli import main as main_module
-    from vigil_cli import status as status_module
     from vigil_cli.docker import DockerResult
 
     install_root = tmp_path / "install"

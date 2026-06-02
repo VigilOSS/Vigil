@@ -11,12 +11,11 @@ name: ci
 #                     `--directory orchestrator/backend` resolves against the
 #                     backend cwd, collects zero tests, and pytest exits 0 —
 #                     a false green. The absolute path is load-bearing.
-#
-# NON-BLOCKING jobs (informational; continue-on-error):
-#   - ruff / mypy   : the tree currently carries lint/type findings that are
-#                     out of scope for this gate. They run for visibility but
-#                     do not block the PR. Tighten + promote to blocking in a
-#                     dedicated cleanup pass.
+#   - ruff / mypy   : lint (`uvx ruff check .`) and types
+#                     (`uvx --with-editable . mypy src/vigil_cli`). The tree is
+#                     now lint- and type-clean, so these are blocking gates:
+#                     any new finding fails the PR. (Promoted from the former
+#                     non-blocking / continue-on-error state.)
 #
 # OFF the PR path:
 #   - nightly-live-eval-capture : a scheduled stub for the live
@@ -75,29 +74,27 @@ jobs:
         run: uv run --directory orchestrator/backend --extra dev pytest "${GITHUB_WORKSPACE}/tests/eval" -q
 
   ruff:
-    name: ruff (non-blocking)
+    name: ruff (blocking)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-      # Informational only until the existing findings are cleaned up; do not
-      # block the PR on style/lint. Remove continue-on-error to promote.
+      # Blocking gate: the tree is lint-clean, so any new ruff finding fails
+      # the PR.
       - name: ruff check
-        continue-on-error: true
         run: uvx ruff check .
 
   mypy:
-    name: mypy (non-blocking)
+    name: mypy (blocking)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-      # Informational only — the tree is not yet type-clean. Remove
-      # continue-on-error to promote to a blocking gate.
+      # Blocking gate: src/vigil_cli is type-clean, so any new mypy error fails
+      # the PR.
       - name: mypy
-        continue-on-error: true
         run: uvx --with-editable . mypy src/vigil_cli
 
   nightly-live-eval-capture:

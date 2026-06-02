@@ -521,7 +521,7 @@ def test_resume_brief_since_filters_old_findings(client, isolate_settings) -> No
 
 
 def test_resume_brief_stale_threshold_per_role(client, isolate_settings) -> None:
-    eng = _write_engagement(isolate_settings["engagements_dir"])
+    _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     # Dispatch an exploit-developer 36h ago — under role default 48h, not stale.
     old_iso = "2026-05-18T00:00:00Z"  # ~36h before frozen test clock? actually deterministic check below

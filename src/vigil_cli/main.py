@@ -65,7 +65,7 @@ from .orchestrator import (
     start_orchestrator,
     stop_orchestrator,
 )
-from .paths import resolve_install_root, resolve_source_root
+from .paths import default_runtime_container, resolve_install_root, resolve_source_root
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
 from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
@@ -76,19 +76,19 @@ def _print_post_install(result: InstallResult) -> None:
     print()
     if result.is_upgrade:
         print("Upgrade complete. Services using the previous install should be restarted:")
-        print(f"  - Kali runtime:   vigil runtime restart")
-        print(f"  - Orchestrator:   vigil orchestrator restart")
+        print("  - Kali runtime:   vigil runtime restart")
+        print("  - Orchestrator:   vigil orchestrator restart")
         if result.image_built:
-            print(f"  - Docker image was rebuilt — running containers use the old image until restarted")
+            print("  - Docker image was rebuilt — running containers use the old image until restarted")
         else:
-            print(f"  - Docker image:   run  vigil runtime build  if agent scripts or Dockerfile changed")
+            print("  - Docker image:   run  vigil runtime build  if agent scripts or Dockerfile changed")
     else:
         print("Install complete. Next steps:")
         print(f"  1. Configure tokens and API keys in {root / '.env'}")
-        print(f"  2. Optional OOB: vigil config set oob.frp_token <token>")
-        print(f"  3. vigil up                      # build/start runtime, orchestrator, and OOB")
-        print(f"  4. vigil engagement create <target>  # create your first engagement")
-        print(f"  5. vigil assess kali --help      # discover target-facing CLI verbs")
+        print("  2. Optional OOB: vigil config set oob.frp_token <token>")
+        print("  3. vigil up                      # build/start runtime, orchestrator, and OOB")
+        print("  4. vigil engagement create <target>  # create your first engagement")
+        print("  5. vigil assess kali --help      # discover target-facing CLI verbs")
     print()
 
 
@@ -526,13 +526,13 @@ def _logs(args: argparse.Namespace, install_root: Path) -> None:
         argv.append(str(log_file))
         subprocess.run(argv, check=False)
     elif args.target == "runtime":
-        _docker_logs("vigil", args.lines, args.follow)
+        _docker_logs(default_runtime_container(), args.lines, args.follow)
     elif args.target == "mitmproxy":
         _docker_logs("vigil-proxy", args.lines, args.follow)
     elif args.target == "oob":
         tail_flag = "-f" if args.follow else ""
         command = f"tail -n {shlex.quote(str(args.lines))} {tail_flag} {OOB_ROOT}/*.log {OOB_ROOT}/clients/*.log 2>/dev/null || true"
-        subprocess.run(["docker", "exec", "vigil", "sh", "-lc", command], check=False)
+        subprocess.run(["docker", "exec", default_runtime_container(), "sh", "-lc", command], check=False)
 
 
 def _docker_logs(container_name: str, lines: str, follow: bool) -> None:
@@ -646,8 +646,8 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             print(output)
     elif command == "export-pdf":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
-        output = Path(args.output).expanduser() if args.output else None
-        print(export_pdf(path, output))
+        pdf_output = Path(args.output).expanduser() if args.output else None
+        print(export_pdf(path, pdf_output))
     elif command == "migrate-scope":
         from .engagements import migrate_legacy_both_engagements
 
@@ -721,7 +721,7 @@ def _runtime(args: argparse.Namespace, install_root: Path) -> None:
     elif args.runtime_command == "status":
         print(runtime_status())
     elif args.runtime_command == "shell":
-        os.execvp("docker", ["docker", "exec", "-it", "vigil", "bash"])
+        os.execvp("docker", ["docker", "exec", "-it", default_runtime_container(), "bash"])
     elif args.runtime_command == "shell-exec":
         _runtime_shell_exec(args.shell_command)
     elif args.runtime_command == "resources":
@@ -737,7 +737,7 @@ def _runtime_shell_exec(command_parts: list[str]) -> None:
     if not command.strip():
         raise SystemExit("Specify a non-empty command string for `vigil runtime shell-exec`.")
     try:
-        result = subprocess.run(["docker", "exec", "vigil", "sh", "-lc", command], check=False)
+        result = subprocess.run(["docker", "exec", default_runtime_container(), "sh", "-lc", command], check=False)
     except FileNotFoundError as exc:
         raise SystemExit("docker CLI not found on PATH") from exc
     if result.returncode != 0:
@@ -903,9 +903,11 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
+            clients = payload["clients"]
+            client_count = len(clients) if isinstance(clients, (list, tuple, dict, str)) else 0
             print(
                 f"{payload['state']}\tserver={payload['server']}\tfrpc={payload['frpc']}"
-                f"\tclients={len(payload['clients'])}\tdomain={payload['domain']}"
+                f"\tclients={client_count}\tdomain={payload['domain']}"
             )
     elif args.oob_command == "test":
         test_oob(options, runner=docker_run_command)
@@ -918,7 +920,7 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
 
 
 def _tmux_has_oob_client(name: str) -> bool:
-    result = docker_run_command(["docker", "exec", "vigil", "sh", "-lc", f"tmux has-session -t oob-client-{shlex.quote(name)} 2>/dev/null"])
+    result = docker_run_command(["docker", "exec", default_runtime_container(), "sh", "-lc", f"tmux has-session -t oob-client-{shlex.quote(name)} 2>/dev/null"])
     return result.returncode == 0
 
 
@@ -938,7 +940,7 @@ def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOption
         client = sanitize_name(args.name)
         tail_flag = "-f" if args.follow else ""
         command = f"tail -n {shlex.quote(str(args.lines))} {tail_flag} {OOB_ROOT}/clients/{shlex.quote(client)}.log 2>/dev/null || true"
-        subprocess.run(["docker", "exec", "vigil", "sh", "-lc", command], check=False)
+        subprocess.run(["docker", "exec", default_runtime_container(), "sh", "-lc", command], check=False)
     elif args.oob_client_command == "stop":
         stop_oob_client(args.name, runner=docker_run_command)
     elif args.oob_client_command == "list":

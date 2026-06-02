@@ -11,7 +11,7 @@ from fastapi import HTTPException, status
 from ..events import _engagement_or_404
 
 from . import _common
-from ._common import _fetch_all, _hash_json, _json_text, _parse_url, _require_canonical_finding_slug, _scalar_row
+from ._common import _fetch_all, _hash_json, _json_text, _parse_url, _scalar_row
 from .dispatches import _serialize_decision
 
 
@@ -543,8 +543,6 @@ def record_target(
     discovered_by: str,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    source_slug = _require_canonical_finding_slug(source_slug, field="source_slug")
-    target_slug = _require_canonical_finding_slug(target_slug, field="target_slug")
     with _common.get_connection() as connection:
         return _upsert_target(
             connection,

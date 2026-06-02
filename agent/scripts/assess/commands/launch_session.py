@@ -84,7 +84,6 @@ def run(args) -> None:
         "status": "active",
         "assigned_targets": requested_slugs,
     }
-    assignment_file = Path(session_dir) / "assignment.json"
     write_assignment_file(session_dir, assignment)
 
     # Write prompt.md
