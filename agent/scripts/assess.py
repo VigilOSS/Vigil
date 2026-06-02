@@ -14,7 +14,7 @@
 #     "tree-sitter-php>=0.23,<1",
 # ]
 # ///
-"""AI Threat Hunting — assessment CLI entry point."""
+"""Vigil — assessment CLI entry point."""
 import sys
 from pathlib import Path
 

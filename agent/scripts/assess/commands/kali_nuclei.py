@@ -1,4 +1,4 @@
-"""aith assess kali nuclei — typed wrapper around nuclei inside the runtime."""
+"""vigil assess kali nuclei — typed wrapper around nuclei inside the runtime."""
 from __future__ import annotations
 
 import fcntl
@@ -24,7 +24,7 @@ _NUCLEI_LOCK_BASENAME = ".nuclei.lock"
 
 @contextmanager
 def _nuclei_engagement_lock(engagement_dir: Path):
-    """C32: per-engagement file lock so two concurrent ``aith assess kali nuclei``
+    """C32: per-engagement file lock so two concurrent ``vigil assess kali nuclei``
     invocations cannot corrupt each other's output. The lockfile records the
     PID of the holding process. If a stale lockfile exists for a PID that is
     no longer alive (crashed run), force-release and acquire.

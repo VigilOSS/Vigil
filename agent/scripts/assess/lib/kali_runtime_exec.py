@@ -14,7 +14,7 @@ import subprocess
 from .client import AssessError
 
 
-_DEFAULT_CONTAINER_NAME = "security-research"
+_DEFAULT_CONTAINER_NAME = "vigil"
 
 
 def _container_pid_file(run_uuid: str) -> str:
@@ -22,7 +22,7 @@ def _container_pid_file(run_uuid: str) -> str:
     command's PID. Sharing the engagement-wide ``run_uuid`` here means the
     audit row and this pid file key on the same identifier — the operator
     can grep one ID across both."""
-    return f"/tmp/aith-pid-{run_uuid}.pid"
+    return f"/tmp/vigil-pid-{run_uuid}.pid"
 
 
 def _build_docker_exec(
@@ -62,7 +62,7 @@ def _build_docker_exec(
     tail = 'exec "$@"'
     wrapper = (
         f'echo $$ > {pid_file} && sync && {tail} || '
-        f'(echo "aith: PID write to {pid_file} failed (errno=$?); proceeding without pid-file" >&2; {tail})'
+        f'(echo "vigil: PID write to {pid_file} failed (errno=$?); proceeding without pid-file" >&2; {tail})'
     )
     docker_argv = [
         "docker",
@@ -161,5 +161,5 @@ def _check_container_running(container_name: str) -> None:
     if container_name not in (result.stdout or "").splitlines():
         raise AssessError(
             f"runtime container '{container_name}' is not running. "
-            "Run `aith runtime start` first."
+            "Run `vigil runtime start` first."
         )

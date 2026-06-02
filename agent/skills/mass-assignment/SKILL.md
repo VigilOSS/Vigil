@@ -1,12 +1,12 @@
 ---
 name: mass-assignment
 description: Detect and exploit mass assignment and excessive data exposure in APIs and web applications
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Mass Assignment Testing
 
-> **`aith assess kali` audit flags:** use `--technique AUTH` (mass assignment is authorization bypass via client-controlled fields — the attacker escalates privileges by injecting `is_admin`, `role`, or `permissions` into the request body). Set `--destructive` whenever the forged request creates, modifies, or deletes a resource.
+> **`vigil assess kali` audit flags:** use `--technique AUTH` (mass assignment is authorization bypass via client-controlled fields — the attacker escalates privileges by injecting `is_admin`, `role`, or `permissions` into the request body). Set `--destructive` whenever the forged request creates, modifies, or deletes a resource.
 
 ## When to Activate
 
@@ -16,7 +16,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (manual parameter injection and response analysis — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique AUTH --probe-kind payload --phase consume-test --timeout 30` for injection attempts, and add `--destructive` when the request creates or modifies a resource)
+- `vigil assess kali exec -- curl ...` (manual parameter injection and response analysis — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique AUTH --probe-kind payload --phase consume-test --timeout 30` for injection attempts, and add `--destructive` when the request creates or modifies a resource)
 - `Arjun` / `param-miner` (hidden parameter discovery and fuzzing)
 - Browser DevTools (compare request fields vs response fields)
 
@@ -66,7 +66,7 @@ curl -X PATCH https://target/api/users/123 -H "Content-Type: application/json" \
       guess — classify the value and reuse its type-confusion + escalation variants so you catch
       binders that coerce types differently than the validator:
 ```bash
-aith assess classify-payload 456 --mutations
+vigil assess classify-payload 456 --mutations
 #   type: sequential_id
 #   format:     '"456"'  '[456]'  '{"id": 456}'  'null'  '[]'   ← type confusion (string/array/object)
 #   escalation: '1' '0' '2' 'admin' 'root'                       ← reassign to first/admin object

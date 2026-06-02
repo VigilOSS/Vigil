@@ -1,6 +1,6 @@
 # Command History — Coverage Check Before Probing
 
-Every `aith assess kali` call made during an engagement lands in the orchestrator
+Every `vigil assess kali` call made during an engagement lands in the orchestrator
 backend's `assessment_command_runs` table with a searchable index. Treat
 this as a **coverage map** — a record of what's already been probed so your
 next probe can go somewhere the engagement hasn't covered yet.
@@ -19,7 +19,7 @@ something that hasn't.
    usually the most valuable coverage signal:
 
    ```bash
-   aith assess list-command-runs --q <keyword> --show-matches
+   vigil assess list-command-runs --q <keyword> --show-matches
    ```
 
    Narrow with `--agent-name` or `--phase` only if the broad result is
@@ -39,7 +39,7 @@ something that hasn't.
 
 4. **When a prior run is genuinely on-point for your current question,
    cite its id** in your output (e.g. "reused command-run #142"). Before
-   citing, open the preview with `aith assess get-command-run <id>` — `success=true`
+   citing, open the preview with `vigil assess get-command-run <id>` — `success=true`
    only means `return_code=0`, not that the output answers your question.
    Soft-failure pages, WAF intercepts, and rate-limited stubs all exit
    cleanly.
@@ -48,31 +48,31 @@ something that hasn't.
 
 ```bash
 # Broad search for prior work on an objective
-aith assess list-command-runs --q "nmap 10.0.0.1" --show-matches
+vigil assess list-command-runs --q "nmap 10.0.0.1" --show-matches
 
 # Scoped to a specific agent and phase
-aith assess list-command-runs \
+vigil assess list-command-runs \
     --agent-name recon-specialist --phase recon
 
 # Only successful runs with a specific typed verb
-aith assess list-command-runs --tool-name nmap_scan --success
+vigil assess list-command-runs --tool-name nmap_scan --success
 
 # Filter by the underlying binary, even when it ran inside the generic
 # execute_command wrapper. The backend derives tool_bin from the command
 # string (peeling off timeout/sudo/env/sh -c wrappers), so --tool-bin catches
 # generic-wrapper rows that --tool-name would miss.
-aith assess list-command-runs --q nuclei --tool-bin nuclei --show-matches
-aith assess list-command-runs --tool-bin sqlmap
-aith assess list-command-runs --tool-bin httpx --success
+vigil assess list-command-runs --q nuclei --tool-bin nuclei --show-matches
+vigil assess list-command-runs --tool-bin sqlmap
+vigil assess list-command-runs --tool-bin httpx --success
 
 # Table rendering shows `tool_bin(tool_name)` whenever the two differ — e.g.
 # `nuclei(command)` means nuclei was invoked through the execute_command wrapper.
 
 # Runs that timed out (prior coverage likely incomplete)
-aith assess list-command-runs --timed-out
+vigil assess list-command-runs --timed-out
 
 # Fetch one run with previews and artifact refs
-aith assess get-command-run 142
+vigil assess get-command-run 142
 ```
 
 ## Coverage-vs-duplicate decision table
@@ -99,7 +99,7 @@ thumb: ~1 KiB per row in JSON, ~80 bytes per row in the CLI table.
 When you've identified the one run worth inspecting, drill in:
 
 ```bash
-aith assess get-command-run <id>
+vigil assess get-command-run <id>
 ```
 
 That returns the full preview (up to 64 KiB) and any artifact refs.

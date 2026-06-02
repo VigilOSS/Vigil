@@ -1,6 +1,6 @@
 # Engagement Methodology
 
-Primary engagement style and investigation mindset for `security-research`.
+Primary engagement style and investigation mindset for `vigil`.
 
 ## Engagement Style
 

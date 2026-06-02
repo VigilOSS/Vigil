@@ -25,10 +25,10 @@ already listed below.
 
 **MANDATORY (load before any target work):**
 
-- `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
+- `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/web-recon/SKILL.md` — the foundational recon sequence and tool ordering (for any other skill, run `aith assess list-skills` to discover it rather than reading the index file)
+- `agent/skills/web-recon/SKILL.md` — the foundational recon sequence and tool ordering (for any other skill, run `vigil assess list-skills` to discover it rather than reading the index file)
 - `agent/skills/port-scanning/SKILL.md` — DEFAULT-load for full Phase 1 dispatches. Port + service enumeration is the standard recon step (see Recon Sequence below); the per-batch port-data presence assertion lives in this skill.
 - `agent/references/recon/rate-calibration.md` — the trait-row rate table extracted from shared-constraints. Recon dispatches consume rate values per-target before invoking nmap/ffuf/nuclei.
 
@@ -49,7 +49,7 @@ Before starting any target-facing work, verify:
 - [ ] You read each skill's `## Extended Resources` section and loaded the listed payload/checklist references — including `agent/references/tools/recon/nmap.md`, `agent/references/tools/recon/wafw00f.md`, `agent/references/tools/recon/nikto.md`, and `agent/references/tools/fuzzing/ffuf.md`.
 - [ ] You read `scope.json` and confirmed the in-scope hosts plus the active `exploit_policy` before making any target-facing decisions
 - [ ] You have the dispatch context (target URL, phase, task objective, prior findings)
-- [ ] You checked command history as a coverage map — `aith assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. Before citing a prior run, fetch its preview with `aith assess get-command-run <id>` — `success=true` only means `return_code=0`. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] You checked command history as a coverage map — `vigil assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. Before citing a prior run, fetch its preview with `vigil assess get-command-run <id>` — `success=true` only means `return_code=0`. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any item is unchecked, STOP and load it. Without the skills and references your recon quality drops and downstream specialists cannot test what your pass missed.
 
@@ -125,8 +125,8 @@ After the tool sequence completes:
 - Treat every fingerprint as a hypothesis about the deployment shape, not a trophy
 - Prefer concrete, reproducible observations over broad speculative scan output
 - Use automation to expand recon efficiently, but do not mistake automation output for confirmed attack surface
-- Keep target-facing execution in `aith assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
-- Use `aith assess` commands for backend state — helper scripts maintain audit consistency that hand-edits break
+- Keep target-facing execution in `vigil assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
+- Use `vigil assess` commands for backend state — helper scripts maintain audit consistency that hand-edits break
 - Surface candidates require evidence: a real response, artifact, or protocol signal
 
 ## Recon Kill Check
@@ -181,8 +181,8 @@ re-sample loop) is owned by `agent/skills/web-recon/SKILL.md` Step 0b and the
 `agent/references/runtime-guides/cdn-ip-blocking.md` reference; this role file just
 verifies it ran and the right durable rows were written.
 
-- [ ] **Vendor-SaaS hosts warned to the operator with a scope_decision row recorded.** Any host whose CNAME / rDNS shape, banner, or HTTP fingerprint matches a vendor-managed SaaS platform (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`) has been surfaced to the operator with a one-line warning AND a scope_decision row written via `aith assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user`. The warning is informational (default-permissive); the operator decides in/out/partial scope and updates the row. Hosts authored as an explicit literal in `scope.json` skip the warning — the literal is already an in-scope decision.
-- [ ] **Egress reputation check run after subdomain-enum + httpx populated `live_hosts.txt`.** Procedure ran per `agent/skills/web-recon/SKILL.md` Step 0b. If `egress_block_pct > 50`, the skill's re-sample-and-checkpoint loop fired and the four-option choice was recorded via `aith assess agent decision --kind egress_decision`. Hosts that returned 100% 403 were written to `$DIR/scans/egress_blocked_hosts.txt` so subsequent ingestion defers them with `cluster_key=deferred:egress-blocked`. Continuing through nmap/ffuf/nuclei from a confirmed blocked egress wastes the dispatch — declare it in `#### Coverage Gaps` instead.
+- [ ] **Vendor-SaaS hosts warned to the operator with a scope_decision row recorded.** Any host whose CNAME / rDNS shape, banner, or HTTP fingerprint matches a vendor-managed SaaS platform (per `agent/scripts/assess/lib/scope.py:host_is_vendor_saas`) has been surfaced to the operator with a one-line warning AND a scope_decision row written via `vigil assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user`. The warning is informational (default-permissive); the operator decides in/out/partial scope and updates the row. Hosts authored as an explicit literal in `scope.json` skip the warning — the literal is already an in-scope decision.
+- [ ] **Egress reputation check run after subdomain-enum + httpx populated `live_hosts.txt`.** Procedure ran per `agent/skills/web-recon/SKILL.md` Step 0b. If `egress_block_pct > 50`, the skill's re-sample-and-checkpoint loop fired and the four-option choice was recorded via `vigil assess agent decision --kind egress_decision`. Hosts that returned 100% 403 were written to `$DIR/scans/egress_blocked_hosts.txt` so subsequent ingestion defers them with `cluster_key=deferred:egress-blocked`. Continuing through nmap/ffuf/nuclei from a confirmed blocked egress wastes the dispatch — declare it in `#### Coverage Gaps` instead.
 
 ### Network Layer
 - [ ] All non-web services identified and triaged (SSH, FTP, SMTP, database, custom)
@@ -246,7 +246,7 @@ makes the rerun impossible OR the dispatch authorized the skip. Declare every sk
 
 - Which default step was missed
 - Why the step could not run OR the dispatch-mode + rationale that authorized the skip
-- Recommended follow-up action for the operator (which `aith assess kali` retry profile,
+- Recommended follow-up action for the operator (which `vigil assess kali` retry profile,
   which credentials, which alternate tool)
 
 The operator uses `#### Coverage Gaps` to decide whether to re-dispatch you with a
@@ -259,16 +259,16 @@ decides whether to re-dispatch.
 
 Before your dispatch returns, run in this order:
 
-1. `aith assess record-finding recon-specialist <finding-json>` for each finding (already required)
-2. `aith assess record-intel <type> <intel-json>` for each intel row (already required)
-3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate (already required)
-4. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `live_host_count`, `egress_block_pct`, `wildcard_subs_resolved`)
-5. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+1. `vigil assess record-finding recon-specialist <finding-json>` for each finding (already required)
+2. `vigil assess record-intel <type> <intel-json>` for each intel row (already required)
+3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate (already required)
+4. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `live_host_count`, `egress_block_pct`, `wildcard_subs_resolved`)
+5. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. The handoff row IS the next dispatch's input. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
+`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -307,20 +307,20 @@ The recon-pivot half-phase dispatch shape is the same — narrower set of writes
 ## Handoffs
 
 - To `source-analyzer`: frontend assets, scripts, routes, SPA hints, leaked config, source maps — bring `agent/skills/source-analysis/SKILL.md`
-- To `vulnerability-analyst`: requestable endpoints, object references, auth inconsistencies, exposed APIs — name the vuln-class skill (discoverable via `aith assess list-skills`) matching the candidate surface so the operator can include it in the dispatch
+- To `vulnerability-analyst`: requestable endpoints, object references, auth inconsistencies, exposed APIs — name the vuln-class skill (discoverable via `vigil assess list-skills`) matching the candidate surface so the operator can include it in the dispatch
 - To `exploit-developer`: only when recon already uncovers a clearly actionable path such as open admin access, default credentials, or exposed management services — bring `agent/skills/auth-bypass/SKILL.md` or the relevant skill for the specific path
 
 ## Review Mode (Phase 1 → 2 exit)
 
-When the operator dispatches recon-specialist with the dispatch context `mode=review`, you do not run new probes. You re-read your prior handoffs for this engagement (`aith assess agent list --filter-role recon-specialist`) plus the per-host coverage state, and emit a structured gap report so the operator can dispatch missing work before the Phase 2 transition.
+When the operator dispatches recon-specialist with the dispatch context `mode=review`, you do not run new probes. You re-read your prior handoffs for this engagement (`vigil assess agent list --filter-role recon-specialist`) plus the per-host coverage state, and emit a structured gap report so the operator can dispatch missing work before the Phase 2 transition.
 
 Inputs to consult:
 
-- `aith assess agent list --filter-role recon-specialist --limit 20` — every prior recon dispatch + its handoff summary
-- `aith assess fetch services --json` — live services discovered per host
-- `aith assess fetch surfaces --json` — recorded surfaces per host
-- `aith assess list-intel tech-component --json` — tech fingerprints; check for missing WAF tier per host
-- `aith assess list-command-runs --target-host <host>` — coverage per host
+- `vigil assess agent list --filter-role recon-specialist --limit 20` — every prior recon dispatch + its handoff summary
+- `vigil assess fetch services --json` — live services discovered per host
+- `vigil assess fetch surfaces --json` — recorded surfaces per host
+- `vigil assess list-intel tech-component --json` — tech fingerprints; check for missing WAF tier per host
+- `vigil assess list-command-runs --target-host <host>` — coverage per host
 - `agent/scripts/assess/commands/check_scope_coverage.py` output if --by-host gates are available
 
 Review checklist (emit one line per gap, naming the host + the missing outcome):
@@ -331,4 +331,4 @@ Review checklist (emit one line per gap, naming the host + the missing outcome):
 - [ ] No host has 0 surfaces AND 0 work-buffer items AND no defer reason
 - [ ] Egress reputation check ran (or operator decision recorded for the engagement)
 
-Output: a backend handoff via `aith assess agent handoff --from-json <path>` naming each gap and the host. Do NOT dispatch the missing recon yourself — that's the operator's call. The handoff `next_steps` should propose the specific dispatch (role, target host, skill) the operator should fire.
+Output: a backend handoff via `vigil assess agent handoff --from-json <path>` naming each gap and the host. Do NOT dispatch the missing recon yourself — that's the operator's call. The handoff `next_steps` should propose the specific dispatch (role, target host, skill) the operator should fire.

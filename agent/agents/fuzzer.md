@@ -22,10 +22,10 @@ already listed below.
 
 ## Load First
 
-- `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
+- `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/directory-fuzzing/SKILL.md` for path/directory work (uses feroxbuster for recursive discovery, ffuf for targeted fuzzing), or `agent/skills/parameter-fuzzing/SKILL.md` for parameter work — load both if the objective spans both surface types (for any other skill, run `aith assess list-skills` to discover it)
+- `agent/skills/directory-fuzzing/SKILL.md` for path/directory work (uses feroxbuster for recursive discovery, ffuf for targeted fuzzing), or `agent/skills/parameter-fuzzing/SKILL.md` for parameter work — load both if the objective spans both surface types (for any other skill, run `vigil assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
 
@@ -35,7 +35,7 @@ Before starting any target-facing work, verify:
 - [ ] You loaded the RIGHT fuzzing skill — `directory-fuzzing/SKILL.md` for path/directory work or `parameter-fuzzing/SKILL.md` for parameter work — choosing wrong means using the wrong tool and payload family entirely
 - [ ] You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
 - [ ] You have the dispatch context (target URL, phase, task objective, bounded stop condition)
-- [ ] You checked command history as a coverage map — `aith assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what fuzzing has already run on this target so your next campaign picks a variant that hasn't been tried — different wordlist (`raft-*` vs `quickhits` vs `seclists-common-params` vs tech-specific), different extensions, different parameter-family, different HTTP method, different auth context. The only fuzz to skip is an identical `ffuf`/`wfuzz` command against identical input; any variant is new coverage and doesn't need justification. If you cite a prior run instead of re-running, fetch its preview with `aith assess get-command-run <id>` first — `success=true` only means `return_code=0`, not that the wordlist actually hit interesting surface. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] You checked command history as a coverage map — `vigil assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what fuzzing has already run on this target so your next campaign picks a variant that hasn't been tried — different wordlist (`raft-*` vs `quickhits` vs `seclists-common-params` vs tech-specific), different extensions, different parameter-family, different HTTP method, different auth context. The only fuzz to skip is an identical `ffuf`/`wfuzz` command against identical input; any variant is new coverage and doesn't need justification. If you cite a prior run instead of re-running, fetch its preview with `vigil assess get-command-run <id>` first — `success=true` only means `return_code=0`, not that the wordlist actually hit interesting surface. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any item is unchecked, STOP and load it now. Fuzzing without the right skill and its references means running payloads blind — your results will be noisy and incomplete.
 
@@ -49,7 +49,7 @@ If any item is unchecked, STOP and load it now. Fuzzing without the right skill 
 
 - Require a specific objective, target class, and stop condition before starting — aimless fuzzing produces noisy hit-logs that vulnerability-analyst must triage from scratch with no context about what signal to look for
 - Prefer representative payload families over brute-force noise
-- Keep target-facing execution in `aith assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
+- Keep target-facing execution in `vigil assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
 
 ## Anomaly Classification
 
@@ -69,16 +69,16 @@ On shared platforms, also watch for account identifiers (account IDs, subdomain 
 
 Before your dispatch returns, run in this order:
 
-1. `aith assess record-finding fuzzer <finding-json>` for each confirmed finding
-2. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` for any new surface fuzzing uncovered (newly-evidenced parameter, hidden directory, etc.)
-3. `aith assess ingest-endpoints "$DIR/cases.db" fuzzer` for newly discovered paths
-4. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at the raw fuzzer hit log under `$DIR/scans/fuzzer/`), and role-specific extras (`payloads_tried`, `hits`, `hit_ratio`)
-5. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+1. `vigil assess record-finding fuzzer <finding-json>` for each confirmed finding
+2. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for any new surface fuzzing uncovered (newly-evidenced parameter, hidden directory, etc.)
+3. `vigil assess ingest-endpoints "$DIR/cases.db" fuzzer` for newly discovered paths
+4. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at the raw fuzzer hit log under `$DIR/scans/fuzzer/`), and role-specific extras (`payloads_tried`, `hits`, `hit_ratio`)
+5. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
+`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -105,29 +105,29 @@ rather than restating canonical state.
 ## OOB Callback Confirmation
 
 When fuzzing blind injection surfaces with OOB payloads, run the **mint → fire →
-poll** loop through `aith` after each batch — do not eyeball the raw listener
+poll** loop through `vigil` after each batch — do not eyeball the raw listener
 log. This keeps routine mint/poll correlation with the specialist while leaving
 shared FRP/server repair with the operator.
 
 ```bash
 # 1. Confirm shared infrastructure is healthy, then ensure a named client is up
-aith oob status --json
-aith oob client list
-aith oob client start <name> --engagement <engagement-key> --agent fuzzer
+vigil oob status --json
+vigil oob client list
+vigil oob client start <name> --engagement <engagement-key> --agent fuzzer
 
 # 2. MINT a nonce-tagged callback URL per probe and record its correlation
 #    context. Capture the http URL it prints and substitute it into the payload.
-aith oob mint --technique <t> --target-url <url> --param <p>
+vigil oob mint --technique <t> --target-url <url> --param <p>
 
 # 3. POLL — parse the client's interaction log and correlate probe<->callback.
-aith oob poll --client <name>
+vigil oob poll --client <name>
 ```
 
-`aith oob poll --client <name>` prints `matched <N> unmatched <M>` then one line
+`vigil oob poll --client <name>` prints `matched <N> unmatched <M>` then one line
 per correlated hit carrying the technique + target you minted with, so a hit is
 self-documenting and names the surface that fired. A matched probe<->callback
-pair confirms the vulnerability. `aith oob client logs <name> --lines 80` (and
-`aith logs oob --lines 80`) is a raw tail of the listener log for infra
+pair confirms the vulnerability. `vigil oob client logs <name> --lines 80` (and
+`vigil logs oob --lines 80`) is a raw tail of the listener log for infra
 debugging only — never read it for correlation.
 
 If OOB is unavailable, fall back to time-based detection (sleep payloads). If

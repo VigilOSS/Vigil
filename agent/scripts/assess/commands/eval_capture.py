@@ -1,4 +1,4 @@
-"""aith assess eval-capture — snapshot backend findings into a golden eval fixture.
+"""vigil assess eval-capture — snapshot backend findings into a golden eval fixture.
 
 Captures a real engagement's backend findings into a committed golden fixture
 that is DROP-IN compatible with the offline eval harness (tests/eval): a flat
@@ -60,12 +60,12 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  aith assess eval-capture --engagement-dir <dir> "
+            "  vigil assess eval-capture --engagement-dir <dir> "
             "--out tests/eval/fixtures/golden_<name>.json\n"
-            "  aith assess eval-capture --engagement-dir <dir> "
+            "  vigil assess eval-capture --engagement-dir <dir> "
             "--out tests/eval/fixtures/golden_<name>.json "
             "--definition tests/eval/definitions/<name>.yaml\n"
-            "  aith assess eval-capture --engagement-dir <dir> "
+            "  vigil assess eval-capture --engagement-dir <dir> "
             "--out tests/eval/fixtures/golden_<name>.json --check"
         ),
     )
@@ -294,7 +294,7 @@ def _scaffold_definition(records: list[dict], fixture_basename: str) -> str:
     """
     count = len(records)
     lines = [
-        f"# Eval definition scaffolded by `aith assess eval-capture` from {fixture_basename}",
+        f"# Eval definition scaffolded by `vigil assess eval-capture` from {fixture_basename}",
         "# Green-by-construction: thresholds derived from the captured snapshot.",
         f"fixture: {fixture_basename}",
         "",

@@ -69,7 +69,7 @@ AI-tell elimination — do NOT write:
 - Cartoonish personas ("a hacker in a basement", "Phantom"). Name the adversary class (criminal, APT, insider, opportunistic) + starting access — stop there.
 - Reader instructions ("It is important that the reader understand..."). State the fact.
 - Restated header metadata. If MITRE is in the finding header, do not repeat "This finding is categorized as T1078.004" in the description.
-- Internal slugs (`F-001`), engagement keys, jj change IDs, raw `aith` output, backend query strings, specialist role names (`alert-triage-specialist`, `incident-verifier`). Use role terms (`the L2 investigation`) or active voice.
+- Internal slugs (`F-001`), engagement keys, jj change IDs, raw `vigil` output, backend query strings, specialist role names (`alert-triage-specialist`, `incident-verifier`). Use role terms (`the L2 investigation`) or active voice.
 
 Write active voice, named subject. Lead with what the adversary gained. If a sentence can be deleted without losing information, delete it.
 -->
@@ -447,17 +447,17 @@ ONE-SCREEN SELF-CHECK — run before delivering
 BACKEND QUERIES (run from the engagement directory)
 ================================================================================
 
-Findings (§5 + §6):   aith assess list-report-findings --mode final --json
-                      aith assess fetch findings/<finding-slug>
-Timeline (§4):        aith assess fetch 'activity-entries?limit=1000'
+Findings (§5 + §6):   vigil assess list-report-findings --mode final --json
+                      vigil assess fetch findings/<finding-slug>
+Timeline (§4):        vigil assess fetch 'activity-entries?limit=1000'
                         # filter by metadata.kind / check_number post-pull
-Artifacts (App. A):   aith assess artifact search --finding <finding-slug>
-                      aith assess artifact get <artifact-id>
-Containment (§7):     aith assess list-command-runs --phase respond
-                      aith assess get-command-run <command-run-id>
-Verification (§5):    aith assess agent list
-                      aith assess agent render-handoff <agent-id>
-Readiness gate:       operator ran `aith assess transition-phase report`
+Artifacts (App. A):   vigil assess artifact search --finding <finding-slug>
+                      vigil assess artifact get <artifact-id>
+Containment (§7):     vigil assess list-command-runs --phase respond
+                      vigil assess get-command-run <command-run-id>
+Verification (§5):    vigil assess agent list
+                      vigil assess agent render-handoff <agent-id>
+Readiness gate:       operator ran `vigil assess transition-phase report`
 
 ================================================================================
 CLOSING SEQUENCE (blue)
@@ -468,12 +468,12 @@ Self-Review), register the rendered file and publish.
 
 False-positive, benign, no-impact, or inconclusive outcomes (closeout path):
 
-    aith assess artifact register closeout.md --kind ir_closeout \
+    vigil assess artifact register closeout.md --kind ir_closeout \
       --agent-id <report-writer-agent-id>
 
 Verified incident outcomes (full report path):
 
-    aith assess artifact register report.md --kind ir_evidence \
+    vigil assess artifact register report.md --kind ir_evidence \
       --finding <slug-list-or-engagement-ref> --agent-id <report-writer-agent-id>
 
 Then run § "Publish After QA Pass" — emit `closeout.generated` (closeout path)

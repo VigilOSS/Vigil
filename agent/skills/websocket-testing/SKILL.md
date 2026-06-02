@@ -1,12 +1,12 @@
 ---
 name: websocket-testing
 description: WebSocket security testing — injection, auth bypass, hijacking
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # WebSocket Security Testing
 
-> **`aith assess kali` audit flags:** use `--technique OTHER` for generic WebSocket protocol and CSWSH probing. Switch to the specific vuln class when the WS message carries a `SQLI`, `XSS`, `CMDI`, or `AUTH` payload.
+> **`vigil assess kali` audit flags:** use `--technique OTHER` for generic WebSocket protocol and CSWSH probing. Switch to the specific vuln class when the WS message carries a `SQLI`, `XSS`, `CMDI`, or `AUTH` payload.
 
 ## When to Activate
 
@@ -16,11 +16,11 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- websocat ...` (CLI WebSocket client — all target-facing WebSocket probing must go through the kali exec wrapper; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 60` for generic probing, switching to the specific vuln class for injection payloads)
+- `vigil assess kali exec -- websocat ...` (CLI WebSocket client — all target-facing WebSocket probing must go through the kali exec wrapper; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 60` for generic probing, switching to the specific vuln class for injection payloads)
 - Burp Suite (WebSocket history + Repeater — use to craft messages, then replay via kali exec for audit pipeline coverage)
 - Browser DevTools (Network → WS tab)
 - OWASP ZAP (WebSocket support)
-- Custom scripts (Python websockets library — run via `aith assess kali exec -- python3 ...`)
+- Custom scripts (Python websockets library — run via `vigil assess kali exec -- python3 ...`)
 
 ## Methodology
 

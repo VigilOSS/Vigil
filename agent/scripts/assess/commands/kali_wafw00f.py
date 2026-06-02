@@ -1,4 +1,4 @@
-"""aith assess kali wafw00f — typed wrapper around wafw00f inside the runtime."""
+"""vigil assess kali wafw00f — typed wrapper around wafw00f inside the runtime."""
 from __future__ import annotations
 
 import sys

@@ -1,4 +1,4 @@
-"""aith assess patch — generic PATCH for findings, coverage items, and similar endpoints."""
+"""vigil assess patch — generic PATCH for findings, coverage items, and similar endpoints."""
 from __future__ import annotations
 
 import argparse
@@ -18,8 +18,8 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  aith assess patch coverage-items/42 payload.json\n"
-            "  aith assess patch coverage-items/42 --inline '{\"status\":\"covered\"}'"
+            "  vigil assess patch coverage-items/42 payload.json\n"
+            "  vigil assess patch coverage-items/42 --inline '{\"status\":\"covered\"}'"
         ),
     )
     p.add_argument("endpoint", help="e.g. coverage-items/42 or findings/VA-001")

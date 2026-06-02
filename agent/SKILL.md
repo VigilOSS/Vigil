@@ -1,14 +1,14 @@
-# AI Threat Hunting Skill Index
+# Vigil Skill Index
 
-> **Operators and specialists:** prefer `aith assess list-skills` for discovery
+> **Operators and specialists:** prefer `vigil assess list-skills` for discovery
 > (compact name + one-line "Use when:"). Reading this full index file costs
 > ~300 lines of context per turn just to pick a skill. This file is retained
 > as a human-readable reference for paired-reference details and the long-form
 > "Use when" descriptions; the CLI is the authoritative discovery surface.
 
 Use this file only as a long-form human reference. For live dispatch selection, run
-`aith assess list-skills` and pass the directory-name skill value to
-`aith assess agent start --skills`; the validator resolves those names
+`vigil assess list-skills` and pass the directory-name skill value to
+`vigil assess agent start --skills`; the validator resolves those names
 against `agent/skills/<name>/SKILL.md` on disk.
 
 ## Deprecated Selection Note
@@ -22,7 +22,7 @@ specific `agent/skills/<name>/SKILL.md` path named in their dispatch prompt.
 ## Core Workflow Skills
 
 - `agent/skills/kali-exec/SKILL.md`
-  **Use when:** Always — every target-facing call uses `aith assess kali ...`. Foundational, paired with `shared-constraints.md`.
+  **Use when:** Always — every target-facing call uses `vigil assess kali ...`. Foundational, paired with `shared-constraints.md`.
   **Paired references:** `references/runtime-guides/kali-cli.md`, plus per-verb references listed inside the skill.
 
 - `agent/skills/web-recon/SKILL.md`
@@ -315,7 +315,7 @@ See `agent/rules/ir-evidence.md` (always-active during IR work) for attribution 
   **Paired references:** `agent/skills/osint-recon/SKILL.md` (red analog), `agent/rules/triage.md` (symmetric evidence bar applies to IOC citations), `agent/shared-constraints-blue.md` (host-exec audit pipeline required for every reputation query).
 
 - `agent/skills/incident-containment/SKILL.md`
-  **Use when:** L4 ir-lead dispatch on a `verified` finding with severity ≥ high; authoring containment / eradication / recovery proposals with target / action / rollback contract; blast-radius assessment; per-action operator approval gate before `aith blue contain` executes.
+  **Use when:** L4 ir-lead dispatch on a `verified` finding with severity ≥ high; authoring containment / eradication / recovery proposals with target / action / rollback contract; blast-radius assessment; per-action operator approval gate before `vigil blue contain` executes.
   **Paired references:** the platform skill in containment mode (e.g., `agent/skills/google-workspaces/SKILL.md`), `agent/rules/triage.md` (containment-proposal shape, never-delete-evidence), `agent/rules/ir-evidence.md`.
 
 ### Reused-from-red skills with blue applicability
@@ -372,7 +372,7 @@ The L2 `investigator` role loads exactly one of these per dispatch, chosen by th
 ### Blue incident report template
 
 - `agent/skills/report-generation/templates/blue.md`
-  **Use when:** `aith blue report` dispatches the report-writer for an `engagement_type=blue` engagement. Provides the 12-section blue-template structure (Executive Summary, Incident Overview, Scope & Authorization, Timeline, Technical Findings, Attack Reconstruction, Containment & Eradication Actions, Posture Observations, Recommendations, Coverage Gaps & Limitations, Evidence Index, Sensitive Annex).
+  **Use when:** `vigil blue report` dispatches the report-writer for an `engagement_type=blue` engagement. Provides the 12-section blue-template structure (Executive Summary, Incident Overview, Scope & Authorization, Timeline, Technical Findings, Attack Reconstruction, Containment & Eradication Actions, Posture Observations, Recommendations, Coverage Gaps & Limitations, Evidence Index, Sensitive Annex).
   **Paired references:** `agent/skills/report-generation/SKILL.md` §Blue Mode for the dispatch contract.
 
 ---

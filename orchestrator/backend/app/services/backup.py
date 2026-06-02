@@ -5,7 +5,7 @@ Every 15 minutes a WAL-coherent snapshot is written to
 snapshots are retained (15 hours of continuous coverage at default cadence).
 
 This complements the per-engagement snapshot taken by
-``aith engagement create``: that command protects against accidents during setup,
+``vigil engagement create``: that command protects against accidents during setup,
 while the scheduled task protects against everything in between — operator
 mistakes against a live DB, filesystem renames of engagement dirs that used
 to trigger the sync cascade-delete, and general OS-level corruption.
@@ -28,7 +28,7 @@ from pathlib import Path
 from .. import db as db_module
 
 
-SCHEDULER_DISABLED_ENV = "AI_THREAT_HUNTING_BACKUP_DISABLED"
+SCHEDULER_DISABLED_ENV = "VIGIL_BACKUP_DISABLED"
 
 
 DEFAULT_INTERVAL_SECONDS = 15 * 60

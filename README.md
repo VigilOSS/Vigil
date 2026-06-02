@@ -1,4 +1,4 @@
-# AI Threat Hunting
+# Vigil
 
 This repository contains the operator prompts, Kali runtime image, engagement scaffolding, and orchestrator services used to run those engagements.
 
@@ -20,33 +20,33 @@ This repository contains the operator prompts, Kali runtime image, engagement sc
 - Specialist prompt sources live under `agent/agents/`.
 - Generated specialist wrappers live under `agent/.codex/agents/` and `agent/.claude/agents/`; install copies them to root `.codex/agents/` and `.claude/agents/`.
 - Always-active rules live under `agent/rules/`.
-- Skill discovery is driven by `aith assess list-skills`, which walks `agent/skills/*/SKILL.md` frontmatter; the operator picks a skill by name and the dispatched specialist reads the full file.
+- Skill discovery is driven by `vigil assess list-skills`, which walks `agent/skills/*/SKILL.md` frontmatter; the operator picks a skill by name and the dispatched specialist reads the full file.
 
 ## Quick Start
 
 ### Install the CLI and workspace
 
-The `aith` CLI is the supported entrypoint for installing, upgrading, creating engagements, starting the orchestrator, and managing the Kali runtime.
+The `vigil` CLI is the supported entrypoint for installing, upgrading, creating engagements, starting the orchestrator, and managing the Kali runtime.
 
 ```bash
 # Install from GitHub
-uv tool install --from git+https://github.com/vigil-oss/security-research.git security-research
+uv tool install --from git+https://github.com/vigil-oss/vigil.git vigil
 
 # Or from a checkout while developing locally
 uv tool install --editable .
 
 # Install or upgrade the working root
-aith install ~/security-research
+vigil install ~/vigil
 
 # Sync source, build stale images, and start the local stack.
 # Prompts for FRP token on first run if not configured.
-aith up
+vigil up
 ```
 
 Each install contains both Claude Code and Codex workflow files. The install root holds the shared prompt source tree, generated client wrappers, runtime assets, and orchestrator state while each client keeps its own entrypoint.
 
 The shared Kali runtime is not per-engagement. Start the local stack once with
-`aith up`; target-facing tool execution happens via `aith assess kali ...`
+`vigil up`; target-facing tool execution happens via `vigil assess kali ...`
 subcommands which call into the container via `docker exec`. Within a single
 install, multiple engagements may exist under `agent/engagements/`.
 
@@ -54,34 +54,34 @@ Use one lead operator per engagement at a time unless you are deliberately coord
 
 ### Updating after a `git pull`
 
-`aith up` automatically syncs source files into the install root before checking images and starting services. After pulling changes, just run `aith up` again — no separate update step is needed.
+`vigil up` automatically syncs source files into the install root before checking images and starting services. After pulling changes, just run `vigil up` again — no separate update step is needed.
 
 For a source-only sync without starting services:
 
 ```bash
-aith install
+vigil install
 ```
 
-`aith install` (and its alias `aith update`) upgrades in place — engagements, the orchestrator database, and `.env` are never moved or deleted. Code, prompts, skills, and scripts are replaced with the latest versions from the repo.
+`vigil install` (and its alias `vigil update`) upgrades in place — engagements, the orchestrator database, and `.env` are never moved or deleted. Code, prompts, skills, and scripts are replaced with the latest versions from the repo.
 
 Check local readiness and live service state:
 
 ```bash
-aith doctor
-aith status
-aith logs orchestrator --lines 80
+vigil doctor
+vigil status
+vigil logs orchestrator --lines 80
 ```
 
 ### Stack details
 
-`aith up` is the supported all-up path. It starts the Kali runtime container, the orchestrator backend (which builds the frontend when needed), and the optional mitmproxy and OOB services if they are configured. For partial restarts the individual `aith runtime start` and `aith orchestrator start` subcommands still exist and are documented under their respective `--help`. `aith status` / `aith logs <target>` report live state.
+`vigil up` is the supported all-up path. It starts the Kali runtime container, the orchestrator backend (which builds the frontend when needed), and the optional mitmproxy and OOB services if they are configured. For partial restarts the individual `vigil runtime start` and `vigil orchestrator start` subcommands still exist and are documented under their respective `--help`. `vigil status` / `vigil logs <target>` report live state.
 
-The Kali runtime is one shared container named `security-research`. It mounts shared runtime data at `.runtime-data/`, applies the resource limits described in [Resource Sizing](#resource-sizing) below, and passes the root `.env` file into the runtime when present. Durable engagement artifacts stay on the host under `agent/engagements/<key>/`, and the runtime bind-mounts the whole engagement root at `/engagements` so `aith assess kali ...` calls can write `/engagements/<key>/...` artifacts directly. Run `aith assess kali --help` for the available tool verbs.
+The Kali runtime is one shared container named `vigil`. It mounts shared runtime data at `.runtime-data/`, applies the resource limits described in [Resource Sizing](#resource-sizing) below, and passes the root `.env` file into the runtime when present. Durable engagement artifacts stay on the host under `agent/engagements/<key>/`, and the runtime bind-mounts the whole engagement root at `/engagements` so `vigil assess kali ...` calls can write `/engagements/<key>/...` artifacts directly. Run `vigil assess kali --help` for the available tool verbs.
 
 For non-interactive runtime maintenance commands, use `shell-exec` so quoting and exit codes stay under the CLI:
 
 ```bash
-aith runtime shell-exec "tmux list-sessions"
+vigil runtime shell-exec "tmux list-sessions"
 ```
 
 ### Resource Sizing
@@ -93,13 +93,13 @@ aith runtime shell-exec "tmux list-sessions"
 | Heavy | 16 GB | 8 | 0 | 1024 | 65536 | Large enterprise scope, 4-6 parallel specialists |
 | Comfortable | 32 GB | 12 | 4 GB | 2048 | 131072 | All tools warm, continuous engagement |
 
-Configure via env vars before `aith runtime start`:
+Configure via env vars before `vigil runtime start`:
 
 ```bash
-AITH_RUNTIME_MEMORY_GB=16 AITH_RUNTIME_CPUS=8 aith runtime start
+VIGIL_RUNTIME_MEMORY_GB=16 VIGIL_RUNTIME_CPUS=8 vigil runtime start
 ```
 
-Live state: `aith runtime resources`.
+Live state: `vigil runtime resources`.
 
 Gotchas:
 
@@ -109,7 +109,7 @@ Gotchas:
 
 ### Container resource limits (optional)
 
-The runtime image does not pin process or file-descriptor rlimits. `docker exec`-launched tools inherit dockerd's daemon defaults — generous on Linux hosts (`nofile=1048576`, `nproc=unlimited`) but tighter on Docker Desktop (`nofile=8192`, `nproc=4096`). `aith runtime start` probes the live limits and prints a stderr WARN when they fall below recommended thresholds.
+The runtime image does not pin process or file-descriptor rlimits. `docker exec`-launched tools inherit dockerd's daemon defaults — generous on Linux hosts (`nofile=1048576`, `nproc=unlimited`) but tighter on Docker Desktop (`nofile=8192`, `nproc=4096`). `vigil runtime start` probes the live limits and prints a stderr WARN when they fall below recommended thresholds.
 
 To raise the daemon defaults so they apply to every container (including `docker exec`-launched specialists), edit `/etc/docker/daemon.json` (Linux) or Docker Desktop → Settings → Docker Engine, then restart dockerd:
 
@@ -126,50 +126,50 @@ Container-side `/etc/security/limits.conf` is not used because `docker exec` doe
 
 ### Orchestrator data and backups
 
-The orchestrator UI is served from the backend at `http://127.0.0.1:18000` once `aith up` (or `aith orchestrator start` for a targeted start) is running.
+The orchestrator UI is served from the backend at `http://127.0.0.1:18000` once `vigil up` (or `vigil orchestrator start` for a targeted start) is running.
 
 The backend stores canonical engagement state in a single SQLite file and keeps rotated snapshots next to it:
 
 - **Live DB**: `<install-root>/orchestrator/backend/data/orchestrator.sqlite3`
-- **Scheduled backups**: `<install-root>/orchestrator/backend/data/backups/orchestrator.<UTC-timestamp>.sqlite3` — a WAL-coherent snapshot every 15 minutes, last 60 copies retained (~15 hours of continuous coverage). Written by the backend process itself; independent of the per-engagement snapshot that `aith engagement create` takes before creating an engagement.
+- **Scheduled backups**: `<install-root>/orchestrator/backend/data/backups/orchestrator.<UTC-timestamp>.sqlite3` — a WAL-coherent snapshot every 15 minutes, last 60 copies retained (~15 hours of continuous coverage). Written by the backend process itself; independent of the per-engagement snapshot that `vigil engagement create` takes before creating an engagement.
 
 Override the data location with env vars (first match wins):
 
-- `AI_THREAT_HUNTING_DATA_DIR` — absolute path to the directory that holds `orchestrator.sqlite3` and `backups/`
+- `VIGIL_DATA_DIR` — absolute path to the directory that holds `orchestrator.sqlite3` and `backups/`
 - `REDTEAM_ORCHESTRATOR_DATA_DIR` — legacy alias of the same setting
-- `AI_THREAT_HUNTING_INSTALL_DIR` — install root; the DB is then read from `$AI_THREAT_HUNTING_INSTALL_DIR/orchestrator/backend/data/`
+- `VIGIL_INSTALL_DIR` — install root; the DB is then read from `$VIGIL_INSTALL_DIR/orchestrator/backend/data/`
 
-Both the backend and `aith engagement create` honor the same precedence so snapshots and the live DB always target the same file. Engagement deletion is explicit: `DELETE /engagements/<key>?confirm=<key>` or the frontend delete button with a typed-key confirmation. Renaming or removing an engagement directory under `agent/engagements/` leaves the DB row intact — no cascade delete.
+Both the backend and `vigil engagement create` honor the same precedence so snapshots and the live DB always target the same file. Engagement deletion is explicit: `DELETE /engagements/<key>?confirm=<key>` or the frontend delete button with a typed-key confirmation. Renaming or removing an engagement directory under `agent/engagements/` leaves the DB row intact — no cascade delete.
 
 Backup cadence tuning (optional):
 
-- `AI_THREAT_HUNTING_BACKUP_DISABLED=1` — turn off the scheduled backup entirely (used by the test suite)
+- `VIGIL_BACKUP_DISABLED=1` — turn off the scheduled backup entirely (used by the test suite)
 
 Manual backup operations:
 
 ```bash
-aith backup create
-aith backup list
-aith backup restore <backup-name-or-path>
+vigil backup create
+vigil backup list
+vigil backup restore <backup-name-or-path>
 ```
 
 Then create an engagement inside the chosen install:
 
 ```bash
-aith engagement create https://target.example --hosts target.example
+vigil engagement create https://target.example --hosts target.example
 ```
 
 In non-interactive runs the safe default is the parsed target hostname as the sole `hosts` entry. The default exploit policy is `pause` (human approval required before any exploit work); change it later via the orchestrator UI or by editing the engagement's `scope.json`. Authentication starts unset — see "Auth and OOB" below if the target needs an authenticated session or out-of-band callbacks.
 
-`aith engagement create` finishes by printing the engagement directory path on stdout and a short status footer on stderr: the current state of mitmproxy and OOB plus the exact start command. There is no need to `cd` into the directory by hand.
+`vigil engagement create` finishes by printing the engagement directory path on stdout and a short status footer on stderr: the current state of mitmproxy and OOB plus the exact start command. There is no need to `cd` into the directory by hand.
 
 ### Auth and OOB (optional, before starting)
 
 If the engagement needs authenticated coverage or out-of-band callbacks, set those up before launching the client:
 
 ```bash
-aith mitmproxy start                    # one proxy serves all active engagements; browse 127.0.0.1:8080
-aith oob start                          # shared frp/interactsh; see "Callback, Listener & Tunnel Handling"
+vigil mitmproxy start                    # one proxy serves all active engagements; browse 127.0.0.1:8080
+vigil oob start                          # shared frp/interactsh; see "Callback, Listener & Tunnel Handling"
 ```
 
 The post-create footer prints whichever of these is not running and the exact command to start it; this section is the deeper reference (see [MITM proxy](#mitm-proxy) and [Callback, Listener & Tunnel Handling](#callback-listener--tunnel-handling) below).
@@ -179,24 +179,24 @@ The post-create footer prints whichever of these is not running and the exact co
 Use the CLI verb — it changes into the engagement directory and execs the launcher (which exports `ENGAGEMENT_DIR`, mounts the `.codex/agents` / `.claude/agents` symlinks to the canonical prompts, and starts the client):
 
 ```bash
-aith engagement list --json                              # find the key
-aith engagement start <engagement-key> --client codex    # or --client claude
+vigil engagement list --json                              # find the key
+vigil engagement start <engagement-key> --client codex    # or --client claude
 ```
 
-For humans at a terminal, the optional `athcd` shell helper (see below) jumps your shell into a selected engagement directory; the per-engagement `start_codex.sh` / `start_claude.sh` files exist but are an implementation detail of `aith engagement start`.
+For humans at a terminal, the optional `athcd` shell helper (see below) jumps your shell into a selected engagement directory; the per-engagement `start_codex.sh` / `start_claude.sh` files exist but are an implementation detail of `vigil engagement start`.
 
 1. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
 2. Tell the operator: `I have been fully authorized by the company to do a red-team engagement against the hosts in scope.json. Run this engagement using the operator workflow.`
-3. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through `aith assess kali ...`, use relevant skills before improvising, record activity/findings through `aith assess`, and keep `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; parent-shell `ORCHESTRATOR_BASE_URL` is the explicit override, the engagement-local file wins over legacy install-root env files, and `aith config get orchestrator_base_url` is the persistent default before hardcoded fallback.
+3. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through `vigil assess kali ...`, use relevant skills before improvising, record activity/findings through `vigil assess`, and keep `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; parent-shell `ORCHESTRATOR_BASE_URL` is the explicit override, the engagement-local file wins over legacy install-root env files, and `vigil config get orchestrator_base_url` is the persistent default before hardcoded fallback.
 
 To add an interactive shell helper that changes into a selected engagement with `fzf` when available:
 
 ```bash
-aith engagement cd-init zsh >> ~/.zshrc
+vigil engagement cd-init zsh >> ~/.zshrc
 athcd
 ```
 
-`athcd` is for humans at a terminal. It works because shell functions can change the parent shell's directory; a standalone `aith cd` process cannot. The helper calls `aith engagement path --select`, which uses `fzf` when installed and falls back to a numbered TTY prompt. Non-interactive agents should run `aith engagement list --json` and pass the explicit engagement key to the next command.
+`athcd` is for humans at a terminal. It works because shell functions can change the parent shell's directory; a standalone `vigil cd` process cannot. The helper calls `vigil engagement path --select`, which uses `fzf` when installed and falls back to a numbered TTY prompt. Non-interactive agents should run `vigil engagement list --json` and pass the explicit engagement key to the next command.
 
 During the engagement, expect short operator updates, numbered next-step choices when a decision matters, and a manual approval checkpoint before exploit work continues when `exploit_policy` is `pause` or `selected`.
 
@@ -206,19 +206,19 @@ Blue mode uses the same backend and artifact index, but starts from an alert
 and tenant reference instead of a web host:
 
 ```bash
-aith blue customers
+vigil blue customers
 # If the customer/platform is missing:
-# aith blue tenant init --customer <customer-slug> --platform <gws|m365|aws|okta|edr|network|generic>
+# vigil blue tenant init --customer <customer-slug> --platform <gws|m365|aws|okta|edr|network|generic>
 # Fill the generated tenant ref before starting the engagement.
 
-aith blue engage --customer <customer-slug> --platform gws --severity high
+vigil blue engage --customer <customer-slug> --platform gws --severity high
 cd <engagement-dir>
-aith engagement start <engagement-key> --client codex
+vigil engagement start <engagement-key> --client codex
 ```
 
-Tell the operator: `I have been fully authorized by the company to run a blue-team incident-response engagement for the tenant in scope.json. Run this engagement using the blue operator workflow.` Then paste the alert into the operator chat. The operator records intake with `aith blue alert record --body-file <path>` and finishes every engagement with either `aith blue closeout` or `aith blue report`.
+Tell the operator: `I have been fully authorized by the company to run a blue-team incident-response engagement for the tenant in scope.json. Run this engagement using the blue operator workflow.` Then paste the alert into the operator chat. The operator records intake with `vigil blue alert record --body-file <path>` and finishes every engagement with either `vigil blue closeout` or `vigil blue report`.
 
-Blue specialists use `aith blue dispatch` for L1/L2/L3/L4 work, run tenant-facing tools through `aith assess host-exec` (`--require-audit` for WRITE/respond actions), record findings/artifacts through `aith assess`, and split containment into proposal approval, audited execution, and `aith blue contain` recording with a command-run id or proof artifact.
+Blue specialists use `vigil blue dispatch` for L1/L2/L3/L4 work, run tenant-facing tools through `vigil assess host-exec` (`--require-audit` for WRITE/respond actions), record findings/artifacts through `vigil assess`, and split containment into proposal approval, audited execution, and `vigil blue contain` recording with a command-run id or proof artifact.
 
 The public red/web roster is intentionally limited to the core roles: `operator`, `recon-specialist`, `source-analyzer`, `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`, and `report-writer`. Blue engagements expose `alert-triage-specialist`, `investigator`, `incident-verifier`, `ir-lead`, plus shared `osint-analyst` and `report-writer`. Validator-, chain-, and ranker-style behaviors are folded into those roles instead of creating a larger visible roster.
 
@@ -237,7 +237,7 @@ Two forms. Use the **generic** form to start a fresh engagement after `cd`-ing i
 
 #### Generic — new or resumed engagement (simple form)
 
-After `aith engagement start <key>`:
+After `vigil engagement start <key>`:
 
 ```
 Read AGENTS.md and assume Operator role.
@@ -252,14 +252,14 @@ explicit human approval required before any exploit-developer dispatch.
 
 #### Refined — resume with prior context
 
-Use this when continuing across sessions. The operator's first action is `aith assess
+Use this when continuing across sessions. The operator's first action is `vigil assess
 resume-brief` for a bounded backend snapshot; paste the rendered handoff blob from the prior
-agent (run `aith assess agent render-handoff <agent-id>` before closing the previous session)
+agent (run `vigil assess agent render-handoff <agent-id>` before closing the previous session)
 when the new session continues a specific dispatch.
 
 ```
 Read AGENTS.md and assume Operator role. Run agent/rules/resume.md hydration before
-planning anything — start with `aith assess resume-brief` (narrow with --finding, --q,
+planning anything — start with `vigil assess resume-brief` (narrow with --finding, --q,
 or --agent-id for targeted continuation).
 
 Authorized engagement: https://bugcrowd.com/engagements/<slug>
@@ -272,7 +272,7 @@ Prefer claude-opus-4-7 / gpt-5.5 xhigh for substantial work; medium only for bou
 Exploitation policy: <pause|selected|full_send> per scope.json.
 
 Previous agent context (paste only when continuing a specific dispatch):
-<paste aith assess agent render-handoff <agent-id> output here>
+<paste vigil assess agent render-handoff <agent-id> output here>
 ```
 
 ### Resume, artifacts, and dispatch closure (operator CLI surface)
@@ -281,11 +281,11 @@ The orchestrator backend is the canonical store for engagement state. Use these 
 commands to read and close that state — they replace ad-hoc file scraping and
 transcript pasting:
 
-- `aith assess resume-brief [--finding <slug>] [--q <text>] [--agent-id <id>] [--max-age-hours N]`
+- `vigil assess resume-brief [--finding <slug>] [--q <text>] [--agent-id <id>] [--max-age-hours N]`
   — bounded JSON+markdown operating picture (finding queues, recent decisions, stale
   dispatches, handoff gaps, top command-history matches, indexed artifacts, and
   one-shot drill-down commands keyed by id).
-- `aith assess artifact search|get|register|refresh|mark-scratch`
+- `vigil assess artifact search|get|register|refresh|mark-scratch`
   — engagement-local file index. Agents/operators register heavy raw files
   explicitly with `register <path> [--finding <slug>] [--agent-id <id>]
   [--command-run-id <n>]`; the backend computes SHA-256, indexes preview text
@@ -294,10 +294,10 @@ transcript pasting:
   `mark-scratch <path-or-id>` dismisses a registered note as scratch so
   `check-report-readiness` no longer blocks on it (the escape valve for operator or
   specialist working notes that are not durable engagement memory).
-- `aith assess agent close <agent-id>`
+- `vigil assess agent close <agent-id>`
   — close an in-progress dispatch when its handoff is `ready` or `blocked`. Records a
   `dispatch_closed_from_handoff` decision row.
-- `aith assess agent reconcile-stale [--dry-run] [--max-age-hours N]`
+- `vigil assess agent reconcile-stale [--dry-run] [--max-age-hours N]`
   — list in-progress dispatches older than the threshold; close ones whose handoff is
   `ready`/`blocked` automatically. Always prints every candidate with `closed=true|false`
   and a `skip_reason`.
@@ -309,26 +309,26 @@ Code analysis uses a separate operator loop (`agent/operator-core-code.md`) with
 1. Create a code analysis engagement using `--type code`:
 ```bash
 # Name only - add source code to the engagement later
-aith engagement create --type code my-project
+vigil engagement create --type code my-project
 
 # Name with a local repository
-aith engagement create --type code --name my-project --repo /path/to/repo
+vigil engagement create --type code --name my-project --repo /path/to/repo
 
 # Name with a clone URL
-aith engagement create --type code --name my-project --repo https://github.com/org/repo
+vigil engagement create --type code --name my-project --repo https://github.com/org/repo
 
 # Combined web + code engagement
-aith engagement create --type both --name my-project --hosts app.example.com --repo /path/to/repo
+vigil engagement create --type both --name my-project --hosts app.example.com --repo /path/to/repo
 ```
 
 This creates an engagement with `current_phase: "ingest"`, a `source/` directory for the repo checkout, and no web-target scaffolding (no hosts, no auth prompting). The engagement directory name is derived from the engagement name. Repositories are optional — source code can be cloned or placed into the `source/` directory after creation.
 
 2. Bootstrap the code-analysis parser toolchain once on the machine:
 ```bash
-aith assess --help
+vigil assess --help
 ```
 
-`aith assess` delegates to `agent/scripts/assess.py`, a `uv run --script` entrypoint with inline `tree-sitter`
+`vigil assess` delegates to `agent/scripts/assess.py`, a `uv run --script` entrypoint with inline `tree-sitter`
 dependencies, so the first invocation installs the bundled parser packages automatically.
 No separate `pip install tree-sitter ...` step is required, but `uv` must already be
 available on `PATH`.
@@ -346,7 +346,7 @@ clang --version
 afl-fuzz -V
 ```
 
-`aith doctor` covers the core operator CLI/runtime prerequisites. Fuzzing is
+`vigil doctor` covers the core operator CLI/runtime prerequisites. Fuzzing is
 conditional; check the Homebrew tools directly when planning a fuzz campaign.
 
 Homebrew's AFL++ package may provide `afl-clang-fast` or `afl-cc` instead of
@@ -355,8 +355,8 @@ as long as `afl-fuzz` and `afl-tmin` are present.
 
 4. Start the client:
 ```bash
-aith engagement list --json
-aith engagement start <engagement-key> --client claude   # or --client codex
+vigil engagement list --json
+vigil engagement start <engagement-key> --client claude   # or --client codex
 ```
 
 5. Tell the operator to use the code analysis workflow:
@@ -373,7 +373,7 @@ Code analysis can also run mid-engagement alongside web testing when source code
 
 ### Primary runtime
 
-The runtime is a long-lived Kali Docker container started by `aith runtime start`. Target-facing tool execution happens via `aith assess kali ...` subcommands which call into the container via `docker exec`. Long-running scans go through `aith assess kali job start ...`, which uses the in-container `dtach` supervisor so workers survive operator session exit.
+The runtime is a long-lived Kali Docker container started by `vigil runtime start`. Target-facing tool execution happens via `vigil assess kali ...` subcommands which call into the container via `docker exec`. Long-running scans go through `vigil assess kali job start ...`, which uses the in-container `dtach` supervisor so workers survive operator session exit.
 
 `agent/docker/runtime-full/Dockerfile` is the main full runtime image and includes:
 
@@ -381,22 +381,22 @@ The runtime is a long-lived Kali Docker container started by `aith runtime start
 - ProjectDiscovery recon utilities including `httpx`, `dnsx`, `gau`, `katana`, `nuclei`, `dalfox`, `puredns`, `shuffledns`, `alterx`, `asnmap`, `cero`, and `bbot`
 - nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, WhatWeb, hydra, john, hashcat, nikto
 - `massdns` and `xmllint` for DNS-stack and XML coverage assertions
-- `dtach` as the in-container supervisor for `aith assess kali job` workers
+- `dtach` as the in-container supervisor for `vigil assess kali job` workers
 - TruffleHog for filesystem/git secret scanning
 - post-access tooling such as evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder
 - pwncat-vl for interactive reverse shell handling, with tmux for session management
 - interactsh for OOB callback detection (blind SSRF, XXE, XSS, DNS)
 - frp SSH tunneling for exposing listeners and OOB servers to remote targets
 
-A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfile`, but it is development-only for faster Dockerfile iteration and validation. Operator workflows, docs, and agent runtime assumptions all target `agent/docker/runtime-full/Dockerfile`. Build the lightweight image only with `aith runtime build lightweight --dev`.
+A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfile`, but it is development-only for faster Dockerfile iteration and validation. Operator workflows, docs, and agent runtime assumptions all target `agent/docker/runtime-full/Dockerfile`. Build the lightweight image only with `vigil runtime build lightweight --dev`.
 
 
 ### Authentication
 
-`aith engagement create` seeds an anonymous `auth.json` (`mode: none`). Three ways to add an authenticated session later:
+`vigil engagement create` seeds an anonymous `auth.json` (`mode: none`). Three ways to add an authenticated session later:
 
-- Run `aith mitmproxy start` (one proxy serves every active engagement) and browse through `127.0.0.1:8080` — `proxy_addon.py` matches the captured host against each engagement's `scope.json` and writes the cookies/headers to THAT engagement's `auth.json`. No engagement context is required at proxy-start time; multiple engagements can be authenticated in parallel without restarting the proxy.
-- Run `aith auth import <key> --source cookies-and-headers.json`.
+- Run `vigil mitmproxy start` (one proxy serves every active engagement) and browse through `127.0.0.1:8080` — `proxy_addon.py` matches the captured host against each engagement's `scope.json` and writes the cookies/headers to THAT engagement's `auth.json`. No engagement context is required at proxy-start time; multiple engagements can be authenticated in parallel without restarting the proxy.
+- Run `vigil auth import <key> --source cookies-and-headers.json`.
 - Edit `auth.json` directly.
 
 `auth.json` carries:
@@ -412,11 +412,11 @@ If auth is expired or missing, the workflow warns and continues anonymously.
 CLI helpers operate on engagement `auth.json`:
 
 ```bash
-aith engagement list --json
-aith auth status <engagement-key>
-aith auth show <engagement-key>
-aith auth import <engagement-key> --source cookies-and-headers.json
-aith auth clear <engagement-key>
+vigil engagement list --json
+vigil auth status <engagement-key>
+vigil auth show <engagement-key>
+vigil auth import <engagement-key> --source cookies-and-headers.json
+vigil auth clear <engagement-key>
 ```
 
 ## Optional Tool Activation
@@ -425,12 +425,12 @@ These capabilities are intentionally present but not always started automaticall
 
 ### MITM proxy
 
-`aith engagement create` prints whether mitmproxy is running and the start command if it is not. This subsection is the deep reference.
+`vigil engagement create` prints whether mitmproxy is running and the start command if it is not. This subsection is the deep reference.
 
-1. `aith mitmproxy start` — the CLI builds the Docker image if needed, bind-mounts the install's `agent/engagements/` directory at `/engagements` (so the addon sees every engagement at once), persists the mitmproxy CA in a Docker volume, and verifies the local proxy port. No engagement context is required.
-2. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow against any scoped host, then confirm that the matching engagement's `auth.json` was refreshed. Continue with authenticated recollection and testing. Use `aith logs mitmproxy` for capture logs.
+1. `vigil mitmproxy start` — the CLI builds the Docker image if needed, bind-mounts the install's `agent/engagements/` directory at `/engagements` (so the addon sees every engagement at once), persists the mitmproxy CA in a Docker volume, and verifies the local proxy port. No engagement context is required.
+2. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow against any scoped host, then confirm that the matching engagement's `auth.json` was refreshed. Continue with authenticated recollection and testing. Use `vigil logs mitmproxy` for capture logs.
 
-The addon routes each captured response to the engagement whose `scope.json` best matches the hostname (precedence: literal host > narrower wildcard > engagement `scope_priority` > most-recently-updated). After creating or scope-editing an engagement, `aith mitmproxy reload` forces the addon to refresh its registry; `aith mitmproxy routes` prints the current mapping for verification.
+The addon routes each captured response to the engagement whose `scope.json` best matches the hostname (precedence: literal host > narrower wildcard > engagement `scope_priority` > most-recently-updated). After creating or scope-editing an engagement, `vigil mitmproxy reload` forces the addon to refresh its registry; `vigil mitmproxy routes` prints the current mapping for verification.
 
 If you need HTTPS interception, install the mitmproxy CA certificate in the browser or device before logging in.
 
@@ -452,22 +452,22 @@ Universal ctags produces richer tag data (signatures, kinds, line numbers) and s
 
 Tunnels (frp), listeners (pwncat-vl), and OOB callback servers (interactsh) are **OPERATOR-CONTROLLED** shared infrastructure. Agents provide commands but never start them.
 
-Configure OOB once, then let `aith oob start` create or verify the shared frp/interactsh sessions.
-The FRP token is required for OOB. `aith up` prompts for it on first startup when it is missing
-and stores the value in `aith config`; non-interactive installs should set it first with
-`aith config set oob.frp_token <token>` or `AI_THREAT_HUNTING_FRP_TOKEN`.
+Configure OOB once, then let `vigil oob start` create or verify the shared frp/interactsh sessions.
+The FRP token is required for OOB. `vigil up` prompts for it on first startup when it is missing
+and stores the value in `vigil config`; non-interactive installs should set it first with
+`vigil config set oob.frp_token <token>` or `VIGIL_FRP_TOKEN`.
 
 ```bash
-aith config set oob.frp_host researcher.example
-aith config set oob.frp_port 7000
-aith config set oob.domain researcher.example
-aith config set oob.frp_token <token>
-aith oob start
-aith oob status --json
-aith engagement list --json
-aith oob client start example-agent --engagement <engagement-key> --agent vulnerability-analyst
-aith oob client logs example-agent --lines 80
-aith oob test
+vigil config set oob.frp_host researcher.example
+vigil config set oob.frp_port 7000
+vigil config set oob.domain researcher.example
+vigil config set oob.frp_token <token>
+vigil oob start
+vigil oob status --json
+vigil engagement list --json
+vigil oob client start example-agent --engagement <engagement-key> --agent vulnerability-analyst
+vigil oob client logs example-agent --lines 80
+vigil oob test
 ```
 
 - **Tunnel setup, OOB callbacks, interactsh, frpc config:** `agent/references/offensive-tactics/frp-tunneling.md`
@@ -475,7 +475,7 @@ aith oob test
 
 ### OOB is single-tenant by design (post-flight conflict check)
 
-`aith oob start` registers proxies on frps with hardcoded server-side resources:
+`vigil oob start` registers proxies on frps with hardcoded server-side resources:
 `remotePort = 53` (UDP), `remotePort = 8443` (TCP), and
 `customDomains = researcher.example`. These are globally unique on frps, so
 only one client at a time can own the OOB profile. The hostname-derived prefix
@@ -492,15 +492,15 @@ existing frp control connection — no extra channel (SSH forward, dashboard
 tunnel, etc.) is required.
 
 If the log shows neither outcome within the timeout, the command prints a
-non-fatal hint pointing at `docker exec security-research tail -n 200
+non-fatal hint pointing at `docker exec vigil tail -n 200
 /data/oob/frpc.log` so the operator can inspect what frpc and frps are
 actually saying. Override the wait via the `frpc_ready_timeout` argument to
 `start_oob` (pass `0` to skip the scan entirely; tests do this).
 
 #### TODO — per-tenant OOB (multi-host concurrency)
 
-Two operators on the same frps cannot both run `aith oob start` today. To make
-the OOB profile multi-tenant, refactor `src/ai_threat_hunting_cli/oob.py
+Two operators on the same frps cannot both run `vigil oob start` today. To make
+the OOB profile multi-tenant, refactor `src/vigil_cli/oob.py
 ::_render_runtime_files` so each container scopes its registration:
 
 1. Use `customDomains = ['<prefix>.researcher.example',
@@ -570,7 +570,7 @@ The queue in `agent/scripts/schema.sql` is a transient work buffer and is not pa
 
 For repo-local development conventions used by Codex, see the root `AGENTS.md` — it carries the
 clone-to-first-dispatch newcomer walkthrough and step-by-step recipes for adding a skill, an
-`aith assess` verb, a deterministic oracle, or an eval case.
+`vigil assess` verb, a deterministic oracle, or an eval case.
 
 ## TODO
 
@@ -585,7 +585,7 @@ clone-to-first-dispatch newcomer walkthrough and step-by-step recipes for adding
   / Assetnote wordlists, the aggregate-rate concern grows. Design space:
   (a) an optional `rate_limit_aggregate_rps` field in `scope.json` with a
   shared-constraints rule that per-call flags must respect `aggregate ÷
-  active dispatch count`; (b) `aith assess kali` wrappers that read the field
+  active dispatch count`; (b) `vigil assess kali` wrappers that read the field
   and warn (or hard-reject with `--force`) when a per-call rate would breach;
   (c) a reference doc mapping common programs' rate caps to per-tool flag
   values. Deferred — pick a path before next batch of probing-heavy fixes.
@@ -609,6 +609,6 @@ npm run build
 Runtime:
 
 ```bash
-docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
-aith runtime resources
+docker build -t vigil:latest -f agent/docker/runtime-full/Dockerfile .
+vigil runtime resources
 ```

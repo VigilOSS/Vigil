@@ -35,7 +35,7 @@ def _render_handoff(args, extra: list[str]) -> None:
     """
     if not extra:
         print(
-            "Usage: aith assess agent render-handoff <agent-id> "
+            "Usage: vigil assess agent render-handoff <agent-id> "
             "[--max-lines N] [--include-evidence]",
             file=sys.stderr,
         )
@@ -59,7 +59,7 @@ def _render_handoff(args, extra: list[str]) -> None:
             print(
                 f"render-handoff: agent-id '{agent_id}' has no recorded handoff in the backend "
                 f"(GET dispatch-handoffs/{agent_id} -> 404). Specialist dispatches should call "
-                f"`aith assess agent handoff` before exiting; a missing handoff means "
+                f"`vigil assess agent handoff` before exiting; a missing handoff means "
                 f"the prior dispatch never wrote one (or the id was mistyped).",
                 file=sys.stderr,
             )

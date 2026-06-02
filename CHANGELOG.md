@@ -1,7 +1,7 @@
 # Changelog
 
-This file records notable changes to the AI Threat Hunting framework — the operator
-prompts, deterministic assessment verbs, orchestrator services, and the `aith` CLI.
+This file records notable changes to the Vigil framework — the operator
+prompts, deterministic assessment verbs, orchestrator services, and the `vigil` CLI.
 Entries are grouped by date and summarize shipped work at a high level; the code at the
 cited paths and the [TODOv2.md](TODOv2.md) backlog remain the detailed record.
 
@@ -18,7 +18,7 @@ holding state for findings that lack runtime proof.
   (`classify-payload`, `anomaly-score`, and `oob mint|poll`) are now referenced from the
   specialist skills that should drive off them, so the Phase 2 oracles are live in the
   workflow rather than available only as bare CLI verbs.
-- **Phase 5 coverage auto-re-entry.** `aith assess check-scope-coverage --auto-redispatch`
+- **Phase 5 coverage auto-re-entry.** `vigil assess check-scope-coverage --auto-redispatch`
   turns a coverage gap into a deterministic, dedup-aware recommendation naming the specialist
   and skills to run next, instead of leaving the operator to translate a gap into a dispatch
   by hand. Prior dispatches power the dedup so the same gap is not re-recommended.
@@ -30,7 +30,7 @@ holding state for findings that lack runtime proof.
 
 - **`pending_runtime_proof` disposition.** A sticky holding state for findings that are
   reasoned but not yet runtime-confirmed, so theoretical findings no longer have to be either
-  promoted prematurely or dropped. Surfaced through `aith assess list-findings --holding`.
+  promoted prematurely or dropped. Surfaced through `vigil assess list-findings --holding`.
 - **Verification-narrative debate artifact.** A client-side `--narrative` capture records the
   argument for and against a finding alongside the finding itself, so the verification
   reasoning is durable rather than living only in a transcript.
@@ -61,7 +61,7 @@ holding state for findings that lack runtime proof.
 
 ### Eval
 
-- **`aith assess eval-capture`.** Snapshots a real engagement's backend findings into a
+- **`vigil assess eval-capture`.** Snapshots a real engagement's backend findings into a
   committed golden fixture — transforming the stored `details_json` / `provenance_json`
   strings back into objects and validating against `agent/schemas/finding-record.schema.json`
   before writing. Supports a `--definition` scaffold and a `--check` regression diff. This is
@@ -70,7 +70,7 @@ holding state for findings that lack runtime proof.
 
 ### Code analysis (Phase 4)
 
-- **`write-probe-script` skill.** A skill plus the `aith assess scaffold-probe` helper for the
+- **`write-probe-script` skill.** A skill plus the `vigil assess scaffold-probe` helper for the
   runtime authoring of single-file probes: draft -> run in the Kali runtime -> validate ->
   register the artifact -> reuse. Seeded with `agent/references/probe-scripts/` so specialists
   start from a known-good shape instead of an empty file.
@@ -86,11 +86,11 @@ holding state for findings that lack runtime proof.
 - **Onboarding consolidation.** The "clone to first dispatch" newcomer walkthrough is
   consolidated into the root `AGENTS.md` maintainer guide and points at `README.md` for install
   and runtime detail rather than duplicating it.
-- **`aith engagement export --format markdown-tree`.** Exports an engagement's state as a
+- **`vigil engagement export --format markdown-tree`.** Exports an engagement's state as a
   readable markdown tree.
 
 ### Release discipline
 
-This is a Python project: builds, packaging, and versioning go through `uv` (the `aith` CLI is
-installed with `uv tool install`, and `aith assess` runs as a `uv run --script` entrypoint with
+This is a Python project: builds, packaging, and versioning go through `uv` (the `vigil` CLI is
+installed with `uv tool install`, and `vigil assess` runs as a `uv run --script` entrypoint with
 inline dependencies). There is no goreleaser path — version metadata lives in `pyproject.toml`.

@@ -1,4 +1,4 @@
-"""aith assess anomaly-score — deterministic HTTP response anomaly oracle.
+"""vigil assess anomaly-score — deterministic HTTP response anomaly oracle.
 
 Scores a *population* of HTTP response records for anomalousness, surfacing
 the odd-one-out(s) without any LLM or network call.  Specialist agents supply

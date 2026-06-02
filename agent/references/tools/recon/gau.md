@@ -2,15 +2,15 @@
 
 **Purpose:** Fetch known URLs from multiple archive sources (Wayback Machine, AlienVault OTX, Common Crawl, URLScan).
 
-**Recommended verb:** `aith assess gau-endpoints` for the standard collection-and-ingest flow (cache-aware, runs gau and seats URLs into `work_items` in one shot). For body-fetch + secret extraction use `aith assess gau-secrets`. For LinkFinder-style extraction over JS bundles use `aith assess gau-js-endpoints`. Drop down to the typed `aith assess kali gau` verb only for ad-hoc archive sweeps that do not need to feed the work buffer.
+**Recommended verb:** `vigil assess gau-endpoints` for the standard collection-and-ingest flow (cache-aware, runs gau and seats URLs into `work_items` in one shot). For body-fetch + secret extraction use `vigil assess gau-secrets`. For LinkFinder-style extraction over JS bundles use `vigil assess gau-js-endpoints`. Drop down to the typed `vigil assess kali gau` verb only for ad-hoc archive sweeps that do not need to feed the work buffer.
 
 ## Basic Usage
 
-The `aith assess kali gau` typed verb writes its own audit row and supports the standard required flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. The wrapper verbs above stamp these automatically.
+The `vigil assess kali gau` typed verb writes its own audit row and supports the standard required flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. The wrapper verbs above stamp these automatically.
 
-Flag reference (used inside `aith assess kali gau`):
+Flag reference (used inside `vigil assess kali gau`):
 
-**Single domain:** `aith assess kali gau example.com --technique DISCOVERY --intent "historical URL harvest (passive)" --probe-kind fingerprint --phase collect --timeout 1800 -o /engagements/$ENGAGEMENT_KEY/scans/gau_example.txt`
+**Single domain:** `vigil assess kali gau example.com --technique DISCOVERY --intent "historical URL harvest (passive)" --probe-kind fingerprint --phase collect --timeout 1800 -o /engagements/$ENGAGEMENT_KEY/scans/gau_example.txt`
 **Include subdomains:** `--subs`
 **With threads:** `--threads 5`
 **Output to file:** `-o /engagements/$ENGAGEMENT_KEY/scans/gau_example.txt` (the typed verb translates `-o` to gau's actual `--o` long-flag form)
@@ -30,7 +30,7 @@ trufflehog). Use the snippet below only when composing a one-off chain manually.
 
 ```bash
 # Step 1 — collect historical URLs (passive, no target traffic)
-aith assess kali gau example.com --subs --threads 5 \
+vigil assess kali gau example.com --subs --threads 5 \
   --providers wayback,otx,commoncrawl,urlscan \
   -o /engagements/$ENGAGEMENT_KEY/scans/gau_example.txt \
   --technique DISCOVERY --intent "historical URL harvest for example.com (passive)" \
@@ -40,8 +40,8 @@ aith assess kali gau example.com --subs --threads 5 \
 grep "=" /engagements/$ENGAGEMENT_KEY/scans/gau_example.txt | sort -u \
   > /engagements/$ENGAGEMENT_KEY/scans/gau_params.txt
 
-# Step 3 — confirm live URLs via aith assess kali httpx (separate audit row)
-aith assess kali httpx \
+# Step 3 — confirm live URLs via vigil assess kali httpx (separate audit row)
+vigil assess kali httpx \
   -l /engagements/$ENGAGEMENT_KEY/scans/gau_example.txt \
   -status-code -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/gau_live.jsonl \

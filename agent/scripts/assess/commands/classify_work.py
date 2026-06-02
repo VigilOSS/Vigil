@@ -1,4 +1,4 @@
-"""aith assess classify-work — idempotent re-application of gf-style classification.
+"""vigil assess classify-work — idempotent re-application of gf-style classification.
 
 Classification now runs *inline* during `db_insert_work_item()` so the work
 buffer is always scored at insert time. This command is retained for two

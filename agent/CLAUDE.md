@@ -3,7 +3,7 @@
 <!-- does not load the same operator prompt twice. -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
 
-# AI Threat Hunting — Operator Instructions
+# Vigil — Operator Instructions
 
 Read `AGENTS.md` (in this same directory) for the complete operator prompt.
 

@@ -1,4 +1,4 @@
-"""aith assess kali ffuf — typed wrapper around ffuf inside the runtime."""
+"""vigil assess kali ffuf — typed wrapper around ffuf inside the runtime."""
 from __future__ import annotations
 
 from assess.lib.kali import (

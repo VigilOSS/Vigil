@@ -172,7 +172,7 @@ export function OverviewTab({ engagementKey, events, assessmentSummary, findings
           <p className="meta-text">
             Surface the numbered checkpoint when recon identifies vendor-managed SaaS; record the
             choice as a backend scope_decision row with{" "}
-            <code>aith assess agent decision --kind scope_decision</code>.
+            <code>vigil assess agent decision --kind scope_decision</code>.
           </p>
         </section>
       )}
@@ -346,7 +346,7 @@ type ReadinessPanelProps = {
 // P1#3 adds a scope-literals-only toggle on the per-host matrix so
 // wildcard-heavy engagements (a scope.json *.example.com that recon
 // expands into hundreds of subdomains) stay readable. Default matches
-// the CLI's `aith assess check-scope-coverage --by-host` behavior: hide
+// the CLI's `vigil assess check-scope-coverage --by-host` behavior: hide
 // wildcard-discovered hosts, summarize them inline.
 //
 // The panel is read-only. Operators dispatch missing work from the CLI; the
@@ -659,7 +659,7 @@ function ActiveDeferralsList({ perHost }: { perHost: PerHostCoverage | undefined
       <p className="meta-text">
         Record new deferrals via{" "}
         <code>
-          aith assess agent decision --kind coverage_deferral --payload-json
+          vigil assess agent decision --kind coverage_deferral --payload-json
           '&#123;...&#125;'
         </code>
         . The payload requires <code>deferred_objectives</code> (one or more

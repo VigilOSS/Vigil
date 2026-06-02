@@ -1,4 +1,4 @@
-"""aith assess code-dispatch — analysis queue dispatch engine for the code analysis pipeline."""
+"""vigil assess code-dispatch — analysis queue dispatch engine for the code analysis pipeline."""
 from __future__ import annotations
 
 from fnmatch import fnmatch

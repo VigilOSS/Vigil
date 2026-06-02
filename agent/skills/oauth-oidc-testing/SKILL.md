@@ -1,12 +1,12 @@
 ---
 name: oauth-oidc-testing
 description: Detect and exploit OAuth 2.0 and OpenID Connect security flaws in authentication flows
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # OAuth / OpenID Connect Testing
 
-> **`aith assess kali` audit flags:** use `--technique AUTH` (OAuth/OIDC bugs — redirect_uri abuse, scope escalation, state/PKCE tampering, id_token acceptance — all collapse to the AUTH class). Switch to `JWT` when attacking the id_token's signature or claims specifically.
+> **`vigil assess kali` audit flags:** use `--technique AUTH` (OAuth/OIDC bugs — redirect_uri abuse, scope escalation, state/PKCE tampering, id_token acceptance — all collapse to the AUTH class). Switch to `JWT` when attacking the id_token's signature or claims specifically.
 
 ## When to Activate
 
@@ -16,10 +16,10 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (manual OAuth flow manipulation and token probing — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique AUTH --probe-kind payload --phase consume-test --timeout 30`)
+- `vigil assess kali exec -- curl ...` (manual OAuth flow manipulation and token probing — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique AUTH --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools (intercept redirects, capture authorization codes, inspect tokens)
 - `jwt_tool` / `jwt.io` (decode and tamper with ID tokens and access tokens — host-side analysis, not target-facing)
-- `aith oob mint` / `aith oob poll` — capture authorization codes / tokens leaked via a hijacked `redirect_uri`. Mint a nonce-tagged callback host (`aith oob mint --technique AUTH --target-url <authorize-url> --param redirect_uri`), submit its `http` host as the `redirect_uri` (or the rebinding/path-confusion variant you are testing), and when the IdP redirects the victim's browser there the code/token rides along; `aith oob poll --client <name>` then returns the matched probe<->callback pair carrying the captured request. Check readiness with `aith oob status --json`; if no named client is running, start one with `aith oob client start <name> --engagement <key> --agent <agent>`. (`aith oob client logs <name> --lines 80` is a raw listener tail for infra debugging only, not correlation.)
+- `vigil oob mint` / `vigil oob poll` — capture authorization codes / tokens leaked via a hijacked `redirect_uri`. Mint a nonce-tagged callback host (`vigil oob mint --technique AUTH --target-url <authorize-url> --param redirect_uri`), submit its `http` host as the `redirect_uri` (or the rebinding/path-confusion variant you are testing), and when the IdP redirects the victim's browser there the code/token rides along; `vigil oob poll --client <name>` then returns the matched probe<->callback pair carrying the captured request. Check readiness with `vigil oob status --json`; if no named client is running, start one with `vigil oob client start <name> --engagement <key> --agent <agent>`. (`vigil oob client logs <name> --lines 80` is a raw listener tail for infra debugging only, not correlation.)
 
 ## Methodology
 

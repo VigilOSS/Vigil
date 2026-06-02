@@ -1,4 +1,4 @@
-"""aith assess web-discovery — composable web-probing pipeline.
+"""vigil assess web-discovery — composable web-probing pipeline.
 
 Pipes the error-prone glue the LLM should not hand-roll into one synchronous,
 audited command:
@@ -169,7 +169,7 @@ def run(args) -> None:
             print(f"web-discovery: ingested {len(urls)} crawled URLs into the work buffer", file=sys.stderr)
 
     print("web-discovery: done. Liveness in the backend ledger; "
-          "run `aith assess fetch host-liveness` or coverage rollup to review.", file=sys.stderr)
+          "run `vigil assess fetch host-liveness` or coverage rollup to review.", file=sys.stderr)
 
 
 def _katana_urls(katana_jsonl: Path) -> list[str]:

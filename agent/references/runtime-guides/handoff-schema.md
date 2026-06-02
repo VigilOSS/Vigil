@@ -3,7 +3,7 @@
 The structured handoff blob is the canonical "what was done, what's missing, what's
 next" record every specialist writes before its dispatch returns. The blob lives in
 the `assessment_dispatch_handoffs` table and is rendered into the next dispatch's
-prompt by `aith assess agent render-handoff <agent-id>`.
+prompt by `vigil assess agent render-handoff <agent-id>`.
 
 ## Purpose
 
@@ -25,7 +25,7 @@ prompt by `aith assess agent render-handoff <agent-id>`.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `agent_id` | string | yes | The dispatching agent_id (the same id passed to `aith assess agent start` / `POST /dispatches`). |
+| `agent_id` | string | yes | The dispatching agent_id (the same id passed to `vigil assess agent start` / `POST /dispatches`). |
 | `agent_role` | string | yes | The role file the dispatch ran under (`recon-specialist`, `vulnerability-analyst`, etc.). |
 | `phase` | string | yes | The phase tag the dispatch was authorized for (`recon`, `consume-test`, `verify`, `exploit`, `report`, `code-hunt`, ..., plus half-phase tags `recon-pivot` / `exploit-recon`). |
 | `summary` | string | yes | ≤2000 chars; one paragraph; what was done in your own words. |
@@ -37,7 +37,7 @@ prompt by `aith assess agent render-handoff <agent-id>`.
 | `working_artifacts` | object[] | optional | Each entry: `{path, description, kind}`. `path` is engagement-relative (e.g. `scans/sans_acme-saas.txt`); the renderer checks each on disk. |
 | `open_questions` | string[] | optional | Free-text questions the operator/human must answer (vendor-SaaS in/out, scope ambiguity, missing credential, etc.). |
 | `recommended_next_agent` | string | optional | The role you'd hand off to (`vulnerability-analyst`, `exploit-developer`, `report-writer`, ...). |
-| `handoff_status` | enum | optional | `checkpointed` / `ready` / `blocked` / `superseded`. Defaults to `checkpointed`; set `ready` or `blocked` in the final handoff so the operator can run `aith assess agent close <agent_id>`. A `ready` or `blocked` handoff whose dispatch stays `in-progress` past the resume-brief threshold surfaces as a `stale_dispatch_ready_handoff` report-readiness blocker. |
+| `handoff_status` | enum | optional | `checkpointed` / `ready` / `blocked` / `superseded`. Defaults to `checkpointed`; set `ready` or `blocked` in the final handoff so the operator can run `vigil assess agent close <agent_id>`. A `ready` or `blocked` handoff whose dispatch stays `in-progress` past the resume-brief threshold surfaces as a `stale_dispatch_ready_handoff` report-readiness blocker. |
 | `closed_dispatch_status` | enum | optional | Dispatch status for `agent close` to apply (`completed`, `blocked`, `failed`, `aborted`). |
 | `handoff_version` | integer | backend-managed | Incremented on every checkpoint write. Specialists do not set it; the orchestrator increments it on each PATCH so concurrent updates and audit trails stay ordered. |
 | `last_checkpoint_at` | ISO datetime | backend-managed | Timestamp of the most recent handoff write. Backfilled to `created_at` for pre-lifecycle rows; updated by every checkpoint PATCH. Used by `agent reconcile-stale` to find dispatches that have not checkpointed recently. |
@@ -136,7 +136,7 @@ Use `checkpointed` while the dispatch is still in progress and the handoff is a
 durable progress save. Use `ready` for the final handoff when the operator can
 close the dispatch as completed. Use `blocked` when the dispatch cannot complete
 without new credentials, scope clarification, runtime repair, or another
-operator action. The operator runs `aith assess agent close <agent_id>` after
+operator action. The operator runs `vigil assess agent close <agent_id>` after
 reviewing a ready/blocked handoff; agents do not close their own dispatch rows.
 
 ### `extras`
@@ -458,13 +458,13 @@ cat > /tmp/handoff-recon-a3f9.json <<'JSON'
 }
 JSON
 
-aith assess agent handoff --from-json /tmp/handoff-recon-a3f9.json
+vigil assess agent handoff --from-json /tmp/handoff-recon-a3f9.json
 # Self-check: confirm the row is readable before exiting (404 → agent_id mismatch)
-aith assess agent render-handoff a3f9
+vigil assess agent render-handoff a3f9
 ```
 
 For simple cases (one or two findings, no nested fields), flag-based alternatives
-exist — see `aith assess agent handoff --help` for the live flag set.
+exist — see `vigil assess agent handoff --help` for the live flag set.
 The `--from-json` form is the canonical path because it's the only way to record
 nested fields (`coverage_gaps`, `next_steps`, `runtime_issues`, `working_artifacts`)
 without shell-escaping pain.
@@ -472,7 +472,7 @@ without shell-escaping pain.
 The renderer reads the row back:
 
 ```bash
-aith assess agent render-handoff <agent-id>
+vigil assess agent render-handoff <agent-id>
 ```
 
 The output is a markdown blob, hard-capped at `--max-lines` (default 40), with
@@ -480,23 +480,23 @@ findings collapsed to "... and N more" before runtime_issues / working_artifacts
 Summary, coverage_gaps, and next_steps are never trimmed. Paste it verbatim into
 the next dispatch's prompt.
 
-## Checkpointing — call `aith assess agent handoff` as you work
+## Checkpointing — call `vigil assess agent handoff` as you work
 
-`aith assess agent handoff --from-json <path>` is idempotent: every
+`vigil assess agent handoff --from-json <path>` is idempotent: every
 call against the same `agent_id` either inserts the row or replaces the prior
 payload. Call it after each major step in your methodology — not just at the
 end.
 
 The pattern: maintain a local handoff JSON file (e.g.
 `/tmp/handoff_<agent-id>.json`). After each tool or methodology step, update
-the file with everything-known-so-far, then re-run `aith assess agent handoff` against it.
-Latest write wins; `aith assess agent render-handoff <agent-id>` always reflects the most
+the file with everything-known-so-far, then re-run `vigil assess agent handoff` against it.
+Latest write wins; `vigil assess agent render-handoff <agent-id>` always reflects the most
 recent state.
 
 Why: durable progress accrues in the backend as you work. If your dispatch
 halts before the final closing call (e.g. context exhaustion in Claude Code
 sub-agents), the most recent checkpoint is your canonical record. Operators
-reading `aith assess agent render-handoff` see whatever step you were on.
+reading `vigil assess agent render-handoff` see whatever step you were on.
 
 ### Suggested checkpoint cadence per role
 
@@ -540,7 +540,7 @@ reading `aith assess agent render-handoff` see whatever step you were on.
 ```
 
 After step 7 completes the same file is rewritten with the full coverage
-gaps, next steps, and a confident summary, and `aith assess agent handoff` is run again
+gaps, next steps, and a confident summary, and `vigil assess agent handoff` is run again
 against the same path. The backend row is replaced in place.
 
 ### What gets persisted on halt

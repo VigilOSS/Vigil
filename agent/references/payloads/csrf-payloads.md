@@ -157,11 +157,11 @@ If the app checks that a cookie value matches a form parameter:
 
 ## Useful Curl for Testing
 
-Run all target-facing curl probes via `aith assess kali exec --technique CSRF --intent "<why>" --probe-kind payload --phase <phase> --timeout <seconds> -- curl ...` so the request lands in the audit pipeline. Keep explicit Cookie overrides only when replaying a victim session on purpose.
+Run all target-facing curl probes via `vigil assess kali exec --technique CSRF --intent "<why>" --probe-kind payload --phase <phase> --timeout <seconds> -- curl ...` so the request lands in the audit pipeline. Keep explicit Cookie overrides only when replaying a victim session on purpose.
 
 ```bash
 # Check if endpoint accepts requests without CSRF token
-aith assess kali exec --technique CSRF \
+vigil assess kali exec --technique CSRF \
   --intent "CSRF probe: POST without token to /api/action" \
   --probe-kind payload --phase consume-test --timeout 30 -- \
   curl -s -X POST http://target.example/api/action \
@@ -169,14 +169,14 @@ aith assess kali exec --technique CSRF \
     -d "email=test@test.com"
 
 # Check if endpoint accepts GET instead of POST
-aith assess kali exec --technique CSRF \
+vigil assess kali exec --technique CSRF \
   --intent "CSRF probe: method switch GET vs POST on /api/action" \
   --probe-kind payload --phase consume-test --timeout 30 -- \
   curl -s "http://target.example/api/action?email=test@test.com" \
     -H "Cookie: session=VICTIM_SESSION"
 
 # Check Referer validation
-aith assess kali exec --technique CSRF \
+vigil assess kali exec --technique CSRF \
   --intent "CSRF probe: cross-origin Referer on /api/action" \
   --probe-kind payload --phase consume-test --timeout 30 -- \
   curl -s -X POST http://target.example/api/action \

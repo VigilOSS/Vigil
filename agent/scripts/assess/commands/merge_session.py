@@ -1,4 +1,4 @@
-"""aith assess merge-session — parse proposals → record each by type."""
+"""vigil assess merge-session — parse proposals → record each by type."""
 from __future__ import annotations
 
 import json

@@ -3,7 +3,7 @@ ARG PRELOADED_TOOLS=0
 FROM ${BASE_IMAGE}
 ARG PRELOADED_TOOLS=0
 ARG INSTALL_VERSION_STAMP=2026.05.05-84a231c
-LABEL security-research.install-versions="${INSTALL_VERSION_STAMP}"
+LABEL vigil.install-versions="${INSTALL_VERSION_STAMP}"
 
 ARG APT_BASE_PACKAGES="ca-certificates curl jq sqlite3 git ripgrep bind9-dnsutils iputils-ping whois openssl netcat-openbsd procps lsof python3 python3-dev python3-pip python3-aiohttp sudo tini wget rlwrap unzip dtach libxml2-utils pipx strace build-essential"
 ARG APT_TOOL_PACKAGES="subfinder sublist3r testssl.sh golang-go chromium chromium-driver whatweb ffuf gobuster wfuzz dirb sqlmap hydra john hashcat ruby-full proxychains4 openssh-client socat tcpdump tmux nikto massdns nmap amass wafw00f"

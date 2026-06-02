@@ -31,7 +31,7 @@ already listed below.
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/code-architecture-mapping/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
+- `agent/skills/code-architecture-mapping/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
 
@@ -217,7 +217,7 @@ Structured document covering:
 - Historical vulnerability patterns (from git history and known CVEs)
 
 ### `#### File Classifications`
-Use `aith assess contract code-classify` as the classification shape source. Every classification
+Use `vigil assess contract code-classify` as the classification shape source. Every classification
 record should include backend `file_id`; `file_path` is helper context and `repo_id` only
 disambiguates path lookup. The machine JSON is an array, not an object keyed by path, and uses
 `analysis_priority` for ordering. Put rationale in the surrounding markdown or Recommended
@@ -234,7 +234,7 @@ Prioritized list of specific vulnerability hypotheses for the file analysis queu
 
 ### `#### File Analysis Queue`
 Flat JSON array written to `tools/analysis-state/file-analysis-queue.json`; use
-`aith assess contract code-dispatch` as the queue shape source. Every critical and high file MUST
+`vigil assess contract code-dispatch` as the queue shape source. Every critical and high file MUST
 appear in this queue. Files without hypotheses appear with an empty `guidance_hypotheses` array —
 the hunter provides unconstrained analysis first, then checks hypotheses. The queue is grouped by
 `batch_theme` (logical module) so the hunter can reason across related files in the same dispatch.
@@ -250,30 +250,30 @@ REQUIRED. Declare every self-check item you could NOT complete. If none, state "
 
 After producing output, the operator records via:
 ```bash
-aith assess contract code-classify
-aith assess contract code-record-threat-model
-aith assess contract code-record-modules
-aith assess code-classify <classifications-json>
-aith assess code-record-threat-model <repo-id> <threat-model-json>
-aith assess code-record-modules <repo-id> <modules-json>
+vigil assess contract code-classify
+vigil assess contract code-record-threat-model
+vigil assess contract code-record-modules
+vigil assess code-classify <classifications-json>
+vigil assess code-record-threat-model <repo-id> <threat-model-json>
+vigil assess code-record-modules <repo-id> <modules-json>
 ```
 
 ## Mandatory Closing Sequence
 
 Before your dispatch returns, run in this order:
 
-1. `aith assess code-record-threat-model <repo-id> <threat-model-json>`
-2. `aith assess code-record-modules <repo-id> <modules-json>`
-3. `aith assess code-classify <classifications-json>` (per-file)
-4. `aith assess record-intel note <intel-json>` for each attack hypothesis (so the hunter inherits them as intel notes)
-5. `aith assess record-finding code-architect <finding-json>` for each architectural finding (rare — only when an obvious vulnerability is visible from project structure)
-6. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
-7. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+1. `vigil assess code-record-threat-model <repo-id> <threat-model-json>`
+2. `vigil assess code-record-modules <repo-id> <modules-json>`
+3. `vigil assess code-classify <classifications-json>` (per-file)
+4. `vigil assess record-intel note <intel-json>` for each attack hypothesis (so the hunter inherits them as intel notes)
+5. `vigil assess record-finding code-architect <finding-json>` for each architectural finding (rare — only when an obvious vulnerability is visible from project structure)
+6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
+7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
+`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -281,7 +281,7 @@ after each major step in your methodology, not only at the end. See
 
 You rarely produce findings directly, but if an obvious vulnerability is visible from
 project structure alone (e.g., hardcoded credentials in config, known-vulnerable dependency
-version), omit `slug` from the finding JSON and let `aith assess record-finding
+version), omit `slug` from the finding JSON and let `vigil assess record-finding
 code-architect <finding-json>` allocate the next `CA-*` slug.
 
 ## Output Contract (Dispatch Response)

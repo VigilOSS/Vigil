@@ -1,12 +1,12 @@
 ---
 name: file-upload-testing
 description: File upload vulnerability testing — webshells, bypass, path traversal
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # File Upload Vulnerability Testing
 
-> **`aith assess kali` audit flags:** use `--technique RCE` for webshell/polyglot uploads (the canonical dangerous outcome). Switch to `LFI` when the filename triggers path traversal, `XSS` for SVG/HTML reflected in a browser context, or `SSRF` when the upload path fetches a URL server-side.
+> **`vigil assess kali` audit flags:** use `--technique RCE` for webshell/polyglot uploads (the canonical dangerous outcome). Switch to `LFI` when the filename triggers path traversal, `XSS` for SVG/HTML reflected in a browser context, or `SSRF` when the upload path fetches a URL server-side.
 
 ## When to Activate
 
@@ -16,7 +16,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (multipart upload — all target-facing curl must go through the kali exec wrapper; use `--technique RCE --probe-kind payload --phase consume-test --timeout 60 --destructive` for webshell upload attempts)
+- `vigil assess kali exec -- curl ...` (multipart upload — all target-facing curl must go through the kali exec wrapper; use `--technique RCE --probe-kind payload --phase consume-test --timeout 60 --destructive` for webshell upload attempts)
 - Burp Suite Repeater (modify upload requests — use to craft the payload, then replay via kali exec)
 - ExifTool (embed payloads in metadata — host-side payload preparation only)
 - Custom polyglot file generators (host-side preparation only)

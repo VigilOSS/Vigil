@@ -1,4 +1,4 @@
-"""aith assess kali sweep-orphans — reconcile stuck `running` command-run rows.
+"""vigil assess kali sweep-orphans — reconcile stuck `running` command-run rows.
 
 When a `kali_exec` finalize PATCH fails (network blip, backend restart, host
 crash mid-run), the pre-exec audit row stays at ``status=running`` forever.
@@ -8,7 +8,7 @@ them alone (the in-container PID is still alive), finalizes them to
 them when Docker probing itself fails and liveness is unknown.
 
 The wrapper shell in ``kali.py:_build_docker_exec`` writes the in-container
-PID to ``/tmp/aith-pid-<run_uuid>.pid``. The canonical source of ``run_uuid``
+PID to ``/tmp/vigil-pid-<run_uuid>.pid``. The canonical source of ``run_uuid``
 is the DB column on ``assessment_command_runs`` (CLI-generated, written into
 the row via the pre-exec POST). The legacy regex parse against ``stdout_path``
 (``scans/kali/<run_uuid>.out``) is kept as a fallback for rows written before
@@ -30,7 +30,7 @@ from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 
 
-_DEFAULT_CONTAINER_NAME = "security-research"
+_DEFAULT_CONTAINER_NAME = "vigil"
 _DEFAULT_MAX_AGE_SECONDS = 3600
 
 # Statuses that are still in-flight (worth probing for liveness). Anything else
@@ -125,7 +125,7 @@ def _run_uuid_from_stdout_path(stdout_path: str | None) -> str | None:
     """Legacy fallback: parse ``run_uuid`` out of ``stdout_path``.
 
     The wrapper in ``kali.py:_build_docker_exec`` writes the in-container PID
-    to ``/tmp/aith-pid-<run_uuid>.pid`` and ``stdout_path`` is recorded as
+    to ``/tmp/vigil-pid-<run_uuid>.pid`` and ``stdout_path`` is recorded as
     ``<eng-dir>/scans/kali/<run_uuid>.out``. ``run_uuid`` is now the canonical
     DB column (``assessment_command_runs.run_uuid``), but rows written before
     that plumbing existed only carry it implicitly via ``stdout_path``. This
@@ -162,7 +162,7 @@ def _resolve_run_uuid(row: dict) -> str | None:
 def _container_pid_file(run_uuid: str) -> str:
     """Mirror of ``kali.py:_container_pid_file`` — the wrapper writes the
     in-container PID here."""
-    return f"/tmp/aith-pid-{run_uuid}.pid"
+    return f"/tmp/vigil-pid-{run_uuid}.pid"
 
 
 def _read_container_pid_result(container_name: str, run_uuid: str) -> _PidReadResult:

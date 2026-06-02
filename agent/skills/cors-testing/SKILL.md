@@ -1,7 +1,7 @@
 ---
 name: cors-testing
 description: CORS misconfiguration testing for data theft and access control bypass
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # CORS Misconfiguration Testing

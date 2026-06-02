@@ -1,4 +1,4 @@
-# Project-local Codex hooks for AI Threat Hunting.
+# Project-local Codex hooks for Vigil.
 # These mirror the Claude Code hooks in agent/.claude/settings.json.
 
 [hooks]
@@ -8,7 +8,7 @@ matcher = "^Bash$"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "bash -c 'if [ -n \"${AI_THREAT_HUNTING_AGENT_ROOT:-}\" ]; then exec bash \"$AI_THREAT_HUNTING_AGENT_ROOT/scripts/hooks/scope-check.sh\"; fi; if [ -f scripts/hooks/scope-check.sh ]; then exec bash scripts/hooks/scope-check.sh; fi; if [ -f agent/scripts/hooks/scope-check.sh ]; then exec bash agent/scripts/hooks/scope-check.sh; fi'"
+command = "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/scope-check.sh\"; fi; if [ -f scripts/hooks/scope-check.sh ]; then exec bash scripts/hooks/scope-check.sh; fi; if [ -f agent/scripts/hooks/scope-check.sh ]; then exec bash agent/scripts/hooks/scope-check.sh; fi'"
 timeout = 10
 statusMessage = "Checking target scope"
 
@@ -17,7 +17,7 @@ matcher = "^(Bash|Agent|Write|Edit|apply_patch|mcp__.*)$"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
-command = "bash -c 'if [ -n \"${AI_THREAT_HUNTING_AGENT_ROOT:-}\" ]; then exec bash \"$AI_THREAT_HUNTING_AGENT_ROOT/scripts/hooks/post-tool-log.sh\"; fi; if [ -f scripts/hooks/post-tool-log.sh ]; then exec bash scripts/hooks/post-tool-log.sh; fi; if [ -f agent/scripts/hooks/post-tool-log.sh ]; then exec bash agent/scripts/hooks/post-tool-log.sh; fi'"
+command = "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/post-tool-log.sh\"; fi; if [ -f scripts/hooks/post-tool-log.sh ]; then exec bash scripts/hooks/post-tool-log.sh; fi; if [ -f agent/scripts/hooks/post-tool-log.sh ]; then exec bash agent/scripts/hooks/post-tool-log.sh; fi'"
 timeout = 10
 async = true
 statusMessage = "Recording tool activity"

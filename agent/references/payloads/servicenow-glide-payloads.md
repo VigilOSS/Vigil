@@ -6,10 +6,10 @@ Use these payloads after `vendor-platform-enum/SKILL.md` triggers on a ServiceNo
 
 ## Standard table probe list
 
-Probe each table via `aith assess kali exec` so each request lands in the audit pipeline. A 200 with non-empty `result[]` is anonymous-readable; 401/403 with `User Not Authenticated` is the expected baseline.
+Probe each table via `vigil assess kali exec` so each request lands in the audit pipeline. A 200 with non-empty `result[]` is anonymous-readable; 401/403 with `User Not Authenticated` is the expected baseline.
 
 ```bash
-aith assess kali exec --technique INFO-DISCLOSURE \
+vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "ServiceNow table probe — sys_user anonymous-read test" \
   --probe-kind payload --phase recon --timeout 30 -- \
   curl -sS 'https://TARGET/api/now/v1/table/sys_user?sysparm_limit=1' \
@@ -94,10 +94,10 @@ GET /api/now/v1/table/sys_user/<modified-sys-id>
 
 ## Default credentials probe (operator-gated)
 
-Only when the engagement scope explicitly permits credentialed testing, probe ServiceNow default-admin credentials. Run via `aith assess kali exec` with `--destructive` because a successful auth test establishes a session:
+Only when the engagement scope explicitly permits credentialed testing, probe ServiceNow default-admin credentials. Run via `vigil assess kali exec` with `--destructive` because a successful auth test establishes a session:
 
 ```bash
-aith assess kali exec --technique AUTH \
+vigil assess kali exec --technique AUTH \
   --intent "ServiceNow default-credential probe admin:admin" \
   --probe-kind payload --phase consume-test --timeout 30 --destructive -- \
   curl -sS 'https://TARGET/api/now/v1/table/sys_user?sysparm_limit=1' \

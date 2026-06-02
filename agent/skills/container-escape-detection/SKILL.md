@@ -1,12 +1,12 @@
 ---
 name: container-escape-detection
 description: Detect and test container escape vectors — privileged containers, Docker socket exposure, cgroup abuse, kernel exploits
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Container Escape Detection
 
-> **`aith assess kali` audit flags:** use `--technique RECON` for capability/cgroup/mount/socket/kernel enumeration; switch to `EXPLOIT-CHAIN` on an actual breakout attempt.
+> **`vigil assess kali` audit flags:** use `--technique RECON` for capability/cgroup/mount/socket/kernel enumeration; switch to `EXPLOIT-CHAIN` on an actual breakout attempt.
 
 ## When to Activate
 
@@ -17,10 +17,10 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- ...` (all target-facing enumeration and escape attempts inside the runtime container must go through the kali exec wrapper; use `--technique RECON --probe-kind fingerprint --phase consume-test --timeout 30` for capability/mount/socket enumeration, and `--technique EXPLOIT-CHAIN --probe-kind exploit --phase consume-test --timeout 120 --destructive` for actual breakout attempts)
+- `vigil assess kali exec -- ...` (all target-facing enumeration and escape attempts inside the runtime container must go through the kali exec wrapper; use `--technique RECON --probe-kind fingerprint --phase consume-test --timeout 30` for capability/mount/socket enumeration, and `--technique EXPLOIT-CHAIN --probe-kind exploit --phase consume-test --timeout 120 --destructive` for actual breakout attempts)
 - Docker CLI / kubectl (use via kali exec when target-facing)
 - Falco (runtime detection — observation layer, host-side)
-- amicontained (capability checker — run via `aith assess kali exec --technique RECON --probe-kind fingerprint --phase consume-test --timeout 30 -- amicontained`)
+- amicontained (capability checker — run via `vigil assess kali exec --technique RECON --probe-kind fingerprint --phase consume-test --timeout 30 -- amicontained`)
 - deepce (container escape enumeration — run via kali exec)
 - CDK (Container penetration toolkit — run via kali exec)
 

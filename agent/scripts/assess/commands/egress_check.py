@@ -1,4 +1,4 @@
-"""aith assess egress-check — detect an egress-reputation blackhole early.
+"""vigil assess egress-check — detect an egress-reputation blackhole early.
 
 The shared NAT egress IP gets progressively blackholed by hardened on-prem
 perimeters as scan volume accumulates (§9), silently turning "reachable origins"

@@ -1,9 +1,9 @@
-"""aith assess export-findings — generate the single findings.md report doc from backend state.
+"""vigil assess export-findings — generate the single findings.md report doc from backend state.
 
 This produces ONE consolidated report document (one ``## [slug] title`` section
 per finding, severity-sorted, with root-cause grouping inline). For a
 git-diff-able per-finding tree (draft/debate/report.md per finding) use instead:
-``aith engagement export --format markdown-tree``.
+``vigil engagement export --format markdown-tree``.
 
 The per-finding markdown block is produced by the shared renderer in
 ``assess.lib.finding_render`` (also used by the markdown-tree export) so the two
@@ -28,7 +28,7 @@ def register(subparsers) -> None:
         help=(
             "Generate the single findings.md report doc from backend state "
             "(one section per finding). For a diffable per-finding tree use "
-            "`aith engagement export --format markdown-tree`."
+            "`vigil engagement export --format markdown-tree`."
         ),
     )
     p.set_defaults(func=run)

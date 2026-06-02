@@ -360,7 +360,7 @@ export function CodeAnalysisTab({
     return (
       <section className="panel">
         <p className="meta-text">
-          No code repositories ingested yet. Run <code>aith assess code-ingest</code> to start code analysis.
+          No code repositories ingested yet. Run <code>vigil assess code-ingest</code> to start code analysis.
         </p>
       </section>
     );

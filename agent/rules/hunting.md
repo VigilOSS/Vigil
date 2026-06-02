@@ -29,7 +29,7 @@ The pattern applies to every vulnerability class: confirm the primitive exists, 
 
 When you capture credentials, tokens, or keys — **use them**. Extract the token, replay it, show what it unlocks. If replay fails, say why (expiry, IP binding, CSRF token required) and mark the finding CHAIN REQUIRED with the specific gap.
 
-A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_disposition=pending_runtime_proof` (see `agent/operator-core.md`), and review the holding area with `aith assess list-findings --holding`. It stays out of the report until a runtime pass proves it.
+A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_disposition=pending_runtime_proof` (see `agent/operator-core.md`), and review the holding area with `vigil assess list-findings --holding`. It stays out of the report until a runtime pass proves it.
 
 ## 3. Precondition equivalence check
 
@@ -146,12 +146,12 @@ report-writer and later operators rely on.
   belong on the operator: scope and authorization decisions, dispatch
   authoring, recording specialist handoffs, reviewing evidence, and the
   occasional one-shot lookup that informs the next dispatch (a single
-  `aith assess fetch ...` query, a `list-skills` call, a contract render).
+  `vigil assess fetch ...` query, a `list-skills` call, a contract render).
   Anything that walks a target, parses output, or iterates over a work-buffer
   cluster is specialist work.
 - **One specialist, one objective, one skill set.** Each dispatch names the
   role, the dispatch mode, and the explicit skill list (`--skills` on
-  `aith assess agent start`). Bundling multiple objectives into one
+  `vigil assess agent start`). Bundling multiple objectives into one
   dispatch defeats the role boundary and produces handoffs that report-writer
   cannot map back to a coherent finding line.
 - **When in doubt, dispatch.** If the operator is about to run a Kali tool,
@@ -173,14 +173,14 @@ Use these to generate testable hypotheses about where developers introduced flaw
 
 ## 20. Severity-CVSS alignment audit before report
 
-Before any report-writer dispatch, query `aith assess list-findings` and verify
+Before any report-writer dispatch, query `vigil assess list-findings` and verify
 each finding's `severity` matches its `details.cvss_score` band:
 
 - `high` requires `cvss_score >= 7.0`
 - `medium` requires `4.0 <= cvss_score <= 6.9`
 - `low` requires `cvss_score < 4.0`
 
-Fix mismatches via `aith assess update-finding --inline '{"details":
+Fix mismatches via `vigil assess update-finding --inline '{"details":
 {"cvss_score": <n>, "cvss_vector": "..."}}'`. The JSON field is `details`,
 not `details_json`. A finding whose severity contradicts its CVSS makes the
 entire report look unverified to the triager, and mismatches are the single
@@ -199,7 +199,7 @@ phrases that contradict the current state:
   the current severity field
 
 Stale narrative is invisible to backend status fields and ends up in
-report.md verbatim. The `aith assess list-findings --json | jq -r .[].slug`
+report.md verbatim. The `vigil assess list-findings --json | jq -r .[].slug`
 loop in `agent/skills/report-generation/SKILL.md` (Review-and-Fix QA Mode)
 provides the executable recipe; this rule is the reason to run it.
 
@@ -208,7 +208,7 @@ provides the executable recipe; this rule is the reason to run it.
 Prefer the smallest probe that gets you the answer. If you already know what
 to test — a discovered path from `robots.txt` / sitemap / JS, a known
 parameter pulled from source analysis, a specific endpoint — `curl` that
-thing directly via `aith assess kali exec -- curl ...`. If you have NO
+thing directly via `vigil assess kali exec -- curl ...`. If you have NO
 knowledge and need to discover from scratch, AND brute-force is in scope per
 the engagement VDP, then use the appropriate Kali verb (`ffuf` for paths,
 `arjun` for params, `puredns` for DNS, `sqlmap` for SQLi, `dalfox` for XSS,

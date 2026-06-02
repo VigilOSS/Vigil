@@ -1,4 +1,4 @@
-"""aith assess kali bbot — typed wrapper around bbot (multi-module recon scanner)."""
+"""vigil assess kali bbot — typed wrapper around bbot (multi-module recon scanner)."""
 from __future__ import annotations
 
 import sys

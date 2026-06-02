@@ -286,7 +286,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     # Dispatch tracking + handoff content live in the orchestrator backend
     # (assessment_dispatches / assessment_dispatch_handoffs /
     # assessment_dispatch_decisions). Write via
-    # `aith assess agent start|handoff|decision`.
+    # `vigil assess agent start|handoff|decision`.
     #
     # AGENT_NAME defaulting to "operator" is handled in
     # agent/scripts/assess/lib/kali_audit.py (`_resolve_agent_name`) so the env
@@ -295,11 +295,11 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     #
     # Only seed `.orchestrator.env` when an explicit override is in effect.
     # The default base URL falls through `resolve_orchestrator_base_url`
-    # (env var → engagement env file → `aith config get orchestrator_base_url`
+    # (env var → engagement env file → `vigil config get orchestrator_base_url`
     # → legacy install env files → hardcoded default), so writing the default
     # into the file would just confuse operators reading it ("do I edit this
     # to change the port?").
-    # When an override IS configured (via env var, `aith config`, or a legacy
+    # When an override IS configured (via env var, `vigil config`, or a legacy
     # install-root env file), we snapshot it into the engagement file so the
     # launcher re-exports it.
     resolved_base_url = resolve_orchestrator_base_url(install_root, eng_dir)
@@ -333,11 +333,11 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
 
     Reuses the existing helpers from ``docker`` and ``oob`` so we don't
     re-implement liveness probes. stdout still carries just the path so
-    ``eng=$(aith engagement create ...)`` keeps working — this writes to
+    ``eng=$(vigil engagement create ...)`` keeps working — this writes to
     stderr only.
     """
     try:
-        mitm_running = docker.container_running("security-research-proxy", runner=runner)
+        mitm_running = docker.container_running("vigil-proxy", runner=runner)
     except Exception:
         mitm_running = False
     try:
@@ -348,14 +348,14 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
         oob_state = "unknown"
 
     mitm_label = "running" if mitm_running else "stopped"
-    mitm_hint = "" if mitm_running else f"   (auth capture: aith mitmproxy start {key})"
-    oob_hint = "" if oob_state == "running" else "   (callbacks: aith oob start)"
+    mitm_hint = "" if mitm_running else f"   (auth capture: vigil mitmproxy start {key})"
+    oob_hint = "" if oob_state == "running" else "   (callbacks: vigil oob start)"
 
-    print(f"[aith] engagement: {key}", file=sys.stderr)
-    print(f"[aith] mitmproxy: {mitm_label}{mitm_hint}", file=sys.stderr)
-    print(f"[aith] oob:       {oob_state}{oob_hint}", file=sys.stderr)
+    print(f"[vigil] engagement: {key}", file=sys.stderr)
+    print(f"[vigil] mitmproxy: {mitm_label}{mitm_hint}", file=sys.stderr)
+    print(f"[vigil] oob:       {oob_state}{oob_hint}", file=sys.stderr)
     print(
-        f"[aith] start:     aith engagement start {key} --client codex   (or --client claude)",
+        f"[vigil] start:     vigil engagement start {key} --client codex   (or --client claude)",
         file=sys.stderr,
     )
 
@@ -364,16 +364,16 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
     """Detect install-root mismatch between this CLI and the running orchestrator.
 
     The orchestrator picks ``settings.install_dir`` at startup time from
-    ``$AI_THREAT_HUNTING_INSTALL_DIR`` and cannot retarget at runtime. When
-    the operator runs ``aith --root /custom/path engagement create ...`` against
+    ``$VIGIL_INSTALL_DIR`` and cannot retarget at runtime. When
+    the operator runs ``vigil --root /custom/path engagement create ...`` against
     a backend that was started with a *different* install root, the new
     engagement directory is invisible to ``sync_engagements()`` — every
-    subsequent ``aith assess`` call will write audit data to a backend that
+    subsequent ``vigil assess`` call will write audit data to a backend that
     cannot see the engagement, silently dropping recon evidence.
 
     Strategy:
       - If the backend is unreachable (offline / not started yet), do nothing.
-        Local-only workflows are valid and ``aith engagement create`` should
+        Local-only workflows are valid and ``vigil engagement create`` should
         succeed when the orchestrator is intentionally down.
       - If the backend is reachable AND its install_root matches ours, force a
         re-sync so the new engagement is registered immediately.
@@ -406,14 +406,14 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
             # Older orchestrator without /admin/install-root — fall back to a
             # plain force-sync attempt; if that also 404s, treat as unreachable.
             print(
-                f"[aith] orchestrator at {base_url} does not expose /admin/install-root "
+                f"[vigil] orchestrator at {base_url} does not expose /admin/install-root "
                 "(older build). Skipping install-root drift check; "
                 "restart the orchestrator after upgrading to validate.",
                 file=sys.stderr,
             )
         else:
             print(
-                f"[aith] orchestrator at {base_url} returned HTTP {resp.status} "
+                f"[vigil] orchestrator at {base_url} returned HTTP {resp.status} "
                 "for /admin/install-root; skipping install-root drift check.",
                 file=sys.stderr,
             )
@@ -433,8 +433,8 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
                     f"  This engagement is at install_root={expected}",
                     "",
                     "Recover by:",
-                    f"  aith --root {expected} orchestrator restart",
-                    f"  aith --root {expected} assess fetch summary --engagement-dir {eng_dir}",
+                    f"  vigil --root {expected} orchestrator restart",
+                    f"  vigil --root {expected} assess fetch summary --engagement-dir {eng_dir}",
                 ]
             )
         )
@@ -457,7 +457,7 @@ def _emit_bootstrap_scope_summary(scope: dict[str, object]) -> None:
     raw_hosts = scope.get("hosts") if isinstance(scope, dict) else None
     if not isinstance(raw_hosts, list) or not raw_hosts:
         return
-    print(f"[aith] scope: {len(raw_hosts)} entries", file=sys.stderr)
+    print(f"[vigil] scope: {len(raw_hosts)} entries", file=sys.stderr)
 
 
 def list_engagements(install_root: Path) -> list[EngagementRow]:
@@ -489,7 +489,7 @@ def _both_engagements_missing_code_phase(install_root: Path) -> list[Path]:
     that change only carry `current_phase` and confuse `transition-phase
     --track code`. The migration in `migrate_legacy_both_engagements` sets
     code_phase='ingest' for those engagements; this helper is the read-only
-    detector used by `aith status` and the CLI summary.
+    detector used by `vigil status` and the CLI summary.
     """
     affected: list[Path] = []
     root = engagements_root(install_root)
@@ -576,7 +576,7 @@ def _select_engagement(rows: list[EngagementRow]) -> EngagementRow:
 def print_shell_cd_init(shell: str = "zsh") -> str:
     if shell not in {"zsh", "bash"}:
         raise SystemExit("Only zsh and bash shell snippets are supported")
-    return 'athcd() { cd "$(aith engagement path --select)"; }\n'
+    return 'athcd() { cd "$(vigil engagement path --select)"; }\n'
 
 
 def start_engagement(install_root: Path, engagement_dir: Path, client: str, extra_args: list[str]) -> None:
@@ -674,7 +674,7 @@ def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
 
 # ── Engagement export: git-diff-able per-finding markdown tree ────────────
 #
-# `aith engagement export --format markdown-tree` materializes one directory
+# `vigil engagement export --format markdown-tree` materializes one directory
 # per finding under an output root, each holding three files:
 #
 #   draft.md   — the raw finding as the backend stores it (every persisted
@@ -728,7 +728,7 @@ def _finding_render():
     ``export-findings`` command can import it directly. This installable ``src``
     package reaches it through the same import bridge it already uses for
     ``assess.lib.client`` / ``assess.lib.db`` (see ``paths.add_assess_import_path``
-    and ``_init_cases_db``): the production ``aith engagement export`` path puts
+    and ``_init_cases_db``): the production ``vigil engagement export`` path puts
     ``agent/scripts`` on ``sys.path`` before this runs (via
     ``_build_assessment_client``), but tests and any direct caller may not — so
     fall back to discovering the repo root from this module's own location and
@@ -855,7 +855,7 @@ def _placeholder_debate(finding: dict) -> str:
         "No verification-narrative artifact (kind=\"verification-narrative\") is "
         "linked to this finding yet.\n\n"
         "Register one during verification with:\n"
-        "    aith assess verify-finding "
+        "    vigil assess verify-finding "
         f"{finding.get('slug', '<slug>')} --disposition <disposition> "
         "--reason \"...\" --narrative <path-to-debate.md>\n"
     )
@@ -865,7 +865,7 @@ def _fetch_debate_narrative(client: FindingReader, slug: str, finding: dict) -> 
     """Resolve debate.md content for one finding.
 
     Searches the artifact index for a ``verification-narrative`` artifact
-    linked to ``slug`` (Phase 3 registers these via `aith assess
+    linked to ``slug`` (Phase 3 registers these via `vigil assess
     verify-finding --narrative`). When found, the top hit's full content is
     read back via the per-artifact GET (which inlines ``content`` for textual
     files). Any miss — no artifact, an unreadable id, or a transport hiccup —
@@ -1081,13 +1081,13 @@ def _snapshot_orchestrator_database(install_root: Path) -> None:
         with sqlite3.connect(str(db_path)) as source, sqlite3.connect(str(backup)) as dest:
             source.backup(dest)
     except sqlite3.Error as exc:
-        print(f"[aith] warning: orchestrator DB snapshot failed for {db_path}: {exc}", file=sys.stderr)
+        print(f"[vigil] warning: orchestrator DB snapshot failed for {db_path}: {exc}", file=sys.stderr)
 
 
 def _install_client_kind(agent_root: Path) -> str:
     has_codex = (agent_root / "AGENTS.md").exists() and (agent_root / ".codex").is_dir()
     has_claude = (agent_root / "CLAUDE.md").exists() and (agent_root / ".claude").is_dir()
-    env_client = os.environ.get("AI_THREAT_HUNTING_CLIENT")
+    env_client = os.environ.get("VIGIL_CLIENT")
     if env_client in {"codex", "claude"}:
         return env_client
     if has_codex and not has_claude:
@@ -1126,8 +1126,8 @@ def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *,
 - Scripts: {agent_root / "scripts"}
 
 Artifacts:
-- Use `aith assess artifact register <path>` to index engagement files explicitly
-- Use `aith assess ...` for assessment operations from any directory
+- Use `vigil assess artifact register <path>` to index engagement files explicitly
+- Use `vigil assess ...` for assessment operations from any directory
 - Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported automatically
 - The local .orchestrator.env provides this engagement's orchestrator base URL; install-root env files are only fallbacks
 """
@@ -1183,7 +1183,7 @@ def _write_launcher(agent_root: Path, eng_dir: Path, client: str, permission_arg
     # default cannot retarget an engagement-local snapshot.
     #
     # AGENT_NAME is no longer exported here. The kali helper now defaults
-    # to "operator" when neither --agent-name nor $AGENT_NAME / $AITH_AGENT_NAME
+    # to "operator" when neither --agent-name nor $AGENT_NAME / $VIGIL_AGENT_NAME
     # is set, so operator-executed mechanical pipeline work (tier-pick smoke,
     # runtime health, credential validation) still records the right
     # agent_name without the launcher poking the env. Specialist dispatch
@@ -1196,13 +1196,13 @@ ENGAGEMENT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 export ENGAGEMENT_DIR
 ENGAGEMENT_KEY="$(basename "$ENGAGEMENT_DIR")"
 export ENGAGEMENT_KEY
-AI_THREAT_HUNTING_AGENT_ROOT="{agent_root}"
-export AI_THREAT_HUNTING_AGENT_ROOT
-AI_THREAT_HUNTING_INSTALL_DIR="{agent_root.parent}"
-export AI_THREAT_HUNTING_INSTALL_DIR
+VIGIL_AGENT_ROOT="{agent_root}"
+export VIGIL_AGENT_ROOT
+VIGIL_INSTALL_DIR="{agent_root.parent}"
+export VIGIL_INSTALL_DIR
 
 if [[ -z "${{ORCHESTRATOR_BASE_URL:-}}" ]]; then
-  for env_file in "$ENGAGEMENT_DIR/.orchestrator.env" "$AI_THREAT_HUNTING_INSTALL_DIR/.orchestrator.env" "$AI_THREAT_HUNTING_INSTALL_DIR/.env"; do
+  for env_file in "$ENGAGEMENT_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.env"; do
     if [[ -f "$env_file" ]]; then
       candidate="$(grep -E '^ORCHESTRATOR_BASE_URL=' "$env_file" | tail -n1 | cut -d= -f2- || true)"
       if [[ -n "$candidate" ]]; then

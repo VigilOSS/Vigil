@@ -2,10 +2,10 @@
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**
 >
-> Produced by `aith blue tenant init --customer <slug> --platform gws`,
+> Produced by `vigil blue tenant init --customer <slug> --platform gws`,
 > which writes to `agent/references/tenants/<slug>-workspace.md` (the
 > `gws → workspace` alias from `PLATFORM_TO_TENANT_SUFFIX` in
-> `src/ai_threat_hunting_cli/blue.py`).
+> `src/vigil_cli/blue.py`).
 >
 > Before this file is loaded into a real engagement:
 >
@@ -392,7 +392,7 @@ root.
 
 - Source: `agent/references/tenants/_template-gws.md`; modeled on
   `agent/references/tenants/acme-workspace.md` (kept untouched).
-- Alias: `aith blue tenant init --platform gws` writes to
+- Alias: `vigil blue tenant init --platform gws` writes to
   `<customer>-workspace.md` per `PLATFORM_TO_TENANT_SUFFIX["gws"] = "workspace"`.
 - Consumers: `agent/skills/alert-triage/SKILL.md`,
   `agent/agents/alert-triage-specialist.md`,

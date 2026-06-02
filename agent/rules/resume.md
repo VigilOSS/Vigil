@@ -16,17 +16,17 @@ Run the core resume hydration before target-facing commands, specialist dispatch
 transitions, finding writes, or report work:
 
 ```bash
-aith assess resume-brief
+vigil assess resume-brief
 ```
 
 For targeted continuation, narrow the brief instead of manually reconstructing state:
 
 ```bash
-aith assess resume-brief --finding <finding-slug-or-alias>
-aith assess resume-brief --q "<scope-host-or-keyword>"
-aith assess resume-brief --agent-id <agent-id>
-aith assess resume-brief --since <iso-datetime>   # what's new since the last brief
-aith assess resume-brief --max-age-hours <N>      # override the per-role stale threshold
+vigil assess resume-brief --finding <finding-slug-or-alias>
+vigil assess resume-brief --q "<scope-host-or-keyword>"
+vigil assess resume-brief --agent-id <agent-id>
+vigil assess resume-brief --since <iso-datetime>   # what's new since the last brief
+vigil assess resume-brief --max-age-hours <N>      # override the per-role stale threshold
 ```
 
 The brief includes finding queues, recent decisions, stale dispatches, handoff gaps,
@@ -34,14 +34,14 @@ relevant command-history matches, and indexed artifacts. Use the drill-down comm
 prints for exact evidence:
 
 ```bash
-aith assess get-command-run <id>
-aith assess artifact search <query>
-aith assess artifact get <id>
-aith assess agent render-handoff <agent-id>
+vigil assess get-command-run <id>
+vigil assess artifact search <query>
+vigil assess artifact get <id>
+vigil assess agent render-handoff <agent-id>
 ```
 
 Use command history as a coverage map, not as a reuse gate. If you cite a prior run
-instead of re-running, fetch it with `aith assess get-command-run <id>` first because
+instead of re-running, fetch it with `vigil assess get-command-run <id>` first because
 a successful return code does not prove the preview answers the current question.
 
 Treat unlinked markdown notes as scratch, not engagement memory. State that must
@@ -52,7 +52,7 @@ finding, chain, dispatch/agent, surface, request variant, or command run.
 
 - Drill down by id (`get-command-run`, `artifact get`, `fetch findings/<slug>`) — the brief already names the surfaces and command runs you need. `coverage-items`, `request-variants`, and full work-buffer dumps are operational detail, not the resume picture.
 - Treat `artifact search` as the engagement memory index — `.md` files under the engagement directory that are not in the index are scratch.
-- Use `aith assess agent render-handoff <agent-id>` for prior dispatch context — it stays bounded where raw transcripts grow linearly.
+- Use `vigil assess agent render-handoff <agent-id>` for prior dispatch context — it stays bounded where raw transcripts grow linearly.
 - Read command history before re-running probes — the history is canonical, and rerunning is warranted only when the variant differs.
 
 After hydration, summarize the resume state in one compact operator note:

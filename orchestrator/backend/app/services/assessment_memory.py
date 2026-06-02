@@ -361,13 +361,13 @@ def _recommended_actions(
         actions.append(action)
 
     if finding:
-        add("inspect finding", f"aith assess fetch findings/{finding}", entity_kind="finding", entity_id=finding)
-        add("command coverage", f"aith assess list-command-runs --q {finding} --show-matches", entity_kind="finding", entity_id=finding)
-        add("artifact context", f"aith assess artifact search --finding {finding}", entity_kind="finding", entity_id=finding)
+        add("inspect finding", f"vigil assess fetch findings/{finding}", entity_kind="finding", entity_id=finding)
+        add("command coverage", f"vigil assess list-command-runs --q {finding} --show-matches", entity_kind="finding", entity_id=finding)
+        add("artifact context", f"vigil assess artifact search --finding {finding}", entity_kind="finding", entity_id=finding)
     elif not command_matches:
-        add("recent command coverage", "aith assess list-command-runs --limit 20")
+        add("recent command coverage", "vigil assess list-command-runs --limit 20")
     if agent_id:
-        add("handoff continuation", f"aith assess agent render-handoff {agent_id}", entity_kind="agent", entity_id=agent_id)
+        add("handoff continuation", f"vigil assess agent render-handoff {agent_id}", entity_kind="agent", entity_id=agent_id)
     if stale_dispatches:
         threshold_arg = (
             "" if abs(stale_threshold_hours - 24.0) < 1e-9
@@ -375,16 +375,16 @@ def _recommended_actions(
         )
         add(
             "stale dispatch lifecycle",
-            f"aith assess agent reconcile-stale --dry-run{threshold_arg}",
+            f"vigil assess agent reconcile-stale --dry-run{threshold_arg}",
         )
     if not artifacts:
-        add("refresh artifact index", "aith assess artifact register <path> --finding <slug>")
+        add("refresh artifact index", "vigil assess artifact register <path> --finding <slug>")
     for row in command_matches[:3]:
         run_id = row.get("id")
         if run_id is not None:
             add(
                 "inspect matching command run",
-                f"aith assess get-command-run {run_id}",
+                f"vigil assess get-command-run {run_id}",
                 entity_kind="command_run",
                 entity_id=run_id,
             )
@@ -393,7 +393,7 @@ def _recommended_actions(
         if artifact_id is not None:
             add(
                 "inspect indexed artifact",
-                f"aith assess artifact get {artifact_id}",
+                f"vigil assess artifact get {artifact_id}",
                 entity_kind="artifact",
                 entity_id=artifact_id,
             )

@@ -1,4 +1,4 @@
-"""aith assess kill-finding — false-positive verification helper."""
+"""vigil assess kill-finding — false-positive verification helper."""
 from __future__ import annotations
 
 import argparse
