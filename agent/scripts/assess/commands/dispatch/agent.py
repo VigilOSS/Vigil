@@ -4,7 +4,7 @@ Internal action names register / update-status / abort-duplicate / list / get /
 record-decision / record-handoff — backend-table writes via the orchestrator
 API (assessment_dispatches + assessment_dispatch_handoffs +
 assessment_dispatch_decisions). These are dbless: they take no cases.db path.
-The operator-facing surface routes here through ``aith assess agent``.
+The operator-facing surface routes here through ``vigil assess agent``.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from assess.commands.dispatch._shared import (
 # leave db_path empty rather than forcing the operator to pass a useless path.
 # Round 9: internal action names register/update-status/list/get/record-decision/
 # record-handoff (plus render-handoff) hit the orchestrator backend, not the work buffer.
-# Operator CLI maps these to ``aith assess agent start|done|list|get|handoff|decision|...``.
+# Operator CLI maps these to ``vigil assess agent start|done|list|get|handoff|decision|...``.
 _DBLESS_ACTIONS = (
     "render-handoff",
     "register",
@@ -243,7 +243,7 @@ def _string_set(value: Any) -> set[str]:
 def _update_dispatch_status(args, extra: list[str]) -> None:
     agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
     if not agent_id:
-        print("Usage: aith assess agent done <agent-id> --status ...", file=sys.stderr)
+        print("Usage: vigil assess agent done <agent-id> --status ...", file=sys.stderr)
         sys.exit(1)
     patch: dict[str, Any] = {}
     if getattr(args, "dispatch_status", None):
@@ -275,7 +275,7 @@ def _abort_duplicate_dispatch(args, extra: list[str]) -> None:
     reason = (getattr(args, "reason", "") or "").strip()
     if not agent_id or not replacement or not reason:
         print(
-            "Usage: aith assess agent abort-duplicate <agent-id> "
+            "Usage: vigil assess agent abort-duplicate <agent-id> "
             "--replacement-agent-id <agent-id> --reason TEXT",
             file=sys.stderr,
         )
@@ -344,7 +344,7 @@ def _list_dispatches(args) -> None:
 def _get_dispatch(args, extra: list[str]) -> None:
     agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
     if not agent_id:
-        print("Usage: aith assess agent get <agent-id>", file=sys.stderr)
+        print("Usage: vigil assess agent get <agent-id>", file=sys.stderr)
         sys.exit(1)
     client, _ = _client_for(args)
     try:

@@ -1,4 +1,4 @@
-"""aith assess dns-discovery — composable DNS-discovery pipeline.
+"""vigil assess dns-discovery — composable DNS-discovery pipeline.
 
 Runs the DNS discovery methods and merges them into one de-noised, resolved set
 so the LLM does not hand-roll the 30-file glue that caused the §7 coverage gap:
@@ -11,7 +11,7 @@ Safe defaults (passive-first, non-recursive subfinder, brute OFF, de-noised
 output) but every knob stays a first-class flag (`--recursive`, `--brute`,
 `--wordlist`, `--dnsx-profile`, …). Runs synchronously; each tool stage writes
 its own audit row via kali_exec. Feed `resolved_hosts.txt` straight into
-`aith assess web-discovery`.
+`vigil assess web-discovery`.
 """
 from __future__ import annotations
 
@@ -147,4 +147,4 @@ def run(args) -> None:
     _exec(args, dnsx_cmd, "dns-discovery: dnsx resolve merged set", "dnsx")
 
     print(f"dns-discovery: done. Resolved hosts -> {resolved_host}\n"
-          f"  Next: aith assess web-discovery {resolved_host}", file=sys.stderr)
+          f"  Next: vigil assess web-discovery {resolved_host}", file=sys.stderr)

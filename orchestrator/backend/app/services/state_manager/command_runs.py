@@ -1193,11 +1193,11 @@ def list_command_runs(
     if route:
         # Provenance-lane filter so host-side katana/httpx coverage is visible.
         # host-exec rows are stamped route='host_exec'; container/kali typed-verb
-        # rows are stamped route='aith assess kali/<tool>'. 'kali' is therefore a
+        # rows are stamped route='vigil assess kali/<tool>'. 'kali' is therefore a
         # prefix match, 'host_exec' an exact match, and any other value an exact
         # match against the stored route string.
         if route == "kali":
-            filters.append(("r.route LIKE 'aith assess kali/%'", []))
+            filters.append(("r.route LIKE 'vigil assess kali/%'", []))
         else:
             filters.append(("r.route = ?", [route]))
     if success is not None:
@@ -1396,7 +1396,7 @@ def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
 
 # ── Host liveness ledger ──────────────────────────────────────────────────
 # Authoritative per-host reachability, upserted from httpx probes via
-# `aith assess ingest-httpx`. A verdict older than the TTL is reported as
+# `vigil assess ingest-httpx`. A verdict older than the TTL is reported as
 # 'stale' by the read projection (not stored as 'stale'), forcing a re-probe
 # rather than trusting it across the shifting-egress boundary (§9).
 _HOST_LIVENESS_TTL_SECONDS = 120 * 60  # 2h

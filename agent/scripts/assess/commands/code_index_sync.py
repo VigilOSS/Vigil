@@ -1,4 +1,4 @@
-"""aith assess code-index-sync — push structural index metadata to the backend."""
+"""vigil assess code-index-sync — push structural index metadata to the backend."""
 from __future__ import annotations
 
 import json

@@ -7,11 +7,11 @@ send a control request and a test request, then decide on the delta (status,
 length, marker presence, latency). That branching is bespoke logic no typed
 `kali` verb expresses — hence a probe (see agent/skills/write-probe-script/SKILL.md).
 
-Copy this into an engagement with `aith assess scaffold-probe`, or run it as-is.
+Copy this into an engagement with `vigil assess scaffold-probe`, or run it as-is.
 Stdlib-only so it replays on any runtime tier.
 
 Run (inside the runtime container, via kali exec):
-  aith assess kali exec \\
+  vigil assess kali exec \\
     --technique IDOR --intent "differential: object id A vs B body delta" \\
     --probe-kind payload --phase consume-test --timeout 60 -- \\
     python3 /engagements/$ENGAGEMENT_KEY/scripts/http_differential.py \\
@@ -56,7 +56,7 @@ def fetch(url: str, *, header: list[str], timeout: int) -> dict:
 
 
 def _parse_headers(pairs: list[str]) -> dict[str, str]:
-    headers = {"User-Agent": "aith-probe"}
+    headers = {"User-Agent": "vigil-probe"}
     for pair in pairs:
         if ":" in pair:
             key, _, value = pair.partition(":")

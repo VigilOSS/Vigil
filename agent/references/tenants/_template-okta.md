@@ -2,10 +2,10 @@
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**
 >
-> Produced by `aith blue tenant init --customer <slug> --platform okta`,
+> Produced by `vigil blue tenant init --customer <slug> --platform okta`,
 > which writes to `agent/references/tenants/<slug>-okta.md` (per
 > `PLATFORM_TO_TENANT_SUFFIX["okta"] = "okta"` in
-> `src/ai_threat_hunting_cli/blue.py`).
+> `src/vigil_cli/blue.py`).
 >
 > Before this file is loaded into a real engagement:
 >
@@ -348,7 +348,7 @@ root.
 
 - Source: `agent/references/tenants/_template-okta.md`; modeled on
   `agent/references/tenants/_template-gws.md` for cross-platform parity.
-- Alias: `aith blue tenant init --platform okta` writes to
+- Alias: `vigil blue tenant init --platform okta` writes to
   `<customer>-okta.md` per `PLATFORM_TO_TENANT_SUFFIX["okta"] = "okta"`.
 - Consumers: `agent/skills/alert-triage/SKILL.md`,
   `agent/agents/alert-triage-specialist.md`,

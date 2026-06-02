@@ -1,4 +1,4 @@
-"""aith assess kali httpx — typed wrapper around httpx inside the runtime."""
+"""vigil assess kali httpx — typed wrapper around httpx inside the runtime."""
 from __future__ import annotations
 
 import sys

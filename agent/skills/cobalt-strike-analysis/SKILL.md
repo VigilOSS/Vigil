@@ -1,7 +1,7 @@
 ---
 name: cobalt-strike-analysis
 description: Extract and analyze Cobalt Strike beacon configuration — C2 endpoints, watermarks, malleable profiles, and OPSEC indicators
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Cobalt Strike Beacon Analysis

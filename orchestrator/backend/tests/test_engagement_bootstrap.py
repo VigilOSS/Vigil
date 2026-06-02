@@ -15,8 +15,8 @@ import pytest
 repo_root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(repo_root / "src"))
 
-from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
-from ai_threat_hunting_cli.client_rosters import repair_engagement_client_rosters
+from vigil_cli.engagements import CreateEngagementOptions, create_engagement
+from vigil_cli.client_rosters import repair_engagement_client_rosters
 
 
 def _copy_agent_fixture(agent_root: Path, sandbox_root: Path, *, client: str) -> None:
@@ -41,7 +41,7 @@ def _isolate_orchestrator_url(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class _StubBackendHandler(BaseHTTPRequestHandler):
     """Tiny in-process backend that mimics /admin/install-root + /admin/sync-engagements
-    so the install-root drift fail-fast logic in `aith engagement create` can be
+    so the install-root drift fail-fast logic in `vigil engagement create` can be
     exercised without spinning up the real FastAPI app on a port."""
 
     install_root_value: str = ""
@@ -108,9 +108,9 @@ def _stub_backend_on_localhost(install_root_value: str):
 
 def test_aith_engagement_create_aborts_on_install_root_mismatch(tmp_path: Path, monkeypatch) -> None:
     """If the running orchestrator was started with a different install_root,
-    `aith engagement create` must fail fast with the recovery instructions
+    `vigil engagement create` must fail fast with the recovery instructions
     instead of leaving the operator to discover the mismatch on their first
-    `aith assess kali` call. Data loss prevention — no audit data should be
+    `vigil assess kali` call. Data loss prevention — no audit data should be
     routed to a backend that cannot see the engagement."""
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "this-install"
@@ -137,7 +137,7 @@ def test_aith_engagement_create_aborts_on_install_root_mismatch(tmp_path: Path, 
 
 
 def test_aith_engagement_create_force_syncs_on_matching_install_root(tmp_path: Path, monkeypatch) -> None:
-    """When the install roots match, `aith engagement create` POSTs
+    """When the install roots match, `vigil engagement create` POSTs
     /admin/sync-engagements so the running backend picks up the new directory
     immediately rather than waiting for the next implicit sync trigger."""
     repo_root = Path(__file__).resolve().parents[3]
@@ -167,7 +167,7 @@ def test_verify_backend_install_root_uses_https_connection_for_https_base_url(
     or drift detection silently skips both admin checks."""
     import http.client
 
-    from ai_threat_hunting_cli import engagements as engagement_module
+    from vigil_cli import engagements as engagement_module
 
     install_root = tmp_path / "install"
     install_root.mkdir()
@@ -226,7 +226,7 @@ def test_verify_backend_install_root_force_syncs_when_install_root_endpoint_miss
     endpoint, so a 404 should only skip drift comparison, not immediate sync."""
     import http.client
 
-    from ai_threat_hunting_cli import engagements as engagement_module
+    from vigil_cli import engagements as engagement_module
 
     install_root = tmp_path / "install"
     install_root.mkdir()
@@ -277,7 +277,7 @@ def test_verify_backend_install_root_force_syncs_when_install_root_endpoint_miss
 
 def test_aith_engagement_create_skips_drift_check_when_backend_unreachable(tmp_path: Path, monkeypatch) -> None:
     """Local-only / offline workflows must still succeed: when the backend is
-    not running, `aith engagement create` should complete without raising."""
+    not running, `vigil engagement create` should complete without raising."""
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "offline-install"
     sandbox_root = install_root / "agent"
@@ -339,7 +339,7 @@ def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path, monkey
     assert codex_agents.resolve() == (sandbox_root / ".codex" / "agents").resolve()
     assert (codex_agents / "vulnerability-analyst.toml").exists()
     claude_settings = (created.path / ".claude" / "settings.json").read_text(encoding="utf-8")
-    assert "AI_THREAT_HUNTING_AGENT_ROOT" in claude_settings
+    assert "VIGIL_AGENT_ROOT" in claude_settings
     assert "agent/scripts/hooks/post-tool-log.sh" in claude_settings
     assert "agent/scripts/hooks/scope-check.sh" in claude_settings
     claude_agents = created.path / ".claude" / "agents"
@@ -376,7 +376,7 @@ def test_repair_refreshes_stale_claude_hook_settings(tmp_path: Path) -> None:
         for hook in entry["hooks"]
     ]
     assert all(command.startswith("bash -c ") for command in repaired_commands)
-    assert "AI_THREAT_HUNTING_AGENT_ROOT" in repaired_settings
+    assert "VIGIL_AGENT_ROOT" in repaired_settings
     assert "agent/scripts/hooks/post-tool-log.sh" in repaired_settings
     assert "agent/scripts/hooks/scope-check.sh" in repaired_settings
     assert (claude_dir / "agents").is_symlink()
@@ -440,7 +440,7 @@ def test_aith_engagement_create_emits_scope_summary(tmp_path: Path, capsys, monk
     )
 
     err = capsys.readouterr().err
-    assert "[aith] scope: 2 entries" in err
+    assert "[vigil] scope: 2 entries" in err
     # All entries are bare hosts — no wildcard-only-no-apex warning.
     assert "wildcard-only entries lacking explicit apex" not in err
 
@@ -467,7 +467,7 @@ def test_aith_engagement_create_no_warning_under_wildcard_only_scope(
     )
 
     err = capsys.readouterr().err
-    assert "[aith] scope: 1 entries" in err
+    assert "[vigil] scope: 1 entries" in err
     assert "wildcard-only entries lacking explicit apex" not in err
 
 
@@ -492,7 +492,7 @@ def test_aith_engagement_create_no_warning_when_apex_listed_alongside_wildcard(
     )
 
     err = capsys.readouterr().err
-    assert "[aith] scope: 2 entries" in err
+    assert "[vigil] scope: 2 entries" in err
     assert "wildcard-only entries lacking explicit apex" not in err
 
 
@@ -520,7 +520,7 @@ def test_aith_start_codex_exports_engagement_environment(tmp_path: Path) -> None
     (bin_dir / "codex").write_text(
         "#!/usr/bin/env bash\n"
         "printf 'ENGAGEMENT_DIR=%s\\n' \"${ENGAGEMENT_DIR:-}\"\n"
-        "printf 'AI_THREAT_HUNTING_AGENT_ROOT=%s\\n' \"${AI_THREAT_HUNTING_AGENT_ROOT:-}\"\n"
+        "printf 'VIGIL_AGENT_ROOT=%s\\n' \"${VIGIL_AGENT_ROOT:-}\"\n"
         "printf 'ORCHESTRATOR_BASE_URL=%s\\n' \"${ORCHESTRATOR_BASE_URL:-}\"\n",
         encoding="utf-8",
     )
@@ -538,7 +538,7 @@ def test_aith_start_codex_exports_engagement_environment(tmp_path: Path) -> None
     )
 
     assert f"ENGAGEMENT_DIR={created.path}" in launch.stdout
-    assert f"AI_THREAT_HUNTING_AGENT_ROOT={sandbox_root}" in launch.stdout
+    assert f"VIGIL_AGENT_ROOT={sandbox_root}" in launch.stdout
     assert "ORCHESTRATOR_BASE_URL=https://override.example.test" in launch.stdout
 
 
@@ -595,7 +595,7 @@ def test_aith_engagement_create_does_not_write_agent_name_to_env_file(
 
     The default-to-"operator" fallback now lives in
     ``agent/scripts/assess/lib/kali.py:_resolve_agent_name`` so the operator's
-    first ``aith assess kali`` call records ``operator`` without any env-file
+    first ``vigil assess kali`` call records ``operator`` without any env-file
     plumbing. Specialist dispatch wrappers still export AGENT_NAME=<role>
     explicitly when they launch a subagent.
     """

@@ -1,7 +1,7 @@
 ---
 name: ioc-enrichment
 description: Support skill for IOC reputation, classification, and cross-referencing against threat-intelligence sources — IPs, domains, URLs, hashes, emails, ASNs
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # IOC Enrichment
@@ -26,8 +26,8 @@ origin: AI Threat Hunting
 This skill is **support-class** — it does not produce findings on its
 own. IOC reputation lookups feed the investigator's evidence_refs, the
 verifier's check outcomes, and the ir-lead's containment proposals.
-Record reputation as intel via `aith assess record-intel`, link intel
-to findings via `aith assess link-finding`.
+Record reputation as intel via `vigil assess record-intel`, link intel
+to findings via `vigil assess link-finding`.
 
 ## Always-active references
 
@@ -48,7 +48,7 @@ to findings via `aith assess link-finding`.
 
 ## Tools
 
-All IOC reputation queries run through `aith assess host-exec` so the
+All IOC reputation queries run through `vigil assess host-exec` so the
 audit pipeline records them. The `host-exec` envelope for IOC
 enrichment uses `--technique IOC-ENRICH`.
 
@@ -91,15 +91,15 @@ credentials.
 
 These touch no external services and do not need the audit envelope:
 
-- `aith assess record-intel <type> <json-file>` — record reputation
+- `vigil assess record-intel <type> <json-file>` — record reputation
   results into the appropriate `intel_*` table
-- `aith assess link-finding <finding> --intel <intel-id>` —
+- `vigil assess link-finding <finding> --intel <intel-id>` —
   associate enriched IOC with a finding; `--intel` may be repeated to
   attach multiple intel rows in one call (the verb merges with any
   existing `details.related_intel_ids[]` on the finding)
-- `aith assess list-intel <type>` — query existing intel records to
+- `vigil assess list-intel <type>` — query existing intel records to
   avoid duplicate enrichment
-- `aith assess artifact register` / `artifact search` — register IOC
+- `vigil assess artifact register` / `artifact search` — register IOC
   dump artifacts
 
 ## Methodology
@@ -119,8 +119,8 @@ touch no tenant data.
 Before enriching, query existing intel for de-duplication:
 
 ```bash
-aith assess list-intel domain --q "<domain>" --json | jq '.[]'
-aith assess list-intel dns-record --q "<ip>" --json | jq '.[]'
+vigil assess list-intel domain --q "<domain>" --json | jq '.[]'
+vigil assess list-intel dns-record --q "<ip>" --json | jq '.[]'
 ```
 
 An IOC already recorded from a prior dispatch does not need re-enrichment
@@ -145,11 +145,11 @@ Output is a JSON envelope per IOC with `classification` populated and
 
 ### Step 3 — Pull reputation via host-exec
 
-Every reputation query runs through `aith assess host-exec` with a
+Every reputation query runs through `vigil assess host-exec` with a
 uniform envelope; only the tool and target change. Canonical envelope:
 
 ```bash
-aith assess host-exec \
+vigil assess host-exec \
   --tool <whois|dig|curl> \
   --intent "<source> reputation for <ioc-kind> <value>" \
   --technique IOC-ENRICH \
@@ -241,7 +241,7 @@ cat > /tmp/dns-record.json <<JSON
 }
 JSON
 
-aith assess record-intel dns-record /tmp/dns-record.json
+vigil assess record-intel dns-record /tmp/dns-record.json
 ```
 
 For `domain` records, set `record_type` to the WHOIS+VT shape (registrar,
@@ -261,7 +261,7 @@ After `record-intel` returns the intel row's ID, link it to the
 finding:
 
 ```bash
-aith assess link-finding <finding-slug> --intel <intel-id> \
+vigil assess link-finding <finding-slug> --intel <intel-id> \
   --note "IP <ip> recorded as DNS record intel; reputation supports adversarial classification"
 ```
 
@@ -274,7 +274,7 @@ merges the new ids (dedupe + preserve order), and PATCHes the finding.
 1. **Register raw IOC dumps** as artifacts:
 
    ```bash
-   aith assess artifact register \
+   vigil assess artifact register \
      "$ENGAGEMENT_DIR/ir/evidence/ioc-ip-80.94.92.234.json" \
      --kind ioc_dump \
      --finding <finding-slug> \
@@ -290,7 +290,7 @@ merges the new ids (dedupe + preserve order), and PATCHes the finding.
 2. **Record the activity entry**:
 
    ```bash
-   aith assess log <agent-id> \
+   vigil assess log <agent-id> \
      "IOC enrichment for <finding-slug>" \
      "Enriched <N> IOCs via VT/AbuseIPDB/OTX/WHOIS; <M> matched tenant-ref allowlist; <K> recorded as adversarial intel" \
      "intel-ids: <id-1>,<id-2>,<id-3>" \

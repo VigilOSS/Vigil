@@ -1,4 +1,4 @@
-"""aith assess kali alterx — typed wrapper around alterx (subdomain permutation generator)."""
+"""vigil assess kali alterx — typed wrapper around alterx (subdomain permutation generator)."""
 from __future__ import annotations
 
 import sys

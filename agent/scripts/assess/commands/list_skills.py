@@ -1,4 +1,4 @@
-"""aith assess list-skills — compact skill index for operator dispatch.
+"""vigil assess list-skills — compact skill index for operator dispatch.
 
 The operator and specialists used to read the full ~300-line `agent/SKILL.md`
 index just to pick a skill. That wastes context tokens for what is really a

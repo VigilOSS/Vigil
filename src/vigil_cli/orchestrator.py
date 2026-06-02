@@ -45,7 +45,7 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
 
     env = {
         **os.environ,
-        "AI_THREAT_HUNTING_INSTALL_DIR": str(install_root),
+        "VIGIL_INSTALL_DIR": str(install_root),
     }
     argv = [
         "uv",
@@ -120,7 +120,7 @@ def stop_orchestrator(install_root: Path, *, host: str = "127.0.0.1", port: int 
         holder_str = f" (PID {holder})" if holder is not None else ""
         print(
             f"orchestrator\twarn\t{host}:{port} still held{holder_str} "
-            f"after stop; `aith orchestrator start` will surface the conflict"
+            f"after stop; `vigil orchestrator start` will surface the conflict"
         )
         return
     print("orchestrator\tstopped")
@@ -132,7 +132,7 @@ def orchestrator_status(install_root: Path) -> str:
 
 
 def orchestrator_status_payload(install_root: Path, *, host: str = "127.0.0.1", port: int = 18000) -> dict[str, object]:
-    """Structured status — backs `aith orchestrator status --json`."""
+    """Structured status — backs `vigil orchestrator status --json`."""
     install_root = install_root.expanduser().resolve()
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
     pid = _read_pid(pid_file)
@@ -154,8 +154,8 @@ def _already_running_message(pid_file: Path, pid: str, host: str, port: int) -> 
         f"  PID: {pid}\n"
         f"  PID file: {pid_file}\n"
         f"  URL: http://{host}:{port}\n"
-        "Use `aith orchestrator status` or `aith logs orchestrator` to inspect it.\n"
-        "Use `aith orchestrator restart` to restart it, or `aith orchestrator stop` to stop it."
+        "Use `vigil orchestrator status` or `vigil logs orchestrator` to inspect it.\n"
+        "Use `vigil orchestrator restart` to restart it, or `vigil orchestrator stop` to stop it."
     )
 
 
@@ -166,7 +166,7 @@ def _build_frontend(install_root: Path) -> None:
 
 
 def build_frontend(install_root: Path, *, force: bool = False) -> None:
-    """Public entrypoint for `aith orchestrator build`.
+    """Public entrypoint for `vigil orchestrator build`.
 
     Builds the install-side `orchestrator/frontend/dist/` even when the
     backend was already started without it. Use this when a direct
@@ -339,7 +339,7 @@ def _check_port_available(host: str, port: int) -> None:
 
     The previous implementation relied on uvicorn discovering EADDRINUSE on
     bind and crashing seconds later. With the pid file already written, the
-    operator would see `aith orchestrator status` flip running → stopped
+    operator would see `vigil orchestrator status` flip running → stopped
     and have no obvious cue that the port was the problem. Catching it here
     turns that into a clear SystemExit naming the holding PID.
     """
@@ -350,7 +350,7 @@ def _check_port_available(host: str, port: int) -> None:
     raise SystemExit(
         f"Cannot start orchestrator: {host}:{port} is already in use{holder_str}.\n"
         f"Inspect with `lsof -nP -iTCP:{port} -sTCP:LISTEN`, stop the holder, then retry.\n"
-        "If this is a stale aith instance, run `aith orchestrator stop` first."
+        "If this is a stale vigil instance, run `vigil orchestrator stop` first."
     )
 
 

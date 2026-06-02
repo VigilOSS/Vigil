@@ -1,20 +1,20 @@
 ---
 name: gau-triage
-description: Decide which gau pipeline verb to run, interpret its structured output, and write findings/surfaces from secrets and JS-discovered endpoints. The full bash pipeline (gau → uro → httpx → trufflehog) is now packaged as `aith assess gau-secrets`; this skill is the dispatch + interpretation layer.
-origin: AI Threat Hunting
+description: Decide which gau pipeline verb to run, interpret its structured output, and write findings/surfaces from secrets and JS-discovered endpoints. The full bash pipeline (gau → uro → httpx → trufflehog) is now packaged as `vigil assess gau-secrets`; this skill is the dispatch + interpretation layer.
+origin: Vigil
 ---
 
 # GAU Triage
 
-> **`aith assess kali` audit flags:** the inner kali invocations (gau, uro, httpx, trufflehog) carry their own audit rows; the wrappers stamp `--technique RECON --probe-kind fingerprint --phase recon` automatically.
+> **`vigil assess kali` audit flags:** the inner kali invocations (gau, uro, httpx, trufflehog) carry their own audit rows; the wrappers stamp `--technique RECON --probe-kind fingerprint --phase recon` automatically.
 
 The gau pipeline is now three composable verbs that all share one cached gau corpus:
 
 | Verb | What it does | Output written to |
 |---|---|---|
-| `aith assess gau-endpoints <target>` | Cache-aware gau, then ingest into work_items with inline classification | `work_items` rows + cluster assignments |
-| `aith assess gau-secrets <target>` | Cache-aware gau → uro dedup → httpx body capture → trufflehog scan | bodies, trufflehog JSON, secrets manifest |
-| `aith assess gau-js-endpoints <target>` | LinkFinder regex over JS bodies → resolve to absolute URLs → ingest as `source=js-extract` | new `work_items` rows hidden in JS bundles |
+| `vigil assess gau-endpoints <target>` | Cache-aware gau, then ingest into work_items with inline classification | `work_items` rows + cluster assignments |
+| `vigil assess gau-secrets <target>` | Cache-aware gau → uro dedup → httpx body capture → trufflehog scan | bodies, trufflehog JSON, secrets manifest |
+| `vigil assess gau-js-endpoints <target>` | LinkFinder regex over JS bodies → resolve to absolute URLs → ingest as `source=js-extract` | new `work_items` rows hidden in JS bundles |
 
 Artifacts for each `(target, gau-flag-set)` pair live under `<engagement>/scans/gau-pipeline/<target_slug>/<cache_key_slug>/`, including `gau_output.txt`, the sidecar `gau_output.meta.json`, intermediate filtered/dedup files, `bodies/`, and `trufflehog.json`. Two targets — or the same target run with different `--subs`/`--providers` — never share `bodies/` or trufflehog input. The wrapper announces cache reuse on stderr and includes `cache_reused: true|false` in the JSON summary so the dispatch-time decision is auditable.
 
@@ -26,7 +26,7 @@ Dispatch this skill when the operator wants signal beyond what live crawling pro
 
 1. **Suspect missing endpoints** (small work buffer, large historical surface) → run `gau-endpoints` first, then `gau-js-endpoints` to catch JS-only routes.
 2. **Secret scanning is in scope** → run `gau-secrets`. The default keeps trufflehog in `--no-verification` mode; pass `--verify` to enable trufflehog's verification step.
-3. **Reviewing existing clusters** → no fresh run needed; read clusters via `aith assess list-clusters`. Inline classification already scored every URL at ingest time.
+3. **Reviewing existing clusters** → no fresh run needed; read clusters via `vigil assess list-clusters`. Inline classification already scored every URL at ingest time.
 
 Skip the pipeline entirely when the corpus is small (<500 URLs), no JS bundles are present, and secret scanning is out of scope.
 
@@ -92,8 +92,8 @@ For each reproducible high-confidence trufflehog or JS-extracted endpoint where 
 
 ```bash
 # Inspect required fields, then write the finding draft.
-aith assess contract record-finding
-aith assess record-finding gau-triage <path-to-finding-json>
+vigil assess contract record-finding
+vigil assess record-finding gau-triage <path-to-finding-json>
 ```
 
 ## Key Rules

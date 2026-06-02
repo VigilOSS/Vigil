@@ -1696,7 +1696,7 @@ def test_stamp_liveness_best_effort_skips(monkeypatch, tmp_path):
 
 
 def test_work_buffer_cli_wires_reason_tag_and_by_reason(tmp_path, capsys):
-    """Drive the REAL `aith assess work-buffer` argparse (not a hand-built
+    """Drive the REAL `vigil assess work-buffer` argparse (not a hand-built
     namespace) — proves --reason-tag and --by reason are wired into the
     operator-facing verb, not just the legacy dispatch register."""
     root = str(_scripts_root())

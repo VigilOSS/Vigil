@@ -1,25 +1,25 @@
 """Markdown-vs-CLI sync-lint.
 
 Operator-facing prose (skills, operator cores, agent prompts, shared
-constraints) routinely names concrete ``aith assess <verb>`` /
-``aith assess kali <verb>`` / ``aith oob <verb>`` invocations. When the CLI
+constraints) routinely names concrete ``vigil assess <verb>`` /
+``vigil assess kali <verb>`` / ``vigil oob <verb>`` invocations. When the CLI
 registries drift away from that prose — a verb renamed, removed, or never
 shipped — an operator copy-pastes a command that dies with argparse's
 generic "invalid choice" error. This guard catches that drift in CI.
 
 Two assertions:
 
-(a) Every ``aith assess`` / ``aith assess kali`` / ``aith oob`` verb named in
+(a) Every ``vigil assess`` / ``vigil assess kali`` / ``vigil oob`` verb named in
     the markdown corpus resolves to a verb that the *real* CLI registries
     register. The registries are derived by importing the CLIs and walking
     the argparse subparser tree (which executes
     ``assess.cli``'s per-command ``register()`` hooks and the inline
-    ``oob`` ``add_parser`` calls in ``ai_threat_hunting_cli.main``), so this
+    ``oob`` ``add_parser`` calls in ``vigil_cli.main``), so this
     test reflects the shipped command surface rather than a hand-maintained
     list.
 
-(b) No file claims ``aith oob client logs`` / ``aith logs oob`` *returns
-    correlated hits*. Correlation is exclusively ``aith oob poll`` (it reads
+(b) No file claims ``vigil oob client logs`` / ``vigil logs oob`` *returns
+    correlated hits*. Correlation is exclusively ``vigil oob poll`` (it reads
     recorded probes from the backend and matches callbacks to nonces); the
     log tails are raw listener/FRP output for infra debugging only. The
     post-QA tree is careful to say "raw tail … not correlation"; this guard
@@ -27,7 +27,7 @@ Two assertions:
 
 Implementation notes:
 - Verb tokens containing argparse-doc placeholders (``*``/``<``/``>``/``$``)
-  or a trailing ``-`` (e.g. the glob ``aith assess record-*``) are prose,
+  or a trailing ``-`` (e.g. the glob ``vigil assess record-*``) are prose,
   not literal invocations, and are skipped.
 - ``assess`` and ``oob`` themselves only have nested subparsers we do not
   enumerate beyond one level; the test validates the *first* verb after the
@@ -102,7 +102,7 @@ def _load_assess_registries() -> tuple[set[str], set[str]]:
 
 def _load_oob_registries() -> tuple[set[str], set[str]]:
     """Return ``(oob_verbs, oob_client_verbs)`` from the installable CLI."""
-    main_mod = importlib.import_module("ai_threat_hunting_cli.main")
+    main_mod = importlib.import_module("vigil_cli.main")
     root = _capture_root_parser(main_mod.main)
     top = _subparser_choices(root)
     oob_verbs: set[str] = set()
@@ -135,10 +135,10 @@ def _is_literal_verb(token: str) -> bool:
     return bool(token) and not _PLACEHOLDER.search(token) and not token.endswith("-")
 
 
-# ``aith assess <verb>`` and ``aith assess kali <verb>``.
-_ASSESS_RE = re.compile(r"aith assess (kali )?([a-z][a-z0-9-]*)")
-# ``aith oob <verb>``.
-_OOB_RE = re.compile(r"aith oob ([a-z][a-z0-9-]*)")
+# ``vigil assess <verb>`` and ``vigil assess kali <verb>``.
+_ASSESS_RE = re.compile(r"vigil assess (kali )?([a-z][a-z0-9-]*)")
+# ``vigil oob <verb>``.
+_OOB_RE = re.compile(r"vigil oob ([a-z][a-z0-9-]*)")
 
 
 @pytest.fixture(scope="module")
@@ -191,17 +191,17 @@ def test_documented_assess_verbs_exist(assess_registries, doc_files):
                 continue
             if is_kali:
                 if verb not in kali_verbs:
-                    unknown_kali.append(f"{rel}: aith assess kali {verb}")
+                    unknown_kali.append(f"{rel}: vigil assess kali {verb}")
             elif verb not in assess_verbs:
-                unknown_assess.append(f"{rel}: aith assess {verb}")
+                unknown_assess.append(f"{rel}: vigil assess {verb}")
     assert not unknown_assess, (
-        "Markdown references `aith assess <verb>` not registered in "
+        "Markdown references `vigil assess <verb>` not registered in "
         "agent/scripts/assess/cli.py:\n  " + "\n  ".join(sorted(set(unknown_assess)))
     )
     assert not unknown_kali, (
-        "Markdown references `aith assess kali <verb>` not registered as a "
+        "Markdown references `vigil assess kali <verb>` not registered as a "
         "kali subverb (host-side tools without a wrapper run via "
-        "`aith assess kali exec -- <tool> ...`):\n  "
+        "`vigil assess kali exec -- <tool> ...`):\n  "
         + "\n  ".join(sorted(set(unknown_kali)))
     )
 
@@ -217,15 +217,15 @@ def test_documented_oob_verbs_exist(oob_registries, doc_files):
             if not _is_literal_verb(verb):
                 continue
             if verb not in oob_verbs:
-                unknown.append(f"{rel}: aith oob {verb}")
+                unknown.append(f"{rel}: vigil oob {verb}")
     assert not unknown, (
-        "Markdown references `aith oob <verb>` not registered in "
-        "src/ai_threat_hunting_cli/main.py:\n  " + "\n  ".join(sorted(set(unknown)))
+        "Markdown references `vigil oob <verb>` not registered in "
+        "src/vigil_cli/main.py:\n  " + "\n  ".join(sorted(set(unknown)))
     )
 
 
 # A logs tail is named with one of these tokens.
-_LOGS_VERB_RE = re.compile(r"aith oob client logs|aith logs oob")
+_LOGS_VERB_RE = re.compile(r"vigil oob client logs|vigil logs oob")
 # Disclaimers that correctly mark a logs tail as NON-correlation. A line that
 # mentions a logs verb together with "correlat" is only acceptable when it
 # carries one of these markers (case-insensitive). These keywords mirror the
@@ -246,14 +246,14 @@ _NEGATION_MARKERS = (
     "raw infra",
     "listener tail",
     "no manual log correlation",
-    "not `aith oob client logs`",
+    "not `vigil oob client logs`",
     "(not ",
 )
 
 
 def test_logs_tail_never_described_as_correlation(doc_files):
-    """No file may assert that `aith oob client logs` / `aith logs oob`
-    *returns correlated* hits. Correlation is exclusively `aith oob poll`."""
+    """No file may assert that `vigil oob client logs` / `vigil logs oob`
+    *returns correlated* hits. Correlation is exclusively `vigil oob poll`."""
     offenders: list[str] = []
     for path in doc_files:
         rel = path.relative_to(_REPO_ROOT).as_posix()
@@ -267,8 +267,8 @@ def test_logs_tail_never_described_as_correlation(doc_files):
                 continue
             offenders.append(f"{rel}:{lineno}: {line.strip()}")
     assert not offenders, (
-        "A logs tail (`aith oob client logs` / `aith logs oob`) is described "
+        "A logs tail (`vigil oob client logs` / `vigil logs oob`) is described "
         "alongside correlation without disavowing it. Correlation is only "
-        "`aith oob poll`; the log tails are raw listener/FRP output for infra "
+        "`vigil oob poll`; the log tails are raw listener/FRP output for infra "
         "debugging:\n  " + "\n  ".join(offenders)
     )

@@ -32,7 +32,7 @@ already listed below.
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/code-fuzz-campaign/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
+- `agent/skills/code-fuzz-campaign/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
 
@@ -42,11 +42,11 @@ Before producing any output, confirm:
 - [ ] Structural index manifest readable at `tools/analysis-state/structural-index-manifest.json`
 - [ ] Threat model readable at `tools/analysis-state/threat-model.json`
 - [ ] Call graph readable at `tools/analysis-state/call-graph.json`
-- [ ] Memory-safety findings fetched via `aith assess fetch findings` (or summary provided by operator)
-- [ ] File classifications fetched via `aith assess fetch "code/files?repo_id=<id>&limit=5000"` (or summary provided)
+- [ ] Memory-safety findings fetched via `vigil assess fetch findings` (or summary provided by operator)
+- [ ] File classifications fetched via `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` (or summary provided)
 - [ ] Existing fuzzer inventory checked via `rg 'LLVMFuzzerTestOneInput' --type c` and `ls oss-fuzz/` in source repo
 - [ ] Build system identified (Makefile, CMake, etc.) and compiler toolchain confirmed (`which clang`)
-- [ ] Prior fuzz campaigns checked as a coverage map — `aith assess list-command-runs --q <harness-or-target> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what's already been fuzzed on this target so your next campaign picks a variant that hasn't been run — different harness, different seed corpus, different dictionary, different sanitizer (ASan vs MSan vs UBSan), different time budget, different mutation strategy. The only campaign to skip is an identical binary+corpus+flags combination already run to completion; any variant is new coverage. If you cite a prior run instead of re-running, fetch its preview with `aith assess get-command-run <id>` first — `success=true` only means `return_code=0`, and a campaign that exited cleanly under its time budget with no crashes is not the same as one that exhausted the search space. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] Prior fuzz campaigns checked as a coverage map — `vigil assess list-command-runs --q <harness-or-target> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what's already been fuzzed on this target so your next campaign picks a variant that hasn't been run — different harness, different seed corpus, different dictionary, different sanitizer (ASan vs MSan vs UBSan), different time budget, different mutation strategy. The only campaign to skip is an identical binary+corpus+flags combination already run to completion; any variant is new coverage. If you cite a prior run instead of re-running, fetch its preview with `vigil assess get-command-run <id>` first — `success=true` only means `return_code=0`, and a campaign that exited cleanly under its time budget with no crashes is not the same as one that exhausted the search space. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If structural index, threat model, or call graph are missing on the filesystem, stop and
 request the operator re-run Phase 0-1 steps before proceeding. If findings are missing from
@@ -102,14 +102,14 @@ record as a finding.
 
 You receive from the operator:
 
-**Backend state (via `aith assess`):**
-- Phase 2+3 findings: `aith assess fetch findings` — filter for memory-safety
+**Backend state (via `vigil assess`):**
+- Phase 2+3 findings: `vigil assess fetch findings` — filter for memory-safety
   `defect_family` values (`buffer-overflow`, `integer-overflow`, `use-after-free`,
   `uninitialized-memory`). Check `verification_state` to distinguish confirmed from unreviewed.
-- File classifications: `aith assess fetch "code/files?repo_id=<id>&limit=5000"` —
+- File classifications: `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` —
   provides `file_id`, `file_path`, `classification`, `slot_types`, `role`, `language` per file.
   Use this to identify critical/high C/C++ files with memory-safety-relevant slot types.
-- Code coverage: `aith assess code-coverage` — confirms Phase 3 gate passed.
+- Code coverage: `vigil assess code-coverage` — confirms Phase 3 gate passed.
 
 **Filesystem artifacts (under `tools/analysis-state/`):**
 - Structural index aggregate: `tools/analysis-state/structural-index-manifest.json` —
@@ -182,7 +182,7 @@ Aggregate stats:
 
 True findings are recorded via:
 ```bash
-aith assess record-finding code-fuzz-engineer <finding-json>
+vigil assess record-finding code-fuzz-engineer <finding-json>
 ```
 
 Finding JSON must include:
@@ -199,7 +199,7 @@ Finding JSON must include:
 
 ## Finding Prefix: CF
 
-Omit the `slug` field from new fuzz finding JSON. `aith assess
+Omit the `slug` field from new fuzz finding JSON. `vigil assess
 record-finding code-fuzz-engineer <finding-json>` allocates the next `CF-*`
 slug under a lock and prints the canonical slug.
 
@@ -207,11 +207,11 @@ slug under a lock and prints the canonical slug.
 
 Before your dispatch returns, run in this order:
 
-1. `aith assess record-finding code-fuzz-engineer <finding-json>` for each confirmed crash finding.
-2. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (harness paths, crash inputs, campaign configs), open questions, and role-specific extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the exact `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the operator placed at the top of your dispatch prompt.
-3. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+1. `vigil assess record-finding code-fuzz-engineer <finding-json>` for each confirmed crash finding.
+2. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (harness paths, crash inputs, campaign configs), open questions, and role-specific extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the exact `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the operator placed at the top of your dispatch prompt.
+3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-`aith assess agent handoff` is idempotent — checkpoint after each major campaign stage, not only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md`.
+`vigil assess agent handoff` is idempotent — checkpoint after each major campaign stage, not only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md`.
 
 ## Handoffs
 

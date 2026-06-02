@@ -131,8 +131,8 @@ def _candidate_env_files(engagement_dir: str, agent_root: str) -> list[str]:
 def _read_aith_config_value(key: str) -> str | None:
     config_path = Path(
         os.environ.get(
-            "AI_THREAT_HUNTING_CONFIG",
-            str(Path.home() / ".config" / "security-research" / "config.json"),
+            "VIGIL_CONFIG",
+            str(Path.home() / ".config" / "vigil" / "config.json"),
         )
     ).expanduser()
     if not config_path.is_file():
@@ -143,11 +143,11 @@ def _read_aith_config_value(key: str) -> str | None:
             return None
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"Invalid aith config JSON at {config_path}: {exc}") from exc
+        raise SystemExit(f"Invalid vigil config JSON at {config_path}: {exc}") from exc
     except OSError:
         return None
     if not isinstance(payload, dict):
-        raise SystemExit(f"Invalid aith config at {config_path}: expected a JSON object")
+        raise SystemExit(f"Invalid vigil config at {config_path}: expected a JSON object")
     value = payload.get(key)
     return str(value) if value is not None else None
 

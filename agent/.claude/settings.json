@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'if [ -n \"${AI_THREAT_HUNTING_AGENT_ROOT:-}\" ]; then exec bash \"$AI_THREAT_HUNTING_AGENT_ROOT/scripts/hooks/post-tool-log.sh\"; fi; if [ -f scripts/hooks/post-tool-log.sh ]; then exec bash scripts/hooks/post-tool-log.sh; fi; if [ -f agent/scripts/hooks/post-tool-log.sh ]; then exec bash agent/scripts/hooks/post-tool-log.sh; fi'"
+            "command": "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/post-tool-log.sh\"; fi; if [ -f scripts/hooks/post-tool-log.sh ]; then exec bash scripts/hooks/post-tool-log.sh; fi; if [ -f agent/scripts/hooks/post-tool-log.sh ]; then exec bash agent/scripts/hooks/post-tool-log.sh; fi'"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'if [ -n \"${AI_THREAT_HUNTING_AGENT_ROOT:-}\" ]; then exec bash \"$AI_THREAT_HUNTING_AGENT_ROOT/scripts/hooks/post-tool-log.sh\"; fi; if [ -f scripts/hooks/post-tool-log.sh ]; then exec bash scripts/hooks/post-tool-log.sh; fi; if [ -f agent/scripts/hooks/post-tool-log.sh ]; then exec bash agent/scripts/hooks/post-tool-log.sh; fi'"
+            "command": "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/post-tool-log.sh\"; fi; if [ -f scripts/hooks/post-tool-log.sh ]; then exec bash scripts/hooks/post-tool-log.sh; fi; if [ -f agent/scripts/hooks/post-tool-log.sh ]; then exec bash agent/scripts/hooks/post-tool-log.sh; fi'"
           }
         ]
       },
@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'if [ -n \"${AI_THREAT_HUNTING_AGENT_ROOT:-}\" ]; then exec bash \"$AI_THREAT_HUNTING_AGENT_ROOT/scripts/hooks/post-tool-log.sh\"; fi; if [ -f scripts/hooks/post-tool-log.sh ]; then exec bash scripts/hooks/post-tool-log.sh; fi; if [ -f agent/scripts/hooks/post-tool-log.sh ]; then exec bash agent/scripts/hooks/post-tool-log.sh; fi'"
+            "command": "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/post-tool-log.sh\"; fi; if [ -f scripts/hooks/post-tool-log.sh ]; then exec bash scripts/hooks/post-tool-log.sh; fi; if [ -f agent/scripts/hooks/post-tool-log.sh ]; then exec bash agent/scripts/hooks/post-tool-log.sh; fi'"
           }
         ]
       },
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'if [ -n \"${AI_THREAT_HUNTING_AGENT_ROOT:-}\" ]; then exec bash \"$AI_THREAT_HUNTING_AGENT_ROOT/scripts/hooks/post-tool-log.sh\"; fi; if [ -f scripts/hooks/post-tool-log.sh ]; then exec bash scripts/hooks/post-tool-log.sh; fi; if [ -f agent/scripts/hooks/post-tool-log.sh ]; then exec bash agent/scripts/hooks/post-tool-log.sh; fi'"
+            "command": "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/post-tool-log.sh\"; fi; if [ -f scripts/hooks/post-tool-log.sh ]; then exec bash scripts/hooks/post-tool-log.sh; fi; if [ -f agent/scripts/hooks/post-tool-log.sh ]; then exec bash agent/scripts/hooks/post-tool-log.sh; fi'"
           }
         ]
       }
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'if [ -n \"${AI_THREAT_HUNTING_AGENT_ROOT:-}\" ]; then exec bash \"$AI_THREAT_HUNTING_AGENT_ROOT/scripts/hooks/scope-check.sh\"; fi; if [ -f scripts/hooks/scope-check.sh ]; then exec bash scripts/hooks/scope-check.sh; fi; if [ -f agent/scripts/hooks/scope-check.sh ]; then exec bash agent/scripts/hooks/scope-check.sh; fi'"
+            "command": "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/scope-check.sh\"; fi; if [ -f scripts/hooks/scope-check.sh ]; then exec bash scripts/hooks/scope-check.sh; fi; if [ -f agent/scripts/hooks/scope-check.sh ]; then exec bash agent/scripts/hooks/scope-check.sh; fi'"
           }
         ]
       }

@@ -1,12 +1,12 @@
 ---
 name: auth-bypass
 description: Test for authentication and authorization flaws including credential attacks, session issues, and access control bypasses
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Authentication & Authorization Bypass
 
-> **`aith assess kali` audit flags:** use `--technique AUTH` (all auth-bypass variants — header spoofing, role drift, logic flaws, forced browsing — collapse to the AUTH class). Switch to `JWT` when attacking a JSON Web Token specifically.
+> **`vigil assess kali` audit flags:** use `--technique AUTH` (all auth-bypass variants — header spoofing, role drift, logic flaws, forced browsing — collapse to the AUTH class). Switch to `JWT` when attacking a JSON Web Token specifically.
 
 ## When to Activate
 
@@ -23,7 +23,7 @@ Check username enumeration: different errors for valid/invalid users, timing dif
 
 ### 2. Brute Force (Hydra)
 
-Run via `aith assess kali exec --technique AUTH --intent "brute-force login" --probe-kind payload --phase consume-test --timeout 300 -- hydra ...` so the run lands in the audit pipeline.
+Run via `vigil assess kali exec --technique AUTH --intent "brute-force login" --probe-kind payload --phase consume-test --timeout 300 -- hydra ...` so the run lands in the audit pipeline.
 ```bash
 hydra -l admin -P /usr/share/wordlists/rockyou.txt target http-post-form \
   "/login:username=^USER^&password=^PASS^:Invalid credentials"
@@ -60,8 +60,8 @@ GET /invoice?id=5001 → ?id=5002
 Don't hand-roll the ID variants. Classify the captured ID and fire its intent-keyed set —
 `neighbor`/`boundary` for horizontal access, `escalation` for vertical (admin/first-object) access:
 ```bash
-aith assess classify-payload 1001 --mutations    # sequential_id → 1002/1000/.., 0/-1/1, admin/root
-aith assess classify-payload "$UUID" --mutations  # uuid → ++last group, all-zeros, ...-000000000001
+vigil assess classify-payload 1001 --mutations    # sequential_id → 1002/1000/.., 0/-1/1, admin/root
+vigil assess classify-payload "$UUID" --mutations  # uuid → ++last group, all-zeros, ...-000000000001
 ```
 For deep IDOR work (split-brain body/route divergence, multi-tenant isolation) hand off to the
 `idor-testing` / `split-brain-idor` skills, which own the full ID-mutation and confirmation flow.
@@ -109,7 +109,7 @@ PUT /api/profile {"name":"test","role":"admin","is_staff":true}  # Mass assignme
 
 ## Methodology Checklist
 
-All HTTP probing steps must go through `aith assess kali exec --technique AUTH --intent "<purpose>" --probe-kind <kind> --phase consume-test --timeout <N> -- curl ...` (or the appropriate typed verb) so every request lands in the audit pipeline. Use `--probe-kind baseline` for control requests, `--probe-kind payload` for attack attempts, `--probe-kind exploit` for confirmed bypass demonstrations.
+All HTTP probing steps must go through `vigil assess kali exec --technique AUTH --intent "<purpose>" --probe-kind <kind> --phase consume-test --timeout <N> -- curl ...` (or the appropriate typed verb) so every request lands in the audit pipeline. Use `--probe-kind baseline` for control requests, `--probe-kind payload` for attack attempts, `--probe-kind exploit` for confirmed bypass demonstrations.
 
 1. Map all auth endpoints (login, register, reset, logout, MFA, OAuth)
 2. Create accounts at each privilege level

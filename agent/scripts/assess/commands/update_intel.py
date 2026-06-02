@@ -1,4 +1,4 @@
-"""aith assess update-intel — patch an intel row by id.
+"""vigil assess update-intel — patch an intel row by id.
 
 Mirrors ``update-finding`` for intel rows. Use this when an existing intel
 row needs an in-place metadata update (severity refinement, new
@@ -11,8 +11,8 @@ audit and insert a wholly new row that replaces it.
 
 Usage::
 
-    aith assess update-intel <type> <id> <patch-json-file>
-    aith assess update-intel <type> <id> --inline '{"...": "..."}'
+    vigil assess update-intel <type> <id> <patch-json-file>
+    vigil assess update-intel <type> <id> --inline '{"...": "..."}'
 """
 from __future__ import annotations
 
@@ -35,8 +35,8 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  aith assess update-intel tech-component 42 patch.json\n"
-            "  aith assess update-intel cve 17 --inline '{\"validation_status\": \"exploited\"}'\n"
+            "  vigil assess update-intel tech-component 42 patch.json\n"
+            "  vigil assess update-intel cve 17 --inline '{\"validation_status\": \"exploited\"}'\n"
             f"\nValid types: {types_list}"
         ),
     )
@@ -124,7 +124,7 @@ def _maybe_explain_409(exc: AssessError) -> None:
         return
     print(
         "update-intel: backend rejected with HTTP 409 (natural-key collision).\n"
-        "  Hint: use `aith assess supersede-intel <type> <id> ...` when the new "
+        "  Hint: use `vigil assess supersede-intel <type> <id> ...` when the new "
         "payload would change the natural key and you want the prior row retained for audit.",
         file=sys.stderr,
     )

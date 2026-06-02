@@ -1,4 +1,4 @@
-"""aith assess kali cero — typed wrapper around cero (TLS-handshake SAN scraper)."""
+"""vigil assess kali cero — typed wrapper around cero (TLS-handshake SAN scraper)."""
 from __future__ import annotations
 
 import shlex

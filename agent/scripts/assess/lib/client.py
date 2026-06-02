@@ -171,9 +171,9 @@ class AssessmentClient:
 
     def _orchestrator_hint(self) -> str:
         return (
-            "Hint: `aith assess` backend reads/writes require the orchestrator backend, "
-            "not the Kali runtime. Run `aith orchestrator status` or "
-            f"`aith orchestrator start`, and verify ORCHESTRATOR_BASE_URL={self.base_url!r}."
+            "Hint: `vigil assess` backend reads/writes require the orchestrator backend, "
+            "not the Kali runtime. Run `vigil orchestrator status` or "
+            f"`vigil orchestrator start`, and verify ORCHESTRATOR_BASE_URL={self.base_url!r}."
         )
 
     def get(self, endpoint: str) -> Any:

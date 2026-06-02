@@ -1,12 +1,12 @@
 ---
 name: race-condition-testing
 description: Race condition and TOCTOU exploitation — parallel request attacks
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Race Condition / TOCTOU Testing
 
-> **`aith assess kali` audit flags:** use `--technique OTHER` (race/TOCTOU has no dedicated enum class; outcomes span double-spend, auth-bypass, and state corruption).
+> **`vigil assess kali` audit flags:** use `--technique OTHER` (race/TOCTOU has no dedicated enum class; outcomes span double-spend, auth-bypass, and state corruption).
 
 ## When to Activate
 
@@ -24,7 +24,7 @@ origin: AI Threat Hunting
 - Burp Repeater (send group in parallel)
 - GNU parallel
 
-For current-engagement target requests, execute `curl` through `aith assess kali exec --` so
+For current-engagement target requests, execute `curl` through `vigil assess kali exec --` so
 the burst lands in the audit pipeline alongside the audit-flag set you pass. Add explicit
 `Cookie:` or `Authorization:` headers only when intentionally testing alternate-user races or
 session override behavior.

@@ -25,7 +25,7 @@ this table loaded on every dispatch.
 
 The DNS-brute column matches the canonical SKILL profile names in
 `agent/skills/subdomain-enumeration/SKILL.md` "Docker-resource-safe profiles".
-Available profiles per runtime tier (read `aith runtime resources` to confirm
+Available profiles per runtime tier (read `vigil runtime resources` to confirm
 the active tier):
 
 | Runtime tier | `polite-CDN-fronted-target` (cautious 800) | `polite-residential` (2500) | `bursty-OK` (5000) |

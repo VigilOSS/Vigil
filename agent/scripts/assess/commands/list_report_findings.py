@@ -1,4 +1,4 @@
-"""aith assess list-report-findings - grouped report finding projection."""
+"""vigil assess list-report-findings - grouped report finding projection."""
 from __future__ import annotations
 
 import argparse

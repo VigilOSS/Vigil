@@ -1,7 +1,7 @@
 ---
 name: report-generation
 description: Backend-first engagement report structure, generation procedure, and formatting guidelines
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Report Generation
@@ -18,26 +18,26 @@ Use the helper script or `curl` — never query the SQLite database file directl
 
 ```bash
 # Final report gate and grouped final-mode findings
-aith assess check-report-readiness
-aith assess list-report-findings --mode final --json
+vigil assess check-report-readiness
+vigil assess list-report-findings --mode final --json
 
 # Interim grouped findings when the operator explicitly wants a draft before final readiness passes
-aith assess list-report-findings --mode draft --json
+vigil assess list-report-findings --mode draft --json
 
 # Attack chains with narrative and severity
-aith assess fetch attack-chains
+vigil assess fetch attack-chains
 
 # Credentials discovered during exploitation
-aith assess fetch credentials
+vigil assess fetch credentials
 
 # Access records and footholds confirmed via credential validation
-aith assess fetch access-records
+vigil assess fetch access-records
 
 # Surfaces for coverage summary
-aith assess fetch surfaces
+vigil assess fetch surfaces
 
 # Assessment-level counts
-aith assess fetch summary
+vigil assess fetch summary
 ```
 
 The `list-report-findings --json` helper returns grouped report findings. Root and sibling finding rows include:
@@ -47,7 +47,7 @@ The `list-report-findings --json` helper returns grouped report findings. Root a
 - `remediation`, `steps_to_reproduce`, `cwe_id`, `owasp_category` — extracted from `details_json`
 - `impact`, `evidence_detail` — extracted from `details_json`
 
-> **Read vs write asymmetry.** The backend stores finding metadata in a column literally named `details_json` (a JSON string) — that's why the `list-report-findings` projection above references `details_json` as a source. When you **write** via `aith assess update-finding --inline`, the accepted shape is `{"details": {...}}` (a dict under the `details` key). The asymmetry is intentional: the API decodes/encodes the JSON column behind the field name `details` on writes, leaving `details_json` as the raw storage name on reads. If a prompt or recipe says to pass `details_json` to `update-finding`, that's drift — flag it.
+> **Read vs write asymmetry.** The backend stores finding metadata in a column literally named `details_json` (a JSON string) — that's why the `list-report-findings` projection above references `details_json` as a source. When you **write** via `vigil assess update-finding --inline`, the accepted shape is `{"details": {...}}` (a dict under the `details` key). The asymmetry is intentional: the API decodes/encodes the JSON column behind the field name `details` on writes, leaving `details_json` as the raw storage name on reads. If a prompt or recipe says to pass `details_json` to `update-finding`, that's drift — flag it.
 - top-level `groups` and `standalone`; each group has a `root` finding and `siblings`
 
 Sibling rows include
@@ -86,7 +86,7 @@ Written for the person who will not read the rest — a director, VP, or CISO.
 
 ```markdown
 ## Executive Summary
-**Target:** [target]  **Scope:** [scope]  **Date:** [start] - [end]  **Tester:** AI Threat Hunting
+**Target:** [target]  **Scope:** [scope]  **Date:** [start] - [end]  **Tester:** Vigil
 
 | Severity | Count |
 |----------|-------|
@@ -174,8 +174,8 @@ Tool output in `<details>` blocks, generated scripts, scope verification table, 
 
 Before generating the report body, run these checks against the backend data. If any check fails, **stop and flag the issue to the operator** — do not silently fix or ignore it.
 
-1. **Readiness gate:** for final reports, run `aith assess check-report-readiness`. If it fails, stop and flag the blockers to the operator.
-2. **Root-cause consolidation check:** use `aith assess list-report-findings --mode final --json` and `aith assess check-report-readiness` to confirm intentional root/sibling groups are already represented. If two reportable findings still share the same vulnerable component or configuration and are not grouped, stop and ask the operator to run `aith assess link-finding` or merge them. Apply the BugCrowd/HackerOne standard: one root cause, one submission.
+1. **Readiness gate:** for final reports, run `vigil assess check-report-readiness`. If it fails, stop and flag the blockers to the operator.
+2. **Root-cause consolidation check:** use `vigil assess list-report-findings --mode final --json` and `vigil assess check-report-readiness` to confirm intentional root/sibling groups are already represented. If two reportable findings still share the same vulnerable component or configuration and are not grouped, stop and ask the operator to run `vigil assess link-finding` or merge them. Apply the BugCrowd/HackerOne standard: one root cause, one submission.
 3. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
 4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
 
@@ -184,7 +184,7 @@ Only proceed to report generation after validation passes or the operator resolv
 ## Generation Procedure
 
 1. **Pull backend state** using the queries in "Query Backend First" above
-2. **Use `aith assess list-report-findings --mode final --json`** as the authoritative final finding structure, or `aith assess list-report-findings --mode draft --json` for interim drafts. Render one section per group root; include siblings as downstream outcomes under the root narrative, and explicitly call out `eliminates_attack_path` siblings as residual remediation paths.
+2. **Use `vigil assess list-report-findings --mode final --json`** as the authoritative final finding structure, or `vigil assess list-report-findings --mode draft --json` for interim drafts. Render one section per group root; include siblings as downstream outcomes under the root narrative, and explicitly call out `eliminates_attack_path` siblings as residual remediation paths.
 3. **Use pre-computed CVSS** from finding details. Recalculate only if proved impact at report time would shift at least one CVSS base metric (AV, AC, PR, UI, S, C, I, A) by one or more levels versus the validated vector
 4. **Use pre-computed remediation** from finding details. Augment only when one of these is true: (a) the chain revealed a prerequisite weakness the original remediation did not address, (b) the exploit bypassed the suggested fix, or (c) the chain spans multiple findings and fixing this one alone does not close the chain
 5. Populate all template fields (flag missing evidence with `[EVIDENCE MISSING]`, never fabricate)
@@ -234,8 +234,8 @@ Per `agent/rules/hunting.md` §21, no finding's `summary` or `details` text may 
 Run this scan against the backend BEFORE rendering the report so the underlying findings are clean — fixing it in `report.md` alone leaks back the next time the report is regenerated.
 
 ```bash
-for slug in $(aith assess list-findings --status active --json | jq -r '.[].slug'); do
-  hit=$(aith assess fetch findings/$slug --jq '.summary,.details' \
+for slug in $(vigil assess list-findings --status active --json | jq -r '.[].slug'); do
+  hit=$(vigil assess fetch findings/$slug --jq '.summary,.details' \
     | grep -iE 'adjusted from|originally rated|previously (high|medium|low)|severity (was|changed)|merged from|downgraded to|upgraded to')
   if [ -n "$hit" ]; then
     echo "==> stale text in $slug:"
@@ -247,7 +247,7 @@ done
 For each hit, fix the source-of-truth on the finding (NOT in `report.md`):
 
 ```bash
-aith assess update-finding <slug> \
+vigil assess update-finding <slug> \
   --summary "<rewritten summary without stale narrative>" \
   --inline '{"details": { ... rewritten details ... }}' \
   --reason "stale-text scrub before report QA"
@@ -262,7 +262,7 @@ Run these publication steps only after the operator confirms the report QA gate 
 1. **Emit a runtime event** so the orchestrator and UI know the artifact exists.
    For red engagements and blue verified-incident reports:
    ```bash
-   aith assess emit-event \
+   vigil assess emit-event \
        "report.generated" \
        "report" \
        "report.md" \
@@ -271,7 +271,7 @@ Run these publication steps only after the operator confirms the report QA gate 
    ```
    For blue closeout artifacts (false-positive, benign, no-impact, or inconclusive):
    ```bash
-   aith assess emit-event \
+   vigil assess emit-event \
        "closeout.generated" \
        "report" \
        "closeout.md" \
@@ -282,7 +282,7 @@ Run these publication steps only after the operator confirms the report QA gate 
    ```bash
    # For each finding slug included in the report, use the finding-specific helper so the
    # workflow transition stays explicit at the command line:
-   aith assess update-finding VA-003 \
+   vigil assess update-finding VA-003 \
      --status reported \
      --notes "Included in report.md" \
      --reason "Included in the generated report deliverable." \
@@ -341,11 +341,11 @@ Differences from red mode:
 - **Closing sequence** — after the rendered closeout/report passes the same post-generation
   self-review checks listed above, register the rendered file as an artifact:
   ```bash
-  aith assess artifact register closeout.md \
+  vigil assess artifact register closeout.md \
     --kind ir_closeout \
     --agent-id <report-writer-agent-id>
 
-  aith assess artifact register report.md \
+  vigil assess artifact register report.md \
     --kind ir_evidence \
     --finding <slug-list-or-engagement-ref> \
     --agent-id <report-writer-agent-id>
@@ -357,10 +357,10 @@ Differences from red mode:
 Dispatch invocation (worked example):
 
 ```bash
-aith blue report --engagement-key <key>
-aith blue closeout --engagement-key <key>
+vigil blue report --engagement-key <key>
+vigil blue closeout --engagement-key <key>
 # internally dispatches:
-# aith assess agent start \
+# vigil assess agent start \
 #   --role report-writer \
 #   --skills report-generation \
 #   --task "Render blue incident report from durable backend state. Load

@@ -1,4 +1,4 @@
-"""aith assess kali puredns — typed wrapper around puredns inside the runtime."""
+"""vigil assess kali puredns — typed wrapper around puredns inside the runtime."""
 from __future__ import annotations
 
 from assess.lib.kali import (

@@ -1,7 +1,7 @@
 ---
 name: code-finding-verification
 description: False-positive elimination using five-check verification protocol with devil's advocate and multi-perspective voting
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Code Finding Verification
@@ -325,7 +325,7 @@ Prerequisites: [what attacker needs: network access, specific request sequence, 
 Data Flow: [how A's output feeds B's input — specific variables and functions]
 ```
 
-Record chains via `aith assess record-chain code-vuln-verifier <chain-json>`
+Record chains via `vigil assess record-chain code-vuln-verifier <chain-json>`
 
 ## FP Context
 
@@ -385,14 +385,14 @@ pending_runtime_proof, state exactly which runtime proof is still owed>
 Register it on the verify call so it links to the finding:
 
 ```bash
-aith assess verify-finding <slug> --disposition pending_runtime_proof \
+vigil assess verify-finding <slug> --disposition pending_runtime_proof \
   --reason "static evidence accepted; runtime PoC outstanding" \
   --narrative notes/<slug>-debate.md
 ```
 
 `--narrative` registers the file as a `kind=verification-narrative` artifact with
 `related_finding_slug=<slug>`; retrieve later with
-`aith assess artifact search --finding <slug> --kind verification-narrative`.
+`vigil assess artifact search --finding <slug> --kind verification-narrative`.
 
 ### Kill Reason Format (for audit trail)
 
@@ -416,9 +416,9 @@ Examples:
 When you persist a false positive in structured finding state, include:
 - `details.kill_check` — integer 1-5 for the failed verification check
 - `details.kill_reason` — concise verifier rationale suitable for later query/reporting
-- Use `aith assess kill-finding <slug> ...` when you already have the kill rationale in hand, because it enforces the required false-positive fields before the request leaves the CLI
-- Use `aith assess verify-finding <slug> <verification-json>` for confirm/downgrade/dispute flows or when the verification payload already exists on disk, because the verification transition belongs in the audit ledger rather than a generic finding patch
-- Use `aith assess reset-finding <slug> ...` when new evidence disproves an earlier verified or false-positive verdict, because reopening is its own lifecycle transition and should clear the prior verification state instead of patching fields by hand
+- Use `vigil assess kill-finding <slug> ...` when you already have the kill rationale in hand, because it enforces the required false-positive fields before the request leaves the CLI
+- Use `vigil assess verify-finding <slug> <verification-json>` for confirm/downgrade/dispute flows or when the verification payload already exists on disk, because the verification transition belongs in the audit ledger rather than a generic finding patch
+- Use `vigil assess reset-finding <slug> ...` when new evidence disproves an earlier verified or false-positive verdict, because reopening is its own lifecycle transition and should clear the prior verification state instead of patching fields by hand
 
 ## Output Format
 

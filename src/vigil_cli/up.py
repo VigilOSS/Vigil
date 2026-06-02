@@ -43,12 +43,12 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
     except SystemExit:
         print("source sync\tskipped (no source checkout found)")
 
-    runtime_was_running = docker.container_running("security-research", runner=runner)
+    runtime_was_running = docker.container_running("vigil", runner=runner)
 
     runtime_built = False
     if options.no_build:
         print("runtime image\tbuild skipped")
-    elif _image_outdated("security-research:latest", _runtime_image_inputs(install_root), runner=runner):
+    elif _image_outdated("vigil:latest", _runtime_image_inputs(install_root), runner=runner):
         print("runtime image\tbuilding")
         build_runtime(install_root, runner=runner)
         runtime_built = True
@@ -59,7 +59,7 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
 
     if options.no_build:
         print("mitmproxy image\tbuild skipped")
-    elif _image_outdated("security-research-proxy:latest", _mitmproxy_image_inputs(install_root), runner=runner):
+    elif _image_outdated("vigil-proxy:latest", _mitmproxy_image_inputs(install_root), runner=runner):
         print("mitmproxy image\tbuilding")
         _build_mitmproxy_image(install_root, runner=runner)
     else:
@@ -92,7 +92,7 @@ def _start_or_restart_runtime(
             start_runtime(RuntimeOptions(install_root=install_root, recreate=True), runner=runner)
             return
         print("runtime\trunning old image; restart skipped")
-        print("Run `aith runtime restart` when you are ready to pick up the new image.")
+        print("Run `vigil runtime restart` when you are ready to pick up the new image.")
         return
 
     print("runtime\talready running")
@@ -110,7 +110,7 @@ def _confirm_runtime_restart(options: UpOptions) -> bool:
 
     timeout = max(0, options.runtime_restart_timeout)
     print(
-        "Runtime image changed. Restarting Kali runtime will terminate any in-flight `aith assess kali ...` "
+        "Runtime image changed. Restarting Kali runtime will terminate any in-flight `vigil assess kali ...` "
         "or `docker exec` sessions; OOB interactsh client domains may be lost unless their session files "
         "can resume with the server."
     )
@@ -124,7 +124,7 @@ def _confirm_runtime_restart(options: UpOptions) -> bool:
 
 
 def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner: docker.Runner) -> None:
-    if docker.container_running("security-research-proxy", runner=runner):
+    if docker.container_running("vigil-proxy", runner=runner):
         print("mitmproxy\talready running")
         return
     engagements_root = install_root / "agent" / "engagements"
@@ -157,8 +157,8 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
             )
         else:
             print("oob\tskipped; missing FRP token")
-            print("Configure it with: aith config set oob.frp_token <token>")
-            print("Then start OOB with: aith oob start")
+            print("Configure it with: vigil config set oob.frp_token <token>")
+            print("Then start OOB with: vigil oob start")
             return
 
     print("oob\tstarting")
@@ -175,10 +175,10 @@ def _oob_options(install_root: Path) -> OobOptions:
     from .oob import DEFAULT_FRP_HOST, DEFAULT_FRP_PORT, DEFAULT_OOB_DOMAIN
     import os
 
-    token = os.environ.get("AI_THREAT_HUNTING_FRP_TOKEN") or config_module.get_config_value("oob.frp_token") or ""
-    host = os.environ.get("AI_THREAT_HUNTING_FRP_HOST") or config_module.get_config_value("oob.frp_host", DEFAULT_FRP_HOST) or DEFAULT_FRP_HOST
-    port = int(os.environ.get("AI_THREAT_HUNTING_FRP_PORT") or config_module.get_config_value("oob.frp_port", str(DEFAULT_FRP_PORT)) or DEFAULT_FRP_PORT)
-    domain = os.environ.get("AI_THREAT_HUNTING_OOB_DOMAIN") or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN) or DEFAULT_OOB_DOMAIN
+    token = os.environ.get("VIGIL_FRP_TOKEN") or config_module.get_config_value("oob.frp_token") or ""
+    host = os.environ.get("VIGIL_FRP_HOST") or config_module.get_config_value("oob.frp_host", DEFAULT_FRP_HOST) or DEFAULT_FRP_HOST
+    port = int(os.environ.get("VIGIL_FRP_PORT") or config_module.get_config_value("oob.frp_port", str(DEFAULT_FRP_PORT)) or DEFAULT_FRP_PORT)
+    domain = os.environ.get("VIGIL_OOB_DOMAIN") or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN) or DEFAULT_OOB_DOMAIN
     return OobOptions(install_root=install_root, frp_host=host, frp_port=port, frp_token=token, oob_domain=domain)
 
 
@@ -260,5 +260,5 @@ def _runtime_image_drift(options: RuntimeOptions, *, runner: docker.Runner) -> b
 
 def _build_mitmproxy_image(install_root: Path, *, runner: docker.Runner = docker.run_command_streaming) -> None:
     dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
-    argv = ["docker", "build", "-t", "security-research-proxy:latest", "-f", str(dockerfile), str(install_root / "agent")]
+    argv = ["docker", "build", "-t", "vigil-proxy:latest", "-f", str(dockerfile), str(install_root / "agent")]
     docker.require_success(runner(argv), argv)

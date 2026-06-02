@@ -1,4 +1,4 @@
-"""aith assess record-finding — most complex command.
+"""vigil assess record-finding — most complex command.
 
 Schema validate → slug allocate → POST → emit event.
 """
@@ -21,7 +21,7 @@ def register(subparsers) -> None:
     p = subparsers.add_parser(
         "record-finding",
         help="Record a structured finding",
-        epilog="See `aith assess contract record-finding` for the canonical payload shape and examples.",
+        epilog="See `vigil assess contract record-finding` for the canonical payload shape and examples.",
     )
     p.add_argument("agent_name", help="Agent name (e.g. vulnerability-analyst)")
     p.add_argument("json_file", help="Path to finding JSON file")
@@ -141,7 +141,7 @@ def _report_validation_errors(payload: dict, errors: list[str]) -> None:
             print(f"  - {hint}", file=sys.stderr)
 
     print("", file=sys.stderr)
-    print("Run `aith assess contract record-finding` for the canonical helper contract.", file=sys.stderr)
+    print("Run `vigil assess contract record-finding` for the canonical helper contract.", file=sys.stderr)
     print("", file=sys.stderr)
     print(render_contract("record-finding"), file=sys.stderr)
     sys.exit(1)

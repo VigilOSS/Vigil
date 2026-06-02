@@ -1,7 +1,7 @@
 ---
 name: open-redirect-testing
 description: Test for unvalidated redirects — URL parameters, login flows, OAuth callbacks that redirect to attacker-controlled domains
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Open Redirect Testing
@@ -22,9 +22,9 @@ Open redirect alone is typically Low severity. It becomes High/Critical when cha
 ## Tools
 
 - `curl` (follow redirects with `-L`, inspect with `-v`)
-- `aith assess classify-payload <value> --mutations` — type the current redirect-parameter value and pull type-aware variants: for a `url`-typed value the `boundary` bucket yields `javascript:alert(1)`/`file://` scheme probes and the `format` bucket yields scheme-downgrade/quoted variants you feed into the bypass sweep (Step 2) instead of hand-typing each.
-- `aith assess anomaly-score` — when sweeping many redirect-parameter names across an endpoint (Parameter Discovery): record each response and let it rank the parameter that produced an odd response (a 3xx with an attacker `Location` where the rest 200) rather than eyeballing the loop.
-- `aith oob mint` / `aith oob poll` — only for the **SSRF-via-server-side-redirect** chain (see Chaining): mint a callback host, make the server-side fetcher follow your open redirect to it, and `poll` to confirm the backend dereferenced it. Readiness: `aith oob status --json`.
+- `vigil assess classify-payload <value> --mutations` — type the current redirect-parameter value and pull type-aware variants: for a `url`-typed value the `boundary` bucket yields `javascript:alert(1)`/`file://` scheme probes and the `format` bucket yields scheme-downgrade/quoted variants you feed into the bypass sweep (Step 2) instead of hand-typing each.
+- `vigil assess anomaly-score` — when sweeping many redirect-parameter names across an endpoint (Parameter Discovery): record each response and let it rank the parameter that produced an odd response (a 3xx with an attacker `Location` where the rest 200) rather than eyeballing the loop.
+- `vigil oob mint` / `vigil oob poll` — only for the **SSRF-via-server-side-redirect** chain (see Chaining): mint a callback host, make the server-side fetcher follow your open redirect to it, and `poll` to confirm the backend dereferenced it. Readiness: `vigil oob status --json`.
 - Burp Suite (intercept and modify redirect parameters, observe redirect chains)
 - Browser DevTools (observe client-side redirects via JavaScript)
 
@@ -61,7 +61,7 @@ A literal `grep -qi "evil"` only catches the clean redirect. When the redirect i
 for param in redirect url next return returnTo continue dest redir redirect_uri forward target goto ref callback rurl to uri u r; do
   read -r code len <<<"$(curl -s -o /dev/null -w '%{http_code} %{size_download}' "https://target.example/?${param}=https://evil.example")"
   printf '{"url":"%s","status":%s,"content_length":%s}\n' "$param" "$code" "$len"
-done | aith assess anomaly-score --top 8
+done | vigil assess anomaly-score --top 8
 ```
 
 The top-ranked record's `anomalous_attributes` (e.g. `status='302'`) is the parameter that diverged from the no-redirect baseline — investigate its `Location` header next.
@@ -237,11 +237,11 @@ The server validates that the URL is not an internal address, fetches `https://t
 **Confirm the server-side fetch with a callback before chasing internal targets.** Point the redirect at a minted nonce host; if the backend dereferences it, `poll` correlates the hit and proves the gadget fetches server-side (which a client-side redirect never would):
 
 ```bash
-aith oob mint --technique ssrf --target-url "https://target/api/import-url" \
+vigil oob mint --technique ssrf --target-url "https://target/api/import-url" \
   --param url --probe-kind redirect-ssrf-gadget
 # Submit the import with the open redirect pointing the fetcher at the minted host:
 #   {"url": "https://trusted.example/redirect?url=http://<nonce>.researcher.example/"}
-aith oob poll --client <name>     # matched row = the backend followed the redirect and fetched
+vigil oob poll --client <name>     # matched row = the backend followed the redirect and fetched
 ```
 
 A matched callback flips this from a Low standalone redirect to a confirmed SSRF gadget — now swap the redirect target to `169.254.169.254`/internal hosts. Hand this off to `agent/skills/ssrf-testing/SKILL.md` for the post-SSRF exploitation flow.
@@ -288,7 +288,7 @@ Crawl the application and look for any endpoint that returns 3xx status codes wi
 For each redirect endpoint, iterate through bypass techniques. Order by likelihood of success. Before hand-crafting variants, pull the type-aware set for the parameter's current value so the scheme-confusion and format-confusion probes are generated for you:
 
 ```bash
-aith assess classify-payload "https://target.example/account" --mutations
+vigil assess classify-payload "https://target.example/account" --mutations
 ```
 
 For a `url`-typed value this returns:

@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class CallbackHandler(BaseHTTPRequestHandler):
-    server_version = "security-research-callback/1.0"
+    server_version = "vigil-callback/1.0"
 
     def _read_body(self) -> bytes:
         length = int(self.headers.get("Content-Length", "0") or "0")

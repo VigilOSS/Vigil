@@ -1,4 +1,4 @@
-"""aith assess ingest-httpx — ingest httpx -json output into the backend host-liveness ledger.
+"""vigil assess ingest-httpx — ingest httpx -json output into the backend host-liveness ledger.
 
 httpx writes liveness verdicts to scattered ``.jsonl`` files that nothing
 reconciles back into the backend (the §10.5 gap: ``work_items.live_status`` is

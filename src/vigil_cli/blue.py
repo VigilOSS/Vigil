@@ -1,6 +1,6 @@
-"""``aith blue`` — incident-response CLI surface.
+"""``vigil blue`` — incident-response CLI surface.
 
-Thin wrapper group over the existing ``aith assess`` verbs plus the
+Thin wrapper group over the existing ``vigil assess`` verbs plus the
 ``engagement create``/``engagement list`` flow. The blue surface gives
 operators a vocabulary that matches the IR lifecycle (intake → triage →
 investigate → verify → respond → report) while every durable write still
@@ -12,17 +12,17 @@ Plan reference: ``Blue Team Engagement.plan.md`` §8.3 (CLI surface) and §8.4
 
 Critical CLI-verb drift handled here (per Unit 7 audit):
 
-* ``aith assess log-entry`` does NOT exist — the real verb is ``aith assess log``.
-* ``aith assess verify-finding --disposition`` accepts CLI vocab
+* ``vigil assess log-entry`` does NOT exist — the real verb is ``vigil assess log``.
+* ``vigil assess verify-finding --disposition`` accepts CLI vocab
   ``{confirmed | downgraded | false_positive | disputed}`` while blue
   specialists speak ``{verified | false_positive | downgraded | escalated}``.
-  ``aith blue verify`` translates blue → CLI for the storage row and
+  ``vigil blue verify`` translates blue → CLI for the storage row and
   separately stamps the blue word into ``details.disposition`` so the
   report-writer sees the blue vocabulary verbatim.
-* ``aith assess link-finding --intel <id>`` attaches one or more intel
+* ``vigil assess link-finding --intel <id>`` attaches one or more intel
   rows to a finding's ``details.related_intel_ids[]`` (merges with the
-  existing list, dedupe-preserve-order). ``aith blue`` does not wrap
-  this directly; specialists call ``aith assess link-finding`` from the
+  existing list, dedupe-preserve-order). ``vigil blue`` does not wrap
+  this directly; specialists call ``vigil assess link-finding`` from the
   ioc-enrichment skill.
 """
 from __future__ import annotations
@@ -110,7 +110,7 @@ KEBAB_SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 
 def register_blue_parser(sub: argparse._SubParsersAction) -> None:
-    """Register the ``aith blue`` subcommand group on the top-level parser."""
+    """Register the ``vigil blue`` subcommand group on the top-level parser."""
     blue_p = sub.add_parser("blue", help="Incident-response engagement flow (alert intake, triage, contain)")
     blue_sub = blue_p.add_subparsers(dest="blue_command", required=True)
 
@@ -214,8 +214,8 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
         "--proposal",
         required=True,
         help=(
-            "dispatch-decisions row id (decision_id) printed by `aith blue "
-            "propose-contain`. Must already be approved via `aith assess "
+            "dispatch-decisions row id (decision_id) printed by `vigil blue "
+            "propose-contain`. Must already be approved via `vigil assess "
             "approve-proposal <decision-id>`; contain refuses unresolved rows."
         ),
     )
@@ -344,10 +344,10 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
             paths_str = " or ".join(str(p) for p in paths)
             lines.append(f"  - platform={platform}: expected {paths_str}")
         lines.append("")
-        lines.append("Known customers/platforms: aith blue customers")
+        lines.append("Known customers/platforms: vigil blue customers")
         for platform, _paths in missing:
             lines.append(
-                f"Recover by: aith blue tenant init --customer {customer} --platform {platform}"
+                f"Recover by: vigil blue tenant init --customer {customer} --platform {platform}"
             )
         raise SystemExit("\n".join(lines))
 
@@ -365,7 +365,7 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
     print(created.path)
     print("\nnext:", file=sys.stderr)
     print(f"  cd {created.path}", file=sys.stderr)
-    print(f"  aith engagement start {created.key} --client codex", file=sys.stderr)
+    print(f"  vigil engagement start {created.key} --client codex", file=sys.stderr)
     print("  Paste the alert into the operator chat; the operator will record intake.", file=sys.stderr)
 
 
@@ -497,9 +497,9 @@ def _cmd_alert_record(args: argparse.Namespace, install_root: Path) -> None:
     )
     if register_rc != 0:
         print(
-            f"WARN aith blue alert record: artifact register failed (rc={register_rc}); "
+            f"WARN vigil blue alert record: artifact register failed (rc={register_rc}); "
             f"alert body persisted at {raw_path} but is not in the artifact index yet. "
-            f"Retry with: aith assess artifact register {raw_path} --kind alert_intake --sensitive",
+            f"Retry with: vigil assess artifact register {raw_path} --kind alert_intake --sensitive",
             file=sys.stderr,
         )
 
@@ -508,15 +508,15 @@ def _cmd_alert_record(args: argparse.Namespace, install_root: Path) -> None:
     log_rc = _run_assess(
         install_root,
         eng_dir,
-        # `aith assess log` signature: <agent> <title> <action> <result>
+        # `vigil assess log` signature: <agent> <title> <action> <result>
         ["log", "operator", log_title, "alert_intake", log_result, "--actor-kind", "operator"],
         check=False,
     )
     if log_rc != 0:
         print(
-            f"WARN aith blue alert record: activity log entry failed (rc={log_rc}). "
+            f"WARN vigil blue alert record: activity log entry failed (rc={log_rc}). "
             "the raw alert file was written and scope.json will still be updated; rerun "
-            "`aith assess log operator 'alert intake' alert_intake '<msg>' --actor-kind operator` manually if you want the audit row.",
+            "`vigil assess log operator 'alert intake' alert_intake '<msg>' --actor-kind operator` manually if you want the audit row.",
             file=sys.stderr,
         )
 
@@ -534,7 +534,7 @@ def _cmd_alert_record(args: argparse.Namespace, install_root: Path) -> None:
 
     print(str(raw_path))
     print(
-        "\nnext: aith blue dispatch --role alert-triage-specialist --tier L1 --skills alert-triage",
+        "\nnext: vigil blue dispatch --role alert-triage-specialist --tier L1 --skills alert-triage",
         file=sys.stderr,
     )
 
@@ -675,7 +675,7 @@ def _cmd_dispatch(args: argparse.Namespace, install_root: Path) -> None:
     if role not in BLUE_ROLES:
         raise SystemExit(
             f"--role must be one of {sorted(BLUE_ROLES)} (got {role!r}). "
-            f"Use `aith assess agent start` directly for non-blue roles."
+            f"Use `vigil assess agent start` directly for non-blue roles."
         )
     eng_dir = _resolve_blue_engagement(install_root, args)
     scope = _read_scope(eng_dir / "scope.json", require_blue=True)
@@ -688,7 +688,7 @@ def _cmd_dispatch(args: argparse.Namespace, install_root: Path) -> None:
         platform_skills = [s for s in skill_list if s in INVESTIGATOR_PLATFORM_SKILLS]
         if not platform_skills:
             print(
-                f"WARN aith blue dispatch: investigator skills {skill_list} do not include a known "
+                f"WARN vigil blue dispatch: investigator skills {skill_list} do not include a known "
                 f"dispatchable investigation skill ({sorted(INVESTIGATOR_PLATFORM_SKILLS)}). "
                 "Check the skill name before dispatching.",
                 file=sys.stderr,
@@ -697,7 +697,7 @@ def _cmd_dispatch(args: argparse.Namespace, install_root: Path) -> None:
     tenant_refs: list[str] = list(scope.get("tenant_reference_paths") or [])
     if not tenant_refs:
         raise SystemExit(
-            "scope.json:tenant_reference_paths[] is empty. Recreate the engagement via `aith blue engage` "
+            "scope.json:tenant_reference_paths[] is empty. Recreate the engagement via `vigil blue engage` "
             "so tenant context is resolved, or hand-edit scope.json before dispatching."
         )
 
@@ -718,7 +718,7 @@ def _cmd_dispatch(args: argparse.Namespace, install_root: Path) -> None:
     agent_id = args.agent_id
     if not agent_id:
         agent_id = f"{role}-{uuid.uuid4().hex[:8]}"
-        print(f"[aith blue] dispatched with agent-id={agent_id}", file=sys.stderr)
+        print(f"[vigil blue] dispatched with agent-id={agent_id}", file=sys.stderr)
     assess_args: list[str] = [
         "agent",
         "start",
@@ -809,9 +809,9 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
 
     if not args.force and not _has_verifier_dispatch_for(install_root, eng_dir, args.finding_slug):
         raise SystemExit(
-            f"aith blue verify: no incident-verifier dispatch found that references "
+            f"vigil blue verify: no incident-verifier dispatch found that references "
             f"finding {args.finding_slug!r}. Dispatch the verifier first via: "
-            f"aith blue dispatch --role incident-verifier --tier L3 --skills alert-fp-verification "
+            f"vigil blue dispatch --role incident-verifier --tier L3 --skills alert-fp-verification "
             f"--task 'verify {args.finding_slug}', or rerun with --force to record an operator-approved bypass."
         )
 
@@ -971,10 +971,10 @@ def _require_containment_command_run(command_row: dict, command_run_id: int) -> 
         failures.append(f"success={command_row.get('success')!r}; expected true")
     if failures:
         raise SystemExit(
-            f"aith blue contain: command run id {command_run_id} is not valid containment proof: "
+            f"vigil blue contain: command run id {command_run_id} is not valid containment proof: "
             + "; ".join(failures)
             + ". Execute the approved action through "
-            "`aith assess host-exec --require-audit --phase respond --technique CONTAINMENT ...` "
+            "`vigil assess host-exec --require-audit --phase respond --technique CONTAINMENT ...` "
             "and pass that run id."
         )
 
@@ -1003,10 +1003,10 @@ def _cmd_propose_contain(args: argparse.Namespace, install_root: Path) -> None:
         payload["finding_slug"] = args.finding_slug
 
     # Authoritative approval ledger row in assessment_dispatch_decisions.
-    #    `aith blue contain` refuses to execute until this row's `resolved` flag
-    #    is 1 (set via `aith assess approve-proposal <decision-id>`). The row's
+    #    `vigil blue contain` refuses to execute until this row's `resolved` flag
+    #    is 1 (set via `vigil assess approve-proposal <decision-id>`). The row's
     #    integer id (printed below) is what the operator passes to
-    #    `aith blue contain --proposal <id> --command-run-id <run-id>`.
+    #    `vigil blue contain --proposal <id> --command-run-id <run-id>`.
     decision_payload = dict(payload)
     decision_payload["finding_slug"] = args.finding_slug
     decision_argv = [
@@ -1035,9 +1035,9 @@ def _cmd_propose_contain(args: argparse.Namespace, install_root: Path) -> None:
         decision_row = json.loads(decision_result.stdout.strip().splitlines()[-1])
     except (IndexError, json.JSONDecodeError):
         sys.stderr.write(
-            "WARN aith blue propose-contain: could not parse decision row JSON from "
-            "`aith assess agent decision` output. Operator must locate the decision id via "
-            "`aith assess agent list` (kind=containment_proposal) before `aith blue contain`.\n"
+            "WARN vigil blue propose-contain: could not parse decision row JSON from "
+            "`vigil assess agent decision` output. Operator must locate the decision id via "
+            "`vigil assess agent list` (kind=containment_proposal) before `vigil blue contain`.\n"
         )
 
     decision_id = decision_row.get("id")
@@ -1045,7 +1045,7 @@ def _cmd_propose_contain(args: argparse.Namespace, install_root: Path) -> None:
         {
             "decision_id": decision_id,
             "approval_hint": (
-                f"aith assess approve-proposal {decision_id} --approved-by <operator>"
+                f"vigil assess approve-proposal {decision_id} --approved-by <operator>"
                 if decision_id is not None
                 else None
             ),
@@ -1065,7 +1065,7 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
 
     # Approval gate: refuse unless the decision row referenced by --proposal
     # is resolved (`resolved=1`). Approval lands via
-    # `aith assess approve-proposal <decision-id>`.
+    # `vigil assess approve-proposal <decision-id>`.
     proposal_action: str | None = None
     proposal_target: str | None = None
     proposal_platform: str | None = None
@@ -1078,28 +1078,28 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
 
     if decision_id_int is None:
         raise SystemExit(
-            f"aith blue contain --proposal must be a decision-id integer (got {decision_id_raw!r}). "
-            f"`aith blue propose-contain` prints the decision_id; approve via "
-            f"`aith assess approve-proposal <decision-id> --approved-by <operator>`."
+            f"vigil blue contain --proposal must be a decision-id integer (got {decision_id_raw!r}). "
+            f"`vigil blue propose-contain` prints the decision_id; approve via "
+            f"`vigil assess approve-proposal <decision-id> --approved-by <operator>`."
         )
 
     decision_row = _fetch_containment_decision(install_root, eng_dir, decision_id_int)
     if decision_row is None:
         raise SystemExit(
-            f"aith blue contain: containment proposal decision id {decision_id_int} not found in "
-            f"dispatch-decisions. Re-run `aith blue propose-contain ...` to generate one."
+            f"vigil blue contain: containment proposal decision id {decision_id_int} not found in "
+            f"dispatch-decisions. Re-run `vigil blue propose-contain ...` to generate one."
         )
     if not decision_row.get("resolved"):
         raise SystemExit(
-            f"aith blue contain: proposal {decision_id_int} not approved — run: "
-            f"aith assess approve-proposal {decision_id_int} --approved-by <operator>"
+            f"vigil blue contain: proposal {decision_id_int} not approved — run: "
+            f"vigil assess approve-proposal {decision_id_int} --approved-by <operator>"
         )
     payload = decision_row.get("payload") if isinstance(decision_row, dict) else None
     if isinstance(payload, dict):
         proposal_finding = payload.get("finding_slug") if isinstance(payload.get("finding_slug"), str) else None
         if proposal_finding and proposal_finding != args.finding_slug:
             raise SystemExit(
-                f"aith blue contain: proposal {decision_id_int} belongs to finding "
+                f"vigil blue contain: proposal {decision_id_int} belongs to finding "
                 f"{proposal_finding!r}, not {args.finding_slug!r}."
             )
         proposal_action = payload.get("action") if isinstance(payload.get("action"), str) else None
@@ -1114,23 +1114,23 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
     command_run_id = getattr(args, "command_run_id", None)
     if not args.proof_artifact and command_run_id is None:
         raise SystemExit(
-            "aith blue contain requires --proof-artifact or --command-run-id. "
-            "Execute the approved action through `aith assess host-exec --require-audit ...` "
+            "vigil blue contain requires --proof-artifact or --command-run-id. "
+            "Execute the approved action through `vigil assess host-exec --require-audit ...` "
             "and pass the command run id, or register the captured stdout/screenshot as proof."
         )
     if command_run_id is not None:
         command_row = _fetch_command_run(install_root, eng_dir, int(command_run_id))
         if command_row is None:
             raise SystemExit(
-                f"aith blue contain: command run id {command_run_id} not found in this engagement. "
-                "Pass the id printed by `aith assess host-exec --require-audit ...` or use --proof-artifact."
+                f"vigil blue contain: command run id {command_run_id} not found in this engagement. "
+                "Pass the id printed by `vigil assess host-exec --require-audit ...` or use --proof-artifact."
             )
         _require_containment_command_run(command_row, int(command_run_id))
 
     if args.proof_artifact:
         proof_path = Path(args.proof_artifact)
         # Relative --proof-artifact should resolve against the engagement
-        # directory first (operators frequently run `aith blue contain -k <key>`
+        # directory first (operators frequently run `vigil blue contain -k <key>`
         # from outside the eng_dir). Fall back to CWD with a stderr warning
         # so the operator notices when their relative path didn't match
         # eng_dir layout.
@@ -1143,7 +1143,7 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
                 if cwd_relative.exists():
                     proof_path = cwd_relative
                     print(
-                        f"[aith blue] proof-artifact resolved against CWD, not eng_dir: {proof_path}",
+                        f"[vigil blue] proof-artifact resolved against CWD, not eng_dir: {proof_path}",
                         file=sys.stderr,
                     )
         if not proof_path.is_file():
@@ -1164,7 +1164,7 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
         )
         if rc != 0:
             print(
-                f"WARN aith blue contain: artifact register failed (rc={rc}); proof artifact "
+                f"WARN vigil blue contain: artifact register failed (rc={rc}); proof artifact "
                 f"{proof_path} not in artifact index yet.",
                 file=sys.stderr,
             )
@@ -1257,7 +1257,7 @@ def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
     # dispatch without operator-supplied --agent-id, and so the operator can
     # reference the id later (handoff, done, render-handoff).
     agent_id = getattr(args, "agent_id", None) or f"report-writer-{uuid.uuid4().hex[:8]}"
-    print(f"[aith blue] dispatched with agent-id={agent_id}", file=sys.stderr)
+    print(f"[vigil blue] dispatched with agent-id={agent_id}", file=sys.stderr)
     rc = _run_assess(
         install_root,
         eng_dir,
@@ -1299,12 +1299,12 @@ def _cmd_closeout(args: argparse.Namespace, install_root: Path) -> None:
         "external id, disposition, short closure description, evidence reviewed, "
         "reasoning for benign/no-incident or unresolved status, actions taken, "
         "recommended follow-up, and UTC timestamps. Register closeout.md as "
-        "kind=ir_closeout with `aith assess artifact register closeout.md "
+        "kind=ir_closeout with `vigil assess artifact register closeout.md "
         "--kind ir_closeout --agent-id <report-writer-agent-id>` when the draft is ready. "
         "Use active blue-team language and avoid red-team report vocabulary."
     )
     agent_id = getattr(args, "agent_id", None) or f"closeout-writer-{uuid.uuid4().hex[:8]}"
-    print(f"[aith blue] dispatched with agent-id={agent_id}", file=sys.stderr)
+    print(f"[vigil blue] dispatched with agent-id={agent_id}", file=sys.stderr)
     rc = _run_assess(
         install_root,
         eng_dir,
@@ -1357,7 +1357,7 @@ def _cmd_tenant_init(args: argparse.Namespace, install_root: Path) -> None:
     dest.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
     # Show both input + output so operators can see how the alias map
     # (e.g. ``gws → workspace``) was applied to the on-disk filename — this
-    # is the same mapping `aith blue engage` uses to find the tenant ref.
+    # is the same mapping `vigil blue engage` uses to find the tenant ref.
     print(f"template: {template}", file=sys.stderr)
     print(f"alias: --platform {platform} → suffix {suffix}", file=sys.stderr)
     print(str(dest))
@@ -1414,7 +1414,7 @@ def _build_assess_argv(install_root: Path, eng_dir: Path, assess_args: list[str]
 
 
 def _run_assess(install_root: Path, eng_dir: Path, assess_args: list[str], *, check: bool = True) -> int:
-    """Invoke ``aith assess ...`` via the assess.py entry script.
+    """Invoke ``vigil assess ...`` via the assess.py entry script.
 
     Matches the pattern main.py uses for assess pass-through (see
     ``_exec_assess_passthrough`` / ``main()``: ``install_root / agent / scripts / assess.py``).

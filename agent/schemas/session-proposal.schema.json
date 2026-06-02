@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://security-research.local/schemas/session-proposal.schema.json",
+  "$id": "https://vigil.local/schemas/session-proposal.schema.json",
   "title": "Exploit Session Proposal",
   "type": "object",
   "additionalProperties": false,

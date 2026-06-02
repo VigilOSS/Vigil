@@ -19,15 +19,15 @@ This is the shortest path from a fresh clone to a running operator loop. It poin
 for install and runtime detail rather than duplicating it — read [Quick Start](README.md#quick-start)
 there for the full reference, env-var precedence, and resource sizing.
 
-1. **Install the CLI and working root.** The `aith` CLI is the only supported entrypoint. From a
+1. **Install the CLI and working root.** The `vigil` CLI is the only supported entrypoint. From a
    checkout you are developing on:
 
    ```bash
    uv tool install --editable .
-   aith install ~/security-research
+   vigil install ~/vigil
    ```
 
-   `aith install ~/security-research` seeds (or upgrades, in place) the working root that holds the
+   `vigil install ~/vigil` seeds (or upgrades, in place) the working root that holds the
    shared prompt tree, generated client wrappers, runtime assets, and orchestrator state. Engagements,
    the orchestrator DB, and `.env` are never moved or deleted on re-install. See
    [Install the CLI and workspace](README.md#install-the-cli-and-workspace).
@@ -36,9 +36,9 @@ there for the full reference, env-var precedence, and resource sizing.
    builds the frontend when needed), and any configured mitmproxy/OOB services:
 
    ```bash
-   aith up
-   aith doctor        # confirm local prerequisites
-   aith status        # confirm live service state
+   vigil up
+   vigil doctor        # confirm local prerequisites
+   vigil status        # confirm live service state
    ```
 
    The runtime is one shared long-lived Kali container, not per-engagement. See
@@ -48,20 +48,20 @@ there for the full reference, env-var precedence, and resource sizing.
    in-scope host and `exploit_policy: pause`:
 
    ```bash
-   aith engagement create https://target.example --hosts target.example
+   vigil engagement create https://target.example --hosts target.example
    ```
 
    The command prints the engagement directory on stdout and a status footer (mitmproxy/OOB state +
    the exact start command) on stderr. For code analysis use `--type code`/`--type both`, and for blue
-   incident work use `aith blue engage`. See [Starting an engagement](README.md#starting-an-engagement).
+   incident work use `vigil blue engage`. See [Starting an engagement](README.md#starting-an-engagement).
 
 4. **Start a client in the engagement.** The CLI verb changes into the engagement directory, exports
    `ENGAGEMENT_DIR`, mounts the `.codex/agents` / `.claude/agents` prompt symlinks, and execs the
    launcher:
 
    ```bash
-   aith engagement list --json                              # find the key
-   aith engagement start <engagement-key> --client codex    # or --client claude
+   vigil engagement list --json                              # find the key
+   vigil engagement start <engagement-key> --client codex    # or --client claude
    ```
 
 5. **Run the first operator dispatch loop.** Give the operator authorization and let it drive the
@@ -73,9 +73,9 @@ there for the full reference, env-var precedence, and resource sizing.
    ```
 
    The operator reads its own prompt (the generated `AGENTS.md` in the engagement root), assesses
-   state, picks skills with `aith assess list-skills`, dispatches specialists for all target-facing
-   work, routes tool execution through `aith assess kali ...`, and records findings/activity through
-   `aith assess`. You stay in the loop for numbered next-step decisions and the exploit-approval
+   state, picks skills with `vigil assess list-skills`, dispatches specialists for all target-facing
+   work, routes tool execution through `vigil assess kali ...`, and records findings/activity through
+   `vigil assess`. You stay in the loop for numbered next-step decisions and the exploit-approval
    checkpoint when `exploit_policy` is `pause`. See
    [Engagement operator start prompts](README.md#engagement-operator-start-prompts) for the generic
    and resume forms, and [Blue incident engagements](README.md#blue-incident-engagements) for the
@@ -94,14 +94,14 @@ dispatch. Discovery is a directory walk, so a skill is self-registering — ther
 roster file to edit.
 
 1. Create `agent/skills/<name>/SKILL.md` with YAML frontmatter. `description` is what
-   `aith assess list-skills` shows the operator; `name` is optional metadata (the directory name is
+   `vigil assess list-skills` shows the operator; `name` is optional metadata (the directory name is
    the canonical identifier that `--skills` resolves on disk):
 
    ```markdown
    ---
    name: <name>
    description: One-line "use when" summary the operator scans to pick this skill
-   origin: AI Threat Hunting
+   origin: Vigil
    ---
 
    # <Title>
@@ -116,7 +116,7 @@ roster file to edit.
 2. Confirm discovery — no other file needs editing:
 
    ```bash
-   aith assess list-skills | grep <name>
+   vigil assess list-skills | grep <name>
    ```
 
    `agent/scripts/assess/commands/list_skills.py` globs `agent/skills/*/SKILL.md` and parses the
@@ -128,9 +128,9 @@ roster file to edit.
    (`agent/operator-core*.md` or a role prompt under `agent/agents/`). The operator passes the skill
    `path` to the specialist; the operator itself does not read skill bodies.
 
-## Add an `aith assess` verb
+## Add an `vigil assess` verb
 
-`aith assess` is the agent-facing contract surface. A verb is one command module plus its wiring and
+`vigil assess` is the agent-facing contract surface. A verb is one command module plus its wiring and
 a test. `agent/scripts/assess/cli.py` is the authoritative subcommand registry.
 
 1. Create `agent/scripts/assess/commands/<name>.py` exposing a `register(subparsers)` that adds the
@@ -147,14 +147,14 @@ a test. `agent/scripts/assess/cli.py` is the authoritative subcommand registry.
    ```
 
    Keep payload-shape and lifecycle truth in the command/lib, not in prompts — prompts should point
-   at `aith assess contract <verb>` rather than duplicating the schema.
+   at `vigil assess contract <verb>` rather than duplicating the schema.
 
 2. Wire it into `agent/scripts/assess/cli.py` in **both** places: add `<name>` to the
    `from assess.commands import (...)` block and add the module to the `for mod in (...)`
    registration loop. (Kali tool verbs register into the separate `kali_sub` loop instead.)
 
 3. If the verb carries durable contract metadata operators should introspect, add it to
-   `agent/scripts/assess/lib/contracts.py` so `aith assess contract <verb>` documents it — that is the
+   `agent/scripts/assess/lib/contracts.py` so `vigil assess contract <verb>` documents it — that is the
    only operator-facing surface for verb contracts.
 
 4. Add a test under `orchestrator/backend/tests/test_<name>.py`. Load the command module with the
@@ -210,7 +210,7 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
    (hard-fail on drift), and can scaffold a green-by-construction definition:
 
    ```bash
-   aith assess eval-capture \
+   vigil assess eval-capture \
      --engagement-dir <engagement-dir> \
      --out tests/eval/fixtures/golden_<name>.json \
      --definition tests/eval/definitions/<name>.yaml
@@ -224,7 +224,7 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
    ```
 
    Commit the fixture and definition together so replay stays zero-token. Use
-   `aith assess eval-capture ... --check` after a re-run to diff a fresh capture against the committed
+   `vigil assess eval-capture ... --check` after a re-run to diff a fresh capture against the committed
    baseline without overwriting it; it exits non-zero on a coverage regression.
 
 # Code map maintenance
@@ -301,7 +301,7 @@ so edits land in the right place and do not create drift.
   CLI, not in only one role prompt.
 - `agent/rules/*.md` are always-active behavioral rules. They shape methodology and writing style;
   they are not the place to define endpoint ownership or payload schemas.
-- `aith assess` and the underlying `agent/scripts/assess.py` helper subcommands are the agent-facing contract surface for
+- `vigil assess` and the underlying `agent/scripts/assess.py` helper subcommands are the agent-facing contract surface for
   durable state. If a helper owns a lifecycle transition, prompts should point to that helper
   instead of teaching raw endpoint payloads from memory.
 
@@ -314,7 +314,7 @@ so edits land in the right place and do not create drift.
 - Put role-specific reasoning guidance in `agent/agents/*.md`, because that is where identity,
   examples, and handoff semantics live.
 - Put payload-shape and lifecycle truth in CLI helpers when possible. Prompts should reference
-  helper commands such as `aith assess contract`, `record-finding`, `verify-finding`, `kill-finding`,
+  helper commands such as `vigil assess contract`, `record-finding`, `verify-finding`, `kill-finding`,
   `reset-finding`, and `update-finding` rather than duplicating raw schema details.
 - Treat generated artifacts as drift detectors, not authoring targets. If you edit a generated
   prompt directly, the next render will overwrite it.
@@ -329,7 +329,7 @@ editing so the change stays coherent across layers:
 3. `agent/operator-core-blue.md` if blue incident response is involved
 4. Relevant `agent/agents/*.md` role prompts
 5. `agent/shared-constraints.md`, `agent/shared-constraints-code.md`, or `agent/shared-constraints-blue.md`
-6. The owning `aith assess` / `aith blue` helper command and its tests
+6. The owning `vigil assess` / `vigil blue` helper command and its tests
 7. Generated operator wrappers after rerendering
 
 If a change affects prompt generation, rerender and review the generated wrapper diffs.
@@ -382,7 +382,7 @@ npm run build
 Build the primary runtime image from the repo root:
 
 ```bash
-docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .
+docker build -t vigil:latest -f agent/docker/runtime-full/Dockerfile .
 ```
 
 # Prompt Authoring Standards
@@ -417,8 +417,8 @@ When a constraint is load-bearing (safety, correctness, or quality depends on it
 ```
 
 Examples from this prompt set:
-- "Use `aith assess record-surface` for all surface writes — calling the library directly bypasses backend sync"
-- "Finding IDs are allocated by `aith assess record-finding` under a lock — hand-allocating risks collisions"
+- "Use `vigil assess record-surface` for all surface writes — calling the library directly bypasses backend sync"
+- "Finding IDs are allocated by `vigil assess record-finding` under a lock — hand-allocating risks collisions"
 - "Route all in-scope target work through Kali MCP — host-side probes bypass the runtime's network isolation"
 
 ## Role clarity in agent prompts

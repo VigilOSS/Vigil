@@ -1,4 +1,4 @@
-"""aith assess link-finding — root-cause/sibling finding grouping helper."""
+"""vigil assess link-finding — root-cause/sibling finding grouping helper."""
 from __future__ import annotations
 
 import argparse

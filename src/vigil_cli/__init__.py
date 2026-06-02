@@ -1,4 +1,4 @@
-"""Universal CLI for AI Threat Hunting."""
+"""Universal CLI for Vigil."""
 
 __all__ = ["__version__"]
 

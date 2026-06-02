@@ -2,7 +2,7 @@
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**
 >
-> Produced by `aith blue tenant init --customer <slug> --platform generic`,
+> Produced by `vigil blue tenant init --customer <slug> --platform generic`,
 > which writes to `agent/references/tenants/<slug>-generic.md`.
 >
 > Before this file is loaded into a real engagement:
@@ -36,7 +36,7 @@ L1, L2, L3, and L4 need without inventing platform-specific command shapes.
 |---|---|---|---|
 | `<console-or-cli>` | `<url-or-command>` | `<principal>` | `<read-only scope / retention / limits>` |
 
-Every tenant-facing command must run through `aith assess host-exec` with
+Every tenant-facing command must run through `vigil assess host-exec` with
 `--tool`, `--intent`, `--technique`, and `--phase`. Do not paste API keys,
 tokens, secrets, or raw credential material into this file.
 

@@ -1553,7 +1553,7 @@ def test_post_rejects_raw_finding_creation_and_points_to_helper(capsys):
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
     assert "record-finding" in err
-    assert "aith assess contract record-finding" in err
+    assert "vigil assess contract record-finding" in err
 
 
 def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
@@ -1573,7 +1573,7 @@ def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
     err = capsys.readouterr().err
     assert "verify-finding" in err
     assert "kill-finding" in err
-    assert "aith assess contract verify-finding" in err
+    assert "vigil assess contract verify-finding" in err
 
 
 def test_patch_rejects_raw_finding_patch_and_points_to_helper(capsys):
@@ -1593,8 +1593,8 @@ def test_patch_rejects_raw_finding_patch_and_points_to_helper(capsys):
     err = capsys.readouterr().err
     assert "update-finding" in err
     assert "reset-finding" in err
-    assert "aith assess contract update-finding" in err
-    assert "aith assess contract reset-finding" in err
+    assert "vigil assess contract update-finding" in err
+    assert "vigil assess contract reset-finding" in err
 
 
 def test_contract_prints_record_finding_contract(capsys):
@@ -1620,7 +1620,7 @@ def test_contract_prints_reset_finding_contract(capsys):
     out = capsys.readouterr().out
     assert "Command: reset-finding" in out
     assert "reopen" in out.lower()
-    assert "aith assess reset-finding <slug>" in out
+    assert "vigil assess reset-finding <slug>" in out
 
 
 def test_contract_prints_code_record_analysis_contract(capsys):
@@ -1657,8 +1657,8 @@ def test_verify_finding_help_is_rendered_from_contract_registry(capsys):
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "aith assess verify-finding <slug> <verification-json>" in out
-    assert "aith assess contract verify-finding" in out
+    assert "vigil assess verify-finding <slug> <verification-json>" in out
+    assert "vigil assess contract verify-finding" in out
     assert "Contract:" not in out
 
 
@@ -1670,7 +1670,7 @@ def test_update_finding_help_drops_patch_finding_alias(capsys):
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "aith assess update-finding <slug> --inline" in out
+    assert "vigil assess update-finding <slug> --inline" in out
     assert "patch-finding" not in out
 
 
@@ -1796,7 +1796,7 @@ def test_record_finding_reports_normalized_contract_errors_before_backend(monkey
     assert "payload.details.evidence is required" in err
     assert "payload.details.impact is required" in err
     assert "workflow_status = active" in err
-    assert "aith assess contract record-finding" in err
+    assert "vigil assess contract record-finding" in err
 
 
 def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):

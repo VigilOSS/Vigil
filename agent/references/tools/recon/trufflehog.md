@@ -4,7 +4,7 @@
 tokens, API keys, and credentials. v3 ships 800+ detectors and can optionally verify
 discovered secrets by making live API calls.
 
-**In this repo**: primary secret scanner for stored HTTP response bodies. The `aith assess gau-secrets` wrapper composes gau → uro → httpx body capture → trufflehog filesystem mode in one verb (default `--no-verification`; pass `--verify` to enable verification). For ad-hoc scans against existing artifacts, invoke via `aith assess kali exec --technique INFO-DISCLOSURE --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> -- trufflehog ...` with the standard audit-flag set; never from host-side bash against in-scope artifacts.
+**In this repo**: primary secret scanner for stored HTTP response bodies. The `vigil assess gau-secrets` wrapper composes gau → uro → httpx body capture → trufflehog filesystem mode in one verb (default `--no-verification`; pass `--verify` to enable verification). For ad-hoc scans against existing artifacts, invoke via `vigil assess kali exec --technique INFO-DISCLOSURE --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> -- trufflehog ...` with the standard audit-flag set; never from host-side bash against in-scope artifacts.
 
 ## CLI syntax (v3)
 
@@ -58,7 +58,7 @@ Slack, Stripe, and hundreds of other services to check validity. That traffic:
 
 **Default posture in this repo**: `--no-verification`. Opt into `--results=verified` only
 when the engagement's `exploit_policy` and scope explicitly cover external validation
-traffic, and record the decision via `aith assess log operator "trufflehog verification opt-in" "<command>" "<scope/policy justification>"` (activity_entries).
+traffic, and record the decision via `vigil assess log operator "trufflehog verification opt-in" "<command>" "<scope/policy justification>"` (activity_entries).
 
 ## Output shape (JSON mode)
 

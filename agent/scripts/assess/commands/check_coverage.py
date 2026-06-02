@@ -1,4 +1,4 @@
-"""aith assess check-coverage — query backend coverage readiness."""
+"""vigil assess check-coverage — query backend coverage readiness."""
 from __future__ import annotations
 
 import sys

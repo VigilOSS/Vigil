@@ -1,7 +1,7 @@
 ---
 name: tls-vhost-correlation
 description: Cross-host TLS / SAN / vhost correlation — split-VIP detection, shared multi-tenant cert detection, vhost-cert mismatch detection
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # TLS / vhost Cross-Host Correlation
@@ -47,7 +47,7 @@ methodology summary; mechanics live in the recipe.
 ### Multi-time DNS resolution (split-VIP detection)
 
 ```bash
-aith assess kali exec --technique RECON --intent "multi-time DNS resolution — detect split-VIP load-balanced clusters" \
+vigil assess kali exec --technique RECON --intent "multi-time DNS resolution — detect split-VIP load-balanced clusters" \
   --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
   for i in 1 2 3 4 5; do dig +short TARGET_HOST A; sleep 60; done | sort -u
 '
@@ -95,9 +95,9 @@ candidate). Recipe: `openssl-sans.md` step 3.
   vhost-cert mismatch without collision detection misses the systemic-default-cert
   pattern.
 - Record collisions and mismatches as durable intel-notes via
-  `aith assess record-intel note <intel-json>`; SAN-discovered subdomains feed Phase 1a
-  via `aith assess ingest-endpoints` so they enter the work buffer.
-- Keep target-facing execution in `aith assess kali ...` — host-side `openssl` /
+  `vigil assess record-intel note <intel-json>`; SAN-discovered subdomains feed Phase 1a
+  via `vigil assess ingest-endpoints` so they enter the work buffer.
+- Keep target-facing execution in `vigil assess kali ...` — host-side `openssl` /
   `dig` bypasses the audit pipeline that downstream specialists rely on.
 
 ## Output Contract
@@ -108,7 +108,7 @@ Outputs feed into the recon-specialist's normal output structure:
 | Section | Holds |
 |---|---|
 | `#### Intelligence` | One `intel-note` per detected collision (count >= 2 entry), per detected vhost-cert mismatch, and per split-VIP cluster. Each note carries the host(s), the shared SAN, and the inferred relationship (shared multi-tenant cert / default cert / load-balanced split-VIP). |
-| `#### Surface Candidates` | Each new host name surfaced from a SAN collision or a vhost-cert CN mismatch becomes a follow-on subdomain seed; record via `aith assess record-surface` so the operator can re-feed Phase 1a. |
+| `#### Surface Candidates` | Each new host name surfaced from a SAN collision or a vhost-cert CN mismatch becomes a follow-on subdomain seed; record via `vigil assess record-surface` so the operator can re-feed Phase 1a. |
 | `#### Coverage Gaps` | When the shared-frontend trigger never fired (single non-shared host, no CDN, no multi-tenant signals), declare "no shared-frontend signal — TLS/vhost cross-host correlation skipped" with the rationale. When the trigger fired but a sub-procedure could not run (openssl missing in runtime, host unreachable), declare which sub-procedure was blocked and why. |
 
 ## Extended Resources

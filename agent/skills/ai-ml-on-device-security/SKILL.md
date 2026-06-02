@@ -1,7 +1,7 @@
 ---
 name: ai-ml-on-device-security
 description: Security testing for on-device AI/ML features including model extraction, inference data leakage, AI feature manipulation, prompt injection in mobile LLMs, and federated learning assessment
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # AI/ML On-Device Security

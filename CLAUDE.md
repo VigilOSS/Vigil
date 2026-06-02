@@ -1,4 +1,4 @@
-# AI Threat Hunting
+# Vigil
 
 Read `agent/AGENTS.md` for operator instructions.
 

@@ -1,4 +1,4 @@
-"""aith assess auth-status — one-shot view of the engagement's auth state.
+"""vigil assess auth-status — one-shot view of the engagement's auth state.
 
 Reads ``auth.json`` in the engagement directory and surfaces:
 - ``auth_context`` (anonymous / authenticated / admin / specific role)

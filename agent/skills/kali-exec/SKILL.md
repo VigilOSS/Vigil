@@ -1,24 +1,24 @@
 ---
 name: kali-exec
-description: Foundational discovery skill for the `aith assess kali` CLI surface — verb menu, audit flags, sync-vs-async decision, and per-verb invocation profiles
-origin: AI Threat Hunting
+description: Foundational discovery skill for the `vigil assess kali` CLI surface — verb menu, audit flags, sync-vs-async decision, and per-verb invocation profiles
+origin: Vigil
 ---
 
-# Kali Execution via `aith assess kali`
+# Kali Execution via `vigil assess kali`
 
-> **Use when:** Always — every target-facing call uses `aith assess kali ...`. This skill is foundational and is paired with `agent/shared-constraints.md`. Load it before any other skill that runs probes against scoped targets, because the verb menu and audit-flag mapping below are how the runtime stays auditable and the orchestrator backend stays in sync.
+> **Use when:** Always — every target-facing call uses `vigil assess kali ...`. This skill is foundational and is paired with `agent/shared-constraints.md`. Load it before any other skill that runs probes against scoped targets, because the verb menu and audit-flag mapping below are how the runtime stays auditable and the orchestrator backend stays in sync.
 
-`aith assess kali` is the host-side CLI that runs Kali tools inside the runtime container with audit recording. It writes a queued audit row to the orchestrator backend before exec, streams stdout/stderr to `${ENGAGEMENT_DIR}/scans/kali/<run-id>.{out,err}` from line one, and finalizes the row on exit. The CLI is the only sanctioned path for target-facing work — host Bash, `docker run`, `docker exec`, and ad-hoc curl/nmap from the host bypass the audit pipeline and the runtime's network isolation.
+`vigil assess kali` is the host-side CLI that runs Kali tools inside the runtime container with audit recording. It writes a queued audit row to the orchestrator backend before exec, streams stdout/stderr to `${ENGAGEMENT_DIR}/scans/kali/<run-id>.{out,err}` from line one, and finalizes the row on exit. The CLI is the only sanctioned path for target-facing work — host Bash, `docker run`, `docker exec`, and ad-hoc curl/nmap from the host bypass the audit pipeline and the runtime's network isolation.
 
 ## Discovery layers
 
 The CLI surface is intentionally large. Three discovery layers keep per-turn context cost bounded while still letting you find the right invocation fast:
 
 1. **This skill (methodology layer)** — verb menu, sync-vs-async decision, audit-flag mapping, half-phase tags, and example flag profiles per verb. Load when you need to pick a verb or remind yourself of the audit-flag set.
-2. **`aith assess kali --help` and `aith assess kali <verb> --help`** — live argparse output. Use when you are composing an invocation and need the exact flag spelling or default for a verb you have already chosen.
-3. **`aith assess contract kali <verb>`** — canonical schema introspection: preferred invocations, helper-supplied defaults, common mistakes, and a JSON example payload. Use when you are authoring a complex invocation and want the canonical field list — same purpose `contract record-intel <type>` serves for intel writes. The schema is derived from `agent/scripts/assess/lib/contracts.py`, so it stays current with the implementation.
+2. **`vigil assess kali --help` and `vigil assess kali <verb> --help`** — live argparse output. Use when you are composing an invocation and need the exact flag spelling or default for a verb you have already chosen.
+3. **`vigil assess contract kali <verb>`** — canonical schema introspection: preferred invocations, helper-supplied defaults, common mistakes, and a JSON example payload. Use when you are authoring a complex invocation and want the canonical field list — same purpose `contract record-intel <type>` serves for intel writes. The schema is derived from `agent/scripts/assess/lib/contracts.py`, so it stays current with the implementation.
 
-Skills should point you at `aith assess contract kali <verb>` for field tables instead of duplicating them, because the contract is generated from the same source as the CLI's argparse. When this skill omits a flag detail, that is intentional — go to layer 2 or 3.
+Skills should point you at `vigil assess contract kali <verb>` for field tables instead of duplicating them, because the contract is generated from the same source as the CLI's argparse. When this skill omits a flag detail, that is intentional — go to layer 2 or 3.
 
 ## Verb menu
 
@@ -56,7 +56,7 @@ Every typed verb accepts an optional `--extra-args "<shell-quoted string>"` to b
 Critical: `--destructive` still applies. If the extra args include a write/delete (`--os-shell` for sqlmap, `--script vuln` for nmap, etc.), you must also pass `--destructive` so the audit row reflects the actual blast radius.
 
 ```bash
-aith assess kali httpx -u https://x -tech-detect \
+vigil assess kali httpx -u https://x -tech-detect \
   --extra-args "-H 'X-Forwarded-For: 127.0.0.1' -mc 200,302" \
   --technique DISCOVERY --intent "tech detect with custom headers" \
   --probe-kind fingerprint --phase recon --timeout 60
@@ -64,7 +64,7 @@ aith assess kali httpx -u https://x -tech-detect \
 
 ## Synchronous vs. async decision
 
-**Specialists run synchronously — always.** One blocking `aith assess kali
+**Specialists run synchronously — always.** One blocking `vigil assess kali
 <verb> ... --timeout N` at a time. No `run_in_background`, no `kali job start`,
 no dtach, no watcher/poll loop. Even heavy probes (nmap+scripts, full-tree
 nuclei sweeps, `sqlmap --level 5 --risk 3`, dirb/gobuster on raft-large
@@ -77,7 +77,7 @@ disappears and nothing is orphaned.
 | Mode | Who | When | Mechanism |
 |------|-----|------|-----------|
 | Synchronous (the rule for specialists) | every dispatched specialist | all target-facing work, light or heavy | The CLI runs as a single process, blocks the calling shell, and finalizes the audit row on exit. |
-| Async (`kali job start ...`) | **operator only** | a single authorized sweep that must outlive its dispatch; never a per-step loop and never to fan out parallel probes | `aith assess kali job start ...` returns a job-id immediately; the worker runs under `dtach` inside the container and survives calling-shell exit. Poll with `kali job status <id>`, read with `kali job tail <id>`, stop with `kali job stop <id>`. |
+| Async (`kali job start ...`) | **operator only** | a single authorized sweep that must outlive its dispatch; never a per-step loop and never to fan out parallel probes | `vigil assess kali job start ...` returns a job-id immediately; the worker runs under `dtach` inside the container and survives calling-shell exit. Poll with `kali job status <id>`, read with `kali job tail <id>`, stop with `kali job stop <id>`. |
 
 **Why specialists never background:** a subagent that launches a detached job
 and halts "waiting for a completion notification" gets auto-resumed by the
@@ -102,7 +102,7 @@ The CLI fails closed when these are missing. Pass them explicitly — there is n
 | `--destructive` | Flag for writes/deletes. | Off by default. Set when the command does POST/PUT/PATCH/DELETE, file upload, account creation, config change, or any state-modifying shell exec on the target. |
 | `--force` | Suppress the dedup-warning log for an intentional retry. | The CLI hashes `(command, argv_json)` and warns when an identical command ran within `KALI_AUDIT_DEDUP_WINDOW_SECONDS` (default 30s), but the new command always executes — the backend records a fresh audit row regardless, with `superseded_by_id` linking it to the predecessor when applicable. `--force` suppresses only the warning text; it does not change run behavior or backend state. |
 
-`--engagement-key` is derived from `${ENGAGEMENT_DIR}/engagement.json`. `--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$AITH_AGENT_NAME`, then `operator`. Specialists should normally inherit `AGENT_NAME=<role>` from their dispatch wrapper; if that context is absent or suspicious, pass `--agent-name <role>` explicitly so the audit row is not misattributed to `operator`.
+`--engagement-key` is derived from `${ENGAGEMENT_DIR}/engagement.json`. `--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$VIGIL_AGENT_NAME`, then `operator`. Specialists should normally inherit `AGENT_NAME=<role>` from their dispatch wrapper; if that context is absent or suspicious, pass `--agent-name <role>` explicitly so the audit row is not misattributed to `operator`.
 
 ## Phase tags (including half-phase tags)
 
@@ -134,7 +134,7 @@ Examples show the audit-flag set explicit so you can copy-paste and edit. All pa
 
 ```bash
 # Cautious-tier profile (CDN-fronted / WAF-protected / regulated) — top-1000 + service detection.
-aith assess kali nmap-scan \
+vigil assess kali nmap-scan \
   --target www.example.gov \
   --ports top-1000 --service-detection \
   --max-rate 200 --max-retries 2 --host-timeout 300s \
@@ -143,7 +143,7 @@ aith assess kali nmap-scan \
   --probe-kind fingerprint --phase recon --timeout 1800
 
 # TLS SAN extraction (ssl-cert + ssl-enum-ciphers on 443 only).
-aith assess kali nmap-scan \
+vigil assess kali nmap-scan \
   --target api.example.com --ports 443 \
   --scripts ssl-cert,ssl-enum-ciphers \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_san_api \
@@ -151,7 +151,7 @@ aith assess kali nmap-scan \
   --probe-kind fingerprint --phase recon --timeout 600
 
 # Multi-host batch from -iL list (recon-pivot when discovered mid-Phase-3).
-aith assess kali nmap-scan \
+vigil assess kali nmap-scan \
   --target placeholder \
   -iL /engagements/$ENGAGEMENT_KEY/scans/new_hosts.txt \
   --ports top-100 --service-detection \
@@ -163,7 +163,7 @@ aith assess kali nmap-scan \
 
 ```bash
 # Reactive sweep against a delta file (Phase 1-2 in-phase pattern).
-aith assess kali nuclei \
+vigil assess kali nuclei \
   -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_reactive_$RID.txt \
   -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/,http/technologies/,http/exposed-panels/ \
   -severity medium,high,critical \
@@ -174,7 +174,7 @@ aith assess kali nuclei \
   --probe-kind fingerprint --phase recon --timeout 1800
 
 # CDN-fronted target — cap rate and concurrency lower so the edge doesn't 429.
-aith assess kali nuclei \
+vigil assess kali nuclei \
   -u https://www.example.com \
   -tags cve -severity critical,high -as -jsonl \
   -rate-limit 50 -c 10 -bs 10 \
@@ -187,7 +187,7 @@ aith assess kali nuclei \
 
 ```bash
 # Live-host confirmation + tech-detect + TLS-grab over a candidate list.
-aith assess kali httpx \
+vigil assess kali httpx \
   -l /engagements/$ENGAGEMENT_KEY/scans/candidate_hosts.txt \
   -status-code -title -tech-detect -tls-grab -json \
   -o /engagements/$ENGAGEMENT_KEY/scans/httpx_live.jsonl \
@@ -199,7 +199,7 @@ aith assess kali httpx \
 
 ```bash
 # Run FIRST so the WAF tier is known before nmap/nuclei/ffuf calibrate.
-aith assess kali wafw00f https://www.example.com \
+vigil assess kali wafw00f https://www.example.com \
   -o /engagements/$ENGAGEMENT_KEY/scans/wafw00f_www.csv \
   --technique DISCOVERY --intent "WAF identification on www.example.com" \
   --probe-kind fingerprint --phase recon --timeout 300
@@ -209,7 +209,7 @@ aith assess kali wafw00f https://www.example.com \
 
 ```bash
 # Standard L1 directory fuzz with a tech-aware extension list.
-aith assess kali ffuf \
+vigil assess kali ffuf \
   -u https://www.example.com/FUZZ \
   -w /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt \
   -mc 200,301,302,401,403 \
@@ -224,7 +224,7 @@ aith assess kali ffuf \
 ```bash
 # Targeted SQLi pass — sqlmap's --technique flag is the SQLi technique set
 # (BEUSTQ); the audit --technique enum is SQLI.
-aith assess kali sqlmap \
+vigil assess kali sqlmap \
   -u "https://www.example.com/search?q=test" \
   --technique=BEUS --level 3 --risk 2 --batch \
   --threads 4 \
@@ -233,11 +233,11 @@ aith assess kali sqlmap \
 
 # Long sqlmap dump — a specialist runs this SYNCHRONOUSLY with a generous --timeout.
 # `kali job start` (shown) is OPERATOR-ONLY (see the sync-vs-async decision above);
-# a dispatched specialist uses `aith assess kali sqlmap ... --timeout 3600` instead.
-aith assess kali job start \
+# a dispatched specialist uses `vigil assess kali sqlmap ... --timeout 3600` instead.
+vigil assess kali job start \
   --technique SQLI --intent "deep sqlmap dump on /api/users?id" \
   --probe-kind exploit --phase exploit --timeout 28800 --destructive \
-  --container-name security-research -- \
+  --container-name vigil -- \
   sqlmap -u "https://www.example.com/api/users?id=1" \
   --technique=BEUSTQ --level 5 --risk 3 --batch --dump
 ```
@@ -246,25 +246,25 @@ aith assess kali job start \
 
 ```bash
 # Passive subdomain enum (subfinder) → active resolution (puredns/dnsx).
-aith assess kali subfinder -d example.com -all -recursive -t 30 \
+vigil assess kali subfinder -d example.com -all -recursive -t 30 \
   -o /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
   --technique RECON --intent "passive subdomain enum for example.com" \
   --probe-kind fingerprint --phase recon --timeout 1800
 
-aith assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
+vigil assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
   -r /engagements/$ENGAGEMENT_KEY/wordlists/resolvers.txt \
   --rate-limit 800 \
   -w /engagements/$ENGAGEMENT_KEY/scans/subs_resolved.txt \
   --technique RECON --intent "active wildcard-aware resolution @ polite-CDN-fronted-target rate" \
   --probe-kind fingerprint --phase recon --timeout 1800
 
-aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_resolved.txt \
+vigil assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_resolved.txt \
   --dnsx-profile polite-cdn --resolver-profile public-tcp -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/dnsx_live.txt \
   --technique RECON --intent "lean dnsx confirmation for resolved subs" \
   --probe-kind baseline --phase recon --timeout 1200
 
-aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/dnsx_live.txt \
+vigil assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/dnsx_live.txt \
   --dnsx-profile polite-cdn --resolver-profile public-tcp \
   -a -cname -resp -json --allow-bulk-json \
   -o /engagements/$ENGAGEMENT_KEY/scans/dnsx.jsonl \
@@ -291,7 +291,7 @@ DNS-bruteforce profile against the runtime tier. Pair it with
 # basic-auth realm, WebDAV indicator) — see references/tools/recon/nikto.md.
 # Note: --host (not -h) because argparse reserves -h for help; the underlying
 # nikto invocation builds `nikto -h <host>` correctly inside the helper.
-aith assess kali nikto \
+vigil assess kali nikto \
   --host www.example.gov --ssl \
   -Tuning x60 -Pause 2 -maxtime 300 \
   -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_www_gov.json \
@@ -303,7 +303,7 @@ aith assess kali nikto \
 
 ```bash
 # JS-aware authenticated crawl with rate cap.
-aith assess kali katana \
+vigil assess kali katana \
   -u https://app.example.com -jc -jsl -d 4 -c 10 -rl 20 \
   -jsonl -o /engagements/$ENGAGEMENT_KEY/scans/katana_app.jsonl \
   --technique DISCOVERY --intent "JS-aware crawl of app.example.com" \
@@ -312,13 +312,13 @@ aith assess kali katana \
 
 ### `kali gau`
 
-For the standard historical-URL collection flow, prefer `aith assess gau-endpoints` —
+For the standard historical-URL collection flow, prefer `vigil assess gau-endpoints` —
 it wraps `kali gau` with cache reuse and inline ingestion in one verb. The raw `kali gau`
 typed verb is for one-off archive sweeps that do not need to feed the work buffer.
 
 ```bash
 # Historical URLs from passive archives — no traffic to the target.
-aith assess kali gau example.com --subs --threads 5 \
+vigil assess kali gau example.com --subs --threads 5 \
   --providers wayback,otx,commoncrawl,urlscan \
   -o /engagements/$ENGAGEMENT_KEY/scans/gau_example.txt \
   --technique DISCOVERY --intent "historical URL harvest for example.com (passive)" \
@@ -329,7 +329,7 @@ aith assess kali gau example.com --subs --threads 5 \
 
 ```bash
 # Deep tech fingerprint — aggression 3 balances depth vs request volume.
-aith assess kali whatweb https://www.example.com -a 3 \
+vigil assess kali whatweb https://www.example.com -a 3 \
   --log-json /engagements/$ENGAGEMENT_KEY/scans/whatweb_www.json \
   --technique DISCOVERY --intent "deep tech fingerprint on www.example.com" \
   --probe-kind fingerprint --phase recon --timeout 600
@@ -339,7 +339,7 @@ aith assess kali whatweb https://www.example.com -a 3 \
 
 ```bash
 # Escape hatch — same audit-metadata flags as a typed verb.
-aith assess kali exec --technique AUTH \
+vigil assess kali exec --technique AUTH \
   --intent "hydra ssh brute, small wordlist, throttled" \
   --probe-kind payload --phase exploit --timeout 3600 --destructive -- \
   hydra -L /engagements/$ENGAGEMENT_KEY/wordlists/users.txt \
@@ -352,25 +352,25 @@ aith assess kali exec --technique AUTH \
 
 ```bash
 # Start a long async run.
-aith assess kali job start \
+vigil assess kali job start \
   --technique CVE-VALIDATION --intent "full http/ nuclei sweep across engagement" \
   --probe-kind fingerprint --phase recon --timeout 21600 \
-  --container-name security-research -- \
+  --container-name vigil -- \
   nuclei -l /engagements/$ENGAGEMENT_KEY/scans/all_live.txt \
          -t http/ -severity medium,high,critical \
          -rate-limit 100 -c 25 -bs 25 -jsonl \
          -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_full.jsonl
 
 # Poll status and tail output.
-aith assess kali job status 42
-aith assess kali job tail 42
-aith assess kali job tail 42 --follow
+vigil assess kali job status 42
+vigil assess kali job tail 42
+vigil assess kali job tail 42 --follow
 
 # Stop a runaway job.
-aith assess kali job stop 42 --container-name security-research
+vigil assess kali job stop 42 --container-name vigil
 
 # List recent jobs (filter by status).
-aith assess kali job list --status running
+vigil assess kali job list --status running
 ```
 
 ## Quick "which verb?" recipes
@@ -406,7 +406,7 @@ container and host share one filesystem at one mount point. See
 `agent/shared-constraints.md §11a` for the path-aliasing rule.
 
 ```bash
-aith assess kali exec \
+vigil assess kali exec \
     --technique EXPLOIT --intent "PoC: chained SSRF -> metadata creds" \
     --probe-kind exploit --phase exploit --timeout 600 \
     -- python3 /engagements/$ENGAGEMENT_KEY/scripts/exploit.py \
@@ -425,7 +425,7 @@ survive container restarts and stay attached to the engagement. `/tmp` and
 invisible from the host.
 
 ```bash
-aith assess kali exec \
+vigil assess kali exec \
     --technique RECON --intent "harvest body of /api/health" \
     --probe-kind fingerprint --phase recon --timeout 60 \
     -- bash -lc "curl -sS https://target.example/api/health \
@@ -434,7 +434,7 @@ aith assess kali exec \
 ```
 
 The same files are visible from the host at `$DIR/scans/health.json` and
-`$DIR/scans/health.err` for review and for `aith assess record-*` references.
+`$DIR/scans/health.err` for review and for `vigil assess record-*` references.
 
 ### Wrap a long-running custom command as a job
 
@@ -444,7 +444,7 @@ parented by tini so it survives the calling agent's exit; recover with
 `kali job status <id>` and `kali job tail <id>`.
 
 ```bash
-aith assess kali job start \
+vigil assess kali job start \
     --technique FUZZ --intent "long ffuf sweep on /api/v1/{id}" \
     --probe-kind payload --phase consume-test --timeout 21600 \
     -- ffuf -u https://target.example/api/v1/FUZZ \
@@ -457,14 +457,14 @@ when the agent that started the job has long since exited.
 
 ## Coverage check before probing
 
-Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `tool`, `agent`, `phase`, `technique`, `intent`, `probe_kind`, `destructive`, exit code, timings, and an output preview. Treat that history as a coverage map — search for prior work on this surface before dispatching, with `aith assess list-command-runs --q <keyword> --show-matches`. The full coverage-vs-duplicate decision table lives in `agent/references/runtime-guides/command-history-auditing.md`. The shared `agent/shared-constraints.md §2b` has the agent-side rule.
+Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `tool`, `agent`, `phase`, `technique`, `intent`, `probe_kind`, `destructive`, exit code, timings, and an output preview. Treat that history as a coverage map — search for prior work on this surface before dispatching, with `vigil assess list-command-runs --q <keyword> --show-matches`. The full coverage-vs-duplicate decision table lives in `agent/references/runtime-guides/command-history-auditing.md`. The shared `agent/shared-constraints.md §2b` has the agent-side rule.
 
 ## Process cleanup discipline
 
-Use PID-targeted cleanup, not binary-name signals — `pkill -f nmap` or `pkill -f ffuf` kills sibling specialists' parallel scans in the shared runtime, losing potentially hours of recon. For async jobs, use `aith assess kali job stop <id>` (signals only the job-owned in-container PID); for synchronous calls, the CLI already handles the SIGTERM/SIGKILL escalation on `--timeout` expiry so no manual cleanup is needed.
+Use PID-targeted cleanup, not binary-name signals — `pkill -f nmap` or `pkill -f ffuf` kills sibling specialists' parallel scans in the shared runtime, losing potentially hours of recon. For async jobs, use `vigil assess kali job stop <id>` (signals only the job-owned in-container PID); for synchronous calls, the CLI already handles the SIGTERM/SIGKILL escalation on `--timeout` expiry so no manual cleanup is needed.
 
 ## Troubleshooting and runtime errors
 
-When `aith assess kali --help` errors or a verb fails unexpectedly, see `agent/references/runtime-guides/kali-cli.md` for diagnosis steps (runtime status, dtach reachability, dedup-window, common error messages).
+When `vigil assess kali --help` errors or a verb fails unexpectedly, see `agent/references/runtime-guides/kali-cli.md` for diagnosis steps (runtime status, dtach reachability, dedup-window, common error messages).
 
-When you see audit rows stuck in `status=running` long after their tool would have finished — typical after a backend restart, host crash mid-run, or a network blip during the finalize PATCH — run `aith assess kali sweep-orphans --dry-run` to inspect candidates, then re-run without `--dry-run` to finalize dead rows to `status=lost`. The sweep is non-destructive for live processes (it leaves still-running rows untouched), so a periodic sweep is safe even when nothing looks broken.
+When you see audit rows stuck in `status=running` long after their tool would have finished — typical after a backend restart, host crash mid-run, or a network blip during the finalize PATCH — run `vigil assess kali sweep-orphans --dry-run` to inspect candidates, then re-run without `--dry-run` to finalize dead rows to `status=lost`. The sweep is non-destructive for live processes (it leaves still-running rows untouched), so a periodic sweep is safe even when nothing looks broken.
