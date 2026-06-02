@@ -212,11 +212,18 @@ def _verify_backend(cfg: Config) -> None:
 
     parsed = urlparse(cfg.base_url)
     host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or 80
+    # Honour the URL scheme: an https:// base_url must be health-checked over
+    # TLS (HTTPSConnection, default port 443), otherwise the plaintext probe
+    # against a TLS port fails and the backend is wrongly reported unreachable.
+    is_https = parsed.scheme == "https"
+    port = parsed.port or (443 if is_https else 80)
     path = f"{(parsed.path or '').rstrip('/')}/engagements/{cfg.engagement_key}/assessment/summary"
 
     try:
-        conn = http.client.HTTPConnection(host, port, timeout=2)
+        if is_https:
+            conn = http.client.HTTPSConnection(host, port, timeout=2)
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=2)
         conn.request("GET", path)
         resp = conn.getresponse()
         body = resp.read().decode("utf-8", errors="replace")

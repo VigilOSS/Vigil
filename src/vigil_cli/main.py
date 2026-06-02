@@ -38,15 +38,13 @@ from .mitmproxy import (
     stop_proxy,
 )
 from .oob import (
-    DEFAULT_FRP_HOST,
-    DEFAULT_FRP_PORT,
-    DEFAULT_OOB_DOMAIN,
     OOB_ROOT,
     OobOptions,
     callback_urls,
     list_oob_clients,
     match_interactions_to_nonces,
     mint_nonce,
+    oob_options as _oob_options,
     oob_status,
     parse_interactsh_log,
     read_client_log,
@@ -904,7 +902,7 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
             print(json.dumps(payload, indent=2))
         else:
             clients = payload["clients"]
-            client_count = len(clients) if isinstance(clients, (list, tuple, dict, str)) else 0
+            client_count = len(clients) if isinstance(clients, list) else 0
             print(
                 f"{payload['state']}\tserver={payload['server']}\tfrpc={payload['frpc']}"
                 f"\tclients={client_count}\tdomain={payload['domain']}"
@@ -1083,14 +1081,6 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
             print(f"  {item.full_host}\t{item.protocol}\tfrom={item.remote_address or '-'}")
 
 
-def _oob_options(install_root: Path) -> OobOptions:
-    token = os.environ.get("VIGIL_FRP_TOKEN") or config_module.get_config_value("oob.frp_token") or ""
-    host = os.environ.get("VIGIL_FRP_HOST") or config_module.get_config_value("oob.frp_host", DEFAULT_FRP_HOST) or DEFAULT_FRP_HOST
-    port = int(os.environ.get("VIGIL_FRP_PORT") or config_module.get_config_value("oob.frp_port", str(DEFAULT_FRP_PORT)) or DEFAULT_FRP_PORT)
-    domain = os.environ.get("VIGIL_OOB_DOMAIN") or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN) or DEFAULT_OOB_DOMAIN
-    return OobOptions(install_root=install_root, frp_host=host, frp_port=port, frp_token=token, oob_domain=domain)
-
-
 def _resolve_command_engagement(install_root: Path, args: argparse.Namespace) -> Path:
     key = getattr(args, "engagement", None)
     return _resolve_current_or_selected_engagement(install_root, key=key, select=getattr(args, "select", False))
@@ -1104,16 +1094,6 @@ def _resolve_current_or_selected_engagement(install_root: Path, *, key: str | No
     if current := current_engagement_path():
         return current
     raise SystemExit("Specify an engagement key or --select, or run from inside an engagement")
-
-
-def _resolve_engagement_reference(install_root: Path, value: str) -> Path:
-    try:
-        return resolve_engagement_path(install_root, value)
-    except SystemExit as exc:
-        candidate = Path(value).expanduser()
-        if candidate.exists() or candidate.is_absolute() or "/" in value:
-            return candidate
-        raise exc
 
 
 def _prompt_choice(label: str, default: str, choices: list[str]) -> str:

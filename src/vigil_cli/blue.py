@@ -422,7 +422,6 @@ def _discover_blue_customers(install_root: Path) -> list[dict[str, str | list[st
         return []
 
     suffix_to_platform = {suffix: platform for platform, suffix in PLATFORM_TO_TENANT_SUFFIX.items()}
-    suffix_to_platform.update({platform: platform for platform in PLATFORM_TO_TENANT_SUFFIX})
     grouped: dict[str, dict[str, str]] = {}
     for path in sorted(tenant_dir.glob("*.md")):
         if path.name.startswith("_template-"):
@@ -923,12 +922,15 @@ def _fetch_containment_decision(
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            if int(row.get("id") or -1) == int(decision_id):
+            try:
+                row_id = int(row.get("id") or -1)
+            except (ValueError, TypeError):
+                continue
+            if row_id == int(decision_id):
                 return row
         if len(rows) < page_size:
             return None
         offset += page_size
-    return None
 
 
 def _fetch_command_run(install_root: Path, eng_dir: Path, command_run_id: int) -> dict | None:

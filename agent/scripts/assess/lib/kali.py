@@ -71,7 +71,6 @@ from .kali_output import (
     _utcnow_iso,
 )
 from .kali_runtime_exec import (
-    _DEFAULT_CONTAINER_NAME,
     _build_docker_exec,
     _check_container_running,
     _cleanup_container_pid_file,
@@ -110,7 +109,7 @@ def kali_exec(
     engagement_dir: Path | None = None,
     engagement_key: str | None = None,
     force: bool = False,
-    container_name: str = _DEFAULT_CONTAINER_NAME,
+    container_name: str | None = None,
     config: Config | None = None,
     tool_name: str | None = None,
 ) -> KaliResult:
@@ -120,6 +119,10 @@ def kali_exec(
     leaves a `running` row that can be reaped by orphan-sweep tooling.
     Stdout/stderr stream to disk from line 1 — never buffered in memory.
     """
+    # Resolve the container name at call time (not import time) so a
+    # VIGIL_RUNTIME_CONTAINER set after this module was imported — or by a test
+    # via monkeypatch.setenv — is honoured. Default stays "vigil" when unset.
+    container_name = container_name or default_runtime_container()
     # When the caller passes engagement_dir explicitly (typically via
     # --engagement-dir hoisted by assess.cli), forward it to load_config so
     # config resolution doesn't fall back to env/cwd and erroneously
@@ -441,7 +444,6 @@ __all__ = [
     "_scope_version",
     "_utcnow_iso",
     # Runtime exec + kill cascade (from kali_runtime_exec)
-    "_DEFAULT_CONTAINER_NAME",
     "_build_docker_exec",
     "_check_container_running",
     "_cleanup_container_pid_file",

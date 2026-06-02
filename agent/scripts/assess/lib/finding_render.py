@@ -26,7 +26,26 @@ imports it directly; the ``src`` CLI package reaches it through the same
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+
+# Longest run of backticks anywhere in a string — used to pick a code fence
+# that the content cannot prematurely close.
+_BACKTICK_RUN = re.compile(r"`+")
+
+
+def _fence_for(*parts: str) -> str:
+    """Return a backtick fence guaranteed not to be closed by any of ``parts``.
+
+    Markdown code fences must be longer than the longest backtick run inside the
+    fenced content, otherwise PoC output / request bodies / response excerpts
+    containing ``` (or longer runs) break out of the block. We scan every part
+    and return a run one backtick longer than the maximum found (minimum 3)."""
+    longest = 0
+    for part in parts:
+        for match in _BACKTICK_RUN.finditer(part or ""):
+            longest = max(longest, len(match.group(0)))
+    return "`" * max(3, longest + 1)
 
 
 def details_object(finding: dict) -> dict:
@@ -183,25 +202,42 @@ def render_finding(finding: dict, *, include_root_cause_group: bool = False) -> 
     if poc_code:
         lines.append("")
         lines.append("**PoC Code:**")
-        lines.append(f"```\n{poc_code}\n```")
+        fence = _fence_for(poc_code)
+        lines.append(f"{fence}\n{poc_code}\n{fence}")
     poc_request = detail_value(finding, "poc_request")
     if isinstance(poc_request, dict):
         lines.append("")
         lines.append("**PoC Request:**")
-        lines.append(f"```\n{poc_request.get('method', '')} {poc_request.get('url', '')}")
-        lines.extend(header_lines(poc_request.get("headers")))
+        req_headers = header_lines(poc_request.get("headers"))
+        req_body = str(poc_request.get("body") or "")
+        # Fence over every fenced part (request line + headers + body) so a
+        # backtick run anywhere in the request cannot close the block early.
+        fence = _fence_for(
+            f"{poc_request.get('method', '')} {poc_request.get('url', '')}",
+            "\n".join(req_headers),
+            req_body,
+        )
+        lines.append(f"{fence}\n{poc_request.get('method', '')} {poc_request.get('url', '')}")
+        lines.extend(req_headers)
         if poc_request.get("body"):
             lines.append(f"\n{poc_request['body']}")
-        lines.append("```")
+        lines.append(fence)
     poc_response = detail_value(finding, "poc_response")
     if isinstance(poc_response, dict):
         lines.append("")
         lines.append("**PoC Response:**")
-        lines.append(f"```\nHTTP {poc_response.get('status', '')}")
-        lines.extend(header_lines(poc_response.get("headers")))
+        resp_headers = header_lines(poc_response.get("headers"))
+        resp_body = str(poc_response.get("body_excerpt") or "")
+        fence = _fence_for(
+            f"HTTP {poc_response.get('status', '')}",
+            "\n".join(resp_headers),
+            resp_body,
+        )
+        lines.append(f"{fence}\nHTTP {poc_response.get('status', '')}")
+        lines.extend(resp_headers)
         if poc_response.get("body_excerpt"):
             lines.append(f"\n{poc_response['body_excerpt']}")
-        lines.append("```")
+        lines.append(fence)
 
     block = "\n".join(lines).rstrip()
     if notes:
