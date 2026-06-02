@@ -18,6 +18,19 @@ ULIMIT_NOFILE_RECOMMENDED = 65536
 ULIMIT_NPROC_RECOMMENDED = 8192
 
 
+def _resolve_runtime_data_dir(install_root: Path) -> Path:
+    """Resolve the runtime container's data dir.
+
+    Honours ``VIGIL_DATA_DIR``, falling back to the legacy ``KALI_MCP_DATA_DIR``
+    so pre-rename installs that relocated runtime state onto a custom disk keep
+    working after an upgrade; otherwise ``<install>/.runtime-data``. ``start_runtime``
+    and ``runtime_mounts_ok`` must resolve this identically or a running container's
+    mount check will spuriously fail after an upgrade.
+    """
+    env_value = os.environ.get("VIGIL_DATA_DIR") or os.environ.get("KALI_MCP_DATA_DIR")
+    return Path(env_value) if env_value else install_root / ".runtime-data"
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeOptions:
     install_root: Path
@@ -44,7 +57,7 @@ def start_runtime(
     allow_existing: bool = False,
 ) -> None:
     install_root = options.install_root.expanduser().resolve()
-    data_dir = Path(os.environ.get("KALI_MCP_DATA_DIR", install_root / ".runtime-data"))
+    data_dir = _resolve_runtime_data_dir(install_root)
     engagements_dir = install_root / "agent" / "engagements"
     data_dir.mkdir(parents=True, exist_ok=True)
     engagements_dir.mkdir(parents=True, exist_ok=True)
@@ -134,7 +147,7 @@ def _already_running_message(container_name: str, install_root: Path) -> str:
 def runtime_mounts_ok(install_root: Path, container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> bool:
     container_name = container_name or default_runtime_container()
     install_root = install_root.expanduser().resolve()
-    data_dir = Path(os.environ.get("KALI_MCP_DATA_DIR", install_root / ".runtime-data"))
+    data_dir = _resolve_runtime_data_dir(install_root)
     engagements_dir = install_root / "agent" / "engagements"
     try:
         _validate_mounts(container_name, data_dir, engagements_dir, runner=runner)

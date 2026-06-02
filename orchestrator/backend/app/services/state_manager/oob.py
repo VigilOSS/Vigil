@@ -111,37 +111,33 @@ def list_oob_probes(engagement_id: int, *, status_value: str | None = None) -> l
             detail=f"invalid oob probe status '{status_value}'; allowed: {sorted(_OOB_PROBE_STATUSES)}",
         )
     with _common.get_connection() as connection:
+        # Single grouped read instead of N+1 per-probe interaction counts. The
+        # LEFT JOIN keeps probes with zero interactions (COUNT -> 0, MAX -> NULL).
+        base_sql = """
+            SELECT p.*,
+                   COUNT(i.id) AS interaction_count,
+                   MAX(i.observed_at) AS last_interaction_at
+            FROM assessment_oob_probes p
+            LEFT JOIN assessment_oob_interactions i ON i.probe_id = p.id
+            WHERE p.engagement_id = ?{status_clause}
+            GROUP BY p.id
+            ORDER BY p.created_at DESC, p.id DESC
+        """
         if status_value is not None:
             rows = connection.execute(
-                """
-                SELECT * FROM assessment_oob_probes
-                WHERE engagement_id = ? AND status = ?
-                ORDER BY created_at DESC, id DESC
-                """,
+                base_sql.format(status_clause=" AND p.status = ?"),
                 (engagement.id, status_value),
             ).fetchall()
         else:
             rows = connection.execute(
-                """
-                SELECT * FROM assessment_oob_probes
-                WHERE engagement_id = ?
-                ORDER BY created_at DESC, id DESC
-                """,
+                base_sql.format(status_clause=""),
                 (engagement.id,),
             ).fetchall()
         probes: list[dict[str, Any]] = []
         for row in rows:
             probe = dict(row)
-            agg = connection.execute(
-                """
-                SELECT COUNT(*) AS n, MAX(observed_at) AS last_seen
-                FROM assessment_oob_interactions
-                WHERE probe_id = ?
-                """,
-                (probe["id"],),
-            ).fetchone()
-            probe["interaction_count"] = int(agg["n"] or 0)
-            probe["last_interaction_at"] = agg["last_seen"] or ""
+            probe["interaction_count"] = int(probe["interaction_count"] or 0)
+            probe["last_interaction_at"] = probe["last_interaction_at"] or ""
             probes.append(probe)
         return probes
 

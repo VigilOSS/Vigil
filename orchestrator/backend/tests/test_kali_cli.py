@@ -2039,6 +2039,136 @@ def test_job_stop_records_lost_when_container_not_running(monkeypatch, fake_enga
     assert fake_client.patches == [("jobs/26", {"status": "lost"})]
 
 
+def test_job_stop_records_stop_failed_when_docker_unreachable_mid_verify(
+    monkeypatch, fake_engagement
+):
+    """3-state liveness: when post-kill ``_wait_for_pid_exit`` returns None
+    (docker unreachable, liveness unknown), ``job_stop`` must record
+    ``stop_failed`` with the 'became unreachable while verifying' message — NOT
+    a false ``killed`` on a possibly-still-running job."""
+    kali_jobs = _import("assess.lib.kali_jobs")
+    from assess.lib.client import AssessError
+
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    class _StopClient(_FakeClient):
+        def get(self, endpoint):
+            return {"id": 27, "dtach_socket_path": "/tmp/vigil-jobs/unreachable.sock"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": 27, "status": payload["status"]}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 4444)
+    monkeypatch.setattr(kali_jobs, "_signal_job_pid", lambda *a, **k: None)
+    # Both verification probes (post-TERM and post-KILL) return None — docker
+    # became unreachable, so liveness is unknown.
+    monkeypatch.setattr(kali_jobs, "_wait_for_pid_exit", lambda *a, **k: None)
+
+    with pytest.raises(AssessError, match="became unreachable while verifying"):
+        kali_jobs.job_stop(27, container_name="vigil")
+
+    assert ("jobs/27", {"status": "stop_failed"}) in fake_client.patches
+
+
+def test_job_start_marks_failed_when_running_patch_raises(monkeypatch, fake_engagement):
+    """After the dtach process is spawned, if the ``status=running`` PATCH
+    raises, ``start_job`` must mark the backend row ``failed`` (a
+    ``{"status": "failed"}`` PATCH) before the error propagates — otherwise the
+    row is stuck at 'queued' forever (no sweeper covers assessment_jobs)."""
+    kali_jobs = _import("assess.lib.kali_jobs")
+    from assess.lib.client import AssessError
+
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    class _FailRunningPatchClient(_FakeClient):
+        def post(self, endpoint, payload):
+            self.posts.append((endpoint, payload))
+            return {"id": 30, "status": "queued"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            if payload.get("status") == "running":
+                raise AssessError("backend down during running patch")
+            return {"id": 30, "status": "queued", **payload}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    fake_client = _FailRunningPatchClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda name: None)
+    monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda name, path: None)
+    # The spawned-job cleanup helpers shell out; stub them so the only behaviour
+    # under test is the failure-PATCH on the backend row.
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 5252)
+    monkeypatch.setattr(kali_jobs, "_signal_job_pid", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "_wait_for_pid_exit", lambda *a, **k: True)
+    monkeypatch.setattr(
+        kali_jobs.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    with pytest.raises(AssessError, match="backend down during running patch"):
+        kali_jobs.start_job(
+            ["nuclei", "-l", "hosts.txt"],
+            audit_meta={
+                "technique": "RECON",
+                "intent": "long sweep",
+                "probe_kind": "fingerprint",
+                "phase": "recon",
+            },
+            container_name="vigil",
+        )
+
+    # The failed-row PATCH must have been issued, and it must come *after* the
+    # running PATCH that raised (so the row transitions queued -> failed).
+    running_idx = next(
+        i for i, (endpoint, payload) in enumerate(fake_client.patches)
+        if payload.get("status") == "running"
+    )
+    failed_idx = next(
+        i for i, (endpoint, payload) in enumerate(fake_client.patches)
+        if payload == {"status": "failed"}
+    )
+    assert failed_idx > running_idx
+    assert fake_client.patches[failed_idx] == ("jobs/30", {"status": "failed"})
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Contract command + smoke tests
 # ──────────────────────────────────────────────────────────────────────────
