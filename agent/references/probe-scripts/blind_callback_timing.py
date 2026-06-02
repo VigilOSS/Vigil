@@ -6,17 +6,17 @@ the response body says nothing — the signal is an out-of-band hit, or, when OO
 egress is blocked, a measurable time delay. This probe fires a crafted payload
 carrying a minted OOB callback host and a time-delay primitive, then reports a
 timing verdict; the authoritative OOB correlation happens on the HOST with
-`aith oob poll` (the callback URL the probe receives is already nonce-tagged).
+`vigil oob poll` (the callback URL the probe receives is already nonce-tagged).
 
 Bespoke logic (mint-carry, timing measurement, dual-signal verdict) that no typed
 `kali` verb expresses — see agent/skills/write-probe-script/SKILL.md. Stdlib-only.
 
 Two-step usage (mint on the HOST first — the nonce is the correlation token):
-  aith oob status --json
-  aith oob mint --technique ssrf --target-url https://t/fetch --param url
+  vigil oob status --json
+  vigil oob mint --technique ssrf --target-url https://t/fetch --param url
   # -> http  http://<nonce>.oob.example.com/
 
-  aith assess kali exec \\
+  vigil assess kali exec \\
     --technique SSRF --intent "blind SSRF via url param, oob + timing" \\
     --probe-kind payload --phase consume-test --timeout 120 -- \\
     python3 /engagements/$ENGAGEMENT_KEY/scripts/blind_callback_timing.py \\
@@ -26,11 +26,11 @@ Two-step usage (mint on the HOST first — the nonce is the correlation token):
       --out /engagements/$ENGAGEMENT_KEY/scans/ssrf_blind.json
 
   # Then correlate the callback (nonce <-> probe) on the HOST:
-  aith oob poll --client <your-client-name>
+  vigil oob poll --client <your-client-name>
 
 Output contract: the LAST stdout line is the JSON verdict
   {"finding": bool, "summary": str, "evidence": {...}}.
-`finding` here reflects the TIMING signal only; treat an `aith oob poll` hit on
+`finding` here reflects the TIMING signal only; treat an `vigil oob poll` hit on
 the minted nonce as the stronger, authoritative confirmation.
 """
 import argparse
@@ -45,7 +45,7 @@ import urllib.request
 
 def timed_get(url: str, *, timeout: int) -> tuple[int | None, int]:
     """GET `url`; return (status_or_None, latency_ms). Timeouts are signal, not errors."""
-    req = urllib.request.Request(url, headers={"User-Agent": "aith-probe"})
+    req = urllib.request.Request(url, headers={"User-Agent": "vigil-probe"})
     started = time.monotonic()
     status: int | None = None
     try:
@@ -69,7 +69,7 @@ def main() -> int:
     ap.add_argument(
         "--callback",
         required=True,
-        help="Minted http://<nonce>.oob.../ host (from `aith oob mint`). The nonce is the correlation token.",
+        help="Minted http://<nonce>.oob.../ host (from `vigil oob mint`). The nonce is the correlation token.",
     )
     ap.add_argument(
         "--baseline-url",
@@ -104,7 +104,7 @@ def main() -> int:
     summary = (
         f"timing signal: baseline={base_ms}ms oob={oob_ms}ms (Δ{delta_ms}ms, "
         f"threshold {threshold_ms}ms) — {'DELAY OBSERVED' if finding else 'no delay'}. "
-        f"Correlate the OOB callback with `aith oob poll` for authoritative proof."
+        f"Correlate the OOB callback with `vigil oob poll` for authoritative proof."
     )
     result = {
         "finding": finding,

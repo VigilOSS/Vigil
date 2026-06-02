@@ -1,7 +1,7 @@
 ---
 name: jwt-testing
 description: JWT token attack techniques — alg bypass, key confusion, claim tampering
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # JWT Testing (JSON Web Token Attacks)
@@ -33,7 +33,7 @@ origin: AI Threat Hunting
 - [ ] Confirm the token is recognised as a JWT and pull a deterministic first-pass variant set
       (the `alg:none` forgery, empty/malformed signatures) before reaching for jwt_tool:
       ```bash
-      aith assess classify-payload "$TOKEN" --mutations
+      vigil assess classify-payload "$TOKEN" --mutations
       #   type: jwt
       #   escalation: 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJyb2xlIjoiYWRtaW4iLCJzdWIiOiIxIn0.'  ← ready-to-send alg:none token (header={"alg":"none","typ":"JWT"}, payload={"role":"admin","sub":"1"})
       #               '<header>.<payload>.AAAA'   ← original header.payload with a bogus signature
@@ -122,7 +122,7 @@ text) and rank the odd-one-out instead of eyeballing every reply:
 
 ```bash
 # one {url,status,content_length,title} object per token variant → jwt_variants.jsonl
-aith assess anomaly-score jwt_variants.jsonl --top 5
+vigil assess anomaly-score jwt_variants.jsonl --top 5
 #   #1  score=4.17  status=200  len=842  url=.../api/me   ← the accepted forgery
 #       ^ status='200'  ^ title='dashboard'              the rest 401'd with identical bodies
 ```

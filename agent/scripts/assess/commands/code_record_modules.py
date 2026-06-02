@@ -1,4 +1,4 @@
-"""aith assess code-record-modules — POST module definitions for a code repository."""
+"""vigil assess code-record-modules — POST module definitions for a code repository."""
 from __future__ import annotations
 
 import json

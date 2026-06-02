@@ -1,14 +1,14 @@
 ---
 name: case-dispatching
 description: Guide operator through the transient work-buffer coordination loop for security testing
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Case Dispatching
 
 Guides consumption of the transient local work buffer in `cases.db` for batching worker tasks. The orchestrator backend remains canonical for findings, coverage, services, request variants, and chains, and the work buffer should mirror canonical backend identities rather than inventing its own request identity.
 
-This skill is coordination-only. Use it to inspect the work buffer, route batches, mark completion or errors, and requeue canonical work items. Do not use host-side shell commands from this skill to probe, crawl, fuzz, or exploit targets directly. All target-facing execution must happen through `aith assess kali ...` subcommands so the audit pipeline stays truthful.
+This skill is coordination-only. Use it to inspect the work buffer, route batches, mark completion or errors, and requeue canonical work items. Do not use host-side shell commands from this skill to probe, crawl, fuzz, or exploit targets directly. All target-facing execution must happen through `vigil assess kali ...` subcommands so the audit pipeline stays truthful.
 
 ## When to Activate
 
@@ -24,14 +24,14 @@ This skill is coordination-only. Use it to inspect the work buffer, route batche
 
 Each iteration (set `DB="$DIR/cases.db"`):
 ```
-1. Reset stale: aith assess work-buffer "$DB" reset-stale 10
-2. Check stats: aith assess work-buffer "$DB" stats    # read total pending
+1. Reset stale: vigil assess work-buffer "$DB" reset-stale 10
+2. Check stats: vigil assess work-buffer "$DB" stats    # read total pending
 3a. Pending < 2000 → type-based dispatch (vulnerability-analyst and source-analyzer can run IN PARALLEL):
 
     vulnerability-analyst: api, api-spec, form, upload, graphql, websocket
     source-analyzer: page, javascript, stylesheet, data
 
-    aith assess work-buffer "$DB" fetch <type> 10 <agent_name>
+    vigil assess work-buffer "$DB" fetch <type> 10 <agent_name>
 
 3b. Pending >= 2000 → priority-first dispatch:
 
@@ -41,8 +41,8 @@ Each iteration (set `DB="$DIR/cases.db"`):
     # weights to already-ingested rows.
 
     # Review clusters and defer low-signal ones before dispatch:
-    aith assess list-clusters "$DB"
-    aith assess work-buffer "$DB" defer-cluster <cluster_key> --reason "..."
+    vigil assess list-clusters "$DB"
+    vigil assess work-buffer "$DB" defer-cluster <cluster_key> --reason "..."
 
     # Fetch across types by priority. `fetch-by-priority` is route-aware: it
     # only claims rows whose type maps to a real specialist route and rejects
@@ -52,15 +52,15 @@ Each iteration (set `DB="$DIR/cases.db"`):
     #   vulnerability-analyst[-N] — claim only API/auth/workflow/debug/portal/
     #                               event rows (N is an optional instance label).
     #   source-analyzer[-N]       — claim only page/javascript/stylesheet/data rows.
-    aith assess work-buffer "$DB" fetch-by-priority 10 auto
-    aith assess work-buffer "$DB" fetch-by-priority 10 vulnerability-analyst
-    aith assess work-buffer "$DB" fetch-by-priority 10 source-analyzer-2
+    vigil assess work-buffer "$DB" fetch-by-priority 10 auto
+    vigil assess work-buffer "$DB" fetch-by-priority 10 vulnerability-analyst
+    vigil assess work-buffer "$DB" fetch-by-priority 10 source-analyzer-2
 
 4. On subagent return:
-   - Done: aith assess work-buffer "$DB" done "id1,id2,..."
-   - New endpoints: feed them back through `aith assess ingest-endpoints "$DB" <source>` or `aith assess ingest-spec "$DB" <spec-file>` — those paths run inline classification so the new rows enter the priority queue with scores immediately
-   - Findings: write structured finding state with `aith assess record-finding`
-   - Errors: aith assess work-buffer "$DB" error "id1,id2,..."
+   - Done: vigil assess work-buffer "$DB" done "id1,id2,..."
+   - New endpoints: feed them back through `vigil assess ingest-endpoints "$DB" <source>` or `vigil assess ingest-spec "$DB" <spec-file>` — those paths run inline classification so the new rows enter the priority queue with scores immediately
+   - Findings: write structured finding state with `vigil assess record-finding`
+   - Errors: vigil assess work-buffer "$DB" error "id1,id2,..."
 5. pending=0 and producers stopped → report completion
 6. Otherwise → loop back to step 1
 ```
@@ -172,7 +172,7 @@ Examples that recur in real engagements:
 - Salesforce-managed vendor SaaS hosts when the brief covers the customer's app, not the vendor platform
 
 ```bash
-aith assess resolve-surface <id> --status not_applicable \
+vigil assess resolve-surface <id> --status not_applicable \
   --rationale "Out of scope per program brief: <quote the relevant exclusion>"
 ```
 
@@ -182,9 +182,9 @@ This step pairs with `agent/scripts/assess/lib/contracts.py` `validate_specialis
 
 ## Key Rules
 
-- Use `aith assess work-buffer "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
-- Treat this skill as host-side coordination only. All real target testing stays in `aith assess kali ...`.
-- Record findings in backend state immediately via `aith assess record-finding`
+- Use `vigil assess work-buffer "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
+- Treat this skill as host-side coordination only. All real target testing stays in `vigil assess kali ...`.
+- Record findings in backend state immediately via `vigil assess record-finding`
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
 - Use reset-stale at start of each iteration
 - **Loop until pending=0 for all consumable types** — stopping early leaves tested surfaces unrecorded and forces a re-dispatch to pick up the tail
@@ -197,11 +197,11 @@ This step pairs with `agent/scripts/assess/lib/contracts.py` `validate_specialis
 
 ```bash
 DB="$DIR/cases.db"
-aith assess work-buffer "$DB" stats
-aith assess work-buffer "$DB" fetch <type> <limit> <agent_name>
-aith assess work-buffer "$DB" done "id1,id2,id3"
-aith assess work-buffer "$DB" error "id1,id2,id3"
-aith assess work-buffer "$DB" reset-stale <minutes>
-echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | aith assess work-buffer "$DB" requeue
-echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | aith assess work-buffer "$DB" requeue
+vigil assess work-buffer "$DB" stats
+vigil assess work-buffer "$DB" fetch <type> <limit> <agent_name>
+vigil assess work-buffer "$DB" done "id1,id2,id3"
+vigil assess work-buffer "$DB" error "id1,id2,id3"
+vigil assess work-buffer "$DB" reset-stale <minutes>
+echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | vigil assess work-buffer "$DB" requeue
+echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | vigil assess work-buffer "$DB" requeue
 ```

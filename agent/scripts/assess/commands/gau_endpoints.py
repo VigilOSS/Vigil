@@ -1,4 +1,4 @@
-"""aith assess gau-endpoints — cache-aware gau → ingest-endpoints pipeline.
+"""vigil assess gau-endpoints — cache-aware gau → ingest-endpoints pipeline.
 
 One verb that runs gau (or reuses a fresh cached corpus) and seats the URLs
 into `work_items` with inline classification. The cache check makes reuse
@@ -102,7 +102,7 @@ def _run_ingest_endpoints(
 
     Calling `cli.main(argv)` directly avoids a subprocess boundary while
     still routing through the same argparse + audit + DB write code path
-    `aith assess ingest-endpoints` uses on the host. SystemExit raised by
+    `vigil assess ingest-endpoints` uses on the host. SystemExit raised by
     the inner command propagates as a non-zero exit, which we translate
     into AssessError so the wrapper can surface it cleanly.
     """

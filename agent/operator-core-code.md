@@ -27,7 +27,7 @@ Always-active rules:
 - `agent/rules/adversarial-mindset.md`
 
 Path convention:
-- All assessment operations use `aith assess <subcommand>` from any directory.
+- All assessment operations use `vigil assess <subcommand>` from any directory.
 
 ## Resume Gate -- Code Analysis Mode
 
@@ -43,22 +43,22 @@ runtime/fuzz command history live in different backend projections.
 After code analysis engagement initialization completes, repeat until all critical/high files
 analyzed or user signals stop:
 
-1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). For resumed engagements, run `aith assess resume-brief` from `agent/rules/resume.md` before planning; use `--finding`, `--q`, `--agent-id`, `--since <iso>` (deltas since the last brief), or `--max-age-hours <N>` (override the per-role stale threshold — 48h default for code-architect/code-vuln-hunter/code-variant-hunter/code-vuln-verifier, 72h for code-fuzz-engineer). Check code coverage stats via `aith assess code-coverage`. Check CWE effort matrix via `aith assess code-coverage --cwe-matrix` when in Phase 2B. Backend state is canonical; use `--require-gate-pass` only for the final Phase 3 gate.
+1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). For resumed engagements, run `vigil assess resume-brief` from `agent/rules/resume.md` before planning; use `--finding`, `--q`, `--agent-id`, `--since <iso>` (deltas since the last brief), or `--max-age-hours <N>` (override the per-role stale threshold — 48h default for code-architect/code-vuln-hunter/code-variant-hunter/code-vuln-verifier, 72h for code-fuzz-engineer). Check code coverage stats via `vigil assess code-coverage`. Check CWE effort matrix via `vigil assess code-coverage --cwe-matrix` when in Phase 2B. Backend state is canonical; use `--require-gate-pass` only for the final Phase 3 gate.
 2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive precise FP elimination on all findings — kills require counter-evidence as rigorous as the original finding. Coverage gaps drive decisions.
 3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Batch size must stay small enough that source code remains the primary context. Use adaptive batching by module, entry-chain cluster, or trust-boundary/behavior family instead of a fixed-size handoff. When unrelated queue items are ready at the same time, split them into multiple independent hunter dispatches so broad hunt parallelizes across modules instead of serializing on fetch order. Verify against the Pre-Dispatch Checklist (bottom of this file) before every dispatch.
 4. **PRESENT OR PROCEED** -- Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.
-5. **USE SKILLS FIRST** -- Use `aith assess list-skills` to pick the matching skill (compact name + one-line "Use when:"), then load that skill file in full before starting target work. After loading the skill, read `agent/references/INDEX.md` to identify paired CWE pattern references and tool cheatsheets. Do not begin analysis work until both reads are complete.
+5. **USE SKILLS FIRST** -- Use `vigil assess list-skills` to pick the matching skill (compact name + one-line "Use when:"), then load that skill file in full before starting target work. After loading the skill, read `agent/references/INDEX.md` to identify paired CWE pattern references and tool cheatsheets. Do not begin analysis work until both reads are complete.
    - **Phase 0 (Ingest + Index):** operator-mechanical, no agent dispatch needed
    - **Phase 1 (Classify + Map):** `code-architect` -> `agent/skills/code-architecture-mapping/SKILL.md`
    - **Phase 2 (Hunt):** `code-vuln-hunter` -> `agent/skills/code-vulnerability-analysis/SKILL.md` + CWE-specific refs
    - **Phase 3 (Verify + Variant):** `code-vuln-verifier` -> `agent/skills/code-finding-verification/SKILL.md` AND `code-variant-hunter` -> `agent/skills/code-variant-analysis/SKILL.md` (parallel)
    - **Phase 4 (Fuzz):** `code-fuzz-engineer` -> `agent/skills/code-fuzz-campaign/SKILL.md` + memory-safety CWE refs (conditional, C/C++ only)
-6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- `aith assess kali` is not needed for reading source files. When code analysis does reach for `aith assess kali ...` (for example, a fuzz campaign or binary-triage pass that runs a tool through the runtime), the same audit-and-reuse rules from `operator-core.md` apply: calls carry `engagement_key`/`agent_name`/`phase` and runs land in `assessment_command_runs`. Default to an unscoped fuzzy search — `aith assess list-command-runs --q <keyword> --show-matches` — so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, fetch its preview with `aith assess get-command-run <id>` — `success=true` only means `return_code=0`, so open the preview to confirm the stored evidence actually answers the current question. See `agent/references/runtime-guides/command-history-auditing.md`. `aith assess kali` calls made from code-analysis workflows (fuzz campaigns, binary triage) must also set the audit-metadata flags — `--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`, plus `--destructive` when applicable — so the command row is filterable alongside web engagement calls; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables, the half-phase tag rationale, and the companion ban on echo-as-commentary breadcrumbs.
+6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- `vigil assess kali` is not needed for reading source files. When code analysis does reach for `vigil assess kali ...` (for example, a fuzz campaign or binary-triage pass that runs a tool through the runtime), the same audit-and-reuse rules from `operator-core.md` apply: calls carry `engagement_key`/`agent_name`/`phase` and runs land in `assessment_command_runs`. Default to an unscoped fuzzy search — `vigil assess list-command-runs --q <keyword> --show-matches` — so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, fetch its preview with `vigil assess get-command-run <id>` — `success=true` only means `return_code=0`, so open the preview to confirm the stored evidence actually answers the current question. See `agent/references/runtime-guides/command-history-auditing.md`. `vigil assess kali` calls made from code-analysis workflows (fuzz campaigns, binary triage) must also set the audit-metadata flags — `--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`, plus `--destructive` when applicable — so the command row is filterable alongside web engagement calls; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables, the half-phase tag rationale, and the companion ban on echo-as-commentary breadcrumbs.
 7. **DISPATCH** -- Dispatch to the appropriate subagent for all analysis work. The operator's job is orchestration: fetching metadata, providing paths, recording outputs, gating quality, and managing the analysis queue. Subagents read source files directly and produce structured outputs. Source reading, file-level analysis, and vulnerability judgment belong to subagents -- the operator provides paths, structural index, and metadata, not content.
 8. **PATH-FIRST HANDOFFS** -- Pass repo-relative file paths and artifact paths instead of pasting large JSON blobs or long source excerpts, because specialist agents can read the artifacts directly and operator tokens are better spent on scope control and quality gates.
-9. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `aith assess record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
+9. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `vigil assess record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
 10. **RECORD SURFACES** -- `record-surface` uses the shared engagement surface taxonomy, not ad hoc code-only labels. Only use supported types: `account_recovery`, `api_documentation`, `auth_entry`, `dynamic_render`, `file_handling`, `object_reference`, `privileged_write`, `workflow_token`. If none apply, do not invent a new surface type.
-11. **TRACK COVERAGE** -- After each batch, run `aith assess code-coverage`. During Phase 2B, use `aith assess code-coverage --cwe-matrix` to check per-file CWE effort scores against thresholds. Before entering Phase 3 verification, verify the coverage gate passes with `aith assess code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context, no unprocessed triggers, CWE effort thresholds met).
+11. **TRACK COVERAGE** -- After each batch, run `vigil assess code-coverage`. During Phase 2B, use `vigil assess code-coverage --cwe-matrix` to check per-file CWE effort scores against thresholds. Before entering Phase 3 verification, verify the coverage gate passes with `vigil assess code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context, no unprocessed triggers, CWE effort thresholds met).
 12. **LOOP** -- Back to step 1.
 
 ## Phase Flow
@@ -73,16 +73,16 @@ git clone <repo-url> $DIR/source/<repo-name>
 # Or: cp -r /path/to/source $DIR/source/<repo-name>
 
 # 2. Ingest into backend
-aith assess code-ingest "$DIR/source/<repo-name>" --name <repo-name> --language <primary-lang>
+vigil assess code-ingest "$DIR/source/<repo-name>" --name <repo-name> --language <primary-lang>
 
 # 3. Generate structural index
-aith assess code-index "$DIR/source/<repo-name>"
+vigil assess code-index "$DIR/source/<repo-name>"
 
 # 4. Sync structural metadata to backend
-aith assess code-index-sync
+vigil assess code-index-sync
 
 # 5. Verify ingestion and index
-aith assess code-coverage
+vigil assess code-coverage
 ```
 
 The `code-ingest` command:
@@ -94,7 +94,7 @@ The `code-ingest` command:
 - Marks generated/vendored/test/doc files as `skip` candidates
 - POSTs all files to backend code-files endpoint — the backend assigns each file an integer
   `file_id` (primary key). Retrieve the mapping via
-  `aith assess fetch "code/files?repo_id=<repo-id>&limit=5000"`;
+  `vigil assess fetch "code/files?repo_id=<repo-id>&limit=5000"`;
   queue fetch responses also include the full file object with `file_id`.
 - Creates code_repos record with repo metadata
 - Generates ctags symbol index (if ctags is available)
@@ -112,7 +112,7 @@ The `code-index` command:
 Output: `tools/analysis-state/structural-index/` directory with per-file JSON + manifest.
 
 ```bash
-aith assess transition-phase classify-map
+vigil assess transition-phase classify-map
 ```
 
 Exit: All files inventoried. ctags symbol index generated if ctags is available. Structural index generated. Transition to Phase 1.
@@ -122,14 +122,14 @@ Exit: All files inventoried. ctags symbol index generated if ctags is available.
 Dispatch `code-architect` with `agent/skills/code-architecture-mapping/SKILL.md`.
 
 Provide:
-- Repo root path plus a file-list artifact or fetched JSON from `aith assess fetch "code/files?repo_id=<repo-id>&limit=5000"` -- do not paste thousands of rows inline
+- Repo root path plus a file-list artifact or fetched JSON from `vigil assess fetch "code/files?repo_id=<repo-id>&limit=5000"` -- do not paste thousands of rows inline
 - Project documentation paths (README, SECURITY.md, build files) so the architect can read the source material directly
 - Git churn data as a short summary or artifact path from `code_repos.git_churn_json`
-- Structural index manifests (aggregate at `tools/analysis-state/structural-index-manifest.json`; per-repo at `tools/analysis-state/structural-index/<repo_key>-manifest.json`) -- if the aggregate is missing or only covers one repo, run `aith assess code-index` per repo (one invocation per source repo) before dispatching. The aggregate gives the architect pre-computed function counts, entry points, and sink statistics per file scoped to the right repo
+- Structural index manifests (aggregate at `tools/analysis-state/structural-index-manifest.json`; per-repo at `tools/analysis-state/structural-index/<repo_key>-manifest.json`) -- if the aggregate is missing or only covers one repo, run `vigil assess code-index` per repo (one invocation per source repo) before dispatching. The aggregate gives the architect pre-computed function counts, entry points, and sink statistics per file scoped to the right repo
 
 Phase 1 produces six deliverables. The call graph and attack hypotheses provide navigational guidance for hunters. The file analysis queue ensures every critical/high file is analyzed regardless of hypothesis coverage.
 
-Use the helper contracts as the durable shape source before authoring or reviewing Phase 1 machine artifacts: `aith assess contract code-classify`, `aith assess contract code-record-modules`, `aith assess contract code-record-threat-model`, and `aith assess contract code-dispatch`. Point dispatches at those contracts instead of embedding copied JSON templates, because the CLI contract stays aligned with backend validation and catches field-name drift.
+Use the helper contracts as the durable shape source before authoring or reviewing Phase 1 machine artifacts: `vigil assess contract code-classify`, `vigil assess contract code-record-modules`, `vigil assess contract code-record-threat-model`, and `vigil assess contract code-dispatch`. Point dispatches at those contracts instead of embedding copied JSON templates, because the CLI contract stays aligned with backend validation and catches field-name drift.
 
 **Deliverables from code-architect:**
 
@@ -171,11 +171,11 @@ Use the helper contracts as the durable shape source before authoring or reviewi
 On return:
 ```bash
 # Record classifications
-aith assess code-classify <classifications-json>
+vigil assess code-classify <classifications-json>
 # Record threat model
-aith assess code-record-threat-model <repo-id> <threat-model-json>
+vigil assess code-record-threat-model <repo-id> <threat-model-json>
 # Record modules
-aith assess code-record-modules <repo-id> <modules-json>
+vigil assess code-record-modules <repo-id> <modules-json>
 # Ensure analysis-state exists for Phase 2 handoff artifacts
 mkdir -p "$DIR/tools/analysis-state"
 # Store call graph in analysis-state/
@@ -185,7 +185,7 @@ cp <hypotheses-json> "$DIR/tools/analysis-state/attack-hypotheses.json"
 # Store file analysis queue in analysis-state/
 cp <file-analysis-queue-json> "$DIR/tools/analysis-state/file-analysis-queue.json"
 # Check progress
-aith assess code-coverage
+vigil assess code-coverage
 ```
 
 **Before transitioning:** Review code-architect's `#### Coverage Gaps` output. Critical gaps to
@@ -202,7 +202,7 @@ in the call graph become blind spots for every downstream phase. Missing files i
 become permanently invisible to the analysis pipeline.
 
 ```bash
-aith assess transition-phase hunt
+vigil assess transition-phase hunt
 ```
 
 Exit: Every file classified. Threat model recorded. Call graph recorded with entry-point chains.
@@ -234,10 +234,10 @@ Adaptive batching is part of the method, not a convenience:
 **Queue setup:**
 ```bash
 # Load file analysis queue into the dispatch engine
-aith assess code-dispatch queue "$DIR/tools/analysis-state/file-analysis-queue.json"
+vigil assess code-dispatch queue "$DIR/tools/analysis-state/file-analysis-queue.json"
 
 # Check queue state
-aith assess code-dispatch stats
+vigil assess code-dispatch stats
 ```
 
 Broad-hunt queue items are file-level only. Do not add `context_id` to the queue artifact. Each
@@ -252,13 +252,13 @@ normalization; it is not part of the backend queue schema.
 **Fetch loop:**
 ```bash
 # Reset stale items from any interrupted work
-aith assess code-dispatch reset-stale 10
+vigil assess code-dispatch reset-stale 10
 
 # Check stats
-aith assess code-dispatch stats
+vigil assess code-dispatch stats
 
 # Fetch batch for analysis -- returns file-based items grouped by batch_theme
-aith assess code-dispatch fetch 10 code-vuln-hunter
+vigil assess code-dispatch fetch 10 code-vuln-hunter
 ```
 
 The fetch size is a queue convenience, not a required prompt batch size. Split fetched items into
@@ -306,7 +306,7 @@ using the available subagent budget.
   predictions.
 - **Structural index** -- pass the manifest path plus the relevant per-file index paths from
   `tools/analysis-state/structural-index/`. If the manifest is missing, stop and run
-  `aith assess code-index` before dispatching. Inline only the minimal function
+  `vigil assess code-index` before dispatching. Inline only the minimal function
   excerpt needed for prioritization. The function map is the primary completeness anchor:
   every listed function must receive a disposition. Sinks, exports, and import targets are
   advisory metadata that helps the hunter navigate -- they do not limit what the hunter looks
@@ -370,13 +370,13 @@ All references are under `agent/references/code-vuln-patterns/`. Include the ful
 **On return:**
 ```bash
 # Confirm the analysis-result contract if the payload was hand-authored
-aith assess contract code-record-analysis
+vigil assess contract code-record-analysis
 
 # Record analysis results (with cwe_coverage and cross_file_triggers)
-aith assess code-record-analysis <analysis-json>
+vigil assess code-record-analysis <analysis-json>
 
 # Preview the exact completion payload before committing queue history when unsure
-aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
+vigil assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
 
 # cwe-coverage-json must be a file path, not inline JSON. Create it before the done call:
 cat > /tmp/cwe_<item-id>.json <<'JSON'
@@ -393,16 +393,16 @@ cat > /tmp/cwe_<item-id>.json <<'JSON'
 JSON
 
 # Mark one file done with structured cwe_coverage after the payload is correct
-aith assess code-dispatch done <item-id> <clean|finding|suspicious> /tmp/cwe_<item-id>.json ["notes"]
+vigil assess code-dispatch done <item-id> <clean|finding|suspicious> /tmp/cwe_<item-id>.json ["notes"]
 
 # Record any findings
-aith assess record-finding code-vuln-hunter <finding-json>
+vigil assess record-finding code-vuln-hunter <finding-json>
 
 # Process cross-file triggers (if analysis returned any)
-aith assess code-dispatch requeue-triggers <triggers-json>
+vigil assess code-dispatch requeue-triggers <triggers-json>
 
 # Before fetching the next batch, reset items stuck in-progress:
-aith assess code-dispatch reset-stale 10
+vigil assess code-dispatch reset-stale 10
 ```
 
 Use `code-dispatch done` with one of `clean`, `finding`, or `suspicious`, because the queue
@@ -420,7 +420,7 @@ queue item, using explicit zero-effort gap entries for omitted/unexamined famili
 3. If the gap is genuinely unresolvable from the filesystem (external library source needed,
    binary dependency, macro-generated code), re-queue the item with additional context about the
    external dependency.
-4. Re-queue the item with `aith assess code-dispatch needs-context ...` -- do not use
+4. Re-queue the item with `vigil assess code-dispatch needs-context ...` -- do not use
    `code-dispatch done needs_context`, because incomplete work must carry explicit expansion
    metadata instead of looking complete in the queue history.
 
@@ -441,7 +441,7 @@ first discoveries.
 - [ ] All critical/high files from the file analysis queue analyzed at least once
 - [ ] No unresolved `needs-context` items on critical/high files
 - [ ] All cross-file triggers processed (target files queued or already completed)
-- [ ] Coverage stats checked: `aith assess code-coverage`
+- [ ] Coverage stats checked: `vigil assess code-coverage`
 
 #### Phase 2B -- CWE Coverage Review
 
@@ -451,7 +451,7 @@ to find and close those gaps systematically.
 
 **Step 1: Generate effort matrix:**
 ```bash
-aith assess code-coverage --cwe-matrix
+vigil assess code-coverage --cwe-matrix
 ```
 
 This displays:
@@ -468,10 +468,10 @@ proceed directly to Phase 3.
 **Step 2: Process any remaining cross-file triggers:**
 ```bash
 # Check for pending triggers and queue blockers
-aith assess code-coverage
+vigil assess code-coverage
 
 # Reset stale items
-aith assess code-dispatch reset-stale 10
+vigil assess code-dispatch reset-stale 10
 ```
 
 Process triggers before re-dispatch -- a trigger may add a file that covers a gap class,
@@ -506,21 +506,21 @@ directed vulnerability classes, and aims to raise effort scores to the target th
 **On return from CWE-directed re-dispatch:**
 ```bash
 # Preview first when the updated effort matrix is large or hand-edited
-aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
+vigil assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
 
 # Mark done with updated cwe_coverage (backend uses max-effort merge)
-aith assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
+vigil assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
 
 # Record any new findings
-aith assess record-finding code-vuln-hunter <finding-json>
+vigil assess record-finding code-vuln-hunter <finding-json>
 
 # Process any new cross-file triggers
-aith assess code-dispatch requeue-triggers <triggers-json>
+vigil assess code-dispatch requeue-triggers <triggers-json>
 ```
 
 **Step 5: Re-check effort matrix:**
 ```bash
-aith assess code-coverage --cwe-matrix
+vigil assess code-coverage --cwe-matrix
 ```
 
 If gaps remain on critical files:
@@ -550,7 +550,7 @@ confirmed findings, not investigation of incomplete ones.
 **Phase 2 exit:** 2A, 2B, and 2C gates pass, AND no unresolved suspicious findings remain.
 
 ```bash
-aith assess transition-phase verify-variant
+vigil assess transition-phase verify-variant
 ```
 
 Exit: All critical/high files analyzed with effort thresholds met. CWE coverage gaps closed
@@ -600,7 +600,7 @@ findings, while the variant hunter scans for new instances of confirmed patterns
 
 **Coverage gate** -- must pass before proceeding:
 ```bash
-aith assess code-coverage --require-gate-pass
+vigil assess code-coverage --require-gate-pass
 # Must show: all critical files analyzed, all high files analyzed, no needs-context, no pending triggers
 ```
 
@@ -683,7 +683,7 @@ contradicts a Phase 2 finding (e.g., discovers a guard the original hunter misse
 #### Handling spot-check findings
 
 If the verifier's clean-file spot-check discovers a missed vulnerability:
-1. Record the finding via `aith assess record-finding code-vuln-verifier <finding-json>`
+1. Record the finding via `vigil assess record-finding code-vuln-verifier <finding-json>`
 2. Dispatch the file back to Phase 2B with a CWE directive targeting the missed class
 3. After re-analysis completes, re-check the effort matrix for the affected file
 
@@ -691,32 +691,32 @@ If the verifier's clean-file spot-check discovers a missed vulnerability:
 
 ```bash
 # Record verification results (updates existing findings)
-aith assess verify-finding <slug> <verification-json>
+vigil assess verify-finding <slug> <verification-json>
 # Or use the dedicated false-positive helper when you already have the kill rationale
-aith assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+vigil assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 # Reopen a previously verified or false-positive finding when new evidence requires re-triage
-aith assess reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
+vigil assess reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
 # Record variant findings (new findings)
-aith assess record-finding code-variant-hunter <variant-finding-json>
+vigil assess record-finding code-variant-hunter <variant-finding-json>
 ```
 
 **Pre-report deduplication:**
 Before dispatching report-writer, check for duplicate findings (same `canonical_location` and
 similar `defect_family` across hunter and variant-hunter prefixes):
 ```bash
-aith assess merge-finding <source-slug> <target-slug> "<reason>"
+vigil assess merge-finding <source-slug> <target-slug> "<reason>"
 ```
 
 **Pre-report deduplication (cross-phase):**
 Before dispatching report-writer, also check for duplicate findings between Phase 3 and Phase 4
 (fuzz findings that confirm static findings):
 ```bash
-aith assess merge-finding <source-slug> <target-slug> "<reason>"
+vigil assess merge-finding <source-slug> <target-slug> "<reason>"
 ```
 
 **Phase 3 exit:**
 ```bash
-aith assess transition-phase fuzz
+vigil assess transition-phase fuzz
 ```
 
 Exit: All findings verified. Variant scan complete. Transition to Phase 4 (Fuzz) if the
@@ -741,17 +741,17 @@ Skip it when ALL of the following are true:
 **Phase 4 entry gate:**
 ```bash
 # Verify Phase 3 complete
-aith assess code-coverage --require-gate-pass
+vigil assess code-coverage --require-gate-pass
 
 # Check for memory-safety findings OR high structural risk in C/C++ code.
 # Filter findings for defect_family in: buffer-overflow, integer-overflow,
 # use-after-free, uninitialized-memory.
-aith assess fetch findings
+vigil assess fetch findings
 
 # Check for critical/high C/C++ files — fuzzing for memory-safety needs C/C++ targets.
 # Even without confirmed memory-safety findings, high-risk C/C++ parsers with low
 # existing fuzz coverage warrant a campaign.
-aith assess fetch "code/files?repo_id=<id>&limit=5000"
+vigil assess fetch "code/files?repo_id=<id>&limit=5000"
 # If no C/C++ files at critical/high classification, skip Phase 4.
 
 # Verify build toolchain
@@ -765,11 +765,11 @@ Dispatch `code-fuzz-engineer` with `agent/skills/code-fuzz-campaign/SKILL.md`.
 Provide:
 
 **Backend state (operator fetches and summarizes):**
-- Memory-safety findings: `aith assess fetch findings` — extract findings with
+- Memory-safety findings: `vigil assess fetch findings` — extract findings with
   `defect_family` in `buffer-overflow`, `integer-overflow`, `use-after-free`,
   `uninitialized-memory`. Include slugs, canonical locations, severity, and
   `verification_state` (confirmed/unreviewed). Pass as a concise summary, not raw JSON dump.
-- File classifications: `aith assess fetch "code/files?repo_id=<id>&limit=5000"` —
+- File classifications: `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` —
   identify critical/high C/C++ files with relevant slot types. The fuzz engineer uses these to
   cross-reference targets against structural index data.
 
@@ -801,7 +801,7 @@ ls tools/fuzz-state/harnesses/*/harness.c
 ls tools/fuzz-state/campaigns/*.json
 
 # Record any findings from quick validation runs or pre-fuzz audit
-aith assess record-finding code-fuzz-engineer <finding-json>
+vigil assess record-finding code-fuzz-engineer <finding-json>
 ```
 
 #### Phase 4B: Campaign Execution
@@ -852,7 +852,7 @@ minimize -> reproduce -> trace -> validate -> classify
 **On return from crash triage:**
 ```bash
 # Record true findings
-aith assess record-finding code-fuzz-engineer <finding-json>
+vigil assess record-finding code-fuzz-engineer <finding-json>
 
 # Triage reports written to tools/fuzz-state/reports/
 ls tools/fuzz-state/reports/*-triage.json
@@ -866,13 +866,13 @@ ls tools/fuzz-state/reports/*-triage.json
 - [ ] Campaign summary written to `tools/fuzz-state/reports/campaign-summary.json`
 
 ```bash
-aith assess transition-phase complete --track code
+vigil assess transition-phase complete --track code
 ```
 
 **Report dispatch:**
-For a final report, run `aith assess check-report-readiness` before dispatching
-`report-writer`. Report-writer runs `aith assess list-report-findings --mode final --json` for final output and
-`aith assess list-report-findings --mode draft --json` for interim output; both include code and web findings from the
+For a final report, run `vigil assess check-report-readiness` before dispatching
+`report-writer`. Report-writer runs `vigil assess list-report-findings --mode final --json` for final output and
+`vigil assess list-report-findings --mode draft --json` for interim output; both include code and web findings from the
 shared backend with root-cause grouping applied. Fuzz findings (CF-xxx) include crash inputs and ASAN reports as evidence.
 Use the same draft → review-and-fix QA → publish gate as runtime engagements: draft generation
 writes `report.md` and returns the 13-check checklist, a fresh `report-writer` reviews and fixes
@@ -899,7 +899,7 @@ the rendered report, and publication plus `reported` lifecycle transitions wait 
 | code-vuln-verifier | VF | (updates only, no new findings -- except spot-check) |
 | code-fuzz-engineer | CF | CF-001 |
 
-These examples describe the prefixes allocated by `aith assess record-finding`.
+These examples describe the prefixes allocated by `vigil assess record-finding`.
 Parallel specialists omit the `slug` field from new finding JSON; the helper allocates and prints the canonical slug to reuse in handoffs and
 analysis rows.
 
@@ -908,7 +908,7 @@ analysis rows.
 Every code analysis dispatch must include:
 - **Agent identity** and **repository name**
 - **Current phase** and **specific task objective**
-- **Which skill(s) to load** (selected via `aith assess list-skills`)
+- **Which skill(s) to load** (selected via `vigil assess list-skills`)
 - **For Phase 1**: full file listing, project docs, git churn data, structural index manifest
 - **For Phase 2 (Hunt)**: file paths from queue items, batch theme, slot types,
   applicable vulnerability classes (ALL classes from SLOT_VULN_CLASSES for these slot types),
@@ -923,9 +923,9 @@ Every code analysis dispatch must include:
   system configuration, list of critical clean files for spot-check
 - **For Phase 3 variant**: confirmed findings with abstract patterns, candidate file list,
   CWE pattern refs, threat model summary
-- **For Phase 4 (Fuzz)**: memory-safety finding summaries from `aith assess fetch findings`
+- **For Phase 4 (Fuzz)**: memory-safety finding summaries from `vigil assess fetch findings`
   (slugs, locations, severity, verification_state — not raw JSON dump), critical/high C/C++ file
-  list from `aith assess fetch "code/files?..."`, filesystem artifact paths (structural index
+  list from `vigil assess fetch "code/files?..."`, filesystem artifact paths (structural index
   manifest, threat model, call graph — fuzz engineer reads these directly), source repo root,
   build system type, compiler availability, existing fuzzer inventory paths, CWE pattern refs
   (buffer-overflow, integer-overflow, use-after-free, uninitialized-memory, fuzz-harness-patterns)
@@ -942,12 +942,12 @@ authorized_phase: <phase>
 ```
 
 The operator obtains `agent_id` by:
-- **Claude Code**: use the id printed by `aith assess agent start` — choose or accept a unique string per dispatch (e.g. `hunt-b7c2`).
+- **Claude Code**: use the id printed by `vigil assess agent start` — choose or accept a unique string per dispatch (e.g. `hunt-b7c2`).
 - **Codex**: use the id returned by `spawn_agent`.
 
-Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. If this is a continuation or resumed engagement, include the relevant `aith assess resume-brief` output immediately after the Runtime Identity block so the specialist starts from compact backend state instead of local-note reconstruction.
+Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. If this is a continuation or resumed engagement, include the relevant `vigil assess resume-brief` output immediately after the Runtime Identity block so the specialist starts from compact backend state instead of local-note reconstruction.
 
-Require immediate backend/artifact linkage for durable notes: if a specialist creates a `.md` file under `notes/` that should matter after the current command, they must register it with `aith assess artifact register <path>` and link it to a finding, chain, dispatch/agent, surface, request variant, or command run before closing. Unlinked markdown notes are scratch and cannot be used as resume or report input.
+Require immediate backend/artifact linkage for durable notes: if a specialist creates a `.md` file under `notes/` that should matter after the current command, they must register it with `vigil assess artifact register <path>` and link it to a finding, chain, dispatch/agent, surface, request variant, or command run before closing. Unlinked markdown notes are scratch and cannot be used as resume or report input.
 
 ### Pre-Dispatch Checklist
 
@@ -955,9 +955,9 @@ Before every dispatch, verify:
 
 - [ ] Agent identity named and repository specified
 - [ ] Current phase stated with specific task objective (not just "analyze this")
-- [ ] Skill name(s) identified from `aith assess list-skills` (the first column = `name`, matches `agent/skills/<name>/`)
+- [ ] Skill name(s) identified from `vigil assess list-skills` (the first column = `name`, matches `agent/skills/<name>/`)
 - [ ] Full skill path(s) `agent/skills/<name>/SKILL.md` included in the dispatch prompt with explicit enforcement: "You MUST read and follow `agent/skills/<name>/SKILL.md` before beginning work; if a skill contradicts this prompt, the skill wins for procedural steps."
-- [ ] Bare skill `name(s)` (not paths) passed to `--skills` on `aith assess agent start` for audit — the validator resolves names against `agent/skills/<name>/SKILL.md`
+- [ ] Bare skill `name(s)` (not paths) passed to `--skills` on `vigil assess agent start` for audit — the validator resolves names against `agent/skills/<name>/SKILL.md`
 - [ ] For Phase 2: file paths from queue items included (NOT context IDs, NOT JSON metadata)
 - [ ] For Phase 2: applicable vulnerability classes copied from backend `applicable_vuln_classes` when present; otherwise derived from slot types + role/language fallback rules
 - [ ] For Phase 2: CWE pattern references selected via slot-type mapping table
@@ -981,17 +981,17 @@ PARALLEL: Independent file batches -> parallel (Phase 2 hunting). Independent ag
 
 ## Session Resumption
 
-On start or when resuming inside a code analysis engagement, apply `agent/rules/resume.md` first (`aith assess resume-brief`, narrowed with `--finding`, `--q`, or `--agent-id` when useful).
+On start or when resuming inside a code analysis engagement, apply `agent/rules/resume.md` first (`vigil assess resume-brief`, narrowed with `--finding`, `--q`, or `--agent-id` when useful).
 Then run the code-mode state checks that do not exist in web/runtime engagements:
 
 ```bash
-aith assess code-coverage                  # File classification + analysis coverage
-aith assess code-dispatch stats             # Queue state (pending/processing/done/needs-context)
-aith assess code-coverage --cwe-matrix      # CWE effort state when Phase 2B or later is active
+vigil assess code-coverage                  # File classification + analysis coverage
+vigil assess code-dispatch stats             # Queue state (pending/processing/done/needs-context)
+vigil assess code-coverage --cwe-matrix      # CWE effort state when Phase 2B or later is active
 ```
 
 Resume from the current phase. If `code-dispatch stats` shows `processing` items, they were
-interrupted -- reset stale items with `aith assess code-dispatch reset-stale 10` and
+interrupted -- reset stale items with `vigil assess code-dispatch reset-stale 10` and
 re-dispatch. If `needs-context` items exist, provide additional context and re-queue them.
 
 Phase-specific resume actions:
@@ -1024,8 +1024,8 @@ Code Analysis: [x] Ingest  [x] Classify+Map  [>] Hunt  [ ] Verify+Variant  [ ] F
 ### Running Alongside Web Testing
 When source code is obtained mid-engagement (exposed .git, source maps, backup download):
 1. Download/reconstruct source to `$DIR/source/<name>/`
-2. Run `aith assess code-ingest "$DIR/source/<name>"`
-3. Run `aith assess code-index "$DIR/source/<name>"` to materialize the required structural index (the script bootstraps bundled tree-sitter packages through `uv` on first run)
+2. Run `vigil assess code-ingest "$DIR/source/<name>"`
+3. Run `vigil assess code-index "$DIR/source/<name>"` to materialize the required structural index (the script bootstraps bundled tree-sitter packages through `uv` on first run)
 4. Code analysis phases run in parallel with ongoing web testing
 5. Findings land in the same `assessment_findings` table
 
@@ -1045,7 +1045,7 @@ degrades, and the engagement produces the exact failure modes seen in prior runs
 - Fetch file lists, classifications, queue stats, and coverage from the backend
 - Provide repo paths, structural index paths, call graph excerpts, threat model summaries,
   applicable vulnerability classes, and effort thresholds to subagents
-- Record subagent outputs via `aith assess` after they pass quality gates
+- Record subagent outputs via `vigil assess` after they pass quality gates
 - Gate phase transitions on mandatory checklists -- reject and re-dispatch when gates fail
 - Manage the analysis queue (fetch, dispatch, done, reset-stale, requeue-triggers)
 - Review coverage gaps and CWE effort matrix to decide whether to re-dispatch or accept

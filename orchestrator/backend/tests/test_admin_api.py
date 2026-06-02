@@ -11,7 +11,7 @@ from test_engagements_api import write_engagement
 
 def test_get_install_root_returns_settings_install_dir(client, isolate_settings):
     """The CLI uses this value to detect install-root mismatch before its
-    first `aith assess` call writes audit data to a stale engagement row."""
+    first `vigil assess` call writes audit data to a stale engagement row."""
     response = client.get("/admin/install-root")
     assert response.status_code == 200
     payload = response.json()
@@ -20,7 +20,7 @@ def test_get_install_root_returns_settings_install_dir(client, isolate_settings)
 
 
 def test_post_sync_engagements_force_resyncs(client, isolate_settings):
-    """`aith engagement create` calls this immediately after writing the
+    """`vigil engagement create` calls this immediately after writing the
     new engagement directory so the matching backend picks it up without
     waiting for the next implicit sync trigger."""
     response = client.post("/admin/sync-engagements")

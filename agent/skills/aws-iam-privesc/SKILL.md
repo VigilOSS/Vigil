@@ -1,12 +1,12 @@
 ---
 name: aws-iam-privesc
 description: Enumerate and exploit AWS IAM privilege escalation paths — dangerous policy combinations, role chaining, and credential abuse
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # AWS IAM Privilege Escalation
 
-> **`aith assess kali` audit flags:** use `--technique AUTH` (cloud IAM privesc maps to the auth/authorization class in this taxonomy). Set `--destructive` whenever the call mutates IAM state (`iam create-*`, `iam attach-*`, `iam put-*`, `iam set-default-policy-version`, or a `sts assume-role` that activates a broader session).
+> **`vigil assess kali` audit flags:** use `--technique AUTH` (cloud IAM privesc maps to the auth/authorization class in this taxonomy). Set `--destructive` whenever the call mutates IAM state (`iam create-*`, `iam attach-*`, `iam put-*`, `iam set-default-policy-version`, or a `sts assume-role` that activates a broader session).
 
 ## When to Activate
 
@@ -17,9 +17,9 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- aws ...` (AWS CLI calls against IAM and STS — all target-facing AWS CLI must go through the kali exec wrapper; use `--technique AUTH --probe-kind fingerprint --phase consume-test --timeout 60` for enumeration, and add `--destructive` plus `--probe-kind exploit` for mutating calls like `create-access-key`, `attach-user-policy`, `put-role-policy`)
-- boto3 (Python scripts — run via `aith assess kali exec --technique AUTH ... -- python3 ...`)
-- Pacu (AWS exploitation framework — run via `aith assess kali exec --technique AUTH --probe-kind exploit --phase consume-test --timeout 300 --destructive -- ...`)
+- `vigil assess kali exec -- aws ...` (AWS CLI calls against IAM and STS — all target-facing AWS CLI must go through the kali exec wrapper; use `--technique AUTH --probe-kind fingerprint --phase consume-test --timeout 60` for enumeration, and add `--destructive` plus `--probe-kind exploit` for mutating calls like `create-access-key`, `attach-user-policy`, `put-role-policy`)
+- boto3 (Python scripts — run via `vigil assess kali exec --technique AUTH ... -- python3 ...`)
+- Pacu (AWS exploitation framework — run via `vigil assess kali exec --technique AUTH --probe-kind exploit --phase consume-test --timeout 300 --destructive -- ...`)
 - Cloudsplaining (IAM policy analyzer — host-side analysis on downloaded policy JSON)
 - enumerate-iam (permission enumeration — run via kali exec)
 - Principal Mapper (pmapper — run host-side for graph analysis on downloaded IAM data)
@@ -79,7 +79,7 @@ aws sts assume-role --role-arn arn:aws:iam::TARGET:role/ROLE --role-session-name
 
 ### 5. Metadata Service Exploitation
 
-Metadata curl calls are target-facing — run them via `aith assess kali exec --technique AUTH --probe-kind exploit --phase consume-test --timeout 30 -- curl ...`.
+Metadata curl calls are target-facing — run them via `vigil assess kali exec --technique AUTH --probe-kind exploit --phase consume-test --timeout 30 -- curl ...`.
 ```bash
 # IMDSv1 (if not disabled)
 curl http://169.254.169.254/latest/meta-data/iam/security-credentials/

@@ -1,4 +1,4 @@
-"""aith assess code-record-threat-model — POST a threat model for a code repository."""
+"""vigil assess code-record-threat-model — POST a threat model for a code repository."""
 from __future__ import annotations
 
 import json

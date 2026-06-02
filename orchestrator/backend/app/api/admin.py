@@ -1,12 +1,12 @@
 """Admin / introspection endpoints.
 
-These exist for the host-side `aith` CLI to detect install-root drift between
+These exist for the host-side `vigil` CLI to detect install-root drift between
 the running orchestrator and a freshly created engagement directory. When the
-operator runs ``aith --root /custom/path engagement create ...``, the new
+operator runs ``vigil --root /custom/path engagement create ...``, the new
 engagement lands under ``/custom/path/agent/engagements/...`` but the running
 orchestrator was started against a *different* install root and cannot see
 the new directory through ``sync_engagements()``. Without an introspection
-hook the mismatch is silent: the CLI's first ``aith assess`` call eventually
+hook the mismatch is silent: the CLI's first ``vigil assess`` call eventually
 hits the 404 warning in ``agent/scripts/assess/lib/config.py``, by which
 point recon data has already been written to a stale or missing engagement.
 
@@ -59,7 +59,7 @@ def get_install_root() -> InstallRootResponse:
 def post_sync_engagements() -> SyncEngagementsResponse:
     """Force a re-scan of the configured engagements root.
 
-    Called by ``aith engagement create`` immediately after writing the new
+    Called by ``vigil engagement create`` immediately after writing the new
     engagement directory so the running backend picks it up without waiting
     for the next implicit sync trigger. Only useful when the orchestrator's
     install root already matches the engagement's install root — the orch

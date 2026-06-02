@@ -48,7 +48,7 @@ alterx takes known subdomains and emits permutations using built-in patterns (or
 
 Default patterns cover the common cases (`{sub}-staging`, `{sub}-dev`, `{sub}.{suffix}`, etc.). Reach for `-p`/`-pf` only when the engagement has obvious naming convention signals (e.g. company internal naming pattern leaked elsewhere).
 
-The chain pattern is **alterx -> puredns resolve**, not `alterx -> dnsx`, because permutations have a high false-positive rate and need wildcard-filtering before downstream tools see them. Pipe directly with `aith assess kali alterx -l <subs>.txt -o /tmp/perms.txt && aith assess kali puredns resolve /tmp/perms.txt --rate-limit 5000 -w /tmp/perms_resolved.txt`.
+The chain pattern is **alterx -> puredns resolve**, not `alterx -> dnsx`, because permutations have a high false-positive rate and need wildcard-filtering before downstream tools see them. Pipe directly with `vigil assess kali alterx -l <subs>.txt -o /tmp/perms.txt && vigil assess kali puredns resolve /tmp/perms.txt --rate-limit 5000 -w /tmp/perms_resolved.txt`.
 
 ## cero — CIDR-feed pattern
 
@@ -76,7 +76,7 @@ Phase C (alterx + puredns) is the highest-CPU step in the workflow. Skip when ei
 - **Phase A returned >5000 unique subs.** At that volume, passive sources have already saturated the namespace. Permutation candidates against a 5000-sub apex rarely add live hosts; the live-host hit rate per permutation drops below 0.1%.
 - **Target is a top-tier organization** (federal agency, F500 enterprise, well-funded bug-bounty program with broad scope). Such targets have years of CT logs, well-known passive footprint, and aggressive wildcard rejection. Passive + CT covers the namespace far better than permutations.
 
-When skipping C, jump from Phase B to Phase D directly. Record the skip rationale via `aith assess log operator "Phase C bruteforce skipped" "<reason>" --actor-kind operator` so the audit trail explains the missing run instead of leaving a coverage gap unexplained.
+When skipping C, jump from Phase B to Phase D directly. Record the skip rationale via `vigil assess log operator "Phase C bruteforce skipped" "<reason>" --actor-kind operator` so the audit trail explains the missing run instead of leaving a coverage gap unexplained.
 
 ## Cross-references
 

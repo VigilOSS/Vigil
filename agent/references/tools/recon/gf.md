@@ -3,7 +3,7 @@
 **Purpose:** Classify URLs by vulnerability-parameter patterns using pre-baked JSON pattern
 files. Bug-bounty staple for triaging large historical URL corpora (gau, waybackurls, katana).
 
-**In this repo**: the gf bucket patterns are compiled into `assess.lib.classify_buckets._BUCKETS` and applied inline at ingest — operators do not need to run `gf` directly. The runtime image still ships `gf` plus the upstream pattern library for ad-hoc one-off triage, invokable via `aith assess kali exec --technique RECON --intent "<why>" --probe-kind fingerprint --phase recon --timeout <seconds> -- gf ...`.
+**In this repo**: the gf bucket patterns are compiled into `assess.lib.classify_buckets._BUCKETS` and applied inline at ingest — operators do not need to run `gf` directly. The runtime image still ships `gf` plus the upstream pattern library for ad-hoc one-off triage, invokable via `vigil assess kali exec --technique RECON --intent "<why>" --probe-kind fingerprint --phase recon --timeout <seconds> -- gf ...`.
 
 ## Install layout
 
@@ -73,7 +73,7 @@ occasionally adds patterns.
 
 ## Pipeline patterns
 
-`gf` is a host-side URL classifier — it reads a corpus file and writes matched URLs to stdout. Run it on the host without `aith assess kali`; feed its output into a file, then pass the file to `aith assess kali` verbs for the target-facing steps.
+`gf` is a host-side URL classifier — it reads a corpus file and writes matched URLs to stdout. Run it on the host without `vigil assess kali`; feed its output into a file, then pass the file to `vigil assess kali` verbs for the target-facing steps.
 
 ```bash
 # Classify the corpus into per-bucket files (host-side, no target traffic)
@@ -82,15 +82,15 @@ for p in ssrf redirect idor sqli lfi; do
     > /engagements/$ENGAGEMENT_KEY/scans/gf_${p}.txt
 done
 
-# Feed classified URLs into target-facing tools via aith assess kali
-aith assess kali httpx \
+# Feed classified URLs into target-facing tools via vigil assess kali
+vigil assess kali httpx \
   -l /engagements/$ENGAGEMENT_KEY/scans/gf_ssrf.txt \
   -silent -mc 200 \
   -o /engagements/$ENGAGEMENT_KEY/scans/gf_ssrf_live.jsonl \
   --technique SSRF --intent "confirm live SSRF-candidate URLs from gf classification" \
   --probe-kind fingerprint --phase consume-test --timeout 600
 
-aith assess kali sqlmap \
+vigil assess kali sqlmap \
   -m /engagements/$ENGAGEMENT_KEY/scans/gf_sqli.txt \
   --technique=BEU --batch \
   --technique SQLI --intent "gf-classified SQLi candidate sweep" \

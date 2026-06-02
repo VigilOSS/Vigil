@@ -1,6 +1,6 @@
-"""aith assess list-command-runs — search the backend command-run audit log.
+"""vigil assess list-command-runs — search the backend command-run audit log.
 
-Use before re-running an `aith assess kali` command to check whether an
+Use before re-running an `vigil assess kali` command to check whether an
 equivalent command already ran in the current engagement. Filter by agent,
 phase, tool, success, timed-out, technique, probe_kind, destructive, or
 keyword (FTS5).
@@ -18,7 +18,7 @@ from assess.lib.config import load_config
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "list-command-runs",
-        help="List `aith assess kali` command-run audit records for this engagement",
+        help="List `vigil assess kali` command-run audit records for this engagement",
     )
     p.add_argument("--q", default="", help="Fuzzy keyword search over command, tool, previews, metadata, and finding aliases")
     p.add_argument(
@@ -66,7 +66,7 @@ def register(subparsers) -> None:
         default="",
         choices=["", "kali", "host_exec"],
         help="Filter by execution lane: host_exec = host-native recon recorded via "
-             "`aith assess host-exec`; kali = container-side. Empty = both.",
+             "`vigil assess host-exec`; kali = container-side. Empty = both.",
     )
     p.add_argument(
         "--technique",
@@ -205,7 +205,7 @@ def _render_table(rows: list[dict]) -> str:
         route_raw = str(row.get("route") or "")
         if route_raw == "host_exec":
             route_display = "host"
-        elif route_raw.startswith("aith assess kali/"):
+        elif route_raw.startswith("vigil assess kali/"):
             route_display = "kali"
         else:
             route_display = "-"

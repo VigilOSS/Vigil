@@ -12,7 +12,7 @@ The literals below are documented placeholder values in vendor installer templat
 
 ```bash
 # Save the headers from the recon pass to a file first
-aith assess kali exec --technique INFO-DISCLOSURE \
+vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "vendor-template CSP/CORS re-baseline header capture" \
   --probe-kind fingerprint --phase recon --timeout 30 -- \
   curl -sSI 'https://TARGET/' \
@@ -132,10 +132,10 @@ for f in "$@"; do
 done
 ```
 
-Run via `aith assess kali exec`:
+Run via `vigil assess kali exec`:
 
 ```bash
-aith assess kali exec --technique INFO-DISCLOSURE \
+vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "CSP-default-grep sweep across captured header dumps" \
   --probe-kind payload --phase recon --timeout 60 -- \
   bash /engagements/$ENGAGEMENT_KEY/tools/csp-default-grep.sh \
@@ -144,13 +144,13 @@ aith assess kali exec --technique INFO-DISCLOSURE \
 
 ## Recording the result
 
-Per host with a hit, record an intel-note via `aith assess record-intel note <json-file>` with:
+Per host with a hit, record an intel-note via `vigil assess record-intel note <json-file>` with:
 
 - `title` — `CSP placeholder default surviving into production on <host>`
 - `body` — the matched directive plus the placeholder literal that triggered the match
 - `category` — `infrastructure`
 
-When the matched directive directly enables an exploitable primitive (e.g., `script-src 'unsafe-inline' 'unsafe-eval'` on a page that reflects user input), record a finding via `aith assess record-finding` with the matched directive as evidence and a severity that follows the proved-impact rule — the placeholder by itself is intel; the primitive it enables is the finding.
+When the matched directive directly enables an exploitable primitive (e.g., `script-src 'unsafe-inline' 'unsafe-eval'` on a page that reflects user input), record a finding via `vigil assess record-finding` with the matched directive as evidence and a severity that follows the proved-impact rule — the placeholder by itself is intel; the primitive it enables is the finding.
 
 ## Production-hardening checklist cross-reference
 

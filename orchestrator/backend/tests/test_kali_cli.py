@@ -1,4 +1,4 @@
-"""Tests for the `aith assess kali` CLI command family.
+"""Tests for the `vigil assess kali` CLI command family.
 
 Argparse round-trip plus mocked-helper coverage for the host-side execution
 helper. The actual `docker exec` is never invoked in these tests — `kali_exec`
@@ -418,7 +418,7 @@ def test_hoist_root_flags_handles_either_position():
     """`--engagement-dir` and `--actor-kind` are root-parser flags and used
     to fail with `unrecognized arguments` when placed after the subcommand.
     1Z.17 fix hoists them to the front before parse_args, so operators can
-    write `aith assess kali nmap-scan --engagement-dir <path>` interchangeably
+    write `vigil assess kali nmap-scan --engagement-dir <path>` interchangeably
     with the canonical front-position form. The hoist must stop at `--` so
     user-supplied argv to `kali exec`/`kali job start` is never mutated."""
     cli = _import("assess.cli")
@@ -741,7 +741,7 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     assert payload["auth_context"] == "cookies"
     # P1 schema fix: the CLI must propagate its engagement-wide run_uuid into
     # the POST so the backend's `run_uuid` column matches the wrapper pid file
-    # key (`/tmp/aith-pid-<run_uuid>.pid`). Without this, sweep-orphans cannot
+    # key (`/tmp/vigil-pid-<run_uuid>.pid`). Without this, sweep-orphans cannot
     # find the pid file from the DB column and falls back to regex-parsing
     # stdout_path — which breaks when the artifact dir is reconfigured.
     assert payload.get("run_uuid"), "CLI must propagate run_uuid into POST"
@@ -825,7 +825,7 @@ def test_kali_exec_timeout_kills_process_group_and_marks_timed_out(
 
 def test_nuclei_lock_rejects_concurrent_invocation(monkeypatch, fake_engagement):
     """C32: a per-engagement file lock prevents two concurrent
-    `aith assess kali nuclei` invocations from corrupting each other's output.
+    `vigil assess kali nuclei` invocations from corrupting each other's output.
     Acquire the lock once, then attempt to reacquire under the same engagement
     and verify the second attempt raises AssessError with a clear message."""
     import importlib.util
@@ -923,7 +923,7 @@ def test_filenotfound_finalizes_running_audit_row_to_failed(monkeypatch, fake_en
 
 def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_engagement):
     """B1: the docker-exec argv must wrap the user command in a tiny shell
-    that records ``$$`` to ``/tmp/aith-pid-<run-uuid>.pid`` before ``exec``-ing
+    that records ``$$`` to ``/tmp/vigil-pid-<run-uuid>.pid`` before ``exec``-ing
     the real command. Without this wrapper, the host helper has no way to
     address the in-container process across the PID namespace boundary, and
     SIGTERM-trapping tools (sqlmap, nuclei) survive the host-side process-group
@@ -958,10 +958,10 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
     assert argv[:2] == ["docker", "exec"]
     assert argv[2:4] == ["--env", f"ENGAGEMENT_KEY={fake_engagement.name}"]
     assert argv[4:6] == ["-w", f"/engagements/{fake_engagement.name}"]
-    container_index = argv.index("security-research")
+    container_index = argv.index("vigil")
     assert argv[container_index + 1:container_index + 3] == ["sh", "-c"]
     wrapper = argv[container_index + 3]
-    assert wrapper.startswith("echo $$ > /tmp/aith-pid-"), wrapper
+    assert wrapper.startswith("echo $$ > /tmp/vigil-pid-"), wrapper
     # The PID-write race fix wraps the original `echo $$ > pidfile; exec "$@"`
     # in `&&`/`||` so a failed write logs to stderr and still execs. Both
     # branches must end in `exec "$@"` so the user command runs either way.
@@ -1131,9 +1131,9 @@ def test_b1_orphan_cleanup_via_live_runtime():
     validated end-to-end.
 
     Flow:
-    1. Spawn a long-running ``nmap -p 1-65535 127.0.0.1`` via ``aith assess kali``.
+    1. Spawn a long-running ``nmap -p 1-65535 127.0.0.1`` via ``vigil assess kali``.
     2. Force a wall-clock timeout (``--timeout 2``).
-    3. After timeout, ``docker exec security-research pgrep -af nmap`` MUST
+    3. After timeout, ``docker exec vigil pgrep -af nmap`` MUST
        return no rows. Before the B1 fix, nmap survived because dockerd's
        SIGTERM forwarding raced with nmap's signal handlers.
     """
@@ -1142,7 +1142,7 @@ def test_b1_orphan_cleanup_via_live_runtime():
 
     if shutil.which("docker") is None:
         pytest.skip("docker CLI not on PATH")
-    container = "security-research"
+    container = "vigil"
     health = subprocess.run(
         ["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{container}$"],
         check=False,
@@ -1153,13 +1153,13 @@ def test_b1_orphan_cleanup_via_live_runtime():
     if container not in (health.stdout or "").splitlines():
         pytest.skip(f"runtime container '{container}' is not running")
 
-    aith = shutil.which("aith")
-    if aith is None:
-        pytest.skip("aith CLI not on PATH")
+    vigil = shutil.which("vigil")
+    if vigil is None:
+        pytest.skip("vigil CLI not on PATH")
 
     proc = subprocess.run(
         [
-            aith,
+            vigil,
             "assess",
             "kali",
             "exec",
@@ -1195,7 +1195,7 @@ def test_b1_orphan_cleanup_via_live_runtime():
     )
     assert pgrep.returncode != 0, (
         f"nmap orphans survived inside container after timeout:\n"
-        f"aith stdout: {proc.stdout}\naith stderr: {proc.stderr}\n"
+        f"vigil stdout: {proc.stdout}\naith stderr: {proc.stderr}\n"
         f"pgrep stdout: {pgrep.stdout}"
     )
 
@@ -1210,28 +1210,28 @@ def test_b1_timeout_kills_sigterm_trapping_in_container_pid():
 
     if shutil.which("docker") is None:
         pytest.skip("docker CLI not on PATH")
-    container = "security-research"
+    container = "vigil"
     health = subprocess.run(
         ["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{container}$"],
         check=False, capture_output=True, text=True, timeout=10,
     )
     if container not in (health.stdout or "").splitlines():
         pytest.skip(f"runtime container '{container}' is not running")
-    aith = shutil.which("aith")
-    if aith is None:
-        pytest.skip("aith CLI not on PATH")
+    vigil = shutil.which("vigil")
+    if vigil is None:
+        pytest.skip("vigil CLI not on PATH")
 
     def _ls_pid_files() -> set[str]:
         r = subprocess.run(
             ["docker", "exec", container, "sh", "-c",
-             "ls /tmp/aith-pid-*.pid 2>/dev/null || true"],
+             "ls /tmp/vigil-pid-*.pid 2>/dev/null || true"],
             check=False, capture_output=True, text=True, timeout=10,
         )
         return {ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()}
 
     before = _ls_pid_files()
     proc = subprocess.run(
-        [aith, "assess", "kali", "exec",
+        [vigil, "assess", "kali", "exec",
          "--technique", "RECON",
          "--intent", "B1 SIGKILL-fallback acceptance test",
          "--probe-kind", "fingerprint", "--phase", "recon", "--timeout", "5",
@@ -1264,7 +1264,7 @@ def test_b1_timeout_kills_sigterm_trapping_in_container_pid():
 
     assert not survivors, (
         f"SIGTERM-trapping victim survived the cascade — SIGKILL leg broken.\n"
-        f"aith stdout: {proc.stdout}\naith stderr: {proc.stderr}\n"
+        f"vigil stdout: {proc.stdout}\naith stderr: {proc.stderr}\n"
         f"pgrep stdout: {pgrep.stdout}"
     )
     for pid_path, recorded in leftover_pids:
@@ -1591,7 +1591,7 @@ def test_kali_exec_defaults_missing_agent_name_to_operator(monkeypatch, fake_eng
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.delenv("AGENT_NAME", raising=False)
-    monkeypatch.delenv("AITH_AGENT_NAME", raising=False)
+    monkeypatch.delenv("VIGIL_AGENT_NAME", raising=False)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
     monkeypatch.setattr(kali.subprocess, "Popen", lambda *_a, **_k: _FakePopen(returncode=0))
@@ -1754,16 +1754,16 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
             "probe_kind": "fingerprint",
             "phase": "recon",
         },
-        container_name="security-research",
+        container_name="vigil",
     )
     assert record["status"] == "running"
-    assert "/tmp/aith-jobs/" in record["dtach_socket_path"]
+    assert "/tmp/vigil-jobs/" in record["dtach_socket_path"]
     # POST /jobs landed.
     assert fake_client.posts and fake_client.posts[0][0] == "jobs"
     assert fake_client.posts[0][1]["status"] == "queued"
     # PATCH /jobs/14 first persisted paths before any process is spawned.
     assert fake_client.patches and fake_client.patches[0][0] == "jobs/14"
-    assert fake_client.patches[0][1]["dtach_socket_path"].startswith("/tmp/aith-jobs/")
+    assert fake_client.patches[0][1]["dtach_socket_path"].startswith("/tmp/vigil-jobs/")
     assert fake_client.patches[0][1]["stdout_path"].endswith(".out")
     assert fake_client.patches[0][1]["stderr_path"].endswith(".err")
     assert "status" not in fake_client.patches[0][1]
@@ -1858,12 +1858,12 @@ def test_job_start_persists_paths_and_cleans_up_when_running_patch_fails(
                 "probe_kind": "fingerprint",
                 "phase": "recon",
             },
-            container_name="security-research",
+            container_name="vigil",
         )
 
     first_patch = events[0]
     assert first_patch[0] == "patch"
-    assert first_patch[1]["dtach_socket_path"].startswith("/tmp/aith-jobs/")
+    assert first_patch[1]["dtach_socket_path"].startswith("/tmp/vigil-jobs/")
     assert first_patch[1]["stdout_path"].endswith(".out")
     assert first_patch[1]["stderr_path"].endswith(".err")
     assert first_patch[1].get("status") != "running"
@@ -1887,7 +1887,7 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
 
     class _StopClient(_FakeClient):
         def get(self, endpoint):
-            return {"id": 22, "dtach_socket_path": "/tmp/aith-jobs/abc.sock"}
+            return {"id": 22, "dtach_socket_path": "/tmp/vigil-jobs/abc.sock"}
 
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
@@ -1910,7 +1910,7 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
         lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
 
-    record = kali_jobs.job_stop(22, container_name="security-research")
+    record = kali_jobs.job_stop(22, container_name="vigil")
     assert record["status"] == "killed"
     assert fake_client.patches[0] == ("jobs/22", {"status": "killed"})
 
@@ -1932,7 +1932,7 @@ def test_job_stop_rejects_already_terminal_job(monkeypatch, fake_engagement):
 
     class _StopClient(_FakeClient):
         def get(self, endpoint):
-            return {"id": 22, "status": "completed", "dtach_socket_path": "/tmp/aith-jobs/abc.sock"}
+            return {"id": 22, "status": "completed", "dtach_socket_path": "/tmp/vigil-jobs/abc.sock"}
 
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
@@ -1950,7 +1950,7 @@ def test_job_stop_rejects_already_terminal_job(monkeypatch, fake_engagement):
     monkeypatch.setattr(kali_jobs, "_signal_job_pid", lambda *args, **kwargs: signals.append(args))
 
     with pytest.raises(AssessError, match="already terminal"):
-        kali_jobs.job_stop(22, container_name="security-research")
+        kali_jobs.job_stop(22, container_name="vigil")
 
     assert fake_client.patches == []
     assert signals == []
@@ -1973,7 +1973,7 @@ def test_job_stop_records_stop_failed_when_pid_missing(monkeypatch, fake_engagem
 
     class _StopClient(_FakeClient):
         def get(self, endpoint):
-            return {"id": 25, "dtach_socket_path": "/tmp/aith-jobs/missing-pid.sock"}
+            return {"id": 25, "dtach_socket_path": "/tmp/vigil-jobs/missing-pid.sock"}
 
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
@@ -1998,7 +1998,7 @@ def test_job_stop_records_stop_failed_when_pid_missing(monkeypatch, fake_engagem
     monkeypatch.setattr(kali_jobs.subprocess, "run", fake_run)
 
     with pytest.raises(AssessError, match="PID.*not available"):
-        kali_jobs.job_stop(25, container_name="security-research")
+        kali_jobs.job_stop(25, container_name="vigil")
 
     assert dtach_interrupts
     assert ("jobs/25", {"status": "stop_failed"}) in fake_client.patches
@@ -2020,7 +2020,7 @@ def test_job_stop_records_lost_when_container_not_running(monkeypatch, fake_enga
 
     class _StopClient(_FakeClient):
         def get(self, endpoint):
-            return {"id": 26, "dtach_socket_path": "/tmp/aith-jobs/gone.sock"}
+            return {"id": 26, "dtach_socket_path": "/tmp/vigil-jobs/gone.sock"}
 
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
@@ -2035,7 +2035,7 @@ def test_job_stop_records_lost_when_container_not_running(monkeypatch, fake_enga
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda name: False)
 
-    record = kali_jobs.job_stop(26, container_name="security-research")
+    record = kali_jobs.job_stop(26, container_name="vigil")
 
     assert record["status"] == "lost"
     assert fake_client.patches == [("jobs/26", {"status": "lost"})]
@@ -2067,7 +2067,7 @@ def test_contract_kali_asnmap_is_registered():
     contracts = _import("assess.lib.contracts")
     rendered = contracts.render_contract("kali asnmap")
     assert "kali asnmap" in rendered
-    assert "aith assess kali asnmap" in rendered
+    assert "vigil assess kali asnmap" in rendered
 
 
 def test_contract_kali_exec_does_not_advertise_removed_strace():
@@ -2088,9 +2088,9 @@ def test_contract_command_supports_two_arg_form(capsys):
 def test_kali_exec_noop_short_circuit_keeps_argparse_smoke_test_offline(
     monkeypatch, fake_engagement
 ):
-    """AITH_KALI_NOOP is a tests-only escape hatch: argparse smoke tests can
+    """VIGIL_KALI_NOOP is a tests-only escape hatch: argparse smoke tests can
     set it so no docker / network call ever happens."""
-    monkeypatch.setenv("AITH_KALI_NOOP", "1")
+    monkeypatch.setenv("VIGIL_KALI_NOOP", "1")
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     result = kali.kali_exec(
         ["nmap", "10.0.0.1"],
@@ -2312,7 +2312,7 @@ def test_kali_job_start_warns_when_timeout_omitted(
     [
         (["status", "7"], "job_status", {"job_id": 7}),
         (["tail", "7"], "job_tail", {"job_id": 7, "follow": False}),
-        (["stop", "7"], "job_stop", {"job_id": 7, "container_name": "security-research"}),
+        (["stop", "7"], "job_stop", {"job_id": 7, "container_name": "vigil"}),
         (["list", "--status", "running"], "job_list", {"status_value": "running", "parent_run_id": None}),
     ],
 )
@@ -2344,7 +2344,7 @@ def test_kali_job_actions_thread_explicit_engagement_dir(
     def fake_job_tail(job_id, *, follow=False, config=None):
         captured["call"] = {"job_id": job_id, "follow": follow, "config": config}
 
-    def fake_job_stop(job_id, *, container_name="security-research", config=None):
+    def fake_job_stop(job_id, *, container_name="vigil", config=None):
         captured["call"] = {"job_id": job_id, "container_name": container_name, "config": config}
         return {"id": job_id, "status": "killed"}
 
@@ -2415,7 +2415,7 @@ def test_kali_job_stop_terminates_with_sigterm_then_sigkill(
 
     class _StopClient(_FakeClient):
         def get(self, endpoint):
-            return {"id": 22, "dtach_socket_path": "/tmp/aith-jobs/abc.sock"}
+            return {"id": 22, "dtach_socket_path": "/tmp/vigil-jobs/abc.sock"}
 
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
@@ -2451,7 +2451,7 @@ def test_kali_job_stop_terminates_with_sigterm_then_sigkill(
     # Avoid sleeping in the poll loop.
     monkeypatch.setattr(kali_jobs.time, "sleep", lambda _: None)
 
-    record = kali_jobs.job_stop(22, container_name="security-research")
+    record = kali_jobs.job_stop(22, container_name="vigil")
     assert record["status"] == "killed"
     assert "TERM" in signals_sent
     assert ("jobs/22", {"status": "killed"}) in fake_client.patches
@@ -2476,7 +2476,7 @@ def test_kali_job_stop_escalates_to_sigkill_when_sigterm_ignored(
 
     class _StopClient(_FakeClient):
         def get(self, endpoint):
-            return {"id": 23, "dtach_socket_path": "/tmp/aith-jobs/def.sock"}
+            return {"id": 23, "dtach_socket_path": "/tmp/vigil-jobs/def.sock"}
 
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
@@ -2516,7 +2516,7 @@ def test_kali_job_stop_escalates_to_sigkill_when_sigterm_ignored(
     monkeypatch.setattr(kali_jobs.time, "monotonic", fast_monotonic)
     monkeypatch.setattr(kali_jobs.time, "sleep", lambda _: None)
 
-    record = kali_jobs.job_stop(23, container_name="security-research")
+    record = kali_jobs.job_stop(23, container_name="vigil")
     assert record["status"] == "killed"
 
 
@@ -2539,7 +2539,7 @@ def test_kali_job_stop_records_stop_failed_when_sigkill_also_fails(
 
     class _StopClient(_FakeClient):
         def get(self, endpoint):
-            return {"id": 24, "dtach_socket_path": "/tmp/aith-jobs/zzz.sock"}
+            return {"id": 24, "dtach_socket_path": "/tmp/vigil-jobs/zzz.sock"}
 
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
@@ -2571,7 +2571,7 @@ def test_kali_job_stop_records_stop_failed_when_sigkill_also_fails(
     from assess.lib.client import AssessError
 
     with pytest.raises(AssessError) as exc:
-        kali_jobs.job_stop(24, container_name="security-research")
+        kali_jobs.job_stop(24, container_name="vigil")
     assert "stop_failed" in str(exc.value)
     # The PATCH still landed with stop_failed so the operator sees the row.
     assert ("jobs/24", {"status": "stop_failed"}) in fake_client.patches
@@ -2669,8 +2669,8 @@ def test_assessment_client_connection_failure_suggests_orchestrator(monkeypatch)
         c.get("summary")
 
     message = str(exc_info.value)
-    assert "aith orchestrator status" in message
-    assert "aith orchestrator start" in message
+    assert "vigil orchestrator status" in message
+    assert "vigil orchestrator start" in message
     assert "not the Kali runtime" in message
 
 
@@ -2704,7 +2704,7 @@ def test_pre_exec_wrapper_handles_pid_write_failure(monkeypatch, fake_engagement
         tool_name="nmap",
     )
     argv = captured["argv"]
-    container_index = argv.index("security-research")
+    container_index = argv.index("vigil")
     wrapper = argv[container_index + 3]
     # Both happy and failure paths exec the user command.
     assert wrapper.count('exec "$@"') == 2
@@ -3638,9 +3638,9 @@ def test_sweep_orphans_finalizes_dead_rows_to_lost(monkeypatch, fake_engagement)
     # PID file is readable, but kill -0 fails — the wrapper recorded a PID
     # whose process has since exited.
     def fake_subprocess_run(argv, **kwargs):
-        if argv[:3] == ["docker", "exec", "security-research"] and argv[3] == "cat":
+        if argv[:3] == ["docker", "exec", "vigil"] and argv[3] == "cat":
             return SimpleNamespace(returncode=0, stdout="9999\n", stderr="")
-        if argv[:3] == ["docker", "exec", "security-research"] and argv[3] == "kill":
+        if argv[:3] == ["docker", "exec", "vigil"] and argv[3] == "kill":
             assert argv[4] == "-0"
             assert argv[5] == "9999"
             return SimpleNamespace(returncode=1, stdout="", stderr="")
@@ -3651,7 +3651,7 @@ def test_sweep_orphans_finalizes_dead_rows_to_lost(monkeypatch, fake_engagement)
     sweep.run(SimpleNamespace(
         engagement_dir=str(fake_engagement),
         max_age_seconds=3600,
-        container_name="security-research",
+        container_name="vigil",
         dry_run=False,
     ))
 
@@ -3683,7 +3683,7 @@ def test_sweep_orphans_skips_alive_rows(monkeypatch, fake_engagement):
     sweep.run(SimpleNamespace(
         engagement_dir=str(fake_engagement),
         max_age_seconds=3600,
-        container_name="security-research",
+        container_name="vigil",
         dry_run=False,
     ))
 
@@ -3723,7 +3723,7 @@ def test_sweep_orphans_dry_run_does_not_patch(monkeypatch, capsys, fake_engageme
     sweep.run(SimpleNamespace(
         engagement_dir=str(fake_engagement),
         max_age_seconds=3600,
-        container_name="security-research",
+        container_name="vigil",
         dry_run=True,
     ))
 
@@ -3767,7 +3767,7 @@ def test_sweep_orphans_filters_to_running_status_serverside(
     sweep.run(SimpleNamespace(
         engagement_dir=str(fake_engagement),
         max_age_seconds=3600,
-        container_name="security-research",
+        container_name="vigil",
         dry_run=True,
     ))
 
@@ -3804,7 +3804,7 @@ def test_sweep_orphans_handles_missing_pid_file_as_dead(monkeypatch, fake_engage
     sweep.run(SimpleNamespace(
         engagement_dir=str(fake_engagement),
         max_age_seconds=3600,
-        container_name="security-research",
+        container_name="vigil",
         dry_run=False,
     ))
 
@@ -3836,7 +3836,7 @@ def test_sweep_orphans_skips_when_pid_probe_fails(
     sweep.run(SimpleNamespace(
         engagement_dir=str(fake_engagement),
         max_age_seconds=3600,
-        container_name="security-research",
+        container_name="vigil",
         dry_run=False,
     ))
 
@@ -3866,7 +3866,7 @@ def test_sweep_orphans_skips_when_liveness_probe_fails(
     sweep.run(SimpleNamespace(
         engagement_dir=str(fake_engagement),
         max_age_seconds=3600,
-        container_name="security-research",
+        container_name="vigil",
         dry_run=False,
     ))
 
@@ -3908,14 +3908,14 @@ def test_sweep_orphans_uses_db_run_uuid_when_present(monkeypatch, fake_engagemen
     sweep.run(SimpleNamespace(
         engagement_dir=str(fake_engagement),
         max_age_seconds=3600,
-        container_name="security-research",
+        container_name="vigil",
         dry_run=False,
     ))
 
     # The cat call must have asked for the DB-column uuid's pid file, not the
     # legacy regex value. This is the load-bearing assertion of the P1 fix.
     assert cat_args, "sweep must look up at least one pid file"
-    assert cat_args[0] == f"/tmp/aith-pid-{db_uuid}.pid"
+    assert cat_args[0] == f"/tmp/vigil-pid-{db_uuid}.pid"
     assert legacy_path_uuid not in cat_args[0]
 
 
@@ -3938,7 +3938,7 @@ def test_sweep_orphans_respects_max_age_threshold(monkeypatch, fake_engagement):
     sweep.run(SimpleNamespace(
         engagement_dir=str(fake_engagement),
         max_age_seconds=3600,
-        container_name="security-research",
+        container_name="vigil",
         dry_run=False,
     ))
 

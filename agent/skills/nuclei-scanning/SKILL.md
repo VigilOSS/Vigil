@@ -1,12 +1,12 @@
 ---
 name: nuclei-scanning
 description: Template-based vulnerability scanning with nuclei for CVEs, misconfigs, and exposures
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Nuclei Scanning
 
-> **`aith assess kali` audit flags:** set `--technique` per the template-tag focus — `CVE-VALIDATION` for `-tags cve` runs, `DISCOVERY` for tech-detect and fingerprint templates, `INFO-DISCLOSURE` for exposure templates, and `OTHER` for mixed sweeps spanning many classes.
+> **`vigil assess kali` audit flags:** set `--technique` per the template-tag focus — `CVE-VALIDATION` for `-tags cve` runs, `DISCOVERY` for tech-detect and fingerprint templates, `INFO-DISCLOSURE` for exposure templates, and `OTHER` for mixed sweeps spanning many classes.
 
 ## When to Activate
 
@@ -37,14 +37,14 @@ priority_score on fresh work-buffer entries before specialists pull them. Trigge
 
 - After `recon-specialist` returns with an endpoint list (`endpoints.txt` or surfaces)
 - After `source-analyzer` harvests JS/HTML URLs (scans/js_urls.txt, extracted endpoint arrays)
-- After `surface-collector` ingests Katana / gau output (`aith assess ingest-endpoints` just ran)
+- After `surface-collector` ingests Katana / gau output (`vigil assess ingest-endpoints` just ran)
 - After `subdomain-enumeration` produces live hosts (`subdomains_live.txt` entries land)
 - After wildcard expansion adds apex siblings that passed the httpx liveness check
 
-### Build the delta file (host-side `aith assess`, runtime-side `aith assess kali`)
+### Build the delta file (host-side `vigil assess`, runtime-side `vigil assess kali`)
 
 The delta is "live URLs not yet covered by a prior reactive nuclei run with the same template
-set." Build it on the host (coverage lookup is host-side `aith assess` work), then write the file
+set." Build it on the host (coverage lookup is host-side `vigil assess` work), then write the file
 under `/engagements/$ENGAGEMENT_KEY/scans/` so Kali sees it at the same path.
 
 ```bash
@@ -54,7 +54,7 @@ KEY=$(basename "$DIR")
 RID=$(date -u +%Y%m%dT%H%M%SZ)
 
 # 1. Gather the current live-URL universe from backend state.
-aith assess fetch summary > "$DIR/scans/_summary_$RID.json"
+vigil assess fetch summary > "$DIR/scans/_summary_$RID.json"
 # Take services/hosts plus any freshly-ingested URLs you want covered. Example shape:
 jq -r '.. | .url? // empty' "$DIR/scans/_summary_$RID.json" | sort -u \
   > "$DIR/scans/_all_live_$RID.txt"
@@ -62,7 +62,7 @@ jq -r '.. | .url? // empty' "$DIR/scans/_summary_$RID.json" | sort -u \
 # katana output — so the reactive pass scans only the newly-added URLs.)
 
 # 2. Gather already-scanned URLs from prior reactive runs with the same template bucket.
-aith assess list-command-runs --q nuclei --tool-bin nuclei --json > \
+vigil assess list-command-runs --q nuclei --tool-bin nuclei --json > \
   "$DIR/scans/_nuclei_runs_$RID.json"
 # Every prior reactive run wrote its input list at /engagements/$KEY/scans/nuclei_reactive_<RID>.txt
 # and its output JSONL alongside. Extract URLs already covered — use the JSONL artifacts as the
@@ -71,13 +71,13 @@ find "$DIR/scans" -name 'nuclei_reactive_*.jsonl' -print0 | \
   xargs -0 -r jq -r '.["matched-at"] // .host // empty' 2>/dev/null | \
   sort -u > "$DIR/scans/_already_scanned_$RID.txt"
 
-# 3. Subtract already-scanned from all-live, then filter the result to scope via aith assess
+# 3. Subtract already-scanned from all-live, then filter the result to scope via vigil assess
 #    filter-scope. filter-scope does exact-host and wildcard-aware matching against scope.json,
 #    so it correctly handles `*.example.com` entries that naive `grep -Ff` treats as literals.
 comm -23 \
   "$DIR/scans/_all_live_$RID.txt" \
   "$DIR/scans/_already_scanned_$RID.txt" | \
-  aith assess filter-scope - \
+  vigil assess filter-scope - \
   > "$DIR/scans/nuclei_reactive_$RID.txt"
 ```
 
@@ -86,10 +86,10 @@ new this pass AND attached to a scope.json host (including wildcard expansions).
 guard risks sweeping an out-of-scope host that was pulled in from a passive source, which would
 break the engagement's authorization envelope.
 
-### Invocation (`aith assess kali nuclei`, exact)
+### Invocation (`vigil assess kali nuclei`, exact)
 
 ```bash
-aith assess kali nuclei \
+vigil assess kali nuclei \
   -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_reactive_$RID.txt \
   -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/,http/technologies/,http/exposed-panels/ \
   -severity medium,high,critical \
@@ -123,7 +123,7 @@ Flags explained — each flag earns its place because removing it breaks an assu
 - `-stats -si 30` prints a 30-second stats tick so the operator sees progress without tailing the
   JSONL file — useful when the delta is large.
 
-Run each sweep synchronously — one blocking `aith assess kali <verb> … --timeout N` at a time. Specialists do NOT background target traffic or use `aith assess kali job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f nmap`) — it stomps sibling agents' processes in the shared runtime. See
+Run each sweep synchronously — one blocking `vigil assess kali <verb> … --timeout N` at a time. Specialists do NOT background target traffic or use `vigil assess kali job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f nmap`) — it stomps sibling agents' processes in the shared runtime. See
 `agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for the full pattern.
 
 ### Template selection rationale
@@ -138,7 +138,7 @@ CVE/misconfig/exposure signal rather than fuzzing noise.
 
 ### Single-instance lock + zero-byte detection (C32)
 
-The wrapper now enforces a per-engagement file lock at `$ENGAGEMENT_DIR/scans/.nuclei.lock`. Concurrent `aith assess kali nuclei` invocations against the same engagement fail-fast with a clear error naming the holding PID — the second run does not start. This prevents two parallel runs from corrupting each other's jsonl output when artifact paths collide.
+The wrapper now enforces a per-engagement file lock at `$ENGAGEMENT_DIR/scans/.nuclei.lock`. Concurrent `vigil assess kali nuclei` invocations against the same engagement fail-fast with a clear error naming the holding PID — the second run does not start. This prevents two parallel runs from corrupting each other's jsonl output when artifact paths collide.
 
 If the holding PID has died (crashed mid-run), the lock auto-recovers on the next invocation. Manual cleanup: `rm $ENGAGEMENT_DIR/scans/.nuclei.lock` only when both the PID is dead AND the engagement directory is otherwise stable.
 
@@ -159,11 +159,11 @@ Hosts where `-as` is known to suppress:
 - **Cloudflare with aggressive bot rules** — fingerprint requests get challenged before wappalyzer can score them. Same workaround.
 - **WAF-fronted enterprise edges in general** — when `wafw00f` already flagged a WAF on the host, expect `-as` to underperform.
 
-When you see `Templates loaded for current scan: NNNN` in stderr but zero result rows in stdout, do NOT report nuclei as broken. Re-run with explicit `-t` paths against the same target. Confirm with `aith assess get-command-run <id>` — the stderr preview is the source of truth for "did the run actually execute templates."
+When you see `Templates loaded for current scan: NNNN` in stderr but zero result rows in stdout, do NOT report nuclei as broken. Re-run with explicit `-t` paths against the same target. Confirm with `vigil assess get-command-run <id>` — the stderr preview is the source of truth for "did the run actually execute templates."
 
 ### Dedup across runs (Option A — no schema change)
 
-Use `aith assess list-command-runs --q nuclei --tool-bin nuclei --json` to compute the "already-scanned" set from prior
+Use `vigil assess list-command-runs --q nuclei --tool-bin nuclei --json` to compute the "already-scanned" set from prior
 reactive runs, then subtract it from the current delta before invoking nuclei. The artifact
 filenames and JSONL outputs are durable engagement state — no new column on
 `assessment_command_runs` is needed because the inputs (delta file) and outputs (JSONL) live
@@ -171,7 +171,7 @@ under `/engagements/$ENGAGEMENT_KEY/scans/` and survive container recreate.
 
 ```bash
 # jq exclusion-set pattern (runs before nuclei invocation)
-aith assess list-command-runs --q nuclei --tool-bin nuclei --json | \
+vigil assess list-command-runs --q nuclei --tool-bin nuclei --json | \
   jq -r '.[].command
          | capture("(?<path>/engagements/[^ ]+/scans/nuclei_reactive_[^ ]+\\.txt)")?.path
          // empty' | \
@@ -196,21 +196,21 @@ Reactive nuclei hits enter the engagement as candidates, not auto-recorded findi
 revalidation catches template false positives (SSRF probes against patched endpoints,
 version-string collisions, etc.) before they reach the finding lifecycle.
 
-- **Critical / high hits** — draft a finding JSON (see `aith assess contract
-  record-finding` for the schema), re-validate the template's PoC manually via `aith assess kali exec` (or the matching typed verb), then
-  record with `aith assess record-finding vulnerability-analyst <finding-json-file>`
+- **Critical / high hits** — draft a finding JSON (see `vigil assess contract
+  record-finding` for the schema), re-validate the template's PoC manually via `vigil assess kali exec` (or the matching typed verb), then
+  record with `vigil assess record-finding vulnerability-analyst <finding-json-file>`
   only if the re-test reproduces the hit.
-- **Medium hits** — record as intel with `aith assess record-intel note <json-file>`,
+- **Medium hits** — record as intel with `vigil assess record-intel note <json-file>`,
   noting the template-id and matched URL. Medium hits often seed Phase 3 targeted testing
   rather than standalone findings.
 - **Tech fingerprints** (from `-as` template matches like `http/technologies/`) — record via
-  `aith assess record-intel tech-component <json-file>` so downstream tooling can match them
+  `vigil assess record-intel tech-component <json-file>` so downstream tooling can match them
   against CVE intel.
 
 ### Safety and scope boundary
 
 Reactive nuclei runs only against URLs present in the scope.json host list (enforced by the
-`aith assess filter-scope` step above, which handles wildcards correctly). Never sweep a host
+`vigil assess filter-scope` step above, which handles wildcards correctly). Never sweep a host
 whose presence in the delta came from passive sources alone — an out-of-scope sweep breaks
 the authorization envelope even if the finding would be accurate.
 
@@ -230,12 +230,12 @@ DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
 KEY=$(basename "$DIR")
 RID=$(date -u +%Y%m%dT%H%M%SZ)
 
-# 1. Universe: every in-scope live URL the engagement has observed. aith assess filter-scope
+# 1. Universe: every in-scope live URL the engagement has observed. vigil assess filter-scope
 #    handles wildcard entries in scope.json correctly; the raw grep -Ff pattern misses
 #    `*.example.com` expansions and must not be reintroduced.
-aith assess fetch summary > "$DIR/scans/_summary_audit_$RID.json"
+vigil assess fetch summary > "$DIR/scans/_summary_audit_$RID.json"
 jq -r '.. | .url? // empty' "$DIR/scans/_summary_audit_$RID.json" | sort -u \
-  | aith assess filter-scope - \
+  | vigil assess filter-scope - \
   > "$DIR/scans/_in_scope_live_audit_$RID.txt"
 
 # 2. Already-covered: every URL that appeared in a prior reactive run's input list.
@@ -252,7 +252,7 @@ comm -23 \
 GAP_COUNT=$(wc -l < "$DIR/scans/nuclei_gap_$RID.txt")
 if [ "$GAP_COUNT" -eq 0 ]; then
   COVERED_COUNT=$(wc -l < "$DIR/scans/_in_scope_live_audit_$RID.txt")
-  aith assess log operator \
+  vigil assess log operator \
     "Phase 3a nuclei coverage audit" \
     "check-scope-coverage --require-stage consumption" \
     "Reactive sweeps covered all ${COVERED_COUNT} in-scope live URLs; no rerun needed." \
@@ -261,10 +261,10 @@ if [ "$GAP_COUNT" -eq 0 ]; then
 fi
 ```
 
-### Invocation (gaps only, `aith assess kali nuclei`)
+### Invocation (gaps only, `vigil assess kali nuclei`)
 
 ```bash
-aith assess kali nuclei \
+vigil assess kali nuclei \
   -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.txt \
   -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/,http/technologies/,http/exposed-panels/ \
   -severity medium,high,critical \

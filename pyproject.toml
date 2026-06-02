@@ -3,15 +3,14 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "security-research"
+name = "vigil"
 version = "0.1.0"
-description = "Universal CLI for AI Threat Hunting installs, engagements, runtime, and orchestrator operations"
+description = "Universal CLI for Vigil installs, engagements, runtime, and orchestrator operations"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-aith = "ai_threat_hunting_cli.main:main"
-security-research = "ai_threat_hunting_cli.main:main"
+vigil = "vigil_cli.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

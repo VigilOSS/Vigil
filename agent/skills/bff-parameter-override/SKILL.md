@@ -1,12 +1,12 @@
 ---
 name: bff-parameter-override
 description: Test for hidden middleware/BFF parameters that override backend identity, authorization, or object resolution when supplied by the client
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # BFF Parameter Override Testing
 
-> **`aith assess kali` audit flags:** use `--technique AUTH` for identity-override probes, `--technique IDOR` for object-override probes. Use `--probe-kind payload` for injection attempts, `--probe-kind exploit` for confirmed override demonstrations.
+> **`vigil assess kali` audit flags:** use `--technique AUTH` for identity-override probes, `--technique IDOR` for object-override probes. Use `--probe-kind payload` for injection attempts, `--probe-kind exploit` for confirmed override demonstrations.
 
 ## When to Activate
 
@@ -28,7 +28,7 @@ The attacker supplies the internal parameter directly, overriding the value the 
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` for all probing (mandatory audit pipeline)
+- `vigil assess kali exec -- curl ...` for all probing (mandatory audit pipeline)
 - Source analysis output (if available) for parameter name discovery
 - Browser DevTools / mitmproxy for observing request enrichment patterns
 
@@ -70,7 +70,7 @@ identical-to-baseline cluster:
 ```bash
 # one {url,status,content_length,title} record per injected param → bff_inject.jsonl
 # (set url to the param name you injected so the ranking names the culprit), then:
-aith assess anomaly-score bff_inject.jsonl --top 5
+vigil assess anomaly-score bff_inject.jsonl --top 5
 #   #1  score=4.17  status=200  len=2210  url=param:notAuthUserId   ← this override changed the response
 #       ^ length_bucket=...  ^ title='...'                          every ignored param matched baseline
 ```
@@ -122,7 +122,7 @@ session-derived ID and use its `escalation`/`boundary`/`neighbor` variants as th
 candidates — these surface the first/admin object and adjacent records without needing a captured
 victim ID:
 ```bash
-aith assess classify-payload "$MY_USER_ID" --mutations
+vigil assess classify-payload "$MY_USER_ID" --mutations
 #   sequential_id → escalation '1' '0' 'admin' 'root';  neighbor ±1/±2;  boundary 0/-1/99999999
 #   uuid          → escalation 00000000-...-000000000000 / ...-000000000001 (likely first/admin user)
 ```

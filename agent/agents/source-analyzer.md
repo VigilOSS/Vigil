@@ -23,10 +23,10 @@ already listed below.
 
 ## Load First
 
-- `agent/shared-constraints.md` — scope, `aith assess kali` rule, finding IDs, rule reminders
+- `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/source-analysis/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
+- `agent/skills/source-analysis/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 
 ## Pre-Work Checkpoint
 
@@ -36,7 +36,7 @@ Before starting any target-facing work, verify:
 - [ ] You loaded the source-analysis skill (`agent/skills/source-analysis/SKILL.md`)
 - [ ] You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
 - [ ] You have the dispatch context (target URL, phase, task objective, prior findings)
-- [ ] You know the backend write paths for what you discover: requestable endpoints go through `aith assess ingest-endpoints "$DIR/cases.db" source-analysis`, durable surface candidates go through `aith assess record-surface ...`, and confirmed findings go through `aith assess record-finding ...`
+- [ ] You know the backend write paths for what you discover: requestable endpoints go through `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis`, durable surface candidates go through `vigil assess record-surface ...`, and confirmed findings go through `vigil assess record-finding ...`
 
 If any item is unchecked, STOP and load it now. Working without the skill and its references means working without methodology — your source analysis quality will be significantly lower.
 
@@ -81,7 +81,7 @@ When the target is a React, Next.js, Vue, or similar SPA, look beyond inline scr
 - Focus on attackable meaning, not inventory for its own sake
 - Distinguish between inferred routes and directly evidenced requestable endpoints
 - Promote only concrete evidence into durable findings; keep weaker leads as hypotheses for follow-up
-- Keep target-facing execution in `aith assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
+- Keep target-facing execution in `vigil assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
 
 ## Pre-Output Coverage Self-Check
 
@@ -147,17 +147,17 @@ declare it in `#### Coverage Gaps` so the operator can decide whether to re-disp
 
 Before your dispatch returns, run in this order:
 
-1. `aith assess record-finding source-analyzer <finding-json>` for each finding (already required)
-2. `aith assess record-intel <type> <intel-json>` for each intel row (tech-component for fingerprints, note for prose, etc.)
-3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate
-4. `aith assess ingest-endpoints "$DIR/cases.db" source-analysis` for newly extracted requestable endpoints
-5. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `routes_extracted`, `secrets_found`, `app_version`)
-6. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+1. `vigil assess record-finding source-analyzer <finding-json>` for each finding (already required)
+2. `vigil assess record-intel <type> <intel-json>` for each intel row (tech-component for fingerprints, note for prose, etc.)
+3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate
+4. `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis` for newly extracted requestable endpoints
+5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `routes_extracted`, `secrets_found`, `app_version`)
+6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
+`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -189,6 +189,6 @@ than enumerating canonical state.
 
 ## Handoffs
 
-- To `vulnerability-analyst`: API routes, object references, mutation paths, auth assumptions, feature flags — name the vuln-class skill (discoverable via `aith assess list-skills`) matching the candidate (e.g., `idor-testing` for object refs, `sqli-testing` for query params) so the operator can include it in the dispatch
+- To `vulnerability-analyst`: API routes, object references, mutation paths, auth assumptions, feature flags — name the vuln-class skill (discoverable via `vigil assess list-skills`) matching the candidate (e.g., `idor-testing` for object refs, `sqli-testing` for query params) so the operator can include it in the dispatch
 - To `fuzzer`: parameter names, format hints, upload paths, parser hints — bring `agent/skills/parameter-fuzzing/SKILL.md`
 - To `exploit-developer`: only when source analysis already proves exploitable secrets or high-confidence abuse paths — bring the skill matching the specific finding class

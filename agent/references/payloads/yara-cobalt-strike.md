@@ -5,7 +5,7 @@
 rule CobaltStrike_Beacon_Config {
     meta:
         description = "Detects Cobalt Strike beacon configuration block"
-        author = "AI Threat Hunting"
+        author = "Vigil"
     strings:
         // XOR'd config markers
         $config_v3 = { 00 01 00 01 00 02 ?? ?? 00 01 00 02 }  // v3.x after XOR 0x69

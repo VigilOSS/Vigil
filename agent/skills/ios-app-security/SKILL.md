@@ -1,7 +1,7 @@
 ---
 name: ios-app-security
 description: Authorized iOS app security assessment for IPA/Xcode/TestFlight builds, app APIs, Keychain, local storage, ATS/TLS, links, pasteboard, WebView, native code, and runtime instrumentation
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # iOS App Security

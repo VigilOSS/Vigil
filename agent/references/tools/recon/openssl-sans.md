@@ -13,7 +13,7 @@ This recipe is the cross-host complement to nmap's TLS-grab pass and httpx's `-t
 ## 1. Per-host SAN extraction recipe
 
 ```bash
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "openssl per-host SAN extraction" \
   --probe-kind fingerprint --phase recon --timeout 30 -- \
   bash -c '
@@ -33,7 +33,7 @@ aith assess kali exec --technique RECON \
 Save per-host SAN sets to disk for the cross-host comparison in step 2:
 
 ```bash
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "per-host SAN extraction loop, write to scans/" \
   --probe-kind fingerprint --phase recon --timeout 600 -- \
   bash -c '
@@ -54,7 +54,7 @@ aith assess kali exec --technique RECON \
 The collision script counts how many input hosts share each SAN entry — a SAN that appears in multiple hosts' SAN sets indicates a shared multi-tenant cert (one cert serving multiple tenant SANs), which is a tenant-identity disclosure surface and a vhost-routing hint:
 
 ```bash
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "cross-host SAN collision detection — flags shared multi-tenant certs" \
   --probe-kind fingerprint --phase recon --timeout 600 -- \
   bash -c '
@@ -88,7 +88,7 @@ When the cert's CN (or first SAN) does not match the requested hostname, the hos
 - A canonical-name CDN edge that does not have a SAN for the requested hostname (the CDN serves the request anyway, but the cert proves the host is not a first-class tenant on that edge).
 
 ```bash
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "vhost-cert CN/SAN mismatch detection" \
   --probe-kind fingerprint --phase recon --timeout 300 -- \
   bash -c '
@@ -122,7 +122,7 @@ aith assess kali exec --technique RECON \
 Single-resolution DNS misses split-VIP load-balanced clusters. When a name resolves to a different IP across multiple resolutions, the cluster is rotating answers (DNS round-robin, GSLB, anycast with split routing) — each unique IP can be probed independently and may serve different content / different cert / different rate-limit policy:
 
 ```bash
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "multi-time DNS resolution — detect split-VIP load-balanced clusters" \
   --probe-kind fingerprint --phase recon --timeout 120 -- \
   bash -c '
@@ -153,11 +153,11 @@ inside a follow-up dispatch.
 
 The SAN extraction in step 1 surfaces candidate subdomains that did not appear in passive sources. Feed them through `dnsx -resp` to confirm which ones are live before adding them to the work buffer.
 
-This is a TWO-call sequence: aith is a host-side CLI and is not on the runtime container's `$PATH`, so a nested `aith assess kali dnsx` inside a `kali exec` heredoc cannot run. Build the candidate list inside the runtime via `kali exec`, then issue a separate `kali dnsx` call from the host so its audit row stamps the dnsx invocation cleanly.
+This is a TWO-call sequence: vigil is a host-side CLI and is not on the runtime container's `$PATH`, so a nested `vigil assess kali dnsx` inside a `kali exec` heredoc cannot run. Build the candidate list inside the runtime via `kali exec`, then issue a separate `kali dnsx` call from the host so its audit row stamps the dnsx invocation cleanly.
 
 ```bash
 # Step 5a — build the candidate list inside the runtime (host-readable path).
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "build SAN candidate list from per-host SAN sets" \
   --probe-kind fingerprint --phase recon --timeout 60 -- \
   bash -c '
@@ -169,7 +169,7 @@ aith assess kali exec --technique RECON \
 # Step 5b — confirm live SAN-discovered names with a separate dnsx call so the
 # audit row records dnsx by name (a single nested wrapper would lose the
 # dnsx-specific audit metadata).
-aith assess kali dnsx \
+vigil assess kali dnsx \
   -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt \
   -a -resp -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/san_live.txt \
@@ -179,7 +179,7 @@ aith assess kali dnsx \
 
 Tradeoff for one-call collapse: `dnsx` is on the runtime container's `$PATH`, so a single `kali exec ... -- bash -c '... dnsx ...'` heredoc would also run, but the audit row would be stamped against `bash` rather than `dnsx`, and downstream coverage queries (`list-command-runs --tool-bin dnsx`) would miss the run. Use the two-call form unless audit fidelity is explicitly out of scope.
 
-`san_live.txt` is the input to `aith assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum` — every confirmed live SAN-discovered name becomes a Phase 2 collection target.
+`san_live.txt` is the input to `vigil assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum` — every confirmed live SAN-discovered name becomes a Phase 2 collection target.
 
 ## What to record
 

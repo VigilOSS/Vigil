@@ -1,7 +1,7 @@
 ---
 name: m365-signin-investigation
 description: L2 Microsoft 365 sign-in + audit log investigation. Entra Sign-In Logs (interactive + non-interactive + service principal + managed identity), AAD audit, UAL hunting, mailbox forensics, OAuth app audit, impossible-travel correlation, conditional access state.
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # M365 Sign-In Investigation (L2)
@@ -44,7 +44,7 @@ command runs.
   (rule 7), confidence labels (rule 9), MITRE technique requirement
   (rule 11), tenant-ref first (rule 12).
 - `agent/shared-constraints-blue.md` — read-only-by-default (§2), artifact
-  chain of custody (§3), UTC (§4), audit pipeline via `aith assess
+  chain of custody (§3), UTC (§4), audit pipeline via `vigil assess
   host-exec` (§6), tenant scope (§7), confidence labels (§8), dispatch
   handoff conventions.
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal
@@ -102,7 +102,7 @@ known executive's frequent-travel pattern as impossible-travel.
 | SharePoint / OneDrive admin audit | `pnp/cli-microsoft365` (`m365 spo ...`) | Site-level activity that UAL summarizes but does not always detail. |
 | Offline parse / correlate | `jq`, `python3` | All offline; no tenant calls, no host-exec wrapper required. |
 
-Every tenant-facing command above runs through `aith assess host-exec`
+Every tenant-facing command above runs through `vigil assess host-exec`
 with `--phase investigate --scope-host <tenant-slug>` and a non-empty
 `--intent`. Host-side `jq`/`python3` over a registered artifact do not
 require the wrapper (see `agent/shared-constraints-blue.md` §6).
@@ -257,7 +257,7 @@ for prev, cur in zip(events, events[1:]):
               "km": round(d_km, 1), "hours": round(dt_h, 3), "kmh": round(v, 0)})
 ```
 
-Wrap with `aith assess host-exec --tool python3 --technique T1078.004
+Wrap with `vigil assess host-exec --tool python3 --technique T1078.004
 --phase investigate --scope-host <tenant-slug> --target-host <upn>`.
 Output to `$ENGAGEMENT_DIR/ir/evidence/impossible_travel_<slug>.jsonl`
 and register with `--kind ir_evidence`.
@@ -563,11 +563,11 @@ Feeds" qualifies; "looks suspicious" does not.
 
 ## Activity Log Convention
 
-Every step outcome and every pull lands as an `aith assess log` entry.
-CLI signature (verified at `src/ai_threat_hunting_cli/blue.py:383`):
+Every step outcome and every pull lands as an `vigil assess log` entry.
+CLI signature (verified at `src/vigil_cli/blue.py:383`):
 
 ```
-aith assess log <agent> <title> <action> <result> --actor-kind agent
+vigil assess log <agent> <title> <action> <result> --actor-kind agent
 ```
 
 Per-step titles: `m365-step-<N>-<short-name>` —
@@ -648,7 +648,7 @@ Sequential. Do not declare the dispatch complete until all five land.
    detail) to suppress the FTS preview while keeping hash + linkage:
 
    ```bash
-   aith assess artifact register "$DIR/<file>.json" \
+   vigil assess artifact register "$DIR/<file>.json" \
      --kind ir_log --finding <finding-slug> \
      --agent-id <agent-id> --command-run-id <run-id>
    ```
@@ -661,20 +661,20 @@ Sequential. Do not declare the dispatch complete until all five land.
    retries, exploratory jq, replaced draft markdown):
 
    ```bash
-   aith assess artifact mark-scratch --under notes/scratch/
+   vigil assess artifact mark-scratch --under notes/scratch/
    ```
 
 4. **Log the handoff entry.**
 
    ```bash
-   aith assess log <agent-name> "m365-signin-handoff" handoff \
+   vigil assess log <agent-name> "m365-signin-handoff" handoff \
      "<one-line summary: streams pulled, velocity, new grants, new rules, proposed disposition + mitre>" \
      --actor-kind agent
    ```
 
 5. **Emit the handoff JSON** to
    `$ENGAGEMENT_DIR/handoffs/<dispatch-id>.json` and exit with
-   `aith assess agent handoff --from-json <path>`.
+   `vigil assess agent handoff --from-json <path>`.
 
 If any step blocks (missing scope, missing tenant ref, missing Exchange
 role group, missing certificate), emit a `blocked` handoff naming the

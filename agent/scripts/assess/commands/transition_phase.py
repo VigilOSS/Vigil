@@ -1,4 +1,4 @@
-"""aith assess transition-phase — guarded scope.json phase transition.
+"""vigil assess transition-phase — guarded scope.json phase transition.
 
 Validates preconditions before writing the new phase to scope.json.
 Exits non-zero and prints blockers when preconditions fail.
@@ -695,7 +695,7 @@ def _blue_check_intake_to_triage(
             "detail": (
                 "scope.json:alert_metadata is empty — paste the alert into the "
                 "operator chat, save it under ir/alerts/, then record it with "
-                "`aith blue alert record --body-file <path>` before "
+                "`vigil blue alert record --body-file <path>` before "
                 "transitioning to triage."
             ),
         })
@@ -706,7 +706,7 @@ def _blue_check_intake_to_triage(
             "kind": "no_tenant_reference_paths",
             "detail": (
                 "scope.json:tenant_reference_paths[] is empty — L1 has no tenant "
-                "context. Populate via `aith blue tenant init` or edit scope.json."
+                "context. Populate via `vigil blue tenant init` or edit scope.json."
             ),
         })
     else:
@@ -738,7 +738,7 @@ def _blue_check_intake_to_triage(
                 "detail": (
                     "no activity_entries row with action='alert_intake' — the "
                     "alert record wrapper did not log the intake. Re-run "
-                    "`aith blue alert record --body-file <path>` so the audit row lands."
+                    "`vigil blue alert record --body-file <path>` so the audit row lands."
                 ),
             })
 
@@ -794,7 +794,7 @@ def _blue_check_triage_to_investigate(
             "detail": (
                 "no completed L1 dispatch (alert-triage-specialist) found — "
                 "L1 work was not done. Dispatch via "
-                "`aith blue dispatch --role alert-triage-specialist --tier L1`."
+                "`vigil blue dispatch --role alert-triage-specialist --tier L1`."
             ),
         })
 
@@ -895,7 +895,7 @@ def _blue_check_investigate_to_verify(
             "detail": (
                 "no completed L2 dispatch (investigator) found — L2 work was "
                 "not done. Dispatch via "
-                "`aith blue dispatch --role investigator --tier L2`."
+                "`vigil blue dispatch --role investigator --tier L2`."
             ),
         })
 
@@ -926,7 +926,7 @@ def _blue_check_verify_to_respond(
                 f"'unreviewed': {', '.join(slugs)}"
                 + (" ..." if len(unreviewed) > 5 else "")
                 + " — verifier must disposition each via "
-                "`aith blue verify <slug> --disposition ...`."
+                "`vigil blue verify <slug> --disposition ...`."
             ),
         })
 
@@ -942,7 +942,7 @@ def _blue_check_verify_to_respond(
             "detail": (
                 "no completed L3 dispatch (incident-verifier) found — verifier "
                 "did not run. Dispatch via "
-                "`aith blue dispatch --role incident-verifier --tier L3`."
+                "`vigil blue dispatch --role incident-verifier --tier L3`."
             ),
         })
 
@@ -963,7 +963,7 @@ def _blue_check_respond_to_report(
     # Verified high/critical findings need actual containment closure
     # (finding status, containment activity/proof) OR an explicit
     # no_containment_required activity log entry. Proposal approval alone is
-    # not closure; `aith blue contain` records the action after host-exec.
+    # not closure; `vigil blue contain` records the action after host-exec.
     confirmed_high = [
         f for f in findings
         if str(f.get("verification_state") or "") == "verified"
@@ -1018,7 +1018,7 @@ def _blue_check_respond_to_report(
         if action != "no_containment_required":
             continue
         # Preferred path: operator passes ``metadata.finding_slug`` in the
-        # ``aith assess log`` invocation. When present, that single value is
+        # ``vigil assess log`` invocation. When present, that single value is
         # the only slug closed by this row — no free-form parsing of titles.
         meta_slug = str(meta.get("finding_slug") or "").strip()
         if meta_slug:
@@ -1065,9 +1065,9 @@ def _blue_check_respond_to_report(
                 f"{len(missing)} verified high/critical finding(s) lack "
                 f"containment closure: {sample}"
                 + (" ..." if len(missing) > 5 else "")
-                + " — either propose+approve+contain (aith blue propose-contain "
-                "/ aith assess approve-proposal / aith blue contain) OR log "
-                "`aith assess log operator <title> no_containment_required <slug> "
+                + " — either propose+approve+contain (vigil blue propose-contain "
+                "/ vigil assess approve-proposal / vigil blue contain) OR log "
+                "`vigil assess log operator <title> no_containment_required <slug> "
                 "--actor-kind operator` if the threat is already mitigated by "
                 "other controls."
             ),
@@ -1105,8 +1105,8 @@ def _blue_check_report_to_complete(
                 "detail": (
                     "no registered final artifact found — expected either "
                     "kind='ir_evidence' with a report path or kind='ir_closeout' "
-                    "with a closeout path. Run `aith blue report` for incidents "
-                    "or `aith blue closeout` for false-positive/no-incident "
+                    "with a closeout path. Run `vigil blue report` for incidents "
+                    "or `vigil blue closeout` for false-positive/no-incident "
                     "closure, then register the output."
                 ),
             })

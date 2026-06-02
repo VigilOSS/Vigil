@@ -1,12 +1,12 @@
 ---
 name: saml-sso-testing
 description: SAML SSO security testing — assertion forgery, signature bypass, RelayState redirect, and SP/IdP trust boundary attacks
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # SAML SSO Security Testing
 
-> **`aith assess kali` audit flags:** use `--technique AUTH` for all SAML auth bypass probes. Use `--probe-kind payload` for manipulation attempts, `--probe-kind exploit` for confirmed bypass demonstrations.
+> **`vigil assess kali` audit flags:** use `--technique AUTH` for all SAML auth bypass probes. Use `--probe-kind payload` for manipulation attempts, `--probe-kind exploit` for confirmed bypass demonstrations.
 
 ## When to Activate
 
@@ -28,7 +28,7 @@ SAML implementations fail in predictable ways. The specification is complex (~80
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` for all probing
+- `vigil assess kali exec -- curl ...` for all probing
 - `xmllint` or `xmlstarlet` for XML manipulation (inside kali runtime)
 - Base64 encoding/decoding for SAMLResponse manipulation
 - SAML Raider (Burp extension) concepts applied manually

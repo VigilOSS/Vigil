@@ -169,7 +169,7 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
 
     image_built = False
     if options.verify_docker_image:
-        image = "security-research:latest"
+        image = "vigil:latest"
         if options.force_image or not docker.image_exists(image, runner=runner):
             argv = ["docker", "build", "-t", image, "-f", str(install_root / "agent" / "docker" / "runtime-full" / "Dockerfile"), str(install_root)]
             docker.require_success(runner(argv), argv)

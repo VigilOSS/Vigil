@@ -2686,7 +2686,7 @@ def _all_report_finding_slugs(report_body: dict) -> set[str]:
 
 def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate_settings):
     # Regression: the draft report projection (mode=draft, the default, which feeds
-    # `aith engagement export --format markdown-tree`) used to filter only
+    # `vigil engagement export --format markdown-tree`) used to filter only
     # `verification_state == "disputed"`. A pending_runtime_proof finding is
     # verification_state="verified", so it leaked into draft reports despite being a
     # non-durable HOLDING finding. Draft must now exclude it exactly like `final` does.

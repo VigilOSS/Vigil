@@ -1,4 +1,4 @@
-"""aith assess merge-finding — POST merge + emit event."""
+"""vigil assess merge-finding — POST merge + emit event."""
 from __future__ import annotations
 
 import os

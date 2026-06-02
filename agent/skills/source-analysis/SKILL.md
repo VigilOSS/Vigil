@@ -1,7 +1,7 @@
 ---
 name: source-analysis
 description: Frontend source code analysis for hidden routes, API endpoints, and secrets
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Source Code Analysis
@@ -17,7 +17,7 @@ origin: AI Threat Hunting
 
 - `LinkFinder` — automated endpoint extraction from JavaScript files
 - `SecretFinder` — scan JS files for API keys, tokens, and secrets
-- `trufflehog` — scan saved JS/source-map artifacts through `aith assess kali exec --` (host-side installs
+- `trufflehog` — scan saved JS/source-map artifacts through `vigil assess kali exec --` (host-side installs
   aren't required; the runtime image ships trufflehog)
 - `curl`, `grep`/`sed`/`awk`, `jq` — manual extraction and verification
 
@@ -44,7 +44,7 @@ HTML comments, meta tags (canonical, CSRF, API base), inline config (`window.__C
 
 ### 3. JavaScript Analysis
 
-Write the grep pattern to a temp file to avoid shell-quoting issues, then run via `aith assess kali exec`:
+Write the grep pattern to a temp file to avoid shell-quoting issues, then run via `vigil assess kali exec`:
 
 ```bash
 # Host-side: write the extraction script to a file inside the engagement dir
@@ -55,7 +55,7 @@ SCRIPT
 chmod +x "$ENGAGEMENT_DIR/scans/js_grep.sh"
 
 # Run via audit-wrapped exec
-aith assess kali exec --technique DISCOVERY \
+vigil assess kali exec --technique DISCOVERY \
   --intent "manual JS endpoint grep for inline route strings" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c \
   '/engagements/$ENGAGEMENT_KEY/scans/js_grep.sh <js-url>'
@@ -65,13 +65,13 @@ aith assess kali exec --technique DISCOVERY \
 
 ```bash
 # LinkFinder — extract endpoints from JS (far more thorough than manual grep on minified code)
-aith assess kali exec --technique DISCOVERY \
+vigil assess kali exec --technique DISCOVERY \
   --intent "LinkFinder endpoint extraction from app.js" \
   --probe-kind fingerprint --phase recon --timeout 300 -- \
   python3 linkfinder.py -i https://TARGET/static/js/app.js -o cli
 
 # Batch all JS files discovered in step 1
-aith assess kali exec --technique DISCOVERY \
+vigil assess kali exec --technique DISCOVERY \
   --intent "LinkFinder batch endpoint extraction from all JS files" \
   --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
 for js_url in $(cat /engagements/$ENGAGEMENT_KEY/scans/js_files.txt); do
@@ -80,13 +80,13 @@ done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_endpoints.txt
 '
 
 # SecretFinder — scan for API keys, tokens, credentials in JS
-aith assess kali exec --technique INFO-DISCLOSURE \
+vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "SecretFinder secret scan on app.js" \
   --probe-kind fingerprint --phase recon --timeout 300 -- \
   python3 SecretFinder.py -i https://TARGET/static/js/app.js -o cli
 
 # Batch scan
-aith assess kali exec --technique INFO-DISCLOSURE \
+vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "SecretFinder batch secret scan across all JS files" \
   --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
 for js_url in $(cat /engagements/$ENGAGEMENT_KEY/scans/js_files.txt); do
@@ -98,11 +98,11 @@ done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_secrets.txt
 Use LinkFinder and SecretFinder as the primary extraction pass. Fall back to manual grep
 for edge cases they miss (inline scripts, dynamically loaded chunks, non-standard patterns).
 When scanning saved artifacts for secrets, invoke `trufflehog filesystem` via
-`aith assess kali exec --technique INFO-DISCLOSURE --intent "secret scan on saved JS/source-map artifacts" --probe-kind fingerprint --phase recon --timeout 600 -- trufflehog filesystem ...`
+`vigil assess kali exec --technique INFO-DISCLOSURE --intent "secret scan on saved JS/source-map artifacts" --probe-kind fingerprint --phase recon --timeout 600 -- trufflehog filesystem ...`
 against `/engagements/$ENGAGEMENT_KEY/...` paths so the runtime-owned install is used consistently
 and the run lands in the audit pipeline.
 
-For code-analysis engagements, remember that `aith assess code-ingest` skips generated/minified
+For code-analysis engagements, remember that `vigil assess code-ingest` skips generated/minified
 build output by default while writing a skipped-artifacts manifest under
 `tools/analysis-state/skipped-artifacts/`. If a browser-visible minified bundle is security-relevant,
 prefer the source equivalent or source map for deep review; if neither exists, ask the operator to
@@ -127,13 +127,13 @@ The local queue can still be populated as a transient batching aid, but the oper
 the backend ledger:
 
 ```bash
-aith assess kali exec --technique DISCOVERY \
+vigil assess kali exec --technique DISCOVERY \
   --intent "fetch OpenAPI spec for spec ingestion" \
   --probe-kind fingerprint --phase recon --timeout 60 -- \
   curl -sL "https://TARGET/openapi.json" -o /engagements/$ENGAGEMENT_KEY/scans/openapi.json
 # Host-side: ingest the downloaded spec into the backend work buffer
-aith assess ingest-spec "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
-aith assess work-buffer "$ENGAGEMENT_DIR/cases.db" stats
+vigil assess ingest-spec "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
+vigil assess work-buffer "$ENGAGEMENT_DIR/cases.db" stats
 ```
 
 This creates durable request/service coverage candidates and, when the local buffer is in use,
@@ -191,13 +191,13 @@ expected to harden them; a placeholder surviving into production confirms the op
 did not run the vendor's hardening checklist.
 
 ```bash
-aith assess kali exec --technique INFO-DISCLOSURE \
+vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "vendor-product CSP/CORS re-baseline header capture" \
   --probe-kind fingerprint --phase recon --timeout 30 -- \
   curl -sSI 'https://TARGET/' \
   > /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
 
-aith assess kali exec --technique INFO-DISCLOSURE \
+vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "vendor-product placeholder + unsafe-inline/eval grep" \
   --probe-kind payload --phase recon --timeout 60 -- bash -c '
   grep -inE "example\.(com|org|net|test)|domain-here\.tld|your-domain\.tld|placeholder|REPLACE_ME|TODO|FIXME|localhost|127\.0\.0\.1|::1" \
@@ -259,18 +259,18 @@ exposed.
 
 The skill produces these structured sections in the source-analyzer's return payload.
 Backend writes (`record-finding`, `record-intel`, `record-surface`,
-`ingest-endpoints`, `aith assess agent handoff`) are the durable record; this contract names what
+`ingest-endpoints`, `vigil assess agent handoff`) are the durable record; this contract names what
 each markdown section should hold so downstream specialists can parse the output
 consistently.
 
 | Section | Holds |
 |---|---|
 | `#### Summary` | One-paragraph headline: bundles analyzed, route count extracted, secret-scan hits, vendor-platform fingerprint hits, app-version pinned. |
-| `#### Findings` | Decisive findings the source pass already proved (e.g., a live API key with non-empty value, a secret string verified against a third-party endpoint). Each must also be recorded via `aith assess record-finding`. |
-| `#### Surface Candidates` | Requestable endpoints, API bases, hidden routes, GraphQL endpoints, admin paths extracted from JS / source maps / inline config — each surfaced via `aith assess record-surface` and ingested via `aith assess ingest-endpoints "$DIR/cases.db" source-analysis`. |
+| `#### Findings` | Decisive findings the source pass already proved (e.g., a live API key with non-empty value, a secret string verified against a third-party endpoint). Each must also be recorded via `vigil assess record-finding`. |
+| `#### Surface Candidates` | Requestable endpoints, API bases, hidden routes, GraphQL endpoints, admin paths extracted from JS / source maps / inline config — each surfaced via `vigil assess record-surface` and ingested via `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis`. |
 | `#### Secrets` | Secret-scan hits (API keys, JWT samples, AWS access-key prefixes, internal hostnames, tokens) with confidence and matched pattern. Confirmed-live secrets escalate to `#### Findings`; unverified hits stay here as leads. |
 | `#### Backend Hypotheses` | Inferred backend shape from frontend evidence — auth role checks, feature flags, internal-only branches, tenant IDs, callback routes, proxy base paths, debugging toggles. Drives the next-step list for vulnerability-analyst dispatch. |
-| `#### Intelligence` | Tech components from bundle fingerprinting, vendor-product fingerprints (Salesforce / ServiceNow / Drupal / Pexip), APP_VERSION / BUILD_HASH / Sentry-release constants for osint-analyst triangulation, vendor-template CSP / CORS placeholder hits — each row landed via `aith assess record-intel <type>`. |
+| `#### Intelligence` | Tech components from bundle fingerprinting, vendor-product fingerprints (Salesforce / ServiceNow / Drupal / Pexip), APP_VERSION / BUILD_HASH / Sentry-release constants for osint-analyst triangulation, vendor-template CSP / CORS placeholder hits — each row landed via `vigil assess record-intel <type>`. |
 | `#### Coverage Gaps` | Bundles too minified to analyze, files behind auth, source-maps not present, vendor-platform deep-enum trigger fired but the matching playbook could not run. The operator reads this section to decide whether to re-dispatch. |
 
 ## Extended Resources

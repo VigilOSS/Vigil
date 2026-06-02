@@ -290,7 +290,7 @@ def db_insert_work_item(
     status = "skipped" if case_type in _SKIP_TYPES else "pending"
 
     # Inline classification at insert time. Previously, classification ran as
-    # a separate `aith assess classify-work` step that operators routinely
+    # a separate `vigil assess classify-work` step that operators routinely
     # forgot, leaving the work buffer unscored and the priority-mode dispatch
     # with nothing to sort by. The classification helper is pure string
     # matching (<1ms per row, no I/O) so doing it here is effectively free
@@ -444,7 +444,7 @@ def db_insert_work_item(
         # rows that are still at the schema-default classification — so a
         # newly-inserted row gets its inline assignment, while a row that
         # was already ingested and possibly re-classified by hand or by
-        # `aith assess classify-work --reclassify-all` keeps its existing
+        # `vigil assess classify-work --reclassify-all` keeps its existing
         # priority_score / cluster_key. Without the default-only predicate,
         # every re-ingest would clobber operator triage.
         conn.execute(

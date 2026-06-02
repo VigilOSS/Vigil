@@ -5,12 +5,12 @@
 // overridden at `:root[data-theme="dark"]`, so setting this one attribute
 // flips the entire UI.
 //
-// Storage key is intentionally namespaced with `aith.` so multiple apps on
+// Storage key is intentionally namespaced with `vigil.` so multiple apps on
 // the same origin don't collide.
 
 export type Theme = "light" | "dark";
 
-const STORAGE_KEY = "aith.theme";
+const STORAGE_KEY = "vigil.theme";
 
 /** Read the saved theme, or fall back to OS preference. */
 export function detectInitialTheme(): Theme {
@@ -43,7 +43,7 @@ export function setTheme(theme: Theme): void {
   applyTheme(theme);
   // Notify in-process listeners so React components re-render without a
   // storage event round-trip (storage events only fire cross-tab).
-  window.dispatchEvent(new CustomEvent<Theme>("aith:theme-change", { detail: theme }));
+  window.dispatchEvent(new CustomEvent<Theme>("vigil:theme-change", { detail: theme }));
 }
 
 /** Read the current document theme. */
@@ -69,10 +69,10 @@ export function subscribeTheme(listener: (theme: Theme) => void): () => void {
       listener(v);
     }
   };
-  window.addEventListener("aith:theme-change", onCustom as EventListener);
+  window.addEventListener("vigil:theme-change", onCustom as EventListener);
   window.addEventListener("storage", onStorage);
   return () => {
-    window.removeEventListener("aith:theme-change", onCustom as EventListener);
+    window.removeEventListener("vigil:theme-change", onCustom as EventListener);
     window.removeEventListener("storage", onStorage);
   };
 }

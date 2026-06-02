@@ -1,14 +1,14 @@
 ---
 name: osint-recon
 description: Open-source intelligence gathering — CVE lookup, breach search, DNS history, social profiling
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # OSINT Reconnaissance
 
 ## When to Activate
 
-- After TEST phase, the backend intel tables (`intel_tech_components`, `intel_people`, `intel_domains`, and `assessment_credentials`) have accumulated tech stack, people, domains, and credentials — query via `aith assess list-intel <type>` or `aith assess fetch intel`
+- After TEST phase, the backend intel tables (`intel_tech_components`, `intel_people`, `intel_domains`, and `assessment_credentials`) have accumulated tech stack, people, domains, and credentials — query via `vigil assess list-intel <type>` or `vigil assess fetch intel`
 - Parallel with exploit phase to enrich attack context
 
 ## Tools
@@ -31,7 +31,7 @@ artifacts directly under `/engagements/$ENGAGEMENT_KEY/scans/` (the host sees th
 the container, because anything under `/tmp` disappears on container recreate.
 
 > **Audit envelope is mandatory.** Every command in sections 1–6 below is illustrative shell —
-> execution wraps each network probe in `aith assess kali exec --` with the audit envelope
+> execution wraps each network probe in `vigil assess kali exec --` with the audit envelope
 > (`--technique OSINT --intent "<purpose>" --probe-kind fingerprint --phase recon --timeout N`).
 > The bare `searchsploit`/`theHarvester`/`bbot`/`curl`/`whois`/`dig`/`subfinder`/`gau`/`waymore`
 > invocations shown without the wrap are *examples of the underlying tool argv*; running them
@@ -43,11 +43,11 @@ the container, because anything under `/tmp` disappears on container recreate.
 
 ### 1. CVE & Exploit Lookup
 
-Pull the tech stack from the backend (`aith assess list-intel tech-component`) — for each component+version:
+Pull the tech stack from the backend (`vigil assess list-intel tech-component`) — for each component+version:
 
 ```bash
 # Exploit-DB local search (canonical wrapped form — copy this for every other tool below)
-aith assess kali exec \
+vigil assess kali exec \
   --technique OSINT --intent "searchsploit lookup for <component> <version>" \
   --probe-kind fingerprint --phase recon --timeout 60 -- \
   searchsploit -j "<component> <version>"
@@ -70,7 +70,7 @@ For every component+version row in the tech stack, the four lookups above are **
 **Systematic nuclei CVE-template pass** — for containerized app platforms and well-known products with public CVE templates (ShinyProxy, R-Shiny, Jenkins, Confluence, GitLab, Grafana, Argo CD, Sentry, MinIO, Splunk Web, Spring Boot Actuator, anything with `http/cves/` template coverage), record the tech-component intel, then trigger a targeted nuclei pass scoped to that product:
 
 ```bash
-aith assess kali nuclei \
+vigil assess kali nuclei \
   -l /engagements/$ENGAGEMENT_KEY/scans/<product>-hosts.txt \
   -t http/cves/ -tags <product-slug> \
   -severity medium,high,critical -jsonl \
@@ -84,18 +84,18 @@ This is **not** the reactive Phase 1c sweep (which is `-as` against all live hos
 **Recording rule.** After the CVE lookup + targeted nuclei pass, record each version-matched CVE as intel:
 
 ```bash
-aith assess record-intel cve <cve-json-file>
+vigil assess record-intel cve <cve-json-file>
 ```
 
 Then the operator dispatches `exploit-developer` to validate. Version-matched CVE is **intel, not finding** until the exploit-developer pass produces target-proven evidence. Do NOT call `record-finding` from the osint-recon pass — that breaks the no-theoretical-findings rule in `agent/rules/hunting.md`.
 
 ### 2. Breach & Credential Intelligence
 
-Pull emails and domains from the backend (`aith assess list-intel email` and `aith assess list-intel domain`):
+Pull emails and domains from the backend (`vigil assess list-intel email` and `vigil assess list-intel domain`):
 
 ```bash
 # theHarvester wrapped form — note --technique RECON when modules touch target DNS.
-aith assess kali exec \
+vigil assess kali exec \
   --technique RECON --intent "theHarvester email + subdomain enum on <domain>" \
   --probe-kind fingerprint --phase recon --timeout 1800 -- \
   theHarvester -d <domain> -b all -f /engagements/$ENGAGEMENT_KEY/scans/osint_harvester.json
@@ -117,11 +117,11 @@ aith assess kali exec \
 
 ### 3. DNS & Infrastructure History
 
-Pull domains from the backend (`aith assess list-intel domain`):
+Pull domains from the backend (`vigil assess list-intel domain`):
 
 ```bash
 # WHOIS wrapped form (illustrative — every tool in this section follows the same wrap pattern).
-aith assess kali exec \
+vigil assess kali exec \
   --technique OSINT --intent "WHOIS lookup for <domain>" \
   --probe-kind fingerprint --phase recon --timeout 60 -- \
   whois <domain>
@@ -163,12 +163,12 @@ aith assess kali exec \
 
 ### 4. Social & Organizational Intelligence
 
-Pull people and org facts from the backend (`aith assess list-intel person` and `aith assess list-intel org-fact`):
+Pull people and org facts from the backend (`vigil assess list-intel person` and `vigil assess list-intel org-fact`):
 
 ```bash
 # theHarvester social wrapped form. Use --technique OSINT here — the
 # linkedin/google modules query third-party search APIs, not the target.
-aith assess kali exec \
+vigil assess kali exec \
   --technique OSINT --intent "theHarvester linkedin/google enumeration for <domain>" \
   --probe-kind fingerprint --phase recon --timeout 1200 -- \
   theHarvester -d <domain> -b linkedin,google -f /engagements/$ENGAGEMENT_KEY/scans/osint_social.json
@@ -222,7 +222,7 @@ scrutiny than the flagship org.
    often contain target-specific configuration, deployment scripts, or proof-of-concept
    code with hardcoded internal URLs and credentials.
 
-Wrap every HTTP probe in `aith assess kali exec --` with the audit envelope so the run
+Wrap every HTTP probe in `vigil assess kali exec --` with the audit envelope so the run
 lands in the audit pipeline. Concrete commands and rate-limit guidance live in
 `agent/references/tools/recon/github-osint.md`.
 
@@ -260,12 +260,12 @@ a version older than what is actually deployed).
 
 Worked examples per vendor (npm/pypi/maven probe pipelines and Sentry grep recipes) are
 in `agent/references/payloads/version-fingerprint-probes.md`. Wrap every HTTP probe in
-`aith assess kali exec --` with the audit envelope.
+`vigil assess kali exec --` with the audit envelope.
 
 ## CVE Validation Gate
 
 CVE recording rules are defined in `agent/agents/osint-analyst.md` § Finding Recording.
-In short: version-only CVE matches are intel, not findings — record via `aith assess record-intel cve <cve-json-file>` and list them under `#### Intelligence` in your output. The operator dispatches exploit-developer to validate before any CVE becomes a durable finding via `record-finding`.
+In short: version-only CVE matches are intel, not findings — record via `vigil assess record-intel cve <cve-json-file>` and list them under `#### Intelligence` in your output. The operator dispatches exploit-developer to validate before any CVE becomes a durable finding via `record-finding`.
 
 ## Priority Order
 
@@ -287,20 +287,20 @@ specific `record-intel <type>` call.
 | Section | Holds |
 |---|---|
 | `#### Summary` | One-paragraph headline: tech components researched, CVE matches, breach hits, GitHub orgs enumerated, exact-version triangulation outcomes. |
-| `#### Findings` | Decisive findings the OSINT pass already proved against the live target (e.g., a breach-leaked credential validated to log in, a CVE PoC reproduced). Each must also be recorded via `aith assess record-finding`. CVE matches without target-specific proof stay in `#### Intelligence` per the CVE Validation Gate. |
+| `#### Findings` | Decisive findings the OSINT pass already proved against the live target (e.g., a breach-leaked credential validated to log in, a CVE PoC reproduced). Each must also be recorded via `vigil assess record-finding`. CVE matches without target-specific proof stay in `#### Intelligence` per the CVE Validation Gate. |
 | `#### Intelligence` | The bulk of OSINT output. CVE matches → `record-intel cve`. Breach records → `record-intel breach-record`. Historical URLs → `record-intel dns-record`. Social profiles → `record-intel social-profile`. Org facts → `record-intel org-fact`. Tech-component fingerprints → `record-intel tech-component`. Free-form prose → `record-intel note`. See "Output Integration" below for the per-type mapping. |
-| `#### Surface Candidates` | Historical URLs / hidden endpoints surfaced via `gau` / `waymore` / SecurityTrails that warrant active probing, fed back via `aith assess ingest-endpoints` so they enter the work buffer. |
+| `#### Surface Candidates` | Historical URLs / hidden endpoints surfaced via `gau` / `waymore` / SecurityTrails that warrant active probing, fed back via `vigil assess ingest-endpoints` so they enter the work buffer. |
 | `#### Coverage Gaps` | API keys missing for SecurityTrails / Hunter / HIBP, rate-limited GitHub queries that did not complete, theHarvester modules that errored, exact-version triangulation that could not pin a single patch level. The operator uses this section to decide whether to re-dispatch with credentials. |
 
 ## Output Integration
 
-Raw OSINT collection is recorded via `aith assess record-intel <type> <json-file>` so the
+Raw OSINT collection is recorded via `vigil assess record-intel <type> <json-file>` so the
 backend intel tables (`intel_cves`, `intel_breach_records`, `intel_dns_records`,
 `intel_social_profiles`, etc.) are the canonical destination. CVE matches stay as intel until
 exploit-developer validates them.
 - CVE matches → `record-intel cve` + `#### Intelligence` (NOT findings — needs validation)
-- Breached credentials → `record-intel breach-record`; credentials with target-specific proof additionally go to `aith assess post credentials <json-file>` and a finding
-- Historical URLs → `record-intel dns-record` (record-type=URL or equivalent), then ingest confirmed or high-value paths into backend coverage state via `aith assess ingest-endpoints`
+- Breached credentials → `record-intel breach-record`; credentials with target-specific proof additionally go to `vigil assess post credentials <json-file>` and a finding
+- Historical URLs → `record-intel dns-record` (record-type=URL or equivalent), then ingest confirmed or high-value paths into backend coverage state via `vigil assess ingest-endpoints`
 - Social/org intel → `record-intel social-profile` for platform accounts, `record-intel org-fact` for structured organizational metadata
 - Free-form prose intel that doesn't fit a structured row → `record-intel note`
 - For each meaningful lead, record the hypothesis it supports: vulnerable component, reachable hidden surface, reusable credential, or escalation path

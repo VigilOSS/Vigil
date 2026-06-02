@@ -61,7 +61,7 @@ def _write_blue_scope(eng_dir: Path) -> None:
 def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement, list_engagements
+    from vigil_cli.engagements import CreateEngagementOptions, create_engagement, list_engagements
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -105,8 +105,8 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
 def test_engagement_create_blue_renders_blue_operator_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import engagements as engagements_module
-    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
+    from vigil_cli import engagements as engagements_module
+    from vigil_cli.engagements import CreateEngagementOptions, create_engagement
 
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
@@ -157,7 +157,7 @@ def test_engagement_create_blue_renders_blue_operator_prompt(
 def test_engagement_create_does_not_accept_exploit_policy_or_auth_mode_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -186,9 +186,9 @@ def test_engagement_create_does_not_accept_exploit_policy_or_auth_mode_flags(
 def test_engagement_create_emits_post_create_footer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from ai_threat_hunting_cli import docker as docker_mod
-    from ai_threat_hunting_cli import oob as oob_mod
-    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
+    from vigil_cli import docker as docker_mod
+    from vigil_cli import oob as oob_mod
+    from vigil_cli.engagements import CreateEngagementOptions, create_engagement
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -208,17 +208,17 @@ def test_engagement_create_emits_post_create_footer(
     captured = capsys.readouterr()
     assert "mitmproxy: stopped" in captured.err
     assert "oob:" in captured.err and "stopped" in captured.err
-    assert f"aith mitmproxy start {created.key}" in captured.err
-    assert "aith oob start" in captured.err
-    assert f"aith engagement start {created.key} --client codex" in captured.err
+    assert f"vigil mitmproxy start {created.key}" in captured.err
+    assert "vigil oob start" in captured.err
+    assert f"vigil engagement start {created.key} --client codex" in captured.err
 
 
 def test_engagement_create_footer_suppresses_hints_when_services_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from ai_threat_hunting_cli import docker as docker_mod
-    from ai_threat_hunting_cli import oob as oob_mod
-    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
+    from vigil_cli import docker as docker_mod
+    from vigil_cli import oob as oob_mod
+    from vigil_cli.engagements import CreateEngagementOptions, create_engagement
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -238,14 +238,14 @@ def test_engagement_create_footer_suppresses_hints_when_services_running(
     captured = capsys.readouterr()
     assert "mitmproxy: running" in captured.err
     assert "oob:       running" in captured.err
-    assert "aith mitmproxy start" not in captured.err
-    assert "aith oob start" not in captured.err
+    assert "vigil mitmproxy start" not in captured.err
+    assert "vigil oob start" not in captured.err
 
 
 def test_engagement_create_android_uses_artifact_only_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement, list_engagements
+    from vigil_cli.engagements import CreateEngagementOptions, create_engagement, list_engagements
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -284,7 +284,7 @@ def test_engagement_create_android_uses_artifact_only_scope(
 def test_engagement_create_android_cli_accepts_package_positional(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -314,7 +314,7 @@ def test_engagement_create_android_cli_accepts_package_positional(
 def test_engagement_create_android_cli_infers_apk_without_interactive_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -351,7 +351,7 @@ def test_engagement_create_android_cli_infers_apk_without_interactive_prompt(
 
 
 def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
+    from vigil_cli.engagements import CreateEngagementOptions, create_engagement
 
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
@@ -360,7 +360,7 @@ def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkey
     _write_marker_database(custom_data / "orchestrator.sqlite3", "custom")
     _write_marker_database(default_data / "orchestrator.sqlite3", "default")
     _isolate_orchestrator_url(monkeypatch)
-    monkeypatch.delenv("AI_THREAT_HUNTING_DATA_DIR", raising=False)
+    monkeypatch.delenv("VIGIL_DATA_DIR", raising=False)
     monkeypatch.setenv("REDTEAM_ORCHESTRATOR_DATA_DIR", str(custom_data))
 
     create_engagement(
@@ -379,14 +379,14 @@ def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkey
 
 
 def test_resolve_source_root_prefers_cached_source_before_install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import paths as paths_module
+    from vigil_cli import paths as paths_module
 
     install_root = tmp_path / "install"
     cached_source = tmp_path / "cached-source"
     for root in (install_root, cached_source):
         (root / "agent").mkdir(parents=True)
         (root / "orchestrator").mkdir()
-    monkeypatch.delenv("AI_THREAT_HUNTING_SOURCE_DIR", raising=False)
+    monkeypatch.delenv("VIGIL_SOURCE_DIR", raising=False)
     monkeypatch.setattr(paths_module, "get_config_value", lambda *args: None)
     monkeypatch.setattr(paths_module, "find_repo_root", lambda start=None: None)
     monkeypatch.setattr(paths_module, "_ensure_cached_source", lambda: cached_source)
@@ -395,7 +395,7 @@ def test_resolve_source_root_prefers_cached_source_before_install_root(tmp_path:
 
 
 def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.install import InstallOptions, install_from_source
+    from vigil_cli.install import InstallOptions, install_from_source
 
     source_root = tmp_path / "source"
     install_root = tmp_path / "install"
@@ -447,8 +447,8 @@ def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path
 
 
 def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
@@ -479,8 +479,8 @@ def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
 
 
 def test_runtime_start_missing_image_points_to_orchestrator_for_backend_state(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
 
@@ -498,15 +498,15 @@ def test_runtime_start_missing_image_points_to_orchestrator_for_backend_state(tm
 
     message = str(exc_info.value)
     assert "Missing runtime image" in message
-    assert "aith runtime build" in message
-    assert "aith orchestrator status" in message
+    assert "vigil runtime build" in message
+    assert "vigil orchestrator status" in message
 
 
 def test_runtime_start_grants_sys_ptrace_capability(tmp_path: Path) -> None:
     """B2: runtime diagnostic tooling needs CAP_SYS_PTRACE; the docker-run argv
     must request it explicitly so ptrace operations do not fail with EPERM."""
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
@@ -535,8 +535,8 @@ def test_runtime_start_grants_sys_ptrace_capability(tmp_path: Path) -> None:
 
 
 def test_runtime_start_retries_without_host_gateway_when_docker_rejects_flag(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
@@ -567,8 +567,8 @@ def test_runtime_start_retries_without_host_gateway_when_docker_rejects_flag(tmp
 
 
 def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.mitmproxy import MitmproxyOptions, start_proxy
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.mitmproxy import MitmproxyOptions, start_proxy
 
     install_root = tmp_path / "install"
     engagements_root = install_root / "agent" / "engagements"
@@ -626,9 +626,9 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Pat
 def test_mitmproxy_start_uses_install_orchestrator_url_not_engagement_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import paths as paths_module
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.mitmproxy import MitmproxyOptions, start_proxy
+    from vigil_cli import paths as paths_module
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.mitmproxy import MitmproxyOptions, start_proxy
 
     monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
     monkeypatch.setattr(paths_module, "get_config_value", lambda key: None)
@@ -670,8 +670,8 @@ def test_mitmproxy_start_uses_install_orchestrator_url_not_engagement_override(
 
 
 def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import mitmproxy as mitmproxy_module
-    from ai_threat_hunting_cli.docker import DockerResult
+    from vigil_cli import mitmproxy as mitmproxy_module
+    from vigil_cli.docker import DockerResult
 
     install_root = tmp_path / "install"
     engagements_root = install_root / "agent" / "engagements"
@@ -713,8 +713,8 @@ def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pyt
 
 
 def test_mitmproxy_status_uses_published_host_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import mitmproxy as mitmproxy_module
-    from ai_threat_hunting_cli.docker import DockerResult
+    from vigil_cli import mitmproxy as mitmproxy_module
+    from vigil_cli.docker import DockerResult
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -768,11 +768,11 @@ def test_mitmproxy_status_uses_published_host_port(tmp_path: Path, monkeypatch: 
 
 
 def test_mitmproxy_start_uses_install_engagements_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`aith mitmproxy start` now mounts the whole engagements tree — no
+    """`vigil mitmproxy start` now mounts the whole engagements tree — no
     per-engagement context required, the addon routes each captured flow to
     the matching engagement.
     """
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -792,7 +792,7 @@ def test_mitmproxy_start_uses_install_engagements_root(tmp_path: Path, monkeypat
 
 
 def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+    from vigil_cli import orchestrator as orchestrator_module
 
     install_root = tmp_path / "install"
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
@@ -825,13 +825,13 @@ def test_orchestrator_foreground_execs_from_install_root(tmp_path: Path, monkeyp
     assert argv[:4] == ["uv", "run", "--directory", "orchestrator/backend"]
     env = captured["env"]
     assert isinstance(env, dict)
-    assert env["AI_THREAT_HUNTING_INSTALL_DIR"] == str(install_root.resolve())
+    assert env["VIGIL_INSTALL_DIR"] == str(install_root.resolve())
 
 
 def test_orchestrator_start_builds_frontend_then_errors_when_backend_already_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+    from vigil_cli import orchestrator as orchestrator_module
 
     install_root = tmp_path / "install"
     frontend_dir = install_root / "orchestrator" / "frontend"
@@ -859,12 +859,12 @@ def test_orchestrator_start_builds_frontend_then_errors_when_backend_already_run
     assert "PID: 123" in message
     assert str(pid_file) in message
     assert "http://127.0.0.1:18000" in message
-    assert "aith orchestrator restart" in message
-    assert "aith logs orchestrator" in message
+    assert "vigil orchestrator restart" in message
+    assert "vigil logs orchestrator" in message
 
 
 def test_orchestrator_health_wait_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+    from vigil_cli import orchestrator as orchestrator_module
 
     attempts: list[str] = []
 
@@ -880,7 +880,7 @@ def test_orchestrator_health_wait_fails_closed(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+    from vigil_cli import orchestrator as orchestrator_module
 
     install_root = tmp_path / "install"
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
@@ -933,7 +933,7 @@ def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Pat
 
 
 def test_orchestrator_start_terminates_child_when_readiness_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+    from vigil_cli import orchestrator as orchestrator_module
 
     install_root = tmp_path / "install"
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
@@ -976,7 +976,7 @@ def test_orchestrator_start_terminates_child_when_readiness_times_out(tmp_path: 
 def test_orchestrator_start_refuses_when_port_already_in_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+    from vigil_cli import orchestrator as orchestrator_module
 
     install_root = tmp_path / "install"
     frontend_dist = install_root / "orchestrator" / "frontend" / "dist"
@@ -1000,14 +1000,14 @@ def test_orchestrator_start_refuses_when_port_already_in_use(
     message = str(excinfo.value)
     assert "127.0.0.1:18000 is already in use" in message
     assert "PID 99999" in message
-    assert "aith orchestrator stop" in message
+    assert "vigil orchestrator stop" in message
     assert popen_called is False
 
 
 def test_stop_orchestrator_escalates_to_sigkill_when_sigterm_ignored(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+    from vigil_cli import orchestrator as orchestrator_module
 
     install_root = tmp_path / "install"
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
@@ -1046,7 +1046,7 @@ def test_stop_orchestrator_escalates_to_sigkill_when_sigterm_ignored(
 def test_stop_orchestrator_warns_when_port_stays_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+    from vigil_cli import orchestrator as orchestrator_module
 
     install_root = tmp_path / "install"
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
@@ -1081,7 +1081,7 @@ def test_stop_orchestrator_warns_when_port_stays_held(
 def test_orchestrator_status_payload_reports_stopped_when_pid_dead(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+    from vigil_cli import orchestrator as orchestrator_module
 
     install_root = tmp_path / "install"
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
@@ -1101,7 +1101,7 @@ def test_orchestrator_status_payload_reports_stopped_when_pid_dead(
 def test_orchestrator_status_payload_reports_running_with_live_pid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import orchestrator as orchestrator_module
+    from vigil_cli import orchestrator as orchestrator_module
 
     install_root = tmp_path / "install"
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"
@@ -1118,7 +1118,7 @@ def test_orchestrator_status_payload_reports_running_with_live_pid(
 
 
 def test_assess_kali_help_lists_every_typed_verb(capsys: pytest.CaptureFixture[str]) -> None:
-    """`aith assess kali --help` must enumerate the 13 typed verbs plus exec and job."""
+    """`vigil assess kali --help` must enumerate the 13 typed verbs plus exec and job."""
     scripts_root = repo_root / "agent" / "scripts"
     if str(scripts_root) not in sys.path:
         sys.path.insert(0, str(scripts_root))
@@ -1153,7 +1153,7 @@ def test_assess_kali_help_lists_every_typed_verb(capsys: pytest.CaptureFixture[s
 
 
 def test_main_assess_passthrough_only_applies_to_top_level_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -1172,7 +1172,7 @@ def test_main_assess_passthrough_only_applies_to_top_level_command(tmp_path: Pat
 
 
 def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
@@ -1194,7 +1194,7 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
 
 
 def test_aith_mcp_subcommand_prints_deprecation_and_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     with pytest.raises(SystemExit) as excinfo:
         main_module.main(["mcp", "install", "both"])
@@ -1202,19 +1202,19 @@ def test_aith_mcp_subcommand_prints_deprecation_and_exits_two(capsys: pytest.Cap
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
     assert "removed in the typed-CLI cutover" in err
-    assert "aith assess kali" in err
+    assert "vigil assess kali" in err
 
 
 def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
-    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "16")
-    monkeypatch.setenv("AITH_RUNTIME_CPUS", "8")
-    monkeypatch.setenv("AITH_RUNTIME_PIDS_LIMIT", "1024")
-    monkeypatch.setenv("AITH_RUNTIME_SHM_SIZE", "2g")
+    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "16")
+    monkeypatch.setenv("VIGIL_RUNTIME_CPUS", "8")
+    monkeypatch.setenv("VIGIL_RUNTIME_PIDS_LIMIT", "1024")
+    monkeypatch.setenv("VIGIL_RUNTIME_SHM_SIZE", "2g")
     commands: list[list[str]] = []
 
     def runner(argv: list[str], **_: object) -> DockerResult:
@@ -1242,13 +1242,13 @@ def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pyte
     assert "--shm-size=2g" in run_command
     assert "--oom-score-adj=-500" in run_command
     # nofile/nproc are dockerd-side (default-ulimits in daemon.json); see README
-    # "Container resource limits". `aith runtime start` probes them via
+    # "Container resource limits". `vigil runtime start` probes them via
     # _check_runtime_ulimits and warns to stderr when low.
 
 
 def test_runtime_start_rejects_already_running_container_with_clear_message(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
@@ -1257,7 +1257,7 @@ def test_runtime_start_rejects_already_running_container_with_clear_message(tmp_
         if argv[:3] == ["docker", "image", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
+            return DockerResult(0, "vigil\n", "")
         if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
             return DockerResult(
                 0,
@@ -1266,7 +1266,7 @@ def test_runtime_start_rejects_already_running_container_with_clear_message(tmp_
             )
         if argv[:2] == ["docker", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+        if argv[:3] == ["docker", "exec", "vigil"] and argv[-1] == "ulimit -n; ulimit -u":
             return DockerResult(0, "1048576\nunlimited\n", "")
         return DockerResult(0, "", "")
 
@@ -1275,14 +1275,14 @@ def test_runtime_start_rejects_already_running_container_with_clear_message(tmp_
 
     message = str(excinfo.value)
     assert "Runtime container is already running" in message
-    assert "container: security-research" in message
-    assert "aith runtime status" in message
-    assert "aith runtime restart" in message
+    assert "container: vigil" in message
+    assert "vigil runtime status" in message
+    assert "vigil runtime restart" in message
 
 
 def test_check_runtime_ulimits_warns_when_below_threshold(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
@@ -1291,12 +1291,12 @@ def test_check_runtime_ulimits_warns_when_below_threshold(tmp_path: Path, capsys
         if argv[:3] == ["docker", "image", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
+            return DockerResult(0, "vigil\n", "")
         if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
             return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
         if argv[:2] == ["docker", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+        if argv[:3] == ["docker", "exec", "vigil"] and argv[-1] == "ulimit -n; ulimit -u":
             return DockerResult(0, "8192\n4096\n", "")
         return DockerResult(0, "", "")
 
@@ -1313,8 +1313,8 @@ def test_check_runtime_ulimits_warns_when_below_threshold(tmp_path: Path, capsys
 
 
 def test_check_runtime_ulimits_silent_when_limits_ok(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
@@ -1323,12 +1323,12 @@ def test_check_runtime_ulimits_silent_when_limits_ok(tmp_path: Path, capsys: pyt
         if argv[:3] == ["docker", "image", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
+            return DockerResult(0, "vigil\n", "")
         if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
             return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
         if argv[:2] == ["docker", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+        if argv[:3] == ["docker", "exec", "vigil"] and argv[-1] == "ulimit -n; ulimit -u":
             return DockerResult(0, "1048576\nunlimited\n", "")
         return DockerResult(0, "", "")
 
@@ -1342,8 +1342,8 @@ def test_check_runtime_ulimits_silent_when_limits_ok(tmp_path: Path, capsys: pyt
 
 
 def test_check_runtime_ulimits_silent_on_exec_failure(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
@@ -1352,12 +1352,12 @@ def test_check_runtime_ulimits_silent_on_exec_failure(tmp_path: Path, capsys: py
         if argv[:3] == ["docker", "image", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
+            return DockerResult(0, "vigil\n", "")
         if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
             return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
         if argv[:2] == ["docker", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "exec", "security-research"] and argv[-1] == "ulimit -n; ulimit -u":
+        if argv[:3] == ["docker", "exec", "vigil"] and argv[-1] == "ulimit -n; ulimit -u":
             return DockerResult(1, "", "exec failed")
         return DockerResult(0, "", "")
 
@@ -1370,19 +1370,19 @@ def test_check_runtime_ulimits_silent_on_exec_failure(tmp_path: Path, capsys: py
     assert "WARN" not in capsys.readouterr().err
 
 
-def test_aith_runtime_resources_renders_configured_and_live_state(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import aith_runtime_resources
+def test_vigil_runtime_resources_renders_configured_and_live_state(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import vigil_runtime_resources
 
-    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
-    monkeypatch.setenv("AITH_RUNTIME_CPUS", "4")
-    monkeypatch.setenv("AITH_RUNTIME_PIDS_LIMIT", "512")
-    monkeypatch.setenv("AITH_RUNTIME_SHM_SIZE", "1g")
+    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
+    monkeypatch.setenv("VIGIL_RUNTIME_CPUS", "4")
+    monkeypatch.setenv("VIGIL_RUNTIME_PIDS_LIMIT", "512")
+    monkeypatch.setenv("VIGIL_RUNTIME_SHM_SIZE", "1g")
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
-        if argv[:3] == ["docker", "exec", "security-research"]:
+            return DockerResult(0, "vigil\n", "")
+        if argv[:3] == ["docker", "exec", "vigil"]:
             return DockerResult(
                 0,
                 "/sys/fs/cgroup/memory.max=8589934592\n"
@@ -1392,7 +1392,7 @@ def test_aith_runtime_resources_renders_configured_and_live_state(monkeypatch: p
             )
         return DockerResult(0, "", "")
 
-    aith_runtime_resources(runner=runner)
+    vigil_runtime_resources(runner=runner)
     output = capsys.readouterr().out
     assert "configured\tmemory=8g" in output
     assert "cpus=4" in output
@@ -1401,28 +1401,28 @@ def test_aith_runtime_resources_renders_configured_and_live_state(monkeypatch: p
     assert "pids.max=512" in output
 
 
-def test_aith_runtime_resources_handles_stopped_container(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import aith_runtime_resources
+def test_vigil_runtime_resources_handles_stopped_container(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import vigil_runtime_resources
 
-    monkeypatch.delenv("AITH_RUNTIME_MEMORY_GB", raising=False)
-    monkeypatch.delenv("AITH_RUNTIME_CPUS", raising=False)
-    monkeypatch.delenv("AITH_RUNTIME_PIDS_LIMIT", raising=False)
-    monkeypatch.delenv("AITH_RUNTIME_SHM_SIZE", raising=False)
+    monkeypatch.delenv("VIGIL_RUNTIME_MEMORY_GB", raising=False)
+    monkeypatch.delenv("VIGIL_RUNTIME_CPUS", raising=False)
+    monkeypatch.delenv("VIGIL_RUNTIME_PIDS_LIMIT", raising=False)
+    monkeypatch.delenv("VIGIL_RUNTIME_SHM_SIZE", raising=False)
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         if argv[:3] == ["docker", "ps", "--format"]:
             return DockerResult(0, "", "")
         return DockerResult(0, "", "")
 
-    aith_runtime_resources(runner=runner)
+    vigil_runtime_resources(runner=runner)
     output = capsys.readouterr().out
     assert "running=False" in output
     assert "live\tcontainer not running" in output
 
 
 def test_runtime_shell_exec_passes_symbol_heavy_command_as_single_shell_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     calls: list[list[str]] = []
 
@@ -1438,11 +1438,11 @@ def test_runtime_shell_exec_passes_symbol_heavy_command_as_single_shell_payload(
 
     main_module.main(["runtime", "shell-exec", command])
 
-    assert calls == [["docker", "exec", "security-research", "sh", "-lc", command]]
+    assert calls == [["docker", "exec", "vigil", "sh", "-lc", command]]
 
 
 def test_runtime_shell_exec_propagates_container_command_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 37, "", "boom")
@@ -1456,7 +1456,7 @@ def test_runtime_shell_exec_propagates_container_command_failure(monkeypatch: py
 
 
 def test_runtime_shell_exec_strips_separator_and_quotes_multiple_parts(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     calls: list[list[str]] = []
 
@@ -1468,11 +1468,11 @@ def test_runtime_shell_exec_strips_separator_and_quotes_multiple_parts(monkeypat
 
     main_module.main(["runtime", "shell-exec", "--", "printf", "%s", "a b"])
 
-    assert calls == [["docker", "exec", "security-research", "sh", "-lc", "printf %s 'a b'"]]
+    assert calls == [["docker", "exec", "vigil", "sh", "-lc", "printf %s 'a b'"]]
 
 
 def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -1489,7 +1489,7 @@ def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path, monkeypat
 
 
 def test_engagement_select_uses_fzf_when_requested(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import engagements
+    from vigil_cli import engagements
 
     root = tmp_path / "install" / "agent" / "engagements"
     older = root / "2026-04-24-120000-z-last"
@@ -1516,8 +1516,8 @@ def test_engagement_select_uses_fzf_when_requested(tmp_path: Path, monkeypatch: 
 
 
 def test_runtime_start_rejects_running_container_with_wrong_mount(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
@@ -1526,14 +1526,14 @@ def test_runtime_start_rejects_running_container_with_wrong_mount(tmp_path: Path
         if argv[:3] == ["docker", "image", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
+            return DockerResult(0, "vigil\n", "")
         if argv[:4] == ["docker", "inspect", "-f", "{{.Image}}"]:
             return DockerResult(0, "sha256:image\n", "")
         if argv[:4] == ["docker", "image", "inspect", "-f"]:
             return DockerResult(0, "sha256:image\n", "")
         if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
             return DockerResult(0, "/wrong/data -> /data\n/wrong/engagements -> /engagements\n", "")
-        if argv[:3] == ["docker", "exec", "security-research"]:
+        if argv[:3] == ["docker", "exec", "vigil"]:
             return DockerResult(0, "", "")
         return DockerResult(0, "", "")
 
@@ -1542,9 +1542,9 @@ def test_runtime_start_rejects_running_container_with_wrong_mount(tmp_path: Path
 
 
 def test_doctor_reports_missing_binary_without_crashing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    from ai_threat_hunting_cli import main as main_module
-    from ai_threat_hunting_cli import status as status_module
-    from ai_threat_hunting_cli.docker import DockerResult
+    from vigil_cli import main as main_module
+    from vigil_cli import status as status_module
+    from vigil_cli.docker import DockerResult
 
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 0, "ok", "")
@@ -1569,9 +1569,9 @@ def test_doctor_reports_missing_binary_without_crashing(tmp_path: Path, monkeypa
 def test_doctor_skips_docker_checks_when_docker_cli_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from ai_threat_hunting_cli import main as main_module
-    from ai_threat_hunting_cli import status as status_module
-    from ai_threat_hunting_cli.docker import DockerResult
+    from vigil_cli import main as main_module
+    from vigil_cli import status as status_module
+    from vigil_cli.docker import DockerResult
 
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 0, "ok", "")
@@ -1594,16 +1594,16 @@ def test_doctor_skips_docker_checks_when_docker_cli_missing(
 
 
 def test_status_json_reports_runtime_mount_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    from ai_threat_hunting_cli import main as main_module
-    from ai_threat_hunting_cli import status as status_module
-    from ai_threat_hunting_cli.docker import DockerResult
+    from vigil_cli import main as main_module
+    from vigil_cli import status as status_module
+    from vigil_cli.docker import DockerResult
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
+            return DockerResult(0, "vigil\n", "")
         if argv[:3] == ["docker", "image", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
         if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
@@ -1620,10 +1620,10 @@ def test_status_json_reports_runtime_mount_mismatch(tmp_path: Path, monkeypatch:
 
 
 def test_config_set_get_and_unset_uses_config_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     config_path = tmp_path / "config.json"
-    monkeypatch.setenv("AI_THREAT_HUNTING_CONFIG", str(config_path))
+    monkeypatch.setenv("VIGIL_CONFIG", str(config_path))
 
     main_module.main(["config", "set", "oob.domain", "oob.example.test"])
     main_module.main(["config", "get", "oob.domain"])
@@ -1639,11 +1639,11 @@ def test_oob_status_json_reports_effective_domain(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from ai_threat_hunting_cli import main as main_module
-    from ai_threat_hunting_cli.docker import DockerResult
+    from vigil_cli import main as main_module
+    from vigil_cli.docker import DockerResult
 
     config_path = tmp_path / "config.json"
-    monkeypatch.setenv("AI_THREAT_HUNTING_CONFIG", str(config_path))
+    monkeypatch.setenv("VIGIL_CONFIG", str(config_path))
 
     main_module.main(["config", "set", "oob.domain", "oob.example.test"])
     capsys.readouterr()
@@ -1663,7 +1663,7 @@ def test_oob_status_json_reports_effective_domain(
 
 
 def test_logs_routes_to_centralized_targets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     install_root = tmp_path / "install"
     log_file = install_root / ".runtime-data" / "logs" / "orchestrator.log"
@@ -1680,12 +1680,12 @@ def test_logs_routes_to_centralized_targets(tmp_path: Path, monkeypatch: pytest.
     main_module.main(["--root", str(install_root), "logs", "runtime", "--lines", "5"])
     main_module.main(["--root", str(install_root), "logs", "orchestrator", "--lines", "5"])
 
-    assert ["docker", "logs", "--tail", "5", "security-research"] in calls
+    assert ["docker", "logs", "--tail", "5", "vigil"] in calls
     assert ["tail", "-n", "5", str(log_file)] in calls
 
 
 def test_auth_status_and_clear_operate_on_engagement_auth(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     install_root = tmp_path / "install"
     engagement = install_root / "agent" / "engagements" / "eng-1"
@@ -1707,8 +1707,8 @@ def test_auth_status_and_clear_operate_on_engagement_auth(tmp_path: Path, capsys
 
 
 def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import main as main_module
-    from ai_threat_hunting_cli import engagements
+    from vigil_cli import main as main_module
+    from vigil_cli import engagements
 
     install_root = tmp_path / "install"
     root = install_root / "agent" / "engagements"
@@ -1747,7 +1747,7 @@ def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monke
 
 
 def test_auth_without_engagement_context_requires_key_or_select(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     install_root = tmp_path / "install"
     engagement = install_root / "agent" / "engagements" / "eng-1"
@@ -1763,11 +1763,11 @@ def test_auth_without_engagement_context_requires_key_or_select(tmp_path: Path, 
 def test_mitmproxy_start_legacy_engagement_arg_is_ignored(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Legacy `aith mitmproxy start <engagement>` is a no-op selector — the
+    """Legacy `vigil mitmproxy start <engagement>` is a no-op selector — the
     proxy serves every active engagement. The CLI should accept it silently
     (printing one notice) rather than error out.
     """
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -1788,10 +1788,10 @@ def test_mitmproxy_start_legacy_engagement_arg_is_ignored(
 
 
 def test_mitmproxy_reload_touches_sentinel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`aith mitmproxy reload` writes the sentinel the addon polls for, so the
+    """`vigil mitmproxy reload` writes the sentinel the addon polls for, so the
     bind-mount surfaces it to the running container immediately.
     """
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -1805,10 +1805,10 @@ def test_mitmproxy_reload_touches_sentinel(tmp_path: Path, monkeypatch: pytest.M
 def test_mitmproxy_routes_reads_addon_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`aith mitmproxy routes` parses the snapshot the addon wrote and prints
+    """`vigil mitmproxy routes` parses the snapshot the addon wrote and prints
     a readable summary; --json round-trips the raw cache.
     """
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -1836,7 +1836,7 @@ def test_mitmproxy_routes_reads_addon_cache(
 
 
 def test_backup_create_and_list_uses_sqlite_backup(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     install_root = tmp_path / "install"
     data_dir = install_root / "orchestrator" / "backend" / "data"
@@ -1857,19 +1857,19 @@ def test_backup_create_and_list_uses_sqlite_backup(tmp_path: Path, capsys: pytes
 
 @pytest.mark.parametrize(
     "env_name",
-    ["AI_THREAT_HUNTING_DATA_DIR", "REDTEAM_ORCHESTRATOR_DATA_DIR"],
+    ["VIGIL_DATA_DIR", "REDTEAM_ORCHESTRATOR_DATA_DIR"],
 )
 def test_backup_helpers_use_backend_data_dir_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_name: str) -> None:
-    from ai_threat_hunting_cli.backup import create_backup, list_backups, live_database, restore_backup
+    from vigil_cli.backup import create_backup, list_backups, live_database, restore_backup
 
     install_root = tmp_path / "install"
     default_data = install_root / "orchestrator" / "backend" / "data"
     custom_data = tmp_path / "backend-data"
     legacy_data = tmp_path / "legacy-data"
-    if env_name == "AI_THREAT_HUNTING_DATA_DIR":
+    if env_name == "VIGIL_DATA_DIR":
         monkeypatch.setenv("REDTEAM_ORCHESTRATOR_DATA_DIR", str(legacy_data))
     else:
-        monkeypatch.delenv("AI_THREAT_HUNTING_DATA_DIR", raising=False)
+        monkeypatch.delenv("VIGIL_DATA_DIR", raising=False)
     monkeypatch.setenv(env_name, str(custom_data))
     _write_marker_database(default_data / "orchestrator.sqlite3", "default")
     _write_marker_database(custom_data / "orchestrator.sqlite3", "custom")
@@ -1896,7 +1896,7 @@ def test_backup_helpers_use_backend_data_dir_env(tmp_path: Path, monkeypatch: py
 
 
 def test_backup_create_uses_suffix_when_timestamp_collides(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.backup import create_backup, list_backups
+    from vigil_cli.backup import create_backup, list_backups
 
     install_root = tmp_path / "install"
     data_dir = install_root / "orchestrator" / "backend" / "data"
@@ -1927,7 +1927,7 @@ def test_backup_create_uses_suffix_when_timestamp_collides(tmp_path: Path) -> No
 
 
 def test_backup_restore_removes_stale_sqlite_wal_sidecars(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.backup import restore_backup
+    from vigil_cli.backup import restore_backup
 
     install_root = tmp_path / "install"
     data_dir = install_root / "orchestrator" / "backend" / "data"
@@ -1954,18 +1954,18 @@ def test_backup_restore_removes_stale_sqlite_wal_sidecars(tmp_path: Path) -> Non
 
 
 def test_oob_start_renders_config_and_starts_idempotent_sessions(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.oob import OobOptions, start_oob
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, start_oob
 
     commands: list[list[str]] = []
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         commands.append(argv)
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
-        if argv[:3] == ["docker", "exec", "security-research"] and "tmux has-session -t oob-server" in argv[-1] and "tmux new-session" not in argv[-1]:
+            return DockerResult(0, "vigil\n", "")
+        if argv[:3] == ["docker", "exec", "vigil"] and "tmux has-session -t oob-server" in argv[-1] and "tmux new-session" not in argv[-1]:
             return DockerResult(1, "", "")
-        if argv[:3] == ["docker", "exec", "security-research"] and "tmux has-session -t frpc" in argv[-1] and "tmux new-session" not in argv[-1]:
+        if argv[:3] == ["docker", "exec", "vigil"] and "tmux has-session -t frpc" in argv[-1] and "tmux new-session" not in argv[-1]:
             return DockerResult(1, "", "")
         return DockerResult(0, "", "")
 
@@ -1989,8 +1989,8 @@ def test_oob_start_renders_config_and_starts_idempotent_sessions(tmp_path: Path)
 
 
 def test_oob_start_post_flight_detects_frpc_conflict(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.oob import OobOptions, start_oob
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, start_oob
 
     commands: list[list[str]] = []
     kill_commands: list[str] = []
@@ -2004,7 +2004,7 @@ def test_oob_start_post_flight_detects_frpc_conflict(tmp_path: Path) -> None:
         commands.append(argv)
         cmd = argv[-1] if len(argv) >= 5 else ""
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
+            return DockerResult(0, "vigil\n", "")
         if "tmux has-session -t oob-server" in cmd and "tmux new-session" not in cmd:
             return DockerResult(1, "", "")
         if "tmux has-session -t frpc" in cmd and "tmux new-session" not in cmd:
@@ -2037,8 +2037,8 @@ def test_oob_start_post_flight_detects_frpc_conflict(tmp_path: Path) -> None:
 
 
 def test_oob_start_post_flight_returns_on_success(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.oob import OobOptions, start_oob
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, start_oob
 
     success_log = (
         "2026-05-19 10:00:00 [I] [proxy_manager.go:144] [xyz] proxy added: [host-oob host-oob-dns host-oob-rev]\n"
@@ -2052,7 +2052,7 @@ def test_oob_start_post_flight_returns_on_success(tmp_path: Path) -> None:
         nonlocal tail_calls
         cmd = argv[-1] if len(argv) >= 5 else ""
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
+            return DockerResult(0, "vigil\n", "")
         if "tmux has-session" in cmd and "tmux new-session" not in cmd:
             return DockerResult(1, "", "")
         if "tail -n 200 /data/oob/frpc.log" in cmd:
@@ -2077,8 +2077,8 @@ def test_oob_start_post_flight_returns_on_success(tmp_path: Path) -> None:
 
 
 def test_oob_start_post_flight_waits_for_all_frpc_proxy_successes(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.oob import OobOptions, _check_frpc_for_conflicts
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, _check_frpc_for_conflicts
 
     partial_success_log = "2026-05-19 10:00:01 [I] [control.go:172] [xyz] [host-oob] start proxy success\n"
     mixed_failure_log = (
@@ -2122,8 +2122,8 @@ def test_oob_start_post_flight_waits_for_all_frpc_proxy_successes(tmp_path: Path
 
 
 def test_oob_start_post_flight_resets_frpc_log_before_scan(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.oob import OobOptions, start_oob
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, start_oob
 
     log_reset = False
     tail_calls = 0
@@ -2138,7 +2138,7 @@ def test_oob_start_post_flight_resets_frpc_log_before_scan(tmp_path: Path) -> No
         nonlocal log_reset, tail_calls
         cmd = argv[-1] if len(argv) >= 5 else ""
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
+            return DockerResult(0, "vigil\n", "")
         if "tmux has-session" in cmd and "tmux new-session" not in cmd:
             return DockerResult(1, "", "")
         if ": > /data/oob/frpc.log" in cmd:
@@ -2166,16 +2166,16 @@ def test_oob_start_post_flight_resets_frpc_log_before_scan(tmp_path: Path) -> No
 
 
 def test_oob_client_start_uses_session_file_for_domain_resume(tmp_path: Path) -> None:
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.oob import OobOptions, start_oob_client
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, start_oob_client
 
     commands: list[list[str]] = []
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         commands.append(argv)
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
-        if argv[:3] == ["docker", "exec", "security-research"] and "tmux has-session -t oob-client-demo" in argv[-1] and "tmux new-session" not in argv[-1]:
+            return DockerResult(0, "vigil\n", "")
+        if argv[:3] == ["docker", "exec", "vigil"] and "tmux has-session -t oob-client-demo" in argv[-1] and "tmux new-session" not in argv[-1]:
             return DockerResult(1, "", "")
         return DockerResult(0, "", "")
 
@@ -2195,7 +2195,7 @@ def test_oob_client_start_uses_session_file_for_domain_resume(tmp_path: Path) ->
 
 
 def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import up as up_module
+    from vigil_cli import up as up_module
 
     calls: list[str] = []
 
@@ -2218,7 +2218,7 @@ def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypa
 
 
 def test_up_starts_oob_when_only_client_sessions_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import up as up_module
+    from vigil_cli import up as up_module
 
     calls: list[str] = []
 
@@ -2245,13 +2245,13 @@ def test_up_starts_oob_when_only_client_sessions_exist(tmp_path: Path, monkeypat
 
 
 def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import up as up_module
+    from vigil_cli import up as up_module
 
     calls: list[str] = []
 
     monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
-    monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: name == "security-research")
+    monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: name == "vigil")
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_proxy", lambda *args, **kwargs: calls.append("mitmproxy"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
@@ -2281,7 +2281,7 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
 
 
 def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ai_threat_hunting_cli import up as up_module
+    from vigil_cli import up as up_module
 
     seen: dict[str, object] = {}
 
@@ -2940,7 +2940,7 @@ def test_assess_log_accepts_structured_metadata_file(
 def test_blue_verify_requires_verifier_dispatch_unless_forced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -2979,7 +2979,7 @@ def test_blue_verify_requires_verifier_dispatch_unless_forced(
 def test_blue_verify_rejects_non_blue_engagement_before_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     eng_dir.mkdir(parents=True)
@@ -3020,7 +3020,7 @@ def test_blue_verify_rejects_non_blue_engagement_before_mutation(
 def test_blue_verify_force_bypasses_missing_verifier_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3072,7 +3072,7 @@ def test_blue_dispatch_recognizes_dispatchable_investigator_skills(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3109,7 +3109,7 @@ def test_blue_dispatch_recognizes_dispatchable_investigator_skills(
 def test_blue_contain_logs_structured_activity_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3167,7 +3167,7 @@ def test_blue_contain_logs_structured_activity_metadata(
 def test_blue_contain_requires_proof_artifact_or_command_run_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3215,7 +3215,7 @@ def test_blue_contain_requires_proof_artifact_or_command_run_id(
 def test_blue_contain_aborts_when_only_proof_artifact_registration_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3276,7 +3276,7 @@ def test_blue_contain_aborts_when_only_proof_artifact_registration_fails(
 def test_blue_contain_accepts_command_run_id_as_execution_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3337,7 +3337,7 @@ def test_blue_contain_accepts_command_run_id_as_execution_proof(
 def test_blue_contain_rejects_unknown_command_run_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3434,7 +3434,7 @@ def test_blue_contain_rejects_non_containment_command_run_proof(
     command_row: dict,
     message: str,
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3484,7 +3484,7 @@ def test_blue_fetch_containment_decision_pages_until_match(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     calls: list[list[str]] = []
 
@@ -3523,7 +3523,7 @@ def test_blue_propose_contain_writes_only_dispatch_decision(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3563,7 +3563,7 @@ def test_blue_propose_contain_writes_only_dispatch_decision(
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
         "decision_id": 7,
-        "approval_hint": "aith assess approve-proposal 7 --approved-by <operator>",
+        "approval_hint": "vigil assess approve-proposal 7 --approved-by <operator>",
     }
     assert assess_calls == []
     assert not list((eng_dir / "sessions").glob("containment-proposal-*.json"))
@@ -3572,7 +3572,7 @@ def test_blue_propose_contain_writes_only_dispatch_decision(
 def test_blue_contain_rejects_proposal_for_different_finding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3620,7 +3620,7 @@ def test_blue_contain_rejects_proposal_for_different_finding(
 def test_blue_dispatch_passes_model_reasoning_and_default_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3659,8 +3659,8 @@ def test_blue_dispatch_passes_model_reasoning_and_default_mode(
 def test_blue_initial_report_scaffold_uses_customer_and_platform(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import engagements as engagements_module
-    from ai_threat_hunting_cli.engagements import CreateEngagementOptions, create_engagement
+    from vigil_cli import engagements as engagements_module
+    from vigil_cli.engagements import CreateEngagementOptions, create_engagement
 
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
@@ -3692,7 +3692,7 @@ def test_blue_tenant_init_generic_platform_has_template(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     install_root = tmp_path / "install"
     tenant_root = install_root / "agent" / "references" / "tenants"
@@ -3712,7 +3712,7 @@ def test_blue_customers_lists_known_tenant_refs_grouped(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     tenant_root = tmp_path / "agent" / "references" / "tenants"
     tenant_root.mkdir(parents=True)
@@ -3734,7 +3734,7 @@ def test_blue_customers_json_filters_by_platform(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     tenant_root = tmp_path / "agent" / "references" / "tenants"
     tenant_root.mkdir(parents=True)
@@ -3758,7 +3758,7 @@ def test_blue_engage_guides_operator_to_start_session_and_paste_alert(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     tenant_root = tmp_path / "agent" / "references" / "tenants"
     tenant_root.mkdir(parents=True)
@@ -3784,9 +3784,9 @@ def test_blue_engage_guides_operator_to_start_session_and_paste_alert(
 
     captured = capsys.readouterr()
     assert captured.out.strip() == str(created_path)
-    assert "aith blue alert paste" not in captured.err
+    assert "vigil blue alert paste" not in captured.err
     assert f"cd {created_path}" in captured.err
-    assert "aith engagement start eng-1 --client codex" in captured.err
+    assert "vigil engagement start eng-1 --client codex" in captured.err
     assert "Paste the alert into the operator chat" in captured.err
 
 
@@ -3795,7 +3795,7 @@ def test_blue_alert_record_body_file_updates_scope_and_registers_artifact(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3834,14 +3834,14 @@ def test_blue_alert_record_body_file_updates_scope_and_registers_artifact(
     assert raw_path.read_text(encoding="utf-8") == body_path.read_text(encoding="utf-8")
     assert ["artifact", "register", str(raw_path), "--kind", "alert_intake", "--sensitive"] in calls
     assert any(call[:5] == ["log", "operator", "alert intake", "alert_intake", "alert recorded"] for call in calls)
-    assert "aith blue dispatch --role alert-triage-specialist" in capsys.readouterr().err
+    assert "vigil blue dispatch --role alert-triage-specialist" in capsys.readouterr().err
 
 
 def test_blue_alert_record_rejects_second_intake_without_replace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3889,7 +3889,7 @@ def test_blue_alert_record_replace_keeps_prior_raw_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3923,7 +3923,7 @@ def test_blue_closeout_dispatches_report_writer_for_closure_summary(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3947,14 +3947,14 @@ def test_blue_closeout_dispatches_report_writer_for_closure_summary(
     assert dispatch[dispatch.index("--role") + 1] == "report-writer"
     assert "closeout.md" in dispatch[dispatch.index("--task") + 1]
     assert "false positive" in dispatch[dispatch.index("--task") + 1]
-    assert "[aith blue] dispatched with agent-id=closeout-writer-" in capsys.readouterr().err
+    assert "[vigil blue] dispatched with agent-id=closeout-writer-" in capsys.readouterr().err
 
 
 def test_blue_report_aborts_when_final_readiness_preflight_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -3978,7 +3978,7 @@ def test_blue_closeout_aborts_when_final_readiness_preflight_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from ai_threat_hunting_cli import blue as blue_module
+    from vigil_cli import blue as blue_module
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
@@ -4086,7 +4086,7 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
             return False
 
     monkeypatch.setenv("AGENT_NAME", "investigator")
-    monkeypatch.delenv("AITH_AGENT_NAME", raising=False)
+    monkeypatch.delenv("VIGIL_AGENT_NAME", raising=False)
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
         module,
@@ -5233,7 +5233,7 @@ def _stub_render_handoff_environment(
 def _load_dispatch_module():
     """Load ``dispatch.py`` (internal lifecycle + work-buffer implementation).
 
-    The operator CLI routes to ``aith assess agent`` / ``aith assess work-buffer``;
+    The operator CLI routes to ``vigil assess agent`` / ``vigil assess work-buffer``;
     this module remains shared implementations and legacy argparse for tests.
     """
     return _load_assess_module(
@@ -5949,7 +5949,7 @@ def test_dispatch_backend_actions_reject_cases_db_prefix(capsys: pytest.CaptureF
     assert exc_info.value.code == 1
     err = capsys.readouterr().err
     assert "must not take a cases.db path" in err
-    assert "aith assess agent handoff" in err
+    assert "vigil assess agent handoff" in err
 
 
 def test_dispatch_record_handoff_from_json_rejects_agent_id_mismatch(
@@ -6542,7 +6542,7 @@ def test_record_handoff_client_upsert_does_not_patch_role_mismatch_409() -> None
 # Resolution order (highest → lowest):
 #   1. ORCHESTRATOR_BASE_URL env var (explicit override)
 #   2. Per-engagement ``.orchestrator.env``
-#   3. ``aith config get orchestrator_base_url`` (persistent default)
+#   3. ``vigil config get orchestrator_base_url`` (persistent default)
 #   4. Install-root env files (legacy fallback)
 #   5. Hardcoded fallback ``http://127.0.0.1:18000``
 # ──────────────────────────────────────────────────────────────────────────
@@ -6551,8 +6551,8 @@ def test_record_handoff_client_upsert_does_not_patch_role_mismatch_409() -> None
 def test_resolve_orchestrator_base_url_env_var_wins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import paths as paths_module
-    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+    from vigil_cli import paths as paths_module
+    from vigil_cli.paths import resolve_orchestrator_base_url
 
     install_root = tmp_path / "install"
     install_root.mkdir()
@@ -6574,8 +6574,8 @@ def test_resolve_orchestrator_base_url_env_var_wins(
 def test_resolve_orchestrator_base_url_engagement_env_file_wins_over_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import paths as paths_module
-    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+    from vigil_cli import paths as paths_module
+    from vigil_cli.paths import resolve_orchestrator_base_url
 
     install_root = tmp_path / "install"
     install_root.mkdir()
@@ -6597,10 +6597,10 @@ def test_resolve_orchestrator_base_url_engagement_env_file_wins_over_config(
 def test_resolve_orchestrator_base_url_aith_config_falls_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With env var unset and no engagement env file override, aith config
+    """With env var unset and no engagement env file override, vigil config
     is consulted before the hardcoded default."""
-    from ai_threat_hunting_cli import paths as paths_module
-    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+    from vigil_cli import paths as paths_module
+    from vigil_cli.paths import resolve_orchestrator_base_url
 
     install_root = tmp_path / "install"
     install_root.mkdir()
@@ -6620,8 +6620,8 @@ def test_resolve_orchestrator_base_url_aith_config_falls_through(
 def test_resolve_orchestrator_base_url_engagement_env_wins_over_install_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import paths as paths_module
-    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+    from vigil_cli import paths as paths_module
+    from vigil_cli.paths import resolve_orchestrator_base_url
 
     install_root = tmp_path / "install"
     install_root.mkdir()
@@ -6646,8 +6646,8 @@ def test_resolve_orchestrator_base_url_engagement_env_wins_over_install_env(
 def test_resolve_orchestrator_base_url_aith_config_wins_over_install_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import paths as paths_module
-    from ai_threat_hunting_cli.paths import resolve_orchestrator_base_url
+    from vigil_cli import paths as paths_module
+    from vigil_cli.paths import resolve_orchestrator_base_url
 
     install_root = tmp_path / "install"
     install_root.mkdir()
@@ -6669,8 +6669,8 @@ def test_resolve_orchestrator_base_url_aith_config_wins_over_install_env(
 def test_resolve_orchestrator_base_url_falls_back_to_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_threat_hunting_cli import paths as paths_module
-    from ai_threat_hunting_cli.paths import (
+    from vigil_cli import paths as paths_module
+    from vigil_cli.paths import (
         DEFAULT_ORCHESTRATOR_BASE_URL,
         resolve_orchestrator_base_url,
     )
@@ -6709,7 +6709,7 @@ def test_assess_config_engagement_env_wins_over_install_env(
     )
 
     monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
-    monkeypatch.delenv("AI_THREAT_HUNTING_CONFIG", raising=False)
+    monkeypatch.delenv("VIGIL_CONFIG", raising=False)
 
     assert (
         module.resolve_base_url(str(engagement_dir), str(install_root / "agent"))
@@ -6732,14 +6732,14 @@ def test_assess_config_aith_config_wins_over_install_env(
     (install_root / ".env").write_text(
         "ORCHESTRATOR_BASE_URL=http://from-install-env:18000\n", encoding="utf-8"
     )
-    config_path = tmp_path / "aith-config.json"
+    config_path = tmp_path / "vigil-config.json"
     config_path.write_text(
         json.dumps({"orchestrator_base_url": "http://from-config:5678/"}),
         encoding="utf-8",
     )
 
     monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
-    monkeypatch.setenv("AI_THREAT_HUNTING_CONFIG", str(config_path))
+    monkeypatch.setenv("VIGIL_CONFIG", str(config_path))
 
     assert (
         module.resolve_base_url(str(engagement_dir), str(install_root / "agent"))
@@ -6866,7 +6866,7 @@ def _load_auth_status_module():
 def test_auth_status_reports_bearer_token_and_recommends_refresh(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """C42a: aith assess auth-status reads auth.json and emits a structured
+    """C42a: vigil assess auth-status reads auth.json and emits a structured
     snapshot — auth_context, mode, expires_state, present token shapes, and
     a refresh-path recommendation matching the C42 recovery loop. The
     command does NOT write to auth.json or trigger a refresh."""
@@ -7261,7 +7261,7 @@ def _gib(n: float) -> int:
 
 
 def _preflight_runner(commands, *, info_stdout: str, install_root: Path, cotenants=()):
-    from ai_threat_hunting_cli.docker import DockerResult
+    from vigil_cli.docker import DockerResult
 
     mounts = (
         f"{install_root / '.runtime-data'} -> /data\n"
@@ -7293,9 +7293,9 @@ def _preflight_install_root(tmp_path: Path) -> Path:
 
 def test_runtime_start_refuses_when_tier_exceeds_vm(tmp_path, monkeypatch):
     import json as _json
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
-    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
     install_root = _preflight_install_root(tmp_path)
     commands: list[list[str]] = []
     # 8 GB VM, 8 GB tier => 100% => refuse.
@@ -7310,10 +7310,10 @@ def test_runtime_start_refuses_when_tier_exceeds_vm(tmp_path, monkeypatch):
 
 def test_runtime_start_preflights_before_removing_existing_container(tmp_path, monkeypatch):
     import json as _json
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
-    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
     install_root = _preflight_install_root(tmp_path)
     commands: list[list[str]] = []
 
@@ -7326,7 +7326,7 @@ def test_runtime_start_preflights_before_removing_existing_container(tmp_path, m
         if argv[:3] == ["docker", "ps", "--format"]:
             return DockerResult(0, "", "")
         if argv[:3] == ["docker", "ps", "-a"]:
-            return DockerResult(0, "security-research\n", "")
+            return DockerResult(0, "vigil\n", "")
         return DockerResult(0, "", "")
 
     with pytest.raises(SystemExit):
@@ -7342,9 +7342,9 @@ def test_runtime_start_preflights_before_removing_existing_container(tmp_path, m
 
 def test_runtime_start_allow_oversubscribe_bypasses_refusal(tmp_path, monkeypatch):
     import json as _json
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
-    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
     install_root = _preflight_install_root(tmp_path)
     commands: list[list[str]] = []
     runner = _preflight_runner(commands, info_stdout=_json.dumps({"MemTotal": _gib(8), "NCPU": 4}), install_root=install_root)
@@ -7359,9 +7359,9 @@ def test_runtime_start_allow_oversubscribe_bypasses_refusal(tmp_path, monkeypatc
 
 def test_runtime_start_warns_with_cotenants_but_proceeds(tmp_path, monkeypatch, capsys):
     import json as _json
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
-    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
     install_root = _preflight_install_root(tmp_path)
     commands: list[list[str]] = []
     # Ample 64 GB VM (frac 0.125) but co-tenant containers present => warn, proceed.
@@ -7377,9 +7377,9 @@ def test_runtime_start_warns_with_cotenants_but_proceeds(tmp_path, monkeypatch, 
 
 
 def test_runtime_start_proceeds_when_docker_info_unparseable(tmp_path, monkeypatch):
-    from ai_threat_hunting_cli.runtime import RuntimeOptions, start_runtime
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
 
-    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
+    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
     install_root = _preflight_install_root(tmp_path)
     commands: list[list[str]] = []
     runner = _preflight_runner(commands, info_stdout="not-json-garbage", install_root=install_root)
@@ -7388,7 +7388,7 @@ def test_runtime_start_proceeds_when_docker_info_unparseable(tmp_path, monkeypat
     assert any(c[:3] == ["docker", "run", "-d"] for c in commands)
 
 
-# ── Phase 6c: `aith engagement export --format markdown-tree` ──────────────
+# ── Phase 6c: `vigil engagement export --format markdown-tree` ──────────────
 #
 # Deterministic, no live LLM: seed an engagement + findings + a
 # verification-narrative artifact through the FastAPI TestClient (the same
@@ -7519,7 +7519,7 @@ def _seed_export_engagement(client, isolate_settings) -> Path:
 def test_engagement_export_markdown_tree_writes_per_finding_dirs(
     client, isolate_settings, tmp_path: Path
 ) -> None:
-    from ai_threat_hunting_cli.engagements import export_engagement_tree
+    from vigil_cli.engagements import export_engagement_tree
 
     _seed_export_engagement(client, isolate_settings)
     adapter = _TestClientGetAdapter(client, _EXPORT_ENGAGEMENT_KEY)
@@ -7560,7 +7560,7 @@ def test_engagement_export_markdown_tree_writes_per_finding_dirs(
     # VA-002 has no narrative → placeholder debate.md (still git-diff-able).
     va002_debate = (out_root / "VA-002" / "debate.md").read_text(encoding="utf-8")
     assert "No verification-narrative artifact" in va002_debate
-    assert "aith assess verify-finding VA-002" in va002_debate
+    assert "vigil assess verify-finding VA-002" in va002_debate
 
 
 def test_engagement_export_markdown_tree_is_idempotent(
@@ -7572,7 +7572,7 @@ def test_engagement_export_markdown_tree_is_idempotent(
     backend changes must leave the tree byte-for-byte identical so git shows
     an empty diff.
     """
-    from ai_threat_hunting_cli.engagements import export_engagement_tree
+    from vigil_cli.engagements import export_engagement_tree
 
     _seed_export_engagement(client, isolate_settings)
     adapter = _TestClientGetAdapter(client, _EXPORT_ENGAGEMENT_KEY)
@@ -7604,7 +7604,7 @@ def test_engagement_export_markdown_tree_prunes_stale_finding_dirs(
     must not leave orphan dirs. The marker-file guard (draft.md + report.md)
     ensures only this exporter's own dirs are pruned.
     """
-    from ai_threat_hunting_cli.engagements import export_engagement_tree
+    from vigil_cli.engagements import export_engagement_tree
 
     _seed_export_engagement(client, isolate_settings)
     adapter = _TestClientGetAdapter(client, _EXPORT_ENGAGEMENT_KEY)
@@ -7638,7 +7638,7 @@ def test_engagement_export_markdown_tree_prunes_stale_finding_dirs(
 def test_engagement_export_markdown_tree_rejects_unknown_format(
     client, isolate_settings, tmp_path: Path
 ) -> None:
-    from ai_threat_hunting_cli.engagements import export_engagement_tree
+    from vigil_cli.engagements import export_engagement_tree
 
     _seed_export_engagement(client, isolate_settings)
     adapter = _TestClientGetAdapter(client, _EXPORT_ENGAGEMENT_KEY)

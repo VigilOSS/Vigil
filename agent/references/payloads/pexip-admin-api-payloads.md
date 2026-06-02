@@ -23,7 +23,7 @@ managed_certificate, dns_server, ntp_server, http_proxy
 For each namespace, send:
 
 ```bash
-aith assess kali exec --technique INFO-DISCLOSURE \
+vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "Pexip admin-API namespace probe (anonymous reachability test)" \
   --probe-kind payload --phase recon --timeout 20 -- \
   curl -sS 'https://TARGET/api/admin/configuration/v1/<namespace>/?limit=1' \
@@ -79,14 +79,14 @@ Walk each adjacent read in the same dispatch — the chain is the high-severity 
 {"version-id": "31.1.1.62820.0", "pseudo-version": "..."}
 ```
 
-Version intel feeds CVE-match in osint-recon — record under `aith assess record-intel tech-component` with the resolved version string.
+Version intel feeds CVE-match in osint-recon — record under `vigil assess record-intel tech-component` with the resolved version string.
 
 ## Bounded-vs-systemic IDOR test
 
-Pexip uses sequential integer IDs in object URLs (`/api/admin/configuration/v1/conferencing_node/1/`, `.../2/`). Walk the ID space via `aith assess kali exec` so the sweep lands in the audit pipeline:
+Pexip uses sequential integer IDs in object URLs (`/api/admin/configuration/v1/conferencing_node/1/`, `.../2/`). Walk the ID space via `vigil assess kali exec` so the sweep lands in the audit pipeline:
 
 ```bash
-aith assess kali exec --technique IDOR \
+vigil assess kali exec --technique IDOR \
   --intent "Pexip conferencing_node IDOR boundedness sweep, IDs 1-10" \
   --probe-kind payload --phase consume-test --timeout 60 -- \
   bash -c '

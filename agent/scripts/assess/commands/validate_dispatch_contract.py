@@ -1,15 +1,15 @@
-"""aith assess validate-dispatch-contract — sanity-check a Specialist Dispatch Contract.
+"""vigil assess validate-dispatch-contract — sanity-check a Specialist Dispatch Contract.
 
 The operator-core "Specialist Dispatch Contract" is currently enforced only by
 prose; this helper turns the contract table into a runnable validator so the
 operator can pipe a JSON payload through before passing it to
-``aith assess agent start --from-json <path>``.
+``vigil assess agent start --from-json <path>``.
 
 Usage::
 
-    aith assess validate-dispatch-contract path/to/dispatch.json
-    cat dispatch.json | aith assess validate-dispatch-contract -
-    cat dispatch.json | aith assess validate-dispatch-contract
+    vigil assess validate-dispatch-contract path/to/dispatch.json
+    cat dispatch.json | vigil assess validate-dispatch-contract -
+    cat dispatch.json | vigil assess validate-dispatch-contract
 """
 from __future__ import annotations
 

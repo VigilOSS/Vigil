@@ -30,7 +30,7 @@ listed below.
 - `agent/rules/triage.md` — outcome-before-theory, severity discipline, disposition vocabulary, symmetric evidence bar, mechanical-auto-close rule
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, confidence-label semantics
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read
-- `agent/rules/resume.md` — universal resume hydration; `aith assess resume-brief --finding <slug>` before any continuation
+- `agent/rules/resume.md` — universal resume hydration; `vigil assess resume-brief --finding <slug>` before any continuation
 - `agent/rules/reporting.md` — banned hedge phrases, severity discipline, section-length limits
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - `agent/skills/alert-triage/SKILL.md` — the alert normalization schema, the platform-skill-routing table, the mechanical-noise FP register format, the L1→L2 handoff contract (built in Unit 7)
@@ -44,7 +44,7 @@ Before classifying any alert, verify:
 - [ ] `agent/skills/alert-triage/SKILL.md` loaded — the normalization schema and platform-routing table are active
 - [ ] Every path in `scope.json:tenant_reference_paths[]` exists on disk and is loaded; the customer slug in scope.json matches the engagement you were dispatched for
 - [ ] The dispatch payload includes the alert body (pasted text, alert id, or artifact id) and the platform it came from
-- [ ] You ran `aith assess resume-brief --finding <slug-if-any>` (or unscoped if this is a fresh paste) to surface any prior dispatches against this same actor / target / IOC. Duplicate L1 triage on the same alert is the most common L1 failure mode.
+- [ ] You ran `vigil assess resume-brief --finding <slug-if-any>` (or unscoped if this is a fresh paste) to surface any prior dispatches against this same actor / target / IOC. Duplicate L1 triage on the same alert is the most common L1 failure mode.
 
 If any item is unchecked, STOP and load it now or return a `blocked` handoff.
 The platform table in `alert-triage/SKILL.md` only resolves to a skill when the
@@ -124,10 +124,10 @@ Forbidden auto-close phrasings (drop the alert into `dispatch_to_L2` instead):
 - "Already saw this last week" — a prior dispatch on this engagement does NOT
   auto-close a new alert; it informs L2's evidence ladder
 
-Auto-close payload shape (passed to `aith assess kill-finding`):
+Auto-close payload shape (passed to `vigil assess kill-finding`):
 
 ```bash
-aith assess kill-finding <slug> \
+vigil assess kill-finding <slug> \
   --reason "Mechanical noise — known-benign pattern" \
   --kill-reason "Tenant ref <path>#<section>: '<verbatim pattern text>'. Alert matches on actor=<x>, ip_range=<y>, action=<z>." \
   --kill-check 0
@@ -136,7 +136,7 @@ aith assess kill-finding <slug> \
 ## L1→L2 Handoff Contract
 
 For every alert that is **not** auto-closed, emit the L1→L2 handoff JSON via
-`aith assess agent handoff --from-json <path>` with the fields required by
+`vigil assess agent handoff --from-json <path>` with the fields required by
 `agent/shared-constraints-blue.md` "Dispatch Handoff Conventions". Required
 blue-specific fields:
 
@@ -147,7 +147,7 @@ blue-specific fields:
 | `coverage_gaps` | One-line strings naming the open questions L2 must close (e.g., "no IP geolocation pulled — L2 must enrich", "actor email lookup not run", "platform skill `<name>` not yet built") |
 | `mitre_techniques` | Array of MITRE ATT&CK technique IDs guessed from the alert payload; matches `details.mitre_techniques` on the draft finding |
 | `tenant_ref_paths_consulted` | Array of tenant-ref paths you actually loaded — distinct from `scope.json:tenant_reference_paths[]` (which is "available") |
-| `next_steps` | Names the downstream skill, the exact `aith blue dispatch` command for L2, and the evidence-bar hint |
+| `next_steps` | Names the downstream skill, the exact `vigil blue dispatch` command for L2, and the evidence-bar hint |
 | `handoff_status` | `ready` when normalized + dispatchable, `blocked` when a tenant ref is missing or the platform is out of scope |
 
 `disposition` is **never** `verified` from L1 (that flip belongs to L3).
@@ -159,7 +159,7 @@ auto-close path fired.
 - Normalize before classifying. A finding that says "suspicious sign-in" is incomplete — name actor, target, action, time window, source signal, suspected MITRE technique
 - Cite the tenant ref before any auto-close. No citation, no auto-close — escalate to L2 with that same coverage gap named
 - Disposition vocabulary is `verified | false_positive | downgraded | escalated` (see `agent/rules/triage.md` §3); L1 emits only `null` or `false_positive`
-- L1 reads the alert payload + the tenant ref only. Telemetry pulls belong to L2 through `aith assess host-exec` — L1 invoking GAM/gcloud/az/splunk directly corrupts the audit trail
+- L1 reads the alert payload + the tenant ref only. Telemetry pulls belong to L2 through `vigil assess host-exec` — L1 invoking GAM/gcloud/az/splunk directly corrupts the audit trail
 - Set severity from the MITRE technique and the alert's described impact per `agent/rules/triage.md` §2 — NOT from the alert source's `severity_hint`. L2 may revise; L3 finalizes
 - Confidence at L1 is `low` by definition (single-signal). The L2 handoff names the second signal L2 must find for `medium` and the reproduction L2 must build for `high`
 - Stay UTC. Time-window fields in the normalized alert and in the draft finding's `details_json.timeline` carry explicit `Z` or `+00:00`
@@ -171,11 +171,11 @@ Before your dispatch returns, run in this order:
 
 1. **Confirm the alert-intake artifact.** The operator owns raw alert intake:
    the pasted alert body lands under `$ENGAGEMENT_DIR/ir/alerts/` and is
-   recorded before L1 dispatch via `aith blue alert record --body-file <path>`.
+   recorded before L1 dispatch via `vigil blue alert record --body-file <path>`.
    Look it up before triage:
 
    ```bash
-   aith assess artifact search --kind alert_intake --limit 10
+   vigil assess artifact search --kind alert_intake --limit 10
    ```
 
    If no `alert_intake` artifact exists, return a `blocked` handoff. Do not
@@ -187,7 +187,7 @@ Before your dispatch returns, run in this order:
    `ir/evidence/tenant_ref_cite_<finding-slug>.md` and registers via:
 
    ```bash
-   aith assess artifact register <path> \
+   vigil assess artifact register <path> \
      --kind ir_evidence \
      --finding <finding-slug> \
      --agent-id <id>
@@ -196,34 +196,34 @@ Before your dispatch returns, run in this order:
 3. **Mark transient working notes as scratch.** Anything under `notes/scratch/`:
 
    ```bash
-   aith assess artifact mark-scratch --under notes/scratch/
+   vigil assess artifact mark-scratch --under notes/scratch/
    ```
 
 4. **Record the finding.**
-   - Auto-close path: `aith assess record-finding alert-triage-specialist
-     <finding-json>` followed by `aith assess kill-finding <slug> ...` with
+   - Auto-close path: `vigil assess record-finding alert-triage-specialist
+     <finding-json>` followed by `vigil assess kill-finding <slug> ...` with
      the verbatim tenant-ref citation in `--kill-reason`.
-   - Dispatch-to-L2 path: `aith assess record-finding alert-triage-specialist
+   - Dispatch-to-L2 path: `vigil assess record-finding alert-triage-specialist
      <finding-json>` with `status=draft`, `verification_state=unreviewed`.
 
-5. **Record the activity entry.** `aith assess log` with `--actor-kind agent`,
+5. **Record the activity entry.** `vigil assess log` with `--actor-kind agent`,
    `action=alert_triaged`, and `--metadata-inline` carrying `{tier:"L1",
    alert_external_id, platform, disposition, confidence, mitre_techniques[],
    tenant_ref_paths_consulted[]}`. The disposition on this row is `null` for
    dispatch-to-L2 and `false_positive` for auto-close.
 
-6. **Emit the handoff JSON** via `aith assess agent handoff --from-json <path>`
+6. **Emit the handoff JSON** via `vigil assess agent handoff --from-json <path>`
    using the artifact IDs returned by `register` in `evidence_refs[]`.
 
-7. **Self-check.** `aith assess agent render-handoff <agent_id>` — exit only
+7. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only
    after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write leaves L2 with nothing to feed into the next dispatch.
 Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
+`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
 after artifact registration even before recording the finding so the operator
-sees in-flight progress via `aith assess resume-brief`.
+sees in-flight progress via `vigil assess resume-brief`.
 
 ## Output Contract
 

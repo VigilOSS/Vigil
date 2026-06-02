@@ -1,12 +1,12 @@
 ---
 name: elasticsearch-injection
 description: Elasticsearch and Lucene query injection — query_string abuse, field enumeration, cross-index access, and data extraction via search syntax
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Elasticsearch / Lucene Injection Testing
 
-> **`aith assess kali` audit flags:** use `--technique NOSQLI` for injection probes (ES is a document store). Use `--probe-kind payload` for injection attempts, `--probe-kind exploit` for confirmed extraction demonstrations.
+> **`vigil assess kali` audit flags:** use `--technique NOSQLI` for injection probes (ES is a document store). Use `--probe-kind payload` for injection attempts, `--probe-kind exploit` for confirmed extraction demonstrations.
 
 ## When to Activate
 
@@ -27,8 +27,8 @@ Elasticsearch injection in 2025 primarily targets `query_string` and `simple_que
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` for all probing (mandatory audit pipeline)
-- `aith assess anomaly-score <responses.jsonl>` (triage a blind `$regex`-range / `_exists_` sweep — rank the search-response population to find the range that flipped the result count; see Phase 4)
+- `vigil assess kali exec -- curl ...` for all probing (mandatory audit pipeline)
+- `vigil assess anomaly-score <responses.jsonl>` (triage a blind `$regex`-range / `_exists_` sweep — rank the search-response population to find the range that flipped the result count; see Phase 4)
 - Browser DevTools for observing search request/response shapes
 - `jq` for parsing JSONL search responses
 
@@ -190,7 +190,7 @@ search=admin_password:/^[h-j].*/  → results → first char is h-j
 
 ```bash
 # one JSONL line per range probe: {"url":"...:/^[a-m].*/","status":200,"content_length":18840,"words":150,"lines":1}
-aith assess anomaly-score es_ranges.jsonl --top 5
+vigil assess anomaly-score es_ranges.jsonl --top 5
 ```
 
 The range that matched (returned the full result set) lands in a different `length_bucket`/`words_bucket` than the empty-result probes, so the oracle ranks it first — that is your "true" branch; recurse into it. (The oracle scores only the response-shape attributes it understands — `status`, `length_bucket`, `content_type`, header/title/words/lines buckets — so a volatile `took`/`_scroll_id` in the raw JSON is simply ignored; record the stable `hits.total` as `content_length` or `words` to give it a signal.) A flat ranking means no range flipped the count: the field does not exist or is not searchable on this signal. Same pass works for triaging an `_exists_:<field>` field-enumeration sweep — feed all candidate-field responses in and investigate the outlier (the field that exists) first.

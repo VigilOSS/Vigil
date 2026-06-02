@@ -1,7 +1,7 @@
 """Tests for the gau pipeline shared library and the three wrapper verbs.
 
 The wrappers themselves shell out to `kali_exec` (target-touching) and
-`ingest-endpoints` (a child `aith assess` subprocess), so end-to-end tests
+`ingest-endpoints` (a child `vigil assess` subprocess), so end-to-end tests
 would need a runtime container and an orchestrator backend. These unit
 tests cover the pieces that can be exercised in-process without those
 dependencies:

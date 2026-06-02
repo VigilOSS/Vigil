@@ -1,4 +1,4 @@
-"""aith assess resolve-surface — PATCH a surface by id.
+"""vigil assess resolve-surface — PATCH a surface by id.
 
 Backend lifecycle states already exist (``covered``, ``not_applicable``,
 ``deferred``, ``discovered``); this helper drives ``PATCH /assessment/
@@ -7,7 +7,7 @@ to resolve a discovered surface after triage.
 
 Usage::
 
-    aith assess resolve-surface <id> --status covered --rationale "..."
+    vigil assess resolve-surface <id> --status covered --rationale "..."
 
 The reason for the patch is appended to the existing rationale rather than
 overwriting it, so the audit trail accumulates context across multiple
@@ -32,10 +32,10 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  aith assess resolve-surface 42 --status covered --rationale \"vulnerability-analyst confirmed coverage\"\n"
-            "  aith assess resolve-surface 99 --status not_applicable --rationale \"static asset, no input vector\"\n"
-            "  aith assess resolve-surface 17 --status deferred --rationale \"low-signal, revisit after Phase 5\"\n"
-            "  aith assess resolve-surface 31 --status partially-covered --rationale \"unauth path tested\" --followup-condition \"needs auth re-test\"\n"
+            "  vigil assess resolve-surface 42 --status covered --rationale \"vulnerability-analyst confirmed coverage\"\n"
+            "  vigil assess resolve-surface 99 --status not_applicable --rationale \"static asset, no input vector\"\n"
+            "  vigil assess resolve-surface 17 --status deferred --rationale \"low-signal, revisit after Phase 5\"\n"
+            "  vigil assess resolve-surface 31 --status partially-covered --rationale \"unauth path tested\" --followup-condition \"needs auth re-test\"\n"
             f"\nValid statuses: {valid_statuses}"
         ),
     )

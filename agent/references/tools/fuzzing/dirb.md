@@ -1,7 +1,7 @@
 # dirb
 
 **Purpose:** Web directory brute-forcing with built-in wordlists
-For live engagement targets, run dirb via `aith assess kali exec --technique RECON --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> -- dirb ...` with the standard audit-flag set.
+For live engagement targets, run dirb via `vigil assess kali exec --technique RECON --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> -- dirb ...` with the standard audit-flag set.
 
 ## Basic Usage
 
