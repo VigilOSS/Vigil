@@ -10,7 +10,6 @@ from pathlib import Path
 
 from assess.commands.code_ingest import (
     SKIP_DIRS,
-    SKIP_EXTENSIONS,
     _is_regular_file,
     _repo_key_for_path,
     _should_skip_file,
@@ -332,7 +331,7 @@ def run(args) -> None:
     _update_aggregate_manifest(aggregate_path, repo_key, aggregate_entry)
 
     # --- Print summary -------------------------------------------------------
-    print(f"\n=== Structural Index Summary ===", file=sys.stderr)
+    print("\n=== Structural Index Summary ===", file=sys.stderr)
     print(f"Repository: {repo_name} ({repo_key})  path: {repo_path}", file=sys.stderr)
     print(f"Total files: {len(file_list)}  |  Indexed: {indexed}  |  Skipped (unsupported): {skipped_unsupported}", file=sys.stderr)
     print(f"Languages: {json.dumps(lang_counts)}", file=sys.stderr)
@@ -342,4 +341,4 @@ def run(args) -> None:
     print(f"\nPer-file indexes: {idx_dir}", file=sys.stderr)
     print(f"Per-repo manifest: {per_repo_manifest_path}", file=sys.stderr)
     print(f"Aggregate manifest: {aggregate_path}", file=sys.stderr)
-    print(f"\nRun 'code-index-sync' to push structural metadata to the backend.", file=sys.stderr)
+    print("\nRun 'code-index-sync' to push structural metadata to the backend.", file=sys.stderr)

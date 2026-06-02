@@ -76,19 +76,19 @@ def _print_post_install(result: InstallResult) -> None:
     print()
     if result.is_upgrade:
         print("Upgrade complete. Services using the previous install should be restarted:")
-        print(f"  - Kali runtime:   vigil runtime restart")
-        print(f"  - Orchestrator:   vigil orchestrator restart")
+        print("  - Kali runtime:   vigil runtime restart")
+        print("  - Orchestrator:   vigil orchestrator restart")
         if result.image_built:
-            print(f"  - Docker image was rebuilt — running containers use the old image until restarted")
+            print("  - Docker image was rebuilt — running containers use the old image until restarted")
         else:
-            print(f"  - Docker image:   run  vigil runtime build  if agent scripts or Dockerfile changed")
+            print("  - Docker image:   run  vigil runtime build  if agent scripts or Dockerfile changed")
     else:
         print("Install complete. Next steps:")
         print(f"  1. Configure tokens and API keys in {root / '.env'}")
-        print(f"  2. Optional OOB: vigil config set oob.frp_token <token>")
-        print(f"  3. vigil up                      # build/start runtime, orchestrator, and OOB")
-        print(f"  4. vigil engagement create <target>  # create your first engagement")
-        print(f"  5. vigil assess kali --help      # discover target-facing CLI verbs")
+        print("  2. Optional OOB: vigil config set oob.frp_token <token>")
+        print("  3. vigil up                      # build/start runtime, orchestrator, and OOB")
+        print("  4. vigil engagement create <target>  # create your first engagement")
+        print("  5. vigil assess kali --help      # discover target-facing CLI verbs")
     print()
 
 
@@ -646,8 +646,8 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             print(output)
     elif command == "export-pdf":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
-        output = Path(args.output).expanduser() if args.output else None
-        print(export_pdf(path, output))
+        pdf_output = Path(args.output).expanduser() if args.output else None
+        print(export_pdf(path, pdf_output))
     elif command == "migrate-scope":
         from .engagements import migrate_legacy_both_engagements
 
@@ -903,9 +903,11 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
+            clients = payload["clients"]
+            client_count = len(clients) if isinstance(clients, (list, tuple, dict, str)) else 0
             print(
                 f"{payload['state']}\tserver={payload['server']}\tfrpc={payload['frpc']}"
-                f"\tclients={len(payload['clients'])}\tdomain={payload['domain']}"
+                f"\tclients={client_count}\tdomain={payload['domain']}"
             )
     elif args.oob_command == "test":
         test_oob(options, runner=docker_run_command)

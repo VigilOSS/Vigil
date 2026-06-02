@@ -1,6 +1,6 @@
 """vigil assess list-command-runs — search the backend command-run audit log.
 
-Use before re-running an `vigil assess kali` command to check whether an
+Use before re-running a `vigil assess kali` command to check whether an
 equivalent command already ran in the current engagement. Filter by agent,
 phase, tool, success, timed-out, technique, probe_kind, destructive, or
 keyword (FTS5).
@@ -205,7 +205,9 @@ def _render_table(rows: list[dict]) -> str:
         route_raw = str(row.get("route") or "")
         if route_raw == "host_exec":
             route_display = "host"
-        elif route_raw.startswith("vigil assess kali/"):
+        elif route_raw.startswith(("vigil assess kali/", "aith assess kali/")):
+            # Transitional back-compat: pre-rename rows are stamped with the
+            # old 'aith assess kali/<tool>' route prefix.
             route_display = "kali"
         else:
             route_display = "-"

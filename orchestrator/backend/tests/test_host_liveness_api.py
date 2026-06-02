@@ -1,6 +1,5 @@
 """host_liveness store: upsert, keep-newest dedupe, freshness TTL overlay, filters."""
 import json
-from pathlib import Path
 
 ENGAGEMENT_KEY = "2026-05-29-130000-liveness"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"

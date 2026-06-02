@@ -84,7 +84,8 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     orchestrator_blk = status["orchestrator"]  # type: ignore[index]
     runtime = status["runtime"]  # type: ignore[index]
     mitmproxy = status["mitmproxy"]  # type: ignore[index]
-    oob = status["oob"]  # type: ignore[index]
+    oob_block = status["oob"]
+    oob = oob_block if isinstance(oob_block, dict) else {}
     backup = status["backup"]  # type: ignore[index]
     readiness = orchestrator_blk.get("readiness") if isinstance(orchestrator_blk, dict) else None
     ready_bits = ""
@@ -113,7 +114,10 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
             )
         print(f"runtime-tier\t{configured_str}{live_str}")
     print(f"mitmproxy\t{mitmproxy['state']}\tca_volume={mitmproxy['ca_volume']}")  # type: ignore[index]
-    print(f"oob\t{oob['state']}\tclients={len(oob['clients'])}\tdomain={oob.get('domain') or '-'}")  # type: ignore[index]
+    print(
+        f"oob\t{oob.get('state', '-')}\tclients={len(oob.get('clients') or [])}"
+        f"\tdomain={oob.get('domain') or '-'}"
+    )
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
     legacy_keys = status.get("legacy_both_missing_code_phase") or []
     if isinstance(legacy_keys, list) and legacy_keys:

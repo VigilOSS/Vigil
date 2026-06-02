@@ -128,7 +128,7 @@ def _candidate_env_files(engagement_dir: str, agent_root: str) -> list[str]:
     return unique
 
 
-def _read_aith_config_value(key: str) -> str | None:
+def _read_vigil_config_value(key: str) -> str | None:
     config_path = Path(
         os.environ.get(
             "VIGIL_CONFIG",
@@ -168,7 +168,7 @@ def resolve_base_url(engagement_dir: str, agent_root: str) -> str:
         if val:
             return val.rstrip("/")
 
-    config_value = _read_aith_config_value("orchestrator_base_url")
+    config_value = _read_vigil_config_value("orchestrator_base_url")
     if config_value:
         return config_value.rstrip("/")
 
@@ -207,7 +207,6 @@ def _verify_backend(cfg: Config) -> None:
     workflows should still work.
     """
     import http.client
-    import json as _json
     import sys
     from urllib.parse import urlparse
 

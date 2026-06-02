@@ -23,7 +23,6 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessError, AssessmentClient

@@ -329,7 +329,7 @@ def _print_vuln_class_summary(data: dict) -> None:
             full_coverage += 1
 
     if total > 0:
-        print(f"Vulnerability Class Coverage:")
+        print("Vulnerability Class Coverage:")
         print(f"  Files at full coverage: {full_coverage}/{total}")
         print(f"  Files with shallow gaps: {shallow_gaps}/{total}")
         print(f"  Files with zero-tested classes: {zero_tested}/{total}")
@@ -339,13 +339,13 @@ def _print_vuln_class_summary(data: dict) -> None:
 def _print_coverage(data: dict) -> None:
     total_files = data.get('total_files', 0)
 
-    print(f"=== Code Analysis Coverage ===")
+    print("=== Code Analysis Coverage ===")
     print(f"Total files: {total_files}")
 
     # By Classification
     by_class = data.get('by_classification', {})
     if by_class:
-        print(f"\nBy Classification:")
+        print("\nBy Classification:")
         for tier in ('critical', 'high', 'medium', 'low', 'skip'):
             tier_data = by_class.get(tier, {})
             if isinstance(tier_data, dict):
@@ -369,7 +369,7 @@ def _print_coverage(data: dict) -> None:
         analyzed_ctx = func_level.get('analyzed', 0)
         needs_ctx = func_level.get('needs_context', 0)
         pending_ctx = func_level.get('pending', 0)
-        print(f"\nFunction-Level:")
+        print("\nFunction-Level:")
         print(f"  Total contexts: {total_ctx}")
         print(f"  Analyzed: {analyzed_ctx} | Needs context: {needs_ctx} | Pending: {pending_ctx}")
 
@@ -407,13 +407,13 @@ def _print_coverage(data: dict) -> None:
     if isinstance(gate, dict):
         passed = gate.get('passed')
         if passed is True:
-            print(f"\nCoverage Gate: PASS")
+            print("\nCoverage Gate: PASS")
         elif passed is False:
-            print(f"\nCoverage Gate: FAIL")
+            print("\nCoverage Gate: FAIL")
             reasons = gate.get('reasons', [])
             if reasons:
                 for reason in reasons:
                     print(f"  - {reason}")
         else:
-            print(f"\nCoverage Gate: UNKNOWN")
+            print("\nCoverage Gate: UNKNOWN")
     print()

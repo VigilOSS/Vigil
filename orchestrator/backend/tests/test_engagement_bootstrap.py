@@ -15,8 +15,10 @@ import pytest
 repo_root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(repo_root / "src"))
 
-from vigil_cli.engagements import CreateEngagementOptions, create_engagement
-from vigil_cli.client_rosters import repair_engagement_client_rosters
+# E402: these imports must follow the sys.path.insert above, which puts the
+# repo `src/` on the path so vigil_cli is importable. Reordering breaks import.
+from vigil_cli.engagements import CreateEngagementOptions, create_engagement  # noqa: E402
+from vigil_cli.client_rosters import repair_engagement_client_rosters  # noqa: E402
 
 
 def _copy_agent_fixture(agent_root: Path, sandbox_root: Path, *, client: str) -> None:

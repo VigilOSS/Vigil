@@ -157,7 +157,6 @@ def run(args: argparse.Namespace) -> None:
                 (status, limit),
             ).fetchall()
         else:
-            placeholders = ",".join("?" * len(matching_clusters))
             null_in_set = None in matching_clusters
             non_null = [k for k in matching_clusters if k is not None]
             params: list[Any] = [status]

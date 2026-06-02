@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
