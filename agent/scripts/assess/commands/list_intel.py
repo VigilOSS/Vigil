@@ -75,9 +75,7 @@ def _format_row(row: dict) -> str:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         if args.q:
             # FTS search across intel tables.
             from urllib.parse import urlencode
@@ -103,8 +101,6 @@ def run(args) -> None:
             result = client.get_engagement(f"intel/{endpoint_segment}")
         else:
             result = client.get_engagement("intel/summary")
-    finally:
-        client.close()
 
     if args.as_json or not isinstance(result, list):
         print(json.dumps(result, indent=2, ensure_ascii=False))

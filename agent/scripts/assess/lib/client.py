@@ -399,6 +399,13 @@ class AssessmentClient:
         """Close the underlying connection."""
         self._reset_conn()
 
+    def __enter__(self) -> "AssessmentClient":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.close()
+        return False
+
 
 def _build_query(filters: dict[str, Any]) -> str:
     """Build a URL query string from a filters dict, dropping None/empty values."""

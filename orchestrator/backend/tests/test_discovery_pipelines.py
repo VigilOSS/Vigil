@@ -89,6 +89,11 @@ def test_web_discovery_pipeline(monkeypatch, tmp_path):
     class _Client:
         def __init__(self, *a, **k): pass
         def close(self): pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
     monkeypatch.setattr(web, "AssessmentClient", _Client)
 
     endpoints_called = {}
@@ -132,6 +137,11 @@ def test_web_discovery_no_crawl_and_db_ingest(monkeypatch, tmp_path):
     class _Client:
         def __init__(self, *a, **k): pass
         def close(self): pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
     monkeypatch.setattr(web, "AssessmentClient", _Client)
 
     web.run(SimpleNamespace(
@@ -209,6 +219,11 @@ def test_web_discovery_zero_live_hosts_does_not_crash(monkeypatch, tmp_path):
     class _Client:
         def __init__(self, *a, **k): pass
         def close(self): pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
     monkeypatch.setattr(web, "AssessmentClient", _Client)
 
     # Must complete cleanly (no FileNotFoundError); no katana since no live URLs.

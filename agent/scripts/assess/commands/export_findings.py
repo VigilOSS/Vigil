@@ -195,12 +195,9 @@ def run(args) -> None:
     scope = load_scope(cfg.engagement_dir)
     engagement_name = scope.get("engagement_name") or scope.get("name") or cfg.engagement_key
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         findings = client.get("findings")
         groups = client.get("finding-groups")
-    finally:
-        client.close()
 
     if not isinstance(findings, list):
         print("export-findings: unexpected response from backend", file=sys.stderr)

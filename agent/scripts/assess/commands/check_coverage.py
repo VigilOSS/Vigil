@@ -15,11 +15,8 @@ def register(subparsers) -> None:
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         readiness = client.get("coverage-readiness")
-    finally:
-        client.close()
 
     if not isinstance(readiness, dict):
         print("check-coverage: unexpected response from backend", file=sys.stderr)

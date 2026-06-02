@@ -55,8 +55,7 @@ def run(args) -> None:
     if args.note:
         resolution["note"] = args.note
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         decisions = client.list_all_decisions(kind="containment_proposal")
         decision = next(
             (row for row in decisions if isinstance(row, dict) and int(row.get("id") or -1) == int(args.decision_id)),
@@ -79,8 +78,6 @@ def run(args) -> None:
             int(args.decision_id),
             {"resolved": True, "resolution": resolution},
         )
-    finally:
-        client.close()
 
     if not isinstance(row, dict):
         print("approve-proposal: unexpected response shape from backend", file=sys.stderr)

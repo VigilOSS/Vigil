@@ -107,6 +107,7 @@ def main(argv: list[str] | None = None) -> None:
     # Import and register every subcommand
     from assess.commands import (
         agent,
+        anomaly_score,
         approve_exploit,
         approve_proposal,
         artifact,
@@ -115,6 +116,7 @@ def main(argv: list[str] | None = None) -> None:
         check_exploit_gate,
         check_report_readiness,
         check_scope_coverage,
+        classify_payload,
         classify_work,
         contract,
         dns_discovery,
@@ -239,6 +241,8 @@ def main(argv: list[str] | None = None) -> None:
         gau_secrets,
         gau_js_endpoints,
         classify_work,
+        classify_payload,
+        anomaly_score,
         list_clusters,
         list_skills,
         check_coverage,

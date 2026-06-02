@@ -53,6 +53,11 @@ def _wire(monkeypatch, mod, tmp_path, probe_lines: str):
         def __init__(self, *a, **k): pass
         def record_decision(self, payload): recorded["decision"] = payload; return {"id": 1}
         def close(self): pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(mod, "AssessmentClient", _Client)
     return recorded

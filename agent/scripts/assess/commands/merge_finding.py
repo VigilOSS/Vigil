@@ -25,15 +25,11 @@ def run(args) -> None:
         "source_name": "operator",
     }
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         client.post("findings/merge", payload)
-    finally:
-        client.close()
 
     # Emit event
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         client.post_event({
             "event_type": "finding.merged",
             "phase": os.environ.get("ORCHESTRATOR_PHASE", "unknown"),
@@ -41,7 +37,5 @@ def run(args) -> None:
             "agent_name": "operator",
             "summary": f"Merged {args.source_slug} into {args.target_slug}: {args.reason}",
         })
-    finally:
-        client.close()
 
     print(f"Merged {args.source_slug} into {args.target_slug}")

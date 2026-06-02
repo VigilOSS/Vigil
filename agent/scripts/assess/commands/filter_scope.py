@@ -30,14 +30,11 @@ def _vendor_saas_decided_hosts(cfg: Config) -> set[str]:
     older decisions on long-running engagements, causing previously-approved
     hosts to be treated as undecided.
     """
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         try:
             rows = client.list_all_decisions(kind="scope_decision")
         except AssessError:
             return set()
-    finally:
-        client.close()
     decisions: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):

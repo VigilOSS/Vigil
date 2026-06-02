@@ -130,9 +130,8 @@ def run(args) -> None:
         source_path=str(json_path),
         metadata={"command": "code-record-analysis", "count": len(results)},
     )
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     responses = []
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         created = 0
         for result in results:
             resp = client.post("code/analysis-results", result)
@@ -141,8 +140,6 @@ def run(args) -> None:
             disp = result.get("disposition", "?")
             func = result.get("function_name", "unknown")
             print(f"  Recorded: {func} → {disp}")
-    finally:
-        client.close()
 
     response_snapshot = write_json_snapshot(
         cfg.engagement_dir,
