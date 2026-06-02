@@ -6,10 +6,11 @@ import secrets
 import shlex
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import docker
+from .paths import default_runtime_container
 
 DEFAULT_FRP_HOST = "oob-relay.example.com"
 DEFAULT_FRP_PORT = 7000
@@ -30,7 +31,7 @@ class OobOptions:
     frp_port: int = DEFAULT_FRP_PORT
     frp_token: str = ""
     oob_domain: str = DEFAULT_OOB_DOMAIN
-    container_name: str = "vigil"
+    container_name: str = field(default_factory=default_runtime_container)
 
 
 def start_oob(
@@ -68,18 +69,20 @@ def start_oob(
         _check_frpc_for_conflicts(options, runner=runner, timeout=frpc_ready_timeout)
 
 
-def stop_oob(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> None:
+def stop_oob(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> None:
+    container_name = container_name or default_runtime_container()
     for session in ("frpc", "oob-server"):
         _run_exec(container_name, f"tmux kill-session -t {shlex.quote(session)} 2>/dev/null || true", runner=runner, check=False)
     _kill_stale_oob_processes(container_name, runner=runner)
 
 
 def oob_status(
-    container_name: str = "vigil",
+    container_name: str | None = None,
     *,
     oob_domain: str | None = None,
     runner: docker.Runner = docker.run_command,
 ) -> dict[str, object]:
+    container_name = container_name or default_runtime_container()
     if not docker.container_running(container_name, runner=runner):
         return {"state": "stopped", "server": False, "frpc": False, "clients": [], "domain": oob_domain}
     server = _tmux_has_session(container_name, "oob-server", runner=runner)
@@ -125,12 +128,14 @@ def start_oob_client(
     _ensure_tmux_session(options.container_name, session, command, runner=runner)
 
 
-def stop_oob_client(name: str, container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> None:
+def stop_oob_client(name: str, container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> None:
+    container_name = container_name or default_runtime_container()
     client_name = sanitize_name(name)
     _run_exec(container_name, f"tmux kill-session -t oob-client-{shlex.quote(client_name)} 2>/dev/null || true", runner=runner, check=False)
 
 
-def list_oob_clients(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> list[str]:
+def list_oob_clients(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> list[str]:
+    container_name = container_name or default_runtime_container()
     live: set[str] = set()
     result = _run_exec(container_name, "tmux list-sessions -F '#S' 2>/dev/null | sed -n 's/^oob-client-//p'", runner=runner, check=False)
     if result.returncode == 0:
@@ -395,7 +400,7 @@ def _with_nonce(interaction: OobInteraction, nonce: str) -> OobInteraction:
 
 def read_client_log(
     name: str,
-    container_name: str = "vigil",
+    container_name: str | None = None,
     *,
     runner: docker.Runner = docker.run_command,
     lines: int = 2000,
@@ -406,6 +411,7 @@ def read_client_log(
     Returns the tail (default 2000 lines) as text for
     :func:`parse_interactsh_log`. Best-effort: a missing log yields ``""``.
     """
+    container_name = container_name or default_runtime_container()
     client = sanitize_name(name)
     log_path = f"{OOB_ROOT}/clients/{shlex.quote(client)}.log"
     command = f"tail -n {int(lines)} {log_path} 2>/dev/null || true"

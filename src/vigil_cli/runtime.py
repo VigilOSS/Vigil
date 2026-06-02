@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import docker
 from .config import RuntimeResources, runtime_resources
-from .paths import container_host_url, resolve_orchestrator_base_url
+from .paths import container_host_url, default_runtime_container, resolve_orchestrator_base_url
 
 
 HEAVY_TIER_HOST_GB_THRESHOLD = 32
@@ -22,7 +22,7 @@ ULIMIT_NPROC_RECOMMENDED = 8192
 class RuntimeOptions:
     install_root: Path
     image: str = "vigil:latest"
-    container_name: str = "vigil"
+    container_name: str = field(default_factory=default_runtime_container)
     recreate: bool = False
     allow_oversubscribe: bool = False
 
@@ -110,12 +110,14 @@ def start_runtime(
     _check_runtime_ulimits(options.container_name, runner=runner)
 
 
-def stop_runtime(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> None:
+def stop_runtime(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> None:
+    container_name = container_name or default_runtime_container()
     if docker.container_exists(container_name, runner=runner):
         runner(["docker", "rm", "-f", container_name])
 
 
-def runtime_status(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> str:
+def runtime_status(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> str:
+    container_name = container_name or default_runtime_container()
     return "running" if docker.container_running(container_name, runner=runner) else "stopped"
 
 
@@ -129,7 +131,8 @@ def _already_running_message(container_name: str, install_root: Path) -> str:
     )
 
 
-def runtime_mounts_ok(install_root: Path, container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> bool:
+def runtime_mounts_ok(install_root: Path, container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> bool:
+    container_name = container_name or default_runtime_container()
     install_root = install_root.expanduser().resolve()
     data_dir = Path(os.environ.get("KALI_MCP_DATA_DIR", install_root / ".runtime-data"))
     engagements_dir = install_root / "agent" / "engagements"
@@ -140,8 +143,9 @@ def runtime_mounts_ok(install_root: Path, container_name: str = "vigil", *, runn
     return True
 
 
-def runtime_resource_state(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
+def runtime_resource_state(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
     """Return configured runtime resources merged with live cgroup state from the container."""
+    container_name = container_name or default_runtime_container()
     configured = runtime_resources()
     state: dict[str, object] = {
         "configured": {
@@ -160,7 +164,8 @@ def runtime_resource_state(container_name: str = "vigil", *, runner: docker.Runn
     return state
 
 
-def vigil_runtime_resources(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command, json_output: bool = False) -> None:
+def vigil_runtime_resources(container_name: str | None = None, *, runner: docker.Runner = docker.run_command, json_output: bool = False) -> None:
+    container_name = container_name or default_runtime_container()
     state = runtime_resource_state(container_name, runner=runner)
     if json_output:
         print(json.dumps(state, indent=2))
