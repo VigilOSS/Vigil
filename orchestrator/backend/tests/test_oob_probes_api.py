@@ -74,6 +74,14 @@ def test_record_probe_rejects_unknown_engagement(client, isolate_settings):
     assert response.status_code == 404, response.text
 
 
+def test_correlate_interaction_rejects_unknown_engagement(client, isolate_settings):
+    response = client.post(
+        "/engagements/2026-01-01-000000-missing/assessment/oob-probes/interactions",
+        json={"nonce": "whatever123", "protocol": "dns", "remote_address": "203.0.113.1"},
+    )
+    assert response.status_code == 404, response.text
+
+
 def test_correlate_interaction_matches_and_flips_status(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
     probe = _mint_probe(client)

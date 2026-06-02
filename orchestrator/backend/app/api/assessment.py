@@ -508,7 +508,7 @@ class FindingPatchRequest(BaseModel):
 class FindingVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    disposition: Literal["confirmed", "downgraded", "false_positive", "disputed"]
+    disposition: Literal["confirmed", "downgraded", "pending_runtime_proof", "false_positive", "disputed"]
     reason_code: str = Field(default="", max_length=128)
     reason_text: str = Field(min_length=1, max_length=4096)
     new_severity: str | None = Field(default=None, min_length=1, max_length=32)

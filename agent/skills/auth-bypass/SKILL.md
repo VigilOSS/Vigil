@@ -54,10 +54,17 @@ hydra -l root -P passwords.txt target ssh -t 4
 ```
 GET /api/user/1001/profile → /api/user/1002/profile    # Horizontal
 GET /invoice?id=5001 → ?id=5002
-# Test: sequential IDs, leaked UUIDs, Base64 decode/modify/re-encode
 # param pollution: ?id=1001&id=1002, method swap: GET→PUT/DELETE
 # Vertical: regular user → admin endpoints
 ```
+Don't hand-roll the ID variants. Classify the captured ID and fire its intent-keyed set —
+`neighbor`/`boundary` for horizontal access, `escalation` for vertical (admin/first-object) access:
+```bash
+aith assess classify-payload 1001 --mutations    # sequential_id → 1002/1000/.., 0/-1/1, admin/root
+aith assess classify-payload "$UUID" --mutations  # uuid → ++last group, all-zeros, ...-000000000001
+```
+For deep IDOR work (split-brain body/route divergence, multi-tenant isolation) hand off to the
+`idor-testing` / `split-brain-idor` skills, which own the full ID-mutation and confirmation flow.
 
 ### 2. Forced Browsing
 ```

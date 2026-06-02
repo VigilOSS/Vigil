@@ -5,6 +5,10 @@ the odd-one-out(s) without any LLM or network call.  Specialist agents supply
 the population as a JSON file or via stdin; the command returns a ranked list
 of outliers annotated with the specific attributes that made them stand out.
 
+By design the population is operator-supplied (file or stdin) — this command
+never queries the backend store; the caller decides which records form the
+comparison set.
+
 Input format (auto-detected):
   - Top-level JSON array:  ``[{...}, {...}, ...]``
   - JSONL (one JSON object per line)

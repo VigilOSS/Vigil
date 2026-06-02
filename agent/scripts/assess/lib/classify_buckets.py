@@ -198,6 +198,39 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
     ),
 )
 
+# gf-bucket -> vulnerability-class skill(s). SINGLE SOURCE OF TRUTH for the
+# "which specialist skill tests this surface" mapping, kept HERE next to the
+# `_BUCKETS` table it keys off so adding a bucket + its skill is one edit in
+# one file. The redispatch recommender in
+# `assess/commands/check_scope_coverage.py` imports this to turn a consumption
+# coverage gap into a concrete `--skills` list.
+#
+# Every value is the bare skill name — the directory under `agent/skills/<name>/`
+# that holds a `SKILL.md`. The recommender validates each name resolves on disk
+# and drops (with a note) any that does not, so a typo here degrades to "skill
+# dropped" rather than recommending a nonexistent skill.
+#
+# Coverage rule: every NON-inert bucket that names a recognizable vuln class
+# SHOULD map to at least one skill. Generic/ambiguous buckets
+# (`interestingparams`, `interestingext`, `trust_surface`, `debug_logic`) are
+# intentionally absent — they are signal that the dominant-bucket tally is
+# ambiguous, which the recommender surfaces as a low-confidence shortlist
+# rather than a forced single-skill guess.
+BUCKET_SKILLS: dict[str, tuple[str, ...]] = {
+    "idor": ("idor-testing", "split-brain-idor"),
+    "sqli": ("sqli-testing",),
+    "ssrf": ("ssrf-testing",),
+    "xss": ("xss-testing",),
+    "ssti": ("ssti-testing",),
+    "lfi": ("file-inclusion",),
+    "img_traversal": ("file-inclusion",),
+    "rce": ("command-injection",),
+    "redirect": ("open-redirect-testing",),
+    "cors": ("cors-testing",),
+    "upload_fields": ("file-upload-testing",),
+}
+
+
 # Types that carry no exploitable surface on their own.
 #
 # This frozenset is the SINGLE SOURCE OF TRUTH for "inert" work-item types

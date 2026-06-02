@@ -368,11 +368,11 @@ def test_per_host_coverage_does_not_read_command_runs_via_monkeypatch(
         def __exit__(self, *args):
             return self._cm.__exit__(*args)
 
-    monkeypatch.setattr(state_manager, "get_connection", lambda: _Wrapper())
+    monkeypatch.setattr(state_manager._common, "get_connection", lambda: _Wrapper())
     try:
         result = state_manager.per_host_coverage(engagement_id)
     finally:
-        monkeypatch.setattr(state_manager, "get_connection", original_get_connection)
+        monkeypatch.setattr(state_manager._common, "get_connection", original_get_connection)
 
     assert result["hosts"], "expected at least one host with signal"
     joined = "\n".join(seen_sql).lower()

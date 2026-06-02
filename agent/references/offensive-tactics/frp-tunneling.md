@@ -83,7 +83,7 @@ Logs:
 | `/data/oob/frpc.log` | frpc | Tunnel registration and reconnect events |
 | `/data/oob/watch.log` | server watcher | frp IP changes and interactsh restarts |
 | `/data/oob/server.log` | interactsh-server | Raw callback stream; noisy |
-| `/data/oob/clients/<name>.log` | interactsh-client | Correlated callback stream; preferred |
+| `/data/oob/clients/<name>.log` | interactsh-client | Raw per-client callback tail (read by `aith oob client logs`); infra debug only — nonce<->probe correlation is `aith oob poll` |
 
 Use centralized logs from the host:
 
@@ -106,7 +106,7 @@ Interpretation:
 |-------|--------------|--------------|
 | `server` | `true` | interactsh-server is available for callbacks |
 | `frpc` | `true` | FRP tunnel registration is active |
-| `clients` | contains your named client | correlated callback logs are available |
+| `clients` | contains your named client | the listener is up; `aith oob poll --client <name>` can correlate hits |
 
 If `server` or `frpc` is false, inspect `aith logs oob --lines 80` and record a
 runtime issue in your handoff. Escalate to the operator only for shared
@@ -115,26 +115,36 @@ operator-owned controls.
 
 ## Per-Agent Clients
 
-Start one named client per agent/task that needs correlated callback logs. Agents
+Start one named client per agent/task that needs to run the listener. Agents
 can manage these client sessions because they are correlation handles, not shared
 FRP/server infrastructure:
 
 ```bash
 aith engagement list --json
 aith oob client start vuln-ssrf-api --engagement <engagement-key> --agent vulnerability-analyst
-aith oob client logs vuln-ssrf-api --lines 80
 ```
 
-The client log includes a unique callback URL such as `<id>.oob.example.com`.
-Use the full unique URL in payloads, not only the base OOB domain.
+Do NOT read the callback URL out of the client log. Mint a nonce-tagged callback
+URL per payload — the nonce is the correlation token — and use its full `http`
+host in payloads:
 
-Examples:
+```bash
+aith oob mint --technique ssrf --target-url <url> --param <p>
+# → http  http://<nonce>.oob.example.com/
+```
+
+Examples (substitute the minted `<nonce>.oob.example.com` host):
 
 ```text
-http://<id>.oob.example.com/ssrf-users-endpoint
-nslookup <id>.oob.example.com
-<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://<id>.oob.example.com/xxe">]>
+http://<nonce>.oob.example.com/ssrf-users-endpoint
+nslookup <nonce>.oob.example.com
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://<nonce>.oob.example.com/xxe">]>
 ```
+
+Then correlate with `aith oob poll --client vuln-ssrf-api`, which matches each
+recorded probe to its callback. `aith oob client logs vuln-ssrf-api --lines 80`
+is only a raw tail of this client's listener log for infra debugging — it does
+not correlate nonces to probes.
 
 List and stop clients:
 
@@ -159,16 +169,17 @@ curl http://test123.oob.example.com/
 aith logs oob --lines 40
 ```
 
-Use client logs for vulnerability confirmation and raw server logs for infrastructure debugging.
+Use `aith oob poll --client <name>` for vulnerability confirmation (nonce<->probe correlation); client logs and raw server logs are for infrastructure debugging only.
 
 ## Agent Workflow
 
 Agents should:
 
 1. Run `aith oob status --json` and confirm `server=true`, `frpc=true`, and the expected `domain`.
-2. Start or reuse a named client with an explicit engagement key: `aith engagement list --json`, `aith oob client list`, then `aith oob client start <name> --engagement <engagement-key> --agent <agent-name>`.
-3. Use `aith oob client logs <name> --lines 80` to get the unique callback URL and to check correlated hits.
-4. Use `aith logs oob --lines 80` only when debugging shared server/FRP health.
+2. Start or reuse a named client with an explicit engagement key: `aith engagement list --json`, `aith oob client list`, then `aith oob client start <name> --engagement <engagement-key> --agent <agent-name>`. The client runs the listener; it is not where you read the URL or the hits.
+3. Mint a nonce-tagged callback URL per payload with `aith oob mint --technique <t> --target-url <url> [--param <p>]`, and embed its `http` host in the payload (the nonce is the correlation token).
+4. After firing, correlate probe<->callback with `aith oob poll --client <name>` — it prints `matched <N> unmatched <M>` then one line per hit carrying the technique + target you minted with. Add `--json` to capture the matched set as evidence.
+5. `aith oob client logs <name> --lines 80` and `aith logs oob --lines 80` are raw listener-log tails — use them only when debugging shared server/FRP health, never for correlation.
 
 If OOB is unavailable, agents should fall back to time-based detection and state that OOB proof was
 not available.

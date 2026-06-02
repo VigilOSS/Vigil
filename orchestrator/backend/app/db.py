@@ -2396,7 +2396,7 @@ def _create_oob_correlation_tables(connection: sqlite3.Connection) -> None:
                 remote_address TEXT NOT NULL DEFAULT '',
                 query_type TEXT NOT NULL DEFAULT '',
                 raw_request TEXT NOT NULL DEFAULT '',
-                interaction_hash TEXT NOT NULL DEFAULT '',
+                interaction_hash TEXT NOT NULL,
                 observed_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(probe_id, interaction_hash),
