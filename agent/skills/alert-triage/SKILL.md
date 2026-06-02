@@ -1,7 +1,7 @@
 ---
 name: alert-triage
 description: L1 alert normalization, MITRE-aligned severity recompute, mechanical-FP screening against the tenant ref's known-benign register, and dispatch handoff drafting for the L2 platform specialist
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Alert Triage (L1)
@@ -44,31 +44,31 @@ specialists have to correct under stress.
 
 ## Tools
 
-L1 is `aith assess`-only. The platform CLIs (GAM, gcloud, Splunk, Defender)
+L1 is `vigil assess`-only. The platform CLIs (GAM, gcloud, Splunk, Defender)
 are off-limits — those are L2 verbs.
 
-- `aith assess resume-brief` — hydrate engagement state before the first
+- `vigil assess resume-brief` — hydrate engagement state before the first
   classification. Always run this first on continuation; on a fresh
   engagement it returns an empty brief but still records the dispatch
   intent.
-- `aith assess record-finding <agent-name> <finding-json>` — draft the
+- `vigil assess record-finding <agent-name> <finding-json>` — draft the
   finding skeleton with severity, MITRE techniques, actor, target, time
   window, platform.
-- `aith assess kill-finding <slug>` — only on a mechanical-FP match against
+- `vigil assess kill-finding <slug>` — only on a mechanical-FP match against
   the tenant ref's known-benign register; never on operator hunch.
-- `aith assess artifact search --kind alert_intake` — confirm the operator
+- `vigil assess artifact search --kind alert_intake` — confirm the operator
   registered the raw alert intake artifact so the chain of custody survives audit.
-- `aith assess log` — record the triage decision (dispatched or
+- `vigil assess log` — record the triage decision (dispatched or
   auto-closed) in `activity_entries` with the actor/target/platform fields
   pulled out so FTS can find them later.
-- `aith assess agent handoff --from-json <path>` — close the L1 dispatch
+- `vigil assess agent handoff --from-json <path>` — close the L1 dispatch
   with a handoff JSON that names the downstream skill, tenant refs
   consulted, mechanical-FP screen result, and confidence on the
   classification.
 
-Forbidden from L1: `aith assess host-exec` (that is L2 territory),
-`aith assess kali` (red-only), any direct platform CLI invocation, any
-`aith blue propose-contain` / containment proposal.
+Forbidden from L1: `vigil assess host-exec` (that is L2 territory),
+`vigil assess kali` (red-only), any direct platform CLI invocation, any
+`vigil blue propose-contain` / containment proposal.
 
 ## Methodology
 
@@ -200,7 +200,7 @@ register entry already carries the rigor of a previous five-check pass.
 If all five hold, auto-close as `false_positive`:
 
 ```bash
-aith assess kill-finding <draft-slug> \
+vigil assess kill-finding <draft-slug> \
   --kill-reason "Mechanical FP — matches tenant-ref pattern <pattern-id>" \
   --kill-check 0 \
   --inline '{"evidence_refs": [<alert-intake-artifact-id>], "tenant_ref_path": "<path>", "tenant_ref_section": "Known benign patterns / <pattern-id>", "matched_fields": {"actor": "...", "action_verb": "...", "time_pattern": "...", "source_signal": "..."}}'
@@ -218,7 +218,7 @@ register after the verifier confirms it.
 ### Step 5 — Draft the finding skeleton
 
 ```bash
-aith assess record-finding alert-triage-specialist /tmp/finding.json
+vigil assess record-finding alert-triage-specialist /tmp/finding.json
 ```
 
 With `/tmp/finding.json` shaped:
@@ -285,7 +285,7 @@ prerequisite for L2 is a populated tenant ref at
 specialist has no policy / inventory / known-quiet baseline to read against
 and degrades to a blind pull. If the tenant ref is missing or stale, L1's
 handoff should still name the target skill so the operator's queue records
-the gap; bootstrap the ref via `aith blue tenant init --platform <tag>`
+the gap; bootstrap the ref via `vigil blue tenant init --platform <tag>`
 before re-dispatching.
 
 ### Step 7 — Closing sequence
@@ -295,18 +295,18 @@ Run all four in order:
 1. **Confirm the raw alert intake artifact exists:**
 
    ```bash
-   aith assess artifact search --kind alert_intake --limit 10
+   vigil assess artifact search --kind alert_intake --limit 10
    ```
 
    Raw alert recording is operator-owned and happens before L1 dispatch via
-   `aith blue alert record --body-file <path>`. If no `alert_intake` artifact
+   `vigil blue alert record --body-file <path>`. If no `alert_intake` artifact
    exists, return a `blocked` handoff naming the missing intake record instead
    of re-registering the raw alert yourself.
 
 2. **Record the triage activity entry:**
 
    ```bash
-   aith assess log \
+   vigil assess log \
      <runtime-agent-id> \
      "Triaged alert <alert_external_id> as <platform>/<severity>" \
      "Read alert body; normalized fields; classified platform=<x> severity=<y> mitre=<list>; mechanical-FP screen: <hit|miss>" \
@@ -329,7 +329,7 @@ Run all four in order:
    record it:
 
    ```bash
-   aith assess agent handoff --from-json /tmp/handoff.json
+   vigil assess agent handoff --from-json /tmp/handoff.json
    ```
 
 4. **One-screen TSV summary** to stdout for the operator (see Output

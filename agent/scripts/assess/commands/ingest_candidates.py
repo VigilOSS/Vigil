@@ -1,4 +1,4 @@
-"""aith assess ingest-candidates — ingest metadata-rich surface candidate JSONL."""
+"""vigil assess ingest-candidates — ingest metadata-rich surface candidate JSONL."""
 from __future__ import annotations
 
 import json

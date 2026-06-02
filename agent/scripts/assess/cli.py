@@ -18,7 +18,7 @@ def _hoist_root_flags(argv: list[str]) -> list[str]:
 
     argparse defines `--engagement-dir` and `--actor-kind` on the root parser,
     so they only parse cleanly *before* the subcommand name. Operators
-    routinely write `aith assess kali nmap-scan --engagement-dir <path>` and
+    routinely write `vigil assess kali nmap-scan --engagement-dir <path>` and
     hit `unrecognized arguments`. This pre-pass hoists the flag (and any
     `--flag=value` form) to the very front so the original argparse contract
     is preserved without duplicating the flag on every subparser.
@@ -81,8 +81,8 @@ def main(argv: list[str] | None = None) -> None:
     from assess.lib.client import AssessError
 
     parser = argparse.ArgumentParser(
-        prog="aith assess",
-        description="AI Threat Hunting — assessment coordination CLI",
+        prog="vigil assess",
+        description="Vigil — assessment coordination CLI",
     )
     parser.add_argument(
         "--engagement-dir",

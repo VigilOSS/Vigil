@@ -1,4 +1,4 @@
-"""aith assess code-size-summary — summarize backend-indexed code size."""
+"""vigil assess code-size-summary — summarize backend-indexed code size."""
 from __future__ import annotations
 
 from collections import Counter

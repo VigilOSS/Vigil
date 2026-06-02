@@ -15,13 +15,13 @@ def env_flag(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
-    app_name: str = "AI Threat Hunting Orchestrator"
-    data_dir: Path = Path(os.environ.get("AI_THREAT_HUNTING_DATA_DIR", os.environ.get("REDTEAM_ORCHESTRATOR_DATA_DIR", str(BACKEND_ROOT / "data"))))
-    install_dir: Path = Path(os.environ.get("AI_THREAT_HUNTING_INSTALL_DIR", str(REPO_ROOT)))
+    app_name: str = "Vigil Orchestrator"
+    data_dir: Path = Path(os.environ.get("VIGIL_DATA_DIR", os.environ.get("REDTEAM_ORCHESTRATOR_DATA_DIR", str(BACKEND_ROOT / "data"))))
+    install_dir: Path = Path(os.environ.get("VIGIL_INSTALL_DIR", str(REPO_ROOT)))
     frontend_dist_dir: Path = REPO_ROOT / "orchestrator" / "frontend" / "dist"
     agent_source_dir: Path = REPO_ROOT / "agent"
-    orchestrator_public_url: str = os.environ.get("AI_THREAT_HUNTING_PUBLIC_URL", os.environ.get("ORCHESTRATOR_PUBLIC_URL", "http://127.0.0.1:18000"))
-    auto_refresh_seconds: int = int(os.environ.get("AI_THREAT_HUNTING_DISCOVERY_REFRESH_SECONDS", "5"))
+    orchestrator_public_url: str = os.environ.get("VIGIL_PUBLIC_URL", os.environ.get("ORCHESTRATOR_PUBLIC_URL", "http://127.0.0.1:18000"))
+    auto_refresh_seconds: int = int(os.environ.get("VIGIL_DISCOVERY_REFRESH_SECONDS", "5"))
 
 
 settings = Settings()

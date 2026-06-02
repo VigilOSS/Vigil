@@ -1,7 +1,7 @@
 """Tests for the OAST (out-of-band) auto-correlation API.
 
 Covers the engagement-scoped probe + interaction endpoints that back
-``aith oob mint`` / ``aith oob poll``:
+``vigil oob mint`` / ``vigil oob poll``:
 
 - ``POST /assessment/oob-probes`` records a probe keyed on its unique nonce
   (idempotent re-mint returns the existing row).

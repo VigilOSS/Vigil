@@ -1,7 +1,7 @@
 # john (John the Ripper)
 
 **Purpose:** Offline password hash cracking with format auto-detection and conversion utilities
-Run john via `aith assess kali exec --technique AUTH --intent "<why>" --probe-kind payload --phase <phase> --timeout <seconds> -- john ...` with the standard audit-flag set.
+Run john via `vigil assess kali exec --technique AUTH --intent "<why>" --probe-kind payload --phase <phase> --timeout <seconds> -- john ...` with the standard audit-flag set.
 
 ## Basic Usage
 

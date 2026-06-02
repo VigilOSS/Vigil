@@ -1,5 +1,5 @@
 {
-  "name": "security-research-orchestrator-frontend",
+  "name": "vigil-orchestrator-frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",

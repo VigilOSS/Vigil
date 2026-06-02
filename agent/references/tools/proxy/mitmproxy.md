@@ -5,8 +5,8 @@ Intercept browser traffic to capture authenticated sessions (cookies, tokens, he
 ## Quick Start
 
 ```bash
-aith engagement list --json
-aith mitmproxy start <engagement-key>
+vigil engagement list --json
+vigil mitmproxy start <engagement-key>
 ```
 
 ## Browser Proxy Setup (FoxyProxy)
@@ -37,11 +37,11 @@ The CA cert must be trusted by your browser/OS for HTTPS interception to work.
 ### Option B: Terminal Install
 
 ```bash
-docker cp security-research-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ~/Desktop/mitmproxy-ca-cert.pem
+docker cp vigil-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ~/Desktop/mitmproxy-ca-cert.pem
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Desktop/mitmproxy-ca-cert.pem
 ```
 
-`aith mitmproxy cert` prints the same commands for the active Docker-managed proxy.
+`vigil mitmproxy cert` prints the same commands for the active Docker-managed proxy.
 
 Restart the browser after trusting.
 
@@ -52,14 +52,14 @@ The launcher stores CA keys in a named Docker volume (`mitmproxy-ca`). Container
 If you need to regenerate the CA (e.g., compromise, rotation):
 ```bash
 docker volume rm mitmproxy-ca
-aith engagement list --json
-aith mitmproxy start <engagement-key>
+vigil engagement list --json
+vigil mitmproxy start <engagement-key>
 # Re-install the new cert using Option A or B above
 ```
 
 ## Login Capture Workflow
 
-1. List engagements and start the proxy explicitly: `aith engagement list --json` then `aith mitmproxy start <engagement-key>`
+1. List engagements and start the proxy explicitly: `vigil engagement list --json` then `vigil mitmproxy start <engagement-key>`
 2. Configure browser proxy (see above)
 3. Navigate to the target login page and authenticate
 4. Browse a few authenticated pages (admin, settings, API endpoints)
@@ -67,7 +67,7 @@ aith mitmproxy start <engagement-key>
 6. Disable the proxy in FoxyProxy when done
 
 If auto-capture misses the session (addon error, non-standard login flow):
-- Check proxy logs: `aith logs mitmproxy --lines 30`
+- Check proxy logs: `vigil logs mitmproxy --lines 30`
 - Fall back to manual cookie extraction from browser DevTools
 
 ## Troubleshooting
@@ -76,7 +76,7 @@ If auto-capture misses the session (addon error, non-standard login flow):
 |---------|-----|
 | `http://mitm.it` says "traffic not passing through mitmproxy" | FoxyProxy is set to HTTPS mode -- change to HTTP |
 | Certificate errors after proxy restart | Check if the `mitmproxy-ca` volume exists: `docker volume ls \| grep mitmproxy`. If missing, the CA was regenerated -- re-install the cert |
-| Proxy container exits immediately | Check logs: `aith logs mitmproxy --lines 20`. Common: port 8080 already in use |
+| Proxy container exits immediately | Check logs: `vigil logs mitmproxy --lines 20`. Common: port 8080 already in use |
 | `auth.json` not updated after login | Check for addon errors in logs. The `_detect_login` function looks for `set-cookie` headers and token fields in response bodies |
 | Browser still shows cert errors after trusting | Quit browser fully and reopen. macOS may also need: System Settings > Network > clear DNS cache |
 
@@ -84,19 +84,19 @@ If auto-capture misses the session (addon error, non-standard login flow):
 
 ```bash
 # Status
-aith mitmproxy status
+vigil mitmproxy status
 
 # Logs
-aith logs mitmproxy --lines 80
+vigil logs mitmproxy --lines 80
 
 # Stop
-aith mitmproxy stop
+vigil mitmproxy stop
 
 # Restart (reuses same CA cert from volume)
-aith mitmproxy start <engagement-key>
+vigil mitmproxy start <engagement-key>
 
 # Custom port
-aith mitmproxy start <engagement-key> --port 9090
+vigil mitmproxy start <engagement-key> --port 9090
 ```
 
 ## How It Works

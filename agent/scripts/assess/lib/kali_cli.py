@@ -1,4 +1,4 @@
-"""argparse scaffolding shared by every ``aith assess kali <verb>`` command.
+"""argparse scaffolding shared by every ``vigil assess kali <verb>`` command.
 
 These helpers are pure CLI-glue: register the audit/lifecycle flags
 (``--technique``, ``--intent``, ``--probe-kind``, ``--phase``, ``--timeout``,
@@ -85,7 +85,7 @@ def add_required_kali_flags(parser) -> None:
         dest="kali_agent_name",
         default=None,
         help=(
-            "Dispatching agent name. Defaults to $AGENT_NAME / $AITH_AGENT_NAME / "
+            "Dispatching agent name. Defaults to $AGENT_NAME / $VIGIL_AGENT_NAME / "
             "'operator'; specialists should pass this explicitly if wrapper env is missing."
         ),
     )

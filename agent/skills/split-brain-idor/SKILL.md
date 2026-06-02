@@ -1,12 +1,12 @@
 ---
 name: split-brain-idor
 description: Test for body/route parameter divergence where the server uses a different object identifier than the one validated in the URL path
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Split-Brain IDOR Testing
 
-> **`aith assess kali` audit flags:** use `--technique IDOR` for all split-brain identity probes. Use `--probe-kind payload` for divergence testing, `--probe-kind exploit` for confirmed unauthorized access demonstrations.
+> **`vigil assess kali` audit flags:** use `--technique IDOR` for all split-brain identity probes. Use `--probe-kind payload` for divergence testing, `--probe-kind exploit` for confirmed unauthorized access demonstrations.
 
 ## When to Activate
 
@@ -29,7 +29,7 @@ This is distinct from standard IDOR because the application may correctly enforc
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` for all probing (mandatory audit pipeline)
+- `vigil assess kali exec -- curl ...` for all probing (mandatory audit pipeline)
 - Two test accounts with distinct object IDs
 - Mitmproxy or browser DevTools for observing request/response shapes
 
@@ -84,13 +84,13 @@ the body slot:
 
 ```bash
 # Mongo ObjectId (24-char hex) → format + boundary confusions to try in the body
-aith assess classify-payload 6512a1f4e3b9c8a7d2f01b3e --mutations
+vigil assess classify-payload 6512a1f4e3b9c8a7d2f01b3e --mutations
 #   type: hex
 #   format:   '"6512a1f4e3b9c8a7d2f01b3e"'  '6512a1f4e3b9c8a7d2f01b3e=='  (truncated)  null
 #   boundary: '' 'a' (255×a)
 
 # Numeric or UUID id → escalation variants surface the first/admin object directly
-aith assess classify-payload 1042 --mutations          # escalation: '1' '0' 'admin' ...
+vigil assess classify-payload 1042 --mutations          # escalation: '1' '0' 'admin' ...
 ```
 
 - The **victim's real ID** is your primary body payload (Phase 2) — `classify-payload` cannot

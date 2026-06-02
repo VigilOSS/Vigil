@@ -1,4 +1,4 @@
-"""aith assess kali asnmap — typed wrapper around asnmap (ASN → CIDR mapper)."""
+"""vigil assess kali asnmap — typed wrapper around asnmap (ASN → CIDR mapper)."""
 from __future__ import annotations
 
 import subprocess
@@ -23,7 +23,7 @@ _PDCP_FALLBACK_GUIDANCE = (
     "asnmap requires a ProjectDiscovery Cloud (PDCP) API key; without it it exits 0 with\n"
     "empty output (looks identical to 'this ASN announces no CIDRs').\n"
     "  Fix: set PDCP_API_KEY in the runtime (free key at cloud.projectdiscovery.io), e.g. add\n"
-    "  it to <install>/.env and `aith runtime start`. Or use a keyless ASN->CIDR path:\n"
+    "  it to <install>/.env and `vigil runtime start`. Or use a keyless ASN->CIDR path:\n"
     "    Team Cymru :  whois -h whois.cymru.com ' -v <ip>'\n"
     "    RADB       :  whois -h whois.radb.net '!gAS<asn-number>'\n"
     "    ARIN RDAP  :  curl https://rdap.arin.net/registry/ip/<ip>\n"

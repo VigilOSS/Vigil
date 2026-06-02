@@ -1,7 +1,7 @@
 ---
 name: mobile-fuzzing
 description: Authorized mobile fuzzing for app APIs, file parsers, IPC surfaces, WebView/browser-adjacent inputs, native libraries, Android Binder/AIDL, iOS XPC/Mach, crash triage, and reproducible campaigns
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Mobile Fuzzing

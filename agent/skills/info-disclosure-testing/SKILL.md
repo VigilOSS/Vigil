@@ -1,7 +1,7 @@
 ---
 name: info-disclosure-testing
 description: Information disclosure detection — error messages, files, headers, debug endpoints
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Information Disclosure Testing
@@ -20,8 +20,8 @@ Info disclosure severity depends entirely on WHAT is disclosed. A stack trace wi
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (header inspection, endpoint probing, error triggering — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique INFO-DISCLOSURE --probe-kind fingerprint --phase consume-test --timeout 30` for endpoint probing)
-- `aith assess kali ffuf ...` (file and directory brute-force — use `--technique INFO-DISCLOSURE --probe-kind fingerprint --phase consume-test --timeout 600`)
+- `vigil assess kali exec -- curl ...` (header inspection, endpoint probing, error triggering — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique INFO-DISCLOSURE --probe-kind fingerprint --phase consume-test --timeout 30` for endpoint probing)
+- `vigil assess kali ffuf ...` (file and directory brute-force — use `--technique INFO-DISCLOSURE --probe-kind fingerprint --phase consume-test --timeout 600`)
 - Burp Suite (passive scanning, response analysis across all traffic)
 - `git-dumper` (full `.git` repository reconstruction — run host-side after confirming exposure via kali exec)
 - `trufflehog` / `gitleaks` (secret scanning in reconstructed repos or exposed source — host-side tool, not target-facing)
@@ -87,7 +87,7 @@ Useful for CVE matching and targeted exploitation. Worth noting but not worth a 
 
 ### Low: Verbose Errors Without Sensitive Data
 
-Generic stack traces, verbose 404 pages, "null pointer at line 42" without file paths or secrets. Not worth reporting on their own. Capture them via `aith assess record-intel note <json-file>` for context but do not create findings.
+Generic stack traces, verbose 404 pages, "null pointer at line 42" without file paths or secrets. Not worth reporting on their own. Capture them via `vigil assess record-intel note <json-file>` for context but do not create findings.
 
 ---
 
@@ -95,7 +95,7 @@ Generic stack traces, verbose 404 pages, "null pointer at line 42" without file 
 
 Actively trigger errors — different error handlers expose different information, and passive observation misses the valuable ones.
 
-All target-facing curl commands below must run via `aith assess kali exec --technique INFO-DISCLOSURE --intent "<purpose>" --probe-kind fingerprint --phase consume-test --timeout 30 -- curl ...`. The curl examples show the command body only; always prepend the full audit-flag set when running against a scoped target.
+All target-facing curl commands below must run via `vigil assess kali exec --technique INFO-DISCLOSURE --intent "<purpose>" --probe-kind fingerprint --phase consume-test --timeout 30 -- curl ...`. The curl examples show the command body only; always prepend the full audit-flag set when running against a scoped target.
 
 ### Malformed Content-Type
 
@@ -186,10 +186,10 @@ The single most common high-value disclosure in Java applications. Spring Boot A
 
 ### Discovery
 
-Run discovery loops via `aith assess kali exec --technique INFO-DISCLOSURE --intent "actuator endpoint discovery" --probe-kind fingerprint --phase consume-test --timeout 120 -- sh -c '...'`:
+Run discovery loops via `vigil assess kali exec --technique INFO-DISCLOSURE --intent "actuator endpoint discovery" --probe-kind fingerprint --phase consume-test --timeout 120 -- sh -c '...'`:
 
 ```bash
-# Standard paths (run the sh -c block via aith assess kali exec)
+# Standard paths (run the sh -c block via vigil assess kali exec)
 for path in actuator actuator/env actuator/heapdump actuator/mappings actuator/configprops actuator/beans actuator/trace actuator/httptrace actuator/loggers actuator/jolokia actuator/health; do
   code=$(curl -s -o /dev/null -w "%{http_code}" "https://target.example/$path")
   echo "$code $path"
@@ -228,7 +228,7 @@ Finding `/.git/HEAD` returning `ref: refs/heads/main` is not the end -- it is th
 
 ### Verification
 
-Use `aith assess kali exec --technique INFO-DISCLOSURE --intent ".git exposure check" --probe-kind fingerprint --phase consume-test --timeout 30 -- curl -s https://target.example/.git/HEAD` for all target-facing checks.
+Use `vigil assess kali exec --technique INFO-DISCLOSURE --intent ".git exposure check" --probe-kind fingerprint --phase consume-test --timeout 30 -- curl -s https://target.example/.git/HEAD` for all target-facing checks.
 
 ```bash
 # Quick check

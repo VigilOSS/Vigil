@@ -1,4 +1,4 @@
-"""aith assess artifact — indexed engagement artifact operations."""
+"""vigil assess artifact — indexed engagement artifact operations."""
 from __future__ import annotations
 
 import json

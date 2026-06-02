@@ -1,12 +1,12 @@
 ---
 name: surface-collection
 description: URL collection pipeline and intelligent triage methodology for Phase 2 work-buffer population
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Surface Collection
 
-> **`aith assess kali` audit flags:** use `--technique DISCOVERY` (Katana, gau, and wayback URL collection plus triage expand the attack-surface inventory without sending attack payloads).
+> **`vigil assess kali` audit flags:** use `--technique DISCOVERY` (Katana, gau, and wayback URL collection plus triage expand the attack-surface inventory without sending attack payloads).
 
 Guides surface-collector through the Phase 2 URL collection pipeline: live crawling, historical
 enrichment, deduplication, intelligent triage, and work-buffer population. The goal is to turn
@@ -32,22 +32,22 @@ Recon-specialist and source-analyzer produce endpoint lists during Phase 1. Inge
 as the baseline work-buffer seed:
 
 ```bash
-cat "$DIR/scans/endpoints.txt" | aith assess ingest-endpoints "$DB" recon
+cat "$DIR/scans/endpoints.txt" | vigil assess ingest-endpoints "$DB" recon
 ```
 
 If source-analyzer produced a separate endpoint file, ingest it with a distinct source tag:
 
 ```bash
-cat "$DIR/scans/source-endpoints.txt" | aith assess ingest-endpoints "$DB" source-analysis
+cat "$DIR/scans/source-endpoints.txt" | vigil assess ingest-endpoints "$DB" source-analysis
 ```
 
 ### Step 2: Live Crawl via Katana
 
-Run Katana via `aith assess kali katana` to crawl live targets. Katana is installed in the
+Run Katana via `vigil assess kali katana` to crawl live targets. Katana is installed in the
 runtime container; the typed verb wraps it with audit recording.
 
 ```bash
-aith assess kali katana \
+vigil assess kali katana \
   -u https://target.example -d 3 -jc -jsl -c 10 -rl 20 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_output.txt \
   --technique DISCOVERY --intent "live crawl of target.example" \
@@ -56,14 +56,14 @@ aith assess kali katana \
 
 **TLS handling:** Katana does not provide a TLS-verification-skip flag in the runtime this
 repo builds. If a target only responds behind an invalid or self-signed certificate, use
-`aith assess kali exec --technique RECON --intent "spot-validate invalid TLS response" --probe-kind baseline --phase collect --timeout 60 -- curl -k` for spot validation and continue with other collection
+`vigil assess kali exec --technique RECON --intent "spot-validate invalid TLS response" --probe-kind baseline --phase collect --timeout 60 -- curl -k` for spot validation and continue with other collection
 sources instead of relying on Katana to bypass TLS checks.
 
 **Auth-aware crawl:** If `auth.json` has `use_for_requests` set to `true` and `state` set
 to `available`, pass cookies/headers:
 
 ```bash
-aith assess kali katana \
+vigil assess kali katana \
   -u URL -H "Cookie: ..." -H "Authorization: ..." -d 3 -jc -jsl -c 10 -rl 20 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_auth_output.txt \
   --technique DISCOVERY --intent "auth-aware crawl of URL" \
@@ -75,7 +75,7 @@ output files or ingest each separately with the same source tag.
 
 Ingest:
 ```bash
-cat "$DIR/scans/katana_output.txt" | aith assess ingest-endpoints "$DB" katana
+cat "$DIR/scans/katana_output.txt" | vigil assess ingest-endpoints "$DB" katana
 ```
 
 If triage produced metadata-rich candidate JSONL (for example `candidate_records.jsonl`
@@ -83,7 +83,7 @@ with curated score, signals, rationale, selected signal, bucket, or live status)
 that file through the metadata-preserving path instead of flattening it to URLs:
 
 ```bash
-aith assess ingest-candidates "$DB" surface-collector-curated \
+vigil assess ingest-candidates "$DB" surface-collector-curated \
   "$DIR/scans/surface-collector/candidate_records.jsonl"
 ```
 
@@ -94,7 +94,7 @@ ingests the URLs into `work_items` with inline classification, and emits a struc
 JSON summary with `cache_reused: true|false` so the dispatch decision is auditable.
 
 ```bash
-aith assess gau-endpoints TARGET_DOMAIN --subs \
+vigil assess gau-endpoints TARGET_DOMAIN --subs \
   --providers wayback,otx,commoncrawl,urlscan
 ```
 
@@ -112,9 +112,9 @@ sidecar meta keyed by target so reuse decisions stay per-host.
 
 **Follow-on verbs that share the same cached corpus:**
 
-- `aith assess gau-secrets TARGET_DOMAIN` — body capture + trufflehog secret scan.
+- `vigil assess gau-secrets TARGET_DOMAIN` — body capture + trufflehog secret scan.
   Defaults to `--no-verification`; pass `--verify` to enable trufflehog's verification.
-- `aith assess gau-js-endpoints TARGET_DOMAIN --fetch-if-missing` — extract endpoints
+- `vigil assess gau-js-endpoints TARGET_DOMAIN --fetch-if-missing` — extract endpoints
   hidden in minified JS bundles (LinkFinder-derived regex) and ingest them as
   `source='js-extract'`. Catches admin/internal routes that exist only in JS code
   paths — a class of endpoint live crawls and HTML-only inspection consistently miss.
@@ -130,7 +130,7 @@ were never linked anywhere except inside compiled JS.
 If Phase 1 discovered API specifications (source-analyzer may have saved them to `scans/`):
 
 ```bash
-aith assess ingest-spec "$DB" "$DIR/scans/openapi.json"
+vigil assess ingest-spec "$DB" "$DIR/scans/openapi.json"
 ```
 
 This creates `api-spec` work items with full endpoint/parameter schemas and generates
@@ -141,7 +141,7 @@ coverage candidates automatically.
 After all sources are ingested, verify the work buffer is clean:
 
 ```bash
-aith assess work-buffer "$DB" stats
+vigil assess work-buffer "$DB" stats
 ```
 
 The ingestion pipeline handles param-structure deduplication automatically (same endpoint
@@ -157,8 +157,8 @@ There is no per-host URL cap. Volume control happens at ingest:
   `archive`, `sourcemap`, and `manifest` types are stamped `status='skipped'` in
   `db_insert_work_item()` so they never enter the priority-mode dispatch.
 - **Classification runs inline at ingestion** so every URL gets a `cluster_key` and
-  `priority_score` immediately. Run `aith assess list-clusters "$DB"` to review the
-  resulting cluster set and `aith assess work-buffer "$DB" defer-cluster <key> --reason "…"`
+  `priority_score` immediately. Run `vigil assess list-clusters "$DB"` to review the
+  resulting cluster set and `vigil assess work-buffer "$DB" defer-cluster <key> --reason "…"`
   to drop low-signal clusters before Phase 3.
 - **Egress-blocked hosts still defer** (see "Egress-blocked hosts" below) — that is a
   network-failure class, not a volume cap.
@@ -183,13 +183,13 @@ AFTER initial ingestion MUST receive their own gau pass — surface-collector ca
 skip them on the assumption that initial collection was exhaustive. A new host
 ingests through the standard path; inline classification scores its rows
 immediately, and any low-signal cluster gets explicit operator control via
-`aith assess work-buffer defer-cluster` rather than an automatic URL cap.
+`vigil assess work-buffer defer-cluster` rather than an automatic URL cap.
 
 #### Admin / internal / config URL preservation under egress block
 
 When historical gau discovers admin / internal / config paths on a host that is
 currently egress-blocked, save those URLs as intel-notes via
-`aith assess record-intel note` even though the live work item lands in the
+`vigil assess record-intel note` even though the live work item lands in the
 deferred bucket. The path patterns themselves reveal target-environment exposure
 (staging hostnames, internal-tooling routes, config endpoints) and feed the report
 narrative even when live testing is blocked.
@@ -207,16 +207,16 @@ replacement.
 
 **Retrieve work items for analysis:**
 ```bash
-aith assess work-buffer "$DB" fetch api 50 surface-collector
-aith assess work-buffer "$DB" fetch page 50 surface-collector
-aith assess work-buffer "$DB" fetch unknown 50 surface-collector
+vigil assess work-buffer "$DB" fetch api 50 surface-collector
+vigil assess work-buffer "$DB" fetch page 50 surface-collector
+vigil assess work-buffer "$DB" fetch unknown 50 surface-collector
 ```
 
 Analyze the fetched URLs (without testing them — triage is classification, not probing)
 and produce the priority manifest. Then release them back:
 
 ```bash
-aith assess work-buffer "$DB" reset-stale 0
+vigil assess work-buffer "$DB" reset-stale 0
 ```
 
 **Triage categories** (see agent prompt for full pattern lists):
@@ -239,7 +239,7 @@ URL / host fields inside admin / settings POST and PUT bodies are SSRF candidate
 Run this against every captured POST/PUT body in the work buffer:
 
 ```bash
-aith assess work-buffer "$DB" --json \
+vigil assess work-buffer "$DB" --json \
   | jq -r '.[] | select(.method=="POST" or .method=="PUT")
            | "\(.url)\t\(.body_params // empty)"' \
   | grep -iE '\b(url|uri|host|hostname|endpoint|callback|webhook|notify|postback|target|destination|return|redirect|next|continue|origin|fetch|import|source|metadata|discovery)\b\s*[:=]'
@@ -248,7 +248,7 @@ aith assess work-buffer "$DB" --json \
 For each hit, record the candidate so Phase 3 dispatching does not lose it:
 
 ```bash
-aith assess record-surface ssrf-candidate "<endpoint>" surface-collector-url-shape \
+vigil assess record-surface ssrf-candidate "<endpoint>" surface-collector-url-shape \
   --rationale "POST/PUT body field <field> accepts a URL — server-side fetch on save / connection-test (SaaS connector pattern)" \
   --status discovered
 ```
@@ -261,7 +261,7 @@ Before returning to the operator:
 
 **Record surfaces** for all high-signal discoveries:
 ```bash
-aith assess record-surface <type> <target> <source> \
+vigil assess record-surface <type> <target> <source> \
   --rationale "<why this is high-signal>" \
   --status discovered
 ```
@@ -269,14 +269,14 @@ aith assess record-surface <type> <target> <source> \
 **Record findings** when triage produces decisive evidence (e.g., an API key with a
 non-empty value visible in a URL parameter):
 ```bash
-aith assess record-finding surface-collector <finding-json-file>
+vigil assess record-finding surface-collector <finding-json-file>
 ```
 
 ### Step 8: Stats and Priority Manifest
 
 Produce the final stats:
 ```bash
-aith assess work-buffer "$DB" stats
+vigil assess work-buffer "$DB" stats
 ```
 
 Build the priority manifest in the output — a ranked list of attack surface clusters
@@ -284,12 +284,12 @@ with triage signals, recommended dispatch order, and suggested vuln-class skills
 
 ## Key Rules
 
-- Keep all URL crawling and enrichment in `aith assess kali katana` / `aith assess gau-endpoints` (or `gau-secrets` / `gau-js-endpoints`) — host-side crawling bypasses the audit pipeline that downstream specialists rely on
+- Keep all URL crawling and enrichment in `vigil assess kali katana` / `vigil assess gau-endpoints` (or `gau-secrets` / `gau-js-endpoints`) — host-side crawling bypasses the audit pipeline that downstream specialists rely on
 - Use the `gau-*` wrappers for gau collection — they pair gau with ingest in one shot and emit a structured JSON summary with cache-decision metadata
-- Use `aith assess ingest-candidates` whenever a triage step produced rich candidate JSONL — flattening those records to URLs discards the priority metadata specialists rely on
-- Use `aith assess ingest-endpoints` directly only for non-gau sources (katana output, OpenAPI specs, mitmproxy captures) — gau callers should use `gau-endpoints` unless they have a curated candidate JSONL output
-- Use `aith assess record-surface` for all surface writes — bypassing loses backend sync
-- Use `aith assess record-finding` for any findings — unrecorded findings are lost data
+- Use `vigil assess ingest-candidates` whenever a triage step produced rich candidate JSONL — flattening those records to URLs discards the priority metadata specialists rely on
+- Use `vigil assess ingest-endpoints` directly only for non-gau sources (katana output, OpenAPI specs, mitmproxy captures) — gau callers should use `gau-endpoints` unless they have a curated candidate JSONL output
+- Use `vigil assess record-surface` for all surface writes — bypassing loses backend sync
+- Use `vigil assess record-finding` for any findings — unrecorded findings are lost data
 - Triage is classification and pattern matching — analyze URLs without sending target-facing probes during triage
 - Tag each ingestion source correctly (recon, katana, gau, source-analysis, spec) — source provenance matters for coverage tracking
 

@@ -60,7 +60,7 @@ Attack techniques organized by kill chain phase. Used by: operator, exploit-deve
 | File | Techniques |
 |------|-----------|
 | `offensive-tactics/shell-handling.md` | pwncat-vl listeners, tmux session management, reverse shell payloads, log tailing for LLM visibility — paired with `agent/skills/exploit-playbook-authoring/SKILL.md` for playbook bash structure and `# MANUAL:` annotation conventions |
-| `offensive-tactics/frp-tunneling.md` | `aith oob` frp/interactsh setup, per-agent OOB clients, tunnel logging, reverse shell and OOB DNS/HTTP callback conventions — paired with `agent/skills/exploit-playbook-authoring/SKILL.md` for playbook authoring conventions |
+| `offensive-tactics/frp-tunneling.md` | `vigil oob` frp/interactsh setup, per-agent OOB clients, tunnel logging, reverse shell and OOB DNS/HTTP callback conventions — paired with `agent/skills/exploit-playbook-authoring/SKILL.md` for playbook authoring conventions |
 
 ### offensive-tactics/persistence/
 
@@ -222,7 +222,7 @@ Quick-reference per tool, organized by usage phase.
 | `tools/recon/asnmap.md` | ASN → CIDR mapping; feeds cero for TLS SAN sweeps |
 | `tools/recon/bbot.md` | Multi-module passive preset (Phase 0 deep); `subdomain-enum -rf passive`, `--allow-deadly` gated behind `--destructive` |
 | `tools/recon/shuffledns.md` | Lighter alternative to puredns; we generally prefer puredns for better wildcard handling |
-| `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan); `aith assess gau-endpoints` is the recommended wrapper (cache-aware, ingests in one shot), with `gau-secrets` and `gau-js-endpoints` for body capture and JS-extracted route recovery |
+| `tools/recon/gau.md` | Historical URL discovery (Wayback, OTX, Common Crawl, URLScan); `vigil assess gau-endpoints` is the recommended wrapper (cache-aware, ingests in one shot), with `gau-secrets` and `gau-js-endpoints` for body capture and JS-extracted route recovery |
 | `tools/recon/gf.md` | URL parameter-pattern classifier (xss, ssrf, redirect, idor, sqli, lfi, debug); the patterns are now compiled into `assess.lib.classify_buckets` and applied inline at ingest — this reference documents the bucket source-of-truth |
 | `tools/recon/trufflehog.md` | Secret scanner (filesystem mode, 800+ detectors, v3 positional-path syntax, `--no-verification` default) |
 | `tools/recon/github-osint.md` | GitHub OSINT — org-name pattern enumeration (literal/parent/contractor variants), public-member listing, commit-author email mining, code-search cross-reference; rate-limit etiquette and `GITHUB_TOKEN` pattern |
@@ -274,7 +274,7 @@ gau-triage, operator.
 Each file documents what the bucket classifies, the parameter keys and path fragments that
 match, the baseline `priority_score` weight, representative examples, and false-positive
 surface to keep operator calibration honest. Inline classification at ingest applies these
-buckets automatically; the `aith assess classify-work --reclassify-all` verb re-applies
+buckets automatically; the `vigil assess classify-work --reclassify-all` verb re-applies
 them after a `_BUCKETS` change.
 
 | File | Bucket | Baseline weight | What it classifies |
@@ -304,11 +304,11 @@ Shared operator/runtime references. Used by: operator, Claude, Codex.
 | File | Purpose |
 |------|---------|
 | `runtime-guides/engagement-methodology.md` | Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase |
-| `runtime-guides/subagent-registry.md` | Backend dispatch tables (`assessment_dispatches`, `assessment_dispatch_handoffs`, `assessment_dispatch_decisions`) and their `aith assess agent ...` CLI verbs — engagement audit trail, DEDUP input, handoff renderer source, decision audit |
-| `runtime-guides/handoff-schema.md` | Structured handoff schema written by every specialist via `aith assess agent handoff --from-json <path>` — fields, length caps, per-role examples, CLI usage |
-| `runtime-guides/command-history-auditing.md` | How to read `aith assess list-command-runs` as a coverage map — use it to pick variants that haven't been probed, not to gate-keep reruns; includes field-interpretation guide for retention/suppression |
-| `runtime-guides/kali-cli.md` | `aith assess kali` troubleshooting: discovery failures, dispatch-time guardrails (no broad pkill, per-agent binary copy, docker-exec parallelism cap), common errors (`audit POST 422 phase required`, dedup window, dtach missing), and the canonical smoke test |
-| `runtime-guides/cdn-ip-blocking.md` | CDN/edge IP-reputation block detection signals (403 + reference codes, TCP reset, 000-status), the egress reputation curl script, four mitigation options (program allowlist / residential proxy / browser-based tool / accept-gap), give-up-vs-escalate rule, and the `aith assess ingest-endpoints --egress-blocked-hosts` cross-reference |
+| `runtime-guides/subagent-registry.md` | Backend dispatch tables (`assessment_dispatches`, `assessment_dispatch_handoffs`, `assessment_dispatch_decisions`) and their `vigil assess agent ...` CLI verbs — engagement audit trail, DEDUP input, handoff renderer source, decision audit |
+| `runtime-guides/handoff-schema.md` | Structured handoff schema written by every specialist via `vigil assess agent handoff --from-json <path>` — fields, length caps, per-role examples, CLI usage |
+| `runtime-guides/command-history-auditing.md` | How to read `vigil assess list-command-runs` as a coverage map — use it to pick variants that haven't been probed, not to gate-keep reruns; includes field-interpretation guide for retention/suppression |
+| `runtime-guides/kali-cli.md` | `vigil assess kali` troubleshooting: discovery failures, dispatch-time guardrails (no broad pkill, per-agent binary copy, docker-exec parallelism cap), common errors (`audit POST 422 phase required`, dedup window, dtach missing), and the canonical smoke test |
+| `runtime-guides/cdn-ip-blocking.md` | CDN/edge IP-reputation block detection signals (403 + reference codes, TCP reset, 000-status), the egress reputation curl script, four mitigation options (program allowlist / residential proxy / browser-based tool / accept-gap), give-up-vs-escalate rule, and the `vigil assess ingest-endpoints --egress-blocked-hosts` cross-reference |
 | `handoff-protocols.md` | Agent-to-agent handoff rules and expected downstream actions |
 | `subdomain-enumeration.md` | Subdomain enumeration (when `*.domain` in hosts), prioritization, and sliding-window execution rules |
 | `recon/rate-calibration.md` | Per-target rate calibration table (Cloud-fronted / Origin / WAF-protected / High-friction / Vendor SaaS) plus the runtime-tier × DNS-profile matrix and the concurrent-nmap-procs cap. Recon-class roles load on first use; extracted from `shared-constraints.md` §14 to keep the every-specialist load lighter |
@@ -319,14 +319,14 @@ Validated, copy-and-parametrize single-file Python probes for the
 `write-probe-script` capability. Used by: operator, vulnerability-analyst,
 exploit-developer, fuzzer. Paired with `agent/skills/write-probe-script/SKILL.md`
 (the authoring loop) and `agent/skills/kali-exec/SKILL.md` (probes run via
-`aith assess kali exec -- python3 <script>`). Scaffold a fresh probe into an
-engagement with `aith assess scaffold-probe <name>` (add `--finding <slug>` to
+`vigil assess kali exec -- python3 <script>`). Scaffold a fresh probe into an
+engagement with `vigil assess scaffold-probe <name>` (add `--finding <slug>` to
 link the registered probe artifact to a finding at scaffold time).
 
 | File | Probe shape |
 |------|-------------|
 | `probe-scripts/http_differential.py` | Parametrized HTTP differential (control vs test request; decide on status / length / marker / latency delta) — the shape for IDOR boundaries, auth differentials, and any check that is inconclusive from one request. Stdlib-only; finding-return JSON verdict on the last stdout line. |
-| `probe-scripts/blind_callback_timing.py` | Blind OOB callback + timing fallback (carry a minted `aith oob mint` nonce host, measure baseline-vs-payload latency) — the shape for blind SSRF / XXE / command-injection / blind SQLi. Authoritative confirmation is `aith oob poll` on the nonce; timing is the egress-blocked fallback. |
+| `probe-scripts/blind_callback_timing.py` | Blind OOB callback + timing fallback (carry a minted `vigil oob mint` nonce host, measure baseline-vs-payload latency) — the shape for blind SSRF / XXE / command-injection / blind SQLi. Authoritative confirmation is `vigil oob poll` on the nonce; timing is the egress-blocked fallback. |
 
 ## reporting/ — Disclosure & Reporting Formats
 

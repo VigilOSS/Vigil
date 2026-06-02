@@ -37,7 +37,7 @@ already listed below.
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/code-finding-verification/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
+- `agent/skills/code-finding-verification/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 - CWE pattern references matching the findings' defect families
 
 ## Pre-Work Checkpoint
@@ -126,36 +126,36 @@ so the backend clears the prior verification state and the finding returns to ac
 
 ```bash
 # Persist confirm/downgrade/dispute decisions through the verification endpoint
-aith assess verify-finding <slug> <verification-json>
+vigil assess verify-finding <slug> <verification-json>
 
 # Persist kills with the dedicated helper (enforces kill_reason + kill_check fields)
-aith assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+vigil assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 
 # Reopen a previously verified or false-positive finding when retest disproves the prior verdict
-aith assess reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
+vigil assess reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
 
 # Record attack chains
-aith assess record-chain code-vuln-verifier <chain-json>
+vigil assess record-chain code-vuln-verifier <chain-json>
 
 # Only use record-finding when the verifier discovers a net-new spot-check bug
-aith assess record-finding code-vuln-verifier <new-finding-json>
+vigil assess record-finding code-vuln-verifier <new-finding-json>
 ```
 
 ## Mandatory Closing Sequence
 
 Before your dispatch returns, run in this order:
 
-1. `aith assess verify-finding <slug> <verification-json>` for each confirm/downgrade/dispute decision
-2. `aith assess kill-finding <slug> ...` for each kill decision
-3. `aith assess record-chain code-vuln-verifier <chain-json>` for any composed chains
-4. `aith assess record-finding code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)
-5. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
-6. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+1. `vigil assess verify-finding <slug> <verification-json>` for each confirm/downgrade/dispute decision
+2. `vigil assess kill-finding <slug> ...` for each kill decision
+3. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
+4. `vigil assess record-finding code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)
+5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
+6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
+`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -183,7 +183,7 @@ narrative rather than restating canonical state.
 
 Your primary role is to update existing findings (confirm, downgrade, kill) and create attack
 chains linking them. Only net-new spot-check findings should create fresh `VF` finding slugs;
-omit `slug` from those rare new finding payloads and let `aith assess record-finding
+omit `slug` from those rare new finding payloads and let `vigil assess record-finding
 code-vuln-verifier <new-finding-json>` allocate the canonical slug.
 
 ## Key Principles

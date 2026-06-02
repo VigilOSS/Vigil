@@ -1,7 +1,7 @@
 ---
 name: phishing-triage
 description: L2 email-content forensics. Header chain, sender authentication state, URL+attachment detonation, BEC pattern detection. Use after L1 dispatches a phishing-class alert.
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Phishing Triage (L2)
@@ -66,7 +66,7 @@ Load before the first command runs. Do not restate linked content.
 |------|------|-----|
 | Pull raw `.eml` from M365 mailbox | `curl` against Graph `users/{id}/messages/{id}/$value` | Graph returns the exact RFC 822 bytes the recipient received; preserves chain of custody. Authenticate via Azure AD app with `Mail.ReadBasic.All` (read) or `Mail.Read` if body access is required. |
 | Pull raw `.eml` from GWS mailbox | `gam user <u> show message <gmail-internal-id> format raw` | GAM with DWD; mirror the pattern in `google-workspaces/SKILL.md` §3. |
-| Parse RFC 5322 headers (Received chain, Auth-Results, Reply-To, From) | `eml-parser` (pypi) via `aith assess host-exec --tool python3` | Pure-Python parser; deterministic JSON output; handles multipart MIME, attachments, header folding. |
+| Parse RFC 5322 headers (Received chain, Auth-Results, Reply-To, From) | `eml-parser` (pypi) via `vigil assess host-exec --tool python3` | Pure-Python parser; deterministic JSON output; handles multipart MIME, attachments, header folding. |
 | Office attachment triage (macros, OLE, embedded URLs) | `oletools` (`oleid`, `olevba`, `oledump.py`) via host-exec | Standard malicious-document toolkit; surfaces VBA macros, AutoExec triggers, suspicious URL fragments. |
 | PDF action / JS / embedded form triage | `pdfid.py` + `pdf-parser.py` (Didier Stevens) via host-exec | Surfaces `/JS`, `/JavaScript`, `/OpenAction`, `/AcroForm`, `/EmbeddedFile`, `/Launch` — the high-signal phishing-PDF tokens. |
 | DNS auth verification (SPF, DKIM selector, DMARC) | `dig +short TXT <name>` via host-exec | Re-resolves live DNS at investigation time; compares against the verdicts the receiving MTA stamped into `Authentication-Results`. |
@@ -76,7 +76,7 @@ Load before the first command runs. Do not restate linked content.
 | M365 Defender Advanced Hunting (delivery, click-through, post-delivery rules) | `curl` POST `https://api.security.microsoft.com/api/advancedhunting/run` with KQL body | Tables: `EmailEvents`, `EmailUrlInfo`, `EmailAttachmentInfo`, `EmailPostDeliveryEvents`, `UrlClickEvents`. Auth via Azure AD app with `ThreatHunting.Read.All`. |
 | GWS Gmail mailflow pivot | `gam`, `gcloud` Reports API (`gmail`, `rules`) | Cross-link `agent/skills/google-workspaces/SKILL.md` §3 (content search) and §Gmail content for full message access via DWD. |
 | Offline JSON / header analysis | `jq`, `python3 -c '...'` | Read-only, no host-exec needed; manipulate already-pulled artifacts. |
-| Intel record + linkage | `aith assess record-intel`, `aith assess link-finding --intel <id>` | Records each IOC (sender domain, sender IP, lookalike domain, URL, attachment hash) and links it to the finding. |
+| Intel record + linkage | `vigil assess record-intel`, `vigil assess link-finding --intel <id>` | Records each IOC (sender domain, sender IP, lookalike domain, URL, attachment hash) and links it to the finding. |
 
 ### Negative tool list (do NOT invent these)
 
@@ -115,7 +115,7 @@ TOKEN=$(curl -s -X POST "https://login.microsoftonline.com/<tenant>/oauth2/v2.0/
   -d "client_id=$AAD_CLIENT_ID&client_secret=$AAD_CLIENT_SECRET&grant_type=client_credentials&scope=https://graph.microsoft.com/.default" \
   | jq -r '.access_token')
 
-aith assess host-exec \
+vigil assess host-exec \
   --tool curl \
   --intent "preserve raw RFC 822 for phish triage on <finding-slug>" \
   --technique IR-EVIDENCE \
@@ -133,7 +133,7 @@ aith assess host-exec \
 
 ```bash
 GMAIL_ID=<gmail-internal-id-from-alert>   # 16-char hex, e.g. 19e1c40646b0e836
-aith assess host-exec \
+vigil assess host-exec \
   --tool gam \
   --intent "preserve raw RFC 822 for phish triage on <finding-slug>" \
   --technique IR-EVIDENCE \
@@ -153,7 +153,7 @@ resolve first via `gam user <recipient> print messages query
 **Register the artifact:**
 
 ```bash
-aith assess artifact register \
+vigil assess artifact register \
   "$ENGAGEMENT_DIR/ir/evidence/email-${MSG_ID:0:12}.eml" \
   --kind ir_evidence \
   --finding <finding-slug> \
@@ -259,19 +259,19 @@ sub-field:
 SENDER_DOMAIN=invoice-vendor.example
 DKIM_SELECTOR=selector1  # from Authentication-Results header.s=
 
-aith assess host-exec --tool dig \
+vigil assess host-exec --tool dig \
   --intent "live SPF lookup for <finding-slug>" \
   --technique IR-EVIDENCE --phase investigate \
   --scope-host "$TENANT" --target-host "$SENDER_DOMAIN" \
   -- dig +short TXT "$SENDER_DOMAIN"
 
-aith assess host-exec --tool dig \
+vigil assess host-exec --tool dig \
   --intent "live DKIM lookup for <finding-slug>" \
   --technique IR-EVIDENCE --phase investigate \
   --scope-host "$TENANT" --target-host "$SENDER_DOMAIN" \
   -- dig +short TXT "$DKIM_SELECTOR._domainkey.$SENDER_DOMAIN"
 
-aith assess host-exec --tool dig \
+vigil assess host-exec --tool dig \
   --intent "live DMARC lookup for <finding-slug>" \
   --technique IR-EVIDENCE --phase investigate \
   --scope-host "$TENANT" --target-host "$SENDER_DOMAIN" \
@@ -321,7 +321,7 @@ Submit each URL to urlscan with `visibility=private`:
 
 ```bash
 URL=<one-url-from-the-list>
-aith assess host-exec --tool curl \
+vigil assess host-exec --tool curl \
   --intent "urlscan detonation for <finding-slug>" \
   --technique IOC-ENRICH --phase investigate \
   --scope-host "$TENANT" --target-host urlscan.io \
@@ -352,7 +352,7 @@ VirusTotal:
 
 ```bash
 HASH=<sha256-from-SHA256SUMS>
-aith assess host-exec --tool curl \
+vigil assess host-exec --tool curl \
   --intent "VT file reputation for <finding-slug>" \
   --technique IOC-ENRICH --phase investigate \
   --scope-host "$TENANT" --target-host virustotal.com \
@@ -419,7 +419,7 @@ Then check for homoglyph / IDN lookalikes via `dnstwist` against the
 impersonated domain (the recipient's own domain or a known vendor):
 
 ```bash
-aith assess host-exec --tool dnstwist \
+vigil assess host-exec --tool dnstwist \
   --intent "lookalike domain enumeration for <finding-slug>" \
   --technique IOC-ENRICH --phase investigate \
   --scope-host "$TENANT" --target-host "$TARGET_DOMAIN" \
@@ -485,7 +485,7 @@ KQL='EmailEvents
   or Subject =~ "Invoice 2034 - Payment overdue"
 | project Timestamp, NetworkMessageId, RecipientEmailAddress, DeliveryAction, DeliveryLocation, ThreatTypes, DetectionMethods'
 
-aith assess host-exec --tool curl \
+vigil assess host-exec --tool curl \
   --intent "Defender EmailEvents pivot for <finding-slug>" \
   --technique IR-EVIDENCE --phase investigate \
   --scope-host "$TENANT" --target-host api.security.microsoft.com \
@@ -600,10 +600,10 @@ on the finding; the verifier reads it but is not bound by it.
 Every L2 pass writes one activity row per methodology step plus one
 closing handoff row. The closing row is the durable record the
 verifier and report-writer consume; per-step rows are the audit
-trail. Closing-row signature uses `aith assess log`:
+trail. Closing-row signature uses `vigil assess log`:
 
 ```bash
-aith assess log \
+vigil assess log \
   <runtime-agent-id> \
   "phishing-triage-handoff for <finding-slug>" \
   handoff \
@@ -671,7 +671,7 @@ NOT execute purge or block actions.
 Run these four steps in order before returning the handoff JSON:
 
 1. **Register every durable artifact** via
-   `aith assess artifact register <path> --kind <ir_evidence|ioc_dump>
+   `vigil assess artifact register <path> --kind <ir_evidence|ioc_dump>
    --finding <slug> --agent-id <runtime-agent-id> --sensitive`.
    Durables: raw `.eml`, parsed JSON, headers JSON, DNS-verify JSON,
    urlscan JSON + screenshot, attachments + SHA256SUMS, oletools /
@@ -679,18 +679,18 @@ Run these four steps in order before returning the handoff JSON:
    Defender hunting JSONs.
 
 2. **Mark transient working notes scratch** via
-   `aith assess artifact mark-scratch --under
+   `vigil assess artifact mark-scratch --under
    "$ENGAGEMENT_DIR/notes/scratch/"`. Intermediate jq output, draft
    timelines, paste-buffer screenshots are not chain-of-custody and
    must not appear in `evidence_refs`.
 
-3. **Write the activity-log handoff row** with `aith assess log`
+3. **Write the activity-log handoff row** with `vigil assess log`
    (positional args: `<agent-id> <title> <action> <result>`). The
    verb is `log` — the `log` + `entry` compound does NOT exist; see
-   `src/ai_threat_hunting_cli/blue.py:15`. Signature:
+   `src/vigil_cli/blue.py:15`. Signature:
 
    ```bash
-   aith assess log \
+   vigil assess log \
      <runtime-agent-id> \
      "phishing-triage-handoff for <finding-slug>" \
      handoff \
@@ -706,17 +706,17 @@ Run these four steps in order before returning the handoff JSON:
    `ioc-enrichment` created during Step 4:
 
    ```bash
-   aith assess link-finding <finding-slug> --intel <intel-id> \
+   vigil assess link-finding <finding-slug> --intel <intel-id> \
      --note "URL <url> recorded as adversarial via urlscan + VT"
    ```
 
    The `--intel` flag is being added to `link-finding` in parallel
    with this skill's v1; if the flag is not yet wired, fall back to
-   `aith assess update-finding <slug> --inline
+   `vigil assess update-finding <slug> --inline
    '{"details": {"related_intel_ids": [<id-1>, <id-2>]}}'` per the
    pattern in `ioc-enrichment/SKILL.md` §6.
 
-5. **Emit the handoff JSON** via `aith assess agent handoff
+5. **Emit the handoff JSON** via `vigil assess agent handoff
    --from-json /tmp/phishing-triage-handoff.json`. Shape per Output
    Contract above. `next_specialist` routes to:
    - `verifier` for any disposition recommendation with met

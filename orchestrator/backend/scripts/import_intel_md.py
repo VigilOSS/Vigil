@@ -8,8 +8,8 @@ Usage (from the repo root)::
         [--engagement 2026-04-12-072244-acme-info] \
         [--dry-run]
 
-Defaults ``--data-dir`` to ``$AI_THREAT_HUNTING_INSTALL_DIR`` or
-``~/security-research``. Processes every engagement whose
+Defaults ``--data-dir`` to ``$VIGIL_INSTALL_DIR`` or
+``~/vigil``. Processes every engagement whose
 DB row exists AND whose filesystem folder still carries an ``intel.md`` or
 ``log.md``. On success, source files are renamed ``*.imported`` so the
 operator can verify without them being re-read.
@@ -63,12 +63,12 @@ def _configure_environment(install_root: Path) -> None:
     data_dir = install_root / "orchestrator" / "backend" / "data"
     # Accept both the new and legacy env var names; the old orchestrator
     # still checks ``REDTEAM_ORCHESTRATOR_DATA_DIR``.
-    os.environ["AI_THREAT_HUNTING_DATA_DIR"] = str(data_dir)
+    os.environ["VIGIL_DATA_DIR"] = str(data_dir)
     os.environ["REDTEAM_ORCHESTRATOR_DATA_DIR"] = str(data_dir)
-    os.environ["AI_THREAT_HUNTING_INSTALL_DIR"] = str(install_root)
+    os.environ["VIGIL_INSTALL_DIR"] = str(install_root)
     # Disable the scheduled sqlite backup thread; the migration runs in a
     # CLI process that would leak the daemon thread past return.
-    os.environ.setdefault("AI_THREAT_HUNTING_BACKUP_DISABLED", "1")
+    os.environ.setdefault("VIGIL_BACKUP_DISABLED", "1")
 
 
 # ── Section → target-table mapping (plan §4). Keys are lowercased,
@@ -1332,7 +1332,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--data-dir",
-        default=os.environ.get("AI_THREAT_HUNTING_INSTALL_DIR", str(Path.home() / "security-research")),
+        default=os.environ.get("VIGIL_INSTALL_DIR", str(Path.home() / "vigil")),
         help="Install root containing agent/engagements and orchestrator/backend/data.",
     )
     parser.add_argument(

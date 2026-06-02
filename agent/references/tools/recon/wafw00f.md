@@ -1,7 +1,7 @@
 # wafw00f
 
 **Purpose:** Web Application Firewall identification and fingerprinting.
-For live engagement targets, run wafw00f via `aith assess kali wafw00f` (typed verb, audit-flag-aware).
+For live engagement targets, run wafw00f via `vigil assess kali wafw00f` (typed verb, audit-flag-aware).
 
 ## Run FIRST in the recon sequence
 
@@ -17,15 +17,15 @@ in-scope host with the WAF tier recorded. Skip-or-defer is not a supported mode.
 
 ## Basic Usage
 
-Run all target-facing wafw00f probes via `aith assess kali wafw00f` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb — kali wafw00f" for a complete annotated invocation.
+Run all target-facing wafw00f probes via `vigil assess kali wafw00f` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb — kali wafw00f" for a complete annotated invocation.
 
-Flag reference (used inside `aith assess kali wafw00f`):
+Flag reference (used inside `vigil assess kali wafw00f`):
 
-**Single target:** `aith assess kali wafw00f https://target --technique DISCOVERY --intent "WAF identification" --probe-kind fingerprint --phase recon --timeout 300`
+**Single target:** `vigil assess kali wafw00f https://target --technique DISCOVERY --intent "WAF identification" --probe-kind fingerprint --phase recon --timeout 300`
 **Verbose:** pass `-v` via `--extra-args`
 **Test all WAFs (not just first match):** `-a` (via `--extra-args`)
 **Multi-host batch from file:** `--input-list /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt` (typed flag)
-**List all detectable WAFs:** `aith assess kali exec --technique HEALTH --intent "wafw00f list WAFs" --probe-kind fingerprint --phase recon --timeout 30 -- wafw00f -l`
+**List all detectable WAFs:** `vigil assess kali exec --technique HEALTH --intent "wafw00f list WAFs" --probe-kind fingerprint --phase recon --timeout 30 -- wafw00f -l`
 **Custom headers:** `--extra-args "-H 'Cookie: session=abc'"`
 **Proxy:** `--extra-args "-p http://127.0.0.1:8080"`
 **Output (CSV):** `-o /engagements/$ENGAGEMENT_KEY/scans/wafw00f_results.csv` (via `--extra-args`)
@@ -36,7 +36,7 @@ parse CSV output or capture stdout.
 ## Multi-host batch invocation (canonical)
 
 ```bash
-aith assess kali wafw00f --input-list /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
+vigil assess kali wafw00f --input-list /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
   --extra-args "-a -o /engagements/$ENGAGEMENT_KEY/scans/wafw00f_results.csv" \
   --technique RECON --intent "WAF tier sweep across in-scope live hosts" \
   --probe-kind fingerprint --phase recon --timeout 1200

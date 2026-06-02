@@ -2,10 +2,10 @@
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**
 >
-> Produced by `aith blue tenant init --customer <slug> --platform edr`,
+> Produced by `vigil blue tenant init --customer <slug> --platform edr`,
 > which writes to `agent/references/tenants/<slug>-edr.md` (per
 > `PLATFORM_TO_TENANT_SUFFIX["edr"] = "edr"` in
-> `src/ai_threat_hunting_cli/blue.py`).
+> `src/vigil_cli/blue.py`).
 >
 > Before this file is loaded into a real engagement:
 >
@@ -381,7 +381,7 @@ root.
 
 - Source: `agent/references/tenants/_template-edr.md`; modeled on
   `agent/references/tenants/_template-gws.md` for cross-platform parity.
-- Alias: `aith blue tenant init --platform edr` writes to
+- Alias: `vigil blue tenant init --platform edr` writes to
   `<customer>-edr.md` per `PLATFORM_TO_TENANT_SUFFIX["edr"] = "edr"`.
 - Consumers: `agent/skills/alert-triage/SKILL.md`,
   `agent/agents/alert-triage-specialist.md`,

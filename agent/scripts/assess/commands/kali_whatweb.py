@@ -1,4 +1,4 @@
-"""aith assess kali whatweb — typed wrapper around whatweb inside the runtime."""
+"""vigil assess kali whatweb — typed wrapper around whatweb inside the runtime."""
 from __future__ import annotations
 
 import sys

@@ -1,12 +1,12 @@
 ---
 name: crlf-injection
 description: Detect and exploit CRLF injection for HTTP response splitting, header injection, and log forging
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # CRLF Injection Testing
 
-> **`aith assess kali` audit flags:** use `--technique OTHER` (CRLF/header-splitting has no dedicated enum class; outcomes span response splitting, cookie injection, and CRLF→XSS).
+> **`vigil assess kali` audit flags:** use `--technique OTHER` (CRLF/header-splitting has no dedicated enum class; outcomes span response splitting, cookie injection, and CRLF→XSS).
 
 ## When to Activate
 
@@ -16,9 +16,9 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (manual CRLF injection probing with encoded payloads — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30`)
+- `vigil assess kali exec -- curl ...` (manual CRLF injection probing with encoded payloads — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools (inspect injected response headers)
-- `aith oob mint` / `aith oob poll` — when a CRLF injection lets you split the response and plant a redirecting `Location`, an injected `<script src>`/`<img>` into a poisoned body, or otherwise force a victim's browser to fetch attacker-controlled content, mint a nonce-tagged callback host (`aith oob mint --technique OTHER --target-url <url> --param <p>`), embed its `http` host in the split payload, then `aith oob poll --client <name>` returns the matched probe<->callback pair that proves the splice fired. Check readiness with `aith oob status --json`; if no named client is running, start one with `aith oob client start <name> --engagement <key> --agent <agent>`. (`aith oob client logs <name> --lines 80` is a raw listener tail for infra debugging only, not correlation.)
+- `vigil oob mint` / `vigil oob poll` — when a CRLF injection lets you split the response and plant a redirecting `Location`, an injected `<script src>`/`<img>` into a poisoned body, or otherwise force a victim's browser to fetch attacker-controlled content, mint a nonce-tagged callback host (`vigil oob mint --technique OTHER --target-url <url> --param <p>`), embed its `http` host in the split payload, then `vigil oob poll --client <name>` returns the matched probe<->callback pair that proves the splice fired. Check readiness with `vigil oob status --json`; if no named client is running, start one with `vigil oob client start <name> --engagement <key> --agent <agent>`. (`vigil oob client logs <name> --lines 80` is a raw listener tail for infra debugging only, not correlation.)
 
 ## Methodology
 

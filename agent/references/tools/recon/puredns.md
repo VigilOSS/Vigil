@@ -1,7 +1,7 @@
 # puredns
 
 **Purpose:** Fast domain resolver and DNS brute-forcer with accurate wildcard filtering
-For live engagement targets, run puredns via `aith assess kali puredns` (typed verb, audit-flag-aware).
+For live engagement targets, run puredns via `vigil assess kali puredns` (typed verb, audit-flag-aware).
 
 ## Hard `massdns` dependency (read first)
 
@@ -10,12 +10,12 @@ puredns is a wrapper around massdns + a wildcard filter — it has no resolver o
 **Host-CPU and Docker-stability note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime — see `agent/skills/subdomain-enumeration/SKILL.md` "Host-CPU note" for the full mechanism. massdns sends thousands of UDP queries per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive puredns rate-limits have crashed Docker on standard laptop hardware. Default to `polite-residential` everywhere; step up to `bursty-OK` only on private/lab resolvers AND with explicit operator opt-in.
 
 ```bash
-aith assess kali exec --technique HEALTH --intent "massdns/puredns preflight" \
+vigil assess kali exec --technique HEALTH --intent "massdns/puredns preflight" \
   --probe-kind fingerprint --phase recon --timeout 30 -- \
   which massdns puredns
 ```
 
-`runtime-full/Dockerfile` installs massdns from the kali apt repo; if it's missing in a running container the image is drifting and the runtime needs a `aith runtime restart` after rebuild — do NOT swap to a degraded fallback.
+`runtime-full/Dockerfile` installs massdns from the kali apt repo; if it's missing in a running container the image is drifting and the runtime needs a `vigil runtime restart` after rebuild — do NOT swap to a degraded fallback.
 
 ## Resource-safe profiles
 
@@ -27,7 +27,7 @@ Match the rate-limit to the runtime/target tier — full tier rationale in `agen
 | polite-residential default | `--rate-limit 2500 --wildcard-batch 100000` |
 | bursty-OK (opt-in only) | `--rate-limit 5000` |
 
-`--wildcard-batch 100000` is the default for the polite-residential profile; drop to `50000` on tight-RAM containers (`AITH_RUNTIME_MEMORY_GB=4` or lower) because the wildcard-filter dedup map dominates puredns's RAM usage and silent truncation produces missing subs without a clean OOM.
+`--wildcard-batch 100000` is the default for the polite-residential profile; drop to `50000` on tight-RAM containers (`VIGIL_RUNTIME_MEMORY_GB=4` or lower) because the wildcard-filter dedup map dominates puredns's RAM usage and silent truncation produces missing subs without a clean OOM.
 
 `--rate-limit-trusted 200` is the ceiling for the trusted-resolver pool — exceeding it triggers per-resolver rate-limits at the upstream, not local saturation, and the resulting failures look like wildcard misses rather than rate errors.
 

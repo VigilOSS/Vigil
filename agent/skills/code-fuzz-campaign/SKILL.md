@@ -1,7 +1,7 @@
 ---
 name: code-fuzz-campaign
 description: AI-driven fuzz campaign orchestration — target selection, harness construction, sanitizer compilation, and crash triage for memory-safety vulnerabilities in C/C++ codebases
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Code Fuzz Campaign
@@ -29,9 +29,9 @@ Host-side (source code work, not target-facing):
 - `nm` / `objdump` — symbol verification for harness linking
 - `llvm-cov` / `gcov` — coverage measurement
 
-No `aith assess kali` needed — this is entirely host-side source code and build work. When a
+No `vigil assess kali` needed — this is entirely host-side source code and build work. When a
 campaign does run a fuzzer through the runtime container (e.g. against a network-facing target
-binary), use `aith assess kali exec --` so the run lands in the audit pipeline.
+binary), use `vigil assess kali exec --` so the run lands in the audit pipeline.
 
 ## Methodology
 
@@ -39,11 +39,11 @@ binary), use `aith assess kali exec --` so the run lands in the audit pipeline.
 
 Consume Phase 1-3 artifacts and rank functions for fuzzing value.
 
-**Inputs (backend — query via `aith assess`):**
-- Findings: `aith assess fetch findings` — filter for `defect_family` in
+**Inputs (backend — query via `vigil assess`):**
+- Findings: `vigil assess fetch findings` — filter for `defect_family` in
   `buffer-overflow`, `integer-overflow`, `use-after-free`, `uninitialized-memory`.
   Check `verification_state` for Phase 3 confirmation status.
-- File classifications: `aith assess fetch "code/files?repo_id=<id>&limit=5000"` —
+- File classifications: `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` —
   `classification`, `slot_types`, `role`, `language` per file. Target critical/high C/C++ files
   with `NETWORK-INPUT`, `FILE-CONTENT`, `PROTOCOL-FIELD`, or `SERIALIZED-DATA` slot types.
 
@@ -134,7 +134,7 @@ Before writing harness code, inspect each target for specific patterns that fuzz
 }
 ```
 
-If the audit finds a bug that is directly reportable without fuzzing (e.g., provably reachable integer overflow), record it immediately via `aith assess record-finding` and continue — the harness will validate and extend the finding.
+If the audit finds a bug that is directly reportable without fuzzing (e.g., provably reachable integer overflow), record it immediately via `vigil assess record-finding` and continue — the harness will validate and extend the finding.
 
 ### Stage 3: Harness Construction
 
@@ -486,7 +486,7 @@ tools/fuzz-state/
 
 True findings from Stage 6 are recorded via:
 ```bash
-aith assess record-finding code-fuzz-engineer <finding-json>
+vigil assess record-finding code-fuzz-engineer <finding-json>
 ```
 
 Finding prefix: `CF` (code-fuzz). Location format: `file:<path>:<line>`.

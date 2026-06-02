@@ -297,7 +297,7 @@ class SurfaceUpdateRequest(BaseModel):
 
 
 class OobProbeRecordRequest(BaseModel):
-    """Record an OAST probe minted by ``aith oob mint``.
+    """Record an OAST probe minted by ``vigil oob mint``.
 
     The ``nonce`` is the unique random subdomain label that doubles as the
     correlation token routed through the shared interactsh/frp transport.
@@ -321,7 +321,7 @@ class OobProbeRecordRequest(BaseModel):
 class OobInteractionRecordRequest(BaseModel):
     """Correlate a single observed OAST callback to its probe by ``nonce``.
 
-    Driven by ``aith oob poll`` after it parses the interactsh-client log.
+    Driven by ``vigil oob poll`` after it parses the interactsh-client log.
     An unknown nonce is not an error — the backend reports ``matched=False``
     so the poller can surface it under "unmatched interactions".
     """
@@ -490,7 +490,7 @@ class FindingPatchRequest(BaseModel):
     source_name: str | None = Field(default=None, max_length=128)
     details: dict[str, Any] | None = None
     provenance: dict[str, Any] | None = None
-    # C44: allow retroactive labeling via aith assess update-finding.
+    # C44: allow retroactive labeling via vigil assess update-finding.
     evidence_type: Literal[
         "network-confirmed", "code-inferred", "theoretical", "informational"
     ] | None = None
@@ -537,7 +537,7 @@ def _audit_assessment_mutation(
     *,
     title: str,
     action: str,
-    actor_name: str = "aith-assess",
+    actor_name: str = "vigil-assess",
     result: str = "",
     metadata: dict[str, Any] | None = None,
 ) -> None:
@@ -546,7 +546,7 @@ def _audit_assessment_mutation(
         activity_service.record_activity_entry(
             engagement_id,
             actor_kind="system",
-            actor_name=actor_name or "aith-assess",
+            actor_name=actor_name or "vigil-assess",
             title=title,
             action=action,
             result=result,
@@ -604,7 +604,7 @@ def get_per_host_coverage(engagement_key: str) -> dict[str, Any]:
     Surfaces the WAF / service-inventory / directory-fuzz / nikto-trigger /
     OSINT outcome status for every host the engagement has signal for, plus
     active ``coverage_deferral`` decision rows. The CLI consumes this via
-    ``aith assess check-scope-coverage --by-host``; the frontend Readiness
+    ``vigil assess check-scope-coverage --by-host``; the frontend Readiness
     panel (C58) renders the same shape.
 
     P1#3: also embeds ``scope_hosts`` (the raw scope.json hosts list) so
@@ -985,7 +985,7 @@ def get_oob_probes(
     """List OAST probes for the engagement (newest first).
 
     Each row carries an ``interaction_count`` and ``last_interaction_at`` so
-    ``aith oob poll`` can render matched probe↔callback pairs without a
+    ``vigil oob poll`` can render matched probe↔callback pairs without a
     second round-trip per probe.
     """
     engagement = get_engagement_or_404(engagement_key)
@@ -1141,7 +1141,7 @@ async def create_command_run(
 
 
 class HostExecRecord(CommandRunRecordRequest):
-    """Audit payload for ``aith assess host-exec``.
+    """Audit payload for ``vigil assess host-exec``.
 
     Reuses ``CommandRunRecordRequest`` for full field parity with the kali
     route — the host-exec wrapper is just a different execution surface, not
@@ -1275,7 +1275,7 @@ async def patch_job(
 
 @router.post("/oob-probes", status_code=status.HTTP_201_CREATED)
 async def create_oob_probe(engagement_key: str, request: OobProbeRecordRequest) -> dict[str, Any]:
-    """Record an OAST probe (called by ``aith oob mint``).
+    """Record an OAST probe (called by ``vigil oob mint``).
 
     Idempotent on ``nonce`` — re-minting the same nonce returns the existing
     row rather than erroring, so a retried CLI call is safe.
@@ -1299,7 +1299,7 @@ async def create_oob_probe(engagement_key: str, request: OobProbeRecordRequest) 
 
 @router.post("/oob-probes/interactions")
 async def record_oob_interaction(engagement_key: str, request: OobInteractionRecordRequest) -> dict[str, Any]:
-    """Correlate one observed OAST callback to its probe by nonce (``aith oob poll``).
+    """Correlate one observed OAST callback to its probe by nonce (``vigil oob poll``).
 
     Returns ``{matched, duplicate, probe, interaction}``. An unknown nonce
     yields ``matched=False`` with HTTP 200 so the poller can collect stray
@@ -1346,7 +1346,7 @@ async def update_surface_endpoint(
 
     The dedicated by-id PATCH lets the operator resolve a discovered surface
     to ``covered``, ``not_applicable``, or ``deferred`` without re-deriving
-    the (surface_type, target_descriptor) UPSERT key. ``aith assess
+    the (surface_type, target_descriptor) UPSERT key. ``vigil assess
     resolve-surface`` is the helper that drives this endpoint.
     """
     engagement = get_engagement_or_404(engagement_key)
@@ -1749,7 +1749,7 @@ class DispatchCreate(BaseModel):
         if not skills:
             raise ValueError(
                 f"skills is required for role '{role}'; "
-                "list at least one skill name from `aith assess list-skills`"
+                "list at least one skill name from `vigil assess list-skills`"
             )
         return self
 
@@ -1908,11 +1908,11 @@ class ContainmentProposalPayload(BaseModel):
     """Strict shape for ``kind='containment_proposal'`` decision rows.
 
     Mirrors ``agent/schemas/containment-proposal.schema.json`` so the JSONL
-    writer (``aith assess record-proposal``) and the backend dispatch-decisions
-    row written by ``aith blue propose-contain`` enforce the same contract.
+    writer (``vigil assess record-proposal``) and the backend dispatch-decisions
+    row written by ``vigil blue propose-contain`` enforce the same contract.
     Without this, a malformed proposal still records a row but is unsafe to
-    approve+execute later (e.g. ``aith assess approve-proposal`` flips
-    ``resolved=true``, then ``aith blue contain`` reads garbage from the
+    approve+execute later (e.g. ``vigil assess approve-proposal`` flips
+    ``resolved=true``, then ``vigil blue contain`` reads garbage from the
     payload). Catching shape errors at POST time keeps the approval ledger
     trustworthy.
 
@@ -1941,7 +1941,7 @@ class DecisionCreate(BaseModel):
     # The exception is kinds whose payload is consumed by a backend gate
     # (currently: ``coverage_deferral`` → ``per_host_coverage()``) OR by a
     # downstream approve+execute flow (``containment_proposal`` →
-    # ``aith blue contain``). For those, validate the payload shape at POST
+    # ``vigil blue contain``). For those, validate the payload shape at POST
     # time so malformed payloads can't silently neuter the gate that depends
     # on them, or get blindly approved and executed later.
     kind: str = Field(min_length=1, max_length=128)
@@ -1958,7 +1958,7 @@ class DecisionCreate(BaseModel):
             except Exception as exc:
                 # Surface as 422 with the underlying detail so operators see
                 # which field is invalid (matches the JSONL-side error from
-                # ``aith assess record-proposal``).
+                # ``vigil assess record-proposal``).
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=f"containment_proposal payload invalid: {exc}",

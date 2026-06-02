@@ -1,12 +1,12 @@
 ---
 name: subdomain-enumeration
 description: Subdomain discovery via subfinder, DNS brute-force, TLS SAN feedback, and resource-tier-aware staged composition
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Subdomain Enumeration
 
-> **`aith assess kali` audit flags:** use `--technique RECON` when actively probing in-scope DNS infrastructure (DNS brute-force, wildcard tests, zone transfers). Switch to `OSINT` for passive external-source lookups (certificate transparency logs, public archives, OSINT APIs).
+> **`vigil assess kali` audit flags:** use `--technique RECON` when actively probing in-scope DNS infrastructure (DNS brute-force, wildcard tests, zone transfers). Switch to `OSINT` for passive external-source lookups (certificate transparency logs, public archives, OSINT APIs).
 
 ## When to Activate
 
@@ -20,16 +20,16 @@ origin: AI Threat Hunting
 Before any active step, confirm every binary in the chain is reachable inside the runtime — puredns silently fails when massdns is missing (zero output, no error, exit code 0), and a dnsx fallback against a typical bruteforce wordlist will spike container CPU before stabilizing. Run the preflight once at the top of Phase 1a:
 
 ```bash
-aith assess kali exec --technique HEALTH --intent "subdomain-enum tooling preflight" \
+vigil assess kali exec --technique HEALTH --intent "subdomain-enum tooling preflight" \
   --probe-kind fingerprint --phase recon --timeout 60 -- \
   which alterx asnmap bbot cero dnsx massdns puredns shuffledns subfinder
 ```
 
 If any binary is missing, do NOT silently fall back — pause active enumeration and dispatch a runtime fix:
 
-1. Confirm the runtime image tag is current (`aith runtime resources`).
+1. Confirm the runtime image tag is current (`vigil runtime resources`).
 2. If the image is current and the binary is still missing, the runtime image needs a rebuild — `agent/docker/runtime-full/Dockerfile` is the source of truth (see `agent/references/tools/recon/subdomain-enumeration-tools.md` for the canonical tier table).
-3. Re-run the preflight after `aith runtime restart`.
+3. Re-run the preflight after `vigil runtime restart`.
 
 The runtime image is heavy by design — every binary in the preflight list is already installed in `runtime-full`. A missing binary indicates image drift, not a tooling gap.
 
@@ -37,7 +37,7 @@ DNS resolution success-rate parallels the egress reputation problem: if every ho
 
 ## Docker-resource-safe profiles
 
-Subdomain enumeration is the highest-CPU-burst phase of recon. Docker's cgroup limits (`AITH_RUNTIME_MEMORY_GB` / `AITH_RUNTIME_CPUS` / `AITH_RUNTIME_PIDS_LIMIT` / `AITH_RUNTIME_SHM_SIZE` from `.env.example`) bound container userland, but a DNS-heavy profile against the wrong target tier can still saturate host-side Docker networking. Pick the profile by target shape, not by what the apex looks like — wildcards expand the surface and the rate calibration must match the surface, not the seed.
+Subdomain enumeration is the highest-CPU-burst phase of recon. Docker's cgroup limits (`VIGIL_RUNTIME_MEMORY_GB` / `VIGIL_RUNTIME_CPUS` / `VIGIL_RUNTIME_PIDS_LIMIT` / `VIGIL_RUNTIME_SHM_SIZE` from `.env.example`) bound container userland, but a DNS-heavy profile against the wrong target tier can still saturate host-side Docker networking. Pick the profile by target shape, not by what the apex looks like — wildcards expand the surface and the rate calibration must match the surface, not the seed.
 
 > **Serialize heavy ops on a shared runtime.** Run DNS-heavy passes (puredns/dnsx) and bulk
 > `httpx` liveness **one at a time** — never stack a DNS brute and an httpx pass, or two httpx
@@ -47,7 +47,7 @@ Subdomain enumeration is the highest-CPU-burst phase of recon. Docker's cgroup l
 > "one heavy enum op at a time" aggregate-concurrency rule (`agent/operator-core.md` → Recon
 > Dispatch Resource Policy → Aggregate concurrency).
 
-> **Host-CPU note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime. massdns and dnsx can send thousands of DNS packets per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive DNS profiles have crashed Docker on Standard-tier hardware. **The `aith assess kali dnsx` wrapper defaults to `--dnsx-profile polite-cdn --resolver-profile public-tcp`.** Step up to `polite-residential` only after assessing the target, and keep `bursty-OK` gated by runtime tier (see the matrix below). When in doubt, drop a tier.
+> **Host-CPU note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime. massdns and dnsx can send thousands of DNS packets per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive DNS profiles have crashed Docker on Standard-tier hardware. **The `vigil assess kali dnsx` wrapper defaults to `--dnsx-profile polite-cdn --resolver-profile public-tcp`.** Step up to `polite-residential` only after assessing the target, and keep `bursty-OK` gated by runtime tier (see the matrix below). When in doubt, drop a tier.
 
 Profiles and full tier rationale live in `agent/references/tools/recon/subdomain-enumeration-tools.md`; the three operational tiers below are the load-bearing settings, listed from most cautious (default for any unknown target) down to opt-in only.
 
@@ -68,7 +68,7 @@ Profiles and full tier rationale live in `agent/references/tools/recon/subdomain
 
 ### Runtime-tier rate ceilings
 
-Read `aith runtime resources` to identify the active tier; the matrix below scales the
+Read `vigil runtime resources` to identify the active tier; the matrix below scales the
 opt-up paths. Standard tier never picks `bursty-OK` (RAM pressure on puredns's
 wildcard-filter dedup map produces silent truncation under heavy bursts on tight cgroups).
 
@@ -78,14 +78,14 @@ wildcard-filter dedup map produces silent truncation under heavy bursts on tight
 | Heavy | available | available | opt-in (pass the opt-in note in `--intent`) |
 | Comfortable | available | available | default-available — pick when target shape allows |
 
-When the runtime tier is tighter than Standard (e.g. `AITH_RUNTIME_MEMORY_GB=4`), drop the next tier down regardless of target shape — RAM pressure on puredns's wildcard-filter dedup map produces silent truncation, not a clean OOM.
+When the runtime tier is tighter than Standard (e.g. `VIGIL_RUNTIME_MEMORY_GB=4`), drop the next tier down regardless of target shape — RAM pressure on puredns's wildcard-filter dedup map produces silent truncation, not a clean OOM.
 
 ## Phase 0/1/2/3 staged composition
 
-> **Composed pipeline shortcut.** `aith assess dns-discovery <apex…>` runs the
+> **Composed pipeline shortcut.** `vigil assess dns-discovery <apex…>` runs the
 > Phase-0/0b/1 DNS methods (subfinder passive + CT/crt.sh + optional puredns brute)
 > → merge + de-noise → dnsx-resolve in one synchronous, audited command, and
-> `aith assess web-discovery <resolved_hosts.txt>` runs the Phase-3 web side
+> `vigil assess web-discovery <resolved_hosts.txt>` runs the Phase-3 web side
 > (de-noise → httpx liveness → auto-populate the `assessment_host_liveness` ledger
 > → katana crawl → optional work-buffer ingest). Both expose every knob as a flag
 > (`--recursive`, `--brute`, `--wordlist`, `--dnsx-profile`, `--ports`,
@@ -105,7 +105,7 @@ Each phase compounds on the previous one. Stop at any phase when its bound rule 
 # apexes (army.mil: 4,289 subs → docker-ps health-checks timed out) and adds
 # little over `-all` on most targets. Reserve `-recursive` for a DEDICATED
 # runtime; on a shared/Standard runtime keep it off.
-aith assess kali subfinder -d target.example -all -t 20 -silent \
+vigil assess kali subfinder -d target.example -all -t 20 -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
   --technique RECON --intent "Phase 0 passive subdomain enum (non-recursive)" \
   --probe-kind fingerprint --phase recon --timeout 600
@@ -114,7 +114,7 @@ aith assess kali subfinder -d target.example -all -t 20 -silent \
 When budget allows the longer wall-clock, follow with bbot for deeper passive coverage (50+ sources):
 
 ```bash
-aith assess kali bbot -t target.example -p subdomain-enum -rf passive \
+vigil assess kali bbot -t target.example -p subdomain-enum -rf passive \
   -o /engagements/$ENGAGEMENT_KEY/scans/bbot_subs \
   --technique OSINT --intent "Phase 0 deep passive enum (bbot subdomain-enum preset)" \
   --probe-kind fingerprint --phase recon --timeout 1800
@@ -160,7 +160,7 @@ once crt.sh was rate-limited. Merge `subs_ct.txt` into the Phase 2.5 union like 
 
 ```bash
 # polite-residential default (Standard runtime, no specific CDN signal)
-aith assess kali puredns bruteforce \
+vigil assess kali puredns bruteforce \
   /usr/share/wordlists/SecLists/Discovery/DNS/subdomains-top1million-110000.txt target.example \
   -r /engagements/$ENGAGEMENT_KEY/wordlists/resolvers.txt \
   --rate-limit 2500 --wildcard-batch 100000 --wildcard-tests 30 \
@@ -171,7 +171,7 @@ aith assess kali puredns bruteforce \
 
 Skip Phase 1 entirely when Phase 0 returned >5000 unique subs or the target is a top-tier organization — passive sources have already saturated the namespace and permutation bursts add live hosts at <0.1% rate (see `subdomain-enumeration-tools.md` "When NOT to bruteforce").
 
-Conversely, when Phase 0 returned **0 or fewer than 10 subs**, treat that as a signal that either the configured passive-source API keys are misconfigured (check `${SUBFINDER_*_API_KEY}` env vars) or the target genuinely has no public footprint. In both cases Phase 1 brute is the only signal source — run it, BUT cap it at the cautious-tier rate (`polite-CDN-fronted-target` / `puredns --rate-limit 800`) regardless of target shape, since the wordlist is the only signal and faster rates produce noise rather than coverage. Record the rationale via `aith assess log operator "Phase 0 returned <10 subs — Phase 1 brute @ cautious-tier as sole signal source" "<phase-0 count>" --actor-kind operator`.
+Conversely, when Phase 0 returned **0 or fewer than 10 subs**, treat that as a signal that either the configured passive-source API keys are misconfigured (check `${SUBFINDER_*_API_KEY}` env vars) or the target genuinely has no public footprint. In both cases Phase 1 brute is the only signal source — run it, BUT cap it at the cautious-tier rate (`polite-CDN-fronted-target` / `puredns --rate-limit 800`) regardless of target shape, since the wordlist is the only signal and faster rates produce noise rather than coverage. Record the rationale via `vigil assess log operator "Phase 0 returned <10 subs — Phase 1 brute @ cautious-tier as sole signal source" "<phase-0 count>" --actor-kind operator`.
 
 ### Phase 2 — Permutation (estimate-first)
 
@@ -179,20 +179,20 @@ Conversely, when Phase 0 returned **0 or fewer than 10 subs**, treat that as a s
 
 ```bash
 # Step 2a: estimate first to avoid 500k+ explosions
-aith assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
+vigil assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
   -enrich -estimate \
   --technique RECON --intent "Phase 2 permutation estimate (no candidate output)" \
   --probe-kind fingerprint --phase recon --timeout 120
 
 # Step 2b: cap at 100k candidates
-aith assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
+vigil assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
   -enrich -limit 100000 \
   -o /engagements/$ENGAGEMENT_KEY/scans/perms.txt \
   --technique RECON --intent "Phase 2 permutation candidates capped at 100k" \
   --probe-kind fingerprint --phase recon --timeout 600
 
 # Step 2c: resolve the permutation set through puredns (wildcard-aware)
-aith assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/perms.txt \
+vigil assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/perms.txt \
   -r /engagements/$ENGAGEMENT_KEY/wordlists/resolvers.txt \
   --rate-limit 2500 --wildcard-batch 100000 \
   -w /engagements/$ENGAGEMENT_KEY/scans/perms_resolved.txt \
@@ -209,7 +209,7 @@ If `perms_resolved.txt` is empty (alterx produced no expansions or every permuta
 Phase 3 reads from `subs_merged.txt`. Build it once, after Phase 2, by unioning the Phase 0 / Phase 1 / Phase 2 outputs:
 
 ```bash
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "Phase 2.5 merge of passive + brute + permutation outputs" \
   --probe-kind baseline --phase recon --timeout 60 -- bash -c '
   cat /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
@@ -233,26 +233,26 @@ When a phase did not run (Phase 1 skipped, Phase 2 aborted), the missing file is
 # httpx memory under cgroup pressure and was a SIGKILL (RC137) trigger on large
 # merged lists. This pass only needs the SAN/TLS grab; tech-detect the confirmed-
 # live subset later (Phase: Filter/verify/ingest), not the full merged set.
-aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
+vigil assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
   -tls-grab -tls-probe -status-code -title -json \
   -o /engagements/$ENGAGEMENT_KEY/scans/httpx_tls.jsonl \
   --technique DISCOVERY --intent "Phase 3 TLS SAN harvest via httpx -tls-grab (status-only, no tech-detect)" \
   --probe-kind fingerprint --phase recon --timeout 1200
 
 # asnmap → cero CIDR sweep
-aith assess kali asnmap -d target.example -silent \
+vigil assess kali asnmap -d target.example -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
   --technique OSINT --intent "Phase 3 ASN → CIDR mapping for cero feed" \
   --probe-kind fingerprint --phase recon --timeout 300
 
-aith assess kali cero -l /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
+vigil assess kali cero -l /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
   -p 443,8443,9443 -c 100 -t 4 \
   -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt \
   --technique OSINT --intent "Phase 3 TLS SAN scrape across owned CIDRs" \
   --probe-kind fingerprint --phase recon --timeout 600
 
 # Final pass: dnsx resolves the merged set, drives live-host confirmation
-aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
+vigil assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
   --dnsx-profile polite-cdn --resolver-profile public-tcp -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/dnsx_final.txt \
   --technique RECON --intent "Phase 3 final dnsx resolution (lean — no JSON on bulk)" \
@@ -282,7 +282,7 @@ In both cases, treat the SAN set as a primary subdomain source and feed it throu
 
 ```bash
 # Per-host SAN extraction (full recipe in openssl-sans.md step 1)
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "per-host TLS SAN extraction as primary subdomain source" \
   --probe-kind fingerprint --phase recon --timeout 300 -- bash -c '
   while read HOST; do
@@ -294,7 +294,7 @@ aith assess kali exec --technique RECON \
 '
 
 # Merge SAN-discovered names.
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "merge SAN-discovered subdomains" \
   --probe-kind fingerprint --phase recon --timeout 300 -- bash -c '
   cat /engagements/$ENGAGEMENT_KEY/scans/sans_*.txt | sort -u \
@@ -302,14 +302,14 @@ aith assess kali exec --technique RECON \
 '
 
 # Confirm the SAN-discovered names through the typed dnsx verb.
-aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt \
+vigil assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt \
   --dnsx-profile polite-cdn --resolver-profile public-tcp \
   -a -resp -silent -o /engagements/$ENGAGEMENT_KEY/scans/san_live.txt \
   --technique RECON --intent "dnsx -resp confirmation of SAN-discovered subdomains" \
   --probe-kind fingerprint --phase recon --timeout 600
 ```
 
-`san_live.txt` is the primary input to `aith assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum` for this dispatch. The full openssl extraction loop, the cross-host collision counter, and the vhost-cert match check live in `agent/references/tools/recon/openssl-sans.md` — call into it from this section rather than duplicating mechanics here.
+`san_live.txt` is the primary input to `vigil assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum` for this dispatch. The full openssl extraction loop, the cross-host collision counter, and the vhost-cert match check live in `agent/references/tools/recon/openssl-sans.md` — call into it from this section rather than duplicating mechanics here.
 
 This section does NOT replace the Phase 3 TLS SAN feedback loop above; it sits alongside it. The Phase 3 loop is the breadth-first sweep across the merged sub list (post-Phase 0/1/2). The SAN-as-primary section fires when the cross-host signal is already strong (a shared multi-tenant cert was detected, or a vhost-cert mismatch was found), so the enumeration is depth-first against the cert's actual coverage set rather than breadth-first against the apex's enumerated subset.
 
@@ -322,7 +322,7 @@ Stopping criteria are explicit because subdomain enumeration is the easiest plac
 - **Wildcard ratio > 30% (detect EARLY, before brute).** When more than 30% of resolved hits land on the same wildcard answer (single A record, single CNAME), the apex is a wildcard sink and brute force is pure noise. Detect this up front with the random-label probe in Phase 1, not only mid-run. On a detected sink, route to **CT (Phase 0b) + TLS SAN / asnmap (Phase 3)** and skip DNS brute/PTR entirely — wildcard-fronted hosts still have unique certs, and CT/SAN are the sources that cut through the sink.
 - **Permutation estimate > 500k candidates.** Abort Phase 2 and narrow the input set before resolving. A 500k+ candidate run costs ~30+ minutes of runtime CPU at polite-residential rates and produces sub-1% live-host yield.
 
-When stopping early, record the rationale via `aith assess log operator "Subdomain enum bound rule fired" "<rule>" "<round-stats>" --actor-kind operator` so the audit trail explains the missing rounds instead of leaving an unexplained coverage gap.
+When stopping early, record the rationale via `vigil assess log operator "Subdomain enum bound rule fired" "<rule>" "<round-stats>" --actor-kind operator` so the audit trail explains the missing rounds instead of leaving an unexplained coverage gap.
 
 ## When bbot replaces the manual pipeline
 
@@ -342,7 +342,7 @@ The two are complementary, not exclusive. A common pattern is bbot first-pass fo
 
 ## Process-cleanup discipline
 
-Run each subdomain scan **synchronously** (one blocking `aith assess kali <verb> … --timeout N`
+Run each subdomain scan **synchronously** (one blocking `vigil assess kali <verb> … --timeout N`
 at a time) — specialists do not background target traffic or use `kali job start` (operator-only;
 see `agent/shared-constraints.md` §2). A long enum is handled by a generous `--timeout`, which
 cascades SIGTERM→SIGKILL into the in-container PID on expiry, so no manual cleanup is needed.
@@ -372,7 +372,7 @@ grep -viE '(^|\.)(_dmarc|_dkim|_domainkey|_acme-challenge)\.' \
 # Stage 1: HTTP probing with httpx — status-only on the bulk pass. NO -tech-detect
 # here (it amplifies httpx memory under cgroup pressure → RC137 SIGKILL on large
 # lists). tech-detect the confirmed-live subset in Stage 1b only.
-aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_denoised.txt \
+vigil assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_denoised.txt \
   -status-code -title -server -content-length -follow-redirects -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/subdomains_live.txt \
   --technique DISCOVERY --intent "live-host confirmation on de-noised sub list (status-only)" \
@@ -381,7 +381,7 @@ aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_denoised.txt \
 # Stage 1b: tech-detect ONLY the confirmed-live subset (small, safe).
 awk '{print $1}' /engagements/$ENGAGEMENT_KEY/scans/subdomains_live.txt | sort -u \
   > /engagements/$ENGAGEMENT_KEY/scans/subs_live_only.txt
-aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_live_only.txt \
+vigil assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_live_only.txt \
   -tech-detect -json -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/subdomains_tech.jsonl \
   --technique DISCOVERY --intent "tech-detect on confirmed-live subset only" \
@@ -390,7 +390,7 @@ aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_live_only.txt 
 # Stage 2: ingest verified live subs into the work buffer
 awk '{print $1}' "$ENGAGEMENT_DIR/scans/subdomains_live.txt" | sort -u | while IFS= read -r sub; do
   echo "GET https://$sub"
-done | aith assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum
+done | vigil assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum
 ```
 
 After ingestion, the operator triggers a reactive nuclei sweep against the newly-live subdomains — see `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode".

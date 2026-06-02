@@ -1,7 +1,7 @@
 ---
 name: cloud-exposure
 description: Exposed cloud storage triage — S3/GCS/Azure buckets, severity escalation, swarm-dispatch over corpus
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Cloud Exposure Investigation
@@ -20,10 +20,10 @@ A public bucket is not automatically critical. Severity rides on **what is in th
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` for the bucket listing and sample object pulls (use `--technique INFO-DISCLOSURE --probe-kind fingerprint --phase recon --timeout 60`)
-- `aith assess kali exec -- aws s3 ls s3://<bucket> --no-sign-request` and `aws s3 cp` for AWS listings (or `gsutil ls` / `az storage blob list` for GCS/Azure)
-- `aith assess kali exec -- trufflehog filesystem <dir>` for offline secret scanning over a downloaded sample (host-side tool, not target-facing)
-- `aith assess agent start-swarm` for fanning corpus-scale source review out to many parallel `code-vuln-hunter` workers — see "Swarm Dispatch" below
+- `vigil assess kali exec -- curl ...` for the bucket listing and sample object pulls (use `--technique INFO-DISCLOSURE --probe-kind fingerprint --phase recon --timeout 60`)
+- `vigil assess kali exec -- aws s3 ls s3://<bucket> --no-sign-request` and `aws s3 cp` for AWS listings (or `gsutil ls` / `az storage blob list` for GCS/Azure)
+- `vigil assess kali exec -- trufflehog filesystem <dir>` for offline secret scanning over a downloaded sample (host-side tool, not target-facing)
+- `vigil assess agent start-swarm` for fanning corpus-scale source review out to many parallel `code-vuln-hunter` workers — see "Swarm Dispatch" below
 
 ---
 
@@ -36,7 +36,7 @@ Do these five steps in order. Skipping ahead (e.g. recording severity from the l
 Download a representative sample first. Pulling the entire corpus when the bucket holds 100k+ objects burns disk + dispatch time for analysis you cannot use yet.
 
 ```bash
-aith assess kali exec --technique INFO-DISCLOSURE --intent "list and sample bucket <name>" --probe-kind fingerprint --phase recon --timeout 60 -- \
+vigil assess kali exec --technique INFO-DISCLOSURE --intent "list and sample bucket <name>" --probe-kind fingerprint --phase recon --timeout 60 -- \
   bash -c 'curl -s "https://<bucket>.s3.amazonaws.com/?list-type=2&max-keys=200" > /engagements/$ENGAGEMENT_KEY/scans/cloud-exposure/<bucket>-listing.xml'
 ```
 
@@ -72,13 +72,13 @@ When Step 3 lands the corpus in the "Source code / repos" class and the listing 
 
 ```bash
 # Build the items file
-aith assess kali exec --technique INFO-DISCLOSURE --intent "enumerate bucket source files" --probe-kind fingerprint --phase recon --timeout 60 -- \
+vigil assess kali exec --technique INFO-DISCLOSURE --intent "enumerate bucket source files" --probe-kind fingerprint --phase recon --timeout 60 -- \
   bash -c 'curl -s "https://<bucket>.s3.amazonaws.com/?list-type=2" \
     | python3 -c "import sys,re; [print(m.group(1)) for m in re.finditer(r\"<Key>([^<]+)</Key>\", sys.stdin.read()) if m.group(1).endswith((\".js\",\".py\",\".rb\",\".go\",\".ts\",\".env\",\".yml\",\".yaml\"))]" \
     > /engagements/$ENGAGEMENT_KEY/scans/cloud-exposure/<bucket>-sources.txt'
 
 # Fan out to N parallel low-reasoning workers
-aith assess agent start-swarm \
+vigil assess agent start-swarm \
     --role code-vuln-hunter \
     --workers 10 --batch-size 50 \
     --items-file /engagements/$ENGAGEMENT_KEY/scans/cloud-exposure/<bucket>-sources.txt \
@@ -87,14 +87,14 @@ aith assess agent start-swarm \
     --task "download each file in this batch from <bucket>, scan for hardcoded credentials, API keys, internal hostnames, exploitable patterns; record findings as code-vuln-hunter prefix"
 ```
 
-The helper does NOT spawn specialists — it writes N dispatch rows and prints the agent_id table. Operator dispatches the N workers manually via `@code-vuln-hunter` (Claude Code) or `spawn_agent` (Codex). Each worker reads its slice from `aith assess agent get <agent_id>`. Detail: `agent/operator-core.md` Swarm Dispatch.
+The helper does NOT spawn specialists — it writes N dispatch rows and prints the agent_id table. Operator dispatches the N workers manually via `@code-vuln-hunter` (Claude Code) or `spawn_agent` (Codex). Each worker reads its slice from `vigil assess agent get <agent_id>`. Detail: `agent/operator-core.md` Swarm Dispatch.
 
 ### Step 5 — Offline secret scan over the downloaded sample
 
 In parallel with Step 4, run TruffleHog over the downloaded sample on the host. Different signal from the per-file LLM scan — TruffleHog catches known-format secrets (AWS access keys, Slack tokens, JWT, Stripe keys, GitHub tokens) deterministically:
 
 ```bash
-aith assess kali exec --technique INFO-DISCLOSURE --intent "trufflehog filesystem scan of bucket sample" --probe-kind fingerprint --phase recon --timeout 600 -- \
+vigil assess kali exec --technique INFO-DISCLOSURE --intent "trufflehog filesystem scan of bucket sample" --probe-kind fingerprint --phase recon --timeout 600 -- \
   trufflehog filesystem /engagements/$ENGAGEMENT_KEY/scans/cloud-exposure/<bucket>/ --json --no-verification \
     > /engagements/$ENGAGEMENT_KEY/scans/cloud-exposure/<bucket>-trufflehog.jsonl
 ```

@@ -7,11 +7,11 @@ precise patch level. This file carries the curl + jq probes plus per-vendor
 mapping examples that `agent/skills/osint-recon/SKILL.md` references from its
 "Exact-version triangulation" section.
 
-All HTTP probes wrap in `aith assess kali exec` so the run lands in the
+All HTTP probes wrap in `vigil assess kali exec` so the run lands in the
 audit pipeline. Place every audit flag (`--technique`, `--intent`,
 `--probe-kind`, `--phase`, `--timeout`) BEFORE the trailing `-- bash -c
 '...'` — flags after the heredoc are passed to bash itself and silently
-dropped by aith. Use neutral hostnames (`example.test`) in examples.
+dropped by vigil. Use neutral hostnames (`example.test`) in examples.
 
 ## 1. Source-map Bundle Constants
 
@@ -38,14 +38,14 @@ same release day. Querying the registry's `time` field per version is the
 most reliable cross-check.
 
 ```bash
-aith assess kali exec --technique OSINT --intent "npm registry probe for <pkg>@<version>" \
+vigil assess kali exec --technique OSINT --intent "npm registry probe for <pkg>@<version>" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s "https://registry.npmjs.org/<pkg>/<version>" \
     | jq "{name, version, dist_tags: ._npmUser, dependencies, time: ._npmVersion}"
 '
 
 # All-version timeline including publish dates per version
-aith assess kali exec --technique OSINT --intent "npm publish timeline for <pkg>" \
+vigil assess kali exec --technique OSINT --intent "npm publish timeline for <pkg>" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s "https://registry.npmjs.org/<pkg>" | jq ".time"
 '
@@ -58,14 +58,14 @@ those exact versions — a stronger signal than feature-flag inference.
 ## 3. PyPI Registry Probe
 
 ```bash
-aith assess kali exec --technique OSINT --intent "PyPI registry probe for <pkg>==<version>" \
+vigil assess kali exec --technique OSINT --intent "PyPI registry probe for <pkg>==<version>" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s "https://pypi.org/pypi/<pkg>/<version>/json" \
     | jq "{name: .info.name, version: .info.version, requires_dist: .info.requires_dist, urls: [.urls[] | {filename, upload_time}]}"
 '
 
 # All-version metadata
-aith assess kali exec --technique OSINT --intent "PyPI publish timeline for <pkg>" \
+vigil assess kali exec --technique OSINT --intent "PyPI publish timeline for <pkg>" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s "https://pypi.org/pypi/<pkg>/json" \
     | jq "[.releases | to_entries[] | {version: .key, upload_time: (.value[0].upload_time // \"unknown\")}]"
@@ -77,7 +77,7 @@ aith assess kali exec --technique OSINT --intent "PyPI publish timeline for <pkg
 ## 4. Maven Central Probe
 
 ```bash
-aith assess kali exec --technique OSINT \
+vigil assess kali exec --technique OSINT \
   --intent "Maven Central probe for <group>:<artifact>:<version>" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s "https://search.maven.org/solrsearch/select?q=g:<group>+AND+a:<artifact>+AND+v:<version>&wt=json&rows=20" \
@@ -85,7 +85,7 @@ aith assess kali exec --technique OSINT \
 '
 
 # All known versions for an artifact
-aith assess kali exec --technique OSINT \
+vigil assess kali exec --technique OSINT \
   --intent "Maven Central version timeline for <group>:<artifact>" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s "https://search.maven.org/solrsearch/select?q=g:<group>+AND+a:<artifact>&wt=json&core=gav&rows=200" \
@@ -104,7 +104,7 @@ cross-reference it against the vendor's public tag list:
 
 ```bash
 # When the release tag matches a git ref in a public mirror
-aith assess kali exec --technique OSINT --intent "Resolve Sentry release tag to git SHA" \
+vigil assess kali exec --technique OSINT --intent "Resolve Sentry release tag to git SHA" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
     "https://api.github.com/repos/<vendor-mirror>/<repo>/git/refs/tags/<release-tag>" \
@@ -112,7 +112,7 @@ aith assess kali exec --technique OSINT --intent "Resolve Sentry release tag to 
 '
 
 # Resolve a short SHA inside a public repo
-aith assess kali exec --technique OSINT --intent "Resolve Sentry release short SHA" \
+vigil assess kali exec --technique OSINT --intent "Resolve Sentry release short SHA" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
     "https://api.github.com/repos/<vendor-mirror>/<repo>/commits/<short-sha>" \
@@ -224,7 +224,7 @@ CVEs in scope after patch-line check:
   - CVE-XXXX-ZZZZZ (NOT applicable, patched in <version>)
 ```
 
-This payload feeds `aith assess record-intel cve <json>` (one call per
+This payload feeds `vigil assess record-intel cve <json>` (one call per
 applicable CVE) and a follow-up exploit-developer dispatch for live
 validation before any CVE becomes a durable finding.
 

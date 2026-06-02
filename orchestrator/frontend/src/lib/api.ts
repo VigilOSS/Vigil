@@ -871,7 +871,7 @@ type IntelRowBase = {
   notes: string;
   provenance: IntelProvenance;
   // Populated when this row was replaced by a newer record via
-  // `aith assess supersede-intel`. The IntelTab renders superseded rows
+  // `vigil assess supersede-intel`. The IntelTab renders superseded rows
   // distinctly (struck-through, link to the superseder).
   superseded_by_id: number | null;
   superseded_at: string | null;

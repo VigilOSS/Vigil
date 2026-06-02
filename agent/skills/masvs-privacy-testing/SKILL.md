@@ -1,7 +1,7 @@
 ---
 name: masvs-privacy-testing
 description: OWASP MASVS-PRIVACY testing for identifier auditing, tracking transparency (ATT/Privacy Sandbox), data deletion verification, privacy label compliance, and analytics/telemetry over-collection assessment
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # MASVS-PRIVACY Testing

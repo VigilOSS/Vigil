@@ -1,4 +1,4 @@
-"""aith assess list-finding-group — inspect a root-cause finding group."""
+"""vigil assess list-finding-group — inspect a root-cause finding group."""
 from __future__ import annotations
 
 import argparse

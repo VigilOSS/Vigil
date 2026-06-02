@@ -1,6 +1,6 @@
 FROM kalilinux/kali-rolling@sha256:dddc31e0f4bc57b4b91e9027762544506bf91c7cdd7ff52104daaa4449b4c726
 ARG INSTALL_VERSION_STAMP=2026.05.05-84a231c
-LABEL security-research.install-versions="${INSTALL_VERSION_STAMP}"
+LABEL vigil.install-versions="${INSTALL_VERSION_STAMP}"
 
 ARG APT_PACKAGES="nmap whatweb bind9-dnsutils iputils-ping whois ffuf gobuster wfuzz dirb sqlmap hydra john hashcat nuclei subfinder curl wget jq ripgrep unzip python3 python3-dev python3-pip python3-aiohttp netcat-openbsd openssl chromium chromium-driver sublist3r testssl.sh proxychains4 openssh-client socat tcpdump tmux ruby-full golang-go dtach libxml2-utils sudo tini rlwrap wordlists seclists nikto strace"
 ARG PIP_VERSION=26.0.1

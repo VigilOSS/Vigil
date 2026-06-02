@@ -26,7 +26,7 @@ turn:
   `agent/engagements/<key>/` are pointers, not duplicates — loading them is
   fine but they only add a few hundred tokens of bootstrap context.
 
-Skill discovery: prefer `aith assess list-skills` (compact name + one-line
+Skill discovery: prefer `vigil assess list-skills` (compact name + one-line
 "Use when") over reading `agent/SKILL.md` directly. The index file is
 retained as a human-readable reference but is no longer the authoritative
 discovery surface for operators or specialists.

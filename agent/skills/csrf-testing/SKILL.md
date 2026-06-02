@@ -1,7 +1,7 @@
 ---
 name: csrf-testing
 description: Cross-site request forgery testing for state-changing operations
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # CSRF Testing (Cross-Site Request Forgery)

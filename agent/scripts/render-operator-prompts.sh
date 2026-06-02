@@ -188,7 +188,7 @@ render_prompt_locality() {
 - Specialist prompt sources: `agent/agents/*.md`
 - Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md`
 - Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
-- Skill discovery: `aith assess list-skills` (compact name + one-line "Use when").
+- Skill discovery: `vigil assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
 - References: `agent/references/INDEX.md`
 
@@ -237,10 +237,10 @@ render_operator_prompt() {
 <!-- Source: agent/operator-core.md (+ agent/agents/*.md for embedded specialist text) -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
 
-# AI Threat Hunting — Operator Instructions
+# Vigil — Operator Instructions
 
 When a session starts, display:
-"[operator] AI Threat Hunting ready. Ensure `aith runtime start` is running, then use `aith engagement create <target_url>` to start a new engagement."
+"[operator] Vigil ready. Ensure `vigil runtime start` is running, then use `vigil engagement create <target_url>` to start a new engagement."
 
 EOF
     render_prompt_locality
@@ -278,7 +278,7 @@ render_operator_prompt_blue() {
 <!-- Source: agent/operator-core-blue.md (+ agent/agents/*.md for embedded specialist text) -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo --type blue -->
 
-# AI Threat Hunting — Blue Operator Instructions
+# Vigil — Blue Operator Instructions
 
 EOF
     cat "$CORE_BLUE_FILE"
@@ -298,7 +298,7 @@ render_claude() {
 <!-- does not load the same operator prompt twice. -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
 
-# AI Threat Hunting — Operator Instructions
+# Vigil — Operator Instructions
 
 Read `AGENTS.md` (in this same directory) for the complete operator prompt.
 

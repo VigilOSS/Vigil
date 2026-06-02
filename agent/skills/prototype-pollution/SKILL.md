@@ -1,12 +1,12 @@
 ---
 name: prototype-pollution
 description: Detect and exploit JavaScript prototype pollution in client-side and server-side applications
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Prototype Pollution Testing
 
-> **`aith assess kali` audit flags:** use `--technique OTHER` (prototype pollution is a primitive with variable outcomes). Switch to `XSS` or `RCE` when the pollution produces that specifically.
+> **`vigil assess kali` audit flags:** use `--technique OTHER` (prototype pollution is a primitive with variable outcomes). Switch to `XSS` or `RCE` when the pollution produces that specifically.
 
 ## When to Activate
 
@@ -16,7 +16,7 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (server-side pollution probing via JSON bodies — all target-facing curl must go through the kali exec wrapper; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30`)
+- `vigil assess kali exec -- curl ...` (server-side pollution probing via JSON bodies — all target-facing curl must go through the kali exec wrapper; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools (client-side pollution detection and gadget chain testing — client-side analysis, not target-facing)
 - `ppmap` / `ppfuzz` (automated client-side prototype pollution scanning)
 

@@ -43,15 +43,15 @@ Assertions supported: `min_findings`, `max_findings`, `expected_cwes`,
 ## Capturing a fixture from a real engagement
 
 Hand-authoring fixtures is one path; the other is snapshotting the backend
-findings of a real, human-blessed engagement with `aith assess eval-capture`.
+findings of a real, human-blessed engagement with `vigil assess eval-capture`.
 Replay stays zero-token.
 
 Run a seeded engagement against a known-vulnerable app (e.g. DVWA, juice-shop)
-via the normal `aith engagement create` / `start` flow and let the agent record
+via the normal `vigil engagement create` / `start` flow and let the agent record
 findings as usual. Then, with the orchestrator backend running:
 
 ```bash
-aith assess eval-capture \
+vigil assess eval-capture \
   --engagement-dir <engagement-dir> \
   --out tests/eval/fixtures/golden_<name>.json \
   --definition tests/eval/definitions/<name>.yaml
@@ -77,7 +77,7 @@ After re-running an engagement, diff the fresh capture against the committed
 baseline without overwriting it:
 
 ```bash
-aith assess eval-capture --engagement-dir <engagement-dir> \
+vigil assess eval-capture --engagement-dir <engagement-dir> \
   --out tests/eval/fixtures/golden_<name>.json --check
 ```
 

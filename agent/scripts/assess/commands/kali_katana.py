@@ -1,4 +1,4 @@
-"""aith assess kali katana — typed wrapper around katana inside the runtime."""
+"""vigil assess kali katana — typed wrapper around katana inside the runtime."""
 from __future__ import annotations
 
 import sys

@@ -47,9 +47,9 @@ Before applying the five-check protocol to any finding:
 
 - [ ] `agent/rules/triage.md`, `agent/shared-constraints-blue.md`, and `agent/skills/alert-fp-verification/SKILL.md` loaded
 - [ ] Every tenant ref path in `scope.json:tenant_reference_paths[]` exists on disk and is loaded
-- [ ] You ran `aith assess resume-brief --finding <slug>` and reviewed prior dispatches against this finding — including any prior verifier dispatch (reset findings re-enter L3)
-- [ ] You read the L2 handoff via `aith assess agent render-handoff <l2-agent-id>` and fetched the finding payload via `aith assess fetch findings/<slug>`
-- [ ] You resolved every `evidence_refs[]` artifact ID via `aith assess artifact get <id>` — never by re-reading files from local paths. If an artifact ID cannot be resolved, the L2 dispatch is malformed; return a `blocked` handoff naming the broken ID.
+- [ ] You ran `vigil assess resume-brief --finding <slug>` and reviewed prior dispatches against this finding — including any prior verifier dispatch (reset findings re-enter L3)
+- [ ] You read the L2 handoff via `vigil assess agent render-handoff <l2-agent-id>` and fetched the finding payload via `vigil assess fetch findings/<slug>`
+- [ ] You resolved every `evidence_refs[]` artifact ID via `vigil assess artifact get <id>` — never by re-reading files from local paths. If an artifact ID cannot be resolved, the L2 dispatch is malformed; return a `blocked` handoff naming the broken ID.
 
 If any item is unchecked, STOP and load it or return a `blocked` handoff. The
 five-check protocol depends on artifact-index resolution; reading files from
@@ -148,7 +148,7 @@ the L2 hunter's original evidence in specificity. Common over-kill patterns:
 
 ## State Writes
 
-The disposition lands via the correct backend verb. The wrapper `aith blue
+The disposition lands via the correct backend verb. The wrapper `vigil blue
 verify <slug> --disposition <...>` hard-gates on an incident-verifier dispatch
 referencing the finding unless the operator uses `--force` to record an
 explicit bypass. The operator still reviews handoff evidence/disposition
@@ -157,7 +157,7 @@ Underlying verbs:
 
 ```bash
 # verified / downgraded / escalated
-aith assess verify-finding <slug> <verification-json>
+vigil assess verify-finding <slug> <verification-json>
 # verification-json shape:
 # {
 #   "disposition": "verified|downgraded|escalated",
@@ -175,7 +175,7 @@ aith assess verify-finding <slug> <verification-json>
 # }
 
 # false_positive
-aith assess kill-finding <slug> \
+vigil assess kill-finding <slug> \
   --reason "<one-paragraph rationale>" \
   --kill-reason "<verbatim cited register text OR cited counter-evidence>" \
   --kill-check <1-5>
@@ -185,7 +185,7 @@ aith assess kill-finding <slug> \
 new evidence:
 
 ```bash
-aith assess reset-finding <slug> \
+vigil assess reset-finding <slug> \
   --reason "<why the prior verdict no longer holds>" \
   --status draft
 ```
@@ -233,12 +233,12 @@ Categories of verifier-surfaced gaps:
 ## Required Behavior
 
 - Read the L2 finding and handoff through the backend (`fetch findings/<slug>` + `agent render-handoff <l2-agent-id>`), NOT by re-reading dispatch response text
-- Resolve every `evidence_refs[]` artifact ID via `aith assess artifact get <id>` — the artifact index is chain-of-custody
+- Resolve every `evidence_refs[]` artifact ID via `vigil assess artifact get <id>` — the artifact index is chain-of-custody
 - Apply ALL five checks. Skipping a check (or short-circuiting on a confident Check 1 PASS) is not symmetric-bar compliant. Record PASS/KILL/DOWNGRADE/ESCALATE per check on the verification payload's `checks[]` array
 - Enumerate the devil's-advocate hypothesis explicitly in `devils_advocate[]` with the counter-evidence artifact ID. Discharged (proven benign or proven adversarial with citation) goes in with `discharged=true`; unresolved goes in with `discharged=false` and the disposition becomes `escalated`
 - Symmetric-bar verbiage in `verification_reason` and `kill_reason`: cite the artifact ID, the source feed, and the verbatim line carrying the evidence. "Looks legitimate" is not a `kill_reason`; "Tenant ref `<path>#known-benign-patterns`: '<verbatim>' — actor matches on ip_range=<x>, user_agent=<y>, action=<z>" is
 - Stay UTC. Convert to local only for the report's executive summary
-- Artifacts are permanent. `false_positive` findings keep their artifacts; mark investigation-irrelevant artifacts via `aith assess artifact mark-scratch <id>`
+- Artifacts are permanent. `false_positive` findings keep their artifacts; mark investigation-irrelevant artifacts via `vigil assess artifact mark-scratch <id>`
 - Severity ↔ technique alignment audit (`agent/rules/triage.md` §16) runs on `verified` and `downgraded` dispositions. A `verified` finding with a detection-only technique (e.g., `T1078` "Valid Accounts" without a chained `T1114` / `T1567` / `T1490`) cannot carry `critical` severity without a separate chained-impact finding linked via `details.chain_required=true`
 
 ## Mandatory Closing Sequence
@@ -248,7 +248,7 @@ Before your dispatch returns, run in this order:
 1. **Register devil's-advocate evidence as artifacts.** Every counter-evidence pull during the five-check (CA policy dump, change-ticket export, vendor maintenance-window confirmation, on-call calendar snapshot, known-benign register cite) must be registered:
 
    ```bash
-   aith assess artifact register <path> --kind ir_evidence --finding <slug> --agent-id <id> --command-run-id <id>
+   vigil assess artifact register <path> --kind ir_evidence --finding <slug> --agent-id <id> --command-run-id <id>
    ```
 
    Pass `--sensitive` when the artifact contains PII (named users, full email addresses, identity-mapped IPs). Without registered artifacts, Check-5 (devil's advocate) fails the symmetric-evidence-bar test because the counter-evidence is not citable by id in the handoff or report.
@@ -260,21 +260,21 @@ Before your dispatch returns, run in this order:
 4. **Mark investigation-irrelevant artifacts as scratch** (not delete):
 
    ```bash
-   aith assess artifact mark-scratch <artifact-id>
+   vigil assess artifact mark-scratch <artifact-id>
    ```
 
    Per `agent/rules/triage.md` §19 — even `false_positive` findings keep their artifacts; the artifact index is chain-of-custody.
 
 5. **Persist the disposition** via the correct verb:
-   - `verified` / `downgraded` / `escalated` → `aith assess verify-finding <slug> <verification-json>` (or the `aith blue verify` wrapper from Unit 10)
-   - `false_positive` → `aith assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <N>`
-   - Reopening a prior decision → `aith assess reset-finding <slug> --reason "..." --status draft`
+   - `verified` / `downgraded` / `escalated` → `vigil assess verify-finding <slug> <verification-json>` (or the `vigil blue verify` wrapper from Unit 10)
+   - `false_positive` → `vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <N>`
+   - Reopening a prior decision → `vigil assess reset-finding <slug> --reason "..." --status draft`
 
-6. **Run the severity-↔-technique alignment audit** on every `verified` and `downgraded` finding via `aith assess list-findings`. Fix mismatches via `aith assess update-finding <slug> --inline '{"details":{"mitre_techniques":[...], "severity_rationale":"..."}}'` before closing.
+6. **Run the severity-↔-technique alignment audit** on every `verified` and `downgraded` finding via `vigil assess list-findings`. Fix mismatches via `vigil assess update-finding <slug> --inline '{"details":{"mitre_techniques":[...], "severity_rationale":"..."}}'` before closing.
 
-7. **Record activity entries** for state-changing events: `aith assess log` with `--actor-kind agent`, `action=verification_completed`, and `--metadata-inline` carrying `{tier:"L3", finding_slug, disposition, confidence, mitre_techniques[], devils_advocate_count, escalated_reasons[]}`.
+7. **Record activity entries** for state-changing events: `vigil assess log` with `--actor-kind agent`, `action=verification_completed`, and `--metadata-inline` carrying `{tier:"L3", finding_slug, disposition, confidence, mitre_techniques[], devils_advocate_count, escalated_reasons[]}`.
 
-8. **Emit the handoff JSON** via `aith assess agent handoff --from-json <path>`. Required fields:
+8. **Emit the handoff JSON** via `vigil assess agent handoff --from-json <path>`. Required fields:
    - `disposition` — set to the disposition for this dispatch's finding (singular when the dispatch was one finding; an array of `{slug, disposition}` when item-iterating was authorized, though `deep-manual` is the v1 default)
    - `evidence_refs[]` — artifact IDs (NOT local paths) for every artifact cited across the five checks
    - `coverage_gaps[]` — every gap the verifier surfaced (missing cross-platform correlation, missing tenant-ref consultation, retention-expired telemetry, identity-mapping ambiguity)
@@ -282,10 +282,10 @@ Before your dispatch returns, run in this order:
    - `tenant_ref_paths_consulted[]` — every tenant ref path actually consulted by Check 5 (devil's advocate)
    - `cross_platform_correlation_notes` — non-empty when `platforms.length > 1`; explicitly states whether L2's correlation paragraph satisfied the Check-4 reproduction bar
 
-9. **Self-check.** `aith assess agent render-handoff <agent_id>` — exit only after it succeeds.
+9. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only after it succeeds.
 
 Skipping the handoff write means the operator has nothing to feed into L4
-(respond) or report-writer. `aith assess agent handoff` is idempotent —
+(respond) or report-writer. `vigil assess agent handoff` is idempotent —
 checkpoint after each finding the dispatch verifies, not only at the end.
 
 ## Output Contract

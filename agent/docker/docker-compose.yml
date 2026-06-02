@@ -3,7 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: agent/docker/runtime-full/Dockerfile
-    image: security-research:latest
+    image: vigil:latest
     cap_add:
       - NET_RAW
       - NET_ADMIN
@@ -31,7 +31,7 @@ services:
     build:
       context: ../..
       dockerfile: agent/docker/runtime-lightweight/Dockerfile
-    image: security-research-lightweight:latest
+    image: vigil-lightweight:latest
     cap_add:
       - NET_RAW
       - NET_ADMIN
@@ -41,4 +41,4 @@ services:
     build:
       context: ..
       dockerfile: docker/mitmproxy/Dockerfile
-    image: security-research-proxy:latest
+    image: vigil-proxy:latest

@@ -2,7 +2,7 @@
 
 **Purpose:** Subdomain permutation generator — takes known subs and emits permutations using built-in `{{sub}}`, `{{word}}`, `{{suffix}}` patterns or custom DSL templates. Phase 2 candidate generator that always feeds puredns resolve (never a raw resolver — permutations are high-FP and need wildcard filtering).
 
-For live engagement targets, run alterx via `aith assess kali alterx` (typed verb, audit-flag-aware).
+For live engagement targets, run alterx via `vigil assess kali alterx` (typed verb, audit-flag-aware).
 
 **Where it lives:** `/usr/local/bin/alterx` in `runtime-full` (`go install github.com/projectdiscovery/alterx/cmd/alterx@latest` — see `agent/docker/runtime-full/Dockerfile`).
 
@@ -12,13 +12,13 @@ For live engagement targets, run alterx via `aith assess kali alterx` (typed ver
 
 ```bash
 # Step 1: estimate
-aith assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
+vigil assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
   -enrich -estimate \
   --technique RECON --intent "alterx permutation estimate" \
   --probe-kind fingerprint --phase recon --timeout 120
 
 # Step 2: generate, capped at 100k
-aith assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
+vigil assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt \
   -enrich -limit 100000 \
   -o /engagements/$ENGAGEMENT_KEY/scans/perms.txt \
   --technique RECON --intent "alterx permutation generation, capped at 100k" \

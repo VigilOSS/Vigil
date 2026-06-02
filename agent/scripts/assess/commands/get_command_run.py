@@ -1,4 +1,4 @@
-"""aith assess get-command-run — fetch a single command-run record with full previews."""
+"""vigil assess get-command-run — fetch a single command-run record with full previews."""
 from __future__ import annotations
 
 import json
@@ -10,7 +10,7 @@ from assess.lib.config import load_config
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "get-command-run",
-        help="Fetch a single `aith assess kali` command-run record by id, including previews and artifact refs",
+        help="Fetch a single `vigil assess kali` command-run record by id, including previews and artifact refs",
     )
     p.add_argument("command_run_id", type=int, help="numeric id from list-command-runs")
     p.set_defaults(func=run)
