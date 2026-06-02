@@ -123,6 +123,11 @@ def test_code_coverage_is_informational_by_default(monkeypatch, capsys):
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -150,6 +155,11 @@ def test_code_coverage_can_enforce_gate_failures(monkeypatch):
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -225,6 +235,11 @@ def test_code_coverage_cwe_matrix_require_gate_pass_honors_backend_gate(monkeypa
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -290,6 +305,11 @@ def test_code_size_summary_uses_backend_code_files(monkeypatch, capsys):
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -375,6 +395,11 @@ def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -584,6 +609,11 @@ def test_code_ingest_limits_security_scan_for_large_histories(monkeypatch, capsy
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "_git_security_files", fake_security_files)
     monkeypatch.setattr(module, "_setup_ctags", lambda repo_path: {"available": False})
@@ -644,6 +674,11 @@ def test_code_classify_resolves_file_path_to_file_id(monkeypatch, tmp_path):
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -706,6 +741,11 @@ def test_code_classify_resolves_file_path_from_later_pages(monkeypatch, tmp_path
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -775,6 +815,11 @@ def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -858,6 +903,11 @@ def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypa
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -950,6 +1000,11 @@ def test_code_dispatch_queue_resolves_file_path_from_later_pages(monkeypatch, tm
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1025,6 +1080,11 @@ def test_code_dispatch_requeue_triggers_reports_partial_failures(monkeypatch, tm
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1072,6 +1132,11 @@ def test_code_dispatch_queue_rejects_obsolete_context_id(monkeypatch, tmp_path):
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1121,6 +1186,11 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1199,6 +1269,11 @@ def test_code_dispatch_resolve_triggers_posts_terminal_resolution(monkeypatch, t
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1287,6 +1362,11 @@ def test_code_record_analysis_validates_whole_batch_before_any_post(monkeypatch,
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1313,6 +1393,13 @@ def test_code_dispatch_reset_stale_rejects_zero_before_backend(monkeypatch, tmp_
     class FakeClient:
         def __init__(self, *_args, **_kwargs) -> None:
             raise AssertionError("reset-stale 0 must not call the backend")
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1346,6 +1433,11 @@ def test_post_accepts_inline_json_payload(monkeypatch, capsys):
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1531,6 +1623,11 @@ def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1593,6 +1690,13 @@ def test_record_finding_reports_normalized_contract_errors_before_backend(monkey
     class FakeClient:
         def __init__(self, base_url: str, engagement_key: str) -> None:
             raise AssertionError("record-finding should fail before contacting the backend")
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1644,6 +1748,11 @@ def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1705,6 +1814,11 @@ def test_reset_finding_reopens_to_draft(monkeypatch, tmp_path):
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1771,6 +1885,11 @@ def test_list_findings_filters_by_status_and_severity(monkeypatch, capsys):
 
         def close(self) -> None:
             return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1811,6 +1930,13 @@ def test_code_dispatch_done_supports_dry_run(monkeypatch, tmp_path, capsys):
     class FakeClient:
         def __init__(self, *args, **kwargs) -> None:
             raise AssertionError("dry-run should not create a client")
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 

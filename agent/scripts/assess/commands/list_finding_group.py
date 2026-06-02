@@ -23,11 +23,8 @@ def register(subparsers) -> None:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         group = client.get(f"finding-groups/{args.root_slug}")
-    finally:
-        client.close()
 
     if args.json:
         print(json.dumps(group, indent=2, ensure_ascii=False))

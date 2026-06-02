@@ -1,0 +1,42 @@
+{
+  "title": "Stored XSS in user profile bio field",
+  "severity": "medium",
+  "defect_family": "cross-site-scripting",
+  "canonical_location": "https://target.example/api/users/profile",
+  "summary": "Bio field accepts and reflects arbitrary HTML/JS without sanitization",
+  "evidence_ref": "scans/xss_poc.txt",
+  "notes": "Payload: <script>alert(document.cookie)</script> stored and reflected on GET /users/<id>",
+  "details": {
+    "owasp_category": "A03:2021 Injection",
+    "cwe_id": "CWE-79",
+    "request_method": "PUT",
+    "parameter": "bio",
+    "evidence": "Stored payload <script>alert(1)</script> executed in victim session; captured in scans/xss_poc.txt",
+    "impact": "Authenticated attacker can steal session cookies or perform actions as any viewing user",
+    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N",
+    "cvss_score": 5.4,
+    "remediation": "Apply HTML output encoding and a strict Content-Security-Policy; validate bio input server-side",
+    "steps_to_reproduce": [
+      "Log in as low-privilege user",
+      "PUT /api/users/profile with bio containing <script>alert(document.cookie)</script>",
+      "Log in as a second user and visit /users/<attacker-id>",
+      "Observe script execution in victim browser"
+    ],
+    "chain_required": false,
+    "references": [
+      "https://cwe.mitre.org/data/definitions/79.html",
+      "https://owasp.org/www-community/attacks/xss/"
+    ],
+    "discovered_by": "vulnerability-analyst"
+  },
+  "workflow_status": "active",
+  "verification_state": "unreviewed",
+  "verification_disposition": "none",
+  "root_cause_key": "",
+  "auth_context": "authenticated",
+  "source_name": "vulnerability-analyst",
+  "provenance": {
+    "agent_name": "vulnerability-analyst"
+  },
+  "links": []
+}

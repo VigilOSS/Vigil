@@ -17,11 +17,8 @@ def register(subparsers) -> None:
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         surfaces = client.get("surfaces")
-    finally:
-        client.close()
 
     if not isinstance(surfaces, list):
         print("export-surfaces: unexpected response from backend", file=sys.stderr)

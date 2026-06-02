@@ -65,6 +65,11 @@ def _run(monkeypatch, tmp_path):
 
         def close(self):
             pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 

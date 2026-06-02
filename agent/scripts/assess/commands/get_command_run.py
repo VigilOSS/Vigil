@@ -18,9 +18,6 @@ def register(subparsers) -> None:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         row = client.get(f"command-runs/{int(args.command_run_id)}")
-    finally:
-        client.close()
     print(json.dumps(row, indent=2, ensure_ascii=False))

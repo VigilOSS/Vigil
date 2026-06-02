@@ -1546,6 +1546,11 @@ def test_stamp_liveness_marks_claimed_rows(monkeypatch, tmp_path):
             assert endpoint.startswith("host-liveness?host=")
             return [{"host": "a.example.com", "reachability_class": "live", "age_seconds": 540}]
         def close(self): pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _FakeClient)
     module._stamp_liveness(conn, result, SimpleNamespace(base_url="http://x", engagement_key="eng"))
@@ -1572,6 +1577,11 @@ def test_stamp_liveness_best_effort_skips(monkeypatch, tmp_path):
 
     class _Boom:
         def __init__(self, *a, **k): raise RuntimeError("backend down")
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
     monkeypatch.setattr(module, "AssessmentClient", _Boom)
     module._stamp_liveness(conn, result, SimpleNamespace(base_url="http://x", engagement_key="eng"))
     assert "live_status" not in result[0]   # swallowed, no raise
@@ -1648,6 +1658,11 @@ def test_stamp_liveness_clamps_negative_age(monkeypatch):
         def __init__(self, *a, **k): pass
         def get(self, e): return [{"host": "a.example.com", "reachability_class": "live", "age_seconds": -999.0}]
         def close(self): pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _C)
     module._stamp_liveness(conn, result, SimpleNamespace(base_url="x", engagement_key="e"))

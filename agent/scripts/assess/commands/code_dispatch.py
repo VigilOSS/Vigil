@@ -142,11 +142,8 @@ def _validate_id_list(id_list: str) -> list[int]:
 
 
 def _stats(cfg) -> None:
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.get('code/analysis-queue/stats')
-    finally:
-        client.close()
 
     if isinstance(result, dict):
         print("=== Code Analysis Queue Stats ===")
@@ -164,14 +161,11 @@ def _stats(cfg) -> None:
 
 
 def _fetch(cfg, limit: int, agent_name: str) -> None:
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/analysis-queue/fetch', {
             'limit': limit,
             'agent_name': agent_name,
         })
-    finally:
-        client.close()
 
     snapshot = write_json_snapshot(
         cfg.engagement_dir,
@@ -251,11 +245,8 @@ def _done(
         print("Dry run only; no queue state was changed.")
         print(json.dumps({"endpoint": "code/analysis-queue/done", "payload": payload}, indent=2, ensure_ascii=False))
         return
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/analysis-queue/done', payload)
-    finally:
-        client.close()
 
     snapshot = write_json_snapshot(
         cfg.engagement_dir,
@@ -276,11 +267,8 @@ def _error(cfg, id_list: str, notes: str = "") -> None:
     payload: dict = {'item_ids': ids}
     if notes:
         payload['notes'] = notes
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/analysis-queue/error', payload)
-    finally:
-        client.close()
 
     snapshot = write_json_snapshot(
         cfg.engagement_dir,
@@ -308,11 +296,8 @@ def _needs_context(cfg, id_list: str, expansion_file: str | None) -> None:
         expansion = json.loads(ep.read_text(encoding="utf-8"))
         payload['expansion_request'] = expansion
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/analysis-queue/needs-context', payload)
-    finally:
-        client.close()
 
     snapshot = write_json_snapshot(
         cfg.engagement_dir,
@@ -329,11 +314,8 @@ def _needs_context(cfg, id_list: str, expansion_file: str | None) -> None:
 
 
 def _reset_stale(cfg, minutes: int) -> None:
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/analysis-queue/reset-stale', {'minutes': minutes})
-    finally:
-        client.close()
 
     snapshot = write_json_snapshot(
         cfg.engagement_dir,
@@ -350,8 +332,7 @@ def _reset_stale(cfg, minutes: int) -> None:
 
 
 def _fetch_code_files(cfg) -> list[dict]:
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         rows: list[dict] = []
         offset = 0
         while True:
@@ -364,8 +345,6 @@ def _fetch_code_files(cfg) -> list[dict]:
                 result = rows
                 break
             offset += _CODE_FILE_LOOKUP_PAGE_SIZE
-    finally:
-        client.close()
     if not isinstance(result, list):
         print("Could not fetch code files for queue normalization", file=sys.stderr)
         sys.exit(1)
@@ -571,11 +550,8 @@ def _queue(cfg, queue_items_file: str) -> None:
         source_path=str(fp),
         metadata={"command": "code-dispatch queue", "count": len(normalized_items)},
     )
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/analysis-queue', {'items': normalized_items})
-    finally:
-        client.close()
 
     response_snapshot = write_json_snapshot(
         cfg.engagement_dir,
@@ -654,11 +630,8 @@ def _requeue_triggers(cfg, triggers_file: str) -> None:
         source_path=str(fp),
         metadata={"command": "code-dispatch requeue-triggers", "count": len(items)},
     )
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/analysis-queue/requeue', {'items': items})
-    finally:
-        client.close()
 
     response_snapshot = write_json_snapshot(
         cfg.engagement_dir,
@@ -686,11 +659,8 @@ def _list_triggers(cfg, status_filter: str) -> None:
     endpoint = "code/triggers"
     if status_filter:
         endpoint = f"{endpoint}?status={status_filter}"
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.get(endpoint)
-    finally:
-        client.close()
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -750,11 +720,8 @@ def _resolve_triggers(cfg, triggers_file: str, resolution_status: str, note: str
         source_path=str(fp),
         metadata={"command": "code-dispatch resolve-triggers", "count": len(items)},
     )
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post("code/triggers/resolve", payload)
-    finally:
-        client.close()
 
     response_snapshot = write_json_snapshot(
         cfg.engagement_dir,

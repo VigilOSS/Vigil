@@ -1,0 +1,24 @@
+{
+  "title": "Unauthenticated RCE via SQLi to OS command injection",
+  "status": "active",
+  "severity": "critical",
+  "narrative": "Attacker performs boolean-blind SQL injection on /search?q, exfiltrates admin credentials, then chains to an authenticated OS command injection in the admin panel file-upload feature to achieve RCE.",
+  "evidence_ref": "scans/chain_rce.md",
+  "provenance": {
+    "agent_name": "exploit-developer"
+  },
+  "links": [
+    {
+      "relation": "step",
+      "entity_kind": "finding",
+      "entity_ref": "VA-001",
+      "notes": "Initial foothold via SQLi"
+    },
+    {
+      "relation": "step",
+      "entity_kind": "finding",
+      "entity_ref": "VA-003",
+      "notes": "Escalation to RCE via command injection"
+    }
+  ]
+}

@@ -58,11 +58,8 @@ def run(args) -> None:
     endpoint = "resume-brief"
     if params:
         endpoint += "?" + urlencode(params, quote_via=quote)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         brief = client.get(endpoint)
-    finally:
-        client.close()
     # A fresh/empty engagement (or a backend that served the SPA index.html for an
     # unknown route) makes client.get return a raw string instead of a dict. Render
     # a clean "no prior state" notice rather than crashing on brief.get(...).

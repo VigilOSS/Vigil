@@ -722,11 +722,8 @@ def _stamp_liveness(conn, result: list[dict], cfg) -> None:
     if not hosts:
         return
     try:
-        client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-        try:
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
             rows = client.get("host-liveness?host=" + quote(",".join(hosts)))
-        finally:
-            client.close()
     except Exception:
         return
     if not isinstance(rows, list):
@@ -1115,8 +1112,7 @@ def _render_handoff(args, extra: list[str]) -> None:
     include_evidence = bool(getattr(args, "include_evidence", False))
 
     cfg = load_config(getattr(args, "engagement_dir", None))
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         handoff = client.get_handoff(agent_id)
         if handoff is None:
             print(
@@ -1207,8 +1203,6 @@ def _render_handoff(args, extra: list[str]) -> None:
                     c for c in creds
                     if isinstance(c, dict) and (c.get("source_name") or "") == role
                 ]
-    finally:
-        client.close()
 
     # Local-disk presence check for working artifacts. The new payload uses
     # objects with a 'path' key; tolerate plain strings for forward-compat.

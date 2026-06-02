@@ -214,8 +214,7 @@ def run(args) -> None:
             print(f"No per-repo manifest matched --repo-key {requested_repo_key}", file=sys.stderr)
             sys.exit(1)
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         repos = client.get("code/repos")
         if not isinstance(repos, list):
             print(f"Unexpected backend response type for repos: {type(repos)}", file=sys.stderr)
@@ -302,8 +301,6 @@ def run(args) -> None:
             total_updated += upd
             total_skipped += skp
             processed += 1
-    finally:
-        client.close()
 
     if processed == 0:
         print("No repos were synced. Verify backend has matching repo_key entries.", file=sys.stderr)

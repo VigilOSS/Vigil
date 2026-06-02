@@ -110,8 +110,7 @@ def run(args) -> None:
     if metadata is not None:
         payload["metadata"] = metadata
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         try:
             client.post_engagement("activity-entries", payload)
         except Exception as exc:
@@ -120,12 +119,9 @@ def run(args) -> None:
             # callers can retry; do NOT silently drop.
             print(f"aith assess log: failed to record activity entry: {exc}", file=sys.stderr)
             sys.exit(1)
-    finally:
-        client.close()
 
     # Emit event (fire-and-forget).
-    event_client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as event_client:
         event_client.post_event(
             {
                 "event_type": "activity.recorded",
@@ -135,5 +131,3 @@ def run(args) -> None:
                 "summary": payload["title"],
             }
         )
-    finally:
-        event_client.close()
