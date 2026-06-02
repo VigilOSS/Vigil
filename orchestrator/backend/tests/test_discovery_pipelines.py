@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 
 
 def _scripts_root() -> Path:

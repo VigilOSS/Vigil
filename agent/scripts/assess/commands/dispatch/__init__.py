@@ -27,10 +27,11 @@ from assess.lib.db import db_init
 
 # Submodules — imported so the package object exposes them as attributes
 # (e.g. ``dispatch.work_items``, ``dispatch.agent``) for monkeypatch targeting.
-from assess.commands.dispatch import _shared
-from assess.commands.dispatch import work_items
-from assess.commands.dispatch import handoff_renderer
-from assess.commands.dispatch import agent
+# The redundant ``as`` aliases mark these as intentional re-exports.
+from assess.commands.dispatch import _shared as _shared
+from assess.commands.dispatch import work_items as work_items
+from assess.commands.dispatch import handoff_renderer as handoff_renderer
+from assess.commands.dispatch import agent as agent
 
 # Public seam re-exports. Production callers (agent.py / work_buffer.py) and
 # the test suite reach these as ``dispatch.<name>``.

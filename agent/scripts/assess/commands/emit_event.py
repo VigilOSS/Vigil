@@ -1,7 +1,6 @@
 """vigil assess emit-event — fire-and-forget POST to /events."""
 from __future__ import annotations
 
-import os
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config

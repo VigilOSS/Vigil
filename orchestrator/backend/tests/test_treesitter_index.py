@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "a
 from assess.lib.treesitter_index import (
     SUPPORTED_LANGUAGES,
     _TS_AVAILABLE,
-    _detect_exports,
     _resolve_import_targets,
     index_file,
     language_for_file,

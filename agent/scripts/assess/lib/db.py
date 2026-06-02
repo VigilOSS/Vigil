@@ -4,7 +4,6 @@ Kills the 19-positional-parameter db_insert_case() function and SQL injection su
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path

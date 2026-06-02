@@ -1681,7 +1681,7 @@ def _render_per_host_section(section: dict[str, Any], warnings: list[str]) -> No
     objectives = section.get("objectives", list(_PER_HOST_OBJECTIVES))
     discovered_summary = section.get("discovered_summary")
     print("")
-    print(f"per-host coverage outcomes (C40 — WARN-only):")
+    print("per-host coverage outcomes (C40 — WARN-only):")
     if not hosts and not discovered_summary:
         print("  (no hosts with backend signal — recon dispatch is the next step)")
         return

@@ -7,8 +7,6 @@ runtime container — sessions parented by tini survive the calling shell.
 """
 from __future__ import annotations
 
-import json
-import os
 import shlex
 import subprocess
 import sys
