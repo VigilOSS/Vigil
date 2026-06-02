@@ -13,7 +13,7 @@ from .install import InstallOptions, install_from_source
 from .mitmproxy import MitmproxyOptions, start_proxy
 from .oob import OobOptions, oob_status, start_oob
 from .orchestrator import OrchestratorOptions, start_orchestrator
-from .paths import resolve_source_root
+from .paths import default_runtime_container, resolve_source_root
 from .runtime import RuntimeOptions, build_runtime, start_runtime, stop_runtime
 
 
@@ -43,7 +43,7 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
     except SystemExit:
         print("source sync\tskipped (no source checkout found)")
 
-    runtime_was_running = docker.container_running("vigil", runner=runner)
+    runtime_was_running = docker.container_running(default_runtime_container(), runner=runner)
 
     runtime_built = False
     if options.no_build:

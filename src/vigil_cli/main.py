@@ -65,7 +65,7 @@ from .orchestrator import (
     start_orchestrator,
     stop_orchestrator,
 )
-from .paths import resolve_install_root, resolve_source_root
+from .paths import default_runtime_container, resolve_install_root, resolve_source_root
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
 from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
@@ -526,13 +526,13 @@ def _logs(args: argparse.Namespace, install_root: Path) -> None:
         argv.append(str(log_file))
         subprocess.run(argv, check=False)
     elif args.target == "runtime":
-        _docker_logs("vigil", args.lines, args.follow)
+        _docker_logs(default_runtime_container(), args.lines, args.follow)
     elif args.target == "mitmproxy":
         _docker_logs("vigil-proxy", args.lines, args.follow)
     elif args.target == "oob":
         tail_flag = "-f" if args.follow else ""
         command = f"tail -n {shlex.quote(str(args.lines))} {tail_flag} {OOB_ROOT}/*.log {OOB_ROOT}/clients/*.log 2>/dev/null || true"
-        subprocess.run(["docker", "exec", "vigil", "sh", "-lc", command], check=False)
+        subprocess.run(["docker", "exec", default_runtime_container(), "sh", "-lc", command], check=False)
 
 
 def _docker_logs(container_name: str, lines: str, follow: bool) -> None:
@@ -721,7 +721,7 @@ def _runtime(args: argparse.Namespace, install_root: Path) -> None:
     elif args.runtime_command == "status":
         print(runtime_status())
     elif args.runtime_command == "shell":
-        os.execvp("docker", ["docker", "exec", "-it", "vigil", "bash"])
+        os.execvp("docker", ["docker", "exec", "-it", default_runtime_container(), "bash"])
     elif args.runtime_command == "shell-exec":
         _runtime_shell_exec(args.shell_command)
     elif args.runtime_command == "resources":
@@ -737,7 +737,7 @@ def _runtime_shell_exec(command_parts: list[str]) -> None:
     if not command.strip():
         raise SystemExit("Specify a non-empty command string for `vigil runtime shell-exec`.")
     try:
-        result = subprocess.run(["docker", "exec", "vigil", "sh", "-lc", command], check=False)
+        result = subprocess.run(["docker", "exec", default_runtime_container(), "sh", "-lc", command], check=False)
     except FileNotFoundError as exc:
         raise SystemExit("docker CLI not found on PATH") from exc
     if result.returncode != 0:
@@ -920,7 +920,7 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
 
 
 def _tmux_has_oob_client(name: str) -> bool:
-    result = docker_run_command(["docker", "exec", "vigil", "sh", "-lc", f"tmux has-session -t oob-client-{shlex.quote(name)} 2>/dev/null"])
+    result = docker_run_command(["docker", "exec", default_runtime_container(), "sh", "-lc", f"tmux has-session -t oob-client-{shlex.quote(name)} 2>/dev/null"])
     return result.returncode == 0
 
 
@@ -940,7 +940,7 @@ def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOption
         client = sanitize_name(args.name)
         tail_flag = "-f" if args.follow else ""
         command = f"tail -n {shlex.quote(str(args.lines))} {tail_flag} {OOB_ROOT}/clients/{shlex.quote(client)}.log 2>/dev/null || true"
-        subprocess.run(["docker", "exec", "vigil", "sh", "-lc", command], check=False)
+        subprocess.run(["docker", "exec", default_runtime_container(), "sh", "-lc", command], check=False)
     elif args.oob_client_command == "stop":
         stop_oob_client(args.name, runner=docker_run_command)
     elif args.oob_client_command == "list":

@@ -15,11 +15,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .client import AssessError, AssessmentClient
+from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
 
 
-_DEFAULT_CONTAINER_NAME = "vigil"
+_DEFAULT_CONTAINER_NAME = default_runtime_container()
 _DEFAULT_DTACH_DIR = "/tmp/vigil-jobs"
 _JOB_PID_DIR = "/tmp/vigil-jobs"
 _JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
