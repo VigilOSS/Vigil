@@ -1,12 +1,12 @@
 # nmap
 
 **Purpose:** Port/service discovery and enumeration
-For live engagement targets, run Nmap via `aith assess kali nmap-scan` (typed verb, audit-flag-aware).
-Run `aith assess kali nmap-scan --help` for the live flag set, or `aith assess contract kali nmap-scan` for the canonical schema and example payload.
+For live engagement targets, run Nmap via `vigil assess kali nmap-scan` (typed verb, audit-flag-aware).
+Run `vigil assess kali nmap-scan --help` for the live flag set, or `vigil assess contract kali nmap-scan` for the canonical schema and example payload.
 
 ## Discovery Scans
 
-Run all discovery scans via `aith assess kali nmap-scan` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb" for complete invocation profiles.
+Run all discovery scans via `vigil assess kali nmap-scan` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb" for complete invocation profiles.
 
 Flag reference (used inside the wrapper):
 
@@ -91,10 +91,10 @@ edge often produce false positives.
 
 ## Multi-host batch (`-iL`)
 
-Run via `aith assess kali nmap-scan` with `-iL` passed through `--extra-args` or the typed `--input-file` flag so the audit row records the batch and the scan stays inside the runtime:
+Run via `vigil assess kali nmap-scan` with `-iL` passed through `--extra-args` or the typed `--input-file` flag so the audit row records the batch and the scan stays inside the runtime:
 
 ```bash
-aith assess kali nmap-scan \
+vigil assess kali nmap-scan \
   --target placeholder \
   -iL /engagements/$ENGAGEMENT_KEY/scans/hosts.txt \
   --ports top-1000 --service-detection \
@@ -151,7 +151,7 @@ The full mandatory assertion + intel-note recipe lives in
 
 ## Scan Types
 
-Pass scan-type flags through `--extra-args` on the `aith assess kali nmap-scan` typed verb, or use `aith assess kali exec -- nmap ...` when building a complex pipeline not covered by the typed verb. Audit flags are required on both paths.
+Pass scan-type flags through `--extra-args` on the `vigil assess kali nmap-scan` typed verb, or use `vigil assess kali exec -- nmap ...` when building a complex pipeline not covered by the typed verb. Audit flags are required on both paths.
 
 **TCP connect (runtime default):** `-sT` (full handshake, logged) — the `nmap-scan` verb defaults to this. Required in the Docker runtime: raw SYN probes are not delivered through Docker's userland NAT (esp. Docker Desktop/macOS), so `-sS` silently returns 0-open on live hosts.
 **SYN scan (Linux bridged-network only, needs root):** `-sS` (stealthy, half-open) — opt in with `--scan-type sS` only on a runtime where raw packets traverse the network unchanged.

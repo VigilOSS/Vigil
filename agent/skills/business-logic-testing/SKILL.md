@@ -1,12 +1,12 @@
 ---
 name: business-logic-testing
 description: Business logic vulnerability detection — workflow bypass, price manipulation, state abuse, and application-specific flaws
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Business Logic Testing
 
-> **`aith assess kali` audit flags:** use `--technique OTHER` (business-logic flaws are workflow abuse, not a vuln class in the technique taxonomy).
+> **`vigil assess kali` audit flags:** use `--technique OTHER` (business-logic flaws are workflow abuse, not a vuln class in the technique taxonomy).
 
 ## When to Activate
 
@@ -18,8 +18,8 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (craft requests with manipulated parameters — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30` for workflow abuse, and add `--destructive` for requests that create, modify, or delete resources)
-- `aith assess kali ffuf ...` (fuzz parameter values for boundary conditions — use `--technique OTHER --probe-kind payload --phase consume-test --timeout 600`)
+- `vigil assess kali exec -- curl ...` (craft requests with manipulated parameters — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30` for workflow abuse, and add `--destructive` for requests that create, modify, or delete resources)
+- `vigil assess kali ffuf ...` (fuzz parameter values for boundary conditions — use `--technique OTHER --probe-kind payload --phase consume-test --timeout 600`)
 - Browser DevTools — observe workflow state and hidden parameters (client-side analysis only)
 
 Add explicit `-b` or `-H "Authorization: ..."` only when intentionally testing alternate identities, broken session handling, or auth override behavior.

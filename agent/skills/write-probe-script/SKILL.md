@@ -1,22 +1,22 @@
 ---
 name: write-probe-script
 description: Author a single-file Python probe at runtime when a target needs bespoke tooling no existing skill or typed kali verb covers — draft, run via `kali exec`, validate, then `artifact register` for reuse
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Write a Probe Script
 
 > **Use when:** the hypothesis needs request/response logic that no existing skill,
-> typed `aith assess kali` verb, or off-the-shelf tool expresses cleanly — a
+> typed `vigil assess kali` verb, or off-the-shelf tool expresses cleanly — a
 > multi-step differential, a parser-confusion crafter, a stateful auth dance, a
 > blind-callback timing measurement, or a chained primitive. If a typed verb (or
 > `--extra-args` on one) fits, use that instead; this skill is the escape hatch for
 > *logic*, not for tools the typed surface already models. Always paired with
-> `agent/skills/kali-exec/SKILL.md` (the probe runs through `aith assess kali exec`)
+> `agent/skills/kali-exec/SKILL.md` (the probe runs through `vigil assess kali exec`)
 > and `agent/shared-constraints.md`.
 
 A probe is a self-contained Python file the agent writes into the engagement's
-scripts dir, runs **inside the runtime container** via `aith assess kali exec --
+scripts dir, runs **inside the runtime container** via `vigil assess kali exec --
 python3 <script>`, reads the output of, tightens, and — once it earns its keep —
 registers as an artifact so the next engagement (or the next specialist this hour)
 can replay it. It is the bespoke-logic sibling of the typed kali verbs: the verbs
@@ -34,7 +34,7 @@ Reach for a probe when **all** of these hold:
 - The check needs request *logic* — branching on a prior response, diffing two
   responses, crafting a malformed body byte-by-byte, timing a blind callback, or
   walking a reference chain — not just a different flag on an existing tool.
-- No skill in `aith assess list-skills` and no typed `kali` verb (even with
+- No skill in `vigil assess list-skills` and no typed `kali` verb (even with
   `--extra-args`) expresses it. Check first; the typed surface is broad.
 - You will run it more than once, or it proves a finding and should be replayable.
 
@@ -70,13 +70,13 @@ add `--destructive` on the `kali exec` call.
 
 ## Runtime API cheat-sheet
 
-> **Drift caveat:** this cheat-sheet mirrors the real `aith assess kali exec`
+> **Drift caveat:** this cheat-sheet mirrors the real `vigil assess kali exec`
 > surface defined in `agent/scripts/assess/lib/kali.py` + `kali_cli.py` and the
-> `aith oob mint` surface in the top-level CLI. It is a convenience copy, like
+> `vigil oob mint` surface in the top-level CLI. It is a convenience copy, like
 > reference-project's `reference-project.d.ts` is a copy of the live extension API — when the CLI
 > flags change, this section must be re-synced. When in doubt, the live truth is
-> `aith assess kali exec --help`, `aith assess contract kali exec`, and
-> `aith oob mint --help`. Do not trust a stale cheat-sheet over the CLI.
+> `vigil assess kali exec --help`, `vigil assess contract kali exec`, and
+> `vigil oob mint --help`. Do not trust a stale cheat-sheet over the CLI.
 
 ### What the runtime gives a probe
 
@@ -103,7 +103,7 @@ the same bytes at `/engagements/$ENGAGEMENT_KEY/scripts/<name>.py` — one
 bind-mounted filesystem, two names. This dual naming is the rule in
 `agent/shared-constraints.md §11a`; the `scripts/` subdir under the engagement is
 the canonical home for agent-authored helpers (the same place `kali-exec` SKILL.md
-"Run a custom Python helper" points at). `aith assess scaffold-probe <name>`
+"Run a custom Python helper" points at). `vigil assess scaffold-probe <name>`
 writes the skeleton there for you and pre-registers it (see the loop below).
 
 ### Running the probe
@@ -112,7 +112,7 @@ Run it as a raw passthrough through `kali exec`, with the full audit-flag set ev
 typed verb requires (see `kali-exec` SKILL.md "Audit-flag mapping"):
 
 ```bash
-aith assess kali exec \
+vigil assess kali exec \
   --technique <ENUM> --intent "<why, ≤200 chars>" \
   --probe-kind <fingerprint|baseline|payload|exploit> --phase <phase> \
   --timeout <seconds> [--destructive] -- \
@@ -128,7 +128,7 @@ the row on exit with return code, timing, and a stdout preview. Read the result
 with the `stdout_path` from the emitted JSON, or have the probe write a structured
 file under `scans/` and read that.
 
-### Blind callbacks: `aith oob mint`
+### Blind callbacks: `vigil oob mint`
 
 For blind probes (SSRF, XXE, command injection, blind SQLi) the signal is an
 out-of-band hit, not the HTTP response. Mint a nonce-tagged callback host on the
@@ -137,12 +137,12 @@ correlation token (full protocol in `agent/references/offensive-tactics/frp-tunn
 
 ```bash
 # 1. Confirm OOB is up, then mint a per-payload nonce host.
-aith oob status --json
-aith oob mint --technique ssrf --target-url https://target.example/fetch --param url
+vigil oob status --json
+vigil oob mint --technique ssrf --target-url https://target.example/fetch --param url
 # → http  http://<nonce>.oob.example.com/
 
 # 2. Pass the minted host into the probe as a parameter (do NOT hard-code it).
-aith assess kali exec \
+vigil assess kali exec \
   --technique SSRF --intent "blind SSRF via url param, oob callback" \
   --probe-kind payload --phase consume-test --timeout 120 -- \
   python3 /engagements/$ENGAGEMENT_KEY/scripts/ssrf_callback.py \
@@ -150,10 +150,10 @@ aith assess kali exec \
     --callback http://<nonce>.oob.example.com/ssrf-probe
 
 # 3. After firing, correlate the hit (nonce <-> probe) — NOT the raw client log.
-aith oob poll --client <your-client-name>
+vigil oob poll --client <your-client-name>
 ```
 
-`aith oob mint` flags that matter for a probe: `--technique`, `--target-url`,
+`vigil oob mint` flags that matter for a probe: `--technique`, `--target-url`,
 `--param`, `--probe-kind`, `--request-hash`, `--notes`, `--json`. Mint one nonce
 per payload so each callback is unambiguously attributable.
 
@@ -190,7 +190,7 @@ not a `kali ffuf` run.
 **1. Scaffold the skeleton** (writes the file + pre-registers it):
 
 ```bash
-aith assess scaffold-probe traversal_diff --finding LFI-001
+vigil assess scaffold-probe traversal_diff --finding LFI-001
 # wrote: scripts/traversal_diff.py   (registered, present=yes)
 ```
 
@@ -202,7 +202,7 @@ aith assess scaffold-probe traversal_diff --finding LFI-001
 import argparse, json, sys, urllib.request
 
 def fetch(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "aith-probe"})
+    req = urllib.request.Request(url, headers={"User-Agent": "vigil-probe"})
     with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310 (scoped target)
         body = r.read(4096).decode("utf-8", "replace")
         return r.status, body
@@ -247,7 +247,7 @@ if __name__ == "__main__":
 **3. Run it through `kali exec`** and read the verdict:
 
 ```bash
-aith assess kali exec \
+vigil assess kali exec \
   --technique LFI --intent "differential path-traversal on /download?file" \
   --probe-kind payload --phase consume-test --timeout 60 -- \
   python3 /engagements/$ENGAGEMENT_KEY/scripts/traversal_diff.py \
@@ -269,26 +269,26 @@ probe that fires on everything proves nothing.
 edits) and link it to the finding:
 
 ```bash
-aith assess artifact register scripts/traversal_diff.py \
+vigil assess artifact register scripts/traversal_diff.py \
   --kind probe-script --finding LFI-001
 ```
 
 The validated script is now an indexed artifact: discoverable via
-`aith assess artifact search traversal`, replayable next engagement, and linked as
+`vigil assess artifact search traversal`, replayable next engagement, and linked as
 evidence on `LFI-001`.
 
 ## The iterate-and-validate loop
 
 This is the canonical lifecycle — every probe goes through it:
 
-1. **Scaffold** — `aith assess scaffold-probe <name> [--finding <slug>]` writes a
+1. **Scaffold** — `vigil assess scaffold-probe <name> [--finding <slug>]` writes a
    runnable skeleton to `scripts/<name>.py` and pre-registers the artifact, so it
    is linkable from the first second.
 2. **Draft** — fill in the request/response logic. Keep the finding-return
    convention (JSON verdict on the last stdout line). Parametrize anything you
    might change between runs (`--target`, `--payload`, `--marker`) so tightening
    does not mean editing literals.
-3. **Run** — `aith assess kali exec -- python3 .../<name>.py ...` with the full
+3. **Run** — `vigil assess kali exec -- python3 .../<name>.py ...` with the full
    audit-flag set. Output streams to `scans/kali/<run-id>.{out,err}`.
 4. **Read** — inspect the verdict line and the evidence file. Did the hypothesis
    hold? Is the evidence load-bearing?
@@ -298,7 +298,7 @@ This is the canonical lifecycle — every probe goes through it:
 6. **Validate against a control** — confirm the probe yields `finding: false` on a
    known-negative input. An undisciplined probe that always fires is worse than no
    probe.
-7. **Register** — `aith assess artifact register scripts/<name>.py --kind
+7. **Register** — `vigil assess artifact register scripts/<name>.py --kind
    probe-script --finding <slug>` so it is indexed, hashed (`present=yes`), and
    linked. The scaffold pre-registers; re-register after substantive edits so the
    stored hash matches the on-disk bytes.
@@ -310,7 +310,7 @@ registered artifact at the end.
 ## Pitfalls
 
 - **Hard-coding the OOB callback host.** Mint a fresh nonce per payload with
-  `aith oob mint` and pass it as an argument. A baked-in host cannot be correlated
+  `vigil oob mint` and pass it as an argument. A baked-in host cannot be correlated
   and pollutes the next probe's results.
 - **Writing outside the engagement.** `/tmp` and `/data` inside the container are
   non-engagement paths — outputs there are invisible from the host and lost on
@@ -336,12 +336,12 @@ registered artifact at the end.
 
 ## Extended resources
 
-- `agent/skills/kali-exec/SKILL.md` — the `aith assess kali exec` surface this
+- `agent/skills/kali-exec/SKILL.md` — the `vigil assess kali exec` surface this
   skill runs through (audit-flag mapping, the `--` passthrough, custom-helper and
   capture-output patterns). Load it first.
 - `agent/references/probe-scripts/` — reusable, validated probe examples
   (HTTP differential, blind-callback timing) to copy and parametrize.
-- `agent/references/offensive-tactics/frp-tunneling.md` — `aith oob` / interactsh
+- `agent/references/offensive-tactics/frp-tunneling.md` — `vigil oob` / interactsh
   setup and the mint → fire → poll correlation flow for blind probes.
 - `agent/skills/exploit-playbook-authoring/SKILL.md` — once a probe proves an
   exploit, the replayable proof script follows the playbook conventions.

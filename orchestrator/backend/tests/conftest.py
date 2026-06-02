@@ -15,7 +15,7 @@ sys.path.insert(0, str(backend_root))
 # is a daemon thread that would otherwise fire against test-temp data dirs
 # that get torn down between tests, producing log noise and interleaved
 # sqlite3 handles across fixtures.
-os.environ.setdefault("AI_THREAT_HUNTING_BACKUP_DISABLED", "1")
+os.environ.setdefault("VIGIL_BACKUP_DISABLED", "1")
 
 from app.config import settings
 from app import db as db_module
@@ -25,7 +25,7 @@ from app.services import engagements as engagement_service
 
 @pytest.fixture(scope="session")
 def test_root():
-    temp_root = Path(tempfile.mkdtemp(prefix="security-research-tests-"))
+    temp_root = Path(tempfile.mkdtemp(prefix="vigil-tests-"))
     try:
         yield temp_root
     finally:

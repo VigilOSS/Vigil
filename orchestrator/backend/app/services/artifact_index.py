@@ -573,7 +573,7 @@ def set_scratch_flag(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=(
                     f"artifact not found for path={path!r} and the file does not exist on disk. "
-                    "Register the file with `aith assess artifact register <path>` first, or check the path."
+                    "Register the file with `vigil assess artifact register <path>` first, or check the path."
                 ),
             )
         row_dict = register_artifact(engagement_id, path=path)

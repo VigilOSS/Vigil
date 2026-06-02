@@ -241,7 +241,7 @@ type Derived = {
   tags: string[];
   updated_at: string;
   created_at: string;
-  // Populated when the row was superseded via `aith assess supersede-intel`.
+  // Populated when the row was superseded via `vigil assess supersede-intel`.
   // The IntelRow uses this to render the row distinctly (struck-through, badge).
   supersededById: number | null;
   supersededAt: string | null;

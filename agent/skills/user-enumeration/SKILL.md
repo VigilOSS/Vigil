@@ -1,12 +1,12 @@
 ---
 name: user-enumeration
 description: Discover any interface (HTTP, WebSocket, GraphQL, gRPC, or other) that distinguishes between existing and non-existing users through any observable difference
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # User Enumeration
 
-> **`aith assess kali` audit flags:** use `--technique AUTH` (user enumeration is an authentication-failure primitive that enables credential stuffing and targeted brute-force).
+> **`vigil assess kali` audit flags:** use `--technique AUTH` (user enumeration is an authentication-failure primitive that enables credential stuffing and targeted brute-force).
 
 ## Core Principle
 
@@ -56,7 +56,7 @@ existing and non-existing users is an enumeration vector. This includes:
 - Python/websocket scripts — for WebSocket enumeration
 - `grpcurl` — for gRPC service testing (if available)
 
-For live engagement target requests, use plain `curl` by default through `aith assess kali exec --`
+For live engagement target requests, use plain `curl` by default through `vigil assess kali exec --`
 so the request lands in the audit pipeline alongside the audit-flag set you pass. Only add
 explicit cookies or authorization headers when intentionally testing a second account, session
 confusion, or auth override behavior.
@@ -195,8 +195,8 @@ done
 ### 7. Brute-Force Enumeration (after confirming enumerable endpoint)
 
 ```bash
-# Username enumeration via aith assess kali ffuf
-aith assess kali ffuf \
+# Username enumeration via vigil assess kali ffuf
+vigil assess kali ffuf \
   --technique AUTH --intent "username enumeration on login endpoint" \
   --probe-kind payload --phase consume-test --timeout 600 \
   -- -u "http://target/api/login" \
@@ -207,7 +207,7 @@ aith assess kali ffuf \
      -o /engagements/$ENGAGEMENT_KEY/scans/user_enum.json -of json
 
 # Email enumeration via registration check
-aith assess kali ffuf \
+vigil assess kali ffuf \
   --technique AUTH --intent "email enumeration via registration endpoint" \
   --probe-kind payload --phase consume-test --timeout 600 \
   -- -u "http://target/api/register" \
@@ -218,7 +218,7 @@ aith assess kali ffuf \
      -o /engagements/$ENGAGEMENT_KEY/scans/email_enum.json -of json
 
 # Phone number enumeration (if applicable)
-aith assess kali ffuf \
+vigil assess kali ffuf \
   --technique AUTH --intent "phone number enumeration via check-phone endpoint" \
   --probe-kind payload --phase consume-test --timeout 600 \
   -- -u "http://target/api/check-phone" \
@@ -231,7 +231,7 @@ aith assess kali ffuf \
 
 **Triage the result set without guessing a filter.** A single `-fr`/`-fs` filter assumes you
 already know the valid-user response shape. When you don't (or want to confirm the filter caught
-everything), feed the whole ffuf result population to `aith assess anomaly-score` and let it rank
+everything), feed the whole ffuf result population to `vigil assess anomaly-score` and let it rank
 the candidates that broke from the not-found cluster. ffuf's JSON `results` entries already carry
 `status`, `length`, `words`, `lines`, `url` — exactly the fields the oracle reads — so reshape and
 score:
@@ -242,7 +242,7 @@ score:
 jq '[.results[] | {url, status, length, words, lines, content_type: .["content-type"]}]' \
   /engagements/$ENGAGEMENT_KEY/scans/user_enum.json > /tmp/enum_pop.json
 
-aith assess anomaly-score /tmp/enum_pop.json --top 10
+vigil assess anomaly-score /tmp/enum_pop.json --top 10
 #   #1  score=4.17  status=200  len=1561  url=.../login   ← FUZZ=admin: the existing-user response
 #       ^ status='200'  ^ length_bucket=...  ^ words_bucket=...   while every invalid user clustered
 ```
@@ -336,7 +336,7 @@ distinguishing text) into a JSONL file and let the oracle find the odd-one-out:
 
 ```bash
 # one HTTP-response record per probed identifier → enum_records.jsonl, then:
-aith assess anomaly-score enum_records.jsonl --top 10
+vigil assess anomaly-score enum_records.jsonl --top 10
 #   #1  score=4.17  status=302  len=120  url=.../login?u=admin   ← the valid user (redirected)
 #       ^ status='302'  ^ title='redirecting'                     the invalid users all 200'd identically
 ```

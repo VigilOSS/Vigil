@@ -26,7 +26,7 @@ already listed below.
 - `agent/shared-constraints.md` — scope, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/osint-recon/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
+- `agent/skills/osint-recon/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 
 ### Blue Incident Mode
 
@@ -55,7 +55,7 @@ Before starting any work, verify:
 - [ ] You loaded `agent/shared-constraints.md` for red OSINT work or `agent/shared-constraints-blue.md` for blue IOC enrichment
 - [ ] For red OSINT, you loaded the osint-recon skill (`agent/skills/osint-recon/SKILL.md`) and its `## Extended Resources`; for blue IOC enrichment, you loaded `agent/skills/ioc-enrichment/SKILL.md` instead
 - [ ] You have the dispatch context (target domain, tech stack, phase, task objective, prior intel)
-- [ ] You checked command history as a coverage map — `aith assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what OSINT has already been pulled on this domain/stack so your next queries pick angles that haven't been covered — different data source (whois vs cert.sh vs shodan vs github dorking), different CVE year range, different product/version pivot, different subsidiary/acquired-domain relationship. The only query to skip is an identical lookup against identical input; any variant is new intelligence coverage. If you cite a prior run instead of re-running, fetch its preview with `aith assess get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output contains what you need. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] You checked command history as a coverage map — `vigil assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what OSINT has already been pulled on this domain/stack so your next queries pick angles that haven't been covered — different data source (whois vs cert.sh vs shodan vs github dorking), different CVE year range, different product/version pivot, different subsidiary/acquired-domain relationship. The only query to skip is an identical lookup against identical input; any variant is new intelligence coverage. If you cite a prior run instead of re-running, fetch its preview with `vigil assess get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output contains what you need. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
 
 If any item is unchecked, STOP and load it now. Working without the skill and its references means working without methodology — your intelligence quality will be significantly lower.
 
@@ -64,7 +64,7 @@ If any item is unchecked, STOP and load it now. Working without the skill and it
 - Gather relevant CVEs, vendor advisories, public disclosures, org exposure clues, and supporting context
 - Use `gau` for historical URL discovery, `waymore` when available, and `bbot` for recursive recon intelligence
 - Map public intelligence to the current engagement state and target stack
-- Feed useful intel into the backend via `aith assess record-intel <type> <json-file>` — one call per row (cve, person, domain, breach-record, social-profile, dns-record, org-fact, note) — and help the operator decide what to test next
+- Feed useful intel into the backend via `vigil assess record-intel <type> <json-file>` — one call per row (cve, person, domain, breach-record, social-profile, dns-record, org-fact, note) — and help the operator decide what to test next
 
 ## Required Behavior
 
@@ -100,15 +100,15 @@ in CVE matching and missed sibling orgs.
 
 Before your dispatch returns, run in this order:
 
-1. `aith assess record-intel <type> <intel-json>` for every intel row — one call per row (cve, tech-component, person, email, domain, dns-record, social-profile, breach-record, org-fact, note). CVE matches are intel, not findings.
-2. `aith assess record-finding osint-analyst <finding-json>` ONLY when you have target-specific proof that does not require exploit-developer validation (breached credentials confirmed against the target, public data leak containing target-specific secrets).
-3. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (`cve_matches`, `high_value_cve_matches`, `intel_rows`, `github_orgs_enumerated`)
-4. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+1. `vigil assess record-intel <type> <intel-json>` for every intel row — one call per row (cve, tech-component, person, email, domain, dns-record, social-profile, breach-record, org-fact, note). CVE matches are intel, not findings.
+2. `vigil assess record-finding osint-analyst <finding-json>` ONLY when you have target-specific proof that does not require exploit-developer validation (breached credentials confirmed against the target, public data leak containing target-specific secrets).
+3. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (`cve_matches`, `high_value_cve_matches`, `intel_rows`, `github_orgs_enumerated`)
+4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
+`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -133,10 +133,10 @@ intel narrative rather than restating canonical state.
 **CVE matches are intel, not findings.** A CVE with a public PoC does not become a
 finding until exploit-developer validates it against the actual target (backported
 patches, missing CGI binaries, disabled modules, and firewall rules all invalidate
-version-only matches). Run `aith assess contract record-intel cve` to print the
+version-only matches). Run `vigil assess contract record-intel cve` to print the
 allowed/required fields before authoring the JSON; intel schemas are strict.
 
 ## Handoffs
 
-- To `exploit-developer`: when the intel identifies a plausible exploit path or version-specific technique — name the skill matching the CVE/finding class (discoverable via `aith assess list-skills`) so the operator includes it in the dispatch
+- To `exploit-developer`: when the intel identifies a plausible exploit path or version-specific technique — name the skill matching the CVE/finding class (discoverable via `vigil assess list-skills`) so the operator includes it in the dispatch
 - To `operator`: when the intel should reprioritize the queue or change phase timing

@@ -3,15 +3,15 @@
 Single source of truth for turning one persisted finding record into the
 ``## [slug] title`` markdown block used by both finding exporters:
 
-  * ``aith assess export-findings`` — concatenates these blocks into a single
+  * ``vigil assess export-findings`` — concatenates these blocks into a single
     ``findings.md`` report document (one section per finding, with the
     root-cause grouping context inline). See
     ``agent/scripts/assess/commands/export_findings.py``.
-  * ``aith engagement export --format markdown-tree`` — writes the same block
+  * ``vigil engagement export --format markdown-tree`` — writes the same block
     as a per-finding ``draft.md`` in a git-diff-able tree (root-cause grouping
     is rendered separately into each finding's ``report.md`` instead, so the
     draft omits it). See
-    ``src/ai_threat_hunting_cli/engagements.py:export_engagement_tree``.
+    ``src/vigil_cli/engagements.py:export_engagement_tree``.
 
 Both callers share this module so the field selection, ordering, and PoC
 formatting never drift between the report doc and the diffable tree. The only
@@ -21,7 +21,7 @@ to the caller (export-findings strips and re-joins; the tree appends one).
 This module lives under ``agent/scripts/assess/lib`` so the assess command
 imports it directly; the ``src`` CLI package reaches it through the same
 ``add_assess_import_path`` bridge it already uses for ``assess.lib.client`` and
-``assess.lib.db`` (see ``ai_threat_hunting_cli.paths``).
+``assess.lib.db`` (see ``vigil_cli.paths``).
 """
 from __future__ import annotations
 

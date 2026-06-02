@@ -1,4 +1,4 @@
-"""aith assess resume-brief — compact backend operating picture."""
+"""vigil assess resume-brief — compact backend operating picture."""
 from __future__ import annotations
 
 import json

@@ -9,7 +9,7 @@ Use these payloads after `vendor-platform-enum/SKILL.md` triggers on a Drupal JS
 The root document lists every entity-type / bundle pair the API exposes. Anonymous callers usually receive the same root document that authenticated callers do — the access decision happens at the resource level, not the root.
 
 ```bash
-aith assess kali exec --technique INFO-DISCLOSURE \
+vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "Drupal JSON:API root enumeration" \
   --probe-kind fingerprint --phase recon --timeout 30 -- \
   curl -sS 'https://TARGET/jsonapi/' -H 'Accept: application/vnd.api+json'
@@ -54,7 +54,7 @@ For each pair, send `GET /jsonapi/<type>/<bundle>?page[limit]=1`. A 200 with non
 
 Drupal JSON:API supports the JSON:API spec's `?fields[<type>--<bundle>]=...` parameter. The default field set sometimes hides sensitive fields when the access check runs on the default include list — but the sparse-fieldset request can force the response to include them when the per-field access check is missing or misconfigured.
 
-Send each probe via `aith assess kali exec -- curl -sS 'https://TARGET<path>' -H 'Accept: application/vnd.api+json'` with the required audit flags. URL patterns:
+Send each probe via `vigil assess kali exec -- curl -sS 'https://TARGET<path>' -H 'Accept: application/vnd.api+json'` with the required audit flags. URL patterns:
 
 ```
 /jsonapi/user/user?page[limit]=1&fields[user--user]=mail,name,roles,field_phone,field_internal_note,uid,init,langcode,timezone,status

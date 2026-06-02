@@ -66,7 +66,7 @@ from .orchestrator import (
     stop_orchestrator,
 )
 from .paths import resolve_install_root, resolve_source_root
-from .runtime import RuntimeOptions, aith_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
+from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
 from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
 
@@ -76,19 +76,19 @@ def _print_post_install(result: InstallResult) -> None:
     print()
     if result.is_upgrade:
         print("Upgrade complete. Services using the previous install should be restarted:")
-        print(f"  - Kali runtime:   aith runtime restart")
-        print(f"  - Orchestrator:   aith orchestrator restart")
+        print(f"  - Kali runtime:   vigil runtime restart")
+        print(f"  - Orchestrator:   vigil orchestrator restart")
         if result.image_built:
             print(f"  - Docker image was rebuilt — running containers use the old image until restarted")
         else:
-            print(f"  - Docker image:   run  aith runtime build  if agent scripts or Dockerfile changed")
+            print(f"  - Docker image:   run  vigil runtime build  if agent scripts or Dockerfile changed")
     else:
         print("Install complete. Next steps:")
         print(f"  1. Configure tokens and API keys in {root / '.env'}")
-        print(f"  2. Optional OOB: aith config set oob.frp_token <token>")
-        print(f"  3. aith up                      # build/start runtime, orchestrator, and OOB")
-        print(f"  4. aith engagement create <target>  # create your first engagement")
-        print(f"  5. aith assess kali --help      # discover target-facing CLI verbs")
+        print(f"  2. Optional OOB: vigil config set oob.frp_token <token>")
+        print(f"  3. vigil up                      # build/start runtime, orchestrator, and OOB")
+        print(f"  4. vigil engagement create <target>  # create your first engagement")
+        print(f"  5. vigil assess kali --help      # discover target-facing CLI verbs")
     print()
 
 
@@ -98,8 +98,8 @@ def main(argv: list[str] | None = None) -> None:
     if command_idx is not None and raw_argv[command_idx] == "assess":
         _exec_assess_passthrough(raw_argv, command_idx)
         return
-    parser = argparse.ArgumentParser(prog="aith", description="AI Threat Hunting operator CLI")
-    parser.add_argument("--root", help="Install root (default: $AI_THREAT_HUNTING_INSTALL_DIR or ~/security-research)")
+    parser = argparse.ArgumentParser(prog="vigil", description="Vigil operator CLI")
+    parser.add_argument("--root", help="Install root (default: $VIGIL_INSTALL_DIR or ~/vigil)")
     parser.add_argument("--source", help="Source checkout root for install/upgrade")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -183,7 +183,7 @@ def main(argv: list[str] | None = None) -> None:
             "tar.gz; --format markdown-tree writes a diffable per-finding tree "
             "(one dir per finding: draft.md / debate.md / report.md) sourced "
             "from the backend. For a single consolidated findings.md report doc "
-            "instead, use `aith assess export-findings`."
+            "instead, use `vigil assess export-findings`."
         ),
     )
     export_p.add_argument("key", nargs="?")
@@ -195,7 +195,7 @@ def main(argv: list[str] | None = None) -> None:
         default="tar.gz",
         help=(
             "Export format (default: tar.gz archive). markdown-tree = diffable "
-            "per-finding tree (vs `aith assess export-findings` = single "
+            "per-finding tree (vs `vigil assess export-findings` = single "
             "findings.md report doc)."
         ),
     )
@@ -237,7 +237,7 @@ def main(argv: list[str] | None = None) -> None:
     orch_sub.add_parser("open")
     orch_build = orch_sub.add_parser(
         "build",
-        help="Build the install-side frontend dist (recovery for direct-uvicorn launches that bypass aith up).",
+        help="Build the install-side frontend dist (recovery for direct-uvicorn launches that bypass vigil up).",
     )
     orch_build.add_argument("--force", action="store_true", help="Rebuild even if dist looks up-to-date.")
 
@@ -265,7 +265,7 @@ def main(argv: list[str] | None = None) -> None:
 
     mitm_p = sub.add_parser(
         "mitmproxy",
-        help="Manage the engagement-wide intercepting proxy (Docker container security-research-proxy on :8080).",
+        help="Manage the engagement-wide intercepting proxy (Docker container vigil-proxy on :8080).",
     )
     mitm_sub = mitm_p.add_subparsers(dest="mitmproxy_command", required=True)
     mitm_start = mitm_sub.add_parser(
@@ -301,9 +301,9 @@ def main(argv: list[str] | None = None) -> None:
     mitm_routes = mitm_sub.add_parser("routes", help="Print the proxy's loaded engagement→scope mapping.")
     mitm_routes.add_argument("--json", action="store_true")
 
-    # `aith mcp` retired in the typed-CLI cutover. Keep the parser so calls fail with a clear message
+    # `vigil mcp` retired in the typed-CLI cutover. Keep the parser so calls fail with a clear message
     # instead of argparse's generic "unknown command" error; downstream handler prints the deprecation note.
-    mcp_p = sub.add_parser("mcp", help="(removed) Kali MCP support retired; use `aith assess kali ...`")
+    mcp_p = sub.add_parser("mcp", help="(removed) Kali MCP support retired; use `vigil assess kali ...`")
     mcp_p.add_argument("mcp_args", nargs=argparse.REMAINDER)
 
     auth_p = sub.add_parser("auth")
@@ -357,7 +357,7 @@ def main(argv: list[str] | None = None) -> None:
     oob_poll.add_argument(
         "--client",
         required=True,
-        help="OOB client name whose interaction log to read (see `aith oob client list`).",
+        help="OOB client name whose interaction log to read (see `vigil oob client list`).",
     )
     oob_poll.add_argument("--lines", type=int, default=2000, help="Tail this many log lines (default 2000).")
     oob_poll.add_argument("--json", action="store_true", help="Emit matched/unmatched correlation result as JSON.")
@@ -407,7 +407,7 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit("Specify only one of --yes-restart-runtime or --no-restart-runtime.")
         if args.engagement or args.select:
             print(
-                "[aith] `aith up --engagement/--select` is a no-op now; the proxy serves every active engagement.",
+                "[vigil] `vigil up --engagement/--select` is a no-op now; the proxy serves every active engagement.",
                 file=sys.stderr,
             )
         run_up(
@@ -513,7 +513,7 @@ def _config(args: argparse.Namespace) -> None:
 def _logs(args: argparse.Namespace, install_root: Path) -> None:
     if args.target == "all":
         if args.follow:
-            raise SystemExit("`aith logs all --follow` is not supported; follow one target at a time.")
+            raise SystemExit("`vigil logs all --follow` is not supported; follow one target at a time.")
         for target in ("orchestrator", "runtime", "mitmproxy", "oob"):
             print(f"==> {target} <==")
             _logs(argparse.Namespace(target=target, follow=False, lines=args.lines), install_root)
@@ -526,13 +526,13 @@ def _logs(args: argparse.Namespace, install_root: Path) -> None:
         argv.append(str(log_file))
         subprocess.run(argv, check=False)
     elif args.target == "runtime":
-        _docker_logs("security-research", args.lines, args.follow)
+        _docker_logs("vigil", args.lines, args.follow)
     elif args.target == "mitmproxy":
-        _docker_logs("security-research-proxy", args.lines, args.follow)
+        _docker_logs("vigil-proxy", args.lines, args.follow)
     elif args.target == "oob":
         tail_flag = "-f" if args.follow else ""
         command = f"tail -n {shlex.quote(str(args.lines))} {tail_flag} {OOB_ROOT}/*.log {OOB_ROOT}/clients/*.log 2>/dev/null || true"
-        subprocess.run(["docker", "exec", "security-research", "sh", "-lc", command], check=False)
+        subprocess.run(["docker", "exec", "vigil", "sh", "-lc", command], check=False)
 
 
 def _docker_logs(container_name: str, lines: str, follow: bool) -> None:
@@ -636,7 +636,7 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             )
             with _build_assessment_client(install_root, path.name) as client:
                 result = export_engagement_tree(client, output, fmt="markdown-tree")
-            print(f"[aith] exported {result.finding_count} finding(s) to {result.output_root}", file=sys.stderr)
+            print(f"[vigil] exported {result.finding_count} finding(s) to {result.output_root}", file=sys.stderr)
             print(result.output_root)
         else:
             output = Path(args.output).expanduser() if args.output else install_root / ".runtime-data" / "exports" / f"{path.name}.tar.gz"
@@ -663,7 +663,7 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
                 )
             else:
                 for entry in migrated:
-                    print(f"[aith] {prefix}: {entry['key']} code_phase -> {entry['to']}")
+                    print(f"[vigil] {prefix}: {entry['key']} code_phase -> {entry['to']}")
 
 
 def _looks_like_web_target(value: str) -> bool:
@@ -721,23 +721,23 @@ def _runtime(args: argparse.Namespace, install_root: Path) -> None:
     elif args.runtime_command == "status":
         print(runtime_status())
     elif args.runtime_command == "shell":
-        os.execvp("docker", ["docker", "exec", "-it", "security-research", "bash"])
+        os.execvp("docker", ["docker", "exec", "-it", "vigil", "bash"])
     elif args.runtime_command == "shell-exec":
         _runtime_shell_exec(args.shell_command)
     elif args.runtime_command == "resources":
-        aith_runtime_resources(json_output=args.json)
+        vigil_runtime_resources(json_output=args.json)
 
 
 def _runtime_shell_exec(command_parts: list[str]) -> None:
     if command_parts[:1] == ["--"]:
         command_parts = command_parts[1:]
     if not command_parts:
-        raise SystemExit("Specify a command string for `aith runtime shell-exec`.")
+        raise SystemExit("Specify a command string for `vigil runtime shell-exec`.")
     command = command_parts[0] if len(command_parts) == 1 else " ".join(shlex.quote(part) for part in command_parts)
     if not command.strip():
-        raise SystemExit("Specify a non-empty command string for `aith runtime shell-exec`.")
+        raise SystemExit("Specify a non-empty command string for `vigil runtime shell-exec`.")
     try:
-        result = subprocess.run(["docker", "exec", "security-research", "sh", "-lc", command], check=False)
+        result = subprocess.run(["docker", "exec", "vigil", "sh", "-lc", command], check=False)
     except FileNotFoundError as exc:
         raise SystemExit("docker CLI not found on PATH") from exc
     if result.returncode != 0:
@@ -752,7 +752,7 @@ def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
             # now serves every active engagement at once, so we silently ignore
             # the value after printing one line so the operator knows.
             print(
-                "[aith] mitmproxy now serves all active engagements; ignoring engagement selector.",
+                "[vigil] mitmproxy now serves all active engagements; ignoring engagement selector.",
                 file=sys.stderr,
             )
         engagements_root.mkdir(parents=True, exist_ok=True)
@@ -775,11 +775,11 @@ def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
         else:
             _print_mitmproxy_status(payload)
     elif args.mitmproxy_command == "cert":
-        print("docker cp security-research-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ~/Desktop/mitmproxy-ca-cert.pem")
+        print("docker cp vigil-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ~/Desktop/mitmproxy-ca-cert.pem")
         print("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Desktop/mitmproxy-ca-cert.pem")
     elif args.mitmproxy_command == "reload":
         request_proxy_reload(engagements_root)
-        print(f"[aith] mitmproxy reload requested ({engagements_root})")
+        print(f"[vigil] mitmproxy reload requested ({engagements_root})")
     elif args.mitmproxy_command == "routes":
         snapshot = read_proxy_routes(engagements_root)
         if snapshot is None:
@@ -839,12 +839,12 @@ def _print_mitmproxy_status(payload: dict) -> None:
 def _mcp(args: argparse.Namespace) -> None:
     """Stub: Kali MCP support was removed in the typed-CLI cutover."""
     print(
-        "aith mcp install/status/uninstall/remove/repair were removed in the typed-CLI cutover.",
+        "vigil mcp install/status/uninstall/remove/repair were removed in the typed-CLI cutover.",
         file=sys.stderr,
     )
     print(
-        "Use `aith assess kali ...` for target-facing tool execution and `aith runtime status` "
-        "or `aith runtime resources` for runtime visibility.",
+        "Use `vigil assess kali ...` for target-facing tool execution and `vigil runtime status` "
+        "or `vigil runtime resources` for runtime visibility.",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -918,7 +918,7 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
 
 
 def _tmux_has_oob_client(name: str) -> bool:
-    result = docker_run_command(["docker", "exec", "security-research", "sh", "-lc", f"tmux has-session -t oob-client-{shlex.quote(name)} 2>/dev/null"])
+    result = docker_run_command(["docker", "exec", "vigil", "sh", "-lc", f"tmux has-session -t oob-client-{shlex.quote(name)} 2>/dev/null"])
     return result.returncode == 0
 
 
@@ -938,7 +938,7 @@ def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOption
         client = sanitize_name(args.name)
         tail_flag = "-f" if args.follow else ""
         command = f"tail -n {shlex.quote(str(args.lines))} {tail_flag} {OOB_ROOT}/clients/{shlex.quote(client)}.log 2>/dev/null || true"
-        subprocess.run(["docker", "exec", "security-research", "sh", "-lc", command], check=False)
+        subprocess.run(["docker", "exec", "vigil", "sh", "-lc", command], check=False)
     elif args.oob_client_command == "stop":
         stop_oob_client(args.name, runner=docker_run_command)
     elif args.oob_client_command == "list":
@@ -953,7 +953,7 @@ def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOption
 
 # Test seam: deterministic nonce minting. Tests monkeypatch this to a
 # fixed token_factory; production leaves it None so `mint_nonce` draws from
-# `secrets`. Kept at module scope so `aith oob mint` stays seedable without
+# `secrets`. Kept at module scope so `vigil oob mint` stays seedable without
 # threading a factory argument through argparse.
 _oob_nonce_token_factory = None
 
@@ -978,7 +978,7 @@ def _build_assessment_client(install_root: Path, engagement_key: str):
     except ImportError as exc:  # pragma: no cover - defensive
         raise SystemExit(
             "Cannot import the assessment HTTP client (assess.lib.client). "
-            "Run from a source checkout or a completed `aith install`."
+            "Run from a source checkout or a completed `vigil install`."
         ) from exc
     return AssessmentClient(base_url, engagement_key)
 
@@ -1082,10 +1082,10 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
 
 
 def _oob_options(install_root: Path) -> OobOptions:
-    token = os.environ.get("AI_THREAT_HUNTING_FRP_TOKEN") or config_module.get_config_value("oob.frp_token") or ""
-    host = os.environ.get("AI_THREAT_HUNTING_FRP_HOST") or config_module.get_config_value("oob.frp_host", DEFAULT_FRP_HOST) or DEFAULT_FRP_HOST
-    port = int(os.environ.get("AI_THREAT_HUNTING_FRP_PORT") or config_module.get_config_value("oob.frp_port", str(DEFAULT_FRP_PORT)) or DEFAULT_FRP_PORT)
-    domain = os.environ.get("AI_THREAT_HUNTING_OOB_DOMAIN") or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN) or DEFAULT_OOB_DOMAIN
+    token = os.environ.get("VIGIL_FRP_TOKEN") or config_module.get_config_value("oob.frp_token") or ""
+    host = os.environ.get("VIGIL_FRP_HOST") or config_module.get_config_value("oob.frp_host", DEFAULT_FRP_HOST) or DEFAULT_FRP_HOST
+    port = int(os.environ.get("VIGIL_FRP_PORT") or config_module.get_config_value("oob.frp_port", str(DEFAULT_FRP_PORT)) or DEFAULT_FRP_PORT)
+    domain = os.environ.get("VIGIL_OOB_DOMAIN") or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN) or DEFAULT_OOB_DOMAIN
     return OobOptions(install_root=install_root, frp_host=host, frp_port=port, frp_token=token, oob_domain=domain)
 
 

@@ -1,7 +1,7 @@
 ---
 name: incident-containment
 description: L4 containment proposal authoring — per-platform pattern tables, target/action/rollback contract, blast-radius assessment, eradication, and recovery patterns for verified incidents
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Incident Containment (L4)
@@ -15,7 +15,7 @@ origin: AI Threat Hunting
 - The verifier's handoff names `next_specialist: ir-lead` and the
   evidence_refs include reproducible adversarial activity.
 - The operator dispatches the L4 `ir-lead` role to author containment
-  proposals, await per-action approval, then execute via `aith blue contain`.
+  proposals, await per-action approval, then execute via `vigil blue contain`.
 - Eradication (persistence removal) or recovery (clean re-enrollment)
   authoring on a previously contained finding.
 
@@ -30,7 +30,7 @@ proposal record is the audit gate, not a comment field.
   `verified`, not `unreviewed`); containment-proposal shape (rule 18 —
   target/action/rollback); never-delete-evidence (rule 19); UTC (rule 7).
 - `agent/shared-constraints-blue.md` — read-only by default (§2);
-  WRITE-class actions surface as proposals; `aith blue contain` is the
+  WRITE-class actions surface as proposals; `vigil blue contain` is the
   execution verb; artifact chain of custody for the containment-proof
   artifact.
 - `agent/rules/ir-evidence.md` — attribution gates; the verifier's
@@ -50,13 +50,13 @@ proposal record is the audit gate, not a comment field.
 
 | Verb | Purpose |
 |------|---------|
-| `aith blue propose-contain` | Author a containment proposal with `target`, `action`, `rollback`, `blast_radius`, and `note`; prints the backend `decision_id` for approval |
-| `aith blue contain <finding-slug> --proposal <id> --command-run-id <id>` | Records an already-executed proposal: logs to `activity_entries`, bumps finding `workflow_status` to `contained`, and can also register `--proof-artifact <path>`. **Does not** run the platform command itself in v1 — the operator runs `aith assess host-exec --require-audit ... -- <cmd>` first, then passes the command-run id or captured stdout/screenshot proof. |
-| `aith assess log` | Record the containment decision (proposed, approved, executed, rolled-back) with structured `metadata_json` |
-| `aith assess artifact register` | Register containment-proof artifacts (`kind=containment_proof`) — screenshots, command output, ticket links |
-| `aith assess host-exec` | Out-of-band evidence pulls during eradication / recovery (e.g., post-containment verification that the session is actually revoked) |
-| `aith assess update-finding` | Move finding to `workflow_status=contained | eradicated | recovered` after each phase lands |
-| `aith assess agent handoff --from-json <path>` | Close the L4 dispatch with a handoff naming all executed proposals and any remaining gaps |
+| `vigil blue propose-contain` | Author a containment proposal with `target`, `action`, `rollback`, `blast_radius`, and `note`; prints the backend `decision_id` for approval |
+| `vigil blue contain <finding-slug> --proposal <id> --command-run-id <id>` | Records an already-executed proposal: logs to `activity_entries`, bumps finding `workflow_status` to `contained`, and can also register `--proof-artifact <path>`. **Does not** run the platform command itself in v1 — the operator runs `vigil assess host-exec --require-audit ... -- <cmd>` first, then passes the command-run id or captured stdout/screenshot proof. |
+| `vigil assess log` | Record the containment decision (proposed, approved, executed, rolled-back) with structured `metadata_json` |
+| `vigil assess artifact register` | Register containment-proof artifacts (`kind=containment_proof`) — screenshots, command output, ticket links |
+| `vigil assess host-exec` | Out-of-band evidence pulls during eradication / recovery (e.g., post-containment verification that the session is actually revoked) |
+| `vigil assess update-finding` | Move finding to `workflow_status=contained | eradicated | recovered` after each phase lands |
+| `vigil assess agent handoff --from-json <path>` | Close the L4 dispatch with a handoff naming all executed proposals and any remaining gaps |
 
 Forbidden from L4 without an approved proposal: direct platform CLI
 (`gam user X signout`, `gcloud iam ... disable`, `crowdstrike isolate-host`).
@@ -182,7 +182,7 @@ One of:
 # 1) Author proposal — does NOT execute. Writes a containment_proposal
 #    dispatch-decision row whose `decision_id` the operator passes to
 #    approve-proposal + blue contain.
-aith blue propose-contain <finding-slug> \
+vigil blue propose-contain <finding-slug> \
   --action revoke_session \
   --target user@acme.example \
   --platform gws \
@@ -190,20 +190,20 @@ aith blue propose-contain <finding-slug> \
   --blast-radius single-user \
   --note "Verified compromise; sign-in from unfamiliar IP corroborated; revoke active sessions before pulling other forensics."
 
-# `aith blue propose-contain` prints JSON like:
+# `vigil blue propose-contain` prints JSON like:
 #   {"decision_id": 42,
-#    "approval_hint": "aith assess approve-proposal 42 --approved-by <operator>"}
+#    "approval_hint": "vigil assess approve-proposal 42 --approved-by <operator>"}
 
 # 2) Operator approves the proposal (decision-row PATCH; gates step 4)
-#    aith assess approve-proposal <decision-id> --approved-by <operator>
+#    vigil assess approve-proposal <decision-id> --approved-by <operator>
 
 # 3) Operator executes the platform command through host-exec so the
 #    underlying command and its stdout are audited. v1 keeps this as a
-#    separate step from `aith blue contain` so the operator inspects the
+#    separate step from `vigil blue contain` so the operator inspects the
 #    command's output before recording the activity row.
 #
 # IMPORTANT: when dispatching containment commands through
-# `aith assess host-exec`, argv containing `delete`, `--force`, `rm -r`,
+# `vigil assess host-exec`, argv containing `delete`, `--force`, `rm -r`,
 # `dd of=/dev/`, or the `format` command will be blocked by the default
 # destructive-token gate (see the destructive gate constants in
 # `agent/scripts/assess/commands/host_exec.py`). Common containment
@@ -211,13 +211,13 @@ aith blue propose-contain <finding-slug> \
 # `gcloud iam service-accounts delete`, anything with `--force` —
 # require BOTH `--allow-destructive` AND a proposal that has been
 # approved (`assessment_dispatch_decisions.resolved=true`, set by
-# `aith assess approve-proposal`) before invoking. Example:
+# `vigil assess approve-proposal`) before invoking. Example:
 #
-#   aith assess host-exec --tool aws --intent "rotate compromised key" \
+#   vigil assess host-exec --tool aws --intent "rotate compromised key" \
 #     --technique T1098 --phase respond --scope-host <customer-slug> \
 #     --require-audit --allow-destructive \
 #     -- aws iam delete-access-key --user-name <user> --access-key-id <id>
-aith assess host-exec \
+vigil assess host-exec \
   --tool gam --intent "revoke active sessions" \
   --technique T1110 --phase respond --scope-host <customer-slug> \
   --require-audit \
@@ -228,12 +228,12 @@ aith assess host-exec \
 # 4) Record the executed containment: registers the proof artifact,
 #    writes the activity_entries row, bumps finding workflow_status to
 #    `contained`. Refuses unless the proposal's decision row is approved.
-aith blue contain <finding-slug> --proposal <decision-id> --command-run-id <host-exec-run-id> \
+vigil blue contain <finding-slug> --proposal <decision-id> --command-run-id <host-exec-run-id> \
   --proof-artifact "$ENGAGEMENT_DIR/ir/evidence/containment-<slug>-host-exec-stdout.json"
 
 # 5) Register any out-of-band supplementary evidence (screenshot of the
 #    session list emptied, ticket link in the customer's ITSM system):
-aith assess artifact register \
+vigil assess artifact register \
   "$ENGAGEMENT_DIR/ir/evidence/containment-<slug>-proof.png" \
   --kind containment_proof \
   --finding <finding-slug> \
@@ -296,7 +296,7 @@ the report-writer's containment narrative, or the next verifier
 dispatch (if a follow-on finding lands).
 
 1. **Link the audited command-run and register supplementary proof artifacts.**
-   `aith blue contain --command-run-id <id>` links the host-exec audit
+   `vigil blue contain --command-run-id <id>` links the host-exec audit
    row automatically — stdout/stderr are already stored there.
    Supplementary proof (platform admin console screenshot, ITSM ticket
    link, separately-captured output) is registered additionally:
@@ -304,14 +304,14 @@ dispatch (if a follow-on finding lands).
      state (sessions empty, account suspended, key inactive).
    - The customer's ITSM ticket link confirming the change.
    For UI-driven actions without a `host-exec` audit row, fall back to
-   `aith blue contain --proof-artifact <path>` which registers the file
+   `vigil blue contain --proof-artifact <path>` which registers the file
    as `kind=containment_proof`.
 2. **Record the containment activity entry:**
 
    ```bash
-   aith assess log <agent-id> \
+   vigil assess log <agent-id> \
      "Contained: <finding-slug> via <action_verb> against <target>" \
-     "Operator-approved proposal <id>; executed via aith blue contain at <UTC>; rollback plan: <one-line>" \
+     "Operator-approved proposal <id>; executed via vigil blue contain at <UTC>; rollback plan: <one-line>" \
      "containment-proof artifact <id> registered" \
      --actor-kind agent
    ```
@@ -323,7 +323,7 @@ dispatch (if a follow-on finding lands).
 3. **Update the finding workflow status:**
 
    ```bash
-   aith assess update-finding <finding-slug> \
+   vigil assess update-finding <finding-slug> \
      --inline '{
        "workflow_status": "contained",
        "details": {
@@ -375,8 +375,8 @@ dispatch (if a follow-on finding lands).
   irreversible actions only when accompanied by the standard recovery
   procedure (URL or document reference). "Unknown" is not.
 - **Skipping the audit linkage.** In v1 the operator runs the platform
-  command through `aith assess host-exec --require-audit` and then records
-  the containment with `aith blue contain --command-run-id <id>` so the
+  command through `vigil assess host-exec --require-audit` and then records
+  the containment with `vigil blue contain --command-run-id <id>` so the
   audit row and stdout are linked. UI-driven actions (clicked through the
   GWS admin console, M365 portal) that cannot go through `host-exec` must
   supply `--proof-artifact <path>` instead. Without one of these, the
@@ -403,10 +403,10 @@ dispatch (if a follow-on finding lands).
 - `agent/references/tenants/<customer>-<platform>.md` — tenant ref's
   documented admin identities authorized for containment execution,
   comms templates, break-glass procedures.
-- `aith blue contain` — recording verb (v1): does NOT run the platform
-  command itself. The operator runs `aith assess host-exec --require-audit
+- `vigil blue contain` — recording verb (v1): does NOT run the platform
+  command itself. The operator runs `vigil assess host-exec --require-audit
   ... -- <cmd>` first, then records the containment via
-  `aith blue contain --command-run-id <id>` (the primary path — links the
+  `vigil blue contain --command-run-id <id>` (the primary path — links the
   host-exec audit row) or `--proof-artifact <path>` (for UI-driven actions
   without a `host-exec` audit row). Logs to `activity_entries` and bumps
   the finding workflow status to `contained`.

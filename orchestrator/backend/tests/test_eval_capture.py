@@ -1,4 +1,4 @@
-"""Contract tests for ``aith assess eval-capture`` (blueprint §7).
+"""Contract tests for ``vigil assess eval-capture`` (blueprint §7).
 
 Deterministic, NO live LLM. Seeds an engagement + findings via the TestClient
 (mirroring test_dispatch_handoffs_api.py:17-58), fetches the RAW serialized rows

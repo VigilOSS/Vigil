@@ -1,4 +1,4 @@
-"""Shared enums for `aith assess kali` command-audit metadata fields.
+"""Shared enums for `vigil assess kali` command-audit metadata fields.
 
 Single source of truth for ``technique`` and ``probe_kind`` valid values.
 Consumed by:

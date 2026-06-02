@@ -1,7 +1,7 @@
 ---
 name: okta-investigation
 description: L2 Okta SystemLog + factor + admin-API audit. Push-fatigue detection, session-cookie replay, factor enrollment by attacker, API token anomaly, admin role change, hybrid AD-Okta drift.
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Okta Investigation (L2)
@@ -36,7 +36,7 @@ coverage-gaps list, and a handoff JSON the verifier consumes.
 
 Read-only by default. Every Okta API call uses a service-app token with
 read-only scopes; suspend/clear-sessions/reset-factors live in
-`incident-containment` and require an `aith blue propose-contain` approval gate.
+`incident-containment` and require an `vigil blue propose-contain` approval gate.
 
 Always-active references — load before the first API call:
 
@@ -65,7 +65,7 @@ user-visible symptoms.
 
 ## Tools
 
-L2 is `aith assess host-exec` territory for Okta API pulls plus
+L2 is `vigil assess host-exec` territory for Okta API pulls plus
 `artifact register` for every raw response. There is no widely-adopted
 `okta-cli` at production grade — `curl` + `jq` is the primary surface.
 
@@ -81,7 +81,7 @@ L2 is `aith assess host-exec` territory for Okta API pulls plus
 | Active sessions | `curl ".../api/v1/users/{id}/sessions"` | Where supported; some tenants restrict this endpoint by feature flag |
 | Hybrid AD pivot | PowerShell `Get-ADUser`, `Get-ADGroupMember` | AD-side state for hybrid drift in step 6; runs from a domain-joined admin workstation |
 | Filter / project JSON | `jq` | Read-only, fast, no tenant calls |
-| AiTM correlation | `aith assess artifact search "device_fingerprint"` | Sibling-skill artifacts (M365, AWS) often already carry the device fingerprint Okta needs to dedupe |
+| AiTM correlation | `vigil assess artifact search "device_fingerprint"` | Sibling-skill artifacts (M365, AWS) often already carry the device fingerprint Okta needs to dedupe |
 
 ### Token + scope requirement
 
@@ -356,12 +356,12 @@ the verifier owns the decision.
 
 ## Activity Log Convention
 
-Every methodology step closes with an `aith assess log` row. The
+Every methodology step closes with an `vigil assess log` row. The
 metadata fields below let the report-writer's FTS find Okta-specific
 evidence without parsing the free-text body.
 
 ```bash
-aith assess log <agent-id> \
+vigil assess log <agent-id> \
   "Okta step <N>: <step name> for <finding-slug>" \
   "<one-line action summary citing artifact IDs>" \
   "<one-line result summary>" \
@@ -435,7 +435,7 @@ Run in order at the end of the L2 dispatch:
    policies, admin user list, AD `Get-ADUser` JSON:
 
    ```bash
-   aith assess artifact register \
+   vigil assess artifact register \
      "$ENGAGEMENT_DIR/ir/reports/okta_systemlog_${USER_ID}.json" \
      --kind ir_log \
      --finding <finding-slug> \
@@ -455,7 +455,7 @@ Run in order at the end of the L2 dispatch:
 3. **Log the closing handoff entry**:
 
    ```bash
-   aith assess log <agent-id> \
+   vigil assess log <agent-id> \
      "Okta L2 handoff for <finding-slug>" \
      "Pulled SystemLog/factors/tokens/policies across 30d window; ran all 6 steps; registered artifacts <id-list>" \
      "Handoff to verifier with severity_recommendation=<x> confidence=<y>" \
@@ -465,7 +465,7 @@ Run in order at the end of the L2 dispatch:
 4. **Emit the handoff JSON** to `/tmp/handoff.json` and record it:
 
    ```bash
-   aith assess agent handoff --from-json /tmp/handoff.json
+   vigil assess agent handoff --from-json /tmp/handoff.json
    ```
 
 ## Common Failure Modes

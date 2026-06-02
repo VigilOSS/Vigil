@@ -1,7 +1,7 @@
 # ffuf
 
 **Purpose:** Web fuzzing (directories, parameters, vhosts)
-For live engagement targets, run `ffuf` via `aith assess kali ffuf` (typed verb, audit-flag-aware).
+For live engagement targets, run `ffuf` via `vigil assess kali ffuf` (typed verb, audit-flag-aware).
 
 ## Directory Fuzzing
 

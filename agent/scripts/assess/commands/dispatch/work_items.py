@@ -1,6 +1,6 @@
 """Work-buffer (cases.db) implementation helpers.
 
-The ``aith assess work-buffer`` verbs operate on the local SQLite work buffer:
+The ``vigil assess work-buffer`` verbs operate on the local SQLite work buffer:
 stats / peek / fetch / fetch-by-priority / defer-* / done / error /
 reset-stale / retry-errors / requeue. ``_stamp_liveness`` reaches the
 orchestrator backend (via ``AssessmentClient``) to annotate claimed rows with

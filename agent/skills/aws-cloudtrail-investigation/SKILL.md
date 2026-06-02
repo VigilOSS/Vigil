@@ -1,7 +1,7 @@
 ---
 name: aws-cloudtrail-investigation
 description: L2 AWS CloudTrail event hunting + IAM credential abuse investigation. STS AssumeRole chain traversal, IMDSv1/v2 access pattern, GuardDuty correlation, Athena query templates against CloudTrail-in-S3, S3 + Lambda + ECS task-role abuse.
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # AWS CloudTrail Investigation (L2)
@@ -67,10 +67,10 @@ legacy-host exemptions into findings.
 | Lookalike domain | `dnstwist <legit-domain>` for AWS-console phishing variants (`signin.aws.amazon.com` typo-squats often surface in initial access) | Phish ↔ console-login correlation, especially with `m365-signin-investigation` handoffs |
 | Offline parse | `jq`, `python3` (pandas / pyarrow for parquet) | Every Athena result lands as JSON or parquet; offline analysis avoids re-running expensive queries |
 
-All target-facing CLI is wrapped through `aith assess host-exec`:
+All target-facing CLI is wrapped through `vigil assess host-exec`:
 
 ```bash
-aith assess host-exec \
+vigil assess host-exec \
   --tool aws \
   --intent "<one-line purpose>" \
   --technique <T-id> \
@@ -84,10 +84,10 @@ tenant ref (`scope.json:platforms[].account_id` or
 `tenant_ref:org_slug`); never a hostname — AWS scope is the account
 boundary.
 
-Forbidden from L2 AWS dispatches: `aith assess kali` (red-only),
+Forbidden from L2 AWS dispatches: `vigil assess kali` (red-only),
 direct WRITE-class IAM (`iam:CreateAccessKey`, `iam:DetachUserPolicy`,
 role deletion, `iam:DeleteAccessKey`) — those surface as
-`aith blue propose-contain` entries for L4 `ir-lead`. Even an "obvious"
+`vigil blue propose-contain` entries for L4 `ir-lead`. Even an "obvious"
 stolen-key rotation goes through the proposal queue.
 
 ## Methodology
@@ -195,7 +195,7 @@ results bucket the tenant ref documents, then materialize locally as
 parquet:
 
 ```bash
-aith assess host-exec --tool aws --intent "athena pull for <actor>" \
+vigil assess host-exec --tool aws --intent "athena pull for <actor>" \
   --technique T1078.004 --phase investigate \
   --scope-host <aws-account-id> \
   -- aws s3 cp s3://<results-bucket>/<query-id>.csv \
@@ -468,7 +468,7 @@ view.
 principal, over the same window as Step 2:
 
 ```bash
-aith assess host-exec --tool aws --intent "guardduty correlation" \
+vigil assess host-exec --tool aws --intent "guardduty correlation" \
   --technique T1078.004 --phase investigate \
   --scope-host <aws-account-id> \
   -- aws guardduty list-findings --detector-id <detector-id> \
@@ -593,7 +593,7 @@ A finding L2 cannot disposition without an IdP-side pull is
 
 ## Activity Log Convention
 
-Every `aith assess log` row carries the following `metadata_json`
+Every `vigil assess log` row carries the following `metadata_json`
 fields. FTS over `metadata_json` is how the report-writer assembles
 the per-platform narrative.
 
@@ -621,14 +621,14 @@ the per-platform narrative.
 The activity entries themselves run through:
 
 ```bash
-aith assess log <agent-name> \
+vigil assess log <agent-name> \
   "<short title — Step N for <finding-slug>>" \
   "<one-line action summary>" \
   --actor-kind agent \
   --metadata-json "$(cat metadata.json)"
 ```
 
-The CLI verb is `aith assess log`. The legacy shorthand (`log` with
+The CLI verb is `vigil assess log`. The legacy shorthand (`log` with
 a trailing `-entry`) does not route and entries that use it never
 land in `activity_entries`.
 
@@ -636,7 +636,7 @@ land in `activity_entries`.
 
 L2 dispatch closes with a handoff JSON at
 `$ENGAGEMENT_DIR/ir/handoffs/<dispatch-id>.json` submitted via
-`aith assess agent handoff --from-json <path>`. Required shape:
+`vigil assess agent handoff --from-json <path>`. Required shape:
 
 ```json
 {
@@ -684,7 +684,7 @@ a malformed dispatch the verifier rejects.
    dumps, role-trust documents.
 
    ```bash
-   aith assess artifact register <path> --kind ir_log
+   vigil assess artifact register <path> --kind ir_log
    ```
 
 2. **Register derived evidence as `ir_evidence`.** Role-chain
@@ -693,7 +693,7 @@ a malformed dispatch the verifier rejects.
    ASN histograms, cross-source timelines.
 
    ```bash
-   aith assess artifact register <path> --kind ir_evidence
+   vigil assess artifact register <path> --kind ir_evidence
    ```
 
 3. **Mark scratch on transient notes** that no longer carry
@@ -702,14 +702,14 @@ a malformed dispatch the verifier rejects.
    scratch buffer used to draft the timeline).
 
    ```bash
-   aith assess artifact mark-scratch <artifact-id>
+   vigil assess artifact mark-scratch <artifact-id>
    ```
 
-4. **Log the handoff entry.** Use the verb `aith assess log` (the
+4. **Log the handoff entry.** Use the verb `vigil assess log` (the
    legacy shorthand with a trailing `-entry` does not route).
 
    ```bash
-   aith assess log <agent-name> "aws-cloudtrail-handoff" \
+   vigil assess log <agent-name> "aws-cloudtrail-handoff" \
      "L2 AWS CloudTrail investigation closed: <one-line summary>" \
      --actor-kind agent \
      --metadata-json "$(cat metadata.json)"
@@ -718,7 +718,7 @@ a malformed dispatch the verifier rejects.
 5. **Emit the handoff JSON.**
 
    ```bash
-   aith assess agent handoff --from-json $ENGAGEMENT_DIR/ir/handoffs/<dispatch-id>.json
+   vigil assess agent handoff --from-json $ENGAGEMENT_DIR/ir/handoffs/<dispatch-id>.json
    ```
 
 If the dispatch is `blocked` (missing tenant ref, missing Athena

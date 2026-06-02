@@ -1,7 +1,7 @@
 ---
 name: sdk-supply-chain-security
 description: Third-party SDK supply chain security testing for mobile apps including SDK inventory, CVE checking, malicious SDK detection, data exfiltration auditing, and permission scope analysis
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # SDK Supply Chain Security
@@ -24,7 +24,7 @@ Test only authorized app builds on owned devices. SDK traffic analysis requires 
 ### 1. SDK Bill of Materials
 
 Preflight Android tooling through the generic audited route before APK work:
-`aith assess kali exec --technique HEALTH --intent "Android SDK inventory tooling preflight" --probe-kind fingerprint --phase code-ingest --timeout 60 -- which apktool jadx apkid`. Use `HEALTH` for tool inventory — unknown technique tags are rejected before an audit row is written, so coverage filters and command-history queries stay clean.
+`vigil assess kali exec --technique HEALTH --intent "Android SDK inventory tooling preflight" --probe-kind fingerprint --phase code-ingest --timeout 60 -- which apktool jadx apkid`. Use `HEALTH` for tool inventory — unknown technique tags are rejected before an audit row is written, so coverage filters and command-history queries stay clean.
 
 **Android:** Decode the APK with `apktool`. Identify SDKs through four methods: (1) enumerate package namespaces in smali/dex directories, filtering out Android/AndroidX/Material; (2) identify native libraries (`.so` files) by known naming patterns; (3) check assets for SDK configuration files (`google-services.json`, AppsFlyer/Branch/Adjust configs); (4) decompile with `jadx` and search for `BuildConfig.VERSION_NAME` and `SDK_VERSION` strings. If source is available, parse Gradle dependencies for exact versions.
 

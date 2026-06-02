@@ -5,7 +5,7 @@
 #
 # The backend is now authoritative for the narrative activity log (formerly
 # log.md). This script constructs a JSON payload and delegates the HTTP call
-# to `aith assess log`, which centralizes URL resolution, retry, and auth.
+# to `vigil assess log`, which centralizes URL resolution, retry, and auth.
 #
 # Hook JSON fields used:
 #   tool_name        — Bash, Write, Edit, Agent, etc.
@@ -87,7 +87,7 @@ json_preview() {
 }
 
 # post_activity_entry <actor_kind> <title> <action> <result>
-# Delegates to aith assess log so URL resolution, retry, and schema shaping all
+# Delegates to vigil assess log so URL resolution, retry, and schema shaping all
 # live in one place. The hook is best-effort: failure is logged to stderr but
 # does not block the agent's next step.
 post_activity_entry() {
@@ -149,7 +149,7 @@ case "$TOOL_NAME" in
       fi
     fi
     if command_hits_in_scope_target_with_raw_curl "$ENG_DIR" "$COMMAND"; then
-      RESULT="VIOLATION: host-side target traffic bypassed 'aith assess kali'. ${RESULT}"
+      RESULT="VIOLATION: host-side target traffic bypassed 'vigil assess kali'. ${RESULT}"
     fi
 
     post_activity_entry "hook" "Bash" "$ACTION" "$RESULT"

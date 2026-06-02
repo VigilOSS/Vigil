@@ -1,4 +1,4 @@
-"""aith assess kali subfinder — typed wrapper around subfinder inside the runtime."""
+"""vigil assess kali subfinder — typed wrapper around subfinder inside the runtime."""
 from __future__ import annotations
 
 import sys

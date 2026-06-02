@@ -1,7 +1,7 @@
 # wfuzz
 
 **Purpose:** Web fuzzing with advanced filtering and payload encoding
-For live engagement targets, run wfuzz via `aith assess kali exec --technique FUZZ --intent "<why>" --probe-kind payload --phase <phase> --timeout <seconds> -- wfuzz ...` with the standard audit-flag set.
+For live engagement targets, run wfuzz via `vigil assess kali exec --technique FUZZ --intent "<why>" --probe-kind payload --phase <phase> --timeout <seconds> -- wfuzz ...` with the standard audit-flag set.
 
 ## Basic Usage
 

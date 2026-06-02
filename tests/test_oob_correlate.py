@@ -1,5 +1,5 @@
 """Unit tests for the OAST nonce minting + log-parse + match pure functions
-and the ``aith oob mint`` CLI smoke (docker + backend mocked).
+and the ``vigil oob mint`` CLI smoke (docker + backend mocked).
 
 The interactsh log parser and the nonce↔callback matcher are PURE functions
 (no network, no filesystem, no container), so they are exercised directly by
@@ -21,7 +21,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from ai_threat_hunting_cli import oob  # noqa: E402
+from vigil_cli import oob  # noqa: E402
 
 
 # ── nonce minting ────────────────────────────────────────────────────────
@@ -205,7 +205,7 @@ def test_parse_ignores_empty_host_line():
 
 
 def test_read_client_log_tails_the_client_log_file():
-    from ai_threat_hunting_cli.docker import DockerResult
+    from vigil_cli.docker import DockerResult
 
     seen = {}
 
@@ -222,7 +222,7 @@ def test_read_client_log_tails_the_client_log_file():
 
 
 def test_read_client_log_sanitizes_name():
-    from ai_threat_hunting_cli.docker import DockerResult
+    from vigil_cli.docker import DockerResult
 
     seen = {}
 
@@ -239,7 +239,7 @@ def test_read_client_log_sanitizes_name():
     assert "/" not in label
 
 
-# ── aith oob mint CLI smoke (docker + backend mocked) ──────────────────────
+# ── vigil oob mint CLI smoke (docker + backend mocked) ──────────────────────
 
 
 class _FakeAssessmentClient:
@@ -272,7 +272,7 @@ def _seed_engagement_dir(install_root: Path, key: str) -> Path:
 
 
 def test_oob_mint_cli_records_probe_with_seeded_nonce(monkeypatch, tmp_path, capsys):
-    from ai_threat_hunting_cli import main as main_module
+    from vigil_cli import main as main_module
 
     install_root = tmp_path
     key = "2026-05-30-120000-shop"
@@ -316,8 +316,8 @@ def test_oob_mint_cli_records_probe_with_seeded_nonce(monkeypatch, tmp_path, cap
 
 
 def test_oob_poll_cli_correlates_matched_and_unmatched(monkeypatch, tmp_path, capsys):
-    from ai_threat_hunting_cli import main as main_module
-    from ai_threat_hunting_cli.docker import DockerResult
+    from vigil_cli import main as main_module
+    from vigil_cli.docker import DockerResult
 
     install_root = tmp_path
     key = "2026-05-30-120000-poll"
@@ -401,13 +401,13 @@ def test_interaction_dedup_hash_distinguishes_pipe_placement():
 def test_oob_mint_poll_live_round_trip():
     """End-to-end OAST correlation over the live interactsh/frp transport.
 
-    Requires `aith oob start` + a running interactsh-client and the
+    Requires `vigil oob start` + a running interactsh-client and the
     orchestrator backend. Deselected by default (`-m 'not integration'`);
     cannot run in CI/this environment. Documents the manual verification:
 
-      1. `aith oob mint --technique ssrf` -> nonce + callback URL.
+      1. `vigil oob mint --technique ssrf` -> nonce + callback URL.
       2. curl the callback URL (or fire a payload at a target).
-      3. `aith oob poll --client <name>` -> the probe shows status=fired
+      3. `vigil oob poll --client <name>` -> the probe shows status=fired
          with the matched interaction.
     """
     pytest.skip("requires live interactsh/frp runtime (operator-controlled)")

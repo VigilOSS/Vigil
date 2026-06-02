@@ -1,7 +1,7 @@
 ---
 name: parameter-fuzzing
 description: Discover hidden parameters, test values, and identify input handling anomalies
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Parameter Fuzzing
@@ -46,12 +46,12 @@ ffuf -u "https://TARGET/endpoint" -X POST -d '{"FUZZ":"test"}' \
 ### 4. Value Fuzzing
 
 Generate the value wordlist from the parameter's observed value instead of hand-rolling ranges and
-toggle lists. `aith assess classify-payload` types the value and emits intent-keyed variants
+toggle lists. `vigil assess classify-payload` types the value and emits intent-keyed variants
 (neighbor / boundary / escalation / format / empty) you can pipe straight into ffuf:
 
 ```bash
 # Build a type-aware value wordlist from a captured value, then fuzz with it
-aith assess classify-payload 1042 --mutations --json \
+vigil assess classify-payload 1042 --mutations --json \
   | jq -r '.intents | to_entries[].value[]' | sort -u > /tmp/values.txt
 ffuf -u "https://TARGET/endpoint?id=FUZZ" -w /tmp/values.txt -fs BASELINE_SIZE   # IDOR / boundary / escalation in one sweep
 
@@ -109,7 +109,7 @@ Use it to discover parameters that active fuzzing would miss.
 A single `-fs BASELINE_SIZE` filter catches only size deltas and assumes you picked the right
 baseline. To find every parameter/value that altered the response — including status flips, title
 changes, and word/line shifts a size filter misses — rank the ffuf result population with
-`aith assess anomaly-score`. ffuf's JSON `results` carry `status`, `length`, `words`, `lines`,
+`vigil assess anomaly-score`. ffuf's JSON `results` carry `status`, `length`, `words`, `lines`,
 `url`, which the oracle reads directly (rename only the hyphenated `content-type`):
 
 ```bash
@@ -117,7 +117,7 @@ ffuf -u "https://TARGET/endpoint?FUZZ=test" -w params.txt \
   -o /tmp/ffuf_params.json -of json    # discovery sweep, no -fs needed
 jq '[.results[] | {url, status, length, words, lines, content_type: .["content-type"]}]' \
   /tmp/ffuf_params.json > /tmp/ffuf_pop.json
-aith assess anomaly-score /tmp/ffuf_pop.json --top 10
+vigil assess anomaly-score /tmp/ffuf_pop.json --top 10
 #   #1  score=4.17  status=200  len=2210  url=...?debug=test   ← the param that changed behaviour
 #       ^ length_bucket=...  ^ words_bucket=...                 the inert params clustered at the baseline
 ```

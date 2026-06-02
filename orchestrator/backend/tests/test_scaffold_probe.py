@@ -1,4 +1,4 @@
-"""Tests for `aith assess scaffold-probe` (write-probe-script capability, Phase 4).
+"""Tests for `vigil assess scaffold-probe` (write-probe-script capability, Phase 4).
 
 The command writes a templated probe into the engagement's ``scripts/`` dir and
 pre-registers it via the existing artifacts POST path. We drive it in-process
@@ -184,7 +184,7 @@ def test_scaffold_probe_template_is_valid_python(
     # The finding-return convention + the oob-mint hook must be present so the
     # skeleton actually teaches the conventions the SKILL.md documents.
     assert '"finding"' in source
-    assert "aith oob mint" in source
+    assert "vigil oob mint" in source
     assert "scripts/shape_probe.py" in source  # name substituted into the header
 
 

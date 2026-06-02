@@ -1,12 +1,12 @@
 ---
 name: port-scanning
 description: Discover open ports, running services, and their versions on a target
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Port Scanning
 
-> **`aith assess kali` audit flags:** use `--technique RECON` (port and service enumeration against in-scope hosts is canonical reconnaissance).
+> **`vigil assess kali` audit flags:** use `--technique RECON` (port and service enumeration against in-scope hosts is canonical reconnaissance).
 
 ## When to Activate
 
@@ -44,7 +44,7 @@ Resource Policy" — the values in this section pull from that table.
 
 ### 2. Quick Initial Scan
 ```bash
-aith assess kali nmap-scan --target TARGET \
+vigil assess kali nmap-scan --target TARGET \
   --ports top-1000 --scripts safe \
   --extra-args "-Pn -T3 --max-rate 200 --max-retries 2 --host-timeout 300s" \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_initial \
@@ -55,7 +55,7 @@ aith assess kali nmap-scan --target TARGET \
 
 ### 3. Full TCP Scan
 ```bash
-aith assess kali nmap-scan --target TARGET --ports full \
+vigil assess kali nmap-scan --target TARGET --ports full \
   --extra-args "-Pn -T3 --max-rate 200" \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_full_tcp \
   --technique RECON --intent "full-port TCP at cautious rate (CDN/WAF-fronted)" \
@@ -63,13 +63,13 @@ aith assess kali nmap-scan --target TARGET --ports full \
 # Speed optimization: discover ports first, then deep scan.
 # Uses the default -sT (TCP connect) scan — do NOT switch to -sS here: raw SYN
 # probes are dropped by Docker's userland NAT and silently return 0-open.
-aith assess kali nmap-scan --target TARGET --ports full \
+vigil assess kali nmap-scan --target TARGET --ports full \
   --extra-args "-Pn -T3 --min-rate 500" \
   -oA /engagements/$ENGAGEMENT_KEY/scans/ports_only \
   --technique RECON --intent "ports-only sweep before targeted -sV" \
   --probe-kind fingerprint --phase recon --timeout 1800
 PORTS=$(grep -oE '[0-9]+/open' /engagements/$ENGAGEMENT_KEY/scans/ports_only.gnmap | cut -d/ -f1 | tr '\n' ',' | sed 's/,$//')
-aith assess kali nmap-scan --target TARGET --ports "$PORTS" --scan-type sV \
+vigil assess kali nmap-scan --target TARGET --ports "$PORTS" --scan-type sV \
   --extra-args "-Pn -sC -T3" \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_targeted \
   --technique RECON --intent "service detection on discovered open ports" \
@@ -83,7 +83,7 @@ profile. The per-host port-data assertion below catches host-timeout failures ac
 batch:
 
 ```bash
-aith assess kali nmap-scan --target placeholder \
+vigil assess kali nmap-scan --target placeholder \
   -iL /engagements/$ENGAGEMENT_KEY/scans/in_scope_hosts.txt \
   --ports top-1000 --scripts safe \
   --extra-args "-Pn -T3 --max-rate 200 --max-retries 2 --host-timeout 300s" \
@@ -92,7 +92,7 @@ aith assess kali nmap-scan --target placeholder \
   --probe-kind fingerprint --phase recon --timeout 3600
 ```
 
-Run each sweep synchronously — one blocking `aith assess kali <verb> … --timeout N` at a time. Specialists do NOT background target traffic or use `aith assess kali job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f nmap`) — it stomps sibling agents' processes in the shared runtime. See
+Run each sweep synchronously — one blocking `vigil assess kali <verb> … --timeout N` at a time. Specialists do NOT background target traffic or use `vigil assess kali job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f nmap`) — it stomps sibling agents' processes in the shared runtime. See
 `agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for the full
 pattern.
 
@@ -100,7 +100,7 @@ pattern.
 
 Use `-iL hosts.txt` rather than N parallel `nmap host` invocations. Nmap's parallelism is internal: `--max-parallelism`, `--min-parallelism`, and `-T<n>` tune host-and-port concurrency without spawning extra processes. Per-host loops amplify CPU without proportional speedup and create N audit rows that compete for the same network budget.
 
-Split-by-profile parallel sweeps are allowed up to the runtime-tier cap (Standard 2 / Heavy 4 / Comfortable 8 — read `aith runtime resources`) when two disjoint scan profiles run against the same host list. If you need to split work across specialists for context-window reasons, split the host list into N files and run one `-iL` per specialist — never N per-host invocations.
+Split-by-profile parallel sweeps are allowed up to the runtime-tier cap (Standard 2 / Heavy 4 / Comfortable 8 — read `vigil runtime resources`) when two disjoint scan profiles run against the same host list. If you need to split work across specialists for context-window reasons, split the host list into N files and run one `-iL` per specialist — never N per-host invocations.
 
 The trait-row table that drives the cap lives in `agent/references/recon/rate-calibration.md`; tier-pick prose is in `agent/operator-core.md` "Recon Dispatch Resource Policy".
 
@@ -138,7 +138,7 @@ Hosts that the assertion flags as gaps fall into two categories:
 1. **Local rate / WAF intercept** — re-queue the host at the slower retry profile:
    `-T2 --host-timeout 1500-1800s` (or `-sT` if upstream filtering rejects SYN scans):
    ```bash
-   aith assess kali nmap-scan --target $hostname --ports top-1000 \
+   vigil assess kali nmap-scan --target $hostname --ports top-1000 \
      --extra-args "-Pn -sT -T2 --max-retries 3 --host-timeout 1800s" \
      -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_retry_$hostname \
      --technique RECON --intent "slow retry on host-timeout flagged by port-data assertion" \
@@ -158,7 +158,7 @@ Hosts that the assertion flags as gaps fall into two categories:
      "category": "infrastructure"
    }
    EOF
-   aith assess record-intel note /tmp/intel-upstream-filter.json
+   vigil assess record-intel note /tmp/intel-upstream-filter.json
    ```
 
 Do NOT declare a batch complete until every flagged host either passes the assertion on
@@ -190,7 +190,7 @@ list complete, because each unique IP discovered may serve a different banner /
 cert / open-port set on subsequent nmap runs.
 
 ```bash
-aith assess kali exec --technique RECON --intent "multi-time DNS resolution — detect split-VIP load-balanced clusters" \
+vigil assess kali exec --technique RECON --intent "multi-time DNS resolution — detect split-VIP load-balanced clusters" \
   --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
   for i in 1 2 3 4 5; do dig +short TARGET_HOST A; sleep 60; done | sort -u
 '
@@ -215,7 +215,7 @@ grep -oE 'Host: [0-9.]+ \([^)]+\)' /engagements/$ENGAGEMENT_KEY/scans/nmap_initi
   | sort -u > /engagements/$ENGAGEMENT_KEY/scans/nmap_rdns.tsv
 
 # Standalone rDNS pass for hosts that need cleaner output
-aith assess kali exec --technique RECON --intent "rDNS sweep for vendor identification" \
+vigil assess kali exec --technique RECON --intent "rDNS sweep for vendor identification" \
   --probe-kind fingerprint --phase recon --timeout 300 -- \
   bash -c 'while read ip; do printf "%s\t" "$ip"; dig -x "$ip" +short; done \
     < /engagements/$ENGAGEMENT_KEY/scans/in_scope_ips.txt \
@@ -230,37 +230,37 @@ the edge often produce false positives.
 
 ### 9. Service Detection
 ```bash
-aith assess kali nmap-scan --target TARGET --ports "PORT1,PORT2" --scan-type sV \
+vigil assess kali nmap-scan --target TARGET --ports "PORT1,PORT2" --scan-type sV \
   --extra-args "--version-intensity 5" \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_versions \
   --technique RECON --intent "deep version detection on suspect ports" \
   --probe-kind fingerprint --phase recon --timeout 600
 
-# Banner grab via aith assess kali exec (audit-pipeline-respecting)
-aith assess kali exec --technique RECON --intent "nc banner grab" \
+# Banner grab via vigil assess kali exec (audit-pipeline-respecting)
+vigil assess kali exec --technique RECON --intent "nc banner grab" \
   --probe-kind fingerprint --phase recon --timeout 60 -- \
   bash -c 'printf "\n" | nc -nv TARGET PORT 2>&1 | head -5'
 ```
 
 ### 10. Script Scanning
 ```bash
-aith assess kali nmap-scan --target TARGET --scripts vuln \
+vigil assess kali nmap-scan --target TARGET --scripts vuln \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_vuln \
   --technique RECON --intent "vuln NSE category" \
   --probe-kind payload --phase recon --timeout 1800
-aith assess kali nmap-scan --target TARGET --scripts http-enum --ports 80,443 \
+vigil assess kali nmap-scan --target TARGET --scripts http-enum --ports 80,443 \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_http_enum \
   --technique RECON --intent "http-enum NSE on web ports" \
   --probe-kind fingerprint --phase recon --timeout 600
-aith assess kali nmap-scan --target TARGET --scripts smb-enum-shares,smb-enum-users --ports 445 \
+vigil assess kali nmap-scan --target TARGET --scripts smb-enum-shares,smb-enum-users --ports 445 \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_smb_enum \
   --technique RECON --intent "SMB enumeration NSE" \
   --probe-kind fingerprint --phase recon --timeout 600
-aith assess kali nmap-scan --target TARGET --scripts ftp-anon --ports 21 \
+vigil assess kali nmap-scan --target TARGET --scripts ftp-anon --ports 21 \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_ftp_anon \
   --technique RECON --intent "FTP anonymous-login check" \
   --probe-kind fingerprint --phase recon --timeout 300
-aith assess kali nmap-scan --target TARGET --scripts ssh-auth-methods --ports 22 \
+vigil assess kali nmap-scan --target TARGET --scripts ssh-auth-methods --ports 22 \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_ssh \
   --technique RECON --intent "SSH auth-methods enumeration" \
   --probe-kind fingerprint --phase recon --timeout 300
@@ -268,12 +268,12 @@ aith assess kali nmap-scan --target TARGET --scripts ssh-auth-methods --ports 22
 
 ### 11. UDP Scan
 ```bash
-aith assess kali nmap-scan --target TARGET --scan-type sU --ports top-100 \
+vigil assess kali nmap-scan --target TARGET --scan-type sU --ports top-100 \
   --extra-args "-T3 --max-retries 2" \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_udp \
   --technique RECON --intent "top-100 UDP sweep" \
   --probe-kind fingerprint --phase recon --timeout 1800
-aith assess kali nmap-scan --target TARGET --ports 53,67,68,69,123,161,162,500,514,1900 --scan-type sU \
+vigil assess kali nmap-scan --target TARGET --ports 53,67,68,69,123,161,162,500,514,1900 --scan-type sU \
   --extra-args "-T3" \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_udp_targeted \
   --technique RECON --intent "targeted UDP service ports" \
@@ -283,17 +283,17 @@ aith assess kali nmap-scan --target TARGET --ports 53,67,68,69,123,161,162,500,5
 ### 12. Firewall Evasion (when standard scans blocked)
 ```bash
 # Fragment packets / decoy / slow / source-port — pass via --extra-args
-aith assess kali nmap-scan --target TARGET --ports PORT \
+vigil assess kali nmap-scan --target TARGET --ports PORT \
   --extra-args "-f -sV" \
   --technique RECON --intent "fragmented packets evasion" \
   --probe-kind fingerprint --phase recon --timeout 600 \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_evasion_fragment
-aith assess kali nmap-scan --target TARGET --ports PORT \
+vigil assess kali nmap-scan --target TARGET --ports PORT \
   --extra-args "-D RND:5 -sV" \
   --technique RECON --intent "decoy scan evasion" \
   --probe-kind fingerprint --phase recon --timeout 600 \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_evasion_decoy
-aith assess kali nmap-scan --target TARGET --ports PORT \
+vigil assess kali nmap-scan --target TARGET --ports PORT \
   --extra-args "--source-port 53 -sV" \
   --technique RECON --intent "source-port 53 evasion" \
   --probe-kind fingerprint --phase recon --timeout 600 \
@@ -348,9 +348,9 @@ specialists can parse the output consistently.
 |---|---|
 | `#### Summary` | One-paragraph headline: hosts scanned, profile chosen, open-port total, port-data-assertion pass/fail count. |
 | `#### Open Services` | Per-host table of `host : port/proto : service : version : NSE notes`. The canonical port-and-service inventory feeding `record-surface` for non-web services and dispatch decisions for follow-on testing. |
-| `#### Findings` | Decisive findings already proved by the scan (default-creds via NSE, anonymous FTP, well-known-vuln NSE hit). Each must also be recorded via `aith assess record-finding`. |
-| `#### Surface Candidates` | Non-web services that warrant deeper triage (Redis, Elasticsearch, Docker API, MongoDB, exposed RDP, etc.) — each surfaced via `aith assess record-surface`. |
-| `#### Intelligence` | TLS SAN hosts surfaced from `ssl-cert` NSE, rDNS vendor identification for shared / CDN-fronted IPs, OS detection output, banner anomalies. Each row landed via `aith assess record-intel <type>`. |
+| `#### Findings` | Decisive findings already proved by the scan (default-creds via NSE, anonymous FTP, well-known-vuln NSE hit). Each must also be recorded via `vigil assess record-finding`. |
+| `#### Surface Candidates` | Non-web services that warrant deeper triage (Redis, Elasticsearch, Docker API, MongoDB, exposed RDP, etc.) — each surfaced via `vigil assess record-surface`. |
+| `#### Intelligence` | TLS SAN hosts surfaced from `ssl-cert` NSE, rDNS vendor identification for shared / CDN-fronted IPs, OS detection output, banner anomalies. Each row landed via `vigil assess record-intel <type>`. |
 | `#### Coverage Gaps` | Every host the per-host port-data assertion flagged as a gap and the disposition (re-queued at slower retry profile, recorded as upstream-filtering kill-evidence, deferred). UDP coverage gaps. Hosts that hit the host-timeout. The operator uses this section to decide whether to re-dispatch a slower retry pass. |
 
 ## Extended Resources

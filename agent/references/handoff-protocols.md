@@ -10,14 +10,14 @@ governed by `exploit_policy` in scope.json and belongs after Verify in Phase 5, 
 Every specialist writes a structured handoff before its dispatch returns:
 
 ```bash
-aith assess agent handoff --from-json <handoff-json>
+vigil assess agent handoff --from-json <handoff-json>
 ```
 
 The handoff captures summary, coverage gaps, next steps, runtime issues, working
 artifacts, open questions, and role-specific extras. This row is canonical for "what
 was done, what's missing, what's next" — schema in
 `agent/references/runtime-guides/handoff-schema.md`. The operator pulls a bounded
-markdown blob via `aith assess agent render-handoff <agent-id>` and pastes it into
+markdown blob via `vigil assess agent render-handoff <agent-id>` and pastes it into
 the next dispatch's prompt.
 
 **Set `handoff_status` on the FINAL handoff.** Specialists MUST set
@@ -25,7 +25,7 @@ the next dispatch's prompt.
 operator can close it, or `handoff_status=blocked` when the work cannot
 finish (auth expired, scope ambiguity, tool missing, etc.). Intermediate
 checkpoints stay at the default `checkpointed`. Without `ready`/`blocked`
-on the final handoff, `aith assess agent close <agent-id>` will refuse to
+on the final handoff, `vigil assess agent close <agent-id>` will refuse to
 close the dispatch and the row stays `in-progress` — which then surfaces as
 a `stale_dispatch_ready_handoff` or `handoff_gap` blocker in report
 readiness.
@@ -34,7 +34,7 @@ readiness.
 
 Every handoff specifies **which skill the next agent should load**. The operator includes
 this in the dispatch context. Each agent's `## Handoffs` section names the specific skill
-or skill-selection rule. Use the "Use when:" lines from `aith assess list-skills` to select the right
+or skill-selection rule. Use the "Use when:" lines from `vigil assess list-skills` to select the right
 skill when the handoff says "bring the matching vuln-class skill."
 
 ## Phase 1 Returns
@@ -45,7 +45,7 @@ Output: endpoint lists, technologies, JS file URLs, parameters, surface candidat
 
 1. **Read `#### Coverage Gaps` first** — this drives the Recon Coverage Gate. If material gaps exist, re-dispatch recon-specialist with a targeted objective and specific skill before proceeding. See Phase 1 gate checklist in operator-core.
 2. Pass JS file URLs → dispatch source-analyzer (if not already running in parallel) — **bring `agent/skills/source-analysis/SKILL.md`**
-3. Record technology stack → durable state update via `aith assess record-intel tech-component <json-file>` (intel_tech_components table)
+3. Record technology stack → durable state update via `vigil assess record-intel tech-component <json-file>` (intel_tech_components table)
 4. Turn auth boundaries, framework clues, and proxy hints into hypotheses for Phase 3-5
 
 ### SOURCE-ANALYZER
@@ -53,8 +53,8 @@ Output: endpoint lists, technologies, JS file URLs, parameters, surface candidat
 Output: new API endpoints, routes, secrets/tokens, config objects, coverage gaps
 
 1. **Read `#### Coverage Gaps` first** — if JS analysis was incomplete (files behind auth, opaque minification), re-dispatch with additional context before proceeding.
-2. New requestable endpoints → `aith assess ingest-endpoints "$DIR/cases.db" source-analysis`
-3. Secrets/tokens → durable findings immediately via `aith assess record-finding` + credential backend record via `aith assess post credentials <credential-json-file>` (assessment_credentials table)
+2. New requestable endpoints → `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis`
+3. Secrets/tokens → durable findings immediately via `vigil assess record-finding` + credential backend record via `vigil assess post credentials <credential-json-file>` (assessment_credentials table)
 4. API routes, object references, mutation paths, parameter names → queued for Phase 3 dispatch (these enter the work buffer via endpoint ingestion, not via immediate agent dispatch)
 
 ### Phase 1 → Phase 2 Transition
@@ -69,9 +69,9 @@ After both recon-specialist and source-analyzer return:
 
 Output: priority manifest, work-buffer stats, intelligence, coverage gaps, recorded surfaces and findings
 
-1. Translate each `#### Intelligence` row into a JSON payload and record it via `aith assess record-intel <type> <json-file>` (one call per row). Verify with `aith assess list-intel`.
+1. Translate each `#### Intelligence` row into a JSON payload and record it via `vigil assess record-intel <type> <json-file>` (one call per row). Verify with `vigil assess list-intel`.
 2. Review `#### Priority Attack Surfaces` for Phase 3 dispatch ordering
-3. Inspect work-buffer stats: `aith assess work-buffer "$DIR/cases.db" stats`
+3. Inspect work-buffer stats: `vigil assess work-buffer "$DIR/cases.db" stats`
 4. Update scope.json phase to `consume-test`
 
 ## Phase 3 Returns (CONSUME & TEST)
@@ -80,20 +80,20 @@ Output: priority manifest, work-buffer stats, intelligence, coverage gaps, recor
 
 Output: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED signals
 
-1. Record all findings durably via `aith assess record-finding` — this is the immediate obligation
+1. Record all findings durably via `vigil assess record-finding` — this is the immediate obligation
 2. Queue live findings for Phase 4 Verify, not exploitation. Verification decides which findings become confirmed, downgraded, killed, or chain-required before exploit work is spent.
 3. When a finding is real only as part of a chain, keep it in the normal finding table and set `details.chain_required`, `details.chain_rationale`, and `details.required_followup` via `record-finding` or `update-finding`
 4. FUZZER_NEEDED → dispatch fuzzer within Phase 3 — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`**, feed results back through vuln-analyst
-5. Mark work-buffer batch done: `aith assess work-buffer "$DB" done "id1,id2,..."`
+5. Mark work-buffer batch done: `vigil assess work-buffer "$DB" done "id1,id2,..."`
 6. Continue the Phase 3 consumption loop (steps b–f in Phase Flow)
 
 ### FUZZER
 
 Output: discovered paths, valid parameters, anomalous responses, confirmed findings
 
-1. New paths/endpoints → ingest into backend coverage state via `aith assess ingest-endpoints`
+1. New paths/endpoints → ingest into backend coverage state via `vigil assess ingest-endpoints`
 2. Anomalous responses → dispatch vuln-analyst for analysis within Phase 3
-3. Confirmed findings (e.g., valid credentials) → durable findings directly via `aith assess record-finding`
+3. Confirmed findings (e.g., valid credentials) → durable findings directly via `vigil assess record-finding`
 
 ## Phase 4 Returns (VERIFY)
 
@@ -119,10 +119,10 @@ Output: CONFIRMED/PARTIAL/FAILED status, extracted data, PoC, chains, credential
 
 1. CONFIRMED → durable finding update with full evidence
 2. CONFIRMED + credentials/access/credential tests → verify exploit-developer recorded them, then run the credential auto-use workflow (see operator-core)
-3. CONFIRMED + multi-step chain → verify `aith assess record-chain` was called and steps are linked
+3. CONFIRMED + multi-step chain → verify `vigil assess record-chain` was called and steps are linked
 4. CONFIRMED + new attack surface → ingest auth-aware variants and retest obligations
 5. PARTIAL → record as MEDIUM, validate partial signals in stages before giving up
-6. FAILED → record the result via `aith assess log exploit-developer "<title>" "<action>" "<result>"` (activity_entries), move to next finding
+6. FAILED → record the result via `vigil assess log exploit-developer "<title>" "<action>" "<result>"` (activity_entries), move to next finding
 7. Needs OSINT context → dispatch osint-analyst within Phase 5 — **bring `agent/skills/osint-recon/SKILL.md`**
 8. Exploit failed, lead needs targeted re-evaluation → dispatch vulnerability-analyst for a single-finding retest (this is a Phase 5 feedback loop, not a return to the Phase 3 work-buffer consumption loop) — **bring the same vuln-class skill**
 
@@ -131,24 +131,24 @@ Output: CONFIRMED/PARTIAL/FAILED status, extracted data, PoC, chains, credential
 Output: backend intel-table updates via `record-intel` (technology, CVE, breach, credential intel, people, domains, social, org facts, notes)
 
 1. Read Intelligence Assessment section
-2. HIGH-value CVE + PoC match → record via `aith assess record-intel cve <json-file>` and dispatch exploit-developer to **validate** against the live target — **name the matching skill (discoverable via `aith assess list-skills`) so the operator includes it in the dispatch**. Promote to a finding only after exploit-developer confirms exploitability — version-only CVE matches are intel, not findings, because backported patches and disabled modules routinely invalidate version-only matches.
-3. Breached credentials with target-specific proof → record finding + credential via `aith assess post credentials` + dispatch exploit-developer to test access
-4. Historical endpoints → ingest into backend coverage state via `aith assess ingest-endpoints`
+2. HIGH-value CVE + PoC match → record via `vigil assess record-intel cve <json-file>` and dispatch exploit-developer to **validate** against the live target — **name the matching skill (discoverable via `vigil assess list-skills`) so the operator includes it in the dispatch**. Promote to a finding only after exploit-developer confirms exploitability — version-only CVE matches are intel, not findings, because backported patches and disabled modules routinely invalidate version-only matches.
+3. Breached credentials with target-specific proof → record finding + credential via `vigil assess post credentials` + dispatch exploit-developer to test access
+4. Historical endpoints → ingest into backend coverage state via `vigil assess ingest-endpoints`
 5. MEDIUM/LOW intel without target proof → keep in backend intel tables via `record-intel` only — do not promote to findings
 
 ## Phase 7 (REPORT)
 
 ### REPORT-WRITER ← backend API (self-service)
 
-For final reports, run `aith assess check-report-readiness` first. Report-writer queries the backend
-directly via `aith assess list-report-findings --mode final --json` for final output or
-`aith assess list-report-findings --mode draft --json` for interim output, plus `attack-chains`,
+For final reports, run `vigil assess check-report-readiness` first. Report-writer queries the backend
+directly via `vigil assess list-report-findings --mode final --json` for final output or
+`vigil assess list-report-findings --mode draft --json` for interim output, plus `attack-chains`,
 `surfaces`, and `summary`. The operator does not pre-assemble findings context.
 
-Before dispatching a final report, resolve readiness blockers so `aith assess list-report-findings --mode final --json` succeeds:
+Before dispatching a final report, resolve readiness blockers so `vigil assess list-report-findings --mode final --json` succeeds:
 - Check for overlapping `root_cause_key` or `canonical_location` + `defect_family` across agent findings
-- Use `aith assess link-finding <sibling-slug> --root-cause <root-slug>` for intentional root/sibling groups
-- Use `aith assess merge-finding <source-slug> <target-slug> "<reason>"` only for true duplicates
+- Use `vigil assess link-finding <sibling-slug> --root-cause <root-slug>` for intentional root/sibling groups
+- Use `vigil assess merge-finding <source-slug> <target-slug> "<reason>"` only for true duplicates
 - The source finding's status becomes `merged` and is excluded from final report output
 
 After draft generation, dispatch a fresh `report-writer` in review-and-fix QA mode. The QA writer
@@ -158,6 +158,6 @@ report, mark findings `reported`, and complete the engagement after `QA PASS`.
 
 ## Wildcard Mode Specifics
 
-- BACKEND-ONLY FINDING WRITE: every finding lands in the backend via `aith assess record-finding`. No local file sync required.
+- BACKEND-ONLY FINDING WRITE: every finding lands in the backend via `vigil assess record-finding`. No local file sync required.
 - Parent prefix: `## [sub.domain.com / XX-NNN] Title`
 - Set ENGAGEMENT_DIR to specific child directory before each operation

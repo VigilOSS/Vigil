@@ -2,7 +2,7 @@
 
 **Purpose:** TLS Subject Alternative Name (SAN) scraper — opens TLS handshakes against domains or CIDRs and extracts SAN fields from the cert. Catches subdomains that never appear in CT logs because they were issued by a private CA but TLS-handshakable on internet-exposed IPs.
 
-For live engagement targets, run cero via `aith assess kali cero` (typed verb, audit-flag-aware).
+For live engagement targets, run cero via `vigil assess kali cero` (typed verb, audit-flag-aware).
 
 **Where it lives:** `/usr/local/bin/cero` in `runtime-full` (`go install github.com/glebarez/cero@latest` — see `agent/docker/runtime-full/Dockerfile`).
 
@@ -16,21 +16,21 @@ The high-value pattern is asnmap → cero. Feed an asnmap-derived CIDR file into
 
 ```bash
 # File-input form (asnmap → cero feedback loop)
-aith assess kali cero -l /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
+vigil assess kali cero -l /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
   -p 443,8443,9443 -c 100 -t 4 \
   -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt \
   --technique OSINT --intent "TLS SAN scrape across asnmap-derived CIDRs" \
   --probe-kind fingerprint --phase recon --timeout 600
 
 # Single-target form
-aith assess kali cero --target 198.51.100.0/24 \
+vigil assess kali cero --target 198.51.100.0/24 \
   -p 443,8443,9443 -c 100 -t 4 \
   -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans_single.txt \
   --technique OSINT --intent "TLS SAN scrape on single CIDR" \
   --probe-kind fingerprint --phase recon --timeout 600
 
 # --only-domains toggle (cero -d): filter results to valid domain names
-aith assess kali cero -l /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
+vigil assess kali cero -l /engagements/$ENGAGEMENT_KEY/scans/target_cidrs.txt \
   --only-domains -p 443 \
   -o /engagements/$ENGAGEMENT_KEY/scans/cero_domain_sans.txt \
   --technique OSINT --intent "TLS SAN scrape, domain-name results only" \

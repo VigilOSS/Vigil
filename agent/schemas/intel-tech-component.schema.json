@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://security-research.local/schemas/intel-tech-component.schema.json",
+  "$id": "https://vigil.local/schemas/intel-tech-component.schema.json",
   "$comment": "Mirrors app.api.intel_schemas.TechComponentRecordRequest — the orchestrator is the source of truth for this contract.",
   "title": "Intel Tech Component Record",
   "type": "object",
@@ -88,7 +88,7 @@
       ],
       "minimum": 1,
       "default": null,
-      "description": "Backend id of the intel row that superseded this one. Set automatically by `aith assess supersede-intel`; report-writer filters on this so stale rows do not appear in reports."
+      "description": "Backend id of the intel row that superseded this one. Set automatically by `vigil assess supersede-intel`; report-writer filters on this so stale rows do not appear in reports."
     }
   }
 }

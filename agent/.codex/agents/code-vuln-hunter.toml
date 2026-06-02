@@ -37,7 +37,7 @@ already listed below.
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/code-vulnerability-analysis/SKILL.md` (for any other skill, run `aith assess list-skills` to discover it)
+- `agent/skills/code-vulnerability-analysis/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 - The CWE-specific pattern reference matching the context's slot types (from `agent/references/code-vuln-patterns/`)
 
 ## Pre-Work Checkpoint
@@ -275,7 +275,7 @@ Each function gets exactly one disposition:
 
 In addition to per-function dispositions, produce a **`cwe_coverage`** array -- one entry per
 applicable vulnerability class for this file. The coverage file passed to
-`aith assess code-dispatch done` must contain this bare JSON array, not an object wrapper
+`vigil assess code-dispatch done` must contain this bare JSON array, not an object wrapper
 with a `cwe_coverage` key. Include every family listed in the queue item's
 `applicable_vuln_classes`; for any family that genuinely cannot apply to this file's
 language/runtime, emit a not-applicable entry. For families you could not analyze due to
@@ -455,7 +455,7 @@ Record every self-service lookup in `audit_metadata.cross_ref_usage`.
 ### `#### Findings`
 
 Structured finding JSON payloads matching `schemas/finding-record.schema.json`.
-Run `aith assess contract record-finding` for the canonical field list and examples.
+Run `vigil assess contract record-finding` for the canonical field list and examples.
 `record-finding` fills the initial finding lifecycle defaults when omitted — use those rather than setting lifecycle fields manually.
 
 ```json
@@ -559,10 +559,10 @@ When analysis is genuinely blocked on missing code (after self-service failed):
 ## State Recording
 
 ```bash
-aith assess contract record-finding
-aith assess contract code-record-analysis
-aith assess record-finding code-vuln-hunter <finding-json>
-aith assess code-record-analysis <analysis-json>
+vigil assess contract record-finding
+vigil assess contract code-record-analysis
+vigil assess record-finding code-vuln-hunter <finding-json>
+vigil assess code-record-analysis <analysis-json>
 ```
 
 Every `analysis-json` payload must include the fetched `queue_item_id` and `audit_metadata`:
@@ -573,15 +573,15 @@ Every `analysis-json` payload must include the fetched `queue_item_id` and `audi
 
 Before your dispatch returns, run in this order:
 
-1. `aith assess record-finding code-vuln-hunter <finding-json>` per finding
-2. `aith assess code-record-analysis <analysis-json>` per queue item (carries dispositions, CWE coverage, cross-file triggers, and the fetched `queue_item_id`)
-3. `aith assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
-4. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+1. `vigil assess record-finding code-vuln-hunter <finding-json>` per finding
+2. `vigil assess code-record-analysis <analysis-json>` per queue item (carries dispositions, CWE coverage, cross-file triggers, and the fetched `queue_item_id`)
+3. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
+4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
-`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
+`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
@@ -607,7 +607,7 @@ narrative rather than restating canonical state.
 
 ## Finding Prefix: CH
 
-Omit the `slug` field from new finding JSON. `aith assess record-finding
+Omit the `slug` field from new finding JSON. `vigil assess record-finding
 code-vuln-hunter <finding-json>` allocates the next `CH-*` slug under a lock and
 prints the canonical slug; use that returned value in `finding_slug`, handoffs,
 and follow-up notes.

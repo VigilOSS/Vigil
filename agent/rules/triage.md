@@ -204,7 +204,7 @@ patterns apply.
 On any continuation of an existing finding investigation, run:
 
 ```bash
-aith assess resume-brief --finding <finding-slug-or-alias>
+vigil assess resume-brief --finding <finding-slug-or-alias>
 ```
 
 before dispatching specialists or proposing containment. `agent/rules/resume.md`
@@ -245,7 +245,7 @@ false-positive — it is only enough to set the disposition to `escalated`.
 
 ## 16. Severity ↔ technique alignment audit before report
 
-Before any report-writer dispatch, query `aith assess list-findings` and verify
+Before any report-writer dispatch, query `vigil assess list-findings` and verify
 each finding's `severity` matches its `details_json.mitre_techniques` and
 proved impact:
 
@@ -258,7 +258,7 @@ proved impact:
   `details_json.kill_reason` with the tenant-ref citation; severity is no longer
   the load-bearing field once disposition lands
 
-Fix mismatches via `aith assess update-finding --inline '{"details":
+Fix mismatches via `vigil assess update-finding --inline '{"details":
 {"mitre_techniques": [...], "severity_rationale": "..."}}'`. A finding whose
 severity contradicts its technique makes the report look unverified to the
 client.
@@ -274,13 +274,13 @@ text and strip phrases that contradict current state:
 - "see updated timeline below" when the timeline is now the only timeline
 
 The executable recipe lives in `agent/skills/report-generation/SKILL.md`
-Review-and-Fix QA Mode (`aith assess list-findings --json | jq -r .[].slug` loop).
+Review-and-Fix QA Mode (`vigil assess list-findings --json | jq -r .[].slug` loop).
 Stale narrative is invisible to backend status fields and ends up in the
 incident report verbatim.
 
 ## 18. Containment proposals are specific — target, action, rollback
 
-Every containment proposal (recorded via `aith blue propose-contain` from L4
+Every containment proposal (recorded via `vigil blue propose-contain` from L4
 `ir-lead`) must specify:
 
 - **Target** — the exact account / host / IOC affected (e.g.,
@@ -304,7 +304,7 @@ chain-of-custody record; deletion breaks audit. When an artifact turns out to be
 investigation-irrelevant or supports a benign pattern:
 
 ```bash
-aith assess artifact mark-scratch <artifact-id>
+vigil assess artifact mark-scratch <artifact-id>
 ```
 
 Marking scratch keeps the artifact in the backend (SHA-256 preserved, FTS preview
@@ -315,7 +315,7 @@ directory. False-positive disposition is not a license to destroy evidence.
 ## 20. Phase exit requires DoD checklist clean
 
 Each blue phase has a Definition-of-Done checklist enforced by
-`aith assess transition-phase` (see operator-core-blue.md DoD section). Phase
+`vigil assess transition-phase` (see operator-core-blue.md DoD section). Phase
 exit is gated on:
 
 - All dispatched specialists returned a `ready` or `blocked` handoff (no
@@ -327,7 +327,7 @@ exit is gated on:
   `assessment_artifacts` with producer-agent linkage
 - Resume-brief renders cleanly for the next phase's specialists
 
-`aith assess transition-phase --to <next>` reports the DoD gaps; do not force-
+`vigil assess transition-phase --to <next>` reports the DoD gaps; do not force-
 transition without resolving them.
 
 ## 21. Writing discipline (anti-slop)
@@ -421,7 +421,7 @@ date (UTC). Example: `Reduce session-token lifetime to 60 min (currently 24h)
   description.
 - **No internal-only artifacts in customer-facing prose.** The blue report
   goes to the tenant. Internal slugs (`F-001`), engagement keys, jj change
-  IDs, `aith` command output dumps, backend query strings, specialist role
+  IDs, `vigil` command output dumps, backend query strings, specialist role
   names (`alert-triage-specialist`, `incident-verifier`, `ir-lead`) do not
   appear in customer-facing sections. Speak in role terms (`the L2
   investigation`) or active voice (`we determined`).
@@ -457,5 +457,5 @@ date (UTC). Example: `Reduce session-token lifetime to 60 min (currently 24h)
 - `agent/rules/reporting.md` — platform-agnostic reporting discipline; banned
   hedge phrases, section length limits, severity discipline that applies to
   blue incident reports the same way it applies to red engagement reports.
-- `agent/rules/resume.md` — universal resume hydration; `aith assess resume-brief`
+- `agent/rules/resume.md` — universal resume hydration; `vigil assess resume-brief`
   before any continuation, scoped variants by finding / agent / since.

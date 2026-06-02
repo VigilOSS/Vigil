@@ -1,7 +1,7 @@
 ---
 name: nosql-injection
 description: NoSQL injection detection and exploitation — MongoDB operator injection, Mongoose/ORM bypass, blind extraction, and modern defense realities
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # NoSQL Injection Testing
@@ -19,9 +19,9 @@ NoSQL injection in 2025 primarily targets MongoDB through Mongoose/Express apps 
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (manual injection probing and payload delivery — all target-facing curl must go through the kali exec wrapper; use `--technique NOSQLI --probe-kind payload --phase consume-test --timeout 30` for injection attempts)
-- `aith assess anomaly-score <responses.jsonl>` (rank a boolean/blind response population to find the odd-one-out — see "Boolean via Response Differences" below)
-- `aith assess classify-payload <value> --mutations` (type and mutate a scalar auth-bypass value such as a username or email — see Step 2 below)
+- `vigil assess kali exec -- curl ...` (manual injection probing and payload delivery — all target-facing curl must go through the kali exec wrapper; use `--technique NOSQLI --probe-kind payload --phase consume-test --timeout 30` for injection attempts)
+- `vigil assess anomaly-score <responses.jsonl>` (rank a boolean/blind response population to find the odd-one-out — see "Boolean via Response Differences" below)
+- `vigil assess classify-payload <value> --mutations` (type and mutate a scalar auth-bypass value such as a username or email — see Step 2 below)
 - Browser DevTools (observe JSON request bodies and responses)
 
 ---
@@ -79,8 +79,8 @@ username[$regex]=.*&password[$regex]=.*
 **Typing the target identity value.** The operator payload's structure (`{"$ne": ""}`) is fixed, but the *username/email side* you pair it with is a scalar worth mutating. Classify it and pull the `escalation` bucket to enumerate likely-privileged accounts deterministically:
 
 ```bash
-aith assess classify-payload "user@example.com" --mutations   # type: email → escalation: admin@example.com, root@localhost, administrator@example.com
-aith assess classify-payload "507f1f77bcf86cd799439011" --mutations   # an ObjectId-shaped value (type: hex) → neighbor yields the adjacent ObjectIds for IDOR-style pivots
+vigil assess classify-payload "user@example.com" --mutations   # type: email → escalation: admin@example.com, root@localhost, administrator@example.com
+vigil assess classify-payload "507f1f77bcf86cd799439011" --mutations   # an ObjectId-shaped value (type: hex) → neighbor yields the adjacent ObjectIds for IDOR-style pivots
 ```
 
 Use these as the `username` in `{"username": "<escalation-variant>", "password": {"$gt": ""}}` to target a specific admin identity rather than relying on the operator alone. The operator objects themselves are not value-typed (they are query structures, not scalar values) — keep pulling those from the payload reference.
@@ -218,7 +218,7 @@ Often more reliable than timing. Look for:
 
 ```bash
 # one JSONL line per probe: {"url":"login#ne","status":200,"content_length":842,"words":61,"lines":12}
-aith assess anomaly-score nosql_probes.jsonl --top 5
+vigil assess anomaly-score nosql_probes.jsonl --top 5
 ```
 
 The oracle ranks on `status`, `length_bucket`, `words_bucket`, and `title`, bucketing near-equal sizes so login-form jitter clusters and a per-response CSRF token cannot dominate the score. If the true-operator and false-operator rows split into different buckets, that is your boolean oracle — use it to drive the `$regex` binary search below (the field flips the response the same way). If both score ~0 alongside a benign string baseline, the query is not attacker-controllable on this signal: move on. This is also the triage pass for a `$regex`-range fuzz: feed the per-range responses in and investigate the top-ranked outlier first.

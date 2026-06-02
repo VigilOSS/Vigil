@@ -1,4 +1,4 @@
-"""aith assess kali nikto — typed wrapper around nikto inside the runtime.
+"""vigil assess kali nikto — typed wrapper around nikto inside the runtime.
 
 Nikto is a CONDITIONAL tool — specialists evaluate the trigger pattern from
 `agent/references/tools/recon/nikto.md` before calling.

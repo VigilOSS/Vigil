@@ -1,7 +1,7 @@
 ---
 name: alert-fp-verification
 description: L3 five-check verification protocol for blue alerts — symmetric evidence bar, devil's advocate, multi-perspective voting, and the strict four-value disposition vocabulary
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Alert FP Verification (L3)
@@ -52,45 +52,45 @@ investigator's annotations are inputs, never trusted on their own.
 
 ## Tools
 
-- `aith assess resume-brief --finding <slug>` — hydrate the finding's full
+- `vigil assess resume-brief --finding <slug>` — hydrate the finding's full
   history before the first check runs. The verifier never re-pulls
   evidence the investigator already registered; it cross-reads the
   registered artifacts.
-- `aith assess artifact get <id>` — pull the registered artifact by ID and
+- `vigil assess artifact get <id>` — pull the registered artifact by ID and
   read its content (raw log JSON, timeline markdown, IOC dump). Always
   resolve evidence by artifact ID; never by local path. A local path is
   not citable across dispatches.
-- `aith assess artifact search "<query>"` — locate corroborating
+- `vigil assess artifact search "<query>"` — locate corroborating
   artifacts in the engagement's artifact index — sibling pulls in the
   same actor's session, prior verifications of the same actor, change
   tickets, on-call calendar exports.
-- `aith assess host-exec --tool <gam|gcloud|az|splunk|jq|python3|...>` —
+- `vigil assess host-exec --tool <gam|gcloud|az|splunk|jq|python3|...>` —
   when the verifier needs to **cross-source pull** an additional
   telemetry stream the investigator did not (e.g., the investigator
   pulled `login` audit but did not pull `token` audit, and Check 4
   reproduction needs the token feed). Every cross-source pull lands in
   the audit pipeline with the same envelope as the investigator's pulls:
   `--technique`, `--intent`, `--phase verify`, `--scope-host <tenant>`.
-- `aith assess verify-finding <slug>` — record `verified`, `downgraded`,
+- `vigil assess verify-finding <slug>` — record `verified`, `downgraded`,
   or `escalated` disposition with cited evidence. (Note: the CLI's
   `--disposition` flag uses `confirmed | downgraded | false_positive |
   disputed`; the blue vocabulary maps `verified` → `confirmed` and
   `escalated` → `disputed` at the storage layer. Use the
   `--inline` payload's `details.disposition` field to record the blue
   vocabulary verbatim for the report-writer.)
-- `aith assess kill-finding <slug>` — record `false_positive` disposition
+- `vigil assess kill-finding <slug>` — record `false_positive` disposition
   with cited counter-evidence. Enforces required fields
   (`kill_check`, `kill_reason`) before the request leaves the CLI.
-- `aith assess log` — every check outcome is recorded as an
+- `vigil assess log` — every check outcome is recorded as an
   activity entry with `metadata_json.check_number`,
   `metadata_json.outcome`, `metadata_json.evidence_refs`, and
   `metadata_json.confidence`. The activity log is the verifier's audit
   trail; FTS over `metadata_json` is what the report-writer queries to
   produce the per-finding verification narrative.
-- `aith assess artifact register` — register devil's-advocate research
+- `vigil assess artifact register` — register devil's-advocate research
   notes, voting-request artifacts, and any new evidence the verifier
   pulled with `kind=ir_evidence`.
-- `aith assess agent handoff --from-json <path>` — close the verifier
+- `vigil assess agent handoff --from-json <path>` — close the verifier
   dispatch with `disposition`, `evidence_refs`, `coverage_gaps`, and the
   voting outcome (if any).
 
@@ -196,7 +196,7 @@ target at the alleged time?
 **Activity log entry shape:**
 
 ```bash
-aith assess log <agent-id> \
+vigil assess log <agent-id> \
   "Check 1: Reachability for <finding-slug>" \
   "Read artifact <id>; matched actor <email> sign-in at <UTC>; IP <a.b.c.d> outside 30d ASN baseline" \
   "Outcome: PASS — supporting evidence cited" \
@@ -224,7 +224,7 @@ target / time window? Silence here is informative but not determinative.
    - CASB (MCAS / Defender for Cloud Apps, Netskope CASB)
 2. For each layer, check whether a corroborating event exists in the
    investigator's registered artifacts. If not registered, run a
-   targeted cross-source pull via `aith assess host-exec` and register
+   targeted cross-source pull via `vigil assess host-exec` and register
    the new artifact.
 3. Specifically ask:
    - Did the IdP risk engine flag the same sign-in as anomalous?
@@ -290,7 +290,7 @@ devices).
    - Okta: Authentication policies, App-level enrollment, sign-on
      factor requirements, network zones.
 3. Pull a fresh dump of the relevant config via
-   `aith assess host-exec` if the tenant ref is older than 7 days OR
+   `vigil assess host-exec` if the tenant ref is older than 7 days OR
    if the alert is `critical`.
 4. Verify whether the alleged technique would succeed given the
    current config. Three categories:
@@ -511,7 +511,7 @@ red-mode vocabulary (`confirmed | downgraded | false_positive |
 disputed`). The blue mapping is:
 
 - `verified` → `--disposition confirmed` + `--inline '{"details": {"disposition": "verified", ...}}'`
-- `false_positive` → `aith assess kill-finding` (preferred — enforces
+- `false_positive` → `vigil assess kill-finding` (preferred — enforces
   required fields)
 - `downgraded` → `--disposition downgraded` + `--new-severity <new>`
 - `escalated` → `--disposition disputed` + `--inline '{"details": {"disposition": "escalated", "voting_summary": "..."}}'`
@@ -524,7 +524,7 @@ narrative, not the CLI's storage field. Keep both in sync.
 `verified`:
 
 ```bash
-aith assess verify-finding <slug> \
+vigil assess verify-finding <slug> \
   --disposition confirmed \
   --reason "Five-check complete: Checks 1-4 PASS, Check 5 survives" \
   --evidence-ref <artifact-id-1>,<artifact-id-2>,<artifact-id-3> \
@@ -548,7 +548,7 @@ aith assess verify-finding <slug> \
 `false_positive`:
 
 ```bash
-aith assess kill-finding <slug> \
+vigil assess kill-finding <slug> \
   --kill-reason "Mailbox rule add was the delegate's routine — Gmail delegate-list confirms" \
   --kill-check 5 \
   --reason "DA hypothesis confirmed: delegated mailbox owner" \
@@ -567,7 +567,7 @@ aith assess kill-finding <slug> \
 `downgraded`:
 
 ```bash
-aith assess verify-finding <slug> \
+vigil assess verify-finding <slug> \
   --disposition downgraded \
   --new-severity medium \
   --reason "Check 4 DOWNGRADE: reproduction confirms sign-in anomaly but not exfil action" \
@@ -586,7 +586,7 @@ aith assess verify-finding <slug> \
 `escalated`:
 
 ```bash
-aith assess verify-finding <slug> \
+vigil assess verify-finding <slug> \
   --disposition disputed \
   --reason "Check 5 ESCALATE: travel-approval ticket exists but covers different window" \
   --inline '{
@@ -711,7 +711,7 @@ handoff schema.
 5. **Record the closing activity entry:**
 
    ```bash
-   aith assess log <agent-id> \
+   vigil assess log <agent-id> \
      "Verification closed: <finding-slug> → <disposition>" \
      "Five-check complete; <N> PASS, <M> KILL, <K> DOWNGRADE, <L> ESCALATE" \
      "Disposition: <verified|false_positive|downgraded|escalated>" \
@@ -724,7 +724,7 @@ handoff schema.
    `tenant_ref_paths_consulted`, and a one-paragraph
    `cross_platform_correlation_notes` if `scope.json.platforms` has
    more than one entry.
-7. **Self-check** with `aith assess agent render-handoff <agent-id>`.
+7. **Self-check** with `vigil assess agent render-handoff <agent-id>`.
    A 404 means the `agent_id` did not match the dispatch row; fix and
    re-handoff before returning.
 

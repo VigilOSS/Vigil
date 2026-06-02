@@ -1,7 +1,7 @@
 ---
 name: edr-alert-triage
 description: L2 EDR alert context expansion across Defender for Endpoint, CrowdStrike Falcon, and SentinelOne. Process tree, network correlation, file/registry activity, TI cross-ref, persistence checks.
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # EDR Alert Triage (L2)
@@ -46,7 +46,7 @@ dispatch halts and re-routes to `alert-triage` first.
 ## Tools
 
 All target-facing queries (Advanced Hunting, Falcon FQL, Deep Visibility,
-VT) go through `aith assess host-exec` with `--technique IOC-ENRICH` (TI)
+VT) go through `vigil assess host-exec` with `--technique IOC-ENRICH` (TI)
 or `--technique TRIAGE-PULL` (vendor audit). The audit pipeline records
 the full envelope so the verifier can cite the exact query.
 
@@ -297,8 +297,8 @@ IP flagged in a previous engagement (cross-tenant `intel-note` per
 `triage.md` rule 8) is high-signal for severity.
 
 ```bash
-aith assess list-intel dns-record --q "<ip>" --json | jq '.[]'
-aith assess list-intel note --q "<sha256>" --json | jq '.[]'
+vigil assess list-intel dns-record --q "<ip>" --json | jq '.[]'
+vigil assess list-intel note --q "<sha256>" --json | jq '.[]'
 ```
 
 **Evidence** — VT verdict (`malicious_count` / `total_engines`,
@@ -426,7 +426,7 @@ Step 6 outcomes. Raising above L1 ceiling requires verifier confirmation.
 
 ## Activity Log Convention
 
-Every L2 EDR triage pass produces activity entries via `aith assess log`.
+Every L2 EDR triage pass produces activity entries via `vigil assess log`.
 `metadata_json` carries vendor-specific identifiers so FTS and the
 verifier can join across activity entries and audit pulls:
 
@@ -496,7 +496,7 @@ schema. Required fields, EDR-specific:
    inventories** as `ir_log` (raw audit pulls):
 
    ```bash
-   aith assess artifact register \
+   vigil assess artifact register \
      "$ENGAGEMENT_DIR/ir/evidence/edr-process-tree-<slug>.json" \
      --kind ir_log --finding <slug> --agent-id <runtime-agent-id> --sensitive
    ```
@@ -508,7 +508,7 @@ schema. Required fields, EDR-specific:
    persistence inventory, IOC reputation summary) as `ir_evidence`:
 
    ```bash
-   aith assess artifact register \
+   vigil assess artifact register \
      "$ENGAGEMENT_DIR/ir/evidence/edr-persistence-inventory-<slug>.md" \
      --kind ir_evidence --finding <slug> --agent-id <runtime-agent-id>
    ```
@@ -517,15 +517,15 @@ schema. Required fields, EDR-specific:
    intermediate jq pipelines):
 
    ```bash
-   aith assess artifact register \
+   vigil assess artifact register \
      "$ENGAGEMENT_DIR/scratch/edr-kql-draft-<slug>.kql" \
      --kind scratch --finding <slug>
    ```
 
-4. **Record the triage activity entry** (use `aith assess log`):
+4. **Record the triage activity entry** (use `vigil assess log`):
 
    ```bash
-   aith assess log <runtime-agent-id> \
+   vigil assess log <runtime-agent-id> \
      "edr-handoff" "handoff" \
      "Triaged <platform> alert <alert_external_id> for device <device-id>; pulled process tree (<N> nodes, <G> generations), correlated <M> network connections, found <P> persistence mechanisms, enriched <I> IOCs; FP gates: <summary>; proposed <disposition>" \
      --actor-kind agent
@@ -534,7 +534,7 @@ schema. Required fields, EDR-specific:
 5. **Emit the handoff JSON**:
 
    ```bash
-   aith assess agent handoff --from-json /tmp/handoff.json
+   vigil assess agent handoff --from-json /tmp/handoff.json
    ```
 
 ## Common Failure Modes

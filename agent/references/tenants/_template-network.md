@@ -2,10 +2,10 @@
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**
 >
-> Produced by `aith blue tenant init --customer <slug> --platform network`,
+> Produced by `vigil blue tenant init --customer <slug> --platform network`,
 > which writes to `agent/references/tenants/<slug>-network.md` (per
 > `PLATFORM_TO_TENANT_SUFFIX["network"] = "network"` in
-> `src/ai_threat_hunting_cli/blue.py`).
+> `src/vigil_cli/blue.py`).
 >
 > Before this file is loaded into a real engagement:
 >
@@ -393,7 +393,7 @@ root.
 
 - Source: `agent/references/tenants/_template-network.md`; modeled on
   `agent/references/tenants/_template-gws.md` for cross-platform parity.
-- Alias: `aith blue tenant init --platform network` writes to
+- Alias: `vigil blue tenant init --platform network` writes to
   `<customer>-network.md` per `PLATFORM_TO_TENANT_SUFFIX["network"] = "network"`.
 - Consumers: `agent/skills/alert-triage/SKILL.md`,
   `agent/agents/alert-triage-specialist.md`,

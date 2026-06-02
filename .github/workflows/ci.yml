@@ -98,7 +98,7 @@ jobs:
       # continue-on-error to promote to a blocking gate.
       - name: mypy
         continue-on-error: true
-        run: uvx --with-editable . mypy src/ai_threat_hunting_cli
+        run: uvx --with-editable . mypy src/vigil_cli
 
   nightly-live-eval-capture:
     name: nightly live eval-capture e2e (opt-in)

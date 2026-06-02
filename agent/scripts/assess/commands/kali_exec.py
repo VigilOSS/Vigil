@@ -1,4 +1,4 @@
-"""aith assess kali exec — raw passthrough fallback for tools that aren't yet typed."""
+"""vigil assess kali exec — raw passthrough fallback for tools that aren't yet typed."""
 from __future__ import annotations
 
 from assess.lib.kali import add_required_kali_flags, emit_result, kali_args_to_kwargs, kali_exec

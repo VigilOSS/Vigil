@@ -1,15 +1,15 @@
 # Kali CLI Troubleshooting
 
-Use when `aith assess kali --help` errors, a verb fails unexpectedly, or an audit POST returns an unexpected status.
+Use when `vigil assess kali --help` errors, a verb fails unexpectedly, or an audit POST returns an unexpected status.
 
 ## Diagnosis
 
-1. **Local readiness and live state.** `aith doctor` and `aith status`. `aith doctor` checks dtach reachability inside the runtime, the orchestrator backend on the configured base URL, the engagement directory layout, and orphaned `<run_uuid>.failed-audit` markers per engagement under `scans/kali/` (a non-empty marker list means the pre-exec audit POST failed for those runs and the operator should investigate connectivity). `aith status` shows the configured runtime resource tier and live cgroup state.
-2. **Runtime container state.** `aith runtime status` confirms the container is up, the image ID matches the configured tag, and the `/engagements` bind mount is current.
-3. **Configured resource tier.** `aith runtime resources` prints the tier (`Lab/CTF` / `Standard` / `Heavy` / `Comfortable`) and the live cgroup values from inside the container (`/sys/fs/cgroup/memory.max`, `cpu.max`). When OOM events show up in audit rows, this is the first thing to check.
-4. **Engagement context.** If `aith assess kali --help` errors with an engagement-not-found message, run `aith engagement list` to confirm `ENGAGEMENT_DIR` is set and the engagement has a backend record. The CLI reads `engagement.json` from the engagement directory; missing or stale `engagement.json` breaks the audit POST. The orchestrator base URL is resolved through `ORCHESTRATOR_BASE_URL` (env var, highest precedence), then a per-engagement `.orchestrator.env`, then `aith config get orchestrator_base_url`, then the hardcoded default `http://127.0.0.1:18000`. To change the port persistently without editing code or env files, run `aith config set orchestrator_base_url http://127.0.0.1:<port>`.
-5. **Restart the runtime if unhealthy.** `aith runtime restart` recreates the container with the current image and bind mount. No engagement data moves; only the container is replaced.
-6. **Inspect runtime logs when needed.** `aith logs runtime --lines 120` tails container stdout/stderr.
+1. **Local readiness and live state.** `vigil doctor` and `vigil status`. `vigil doctor` checks dtach reachability inside the runtime, the orchestrator backend on the configured base URL, the engagement directory layout, and orphaned `<run_uuid>.failed-audit` markers per engagement under `scans/kali/` (a non-empty marker list means the pre-exec audit POST failed for those runs and the operator should investigate connectivity). `vigil status` shows the configured runtime resource tier and live cgroup state.
+2. **Runtime container state.** `vigil runtime status` confirms the container is up, the image ID matches the configured tag, and the `/engagements` bind mount is current.
+3. **Configured resource tier.** `vigil runtime resources` prints the tier (`Lab/CTF` / `Standard` / `Heavy` / `Comfortable`) and the live cgroup values from inside the container (`/sys/fs/cgroup/memory.max`, `cpu.max`). When OOM events show up in audit rows, this is the first thing to check.
+4. **Engagement context.** If `vigil assess kali --help` errors with an engagement-not-found message, run `vigil engagement list` to confirm `ENGAGEMENT_DIR` is set and the engagement has a backend record. The CLI reads `engagement.json` from the engagement directory; missing or stale `engagement.json` breaks the audit POST. The orchestrator base URL is resolved through `ORCHESTRATOR_BASE_URL` (env var, highest precedence), then a per-engagement `.orchestrator.env`, then `vigil config get orchestrator_base_url`, then the hardcoded default `http://127.0.0.1:18000`. To change the port persistently without editing code or env files, run `vigil config set orchestrator_base_url http://127.0.0.1:<port>`.
+5. **Restart the runtime if unhealthy.** `vigil runtime restart` recreates the container with the current image and bind mount. No engagement data moves; only the container is replaced.
+6. **Inspect runtime logs when needed.** `vigil logs runtime --lines 120` tails container stdout/stderr.
 
 ## Boundary
 
@@ -21,7 +21,7 @@ These are CLI-side rules that prevent foot-guns when many agents share one runti
 
 - **No broad `pkill` by binary name.** Cleaning up "all the nmaps" via `pkill -f nmap` will kill another specialist's parallel scan. Agents only kill processes they spawned via tracked PIDs (the audit row carries `pid` for synchronous runs and `job_id` for async ones). The full process-cleanup discipline lives in `agent/scripts/assess/lib/kali.py`. Broad `pkill -f <binary>` against shared-runtime processes will kill any sibling agent's parallel scan — losing potentially hours of recon work. The audit pipeline already cascades SIGTERM→SIGKILL into the in-container PID on timeout, so manual cleanup is rarely needed; when it is, kill by tracked PID only. The exact-step recipes in "Process cleanup discipline" below are the safe alternatives.
 - **Per-agent binary copy pattern for very-long parallel runs.** When two specialists run multi-hour nmap sweeps in parallel and one finishes, naive cleanup can kill the other. The pattern is `cp /usr/bin/nmap /usr/local/bin/nmap-${AGENT_ID}` so each specialist invokes a uniquely-named binary; a later `pkill -f nmap-${AGENT_ID}` only kills that agent's processes. Use this only when the dispatch genuinely needs hours-long parallel execution; for shorter runs, the tracked-PID approach is enough.
-- **`docker exec` parallelism cap.** Concurrent `aith assess kali ...` calls are capped at 5 by an internal CLI semaphore. This is the documented mitigation for [moby#45595](https://github.com/moby/moby/issues/45595) — `docker exec` becomes unresponsive at high parallelism, and capping at 5 keeps the runtime responsive while still allowing the operator to dispatch multiple specialists. The cap is implemented in `agent/scripts/assess/lib/kali.py`.
+- **`docker exec` parallelism cap.** Concurrent `vigil assess kali ...` calls are capped at 5 by an internal CLI semaphore. This is the documented mitigation for [moby#45595](https://github.com/moby/moby/issues/45595) — `docker exec` becomes unresponsive at high parallelism, and capping at 5 keeps the runtime responsive while still allowing the operator to dispatch multiple specialists. The cap is implemented in `agent/scripts/assess/lib/kali.py`.
 
 ## Process cleanup discipline
 
@@ -33,18 +33,18 @@ lifecycle that owns the PID instead of broad signals.
 ### Long-running probes — `kali job` lifecycle (OPERATOR-ONLY)
 
 > **Specialists run synchronously and never use `kali job start`** — one blocking
-> `aith assess kali <verb> … --timeout N` at a time (see `agent/shared-constraints.md` §2).
+> `vigil assess kali <verb> … --timeout N` at a time (see `agent/shared-constraints.md` §2).
 > A backgrounded job + a halted, auto-resumed agent produces relaunch thrash. The job
 > lifecycle below is for the **operator** launching a single authorized long sweep that must
 > outlive a shell; a long synchronous `--timeout` covers everything else.
 
-Operator use for a probe whose wall clock would normally trigger `aith assess
+Operator use for a probe whose wall clock would normally trigger `vigil assess
 kali job start`: nmap full-port sweeps, sqlmap deep crawls, large nuclei
 sweeps, ffuf with deep wordlists, multi-host puredns runs.
 
 ```bash
 # Start the job — record the returned job id.
-JOB_ID=$(aith assess kali job start \
+JOB_ID=$(vigil assess kali job start \
   --technique RECON --intent "phase 1 nmap full-tcp scan" \
   --probe-kind fingerprint --phase recon --timeout 7200 \
   -- nmap -p- -sV --max-rate 200 -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_full \
@@ -52,29 +52,29 @@ JOB_ID=$(aith assess kali job start \
   | jq -r '.job_id')
 
 # Stop cleanly when you're done — only this job's in-container PID is signaled.
-aith assess kali job stop "$JOB_ID"
+vigil assess kali job stop "$JOB_ID"
 ```
 
 The job worker is dtach-supervised inside the runtime. `kali job stop`
 SIGTERMs the in-container PID it owns and updates the audit row;
 sibling specialists' jobs are not touched.
 
-### Synchronous `aith assess kali exec` — `run_uuid` PID file
+### Synchronous `vigil assess kali exec` — `run_uuid` PID file
 
 Synchronous `kali exec` runs and every typed verb write the in-container
-PID to `/tmp/aith-pid-<run_uuid>.pid` for the duration of the run. The
+PID to `/tmp/vigil-pid-<run_uuid>.pid` for the duration of the run. The
 `run_uuid` is the audit row's run UUID — pull it from `list-command-runs`
 if you need to signal a still-running synchronous call from another shell:
 
 ```bash
 # Find the running call (look for status=running).
-aith assess list-command-runs --q ffuf --json | jq -r '.[]
+vigil assess list-command-runs --q ffuf --json | jq -r '.[]
   | select(.status=="running") | .run_uuid'
 
 # Signal only that run.
-aith assess kali exec --technique META --intent "stop ffuf cleanly" \
+vigil assess kali exec --technique META --intent "stop ffuf cleanly" \
   --probe-kind cleanup --phase recon --timeout 30 -- \
-  sh -c 'kill -TERM "$(cat /tmp/aith-pid-<run_uuid>.pid)"'
+  sh -c 'kill -TERM "$(cat /tmp/vigil-pid-<run_uuid>.pid)"'
 ```
 
 This signals exactly one in-container PID — sibling agents' ffuf or
@@ -88,7 +88,7 @@ catch siblings, copy the binary to a per-agent path before the long
 runs start:
 
 ```bash
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "per-agent nmap copy for parallel-safe cleanup" \
   --probe-kind cleanup --phase recon --timeout 30 -- \
   cp /usr/bin/nmap /usr/local/bin/nmap-${AGENT_NAME}
@@ -102,7 +102,7 @@ math demands it.
 
 ### Timeout-related cleanup — automatic
 
-`aith assess kali exec` and every typed verb already cascade
+`vigil assess kali exec` and every typed verb already cascade
 SIGTERM→SIGKILL into the in-container PID via `docker exec ... kill`
 when `--timeout` expires. The wall-clock budget is enforced from the
 host, but the kill lands inside the container and the in-container
@@ -115,41 +115,41 @@ catching a sibling agent's later parallel run of the same binary.
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `aith assess kali --help` errors with `engagement directory not set` | `ENGAGEMENT_DIR` env var missing or pointing at a non-existent path | `aith engagement list` to confirm engagement keys; export `ENGAGEMENT_DIR=$(aith engagement path <key>)` or `cd` into the engagement directory |
-| `dtach: command not found` inside the runtime | Image was built before Phase 3 added `dtach` to the package list | Rebuild the runtime image: `docker build -t security-research:latest -f agent/docker/runtime-full/Dockerfile .` then `aith runtime restart` |
-| `audit POST 404` after a kali verb runs | Orchestrator backend not running | `aith orchestrator start`, then re-check with `aith status` |
+| `vigil assess kali --help` errors with `engagement directory not set` | `ENGAGEMENT_DIR` env var missing or pointing at a non-existent path | `vigil engagement list` to confirm engagement keys; export `ENGAGEMENT_DIR=$(vigil engagement path <key>)` or `cd` into the engagement directory |
+| `dtach: command not found` inside the runtime | Image was built before Phase 3 added `dtach` to the package list | Rebuild the runtime image: `docker build -t vigil:latest -f agent/docker/runtime-full/Dockerfile .` then `vigil runtime restart` |
+| `audit POST 404` after a kali verb runs | Orchestrator backend not running | `vigil orchestrator start`, then re-check with `vigil status` |
 | `audit POST 422` with `phase required` | Agent forgot to pass `--phase` (or passed an unknown value) | Add `--phase <enum>` to the invocation. Allowed values: `recon`, `collect`, `consume-test`, `verify`, `exploit`, `report`, `code-ingest`, `code-classify`, `code-hunt`, `code-verify`, `recon-pivot`, `exploit-recon`. The CLI fails closed on unknown phases so the backend never sees a malformed row |
 | `audit POST 422` with `technique not in enum` | `--technique` passed a value not in `TECHNIQUE_ENUM` | Pick an enum value from `agent/skills/kali-exec/SKILL.md` (the audit-flag table) — use `OTHER` only when no specific class fits |
 | `--intent exceeds 200 characters` | Intent string too long | Trim the intent to a one-liner; long context belongs in the prompt or the audit notes, not the intent field |
 | `dedup window` warning blocks the call | Same `(command, argv_json)` ran within `KALI_CLI_DEDUP_WINDOW_SECONDS` (default 30s) | Either wait the window out, or pass `--force` if the re-run is intentional. Don't bypass dedup as a habit — the warning is catching accidental double-dispatch |
-| Container not running | Runtime stopped (manual stop, OOM kill, host restart) | `aith runtime start`. If the container repeatedly OOMs, check `aith runtime resources` and bump the tier |
+| Container not running | Runtime stopped (manual stop, OOM kill, host restart) | `vigil runtime start`. If the container repeatedly OOMs, check `vigil runtime resources` and bump the tier |
 | `nikto: -h reserved by argparse` confusion | Trying to use `-h` as the target host | Use `--host <h>` instead — argparse reserves `-h` for help, so the typed wrapper exposes the target as `--host`. The underlying nikto invocation builds `nikto -h <host>` correctly |
-| Stale orphan rows in `assessment_command_runs` | A previous run was killed by host OOM, the container was force-stopped before the CLI could finalize the row, or a finalize PATCH failed mid-flight | Run `aith assess kali sweep-orphans --dry-run` to inspect candidates, then `aith assess kali sweep-orphans` to finalize dead rows to `status=lost`. The sweep probes the in-container PID via `kill -0` and only touches rows whose process is gone or whose pid file is missing |
+| Stale orphan rows in `assessment_command_runs` | A previous run was killed by host OOM, the container was force-stopped before the CLI could finalize the row, or a finalize PATCH failed mid-flight | Run `vigil assess kali sweep-orphans --dry-run` to inspect candidates, then `vigil assess kali sweep-orphans` to finalize dead rows to `status=lost`. The sweep probes the in-container PID via `kill -0` and only touches rows whose process is gone or whose pid file is missing |
 
 ## Verifying the vocabulary
 
 After install or an image rebuild, the canonical smoke test is:
 
 ```bash
-aith assess kali --help                       # lists all 20 verbs
-aith assess kali nmap-scan --help             # shows the typed flag set
-aith assess contract kali nmap-scan           # canonical schema + helper defaults + example
-aith runtime status                           # container up, image current, mount current
-aith runtime resources                        # configured tier matches expectation
+vigil assess kali --help                       # lists all 20 verbs
+vigil assess kali nmap-scan --help             # shows the typed flag set
+vigil assess contract kali nmap-scan           # canonical schema + helper defaults + example
+vigil runtime status                           # container up, image current, mount current
+vigil runtime resources                        # configured tier matches expectation
 ```
 
-If all five succeed, the CLI is healthy. If any fail, walk the diagnosis steps above starting at `aith doctor`.
+If all five succeed, the CLI is healthy. If any fail, walk the diagnosis steps above starting at `vigil doctor`.
 
 ## When to run `kali sweep-orphans`
 
-`aith assess kali sweep-orphans` reconciles `assessment_command_runs` rows that
+`vigil assess kali sweep-orphans` reconciles `assessment_command_runs` rows that
 are stuck in `status=running` past a threshold age (default 3600s). Rows enter
 this state when a finalize PATCH fails mid-flight — typical causes are a
 backend restart between the pre-exec POST and the finalize PATCH, a host crash
 mid-run, an OOM kill of the runtime container, or a network blip during the
 final HTTP call. The sweep probes the in-container PID via
 `docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file
-at `/tmp/aith-pid-<run_uuid>.pid`. Live processes are left alone; rows whose
+at `/tmp/vigil-pid-<run_uuid>.pid`. Live processes are left alone; rows whose
 PID is gone or whose pid file is missing are PATCH-finalized to
 `status=lost`. Run it after any backend restart or host crash, or
 periodically on long engagements where small failure rates accumulate. Use
@@ -159,4 +159,4 @@ cheap to inspect and never finalizes a row whose process is still alive.
 ## See also
 
 - `agent/skills/kali-exec/SKILL.md` — verb menu, audit-flag mapping, sync-vs-async decision, examples per verb.
-- `agent/references/runtime-guides/command-history-auditing.md` — how to read `aith assess list-command-runs` as a coverage map.
+- `agent/references/runtime-guides/command-history-auditing.md` — how to read `vigil assess list-command-runs` as a coverage map.

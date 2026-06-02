@@ -3,7 +3,7 @@
 Replaces dispatcher.sh with parameterized SQL.
 
 This package keeps the historical ``from assess.commands import dispatch`` +
-``dispatch.<symbol>`` seam intact. ``agent.py`` (the operator-facing ``aith
+``dispatch.<symbol>`` seam intact. ``agent.py`` (the operator-facing ``vigil
 assess agent`` command) and ``work_buffer.py`` reach into this module by
 attribute, so the public names they use are re-exported here from the owning
 submodules:
@@ -92,7 +92,7 @@ def run(args) -> None:
     extra = args.extra or []
 
     # render-handoff and other dbless actions don't take a cases.db; the
-    # operator types `aith assess agent render-handoff <agent-id>` and
+    # operator types `vigil assess agent render-handoff <agent-id>` and
     # argparse parks the action name in the db_path slot. Shift it so the
     # rest of the dispatcher can route normally.
     if (db_path or "") in _DBLESS_ACTIONS:
@@ -112,16 +112,16 @@ def run(args) -> None:
         }.get(action, action)
         print(
             f"ERROR: '{action}' is a backend agent lifecycle action and must not take a cases.db path.\n"
-            f"Use: aith assess agent {suggested_action} {' '.join(extra)}".rstrip(),
+            f"Use: vigil assess agent {suggested_action} {' '.join(extra)}".rstrip(),
             file=sys.stderr,
         )
         sys.exit(1)
 
     if not action:
         print(
-            "Usage: aith assess agent <backend-action> [args...]\n"
-            "       aith assess work-buffer <cases.db> <work-buffer-action> [...]\n"
-            "       aith assess agent render-handoff <agent-id> [--max-lines N] [--include-evidence]",
+            "Usage: vigil assess agent <backend-action> [args...]\n"
+            "       vigil assess work-buffer <cases.db> <work-buffer-action> [...]\n"
+            "       vigil assess agent render-handoff <agent-id> [--max-lines N] [--include-evidence]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -153,7 +153,7 @@ def run(args) -> None:
 
     if not db_path:
         print(
-            f"Usage: aith assess work-buffer <db> {action} [...]\n"
+            f"Usage: vigil assess work-buffer <db> {action} [...]\n"
             f"  '{action}' requires a path to cases.db as the first positional.",
             file=sys.stderr,
         )

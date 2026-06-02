@@ -1,7 +1,7 @@
 # dnsx
 
 **Purpose:** Fast multi-purpose DNS toolkit for bulk resolution and record enumeration
-For live engagement targets, run dnsx via `aith assess kali dnsx` (typed verb, audit-flag-aware). The typed wrapper applies Docker-safe defaults: `--dnsx-profile polite-cdn`, `--resolver-profile public-tcp`, `-rl 100`, `-t 20`, `-retry 3`, and `-timeout 5` unless the operator chooses a more aggressive profile.
+For live engagement targets, run dnsx via `vigil assess kali dnsx` (typed verb, audit-flag-aware). The typed wrapper applies Docker-safe defaults: `--dnsx-profile polite-cdn`, `--resolver-profile public-tcp`, `-rl 100`, `-t 20`, `-retry 3`, and `-timeout 5` unless the operator chooses a more aggressive profile.
 
 ## NXDOMAIN / CPU-spike trap (read first)
 
@@ -11,14 +11,14 @@ For live engagement targets, run dnsx via `aith assess kali dnsx` (typed verb, a
 
 ```bash
 # Step 1 — lean brute (no -resp / no -json on bulk inputs)
-aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates.txt \
+vigil assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates.txt \
   --dnsx-profile polite-cdn --resolver-profile public-tcp -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt \
   --technique RECON --intent "bulk dnsx resolve (lean — no JSON, drop NXDOMAIN early)" \
   --probe-kind baseline --phase recon --timeout 1200
 
 # Step 2 — enrich survivors only (smaller set, JSON safe here)
-aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt \
+vigil assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt \
   --dnsx-profile polite-cdn --resolver-profile public-tcp \
   -resp -json --allow-bulk-json -a -cname -silent \
   -o /engagements/$ENGAGEMENT_KEY/scans/dnsx_enriched.jsonl \
@@ -26,10 +26,10 @@ aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.
   --probe-kind fingerprint --phase recon --timeout 600
 ```
 
-For tight-RAM containers (Lab/CTF tier, `AITH_RUNTIME_MEMORY_GB=2`), wrap with `GOMAXPROCS=1 nice -n 10` to bound goroutine CPU usage:
+For tight-RAM containers (Lab/CTF tier, `VIGIL_RUNTIME_MEMORY_GB=2`), wrap with `GOMAXPROCS=1 nice -n 10` to bound goroutine CPU usage:
 
 ```bash
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "tight-RAM dnsx profile (GOMAXPROCS=1 nice -n 10)" \
   --probe-kind baseline --phase recon --timeout 1800 -- \
   env GOMAXPROCS=1 nice -n 10 \

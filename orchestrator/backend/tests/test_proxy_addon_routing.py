@@ -219,7 +219,7 @@ def test_registry_drops_engagement_that_vanished(tmp_path: Path) -> None:
 
 
 def test_routes_cache_is_written_after_reload(tmp_path: Path) -> None:
-    """`aith mitmproxy routes` reads this cache; reload must keep it fresh."""
+    """`vigil mitmproxy routes` reads this cache; reload must keep it fresh."""
     module = _load_proxy_addon_module()
     root = tmp_path / "engagements"
     root.mkdir()

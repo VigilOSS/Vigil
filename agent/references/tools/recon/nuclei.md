@@ -1,15 +1,15 @@
 # nuclei
 
 **Purpose:** Vulnerability scanning with community templates
-For live engagement targets, run `nuclei` via `aith assess kali nuclei` (typed verb, audit-flag-aware).
+For live engagement targets, run `nuclei` via `vigil assess kali nuclei` (typed verb, audit-flag-aware).
 
 Per-target rate calibration: `agent/operator-core.md` "Recon Dispatch Resource Policy". Pull `--rate-limit / -bs / -c` from the matching trait row before running broad sweeps.
 
-Run all nuclei probes via `aith assess kali nuclei` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb — kali nuclei" for complete invocation profiles with OOB configuration.
+Run all nuclei probes via `vigil assess kali nuclei` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb — kali nuclei" for complete invocation profiles with OOB configuration.
 
 ## Basic Scanning
 
-Flag reference (used inside `aith assess kali nuclei`):
+Flag reference (used inside `vigil assess kali nuclei`):
 
 **Single target:** `-u https://target`
 **Multiple targets:** `-l /engagements/$ENGAGEMENT_KEY/scans/targets.txt`
@@ -22,7 +22,7 @@ Flag reference (used inside `aith assess kali nuclei`):
 **Specific template:** `-t http/cves/2021/CVE-2021-44228.yaml`
 **Template directory:** `-t /custom/templates/`
 **Auto-scan (tech-based):** `-as` (detects tech stack, runs matching templates)
-**List templates:** `aith assess kali exec --technique HEALTH --intent "nuclei template list" --probe-kind fingerprint --phase recon --timeout 30 -- nuclei -tl`
+**List templates:** `vigil assess kali exec --technique HEALTH --intent "nuclei template list" --probe-kind fingerprint --phase recon --timeout 30 -- nuclei -tl`
 **Workflows:** `-w http/workflows/wordpress-workflow.yaml`
 
 Note: Template paths use protocol prefix (e.g., `http/cves/`, `dns/`, `network/`).
@@ -36,10 +36,10 @@ Note: Template paths use protocol prefix (e.g., `http/cves/`, `dns/`, `network/`
 ## OOB Callbacks
 
 OOB callbacks use the shared interactsh infrastructure — agents do not pass raw interactsh URLs directly. Instead:
-1. `aith oob status --json` — confirm `server=true`, `frpc=true`.
-2. `aith oob client start <name> --engagement <key> --agent <role>` — start the listener client.
-3. Pass the configured OOB server domain (`domain` from step 1, e.g. `researcher.example`) as `-interactsh-url <domain>` so nuclei's own per-template callbacks land on the shared listener. Nuclei appends its own unique id per probe; `aith oob poll` extracts that label.
-4. `aith oob poll --client <name>` — correlate probe<->callback after probes fire; a matched row is the confirmed hit. `aith oob client logs <name> --lines 80` is a raw listener tail for infra debugging only, not a correlation source.
+1. `vigil oob status --json` — confirm `server=true`, `frpc=true`.
+2. `vigil oob client start <name> --engagement <key> --agent <role>` — start the listener client.
+3. Pass the configured OOB server domain (`domain` from step 1, e.g. `researcher.example`) as `-interactsh-url <domain>` so nuclei's own per-template callbacks land on the shared listener. Nuclei appends its own unique id per probe; `vigil oob poll` extracts that label.
+4. `vigil oob poll --client <name>` — correlate probe<->callback after probes fire; a matched row is the confirmed hit. `vigil oob client logs <name> --lines 80` is a raw listener tail for infra debugging only, not a correlation source.
 
 **Disable interactsh (when OOB unavailable):** `-no-interactsh`
 
@@ -62,7 +62,7 @@ Always write output to `/engagements/$ENGAGEMENT_KEY/scans/` — writing to `/tm
 
 ## Template Management
 
-**Update templates:** `aith assess kali exec --technique HEALTH --intent "nuclei template update" --probe-kind fingerprint --phase recon --timeout 120 -- nuclei -ut`
+**Update templates:** `vigil assess kali exec --technique HEALTH --intent "nuclei template update" --probe-kind fingerprint --phase recon --timeout 120 -- nuclei -ut`
 **Custom template directory:** `-td /path/to/templates/` (override default template location)
 
 ## Triage Rules

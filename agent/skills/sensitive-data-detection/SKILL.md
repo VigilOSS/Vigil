@@ -1,7 +1,7 @@
 ---
 name: sensitive-data-detection
 description: Detect PII, credentials, and corporate sensitive data in API responses, source code, files, headers, and database extracts
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Sensitive Data Detection
@@ -317,12 +317,12 @@ When PII or sensitive data is detected, report as:
 
 ## Integration with Backend Intel Tables
 
-Detected PII feeds into the backend intel tables via `aith assess record-intel <type> <json-file>`:
+Detected PII feeds into the backend intel tables via `vigil assess record-intel <type> <json-file>`:
 - Email addresses → `record-intel email` (intel_emails)
 - People names + roles → `record-intel person` (intel_people)
 - Internal IPs / domains → `record-intel domain` (intel_domains, use the right `kind`: `subdomain`/`ip`/`asn`/...)
-- Credentials → `aith assess post credentials <credential-json-file>` (assessment_credentials — NOT record-intel; credentials live in the assessment domain with their own schema)
-- Bulk PII exposure → durable finding via `aith assess record-finding`
+- Credentials → `vigil assess post credentials <credential-json-file>` (assessment_credentials — NOT record-intel; credentials live in the assessment domain with their own schema)
+- Bulk PII exposure → durable finding via `vigil assess record-finding`
 
 ## Cryptographic Weakness Checks
 

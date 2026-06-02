@@ -11,9 +11,9 @@ Tenant data access is authorized per the engagement's scope
 (`scope.json:customer`, `platforms`, `tenant_reference_paths`). Read-only
 telemetry pulls are permitted within the declared tenant. WRITE-class actions
 (containment, account state mutations, filter deletions) require an
-operator-approved `aith blue propose-contain` record, audited operator
-execution via `aith assess host-exec`, then operator recording with
-`aith blue contain`.
+operator-approved `vigil blue propose-contain` record, audited operator
+execution via `vigil assess host-exec`, then operator recording with
+`vigil blue contain`.
 
 ---
 
@@ -58,7 +58,7 @@ WRITE in the skill it loaded from. WRITE-class actions include:
 WRITE actions surface as containment proposals through the blue wrapper:
 
 ```bash
-aith blue propose-contain <finding-slug> \
+vigil blue propose-contain <finding-slug> \
   --action <action-verb> \
   --target <account|host|ioc> \
   --platform <gws|m365|aws|okta|edr|network|generic> \
@@ -69,9 +69,9 @@ aith blue propose-contain <finding-slug> \
 
 Approval is per-action per-target — a broad "you can contain this BEC"
 approval is not specific. Execution is two operator steps after approval:
-first run the platform command through `aith assess host-exec --require-audit`,
-then record the already executed action with `aith blue contain <finding-slug> --proposal <id> --command-run-id <id>`
-or `aith blue contain <finding-slug> --proposal <id> --proof-artifact <path>`,
+first run the platform command through `vigil assess host-exec --require-audit`,
+then record the already executed action with `vigil blue contain <finding-slug> --proposal <id> --command-run-id <id>`
+or `vigil blue contain <finding-slug> --proposal <id> --proof-artifact <path>`,
 which logs structured metadata to `activity_entries` and bumps the finding's
 workflow status.
 
@@ -98,7 +98,7 @@ $ENGAGEMENT_DIR/ir/evidence/<topic>.md
 dispatch closes:
 
 ```bash
-aith assess artifact register <path> \
+vigil assess artifact register <path> \
   --kind <ir_log|ir_evidence|timeline|ioc_dump|containment_proof|ir_closeout> \
   --finding <finding-slug> \
   --agent-id <id> \
@@ -119,7 +119,7 @@ command run (`producer_command_run_id`), and the finding it substantiates
 Use `--sensitive` for PII-bearing exports (mailbox content, full sign-in
 history, IAM principal listings) so the FTS preview is suppressed but the
 hash + linkage remain auditable. Use `--scratch` (or
-`aith assess artifact mark-scratch --under notes/scratch/` for bulk) on
+`vigil assess artifact mark-scratch --under notes/scratch/` for bulk) on
 transient working notes that should not appear in resume briefs or reports.
 
 **Manual `shasum -a 256 ... > SHA256SUMS.txt` is deprecated.** The backend
@@ -166,7 +166,7 @@ entry point to the client costs more than 30 days of audit pulls upfront.
 
 ---
 
-## 6. Audit pipeline via `aith assess host-exec`
+## 6. Audit pipeline via `vigil assess host-exec`
 
 Every tenant-facing platform command (GAM, gcloud, az, splunk, crowdstrike,
 defender, jq against a raw pull, python3 against a raw pull) runs through
@@ -174,7 +174,7 @@ host-exec so the command lands in `assessment_command_runs` with intent,
 technique, and phase metadata.
 
 ```bash
-aith assess host-exec \
+vigil assess host-exec \
   --tool <gam|gcloud|az|splunk|crowdstrike|defender|jq|python3|...> \
   --intent "<one-line purpose>" \
   --technique <MITRE-technique-id-or-IR-tag> \
@@ -205,7 +205,7 @@ command and do not invent a post-hoc command-run record.
 
 No host-exec required (no tenant data): `jq` over a registered artifact,
 `sqlite3` over the orchestrator backend, `python3` over an artifact file,
-`aith assess` helpers themselves.
+`vigil assess` helpers themselves.
 
 ### Command Metadata — required fields on every host-exec call
 
@@ -284,18 +284,18 @@ outside user's 30-day ASN baseline + impossible-travel from previous session
 On any continuation of an existing engagement, run:
 
 ```bash
-aith assess resume-brief
+vigil assess resume-brief
 ```
 
 before dispatching specialists or proposing containment. Scoped variants for
 narrower hydration:
 
 ```bash
-aith assess resume-brief --finding <finding-slug-or-alias>
-aith assess resume-brief --q "<keyword-or-customer-slug>"
-aith assess resume-brief --agent-id <agent-id>
-aith assess resume-brief --since <iso-datetime>
-aith assess resume-brief --max-age-hours <N>
+vigil assess resume-brief --finding <finding-slug-or-alias>
+vigil assess resume-brief --q "<keyword-or-customer-slug>"
+vigil assess resume-brief --agent-id <agent-id>
+vigil assess resume-brief --since <iso-datetime>
+vigil assess resume-brief --max-age-hours <N>
 ```
 
 `agent/rules/resume.md` is universal; this is the blue-specific reminder.
@@ -320,7 +320,7 @@ Every blue specialist dispatch closes with a handoff JSON conforming to
 `agent/references/runtime-guides/handoff-schema.md`, recorded via:
 
 ```bash
-aith assess agent handoff --from-json <path>
+vigil assess agent handoff --from-json <path>
 ```
 
 Blue handoffs include the following fields beyond the cross-mode baseline:
@@ -330,7 +330,7 @@ Blue handoffs include the following fields beyond the cross-mode baseline:
 - **`evidence_refs`** — array of artifact IDs (from `assessment_artifacts.id`),
   NOT local filesystem paths. The downstream specialist (verifier consuming
   the L2 handoff, report-writer consuming the L3 handoff) resolves artifacts
-  by ID through `aith assess artifact get <id>` rather than re-reading files
+  by ID through `vigil assess artifact get <id>` rather than re-reading files
   on disk.
 - **`coverage_gaps`** — array of one-line strings naming the open questions
   the dispatch did not close. The verifier flags missing
@@ -367,7 +367,7 @@ agents cannot query unindexed local files.
    analysis under `ir/evidence/`, exported timelines, screenshots, IOC dumps:
 
    ```bash
-   aith assess artifact register <path> \
+   vigil assess artifact register <path> \
      --kind <ir_log|ir_evidence|timeline|ioc_dump|containment_proof|ir_closeout> \
      --finding <finding-slug> \
      --agent-id <id> \
@@ -384,13 +384,13 @@ agents cannot query unindexed local files.
    timeline-construction drafts:
 
    ```bash
-   aith assess artifact mark-scratch --under notes/scratch/
+   vigil assess artifact mark-scratch --under notes/scratch/
    ```
 
    Or per-artifact:
 
    ```bash
-   aith assess artifact mark-scratch <artifact-id>
+   vigil assess artifact mark-scratch <artifact-id>
    ```
 
    Scratch artifacts stay in the backend (audit preserved, hash preserved) but
@@ -400,24 +400,24 @@ agents cannot query unindexed local files.
    by `register` or `sync` in the handoff's `evidence_refs`. Never put local
    paths there — the downstream consumer cannot resolve them.
 
-4. **Record the finding(s).** `aith assess record-finding <agent-name>
+4. **Record the finding(s).** `vigil assess record-finding <agent-name>
    <finding-json>` per finding. The JSON must include
    `details_json.mitre_techniques`, `details_json.confidence`, and
    `details_json.timeline` (UTC ISO-8601 entries with `source_file` citations
    per `agent/rules/ir-evidence.md` rule 3).
 
 5. **Record activity entries** for state-changing operator-touching events:
-   `aith assess log` with `--actor-kind`, `action`, and `--metadata-inline`
+   `vigil assess log` with `--actor-kind`, `action`, and `--metadata-inline`
    carrying `{tier, alert_external_id, platform, disposition, confidence,
    mitre_techniques[]}`.
 
-6. **Call `aith assess agent handoff --from-json <path>`** with the
+6. **Call `vigil assess agent handoff --from-json <path>`** with the
    `agent_id`, `agent_role`, and `phase` from the Runtime Identity block at
    the top of the dispatch prompt. The handoff row is keyed on `agent_id`;
    using a different value creates an orphaned row the operator cannot
    render.
 
-7. **Self-check with `aith assess agent render-handoff <agent_id>`.** A 404
+7. **Self-check with `vigil assess agent render-handoff <agent_id>`.** A 404
    means the `agent_id` in step 6 did not match the registered dispatch — fix
    and re-handoff before returning.
 
@@ -446,19 +446,19 @@ Use the IDs in the block (finding slugs, command-run IDs, handoff agent IDs,
 artifact IDs) for drill-down through:
 
 ```bash
-aith assess get-command-run <id>
-aith assess artifact get <id>
-aith assess artifact search <query>
-aith assess agent render-handoff <agent-id>
-aith assess fetch findings/<slug>
+vigil assess get-command-run <id>
+vigil assess artifact get <id>
+vigil assess artifact search <query>
+vigil assess agent render-handoff <agent-id>
+vigil assess fetch findings/<slug>
 ```
 
-Use `aith assess artifact search` as the engagement memory index. A note not in
+Use `vigil assess artifact search` as the engagement memory index. A note not in
 the index is scratch and is not engagement memory. Reading `ir/reports/*.json`
 directly is fine when the artifact index points to a specific file — the index
 is the entry point.
 
-**Use `aith assess agent render-handoff <agent-id>` for prior dispatch context** —
+**Use `vigil assess agent render-handoff <agent-id>` for prior dispatch context** —
 it stays bounded where raw transcript pastes grow linearly.
 
 ---
@@ -472,7 +472,7 @@ wastes context, pollutes FTS preview, and adds no signal.
 This is parity with red mode (`agent/shared-constraints.md` banner-policing).
 The handoff JSON is the durable record; the response is reflection.
 
-Same for `--intent` on `aith assess host-exec`: do not prefix with agent
+Same for `--intent` on `vigil assess host-exec`: do not prefix with agent
 name or phase — those land in the audit row via `--phase` and `agent_name`.
 Use `--intent` for purpose only.
 
@@ -508,7 +508,7 @@ see the response, only the handoff row.
   which alerts get re-read after audit pulls land.
 - `agent/rules/reporting.md` — platform-agnostic reporting discipline; banned
   hedge phrases, section length limits, severity discipline.
-- `agent/rules/resume.md` — universal resume hydration; `aith assess
+- `agent/rules/resume.md` — universal resume hydration; `vigil assess
   resume-brief` before any continuation.
 - `agent/skills/alert-fp-verification/SKILL.md` — five-check protocol and the
   Multi-Perspective Voting Protocol for `escalated` dispositions.

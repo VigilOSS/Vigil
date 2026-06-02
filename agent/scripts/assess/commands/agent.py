@@ -1,4 +1,4 @@
-"""aith assess agent — backend agent lifecycle, handoff, and decision rows."""
+"""vigil assess agent — backend agent lifecycle, handoff, and decision rows."""
 from __future__ import annotations
 
 import json
@@ -201,7 +201,7 @@ def _warn_if_handoff_is_closable(args) -> None:
     if status_value in {"ready", "blocked"}:
         print(
             f"WARN agent done: handoff for {args.agent_id} is handoff_status={status_value!r}; "
-            f"`aith assess agent close {args.agent_id}` would write a dispatch_closed_from_handoff "
+            f"`vigil assess agent close {args.agent_id}` would write a dispatch_closed_from_handoff "
             "decision row for the audit ledger. Proceeding with raw done — pass --status explicitly "
             "and ignore this warning if that is intended.",
             file=sys.stderr,
@@ -238,10 +238,10 @@ def _close(args) -> None:
                 f"  1. Re-dispatch the specialist to write a final handoff with "
                 f"--handoff-status ready (or blocked) — preferred.\n"
                 f"  2. Force-complete without an audit row: "
-                f"`aith assess agent done {agent_id} --status completed` "
+                f"`vigil assess agent done {agent_id} --status completed` "
                 f"(or --status failed / blocked / aborted).\n"
                 f"  3. Operator override: write the closing handoff manually with "
-                f"`aith assess agent handoff --agent-id {agent_id} --role <role> "
+                f"`vigil assess agent handoff --agent-id {agent_id} --role <role> "
                 f"--summary \"...\" --handoff-status blocked` then re-run "
                 f"`agent close`.",
                 file=sys.stderr,
@@ -565,7 +565,7 @@ def _start_swarm(args) -> None:
         "Next: fire one specialist per row using your runtime's wrapper "
         "(@<role> in Claude Code, or spawn_agent in Codex), passing the row's "
         "agent_id in the Runtime Identity block. The specialist reads its "
-        "batch range from its own dispatch row via `aith assess agent get <agent_id>`."
+        "batch range from its own dispatch row via `vigil assess agent get <agent_id>`."
     )
 
 

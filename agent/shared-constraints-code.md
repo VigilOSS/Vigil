@@ -39,21 +39,21 @@ not read. Never request operator-mediated expansion when you can resolve it with
 ## 3. Full Filesystem Access
 
 Source code is read directly from the local filesystem via host Bash or Claude Code tools.
-This is NOT target-facing network work -- `aith assess kali` is not needed for reading source files.
+This is NOT target-facing network work -- `vigil assess kali` is not needed for reading source files.
 
-**When code analysis does reach for `aith assess kali ...`** (for example, a fuzz campaign or
+**When code analysis does reach for `vigil assess kali ...`** (for example, a fuzz campaign or
 binary-triage pass that runs a tool through the runtime), the same coverage-check
 rule as the web mode applies: every call carries `engagement_key`/`agent_name`/`phase`
 and runs land in `assessment_command_runs`. Treat that history as a coverage
 map — a record of what harnesses/corpora/sanitizer configs have already been
 run so your next campaign picks a variant that hasn't been tried. Search with
 an unscoped query first so you see every agent's and every phase's prior work
-— `aith assess list-command-runs --q <keyword> --show-matches` — and narrow
+— `vigil assess list-command-runs --q <keyword> --show-matches` — and narrow
 with `--agent-name` or `--phase` only if the broad result is overwhelming.
 The only campaign to skip is the identical binary + corpus + flags combination
 already run to completion; any variant (new sanitizer, new dictionary, new
 seed corpus, harness change) is new coverage. Before citing a prior run,
-fetch its preview with `aith assess get-command-run <id>` —
+fetch its preview with `vigil assess get-command-run <id>` —
 `success=true` only means `return_code=0`, and a campaign that exited cleanly
 under its time budget but produced no crashes is not the same as one that
 exhausted the search space. Full coverage-vs-duplicate decision table:
@@ -91,7 +91,7 @@ reading the file, and continuing your analysis. You have full filesystem access 
 ## 4. Findings Use the Existing Backend
 
 Code analysis findings record in the **same** `assessment_findings` table as web findings.
-Use `aith assess record-finding <agent-name> <finding-json-file>` to record.
+Use `vigil assess record-finding <agent-name> <finding-json-file>` to record.
 For new findings, omit `slug` from the JSON payload — `record-finding` allocates the next
 canonical slug under a lock and prints it on stdout. Use that returned slug in handoffs,
 analysis rows, and follow-up commands. Hand-authoring `CH-001` / `CV-001` style slugs in
@@ -159,7 +159,7 @@ Use `AV:N` only when the attacker's access path is genuinely network-direct. If 
 - `details.references` is an array of CVE links, advisory URLs, or CWE documentation links
 - `details.poc_code` holds a PoC exploit script; for web findings use `details.poc_request` / `details.poc_response` for structured HTTP pairs
 
-**Deduplication:** Before recording, query existing findings via `aith assess fetch findings`.
+**Deduplication:** Before recording, query existing findings via `vigil assess fetch findings`.
 If the same root cause at the same canonical location already exists, update or merge that finding
 instead of creating a duplicate. Variant instances in different files or materially different sink
 sites are new findings; repeated commentary on the same `file:path:line` is not.
@@ -169,7 +169,7 @@ input file generation, sanitizer invocation, unit-test repro command, or debugge
 to confirm the bug. The goal is reproduction without rediscovery: another analyst should be able to
 rerun the proof from `notes` plus the referenced source files alone.
 
-Coverage finding counts (`aith assess list-findings` with a count flag or equivalent)
+Coverage finding counts (`vigil assess list-findings` with a count flag or equivalent)
 intentionally include only findings whose `canonical_location` starts with `file:` — web
 findings with URL-based locations are excluded from code-analysis queue accounting.
 
@@ -213,7 +213,7 @@ Coverage must be explicit, but write-up depth can be proportional:
 - Obviously mechanical helpers can use concise `clean` dispositions once you have verified they
   do not hide sinks, trust-boundary assumptions, or material error behavior.
 
-Record dispositions via `aith assess code-record-analysis`.
+Record dispositions via `vigil assess code-record-analysis`.
 `finding` dispositions record durable finding state through `record-finding`; `suspicious`,
 `clean`, and `needs-context` still record through `code-record-analysis` so backend coverage knows
 which functions were reviewed and why the queue can advance or re-dispatch.
@@ -242,7 +242,7 @@ functions. A guard in function A does not protect function B unless B re-validat
 
 ## 8. Skills and References Are Methodology -- Required, Not Optional
 
-**Step 1 -- Use the skill named in your dispatch payload, or run `aith assess list-skills`**
+**Step 1 -- Use the skill named in your dispatch payload, or run `vigil assess list-skills`**
 when you begin specialist work. The CLI walks `agent/skills/*/SKILL.md` frontmatter and prints
 each skill's compact description so you can pick the matching code-analysis skill without
 loading the full file. Load the chosen skill before doing any analysis.
@@ -270,7 +270,7 @@ Only improvise after confirming the reference set is genuinely insufficient for 
 
 ## 9. Script Path Convention
 
-All assessment operations use `aith assess <subcommand>` resolved from the agent workspace
+All assessment operations use `vigil assess <subcommand>` resolved from the agent workspace
 root after `cd agent`. JSON payloads belong in files, not inline shell arguments, because payload
 files are auditable and avoid shell escaping damage.
 
@@ -278,11 +278,11 @@ Use `ENGAGEMENT_DIR` or `--engagement-dir` for path resolution — hardcoded abs
 
 Shell-quote Java and Kotlin identifiers that contain `$` (anonymous classes, lambda
 names, generated accessors — e.g. `com.example.Auth$$Lambda$1`): wrap in single quotes
-or escape the `$` when passing to `grep`, `aith`, or shell commands to prevent variable
+or escape the `$` when passing to `grep`, `vigil`, or shell commands to prevent variable
 interpolation.
 
 **No `echo` section banners.** Do not use `echo "=== ... ==="` or similar shell banners for
-progress markers, section headings, or breadcrumbs inside `aith assess kali` invocations or
+progress markers, section headings, or breadcrumbs inside `vigil assess kali` invocations or
 shell scripts that wrap them. The operator never sees that output, the command audit pipeline
 captures the banner as the command stdout preview and pollutes FTS search, and `--intent`
 on the kali call already records purpose in the durable audit row. `echo` is only legitimate
@@ -295,8 +295,8 @@ rule applies in code mode wherever a kali wrapper is invoked from a code-analysi
 ## 10. Recording Format
 
 Use the helper contracts as the canonical shape source before authoring durable JSON. Run
-`aith assess contract record-finding` for finding payloads and
-`aith assess contract code-record-analysis` for analysis-result payloads; this keeps agent output
+`vigil assess contract record-finding` for finding payloads and
+`vigil assess contract code-record-analysis` for analysis-result payloads; this keeps agent output
 aligned with backend validation instead of relying on copied prompt snippets.
 `record-finding` fills the initial lifecycle defaults (`workflow_status=active`, `verification_state=unreviewed`, `verification_disposition=none`) when omitted — use those rather than setting lifecycle fields manually.
 For later finding lifecycle changes, use the dedicated helpers instead of raw `post` or `patch`:
@@ -330,28 +330,28 @@ local notes.
 Write durable state to backend tables and linked artifacts immediately because
 hidden markdown notes break resume, report readiness, and cross-agent handoff.
 Any `.md` file under `notes/` that matters after the current command must be
-registered with `aith assess artifact register <path>` and linked through a
+registered with `vigil assess artifact register <path>` and linked through a
 finding, chain, dispatch/agent, surface, request variant, or command run before
 the dispatch closes. Unlinked markdown notes are scratch only and are not valid
 resume or report input.
 
 Before your dispatch returns, run in this order:
 
-1. `aith assess record-finding <agent-name> <finding-json>` for each confirmed finding.
-2. `aith assess code-record-analysis <analysis-json>` for each queue item disposition, with
+1. `vigil assess record-finding <agent-name> <finding-json>` for each confirmed finding.
+2. `vigil assess code-record-analysis <analysis-json>` for each queue item disposition, with
    `queue_item_id` from the fetched dispatch item.
-3. `aith assess agent handoff --from-json <path>` — use the exact
+3. `vigil assess agent handoff --from-json <path>` — use the exact
    `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the
    operator placed at the top of your dispatch prompt. The handoff row is keyed on
    `agent_id`; using a different value creates an orphaned row the operator cannot render.
    Set `handoff_status` to `ready` when the operator can close the dispatch, or
    `blocked` when the objective could not complete.
-4. `aith assess agent render-handoff <agent_id>` — self-check before exiting.
+4. `vigil assess agent render-handoff <agent_id>` — self-check before exiting.
    A 404 means the `agent_id` did not match the registered dispatch.
 
 `agent done` / `agent close` are operator-only — do not call them.
 
-`aith assess agent handoff` is idempotent; checkpoint after each major phase of work, not only at the end.
+`vigil assess agent handoff` is idempotent; checkpoint after each major phase of work, not only at the end.
 Schema: `agent/references/runtime-guides/handoff-schema.md`.
 
 On long runs, at each handoff checkpoint also re-emit a compact plan-state digest in your

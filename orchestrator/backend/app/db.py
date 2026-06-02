@@ -647,7 +647,7 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
             """
     )
     # Authoritative, freshness-aware host-liveness ledger. One row per
-    # (engagement, host); httpx probes upsert it via `aith assess ingest-httpx`.
+    # (engagement, host); httpx probes upsert it via `vigil assess ingest-httpx`.
     # reachability_class is the stored verdict (live/dead/blackholed/unknown);
     # the read projection degrades a stale verdict to 'stale' past the TTL so
     # a 2-hour-old "live" forces a re-probe rather than being trusted across
@@ -1573,7 +1573,7 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
 
 def _create_jobs_table(connection: sqlite3.Connection) -> None:
     # assessment_jobs tracks long-running dtach-supervised workers spawned
-    # by `aith assess kali job start`. parent_command_run_id links the
+    # by `vigil assess kali job start`. parent_command_run_id links the
     # synchronous audit row that initiated the job; SET NULL on cascade
     # so cleaning up an orphaned command-run does not destroy the job
     # record we still need for forensics.
@@ -2351,10 +2351,10 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
 
 
 def _create_oob_correlation_tables(connection: sqlite3.Connection) -> None:
-    # OAST (out-of-band) auto-correlation. ``aith oob mint`` records a probe
+    # OAST (out-of-band) auto-correlation. ``vigil oob mint`` records a probe
     # with a unique random ``nonce`` subdomain label; that label IS the
     # correlation token routed through the shared interactsh/frp transport
-    # (see src/ai_threat_hunting_cli/oob.py). ``aith oob poll`` parses the
+    # (see src/vigil_cli/oob.py). ``vigil oob poll`` parses the
     # interactsh-client log, extracts the nonce from each callback host, and
     # records the matching interaction here so a blind callback auto-maps to
     # the payload that caused it. The interaction child table keeps one row

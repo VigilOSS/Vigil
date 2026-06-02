@@ -47,13 +47,13 @@ _SCOPE_GATED_ROLES: frozenset[str] = frozenset({
 
 
 def _agent_skills_root() -> Path:
-    """Resolve agent/skills/ relative to this file or AITH_REPO_ROOT.
+    """Resolve agent/skills/ relative to this file or VIGIL_REPO_ROOT.
 
     Used for warn-only validation that named skills exist on disk. Returning a
     bogus path is harmless because the caller treats a missing directory as
     "skip the on-disk check" rather than a hard error.
     """
-    override = os.environ.get("AITH_REPO_ROOT")
+    override = os.environ.get("VIGIL_REPO_ROOT")
     if override:
         candidate = Path(override) / "agent" / "skills"
         if candidate.is_dir():
@@ -73,7 +73,7 @@ def _agent_skills_root() -> Path:
 
 @dataclass
 class SpecialistDispatchContract:
-    """Documentation mirror of specialist dispatch payloads for ``aith assess agent start``.
+    """Documentation mirror of specialist dispatch payloads for ``vigil assess agent start``.
 
     Aligns with the Specialist Dispatch Contract table in ``agent/operator-core.md``.
     Use ``validate_specialist_dispatch_contract`` to lint a parsed JSON payload.
@@ -163,7 +163,7 @@ def validate_specialist_dispatch_contract(
         if not skills_list:
             errors.append(
                 f"skills is required for role '{role_name}'; "
-                "list at least one skill name from `aith assess list-skills`"
+                "list at least one skill name from `vigil assess list-skills`"
             )
 
     if skills_list:
@@ -207,7 +207,7 @@ def validate_specialist_dispatch_contract(
     return errors, warnings
 
 
-# Verbs registered under `aith assess kali ...`. Names are kept in sync with
+# Verbs registered under `vigil assess kali ...`. Names are kept in sync with
 # the modules under `agent/scripts/assess/commands/kali_*.py`.
 #
 # Two categories live here so the audit-flag invariants stay truthful:
@@ -253,7 +253,7 @@ KALI_VERBS: tuple[str, ...] = KALI_TARGET_VERBS + KALI_MAINT_VERBS
 _KALI_COMMON_NOTES: tuple[str, ...] = (
     "Every kali verb requires --technique, --intent, --probe-kind, --phase, and --timeout. The CLI rejects calls missing any of these before it ever reaches the backend.",
     "--technique must be one of TECHNIQUE_ENUM; use HEALTH for runtime/tool inventory, META for operator-side metadata, LOG-READ for artifact reads, and OTHER only when no specific class fits.",
-    "--agent-name resolves from the explicit flag, $AGENT_NAME, $AITH_AGENT_NAME, then operator. Specialists must ensure AGENT_NAME is exported by their wrapper or pass --agent-name <role> explicitly.",
+    "--agent-name resolves from the explicit flag, $AGENT_NAME, $VIGIL_AGENT_NAME, then operator. Specialists must ensure AGENT_NAME is exported by their wrapper or pass --agent-name <role> explicitly.",
     "--phase is REQUIRED — pass the phase the dispatch was authorized for, not scope.json.current_phase. Allowed: recon, collect, consume-test, verify, exploit, report, code-ingest, code-classify, code-hunt, code-verify, plus the half-phase tags recon-pivot and exploit-recon.",
     "--destructive marks a write/edit/delete on the target (POST/PUT/PATCH/DELETE, file upload, account creation). Read-only probes leave it off.",
     "--force bypasses the dedup window. Use only when re-running an identical command intentionally is the right call.",
@@ -265,18 +265,18 @@ _KALI_COMMON_MISTAKES: tuple[tuple[str, str], ...] = (
     ("missing --phase", "always pass --phase explicitly; no env-var fallback exists"),
     ("technique=recon", "uppercase the audit technique tag (RECON, SSRF, SQLI, ...)"),
     ("intent>200 chars", "intent is trimmed to 200 chars; keep it as a one-line purpose"),
-    ("--via-mcp", "MCP path is removed in Wave 1 — `aith assess kali` is the only path"),
+    ("--via-mcp", "MCP path is removed in Wave 1 — `vigil assess kali` is the only path"),
 )
 
 
 def _kali_invocation(verb: str) -> tuple[str, ...]:
     if verb == "exec":
         return (
-            "aith assess kali exec --technique <enum> --intent \"<one-liner>\" "
+            "vigil assess kali exec --technique <enum> --intent \"<one-liner>\" "
             "--probe-kind <kind> --phase <phase> --timeout 1800 -- <command...>",
         )
     return (
-        f"aith assess kali {verb} --technique <enum> --intent \"<one-liner>\" "
+        f"vigil assess kali {verb} --technique <enum> --intent \"<one-liner>\" "
         f"--probe-kind <kind> --phase <phase> --timeout 1800 [verb-flags]",
     )
 
@@ -300,8 +300,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Record structured intelligence through the helper-owned intel schemas.",
         schema_name="type-specific intel schema",
         preferred_invocations=(
-            "aith assess record-intel <type> <intel-json-file>",
-            "aith assess contract record-intel <type>",
+            "vigil assess record-intel <type> <intel-json-file>",
+            "vigil assess contract record-intel <type>",
         ),
         author_supplied_fields=(
             "type-specific required fields",
@@ -331,7 +331,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Create or upsert a finding through helper-normalized lifecycle defaults.",
         schema_name="finding-record.schema.json",
         preferred_invocations=(
-            "aith assess record-finding <agent-name> <finding-json-file>",
+            "vigil assess record-finding <agent-name> <finding-json-file>",
         ),
         author_supplied_fields=(
             "title",
@@ -363,7 +363,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Use details.poc_code for exploit scripts, or details.poc_request / details.poc_response for structured HTTP request/response pairs that demonstrate the vulnerability.",
             "Use details.references for CVE links, advisory URLs, or related documentation (array of strings).",
             "Use details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete and worth tracking, but only becomes exploitation-worthy as part of a larger chain. Specialists set or refine these fields through record-finding or update-finding; verification reviews them but does not own them.",
-            "Do not put `link_kind=root_cause` in the finding `links` array. Record the finding first, then use `aith assess link-finding` after verification so root/sibling grouping stays an explicit lifecycle action.",
+            "Do not put `link_kind=root_cause` in the finding `links` array. Record the finding first, then use `vigil assess link-finding` after verification so root/sibling grouping stays an explicit lifecycle action.",
             "evidence_ref must resolve to a real artifact: an existing engagement file auto-registered and linked on record. record-finding REJECTS URL refs, prose refs, and path-shaped refs with no file because they cannot satisfy report-readiness artifact indexing. Put external URLs in details.references, or pass --allow-unindexed-evidence for a theoretical/code-inferred finding with no file.",
         ),
         common_mistakes=(
@@ -374,7 +374,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("description", "use summary for the short finding statement or notes for replayable proof"),
             ("evidence", "use details.evidence"),
             ("impact", "use details.impact"),
-            ("links[].link_kind=root_cause", "use `aith assess link-finding <sibling-slug> --root-cause <root-slug>` after verification"),
+            ("links[].link_kind=root_cause", "use `vigil assess link-finding <sibling-slug> --root-cause <root-slug>` after verification"),
         ),
         examples=(
             {
@@ -453,9 +453,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Attach one finding as a sibling of a root-cause finding using backend-owned finding links.",
         schema_name="backend RootCauseLinkRequest",
         preferred_invocations=(
-            "aith assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_finding",
-            "aith assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_attack_path --note 'Root removes this exploit chain; residual XXE remains.'",
-            "aith assess link-finding <sibling-slug> --clear-root-cause",
+            "vigil assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_finding",
+            "vigil assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_attack_path --note 'Root removes this exploit chain; residual XXE remains.'",
+            "vigil assess link-finding <sibling-slug> --clear-root-cause",
         ),
         author_supplied_fields=(
             "finding_slug",
@@ -482,8 +482,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Inspect a root-cause finding group as the backend will present it to reporting and the UI.",
         schema_name="backend finding group projection",
         preferred_invocations=(
-            "aith assess list-finding-group <root-slug>",
-            "aith assess list-finding-group <root-slug> --json",
+            "vigil assess list-finding-group <root-slug>",
+            "vigil assess list-finding-group <root-slug> --json",
         ),
         author_supplied_fields=(
             "root_slug",
@@ -497,9 +497,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Fetch the grouped report finding projection that report-writer consumes.",
         schema_name="backend grouped report-findings projection",
         preferred_invocations=(
-            "aith assess list-report-findings --mode final --json",
-            "aith assess list-report-findings --mode draft --json",
-            "aith assess list-report-findings --mode final",
+            "vigil assess list-report-findings --mode final --json",
+            "vigil assess list-report-findings --mode draft --json",
+            "vigil assess list-report-findings --mode final",
         ),
         author_supplied_fields=(
             "mode",
@@ -509,7 +509,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("view", "grouped root-cause projection"),
         ),
         notes=(
-            "Use this helper in prompts and report workflows instead of raw `aith assess fetch report-findings?...` calls. The helper makes grouped root-cause output the contract and keeps query-string details out of operator instructions.",
+            "Use this helper in prompts and report workflows instead of raw `vigil assess fetch report-findings?...` calls. The helper makes grouped root-cause output the contract and keeps query-string details out of operator instructions.",
             "`--json` is the report-writer/LLM ingestion form. The default text form is for quick human inspection before dispatch.",
         ),
     ),
@@ -518,9 +518,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Render a bounded resume brief from backend state, command history, handoffs, and indexed artifacts.",
         schema_name="GET /assessment/resume-brief",
         preferred_invocations=(
-            "aith assess resume-brief",
-            "aith assess resume-brief --finding VA-047",
-            "aith assess resume-brief --q \"OIDC static state\" --json",
+            "vigil assess resume-brief",
+            "vigil assess resume-brief --finding VA-047",
+            "vigil assess resume-brief --q \"OIDC static state\" --json",
         ),
         author_supplied_fields=(
             "--q",
@@ -540,14 +540,14 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Register, refresh, search, fetch, or scratch-mark indexed engagement-local artifact metadata.",
         schema_name="assessment_artifacts table + /assessment/artifacts endpoints",
         preferred_invocations=(
-            "aith assess artifact search VA-047",
-            "aith assess artifact search --finding VA-047",
-            "aith assess artifact get <id>",
-            "aith assess artifact register notes/foo.md --kind note --finding VA-047",
-            "aith assess artifact refresh",
-            "aith assess artifact mark-scratch notes/triage.md",
-            "aith assess artifact mark-scratch --under notes/scratch/",
-            "aith assess artifact unmark-scratch notes/triage.md",
+            "vigil assess artifact search VA-047",
+            "vigil assess artifact search --finding VA-047",
+            "vigil assess artifact get <id>",
+            "vigil assess artifact register notes/foo.md --kind note --finding VA-047",
+            "vigil assess artifact refresh",
+            "vigil assess artifact mark-scratch notes/triage.md",
+            "vigil assess artifact mark-scratch --under notes/scratch/",
+            "vigil assess artifact unmark-scratch notes/triage.md",
         ),
         author_supplied_fields=(
             "subcommand: search | get | register | mark-scratch | unmark-scratch",
@@ -559,7 +559,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "mark-scratch / unmark-scratch: <target> (id or path) or --under <prefix>",
         ),
         notes=(
-            "Each action is a proper subcommand with typed arguments — run `aith assess artifact <action> --help` for per-action help.",
+            "Each action is a proper subcommand with typed arguments — run `vigil assess artifact <action> --help` for per-action help.",
             "Large/raw files stay on disk. The backend stores hashes, capped previews, presence, and entity links.",
             "Register paths relative to the engagement root; absolute paths are accepted only when they resolve inside the engagement directory.",
             "`mark-scratch` dismisses a note as non-durable so `check-report-readiness` no longer blocks on it. The row stays searchable.",
@@ -574,9 +574,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Apply a verification transition to an existing finding through the audit ledger.",
         schema_name="backend FindingVerifyRequest",
         preferred_invocations=(
-            "aith assess verify-finding <slug> <verification-json>",
-            'aith assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity low',
-            'aith assess verify-finding <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check 2',
+            "vigil assess verify-finding <slug> <verification-json>",
+            'vigil assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity low',
+            'vigil assess verify-finding <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check 2',
         ),
         author_supplied_fields=(
             "disposition",
@@ -607,7 +607,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Persist a false_positive verification with the required kill metadata.",
         schema_name="backend FindingVerifyRequest (false_positive)",
         preferred_invocations=(
-            'aith assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>',
+            'vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>',
         ),
         author_supplied_fields=(
             "reason_text",
@@ -637,9 +637,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Patch non-verification finding fields on an existing slug.",
         schema_name="backend FindingPatchRequest",
         preferred_invocations=(
-            "aith assess update-finding <slug> <patch-json-file>",
-            'aith assess update-finding <slug> --status reported --reason "Published in report"',
-            'aith assess update-finding <slug> --inline \'{"workflow_status":"draft","reason_text":"Needs more evidence"}\'',
+            "vigil assess update-finding <slug> <patch-json-file>",
+            'vigil assess update-finding <slug> --status reported --reason "Published in report"',
+            'vigil assess update-finding <slug> --inline \'{"workflow_status":"draft","reason_text":"Needs more evidence"}\'',
         ),
         author_supplied_fields=(
             "at least one patch field",
@@ -670,8 +670,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Reopen a previously verified or false-positive finding for re-triage.",
         schema_name="backend FindingPatchRequest (reopen)",
         preferred_invocations=(
-            'aith assess reset-finding <slug> --reason "..." --status draft',
-            'aith assess reset-finding <slug> --reason "Retest disproved the kill" --status active',
+            'vigil assess reset-finding <slug> --reason "..." --status draft',
+            'vigil assess reset-finding <slug> --reason "Retest disproved the kill" --status active',
         ),
         author_supplied_fields=(
             "reason_text",
@@ -699,10 +699,10 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="PATCH an assessment surface by id (set status + rationale).",
         schema_name="backend SurfaceUpdateRequest",
         preferred_invocations=(
-            'aith assess resolve-surface <id> --status covered --rationale "..."',
-            'aith assess resolve-surface <id> --status not_applicable --rationale "..."',
-            'aith assess resolve-surface <id> --status deferred --rationale "..."',
-            'aith assess resolve-surface <id> --status partially-covered --rationale "..." --followup-condition "..."',
+            'vigil assess resolve-surface <id> --status covered --rationale "..."',
+            'vigil assess resolve-surface <id> --status not_applicable --rationale "..."',
+            'vigil assess resolve-surface <id> --status deferred --rationale "..."',
+            'vigil assess resolve-surface <id> --status partially-covered --rationale "..." --followup-condition "..."',
         ),
         author_supplied_fields=(
             "status",
@@ -740,8 +740,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="PATCH an existing intel row by id without inserting a new history record.",
         schema_name="backend IntelUpdateRequest (per-type updatable column whitelist)",
         preferred_invocations=(
-            "aith assess update-intel <type> <id> <patch.json>",
-            "aith assess update-intel <type> <id> --inline '{...}'",
+            "vigil assess update-intel <type> <id> <patch.json>",
+            "vigil assess update-intel <type> <id> --inline '{...}'",
         ),
         author_supplied_fields=(
             "at least one updatable column",
@@ -764,8 +764,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Insert a replacement intel row; old row stays for audit but is filtered from reports.",
         schema_name="type-specific intel schema for the new payload",
         preferred_invocations=(
-            'aith assess supersede-intel <type> <id> <new.json> --rationale "..."',
-            'aith assess supersede-intel <type> <id> --inline \'{...}\' --rationale "..."',
+            'vigil assess supersede-intel <type> <id> <new.json> --rationale "..."',
+            'vigil assess supersede-intel <type> <id> --inline \'{...}\' --rationale "..."',
         ),
         author_supplied_fields=(
             "type-specific natural-key fields for the new replacement record",
@@ -794,11 +794,11 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Operate the backend code-analysis queue and cross-file trigger lifecycle.",
         schema_name="backend code-analysis queue / trigger request models",
         preferred_invocations=(
-            "aith assess code-dispatch fetch <limit> <agent-name>",
-            "aith assess code-dispatch done <item-id> <disposition> <cwe-coverage-json-file> [notes]",
-            "aith assess code-dispatch list-triggers [status]",
-            "aith assess code-dispatch resolve-triggers <triggers-json-file> <resolution-status> <note>",
-            "aith assess code-dispatch requeue-triggers <triggers-json-file>",
+            "vigil assess code-dispatch fetch <limit> <agent-name>",
+            "vigil assess code-dispatch done <item-id> <disposition> <cwe-coverage-json-file> [notes]",
+            "vigil assess code-dispatch list-triggers [status]",
+            "vigil assess code-dispatch resolve-triggers <triggers-json-file> <resolution-status> <note>",
+            "vigil assess code-dispatch requeue-triggers <triggers-json-file>",
         ),
         author_supplied_fields=(
             "queue item id(s)",
@@ -820,10 +820,10 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         examples=(
             {
-                "command": "aith assess code-dispatch resolve-triggers missing.json external_context_unavailable 'storage DLL source not provided'",
+                "command": "vigil assess code-dispatch resolve-triggers missing.json external_context_unavailable 'storage DLL source not provided'",
             },
             {
-                "command": "aith assess code-dispatch done 42 clean cwe/42.json 'reviewed parser'",
+                "command": "vigil assess code-dispatch done 42 clean cwe/42.json 'reviewed parser'",
             },
         ),
     ),
@@ -832,9 +832,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Build the structural index under the engagement analysis-state directory.",
         schema_name="structural-index aggregate manifest, per-repo manifest, and per-file index JSON",
         preferred_invocations=(
-            "aith assess code-index <repo-path> --repo-key <repo-key>",
-            "aith assess code-index <repo-path> --output-dir <engagement-dir>/tools/analysis-state",
-            "aith assess code-index-sync --repo-key <repo-key>",
+            "vigil assess code-index <repo-path> --repo-key <repo-key>",
+            "vigil assess code-index <repo-path> --output-dir <engagement-dir>/tools/analysis-state",
+            "vigil assess code-index-sync --repo-key <repo-key>",
         ),
         author_supplied_fields=(
             "repo_path",
@@ -863,8 +863,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Bulk-classify code files and persist architect-assigned analysis priority.",
         schema_name="code-file-classification.schema.json",
         preferred_invocations=(
-            "aith assess contract code-classify",
-            "aith assess code-classify <classifications-json-file>",
+            "vigil assess contract code-classify",
+            "vigil assess code-classify <classifications-json-file>",
         ),
         author_supplied_fields=(
             "file_id or file_path",
@@ -880,7 +880,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Use analysis_priority for classification ordering. The code-dispatch queue has its own priority field; operators map analysis_priority to priority only when queueing hunt work.",
             "Classification tiers are critical/high/medium/low/skip. analysis_priority is a 0-100 score that preserves ordering inside those tiers.",
-            "Use `aith assess contract code-classify` before authoring the file instead of copying payload shapes into prompts.",
+            "Use `vigil assess contract code-classify` before authoring the file instead of copying payload shapes into prompts.",
         ),
         common_mistakes=(
             ("priority", "use analysis_priority in code-classify payloads"),
@@ -902,8 +902,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Record repository module boundaries from the architecture mapping pass.",
         schema_name="backend CodeModuleRecord list",
         preferred_invocations=(
-            "aith assess contract code-record-modules",
-            "aith assess code-record-modules <repo-id> <modules-json-file>",
+            "vigil assess contract code-record-modules",
+            "vigil assess code-record-modules <repo-id> <modules-json-file>",
         ),
         author_supplied_fields=(
             "repo_id",
@@ -931,8 +931,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Record the repository threat model produced by code-architect.",
         schema_name="backend threat_model object",
         preferred_invocations=(
-            "aith assess contract code-record-threat-model",
-            "aith assess code-record-threat-model <repo-id> <threat-model-json-file>",
+            "vigil assess contract code-record-threat-model",
+            "vigil assess code-record-threat-model <repo-id> <threat-model-json-file>",
         ),
         author_supplied_fields=(
             "repo_id",
@@ -951,8 +951,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Record a code-vuln-hunter result against the claimed queue item that produced it.",
         schema_name="code-analysis-result.schema.json",
         preferred_invocations=(
-            "aith assess contract code-record-analysis",
-            "aith assess code-record-analysis <analysis-results-json-file>",
+            "vigil assess contract code-record-analysis",
+            "vigil assess code-record-analysis <analysis-results-json-file>",
         ),
         author_supplied_fields=(
             "queue_item_id",
@@ -1155,7 +1155,7 @@ def render_contract_epilog(name: str) -> str:
         [
             "",
             "See also:",
-            f"  aith assess contract {contract.name}",
+            f"  vigil assess contract {contract.name}",
         ]
     )
     return "\n".join(lines)
@@ -1189,16 +1189,16 @@ def raw_endpoint_error(method: str, endpoint: str, payload: Any | None = None) -
             kill_contract = get_contract("kill-finding")
             assert kill_contract is not None
             lines.append(f"  - {kill_contract.preferred_invocations[0]}")
-            lines.append("  - aith assess contract verify-finding")
+            lines.append("  - vigil assess contract verify-finding")
         else:
             lines.append(f"  - {contract.preferred_invocations[0]}")
             if normalized_method == "PATCH" and contract_name == "update-finding":
                 reset_contract = get_contract("reset-finding")
                 assert reset_contract is not None
                 lines.append(f"  - {reset_contract.preferred_invocations[0]}")
-            lines.append(f"  - aith assess contract {contract.name}")
+            lines.append(f"  - vigil assess contract {contract.name}")
             if normalized_method == "PATCH" and contract_name == "update-finding":
-                lines.append("  - aith assess contract reset-finding")
+                lines.append("  - vigil assess contract reset-finding")
         return "\n".join(lines)
     return None
 
@@ -1248,7 +1248,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     ),
     "nuclei": (
         "Pass either -u or -l. Severity filters and `-as` (automatic) shape the run.",
-        "Long sweeps run synchronously with a generous --timeout; `aith assess kali job start` is operator-only (specialists never background — see kali-exec skill).",
+        "Long sweeps run synchronously with a generous --timeout; `vigil assess kali job start` is operator-only (specialists never background — see kali-exec skill).",
     ),
     "sqlmap": (
         "sqlmap's own `--technique` is exposed as `--sql-technique` so it doesn't collide with the audit `--technique` flag.",
@@ -1284,12 +1284,12 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Use only when no typed verb fits. Tool-name attribution falls back to argv[0] for audit recording.",
     ),
     "job": (
-        "Long-running probes go through `aith assess kali job start ...`. The dtach session is parented by tini so it survives the calling shell.",
+        "Long-running probes go through `vigil assess kali job start ...`. The dtach session is parented by tini so it survives the calling shell.",
         "Subcommands: start | status | tail | stop | list.",
     ),
     "sweep-orphans": (
         "Host-side reconciler for `assessment_command_runs` rows stuck in status=running past --max-age-seconds. Run after a backend restart, host crash, or any window where finalize PATCHes may have failed.",
-        "Liveness probe is `docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file at /tmp/aith-pid-<run_uuid>.pid. The run_uuid comes from the row's run_uuid column, with stdout_path parsing kept only for older rows.",
+        "Liveness probe is `docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file at /tmp/vigil-pid-<run_uuid>.pid. The run_uuid comes from the row's run_uuid column, with stdout_path parsing kept only for older rows.",
         "Rows whose PID is alive are left alone (still-running). Rows whose PID is dead OR whose pid file is missing are finalized to status=lost via PATCH command-runs/{id}.",
         "Rows are skipped when Docker probing itself fails, because the command cannot distinguish a live job from an unavailable liveness check.",
         "Use --dry-run first to inspect candidates without writing — a thorough sweep is cheap, an incorrect finalize is not.",
@@ -1301,58 +1301,58 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
 _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     "nmap-scan": (
         {
-            "command": "aith assess kali nmap-scan --target example.com --ports top-1000 --service-detection --technique RECON --intent 'Phase 1 baseline port + service' --probe-kind fingerprint --phase recon --timeout 1800",
+            "command": "vigil assess kali nmap-scan --target example.com --ports top-1000 --service-detection --technique RECON --intent 'Phase 1 baseline port + service' --probe-kind fingerprint --phase recon --timeout 1800",
         },
     ),
     "nuclei": (
         {
-            "command": "aith assess kali nuclei -l hosts.txt -t http/cves/ -severity high,critical -rate-limit 50 -c 25 -bs 25 -jsonl -o scans/nuclei.jsonl --technique RECON --intent 'reactive sweep on Phase-1 URL delta' --probe-kind fingerprint --phase recon --timeout 1800",
+            "command": "vigil assess kali nuclei -l hosts.txt -t http/cves/ -severity high,critical -rate-limit 50 -c 25 -bs 25 -jsonl -o scans/nuclei.jsonl --technique RECON --intent 'reactive sweep on Phase-1 URL delta' --probe-kind fingerprint --phase recon --timeout 1800",
         },
     ),
     "sqlmap": (
         {
-            "command": "aith assess kali sqlmap -u 'https://target/?id=1' --batch --sql-technique BEUSTQ --level 3 --risk 2 --technique SQLI --intent 'verify SQLi on id parameter' --probe-kind payload --phase consume-test --timeout 1800",
+            "command": "vigil assess kali sqlmap -u 'https://target/?id=1' --batch --sql-technique BEUSTQ --level 3 --risk 2 --technique SQLI --intent 'verify SQLi on id parameter' --probe-kind payload --phase consume-test --timeout 1800",
         },
     ),
     "cero": (
         {
-            "command": "aith assess kali cero -d 198.51.100.0/24 -p 443,8443,9443 -c 100 -t 4 -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt --technique OSINT --intent 'TLS SAN scraping for non-CT subs' --probe-kind fingerprint --phase recon --timeout 600",
+            "command": "vigil assess kali cero -d 198.51.100.0/24 -p 443,8443,9443 -c 100 -t 4 -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt --technique OSINT --intent 'TLS SAN scraping for non-CT subs' --probe-kind fingerprint --phase recon --timeout 600",
         },
     ),
     "alterx": (
         {
-            "command": "aith assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt -limit 200000 -o /engagements/$ENGAGEMENT_KEY/scans/perms.txt --technique RECON --intent 'permutation candidate generation from passive subs' --probe-kind fingerprint --phase recon --timeout 600",
+            "command": "vigil assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt -limit 200000 -o /engagements/$ENGAGEMENT_KEY/scans/perms.txt --technique RECON --intent 'permutation candidate generation from passive subs' --probe-kind fingerprint --phase recon --timeout 600",
         },
     ),
     "asnmap": (
         {
-            "command": "aith assess kali asnmap -d example.com -silent -o /engagements/$ENGAGEMENT_KEY/scans/asnmap_cidrs.txt --technique OSINT --intent 'map target-owned CIDRs for TLS SAN sweep' --probe-kind fingerprint --phase recon --timeout 600",
+            "command": "vigil assess kali asnmap -d example.com -silent -o /engagements/$ENGAGEMENT_KEY/scans/asnmap_cidrs.txt --technique OSINT --intent 'map target-owned CIDRs for TLS SAN sweep' --probe-kind fingerprint --phase recon --timeout 600",
         },
     ),
     "bbot": (
         {
-            "command": "aith assess kali bbot -t example.com -p subdomain-enum -rf passive -o /engagements/$ENGAGEMENT_KEY/scans/bbot_subs --technique OSINT --intent 'deep passive subdomain enum' --probe-kind fingerprint --phase recon --timeout 1800",
+            "command": "vigil assess kali bbot -t example.com -p subdomain-enum -rf passive -o /engagements/$ENGAGEMENT_KEY/scans/bbot_subs --technique OSINT --intent 'deep passive subdomain enum' --probe-kind fingerprint --phase recon --timeout 1800",
         },
     ),
     "dnsx": (
         {
-            "command": "aith assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates.txt --dnsx-profile polite-cdn --resolver-profile public-tcp -silent -o /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt --technique RECON --intent 'lean dnsx resolution without bulk JSON' --probe-kind baseline --phase recon --timeout 1200",
+            "command": "vigil assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates.txt --dnsx-profile polite-cdn --resolver-profile public-tcp -silent -o /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt --technique RECON --intent 'lean dnsx resolution without bulk JSON' --probe-kind baseline --phase recon --timeout 1200",
         },
     ),
     "job": (
         {
-            "command": "aith assess kali job start --technique CVE-VALIDATION --intent 'long nuclei sweep' --probe-kind fingerprint --phase recon --timeout 21600 -- nuclei -l targets.txt -t http/cves/",
+            "command": "vigil assess kali job start --technique CVE-VALIDATION --intent 'long nuclei sweep' --probe-kind fingerprint --phase recon --timeout 21600 -- nuclei -l targets.txt -t http/cves/",
         },
         {
-            "command": "aith assess kali job status 42",
+            "command": "vigil assess kali job status 42",
         },
     ),
     "sweep-orphans": (
         {
-            "command": "aith assess kali sweep-orphans --dry-run",
+            "command": "vigil assess kali sweep-orphans --dry-run",
         },
         {
-            "command": "aith assess kali sweep-orphans --max-age-seconds 1800 --container-name security-research",
+            "command": "vigil assess kali sweep-orphans --max-age-seconds 1800 --container-name vigil",
         },
     ),
 }
@@ -1364,9 +1364,9 @@ def _kali_root_contract() -> CommandContract:
         summary="Run Kali tools inside the runtime container with audit recording.",
         schema_name="(per-verb argparse + CommandRunRecordRequest backend model)",
         preferred_invocations=(
-            "aith assess kali <verb> [flags]",
-            "aith assess kali --help",
-            "aith assess contract kali <verb>",
+            "vigil assess kali <verb> [flags]",
+            "vigil assess kali --help",
+            "vigil assess contract kali <verb>",
         ),
         author_supplied_fields=(
             "--technique <enum>",
@@ -1383,7 +1383,7 @@ def _kali_root_contract() -> CommandContract:
         ),
         common_mistakes=_KALI_COMMON_MISTAKES,
         examples=(
-            {"command": "aith assess kali nmap-scan --target example.com --ports top-100 --technique RECON --intent 'fast top-100 sweep' --probe-kind fingerprint --phase recon --timeout 600"},
+            {"command": "vigil assess kali nmap-scan --target example.com --ports top-100 --technique RECON --intent 'fast top-100 sweep' --probe-kind fingerprint --phase recon --timeout 600"},
         ),
     )
 
@@ -1407,13 +1407,13 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
             ),
             schema_name="argparse + CommandRunFinalize backend model",
             preferred_invocations=(
-                "aith assess kali sweep-orphans --dry-run",
-                "aith assess kali sweep-orphans --max-age-seconds 3600",
-                "aith assess kali sweep-orphans --container-name security-research",
+                "vigil assess kali sweep-orphans --dry-run",
+                "vigil assess kali sweep-orphans --max-age-seconds 3600",
+                "vigil assess kali sweep-orphans --container-name vigil",
             ),
             author_supplied_fields=(
                 "--max-age-seconds <int> (default 3600)",
-                "--container-name <name> (default security-research)",
+                "--container-name <name> (default vigil)",
                 "--dry-run (optional, list candidates without writing)",
             ),
             notes=_KALI_VERB_NOTES.get(verb, ()),
@@ -1432,7 +1432,7 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
         "--probe-kind <kind>",
         "--phase <phase>",
         "--timeout <seconds>",
-        "tool-specific flags (see `aith assess kali "
+        "tool-specific flags (see `vigil assess kali "
         + verb
         + " --help`)",
     )
@@ -1473,7 +1473,7 @@ def _record_intel_contract(intel_type: str) -> CommandContract | None:
         summary=f"Record one `{intel_type}` intel row via the record-intel helper.",
         schema_name=schema_name,
         preferred_invocations=(
-            f"aith assess record-intel {intel_type} {intel_type}.json",
+            f"vigil assess record-intel {intel_type} {intel_type}.json",
         ),
         author_supplied_fields=tuple(author_fields),
         notes=(
@@ -1561,14 +1561,14 @@ def _looks_like_verification_payload(payload: Any | None) -> bool:
 # Agent / work-buffer command contracts
 #
 # Work-buffer primitives (stats, fetch, done, …) are documented inline on
-# ``aith assess work-buffer``. Contract entries advertise backend-backed agent
+# ``vigil assess work-buffer``. Contract entries advertise backend-backed agent
 # lifecycle helpers plus ``render-handoff``, whose markdown output is pasted into
 # the next dispatch prompt.
 # ---------------------------------------------------------------------------
 
 # Agent lifecycle sub-verbs that have their own contract entry. The Contract-First
 # Rule directs operators to read these before first use, and the
-# `aith assess contract` resolver uses this tuple to advertise what is
+# `vigil assess contract` resolver uses this tuple to advertise what is
 # discoverable. Read-only sub-verbs (`list`, `get`) are intentionally absent
 # because they do not mutate state and have nothing to validate.
 AGENT_VERBS: tuple[str, ...] = (
@@ -1594,21 +1594,21 @@ def _dispatch_root_contract() -> CommandContract:
         ),
         schema_name="(per-action argparse; backend-backed via assessment_dispatches / _dispatch_handoffs / _dispatch_decisions)",
         preferred_invocations=(
-            "aith assess agent start --role <role> --task \"...\" --dispatch-mode <mode> --skills <skills>",
-            "aith assess agent done <agent-id> --finding-slugs <slug1,slug2>",
-            "aith assess agent handoff --agent-id <id> --role <role> --summary '...' --handoff-status ready",
-            "aith assess agent close <agent-id>",
-            "aith assess agent reconcile-stale --dry-run",
-            "aith assess agent list [--filter-role <role>] [--status <status>]",
-            "aith assess agent render-handoff <agent-id>",
-            "aith assess work-buffer <db_path> stats|fetch|done|...",
+            "vigil assess agent start --role <role> --task \"...\" --dispatch-mode <mode> --skills <skills>",
+            "vigil assess agent done <agent-id> --finding-slugs <slug1,slug2>",
+            "vigil assess agent handoff --agent-id <id> --role <role> --summary '...' --handoff-status ready",
+            "vigil assess agent close <agent-id>",
+            "vigil assess agent reconcile-stale --dry-run",
+            "vigil assess agent list [--filter-role <role>] [--status <status>]",
+            "vigil assess agent render-handoff <agent-id>",
+            "vigil assess work-buffer <db_path> stats|fetch|done|...",
         ),
         author_supplied_fields=(
             "<action> (e.g. start, done, handoff, render-handoff, decision, ...)",
             "action-specific positional args",
         ),
         notes=(
-            "Work-buffer actions live under `aith assess work-buffer <db_path> ...`; "
+            "Work-buffer actions live under `vigil assess work-buffer <db_path> ...`; "
             "agent lifecycle actions never take a cases.db path.",
             "Dispatch state lives in the orchestrator backend. Use `agent start` to log a dispatch, `agent done` "
             "for direct lifecycle patches, `agent handoff` for repeatable checkpoints, `agent close` to consume a ready/blocked handoff into dispatch closure, and `agent render-handoff` to assemble the blob the next dispatch prompt pastes verbatim.",
@@ -1617,14 +1617,14 @@ def _dispatch_root_contract() -> CommandContract:
         common_mistakes=(
             (
                 "transcript paste",
-                "use `aith assess agent render-handoff <prior-agent-id>` and paste the "
+                "use `vigil assess agent render-handoff <prior-agent-id>` and paste the "
                 "rendered blob verbatim — the helper pulls findings, artifacts, and "
                 "credentials from durable state so the prompt stays small",
             ),
             (
                 "stale local DB syntax",
-                "backend dispatch actions use `aith assess agent handoff ...`; "
-                "`aith assess work-buffer cases.db handoff ...` is rejected so handoffs "
+                "backend dispatch actions use `vigil assess agent handoff ...`; "
+                "`vigil assess work-buffer cases.db handoff ...` is rejected so handoffs "
                 "cannot be written to the wrong state surface",
             ),
             (
@@ -1643,11 +1643,11 @@ def _work_buffer_contract() -> CommandContract:
         summary="Operate on the local cases.db work-buffer queue.",
         schema_name="local cases.db work_items schema",
         preferred_invocations=(
-            "aith assess work-buffer <cases.db> stats --by status|source|cluster|host",
-            "aith assess work-buffer <cases.db> fetch <type> <limit> <agent-name>",
-            "aith assess work-buffer <cases.db> fetch-by-priority <limit> auto",
-            "aith assess work-buffer <cases.db> done <id1,id2,...>",
-            "aith assess work-buffer <cases.db> defer-cluster <cluster_key> --reason \"...\"",
+            "vigil assess work-buffer <cases.db> stats --by status|source|cluster|host",
+            "vigil assess work-buffer <cases.db> fetch <type> <limit> <agent-name>",
+            "vigil assess work-buffer <cases.db> fetch-by-priority <limit> auto",
+            "vigil assess work-buffer <cases.db> done <id1,id2,...>",
+            "vigil assess work-buffer <cases.db> defer-cluster <cluster_key> --reason \"...\"",
         ),
         author_supplied_fields=(
             "<cases.db>",
@@ -1656,12 +1656,12 @@ def _work_buffer_contract() -> CommandContract:
         ),
         notes=(
             "Work-buffer rows are local batching state, not backend agent lifecycle rows. "
-            "Use `aith assess agent …` for backend agent lifecycle rows, handoffs, and decisions.",
+            "Use `vigil assess agent …` for backend agent lifecycle rows, handoffs, and decisions.",
             "Mark items done only after the specialist has written durable backend state for "
             "findings, surfaces, probe runs, or coverage satisfied by the work.",
         ),
         common_mistakes=(
-            ("using agent handoff syntax here", "`work-buffer` never records handoffs; use `aith assess agent handoff`"),
+            ("using agent handoff syntax here", "`work-buffer` never records handoffs; use `vigil assess agent handoff`"),
             ("reading cases.db directly", "use the helper so migrations, status transitions, and terminal_reason semantics stay consistent"),
         ),
     )
@@ -1678,12 +1678,12 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             schema_name="(reads GET dispatch-handoffs/{agent_id} + GET dispatches/{agent_id} + GET findings/{slug})",
             preferred_invocations=(
-                "aith assess agent render-handoff <agent-id>",
-                "aith assess agent render-handoff <agent-id> --max-lines 60",
-                "aith assess agent render-handoff <agent-id> --include-evidence",
+                "vigil assess agent render-handoff <agent-id>",
+                "vigil assess agent render-handoff <agent-id> --max-lines 60",
+                "vigil assess agent render-handoff <agent-id> --include-evidence",
             ),
             author_supplied_fields=(
-                "<agent-id> (the prior dispatch's agent_id from `aith assess agent list`)",
+                "<agent-id> (the prior dispatch's agent_id from `vigil assess agent list`)",
             ),
             helper_defaults=(
                 ("--max-lines", "40 (hard cap; findings list collapses with '... and N more')"),
@@ -1725,10 +1725,10 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             examples=(
                 {
-                    "command": "aith assess agent render-handoff a424a88b02054913d",
+                    "command": "vigil assess agent render-handoff a424a88b02054913d",
                 },
                 {
-                    "command": "aith assess agent render-handoff a424a88b02054913d --max-lines 60 --include-evidence",
+                    "command": "vigil assess agent render-handoff a424a88b02054913d --max-lines 60 --include-evidence",
                 },
             ),
         )
@@ -1742,10 +1742,10 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             schema_name="backend DispatchCreate (POST /dispatches)",
             preferred_invocations=(
-                "aith assess agent start --agent-id <id> --role <role> "
+                "vigil assess agent start --agent-id <id> --role <role> "
                 "--task \"...\" --scope-host <host> --model <name> --reasoning <level> "
                 "--dispatch-mode <mode> --skills \"<skill>[,<skill>...]\"",
-                "aith assess agent start --from-json <payload.json>",
+                "vigil assess agent start --from-json <payload.json>",
             ),
             author_supplied_fields=(
                 "--agent-id (unique per dispatch)",
@@ -1764,7 +1764,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "specialist dispatches that omit `skills`; the CLI's "
                 "`validate_specialist_dispatch_contract` performs the same check before "
                 "sending so typos surface locally.",
-                "Use `aith assess list-skills` to discover skill names — the value passed "
+                "Use `vigil assess list-skills` to discover skill names — the value passed "
                 "here must match the directory under `agent/skills/<name>/`.",
                 "Pair with `agent done` when the dispatch finishes: leaving rows in "
                 "`in-progress` past the dispatch's actual lifetime corrupts dedup checks.",
@@ -1777,7 +1777,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             examples=(
                 {
                     "command": (
-                        "aith assess agent start --agent-id va-7f3 "
+                        "vigil assess agent start --agent-id va-7f3 "
                         "--role vulnerability-analyst --task 'review SSRF candidates' "
                         "--scope-host api.example.com --model claude-opus-4-7 "
                         "--reasoning high --dispatch-mode item-iterating "
@@ -1792,9 +1792,9 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             summary="Patch the lifecycle status (and optionally finding_slugs / completed_at) of a registered dispatch row.",
             schema_name="backend DispatchUpdate (PATCH /dispatches/{agent_id})",
             preferred_invocations=(
-                "aith assess agent done <agent-id> --status completed --finding-slugs <slug1,slug2>",
-                "aith assess agent done <agent-id> --status failed",
-                "aith assess agent done <agent-id> --status aborted",
+                "vigil assess agent done <agent-id> --status completed --finding-slugs <slug1,slug2>",
+                "vigil assess agent done <agent-id> --status failed",
+                "vigil assess agent done <agent-id> --status aborted",
             ),
             author_supplied_fields=(
                 "<agent-id>",
@@ -1808,7 +1808,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "Use this when a dispatch returns so cross-dispatch dedup, reporting, "
                 "and report-writer's audit trail see the actual outcome.",
                 "Pair `--status completed --finding-slugs <slugs>` so the dispatch row "
-                "names the slugs the specialist produced; `aith assess agent render-handoff` "
+                "names the slugs the specialist produced; `vigil assess agent render-handoff` "
                 "reads from there.",
             ),
             common_mistakes=(
@@ -1817,7 +1817,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             examples=(
                 {
-                    "command": "aith assess agent done va-7f3 --status completed --finding-slugs VA-001,VA-002",
+                    "command": "vigil assess agent done va-7f3 --status completed --finding-slugs VA-001,VA-002",
                 },
             ),
         )
@@ -1827,8 +1827,8 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             summary="Consume the latest ready/blocked handoff and close the matching dispatch row.",
             schema_name="GET dispatch-handoffs/{agent_id} + PATCH dispatches/{agent_id} + decision-record",
             preferred_invocations=(
-                "aith assess agent close <agent-id>",
-                "aith assess agent close <agent-id> --reason \"ready handoff reviewed\"",
+                "vigil assess agent close <agent-id>",
+                "vigil assess agent close <agent-id> --reason \"ready handoff reviewed\"",
             ),
             author_supplied_fields=(
                 "<agent-id>",
@@ -1845,8 +1845,8 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             summary="List stale in-progress dispatches and optionally close those with ready/blocked handoffs.",
             schema_name="GET dispatches + GET dispatch-handoffs",
             preferred_invocations=(
-                "aith assess agent reconcile-stale --dry-run",
-                "aith assess agent reconcile-stale --max-age-hours 12 --dry-run",
+                "vigil assess agent reconcile-stale --dry-run",
+                "vigil assess agent reconcile-stale --max-age-hours 12 --dry-run",
             ),
             author_supplied_fields=(
                 "--max-age-hours",
@@ -1867,8 +1867,8 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             schema_name="backend handoff-record (POST /dispatch-handoffs, idempotent upsert)",
             preferred_invocations=(
-                "aith assess agent handoff --from-json <handoff.json>",
-                "aith assess agent handoff --agent-id <id> --role <role> "
+                "vigil assess agent handoff --from-json <handoff.json>",
+                "vigil assess agent handoff --agent-id <id> --role <role> "
                 "--summary \"...\" --handoff-status ready --next-step \"...\" --coverage-gap \"<area>: <reason>\"",
             ),
             author_supplied_fields=(
@@ -1897,7 +1897,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             examples=(
                 {
                     "command": (
-                        "aith assess agent handoff --agent-id va-7f3 "
+                        "vigil assess agent handoff --agent-id va-7f3 "
                         "--role vulnerability-analyst "
                         "--summary 'SSRF candidates triaged; 2 confirmed, 1 deferred for OOB' "
                         "--next-step 'Validate confirmed findings against staging' "
@@ -1915,9 +1915,9 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             schema_name="backend decision-record (POST /dispatch-decisions)",
             preferred_invocations=(
-                "aith assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user",
-                "aith assess agent decision --kind egress_decision --choice browser-based-tool --payload-json '{\"egress_block_pct\": 67}'",
-                "aith assess agent decision --kind dispatch_blocked --phase recon --reason \"missing massdns binary in runtime image\" --surfaced-to-user",
+                "vigil assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user",
+                "vigil assess agent decision --kind egress_decision --choice browser-based-tool --payload-json '{\"egress_block_pct\": 67}'",
+                "vigil assess agent decision --kind dispatch_blocked --phase recon --reason \"missing massdns binary in runtime image\" --surfaced-to-user",
             ),
             author_supplied_fields=(
                 "--kind (scope_decision|egress_decision|dispatch_blocked|... — the backend accepts any string but report-writer only renders known kinds)",
@@ -1943,7 +1943,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             examples=(
                 {
                     "command": (
-                        "aith assess agent decision --kind scope_decision "
+                        "vigil assess agent decision --kind scope_decision "
                         "--host api.foo.com --vendor 'Vendor SaaS' --choice pending "
                         "--surfaced-to-user"
                     ),
@@ -1959,7 +1959,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             schema_name="backend DispatchUpdate (PATCH /dispatches/{agent_id}) + decision-record (POST /dispatch-decisions)",
             preferred_invocations=(
-                "aith assess agent abort-duplicate <agent-id> --replacement-agent-id <new-id> --reason \"<text>\"",
+                "vigil assess agent abort-duplicate <agent-id> --replacement-agent-id <new-id> --reason \"<text>\"",
             ),
             author_supplied_fields=(
                 "<agent-id> (the duplicate to abort)",
@@ -1983,7 +1983,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             examples=(
                 {
-                    "command": "aith assess agent abort-duplicate va-bad --replacement-agent-id va-good --reason 'start fired twice — the second one is canonical'",
+                    "command": "vigil assess agent abort-duplicate va-bad --replacement-agent-id va-good --reason 'start fired twice — the second one is canonical'",
                 },
             ),
         )

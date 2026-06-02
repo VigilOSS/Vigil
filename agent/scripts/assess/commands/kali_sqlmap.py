@@ -1,4 +1,4 @@
-"""aith assess kali sqlmap — typed wrapper around sqlmap inside the runtime."""
+"""vigil assess kali sqlmap — typed wrapper around sqlmap inside the runtime."""
 from __future__ import annotations
 
 import sys

@@ -1,8 +1,8 @@
-"""aith assess scaffold-probe — write a runnable probe skeleton + register it.
+"""vigil assess scaffold-probe — write a runnable probe skeleton + register it.
 
 Phase 4 self-expanding "write-probe-script" capability. The agent authors a
 single-file Python probe at runtime (see `agent/skills/write-probe-script/SKILL.md`),
-runs it through `aith assess kali exec -- python3 <script>`, validates it, and
+runs it through `vigil assess kali exec -- python3 <script>`, validates it, and
 persists it for reuse. This command is the thin scaffold that bootstraps step 1:
 it writes a templated, immediately-runnable probe into the engagement's
 ``scripts/`` dir (the canonical home for agent-authored helpers — same place
@@ -12,7 +12,7 @@ linkable to a finding from the first second.
 
 No new plumbing: the engagement dir resolves through ``load_config`` exactly like
 every other command, and registration reuses ``AssessmentClient.post("artifacts",
-...)`` — the same call ``aith assess artifact register`` makes.
+...)`` — the same call ``vigil assess artifact register`` makes.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from assess.lib.config import load_config
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 # The kind we tag scaffolded probes with so they are filterable in the artifact
-# index (``aith assess artifact search --kind probe-script``).
+# index (``vigil assess artifact search --kind probe-script``).
 _PROBE_KIND = "probe-script"
 
 
@@ -45,7 +45,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "Writes scripts/<name>.py with the finding-return convention and an "
             "oob-mint hook commented in, then pre-registers it as an artifact so it "
             "is immediately linkable to a finding. Run it via "
-            "`aith assess kali exec -- python3 /engagements/$ENGAGEMENT_KEY/scripts/<name>.py`."
+            "`vigil assess kali exec -- python3 /engagements/$ENGAGEMENT_KEY/scripts/<name>.py`."
         ),
     )
     p.add_argument(
@@ -133,7 +133,7 @@ def run(args: argparse.Namespace) -> None:
             print(
                 f"warning: artifact registration failed: {exc}; "
                 f"the script is written. Register it with "
-                f"`aith assess artifact register {relative_path} --kind {_PROBE_KIND}`.",
+                f"`vigil assess artifact register {relative_path} --kind {_PROBE_KIND}`.",
                 file=sys.stderr,
             )
 
@@ -149,7 +149,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"registered artifact id={row.get('id')} present={present} finding={finding}")
     print("next: edit the probe, then run it via")
     print(
-        f"  aith assess kali exec --technique <ENUM> --intent '<why>' "
+        f"  vigil assess kali exec --technique <ENUM> --intent '<why>' "
         f"--probe-kind <kind> --phase <phase> --timeout <s> -- "
         f"python3 /engagements/{cfg.engagement_key}/{relative_path} --target <url>"
     )
@@ -158,7 +158,7 @@ def run(args: argparse.Namespace) -> None:
 def _register_artifact(cfg, relative_path: str, finding_slug: str | None) -> dict:
     """Pre-register the scaffolded probe via the existing artifacts POST path.
 
-    Mirrors ``aith assess artifact register``: same endpoint, same payload
+    Mirrors ``vigil assess artifact register``: same endpoint, same payload
     shape (``assess.commands.artifact._run_register``). The file is written
     before this call so the backend hashes real bytes (``present=yes``).
     """
@@ -177,7 +177,7 @@ def _render_template(*, name: str, purpose: str) -> str:
     The skeleton: parses ``--target`` (+ ``--out``), does one passive GET, and
     prints the finding-return JSON verdict on the LAST stdout line (the
     convention `write-probe-script` SKILL.md defines). The active-payload branch
-    and the `aith oob mint` blind-callback hook are present but commented so the
+    and the `vigil oob mint` blind-callback hook are present but commented so the
     file runs as-is yet shows the agent exactly where to extend it.
     """
     # NOTE: kept intentionally small. The template is a starting point the agent
@@ -187,7 +187,7 @@ def _render_template(*, name: str, purpose: str) -> str:
 
 Probe: {name}
 Run inside the runtime container via:
-  aith assess kali exec --technique <ENUM> --intent "<why>" \\
+  vigil assess kali exec --technique <ENUM> --intent "<why>" \\
     --probe-kind <fingerprint|baseline|payload|exploit> --phase <phase> \\
     --timeout <seconds> [--destructive] -- \\
     python3 /engagements/$ENGAGEMENT_KEY/scripts/{name}.py \\
@@ -207,7 +207,7 @@ import urllib.request
 
 def fetch(url: str, *, timeout: int = 15) -> tuple[int, str]:
     """GET `url`, returning (status, first 4 KiB of body). Scoped target only."""
-    req = urllib.request.Request(url, headers={{"User-Agent": "aith-probe"}})
+    req = urllib.request.Request(url, headers={{"User-Agent": "vigil-probe"}})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (scoped target)
         body = resp.read(4096).decode("utf-8", "replace")
         return resp.status, body
@@ -222,7 +222,7 @@ def main() -> int:
     # ap.add_argument("--payload", default="", help="Crafted input under test.")
     # ap.add_argument("--marker", default="", help="Response marker that proves the hypothesis.")
     # Blind-callback hook — mint the host on the HOST first, pass it in here:
-    #   aith oob mint --technique <t> --target-url <url> --param <p>
+    #   vigil oob mint --technique <t> --target-url <url> --param <p>
     # ap.add_argument("--callback", default="", help="Minted http://<nonce>.oob.../ host.")
     args = ap.parse_args()
 

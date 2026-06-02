@@ -115,7 +115,7 @@ Standard structure for SEC project findings. All sections are H2 headings.
 2. **Steps to Reproduce** — Numbered list, each step with inline code for endpoints/params. Each step that sends a request includes the request and response excerpt (5-15 lines, proof annotated) inline as `codeBlock` nodes (language: `http`).
 3. **Impact** — Concrete harm statement (proved attacker outcome, quantified where possible)
 4. **Remediation** — Specific fix with inline code for function/attribute names. When remediation involves multiple files or call sites, enumerate them as a bullet list with full path + line ranges + the specific pattern at each site. The ticket must stand alone for a developer who has never seen the engagement backend.
-5. **Metadata** — Table with: Report ID, OWASP, CWE, CVSS (score + vector), Severity, Affected Host/Path. Internal cross-reference (CH-XXX, EX-XXX, etc.) belongs in the engagement backend (`aith assess agent done --finding-slugs ...`), not in the Jira ticket body — see Rule 17 of `agent/rules/reporting.md`.
+5. **Metadata** — Table with: Report ID, OWASP, CWE, CVSS (score + vector), Severity, Affected Host/Path. Internal cross-reference (CH-XXX, EX-XXX, etc.) belongs in the engagement backend (`vigil assess agent done --finding-slugs ...`), not in the Jira ticket body — see Rule 17 of `agent/rules/reporting.md`.
 
 ### Standalone-ticket rule (Rule 17 enforcement)
 
@@ -123,7 +123,7 @@ Every Jira issue must be readable by a developer who has zero context on the eng
 
 - Describe related findings by their attacker outcome or code path: `"the same unparameterized mysql_query pattern appears across the Service.*.php delivery classes — see file list in Remediation"`, not `"(CH-043, CH-044, CH-045, CH-049, CH-070)"`.
 - Use Jira's native `Linked Issues` / `Epic` / `Blocks` relationships to express cross-ticket dependencies — reference sibling tickets by SEC-XXXX key.
-- Keep the orchestrator-to-Jira mapping in the engagement backend via `aith assess agent done --finding-slugs <slugs>` after the ticket is created. The mapping table is operator-internal and stays in the engagement directory.
+- Keep the orchestrator-to-Jira mapping in the engagement backend via `vigil assess agent done --finding-slugs <slugs>` after the ticket is created. The mapping table is operator-internal and stays in the engagement directory.
 
 ### Priority Mapping
 

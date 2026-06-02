@@ -45,7 +45,7 @@ _INTENT_MAX_LEN = 200
 def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
     """C30: extract a parsed target host from argv for high-traffic verbs.
 
-    Operators query coverage with ``aith assess list-command-runs
+    Operators query coverage with ``vigil assess list-command-runs
     --target-host <host>``; the backend stores this in the
     ``target_host`` column. Per-verb extraction keeps the logic simple
     and deterministic — each kali wrapper knows its argv shape, so the
@@ -159,7 +159,7 @@ def _validate_inputs(
 def _resolve_agent_name(explicit: str | None) -> str:
     """Resolve --agent-name with env-var fallback and an "operator" default.
 
-    Precedence: explicit flag > $AGENT_NAME > $AITH_AGENT_NAME > "operator".
+    Precedence: explicit flag > $AGENT_NAME > $VIGIL_AGENT_NAME > "operator".
     The default lets the operator run mechanical pipeline checks (tier-pick
     smoke, runtime health, credential validation) without remembering to set
     --agent-name. Specialist dispatch wrappers are responsible for exporting
@@ -168,7 +168,7 @@ def _resolve_agent_name(explicit: str | None) -> str:
     """
     if explicit:
         return explicit
-    env_value = os.environ.get("AGENT_NAME") or os.environ.get("AITH_AGENT_NAME") or ""
+    env_value = os.environ.get("AGENT_NAME") or os.environ.get("VIGIL_AGENT_NAME") or ""
     if env_value:
         return env_value
     return "operator"
@@ -207,7 +207,7 @@ def _post_pre_exec_row(
         "command": " ".join(cmd),
         "argv": list(cmd),
         "tool_name": tool_name,
-        "route": f"aith assess kali/{tool_name}",
+        "route": f"vigil assess kali/{tool_name}",
         "agent_name": agent_name,
         "phase": phase,
         "target_host": _extract_target_host(tool_name, cmd),

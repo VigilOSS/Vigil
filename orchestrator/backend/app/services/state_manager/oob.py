@@ -13,11 +13,11 @@ from . import _common
 
 # ── OAST (out-of-band) auto-correlation ──────────────────────────────────
 #
-# ``aith oob mint`` records a probe (the unique ``nonce`` subdomain label is
-# the correlation token). ``aith oob poll`` parses the shared
+# ``vigil oob mint`` records a probe (the unique ``nonce`` subdomain label is
+# the correlation token). ``vigil oob poll`` parses the shared
 # interactsh-client log and records each observed callback against the
 # probe whose nonce appears in the callback host. See db.py
-# :func:`_create_oob_correlation_tables` and src/ai_threat_hunting_cli/oob.py.
+# :func:`_create_oob_correlation_tables` and src/vigil_cli/oob.py.
 
 _OOB_PROBE_STATUSES = {"pending", "fired", "confirmed", "expired", "ignored"}
 
@@ -183,7 +183,7 @@ def correlate_oob_interaction(
 
     Returns ``{"matched": bool, "probe": {...}|None, "interaction": {...}|None,
     "duplicate": bool}``. Unknown nonces return ``matched=False`` (the caller —
-    ``aith oob poll`` — collects those into an "unmatched interactions"
+    ``vigil oob poll`` — collects those into an "unmatched interactions"
     section) rather than 404, so a single poll over a mixed log never aborts
     on the first stray callback. Recording a probe's first interaction flips
     its status ``pending`` → ``fired``. Duplicate callbacks (same
