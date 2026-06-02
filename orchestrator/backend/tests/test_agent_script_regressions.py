@@ -42,7 +42,7 @@ def _load_proxy_addon_module():
 
 
 def test_assess_cli_imports_agent_work_buffer_without_legacy_dispatch_module() -> None:
-    """Top-level ``aith assess`` must not expose ``dispatch``; agent + work-buffer are canonical."""
+    """Top-level ``vigil assess`` must not expose ``dispatch``; agent + work-buffer are canonical."""
     import ast
 
     repo_root = Path(__file__).resolve().parents[3]
@@ -1632,7 +1632,7 @@ def test_log_actor_kind_parses_before_or_after_subcommand() -> None:
         "agent/scripts/assess/commands/log_entry.py",
     )
 
-    parser = argparse.ArgumentParser(prog="aith assess")
+    parser = argparse.ArgumentParser(prog="vigil assess")
     parser.add_argument(
         "--actor-kind",
         dest="actor_kind",
@@ -2033,7 +2033,7 @@ def test_specialist_does_not_load_adversarial_mindset(role: str) -> None:
 def test_start_swarm_records_N_rows_with_worker_encoded_task(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    """C21: aith assess agent start-swarm splits an items file into worker
+    """C21: vigil assess agent start-swarm splits an items file into worker
     batches and writes one backend dispatch row per worker. Each row's task
     encodes the worker index, batch range, and items file name so the
     specialist can read its own slice via `agent get <agent_id>`. The helper
@@ -2210,7 +2210,7 @@ def test_c45_review_mode_section_present(agent_file: str, heading: str) -> None:
 
 def test_no_operator_prompt_invokes_update_finding_with_details_json() -> None:
     """C64: an operator-facing prompt must not instruct passing
-    `details_json` as the field name to `aith assess update-finding`.
+    `details_json` as the field name to `vigil assess update-finding`.
     The canonical write-side field is `details` (a dict); the
     storage column happens to be `details_json` (a JSON string) and
     is correctly referenced on the READ side. This test catches the

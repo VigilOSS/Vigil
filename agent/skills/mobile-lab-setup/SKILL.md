@@ -1,7 +1,7 @@
 ---
 name: mobile-lab-setup
 description: Build and choose Android/iOS mobile security labs with emulators, simulators, owned devices, Mac ARM hosts, Docker, proxies, Frida, device farms, and safe account separation
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Mobile Lab Setup

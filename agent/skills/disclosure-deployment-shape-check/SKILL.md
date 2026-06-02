@@ -1,7 +1,7 @@
 ---
 name: disclosure-deployment-shape-check
 description: Pre-send audit checklist that catches deployment-shape blind spots in critical-severity disclosures — allocator dependence, build-flag gates, claim-vs-evidence fidelity, negative-control bundling, vendor-distro variation
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Disclosure Deployment-Shape Check

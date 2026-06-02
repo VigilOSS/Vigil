@@ -1,4 +1,4 @@
-"""aith assess gau-secrets — gau → uro dedup → httpx body capture → trufflehog.
+"""vigil assess gau-secrets — gau → uro dedup → httpx body capture → trufflehog.
 
 Body-fetch pipeline for secret extraction. Reuses cached gau output and
 cached `bodies/` when present, then runs trufflehog filesystem mode against

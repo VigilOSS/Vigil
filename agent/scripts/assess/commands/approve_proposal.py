@@ -1,8 +1,8 @@
-"""aith assess approve-proposal — operator-approval ledger PATCH.
+"""vigil assess approve-proposal — operator-approval ledger PATCH.
 
 Marks a containment-proposal decision row (kind=``containment_proposal``)
 as ``resolved=1`` with ``resolution_json={"approved_by": <name>,
-"approved_at": <utc-iso>}``. ``aith blue contain`` refuses to execute
+"approved_at": <utc-iso>}``. ``vigil blue contain`` refuses to execute
 unless the proposal it references is approved here first.
 
 Backend endpoint: PATCH /engagements/{key}/dispatch-decisions/{id} with
@@ -27,7 +27,7 @@ def register(subparsers) -> None:
     p.add_argument(
         "decision_id",
         type=int,
-        help="dispatch-decisions row id (printed by `aith blue propose-contain`)",
+        help="dispatch-decisions row id (printed by `vigil blue propose-contain`)",
     )
     p.add_argument(
         "--approved-by",

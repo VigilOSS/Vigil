@@ -2,9 +2,9 @@
 matching engagement's scope, auth.json, cases.db, and orchestrator backend.
 
 Managed launch:
-    aith mitmproxy start
+    vigil mitmproxy start
 
-The CLI runs this addon inside the security-research-proxy Docker container.
+The CLI runs this addon inside the vigil-proxy Docker container.
 The container bind-mounts the install's ``agent/engagements`` directory at
 ``/engagements`` so every active engagement is visible to the addon at once,
 and the addon picks the matching engagement per request from a registry kept

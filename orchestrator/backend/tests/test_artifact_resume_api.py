@@ -46,7 +46,7 @@ def _register_note(client, path: str, **kwargs) -> dict:
     The auto-walking ``artifacts/sync`` endpoint was removed; tests that
     previously relied on sync to bulk-index ``notes/``-style files now
     register each file with this helper to mirror what specialists do via
-    ``aith assess artifact register``.
+    ``vigil assess artifact register``.
     """
     payload = {"path": path, "kind": "note"}
     payload.update(kwargs)
@@ -289,12 +289,12 @@ def test_resume_brief_returns_bounded_operating_picture(client, isolate_settings
     assert any(row["relative_path"] == "notes/VA-047-note.md" for row in body["artifacts"])
     assert any("list-command-runs" in row["command"] for row in body["recommended_next_actions"])
     assert any(
-        row["entity_kind"] == "command_run" and row["command"] == f"aith assess get-command-run {command.json()['id']}"
+        row["entity_kind"] == "command_run" and row["command"] == f"vigil assess get-command-run {command.json()['id']}"
         for row in body["recommended_next_actions"]
     )
     artifact_id = next(row["id"] for row in body["artifacts"] if row["relative_path"] == "notes/VA-047-note.md")
     assert any(
-        row["entity_kind"] == "artifact" and row["command"] == f"aith assess artifact get {artifact_id}"
+        row["entity_kind"] == "artifact" and row["command"] == f"vigil assess artifact get {artifact_id}"
         for row in body["recommended_next_actions"]
     )
 
@@ -380,7 +380,7 @@ def test_report_readiness_validates_evidence_ref_when_artifact_id_is_present(cli
         for blocker in blockers
         if blocker["kind"] == "finding_evidence_artifact_mismatch" and blocker["slug"] == "VA-047"
     )
-    assert "aith assess update-finding VA-047 --evidence-ref notes/replacement-evidence.md" in mismatch["detail"]
+    assert "vigil assess update-finding VA-047 --evidence-ref notes/replacement-evidence.md" in mismatch["detail"]
 
 
 def test_mark_scratch_clears_unlinked_markdown_blocker(client, isolate_settings) -> None:
@@ -557,5 +557,5 @@ def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:
 
     commands = [row["command"] for row in actions]
     assert len(actions) == 8
-    assert "aith assess agent render-handoff va-memory" in commands
-    assert "aith assess agent reconcile-stale --dry-run" in commands
+    assert "vigil assess agent render-handoff va-memory" in commands
+    assert "vigil assess agent reconcile-stale --dry-run" in commands

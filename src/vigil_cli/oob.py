@@ -30,7 +30,7 @@ class OobOptions:
     frp_port: int = DEFAULT_FRP_PORT
     frp_token: str = ""
     oob_domain: str = DEFAULT_OOB_DOMAIN
-    container_name: str = "security-research"
+    container_name: str = "vigil"
 
 
 def start_oob(
@@ -41,7 +41,7 @@ def start_oob(
 ) -> None:
     _require_runtime(options.container_name, runner=runner)
     if not options.frp_token:
-        raise SystemExit("Missing OOB FRP token. Set it with `aith config set oob.frp_token <token>`.")
+        raise SystemExit("Missing OOB FRP token. Set it with `vigil config set oob.frp_token <token>`.")
     _require_runtime_tools(options.container_name, runner=runner)
     _kill_stale_oob_processes(options.container_name, runner=runner)
     _render_runtime_files(options, runner=runner)
@@ -68,14 +68,14 @@ def start_oob(
         _check_frpc_for_conflicts(options, runner=runner, timeout=frpc_ready_timeout)
 
 
-def stop_oob(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> None:
+def stop_oob(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> None:
     for session in ("frpc", "oob-server"):
         _run_exec(container_name, f"tmux kill-session -t {shlex.quote(session)} 2>/dev/null || true", runner=runner, check=False)
     _kill_stale_oob_processes(container_name, runner=runner)
 
 
 def oob_status(
-    container_name: str = "security-research",
+    container_name: str = "vigil",
     *,
     oob_domain: str | None = None,
     runner: docker.Runner = docker.run_command,
@@ -125,12 +125,12 @@ def start_oob_client(
     _ensure_tmux_session(options.container_name, session, command, runner=runner)
 
 
-def stop_oob_client(name: str, container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> None:
+def stop_oob_client(name: str, container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> None:
     client_name = sanitize_name(name)
     _run_exec(container_name, f"tmux kill-session -t oob-client-{shlex.quote(client_name)} 2>/dev/null || true", runner=runner, check=False)
 
 
-def list_oob_clients(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> list[str]:
+def list_oob_clients(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> list[str]:
     live: set[str] = set()
     result = _run_exec(container_name, "tmux list-sessions -F '#S' 2>/dev/null | sed -n 's/^oob-client-//p'", runner=runner, check=False)
     if result.returncode == 0:
@@ -147,7 +147,7 @@ def list_oob_clients(container_name: str = "security-research", *, runner: docke
 
 
 def test_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command) -> None:
-    marker = "aith-test"
+    marker = "vigil-test"
     command = (
         f"dig +short {marker}.{shlex.quote(options.oob_domain)} @8.8.8.8 >/dev/null 2>&1 || true; "
         f"curl -fsS --max-time 5 http://{marker}.{shlex.quote(options.oob_domain)}/ >/dev/null 2>&1 || true; "
@@ -395,13 +395,13 @@ def _with_nonce(interaction: OobInteraction, nonce: str) -> OobInteraction:
 
 def read_client_log(
     name: str,
-    container_name: str = "security-research",
+    container_name: str = "vigil",
     *,
     runner: docker.Runner = docker.run_command,
     lines: int = 2000,
 ) -> str:
     """Read the interactsh-client interaction log — the SAME source
-    ``aith oob client logs`` reads (``/data/oob/clients/<name>.log``).
+    ``vigil oob client logs`` reads (``/data/oob/clients/<name>.log``).
 
     Returns the tail (default 2000 lines) as text for
     :func:`parse_interactsh_log`. Best-effort: a missing log yields ``""``.
@@ -425,7 +425,7 @@ def _reset_frpc_log(container_name: str, *, runner: docker.Runner) -> None:
 
 def _require_runtime(container_name: str, *, runner: docker.Runner) -> None:
     if not docker.container_running(container_name, runner=runner):
-        raise SystemExit("Kali runtime is not running. Start it with `aith runtime start`.")
+        raise SystemExit("Kali runtime is not running. Start it with `vigil runtime start`.")
 
 
 def _require_runtime_tools(container_name: str, *, runner: docker.Runner) -> None:
@@ -491,7 +491,7 @@ def _check_frpc_for_conflicts(
                 + "\n".join(f"  {line}" for line in conflicts[:10])
                 + f"\n\nThe OOB profile is single-tenant: remotePort {OOB_UDP_REMOTE_PORT}/{OOB_TCP_REMOTE_PORT} and "
                 + f"customDomains {options.oob_domain!r} can only be served by one client at a time.\n"
-                "Stop the other `aith oob start` instance, then retry. To inspect:\n"
+                "Stop the other `vigil oob start` instance, then retry. To inspect:\n"
                 f"  docker exec {options.container_name} tail -n 200 {OOB_ROOT}/frpc.log\n"
                 "(See README §Callback, Listener & Tunnel Handling — TODO: per-tenant OOB.)"
             )

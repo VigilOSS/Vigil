@@ -7,9 +7,9 @@ from pathlib import Path
 
 from .config import get_config_value
 
-DEFAULT_INSTALL_ROOT = Path.home() / "security-research"
-CONFIG_DIR = Path.home() / ".config" / "security-research"
-DEFAULT_SOURCE_REPO = "https://github.com/vigil-oss/security-research.git"
+DEFAULT_INSTALL_ROOT = Path.home() / "vigil"
+CONFIG_DIR = Path.home() / ".config" / "vigil"
+DEFAULT_SOURCE_REPO = "https://github.com/vigil-oss/vigil.git"
 # Hardcoded fallback for ``ORCHESTRATOR_BASE_URL`` — last layer of the
 # resolution chain in ``resolve_orchestrator_base_url`` and the value the
 # engagement-creation flow compares against to decide whether
@@ -32,7 +32,7 @@ def find_repo_root(start: Path | None = None) -> Path | None:
 def resolve_install_root(value: str | Path | None = None) -> Path:
     if value:
         return Path(value).expanduser().resolve()
-    env_value = os.environ.get("AI_THREAT_HUNTING_INSTALL_DIR") or os.environ.get("AI_THREAT_HUNTING_DIR")
+    env_value = os.environ.get("VIGIL_INSTALL_DIR") or os.environ.get("VIGIL_DIR")
     if env_value:
         return Path(env_value).expanduser().resolve()
     config_value = get_config_value("install.root")
@@ -45,7 +45,7 @@ def resolve_source_root(value: str | Path | None = None, *, install_root: Path |
     candidates: list[Path] = []
     if value:
         candidates.append(Path(value).expanduser())
-    env_value = os.environ.get("AI_THREAT_HUNTING_SOURCE_DIR")
+    env_value = os.environ.get("VIGIL_SOURCE_DIR")
     if env_value:
         candidates.append(Path(env_value).expanduser())
     config_value = get_config_value("source.dir")
@@ -72,18 +72,18 @@ def resolve_source_root(value: str | Path | None = None, *, install_root: Path |
             return resolved_install_root
 
     raise SystemExit(
-        "Cannot locate AI Threat Hunting source files. Run from a source checkout, "
-        "set AI_THREAT_HUNTING_SOURCE_DIR, pass --source, or install git so the CLI can fetch its source bundle."
+        "Cannot locate Vigil source files. Run from a source checkout, "
+        "set VIGIL_SOURCE_DIR, pass --source, or install git so the CLI can fetch its source bundle."
     )
 
 
 def _ensure_cached_source() -> Path | None:
-    if os.environ.get("AI_THREAT_HUNTING_DISABLE_SOURCE_SYNC") == "1":
+    if os.environ.get("VIGIL_DISABLE_SOURCE_SYNC") == "1":
         return None
     if not shutil_which("git"):
         return None
     source_dir = CONFIG_DIR / "source"
-    repo_url = os.environ.get("AI_THREAT_HUNTING_SOURCE_REPO") or get_config_value("source.repo", DEFAULT_SOURCE_REPO)
+    repo_url = os.environ.get("VIGIL_SOURCE_REPO") or get_config_value("source.repo", DEFAULT_SOURCE_REPO)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if source_dir.exists():
         subprocess.run(["git", "-C", str(source_dir), "pull", "--ff-only"], text=True, capture_output=True, check=False)
@@ -107,7 +107,7 @@ def engagements_root(install_root: Path) -> Path:
 
 
 def resolve_orchestrator_data_dir(install_root: Path) -> Path:
-    env_value = os.environ.get("AI_THREAT_HUNTING_DATA_DIR") or os.environ.get("REDTEAM_ORCHESTRATOR_DATA_DIR")
+    env_value = os.environ.get("VIGIL_DATA_DIR") or os.environ.get("REDTEAM_ORCHESTRATOR_DATA_DIR")
     if env_value:
         return Path(env_value).expanduser().resolve()
     return install_root.expanduser().resolve() / "orchestrator" / "backend" / "data"
@@ -137,7 +137,7 @@ def resolve_orchestrator_base_url(install_root: Path, engagement_dir: Path | Non
     1. ``ORCHESTRATOR_BASE_URL`` env var — explicit override always wins.
     2. Per-engagement ``.orchestrator.env`` — the backend snapshot for this
        specific engagement.
-    3. ``aith config get orchestrator_base_url`` — user-set persistent
+    3. ``vigil config get orchestrator_base_url`` — user-set persistent
        default, so changing the port doesn't require touching code or
        fiddling with environment variables.
     4. Install-root ``.orchestrator.env`` / ``.env`` — legacy fallbacks.

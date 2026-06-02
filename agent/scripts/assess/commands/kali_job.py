@@ -1,4 +1,4 @@
-"""aith assess kali job — async-job lifecycle commands.
+"""vigil assess kali job — async-job lifecycle commands.
 
 Subcommands:
 - start  — write `assessment_jobs` queued row, spawn dtach session, mark running.
@@ -70,7 +70,7 @@ def register(subparsers) -> None:
     )
     start.add_argument("--destructive", action="store_true")
     start.add_argument("--agent-name", dest="agent_name", required=False, default=None)
-    start.add_argument("--container-name", dest="container_name", default="security-research")
+    start.add_argument("--container-name", dest="container_name", default="vigil")
     start.add_argument(
         "--parent-command-run-id",
         dest="parent_command_run_id",
@@ -98,7 +98,7 @@ def register(subparsers) -> None:
         help="Terminate the recorded PID and PATCH killed/stop_failed/lost.",
     )
     stop_p.add_argument("job_id", type=int)
-    stop_p.add_argument("--container-name", dest="container_name", default="security-research")
+    stop_p.add_argument("--container-name", dest="container_name", default="vigil")
     stop_p.set_defaults(func=_run_stop)
 
     list_p = job_sub.add_parser("list", help="List jobs.")
@@ -115,7 +115,7 @@ def register(subparsers) -> None:
 
 
 def _print_help_when_missing(args) -> None:
-    print("usage: aith assess kali job {start|status|tail|stop|list} ...", file=sys.stderr)
+    print("usage: vigil assess kali job {start|status|tail|stop|list} ...", file=sys.stderr)
     raise AssessError("missing kali job action")
 
 

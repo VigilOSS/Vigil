@@ -1,4 +1,4 @@
-"""Host-side `aith assess kali` orchestration.
+"""Host-side `vigil assess kali` orchestration.
 
 Owns ``kali_exec`` — the high-level loop that ties the docker-exec
 subprocess, the audit pipeline (pre-exec POST + finalize PATCH), output
@@ -94,7 +94,7 @@ from .kali_tool_naming import (
 # argparse round-trip tests don't require a live backend or container. The
 # `run` callable on every kali_* command should still be reachable for `--help`
 # without going through the helper.
-_KALI_NOOP_ENV = "AITH_KALI_NOOP"
+_KALI_NOOP_ENV = "VIGIL_KALI_NOOP"
 
 
 def kali_exec(

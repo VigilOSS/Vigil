@@ -1,7 +1,7 @@
 ---
 name: network-threat-hunt
 description: L2 network-plane threat hunt. SIEM alert triage (Splunk/Elastic/Sentinel), firewall + proxy log parsing (PAN/FortiGate/Zscaler), DNS sinkhole coordination, TI feed matching, beaconing detection (RITA), JA3 TLS fingerprint correlation.
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Network Threat Hunt (L2)
@@ -67,7 +67,7 @@ known-benign register first (documented outbound jobs, baseline JA3
 set, partner VPN egress, DNS allowlist). Elimination is by reference,
 not intuition.
 
-**Host commands via `aith assess host-exec`.** Zeek, `dig`, `whois`,
+**Host commands via `vigil assess host-exec`.** Zeek, `dig`, `whois`,
 `python3` entropy, RITA — all wrapped so the run is logged, hashed, and
 attributable. Direct shell outside the runner is forbidden.
 
@@ -78,20 +78,20 @@ IOCs do not enter this engagement's evidence tree.
 
 ### Backend / orchestration
 
-- `aith assess resume-brief` — hydrate engagement state first on
+- `vigil assess resume-brief` — hydrate engagement state first on
   continuation.
-- `aith assess record-finding <agent-name> <finding-json>` — draft or
+- `vigil assess record-finding <agent-name> <finding-json>` — draft or
   update findings.
-- `aith assess host-exec` — wrap every host command (tshark, dig,
+- `vigil assess host-exec` — wrap every host command (tshark, dig,
   whois, python entropy, RITA, Zeek).
-- `aith assess artifact register` — raw exports/pcap/RITA snapshots as
+- `vigil assess artifact register` — raw exports/pcap/RITA snapshots as
   `--kind ir_log`; derived analysis (beacon CSV, JA3 matrix, DNS
   scoring) as `--kind ir_evidence`.
-- `aith assess artifact mark-scratch` — transient notes under
+- `vigil assess artifact mark-scratch` — transient notes under
   `notes/scratch/`.
-- `aith assess log` — activity row with `--metadata-inline` carrying
+- `vigil assess log` — activity row with `--metadata-inline` carrying
   network fields (see Activity Log Convention).
-- `aith assess agent handoff --from-json <path>` — close dispatch.
+- `vigil assess agent handoff --from-json <path>` — close dispatch.
 
 ### SIEMs
 
@@ -147,7 +147,7 @@ either hit the wrong index or silently miss data outside retention.
   | outputlookup append=true network_window_10.42.0.18.csv
   ```
 
-  Run through `aith assess host-exec`; redirect result to
+  Run through `vigil assess host-exec`; redirect result to
   `$ENGAGEMENT_DIR/ir/net/fw_<src_ip>_<window>.csv` and register it.
 - SIEM is authority when no pcap exists; dump pcap from Arkime/Moloch/
   full-packet tap for forensic confirmation when available.
@@ -177,11 +177,11 @@ maps to roughly the same regime.
 - If Zeek logs are loaded into RITA:
 
   ```bash
-  aith assess host-exec --tool rita --intent "show human-readable beacon candidates" \
+  vigil assess host-exec --tool rita --intent "show human-readable beacon candidates" \
     --technique T1071 --phase investigate --scope-host <customer-slug> \
     -- rita show-beacons <db-name> --human
   # writes top beacons by score; save the full machine-readable form:
-  aith assess host-exec --tool rita --intent "export beacon candidates" \
+  vigil assess host-exec --tool rita --intent "export beacon candidates" \
     --technique T1071 --phase investigate --scope-host <customer-slug> \
     -- rita show-beacons <db-name> --no-header > \
       "$ENGAGEMENT_DIR/ir/evidence/network/beacons_<db>.tsv"
@@ -233,7 +233,7 @@ exfiltration via TXT records.
    leftmost label is a DGA signature.
 
    ```bash
-aith assess host-exec --tool python3 --intent "score DNS label entropy" \
+vigil assess host-exec --tool python3 --intent "score DNS label entropy" \
   --technique T1568.002 --phase investigate --scope-host <customer-slug> -- python3 - <<'PY'
    import math, collections, sys
    for line in sys.stdin:
@@ -295,7 +295,7 @@ HTTPS to defeat content inspection.
 from saved pcap:
 
 ```bash
-aith assess host-exec --tool tshark --intent "extract JA3 client fingerprints" \
+vigil assess host-exec --tool tshark --intent "extract JA3 client fingerprints" \
   --technique T1573 --phase investigate --scope-host <customer-slug> -- tshark -r capture.pcap \
   -Y "tls.handshake.type==1" \
   -T fields -e ip.src -e ip.dst -e tls.handshake.ja3 \
@@ -378,7 +378,7 @@ recently-registered domains, downloads from unusual TLDs.
   ```
 
 - WHOIS age on every destination not in the tenant allowlist —
-  `aith assess host-exec --tool whois --intent "lookup domain age" --technique T1583 --phase investigate --scope-host <customer-slug> -- whois <domain>`
+  `vigil assess host-exec --tool whois --intent "lookup domain age" --technique T1583 --phase investigate --scope-host <customer-slug> -- whois <domain>`
   and extract creation date.
   Domains < 30 days old warrant investigation independent of other
   signal.
@@ -458,7 +458,7 @@ The L2 disposition feeds the verifier's five-check. Pick from
 
 ## Activity Log Convention
 
-Every `aith assess log` call in this skill carries `--metadata-inline`
+Every `vigil assess log` call in this skill carries `--metadata-inline`
 shaped with the network fields below. The backend FTS indexes these
 keys so the verifier can locate evidence without re-reading the raw
 exports.
@@ -482,7 +482,7 @@ exports.
 }
 ```
 
-Always use `aith assess log` (one word verb). A mistyped verb produces
+Always use `vigil assess log` (one word verb). A mistyped verb produces
 a help banner and no activity row — the operator's audit will show a
 silent gap.
 
@@ -535,7 +535,7 @@ silent gap.
    ```bash
    for f in "$ENGAGEMENT_DIR/ir/net/"*.{csv,json,pcap}; do
      [ -f "$f" ] || continue
-     aith assess artifact register "$f" \
+     vigil assess artifact register "$f" \
        --kind ir_log --finding <slug> --agent-id <runtime-agent-id>
    done
    ```
@@ -545,12 +545,12 @@ silent gap.
    `$ENGAGEMENT_DIR/ir/evidence/network/`.
 
 3. **Mark transient notes as scratch:**
-   `aith assess artifact mark-scratch --under "$ENGAGEMENT_DIR/notes/scratch/"`.
+   `vigil assess artifact mark-scratch --under "$ENGAGEMENT_DIR/notes/scratch/"`.
 
 4. **Record the activity entry** (verb is `log`, one word):
 
    ```bash
-   aith assess log <runtime-agent-id> \
+   vigil assess log <runtime-agent-id> \
      "network-handoff" \
      "Ran 6-step network hunt: window, beacon, DNS, JA3, lateral, proxy" \
      "Handoff to <next_specialist>" \
@@ -559,7 +559,7 @@ silent gap.
    ```
 
 5. **Emit the handoff JSON:**
-   `aith assess agent handoff --from-json /tmp/network_handoff.json`.
+   `vigil assess agent handoff --from-json /tmp/network_handoff.json`.
 
 ## Common Failure Modes
 
@@ -580,9 +580,9 @@ silent gap.
   (`src_subnet`, `dest_fqdn|dest_ip`, `dest_port`, `cadence_seconds`),
   not just cadence + source.
 - **Skipping `host-exec` for "trivial" commands.** `dig`/`whois`
-  outside `aith assess host-exec` produces no activity row and no
+  outside `vigil assess host-exec` produces no activity row and no
   hash — the verifier cannot reproduce it.
-- **Mistyped activity verb.** The verb is `aith assess log`. Any other
+- **Mistyped activity verb.** The verb is `vigil assess log`. Any other
   shape returns a help banner and writes nothing.
 
 ## Reference Block

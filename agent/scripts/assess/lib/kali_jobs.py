@@ -1,4 +1,4 @@
-"""Async-job helpers for `aith assess kali job ...`.
+"""Async-job helpers for `vigil assess kali job ...`.
 
 Backed by the orchestrator backend's `assessment_jobs` table plus a local
 transient queue in `cases.db` (kali_jobs) so the operator has an offline
@@ -21,9 +21,9 @@ from .client import AssessError, AssessmentClient
 from .config import Config, load_config
 
 
-_DEFAULT_CONTAINER_NAME = "security-research"
-_DEFAULT_DTACH_DIR = "/tmp/aith-jobs"
-_JOB_PID_DIR = "/tmp/aith-jobs"
+_DEFAULT_CONTAINER_NAME = "vigil"
+_DEFAULT_DTACH_DIR = "/tmp/vigil-jobs"
+_JOB_PID_DIR = "/tmp/vigil-jobs"
 _JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
 
 
@@ -98,7 +98,7 @@ def start_job(
     if not _container_running(container_name):
         raise AssessError(
             f"runtime container '{container_name}' is not running. "
-            "Run `aith runtime start` first."
+            "Run `vigil runtime start` first."
         )
     _check_dtach_in_container(container_name)
     _ensure_dtach_dir(container_name, dtach_socket_dir)

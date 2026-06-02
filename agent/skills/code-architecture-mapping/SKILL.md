@@ -1,7 +1,7 @@
 ---
 name: code-architecture-mapping
 description: Classify source code files, map modules, identify trust boundaries, build threat model
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Code Architecture Mapping
@@ -328,8 +328,8 @@ Score = reachability x impact_severity x guard_absence. Include hypotheses scori
 
 ## Output Format
 
-Use `aith assess contract code-classify`, `aith assess contract code-record-modules`,
-`aith assess contract code-record-threat-model`, and `aith assess contract code-dispatch`
+Use `vigil assess contract code-classify`, `vigil assess contract code-record-modules`,
+`vigil assess contract code-record-threat-model`, and `vigil assess contract code-dispatch`
 as the canonical machine-artifact shape references. Cite those contract names in your handoff
 instead of duplicating payload templates, because the operator records your outputs through those
 helpers and their backend validation.

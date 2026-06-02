@@ -28,7 +28,7 @@ already listed below.
 
 - `agent/shared-constraints.md` — scope, finding IDs, CVSS/details format, rule reminders
 - `agent/rules/reporting.md`
-- `agent/skills/report-generation/SKILL.md` (named explicitly because it is your primary procedure; for any other skill needed, run `aith assess list-skills`)
+- `agent/skills/report-generation/SKILL.md` (named explicitly because it is your primary procedure; for any other skill needed, run `vigil assess list-skills`)
 
 ### Blue Incident Mode
 
@@ -43,7 +43,7 @@ constraint set:
 - `agent/skills/report-generation/SKILL.md`
 - `agent/skills/report-generation/templates/blue.md`
 
-For blue reports, the operator gates readiness through `aith assess
+For blue reports, the operator gates readiness through `vigil assess
 transition-phase report` / `transition-phase complete`; `check-report-readiness`
 is a generic red report gate and does not own containment semantics.
 
@@ -68,15 +68,15 @@ The full query set, field descriptions, and generation procedure are in
 Minimum backend pull set:
 
 ```bash
-aith assess check-report-readiness        # red final reports only
-aith assess list-report-findings --mode final --json
+vigil assess check-report-readiness        # red final reports only
+vigil assess list-report-findings --mode final --json
 # or for interim work:
-aith assess list-report-findings --mode draft --json
-aith assess fetch attack-chains
-aith assess fetch surfaces
-aith assess fetch credentials
-aith assess fetch access-records
-aith assess fetch summary
+vigil assess list-report-findings --mode draft --json
+vigil assess fetch attack-chains
+vigil assess fetch surfaces
+vigil assess fetch credentials
+vigil assess fetch access-records
+vigil assess fetch summary
 ```
 For red final reports, if `check-report-readiness` exits non-zero, report the blockers to the operator and stop. For blue incident reports, rely on the operator's `transition-phase report` gate and the blue template's backend query checklist.
 
@@ -199,15 +199,15 @@ closing sequence is:
 2. Run the 13-check self-review in `agent/skills/report-generation/SKILL.md`
 3. In review-and-fix QA mode, run the QA checklist and fix report-local issues
 4. In publish mode, emit `report.generated`, mark included findings `reported`, update scope.json phase to `complete`
-5. `aith assess agent handoff --from-json <path>` to capture summary, runtime issues, working artifacts (point at `report.md`), open questions, and role-specific extras (`qa_status`, `findings_in_report`)
-6. `aith assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+5. `vigil assess agent handoff --from-json <path>` to capture summary, runtime issues, working artifacts (point at `report.md`), open questions, and role-specific extras (`qa_status`, `findings_in_report`)
+6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`. The handoff
 `working_artifacts` MUST list `report.md` so the renderer surfaces present/missing
 state.
 
-`aith assess agent handoff` is idempotent — call it incrementally; checkpoint
+`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
 after each major step in your methodology, not only at the end. See
 `agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 

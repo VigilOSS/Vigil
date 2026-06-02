@@ -1,4 +1,4 @@
-"""aith assess launch-session — create exploit session dir + prompt."""
+"""vigil assess launch-session — create exploit session dir + prompt."""
 from __future__ import annotations
 
 import sys
@@ -94,10 +94,10 @@ def run(args) -> None:
         "",
         "Rules:",
         "- Work only on the assigned findings below.",
-        "- Use `aith assess kali ...` subcommands for target-facing work; never host Bash, docker run, or docker exec.",
+        "- Use `vigil assess kali ...` subcommands for target-facing work; never host Bash, docker run, or docker exec.",
         "- Do not edit the root report.md or scope.json.",
         "- Place artifacts in ./artifacts and notes in ./notes.",
-        "- Record proposals with aith assess record-proposal <session-dir> <proposal-json-file>.",
+        "- Record proposals with vigil assess record-proposal <session-dir> <proposal-json-file>.",
         "- Use proposal type finding_record to update or add findings.",
         "- Use proposal type probe_run to submit exploit/validation evidence for merge review.",
         "",

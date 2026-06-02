@@ -1,7 +1,7 @@
 ---
 name: code-variant-analysis
 description: Systematic scanning for variant instances of confirmed bug patterns across the codebase
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Code Variant Analysis

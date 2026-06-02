@@ -1,7 +1,7 @@
 ---
 name: ssrf-testing
 description: Detect and exploit server-side request forgery — blind confirmation, filter bypass decision trees, cloud metadata reality, post-SSRF exploitation of internal services
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # SSRF Testing
@@ -22,8 +22,8 @@ origin: AI Threat Hunting
 ## Tools
 
 - `curl` — manual SSRF probing and payload delivery
-- `aith oob mint` / `aith oob poll` — mint a nonce-tagged callback URL per probe, then correlate which probe fired (replaces eyeballing the raw listener log). Check shared readiness with `aith oob status --json`; if no named client is running, start one with `aith oob client start <name> --engagement <key> --agent <agent>`.
-- `aith assess classify-payload <value> --mutations` — type the URL/host value in the suspected SSRF parameter and emit ready-made variant sets (the `escalation` bucket for a `url`-typed value is the IMDS/localhost/IPv6-loopback set; `boundary` adds `file://` and `javascript:` scheme probes)
+- `vigil oob mint` / `vigil oob poll` — mint a nonce-tagged callback URL per probe, then correlate which probe fired (replaces eyeballing the raw listener log). Check shared readiness with `vigil oob status --json`; if no named client is running, start one with `vigil oob client start <name> --engagement <key> --agent <agent>`.
+- `vigil assess classify-payload <value> --mutations` — type the URL/host value in the suspected SSRF parameter and emit ready-made variant sets (the `escalation` bucket for a `url`-typed value is the IMDS/localhost/IPv6-loopback set; `boundary` adds `file://` and `javascript:` scheme probes)
 - Gopherus — gopher protocol payload generation for Redis, MySQL, SMTP exploitation
 
 ---
@@ -51,7 +51,7 @@ Test beyond `url=`. The following parameter names and functional patterns are al
 **Generate the bypass set deterministically — do not hand-pick payloads.** Once you have the parameter's current value, classify it and pull the type-aware variants instead of typing IMDS/loopback URLs from memory:
 
 ```bash
-aith assess classify-payload "https://api.example.com/fetch" --mutations
+vigil assess classify-payload "https://api.example.com/fetch" --mutations
 ```
 
 For a `url`-typed value this returns intent buckets you feed straight into Step 2's mint/fire/poll loop:
@@ -59,7 +59,7 @@ For a `url`-typed value this returns intent buckets you feed straight into Step 
 - `boundary` → `http://localhost/`, `http://127.0.0.1/`, `file:///etc/passwd`, `javascript:alert(1)` (loopback + scheme-confusion probes)
 - `format` → scheme-downgrade and quoted/embedded variants for parser-differential bypasses
 
-If the parameter instead carries a bare hostname, IP, or path, classify that value — the buckets adapt to the type. Swap the OOB host from `aith oob mint` into each variant before firing so a blind hit is attributable.
+If the parameter instead carries a bare hostname, IP, or path, classify that value — the buckets adapt to the type. Swap the OOB host from `vigil oob mint` into each variant before firing so a blind hit is attributable.
 
 #### SaaS Integration Connector Pattern
 
@@ -102,12 +102,12 @@ A 4-way differential is a port-mapping primitive even when response bodies are n
 
 ### Step 2: Confirm with OOB Callback
 
-OOB callback is the fastest confirmation method. Confirm `aith oob status --json` reports healthy shared infrastructure, then run the **mint → fire → poll** loop — do not eyeball the raw listener log.
+OOB callback is the fastest confirmation method. Confirm `vigil oob status --json` reports healthy shared infrastructure, then run the **mint → fire → poll** loop — do not eyeball the raw listener log.
 
 ```bash
 # 1. MINT a nonce-tagged callback URL and record the correlation context
 #    (target/param/technique) in one step. Capture the http URL it prints.
-aith oob mint --technique ssrf \
+vigil oob mint --technique ssrf \
   --target-url "https://target/api/fetch" --param url \
   --probe-kind blind-confirm
 
@@ -118,7 +118,7 @@ aith oob mint --technique ssrf \
 # 3. POLL — parse the client's interaction log and correlate probe<->callback.
 #    Matched rows print the technique + target you minted with, so a hit is
 #    self-documenting; you never grep the listener log by hand.
-aith oob poll --client <name>
+vigil oob poll --client <name>
 ```
 
 `poll` prints `matched <N> unmatched <M>` then one line per correlated hit (`<nonce>  http  from=<ip>  technique=ssrf  target=https://target/api/fetch`). A matched row IS your blind-SSRF confirmation: the server resolved/fetched your nonce host. Unmatched interactions are callbacks with no recorded probe — usually noise or a probe you forgot to mint; ignore them for confirmation. Add `--json` when you want to capture the matched set as evidence.
@@ -144,7 +144,7 @@ The type determines your entire exploitation path. Classify before spending time
 | **Full response** | Server response body returned to you | Highest — read internal services, cloud metadata, files |
 | **Status code only** | 200 vs 500, or "success" vs "error" | Medium — boolean oracle, port scanning, some metadata |
 | **Partial (content-length/headers)** | Response size or headers leak through error messages | Medium — content-length oracle can exfiltrate data bit-by-bit |
-| **Blind** | `aith oob poll` returns a matched callback, no response data | Low for direct data theft, high for internal service interaction via gopher/POST |
+| **Blind** | `vigil oob poll` returns a matched callback, no response data | Low for direct data theft, high for internal service interaction via gopher/POST |
 | **Timing only** | Response time differential only | Lowest — port scanning, existence checks only |
 
 ### Step 4: Select Exploitation Path Based on Type
@@ -454,11 +454,11 @@ If the application uses one of these, basic bypass techniques will not work. DNS
 ## Kill Signals — Stop Testing When
 - Application uses SSRF-safe URL library (ssrf-filter, ssrfcheck) confirmed via error messages → bypass unlikely, move on
 - All IP encoding, DNS rebinding, and redirect chain bypasses fail after 15+ attempts → blocklist is robust, move on
-- `aith oob poll` returns a matched callback but response is not returned AND no internal services are reachable → record as blind SSRF (MEDIUM), stop exploitation
+- `vigil oob poll` returns a matched callback but response is not returned AND no internal services are reachable → record as blind SSRF (MEDIUM), stop exploitation
 - Cloud metadata returns IAM credentials → CRITICAL, record immediately, stop testing other SSRF vectors
 
 ## Escalate When
-- `aith oob poll` matches a callback to any payload — even one aimed at a whitelisted domain — the server is fetching on your behalf, now enumerate which other schemes, ports, and internal hosts it will reach (mint a fresh nonce per host so each hit stays attributable)
+- `vigil oob poll` matches a callback to any payload — even one aimed at a whitelisted domain — the server is fetching on your behalf, now enumerate which other schemes, ports, and internal hosts it will reach (mint a fresh nonce per host so each hit stays attributable)
 - Response time for an internal-looking target (127.0.0.1, 169.254.169.254, localhost-only ports, RFC1918 ranges) differs measurably from an external target even when bodies are identical — timing side channels survive when body parity does not
 - An error body, stack trace, redirect Location header, or Content-Length delta leaks an internal hostname, IP, cloud-metadata path, or closed-vs-open port oracle — partial SSRF still chains to IMDS and internal APIs
 - The parameter accepts a non-http(s) scheme (gopher://, dict://, file://, ftp://, ldap://) without a parser error, or DNS resolves before the blocklist check — URL-parser/fetcher split is a classic bypass surface and DNS rebinding is live
@@ -481,7 +481,7 @@ SSRF + CRLF injection -> GCP metadata with Metadata-Flavor header -> service acc
 
 - Vulnerable parameter and endpoint
 - SSRF type (full response, status-code-only, partial, blind, timing-only)
-- OOB callback confirmation — the matched probe<->callback pair from `aith oob poll --client <name> --json` (for blind SSRF)
+- OOB callback confirmation — the matched probe<->callback pair from `vigil oob poll --client <name> --json` (for blind SSRF)
 - Filter bypass technique used (encoding, redirect chain, DNS rebinding)
 - Internal services or metadata accessed — confirming an OOB callback fired is not enough; you must show the **attacker outcome** (e.g., full SSRF returned AWS IAM credentials from 169.254.169.254 and those credentials granted `s3:ListBucket` on the production data bucket exposing 50,000 customer records; blind SSRF via gopher reached the unauthenticated Redis instance on port 6379 and set a cron job payload achieving RCE as www-data; SSRF to the internal Docker API at `127.0.0.1:2375` listed running containers and the privileged container creation command confirmed host root access)
 - Full request/response or OOB evidence for reproducibility

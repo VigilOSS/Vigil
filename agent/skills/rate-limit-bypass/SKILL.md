@@ -1,7 +1,7 @@
 ---
 name: rate-limit-bypass
 description: Identify rate limiting mechanisms and bypass them — CDN-specific header behavior, race condition exploitation, GraphQL batching, and practical impact calculation
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Rate Limit Bypass
@@ -25,7 +25,7 @@ Rate limiting implementation varies wildly: some track by IP (bypassed by header
 - `ffuf` (header and path fuzzing with rate limit evasion)
 - Turbo Intruder (Burp extension — purpose-built for race condition exploitation)
 
-For current-engagement target requests, execute through `aith assess kali exec --` (or a typed verb where applicable) so the request lands in the audit pipeline alongside the audit-flag set.
+For current-engagement target requests, execute through `vigil assess kali exec --` (or a typed verb where applicable) so the request lands in the audit pipeline alongside the audit-flag set.
 
 ---
 

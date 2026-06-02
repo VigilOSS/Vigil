@@ -18,22 +18,22 @@ pwncat-vl is the maintained fork of pwncat-cs with Python 3.13+ support.
 
 ### Basic TCP listener
 ```bash
-aith runtime shell-exec "tmux new-session -d -s shell-4444 'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'"
+vigil runtime shell-exec "tmux new-session -d -s shell-4444 'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'"
 ```
 
 ### SSL/TLS listener
 ```bash
-aith runtime shell-exec "tmux new-session -d -s shell-ssl 'pwncat -l -p 4444 --ssl 2>&1 | tee /data/shell-ssl.log'"
+vigil runtime shell-exec "tmux new-session -d -s shell-ssl 'pwncat -l -p 4444 --ssl 2>&1 | tee /data/shell-ssl.log'"
 ```
 
 ### Connecting to a bind shell
 ```bash
-aith runtime shell-exec "tmux new-session -d -s shell-bind 'pwncat -c TARGET_IP -p 4444 2>&1 | tee /data/shell-bind.log'"
+vigil runtime shell-exec "tmux new-session -d -s shell-bind 'pwncat -c TARGET_IP -p 4444 2>&1 | tee /data/shell-bind.log'"
 ```
 
 ### SSH-based session (with stolen credentials)
 ```bash
-aith runtime shell-exec "tmux new-session -d -s shell-ssh 'pwncat -c TARGET_IP -p 22 --ssh --identity /data/stolen_key 2>&1 | tee /data/shell-ssh.log'"
+vigil runtime shell-exec "tmux new-session -d -s shell-ssh 'pwncat -c TARGET_IP -p 22 --ssh --identity /data/stolen_key 2>&1 | tee /data/shell-ssh.log'"
 ```
 
 ## tmux Session Management
@@ -47,31 +47,31 @@ Interactive tmux attach is only for manual operator debugging outside agent-exec
 
 ```bash
 # List active sessions
-aith runtime shell-exec "tmux list-sessions"
+vigil runtime shell-exec "tmux list-sessions"
 
 # Send a command to a running session (non-interactive)
-aith runtime shell-exec "tmux send-keys -t shell-4444 'whoami' Enter"
+vigil runtime shell-exec "tmux send-keys -t shell-4444 'whoami' Enter"
 
 # Read recent output from the log
-aith runtime shell-exec "tail -50 /data/shell-4444.log"
+vigil runtime shell-exec "tail -50 /data/shell-4444.log"
 
 # Kill a session when done
-aith runtime shell-exec "tmux kill-session -t shell-4444"
+vigil runtime shell-exec "tmux kill-session -t shell-4444"
 ```
 
 ### Log file visibility
 
-Agents observe shell output through `aith runtime shell-exec` because shell
+Agents observe shell output through `vigil runtime shell-exec` because shell
 listeners are shared runtime infrastructure, not target-facing probes. Record
 the important result afterward in the finding, probe-run, or handoff so the
 backend remains the durable source of engagement state.
 
 ```bash
 # Recent shell session output
-aith runtime shell-exec "tail -100 /data/shell-4444.log"
+vigil runtime shell-exec "tail -100 /data/shell-4444.log"
 
 # Full shell session output
-aith runtime shell-exec "cat /data/shell-4444.log"
+vigil runtime shell-exec "cat /data/shell-4444.log"
 ```
 
 Log files under `/data/` persist across tmux restarts because `/data` is the
@@ -84,7 +84,7 @@ To expose it to remote targets, set up an frp tunnel.
 
 **Full tunnel setup commands:** `agent/references/offensive-tactics/frp-tunneling.md`
 
-The `oob-rev` proxy rendered by `aith oob start` in `/data/oob/frpc.toml` handles this. After `aith oob start` is healthy, record the address:
+The `oob-rev` proxy rendered by `vigil oob start` in `/data/oob/frpc.toml` handles this. After `vigil oob start` is healthy, record the address:
 ```bash
 echo "oob-relay.example.com:8443" > "$DIR/.listener_url"
 ```
@@ -126,12 +126,12 @@ Agents **MUST NOT:**
 - Kill or restart existing listener or tunnel sessions
 
 Agents **CAN:**
-- Read listener log files with `aith runtime shell-exec "tail -80 /data/shell-<name>.log"`, then record the meaningful result in the backend
-- Read correlated OOB hits with `aith oob poll --client <name> --json` (the nonce↔probe matches); `aith oob client logs <name> --lines 80` is the raw per-client listener tail, not correlation
-- Read raw OOB infrastructure logs with `aith logs oob --lines 80`
+- Read listener log files with `vigil runtime shell-exec "tail -80 /data/shell-<name>.log"`, then record the meaningful result in the backend
+- Read correlated OOB hits with `vigil oob poll --client <name> --json` (the nonce↔probe matches); `vigil oob client logs <name> --lines 80` is the raw per-client listener tail, not correlation
+- Read raw OOB infrastructure logs with `vigil logs oob --lines 80`
 - Provide reverse shell payloads for the operator to deploy
 - Verify that a shell connected by checking log output
-- Provide authorized runtime commands such as `aith runtime shell-exec "tmux send-keys -t shell-4444 'whoami' Enter"` for the operator to run
+- Provide authorized runtime commands such as `vigil runtime shell-exec "tmux send-keys -t shell-4444 'whoami' Enter"` for the operator to run
 
 Agents **MUST:**
 - Mark shell-catching steps as `# MANUAL:` in playbooks

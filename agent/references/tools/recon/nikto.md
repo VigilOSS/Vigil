@@ -19,7 +19,7 @@ If none of these match, skip nikto entirely. The reactive nuclei sweep already c
 ## Standard invocation
 
 ```bash
-aith assess kali nikto \
+vigil assess kali nikto \
   --host www.example.com --ssl \
   -Tuning x60 -Pause 2 -maxtime 300 \
   -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_www.json \
@@ -85,7 +85,7 @@ Combine modes by adding the digits (e.g. `-evasion 124` for modes 1, 2, and 4). 
 ## cautious profile (rate-limited, WAF-protected)
 
 ```bash
-aith assess kali nikto \
+vigil assess kali nikto \
   --host www.example.com --ssl \
   -Tuning x60 -Pause 2 -maxtime 300 \
   --technique INFO-DISCLOSURE --intent "cautious-tier nikto, x60 production-safe" \
@@ -99,24 +99,24 @@ Cross-reference the cautious-tier rate-limit profile in `agent/references/tools/
 `-Format` accepts `csv | htm | json | txt | xml`. JSON is the most ingestion-friendly:
 
 ```bash
-aith assess kali nikto \
+vigil assess kali nikto \
   --host app.example.com \
   -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_app.json \
   --technique INFO-DISCLOSURE --intent "nikto JSON output for app.example.com" \
   --probe-kind payload --phase recon --timeout 600
 ```
 
-The output file lands at `/engagements/$ENGAGEMENT_KEY/scans/nikto_app.json` because the runtime bind mounts engagement state at `/engagements/$ENGAGEMENT_KEY/`. Subsequent `aith assess` ingestion can pick it up directly without ferrying.
+The output file lands at `/engagements/$ENGAGEMENT_KEY/scans/nikto_app.json` because the runtime bind mounts engagement state at `/engagements/$ENGAGEMENT_KEY/`. Subsequent `vigil assess` ingestion can pick it up directly without ferrying.
 
 ## Common findings
 
 Nikto produces these classes of result; map each to the right intel/finding write:
 
-- **Outdated server versions** (`outdated.db` plugin) — record as `aith assess record-intel tech-component` with `version` and `note=outdated`. Promote to a finding only after osint-analyst confirms a relevant CVE has a working PoC.
-- **Exposed `.htaccess` / `.svn` / `.git` directories** — record as a finding via `aith assess record-finding` with `defect_family=info-disclosure` and the leaked path in `details.evidence`.
+- **Outdated server versions** (`outdated.db` plugin) — record as `vigil assess record-intel tech-component` with `version` and `note=outdated`. Promote to a finding only after osint-analyst confirms a relevant CVE has a working PoC.
+- **Exposed `.htaccess` / `.svn` / `.git` directories** — record as a finding via `vigil assess record-finding` with `defect_family=info-disclosure` and the leaked path in `details.evidence`.
 - **Dangerous methods enabled (PUT, DELETE, TRACE)** — TRACE is usually finding-worthy on its own (cross-site tracing). PUT/DELETE require `put_del_test` to actively demonstrate write capability before promoting to a finding; a methods-allowed banner alone is intel.
 - **Default / backup pages** (admin consoles, install scripts, phpMyAdmin defaults) — record as `record-surface` with `type=privileged_write` or `type=auth_entry` depending on what the page exposes.
-- **Known CVE matches** (`outdated.db` advisory engine) — record via `aith assess record-intel cve` and dispatch exploit-developer to validate before promoting to a finding.
+- **Known CVE matches** (`outdated.db` advisory engine) — record via `vigil assess record-intel cve` and dispatch exploit-developer to validate before promoting to a finding.
 
 ## Plugin set — the unique-value-add over nuclei
 
@@ -135,4 +135,4 @@ If the fingerprint that triggered nikto does not match one of those plugins, the
 
 - All paths use `/engagements/$ENGAGEMENT_KEY/` because the runtime bind mounts engagement state there. Writing to `/tmp` loses output on container recreate.
 - `kali nikto` records its audit row before exec so a crashed run still has a row showing what was attempted. Stdout and stderr stream to `${ENGAGEMENT_DIR}/scans/kali/<run-id>.{out,err}` from line one.
-- For long sweeps (>30 minutes wall clock), wrap nikto in `aith assess kali job start --technique RECON --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> --container-name security-research -- nikto ...` — the synchronous `kali nikto` call is killed cleanly on `--timeout` expiry.
+- For long sweeps (>30 minutes wall clock), wrap nikto in `vigil assess kali job start --technique RECON --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> --container-name vigil -- nikto ...` — the synchronous `kali nikto` call is killed cleanly on `--timeout` expiry.

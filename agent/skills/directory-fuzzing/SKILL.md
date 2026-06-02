@@ -1,7 +1,7 @@
 ---
 name: directory-fuzzing
 description: Discover hidden directories, files, and endpoints on a web server
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Directory Fuzzing
@@ -20,14 +20,14 @@ origin: AI Threat Hunting
 
 ### 1. Baseline Response
 ```bash
-aith assess kali exec --technique FUZZ --intent "baseline 404 fingerprint for filter calibration" \
+vigil assess kali exec --technique FUZZ --intent "baseline 404 fingerprint for filter calibration" \
   --probe-kind baseline --phase consume-test --timeout 30 -- \
   curl -s -o /dev/null -w "Code: %{http_code}, Size: %{size_download}" https://TARGET/nonexistent12345
 ```
 
 ### 2. Common Path Discovery
 ```bash
-aith assess kali ffuf \
+vigil assess kali ffuf \
   -u https://TARGET/FUZZ \
   -w /usr/share/wordlists/dirb/common.txt \
   -fc 404 \
@@ -36,7 +36,7 @@ aith assess kali ffuf \
   --probe-kind payload --phase consume-test --timeout 1800
 
 # Auto-calibrate variant
-aith assess kali ffuf \
+vigil assess kali ffuf \
   -u https://TARGET/FUZZ \
   -w /usr/share/wordlists/dirb/common.txt \
   -ac \
@@ -47,7 +47,7 @@ aith assess kali ffuf \
 
 ### 3. Extension Fuzzing
 ```bash
-aith assess kali ffuf \
+vigil assess kali ffuf \
   -u https://TARGET/FUZZ \
   -w /usr/share/wordlists/dirb/common.txt \
   -e .php,.html,.js,.txt,.bak,.old,.conf,.xml,.json,.yml,.env,.log,.sql,.zip,.tar.gz \
@@ -60,7 +60,7 @@ aith assess kali ffuf \
 
 ### 4. Filter Tuning
 
-Apply these flags on any `aith assess kali ffuf` invocation to tune signal/noise:
+Apply these flags on any `vigil assess kali ffuf` invocation to tune signal/noise:
 ```
 -fc 404,403,301        # Status code filter
 -fs 1234               # Response size filter
@@ -71,21 +71,21 @@ Apply these flags on any `aith assess kali ffuf` invocation to tune signal/noise
 ### 5. Recursive Discovery
 ```bash
 # feroxbuster for recursive content discovery (faster, auto-recurses, Rust-based)
-aith assess kali exec --technique FUZZ \
+vigil assess kali exec --technique FUZZ \
   --intent "recursive dir discovery (feroxbuster smart + auto-tune)" \
   --probe-kind payload --phase consume-test --timeout 1800 -- \
   feroxbuster -u https://TARGET -w /usr/share/wordlists/dirb/common.txt --smart --auto-tune \
     -d 3 -t 50 -o /engagements/$ENGAGEMENT_KEY/scans/ferox_results.txt
 
 # feroxbuster with extensions
-aith assess kali exec --technique FUZZ \
+vigil assess kali exec --technique FUZZ \
   --intent "recursive dir discovery with extension variants" \
   --probe-kind payload --phase consume-test --timeout 1800 -- \
   feroxbuster -u https://TARGET -w /usr/share/wordlists/dirb/common.txt \
     -x php,html,js,txt,bak -d 2 --auto-tune
 
 # ffuf for targeted sub-path fuzzing after feroxbuster finds interesting directories
-aith assess kali ffuf \
+vigil assess kali ffuf \
   -u https://TARGET/admin/FUZZ \
   -w /usr/share/wordlists/dirb/common.txt \
   -ac \
@@ -94,8 +94,8 @@ aith assess kali ffuf \
   --probe-kind payload --phase consume-test --timeout 1800
 ```
 
-Run each directory-fuzz sweep synchronously — one blocking `aith assess kali <verb> …
---timeout N` at a time. Specialists do NOT background target traffic or use `aith assess kali
+Run each directory-fuzz sweep synchronously — one blocking `vigil assess kali <verb> …
+--timeout N` at a time. Specialists do NOT background target traffic or use `vigil assess kali
 job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a
 generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f ffuf`) — it stomps
 sibling agents' processes in the shared runtime. See
@@ -112,7 +112,7 @@ sibling agents' processes in the shared runtime. See
 
 ### 7. Backup and Sensitive Files
 ```bash
-aith assess kali ffuf \
+vigil assess kali ffuf \
   -u https://TARGET/FUZZ \
   -w /usr/share/seclists/Discovery/Web-Content/common.txt \
   -e .bak,.old,.orig,.save,.swp,.tmp,~,.copy \
@@ -121,7 +121,7 @@ aith assess kali ffuf \
   --technique INFO-DISCLOSURE --intent "backup and sensitive file extension sweep" \
   --probe-kind payload --phase consume-test --timeout 1800
 
-aith assess kali exec --technique INFO-DISCLOSURE \
+vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "sensitive file checklist (.env, .git, .htaccess, wp-config)" \
   --probe-kind fingerprint --phase consume-test --timeout 60 -- bash -c '
 for f in .env .git/config .htaccess web.config wp-config.php .DS_Store; do
@@ -138,7 +138,7 @@ curl -s https://TARGET/.svn/entries | head -5
 SaaS platforms nest APIs under versioned/namespaced prefixes. Fuzz each known prefix separately:
 ```bash
 # Discover API versions and namespaces
-aith assess kali exec --technique DISCOVERY \
+vigil assess kali exec --technique DISCOVERY \
   --intent "SaaS API namespace prefix enumeration" \
   --probe-kind fingerprint --phase consume-test --timeout 120 -- bash -c '
 for prefix in /api/v1 /api/v2 /api/v3 /api/internal /api/admin /api/lotus /api/private \
@@ -150,7 +150,7 @@ done
 '
 
 # For each live prefix, fuzz endpoints
-aith assess kali ffuf \
+vigil assess kali ffuf \
   -u "https://TARGET/api/v2/FUZZ.json" \
   -w /usr/share/seclists/Discovery/Web-Content/api/api-endpoints.txt \
   -ac \
@@ -163,7 +163,7 @@ aith assess kali ffuf \
 
 ### 9. Virtual Host / Subdomain
 ```bash
-aith assess kali ffuf \
+vigil assess kali ffuf \
   -u https://TARGET \
   -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
   -H "Host: FUZZ.TARGET" \
@@ -177,7 +177,7 @@ aith assess kali ffuf \
 
 Status/size filters (`-fc`, `-fs`, `-ac`) thin the noise but cannot catch a soft-200 that returns
 a `200` with a custom-error body, or an admin page that differs only in size class from the bulk of
-hits. After a sweep, rank the surviving results with `aith assess anomaly-score` to surface the
+hits. After a sweep, rank the surviving results with `vigil assess anomaly-score` to surface the
 genuine odd-ones-out. ffuf's JSON `results` carry `status`, `length`, `words`, `lines`, `url` —
 exactly the oracle's fields (rename only the hyphenated `content-type`):
 
@@ -185,7 +185,7 @@ exactly the oracle's fields (rename only the hyphenated `content-type`):
 # Rank the ffuf hit set written by §2–§9 (e.g. ffuf_common.json):
 jq '[.results[] | {url, status, length, words, lines, content_type: .["content-type"]}]' \
   /engagements/$ENGAGEMENT_KEY/scans/ffuf_common.json > /tmp/dir_pop.json
-aith assess anomaly-score /tmp/dir_pop.json --top 15
+vigil assess anomaly-score /tmp/dir_pop.json --top 15
 #   #1  score=4.17  status=200  len=8800  url=https://TARGET/admin   ← off-cluster: big body, unique title
 #       ^ length_bucket=...  ^ title='admin login'  ^ words_bucket=...
 ```
@@ -200,7 +200,7 @@ category outliers, not byte-level deltas. Then verify the top hits by hand:
 ```bash
 # Main output (embedded in every ffuf call above via -o / -of json)
 # Verify a discovered path:
-aith assess kali exec --technique DISCOVERY \
+vigil assess kali exec --technique DISCOVERY \
   --intent "HEAD verification of discovered path" \
   --probe-kind fingerprint --phase consume-test --timeout 30 -- \
   curl -sI https://TARGET/discovered_path
@@ -213,7 +213,7 @@ aith assess kali exec --technique DISCOVERY \
 - Admin/management interfaces discovered
 - Wordlists used and filter/matcher settings
 - Whether authenticated fuzzing was performed
-- New endpoints to feed into work buffer via `aith assess ingest-endpoints`
+- New endpoints to feed into work buffer via `vigil assess ingest-endpoints`
 
 ## Extended Resources
 

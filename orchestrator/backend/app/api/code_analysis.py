@@ -239,7 +239,7 @@ def _audit_code_mutation(
     *,
     title: str,
     action: str,
-    actor_name: str = "aith-assess",
+    actor_name: str = "vigil-assess",
     result: str = "",
     metadata: dict[str, Any] | None = None,
 ) -> None:
@@ -247,7 +247,7 @@ def _audit_code_mutation(
         activity_service.record_activity_entry(
             engagement_id,
             actor_kind="system",
-            actor_name=actor_name or "aith-assess",
+            actor_name=actor_name or "vigil-assess",
             title=title,
             action=action,
             result=result,

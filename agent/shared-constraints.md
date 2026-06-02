@@ -25,10 +25,10 @@ All testing stays within listed scope hosts. Exploit policy escalation requires 
 
 ---
 
-## 2. `aith assess kali` for All Target Work
+## 2. `vigil assess kali` for All Target Work
 
 All target-facing work — HTTP probing, scanning, crawling, fuzzing, exploitation,
-OOB/DNS callbacks, and raw TCP — must go through `aith assess kali ...` subcommands.
+OOB/DNS callbacks, and raw TCP — must go through `vigil assess kali ...` subcommands.
 The CLI runs on the host, executes inside the runtime container, and records the
 audit row directly to the orchestrator backend. Use it because the CLI owns the
 audit pipeline — host-side probes against scoped targets break the runtime's
@@ -39,9 +39,9 @@ Discovery (in order):
 
 1. Read `agent/skills/kali-exec/SKILL.md` for the verb menu, methodology profiles,
    sync-vs-async decision, audit-flag mapping, and example invocations per verb.
-2. Use `aith assess kali --help` and `aith assess kali <verb> --help` for the live
+2. Use `vigil assess kali --help` and `vigil assess kali <verb> --help` for the live
    flag set and defaults on a verb you're about to invoke.
-3. Use `aith assess contract kali <verb>` for the canonical schema, helper
+3. Use `vigil assess contract kali <verb>` for the canonical schema, helper
    defaults, common mistakes, and an example payload.
 
 Forbidden because they bypass the audit pipeline: host Bash that runs probes
@@ -50,8 +50,8 @@ ad-hoc curl/nmap/sqlmap/etc. from the host. The host boundary is for
 orchestration, not target traffic.
 
 Target-facing dispatches run **synchronously by default**: one blocking
-`aith assess kali <verb> ... --timeout N` at a time — no `run_in_background`,
-no `aith assess kali job start`, no dtach, and no watcher/poll loop. A
+`vigil assess kali <verb> ... --timeout N` at a time — no `run_in_background`,
+no `vigil assess kali job start`, no dtach, and no watcher/poll loop. A
 specialist must never background target traffic and then halt waiting for a
 completion notification: the harness auto-resumes the halted agent, which
 launches the next detached job and halts again, producing unbounded relaunch
@@ -62,7 +62,7 @@ sweep, `dirb`, `gobuster`, `ffuf` large wordlists): when it expires the audit
 pipeline cascades SIGTERM→SIGKILL into the in-container PID, so a synchronous
 call is killed cleanly and is never orphaned.
 
-`aith assess kali job start` — the SQLite-backed, dtach-supervised worker that
+`vigil assess kali job start` — the SQLite-backed, dtach-supervised worker that
 survives calling-shell exit — is reserved for a **single** long-running sweep
 the **operator** explicitly launches and monitors directly. It is never a
 per-step pattern inside a specialist's agent loop and never a way to fan out
@@ -72,13 +72,13 @@ job rather than backgrounding it itself.
 
 Host-side commands are limited to coordination and non-target support only:
 `jq`, `sqlite3`, `python3`, `grep` / `rg`, `sed`, `awk`, `base64`, `openssl`,
-plus `aith assess` helpers for backend state writes.
+plus `vigil assess` helpers for backend state writes.
 
 If a required target-facing tool is missing from the runtime image, rebuild the
 image rather than falling back to host or Docker-side execution paths — the
 runtime image is the single source of truth for the tool surface.
 
-**Reserve `echo` inside `aith assess kali` commands for functional output only.**
+**Reserve `echo` inside `vigil assess kali` commands for functional output only.**
 Stdout is captured to the audit log, not shown to the user, and commentary-echoes
 bloat the preview and pollute FTS search without adding retrievable signal. Use
 `--intent` for a one-line purpose annotation. `echo` is legitimate when its output
@@ -96,36 +96,36 @@ cleanup is rarely needed; when it is, **PID-targeted kill is OK** — `kill
 -TERM <pid>` against a tracked, in-container PID only signals your own
 process, not siblings. The forbidden pattern is the *binary-name* selector
 (`pkill -f nmap`, `killall nuclei`); the safe pattern is the *PID*
-selector (`kill -TERM "$(cat /tmp/aith-pid-<run_uuid>)"`).
+selector (`kill -TERM "$(cat /tmp/vigil-pid-<run_uuid>)"`).
 
 What to do instead — track the lifecycle of every process you spawn and stop
 only the one you started:
 
 - **Synchronous runs (the specialist default) — let `--timeout` clean up.**
-  A blocking `aith assess kali <verb> ... --timeout N` cascades
+  A blocking `vigil assess kali <verb> ... --timeout N` cascades
   SIGTERM→SIGKILL into the in-container PID when the budget expires, so no
   manual cleanup is needed for the common case.
 - **Operator-owned long sweeps — use the job lifecycle.** When the operator
-  has launched a single authorized long sweep with `aith assess kali job
-  start ... -- <verb> ...`, stop it cleanly with `aith assess kali job stop
+  has launched a single authorized long sweep with `vigil assess kali job
+  start ... -- <verb> ...`, stop it cleanly with `vigil assess kali job stop
   <id>`. The job worker SIGTERMs only the in-container PID it owns; sibling
   jobs stay alive. (Specialists do not start jobs — see §2.)
 - **Mid-run synchronous cleanup — use the run-uuid PID file.**
   Every audit row carries a `run_uuid`. The runtime writes the
-  in-container PID to `/tmp/aith-pid-<run_uuid>` for the duration of the
-  run, so cleanup is `aith assess kali exec --technique META --intent
+  in-container PID to `/tmp/vigil-pid-<run_uuid>` for the duration of the
+  run, so cleanup is `vigil assess kali exec --technique META --intent
   "terminate tracked runtime pid" --probe-kind cleanup --phase <phase>
   --timeout 30 -- sh -c 'kill -TERM "$(cat
-  /tmp/aith-pid-<run_uuid>.pid)"'`. This signals only your run, not sibling
+  /tmp/vigil-pid-<run_uuid>.pid)"'`. This signals only your run, not sibling
   runs of the same binary.
 - **Last-resort hygiene for hours-long parallel runs — copy the binary
-  per agent.** `aith assess kali exec --technique META --intent
+  per agent.** `vigil assess kali exec --technique META --intent
   "create per-agent nmap copy" --probe-kind cleanup --phase <phase>
   --timeout 30 -- cp /usr/bin/nmap /usr/local/bin/nmap-${AGENT_NAME}` so a later `pkill -f
   nmap-${AGENT_NAME}` only matches your processes. Prefer the job
   lifecycle; reach for this only when two specialists genuinely need
   multi-hour parallel sweeps of the same heavy binary.
-- **Timeout-related cleanup is automatic.** `aith assess kali exec` and
+- **Timeout-related cleanup is automatic.** `vigil assess kali exec` and
   every typed verb cascade SIGTERM→SIGKILL into the in-container PID via
   `docker exec ... kill` when `--timeout` expires. Operators do not need
   to kill anything manually for a timeout — the in-container tree is
@@ -133,7 +133,7 @@ only the one you started:
 
 ### Command Metadata
 
-Every target-facing `aith assess kali` call carries audit metadata as CLI flags.
+Every target-facing `vigil assess kali` call carries audit metadata as CLI flags.
 The CLI fails closed when required flags are missing — the audit row stays
 truthful instead of degrading to a stale env-var default.
 
@@ -165,7 +165,7 @@ truthful instead of degrading to a stale env-var default.
 - **`--timeout <seconds>`** — wall-clock budget. Required. Synchronous calls hit
   the timeout cleanly (SIGTERM→SIGKILL into the in-container PID), so raise the
   budget for a heavy single probe rather than backgrounding it. A long budget is
-  not a reason to use `aith assess kali job start` — that is operator-only (§2).
+  not a reason to use `vigil assess kali job start` — that is operator-only (§2).
 - **`--phase <enum>`** — REQUIRED on every call. Pass the phase the dispatch was
   authorized for, NOT `scope.json.current_phase`. The reason is that
   `scope.json.current_phase` is operator state and updates only on phase
@@ -188,7 +188,7 @@ truthful instead of degrading to a stale env-var default.
   behavior or backend state.
 
 `--engagement-key` is derived from `${ENGAGEMENT_DIR}/engagement.json`.
-`--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$AITH_AGENT_NAME`,
+`--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$VIGIL_AGENT_NAME`,
 then `operator`. Specialist dispatch wrappers must export `AGENT_NAME=<role>`;
 if that context is missing, pass `--agent-name <role>` explicitly because a
 silent `operator` attribution breaks coverage ownership.
@@ -197,27 +197,27 @@ silent `operator` attribution breaks coverage ownership.
 
 ## Contract-First Rule
 
-Before the **first invocation of any `aith assess` verb that mutates durable
+Before the **first invocation of any `vigil assess` verb that mutates durable
 state, dispatches a kali tool, or seats work-buffer rows**, run
-`aith assess contract <verb>` (or `aith assess contract <verb> <variant>`)
+`vigil assess contract <verb>` (or `vigil assess contract <verb> <variant>`)
 to read the canonical schema, the required fields, the common mistakes, and
 the example payload. Schema validation errors from guessing waste a full
 round-trip, so reading the contract first is faster than re-running the
 verb after a rejection.
 
-Verbs covered by the rule (all have a contract entry; `aith assess contract`
+Verbs covered by the rule (all have a contract entry; `vigil assess contract`
 emits the canonical schema and an example):
 
-- `kali <verb>` — `aith assess contract kali <verb>`
-- `record-finding` — `aith assess contract record-finding`
-- `record-intel <type>` — `aith assess contract record-intel <type>`
-- `record-surface` — `aith assess contract record-surface`
+- `kali <verb>` — `vigil assess contract kali <verb>`
+- `record-finding` — `vigil assess contract record-finding`
+- `record-intel <type>` — `vigil assess contract record-intel <type>`
+- `record-surface` — `vigil assess contract record-surface`
 - `agent <subverb>` for sub-verbs that mutate durable dispatch state or
   emit the canonical handoff blob:
   `start`, `done`, `handoff`, `decision`,
-  `abort-duplicate`, `render-handoff` — `aith assess contract agent <subverb>`
+  `abort-duplicate`, `render-handoff` — `vigil assess contract agent <subverb>`
 - Lifecycle helpers (`verify-finding`, `kill-finding`, `update-finding`,
-  `reset-finding`, `resolve-surface`) — `aith assess contract <verb>`
+  `reset-finding`, `resolve-surface`) — `vigil assess contract <verb>`
 
 Verbs **not** covered (skip the contract round-trip — they are read-only or
 have no payload to validate): `fetch`, `list-skills`, `list-clusters`,
@@ -242,17 +242,17 @@ Shared listener infrastructure belongs to the operator because a listener, tunne
 interactsh server is global runtime state that can break other specialists if it is
 started, restarted, or reconfigured mid-engagement.
 
-Agents do their own readiness and evidence checks through `aith`:
-1. Inspect shared OOB state with `aith oob status --json` before blind payload work.
+Agents do their own readiness and evidence checks through `vigil`:
+1. Inspect shared OOB state with `vigil oob status --json` before blind payload work.
    `server=true` and `frpc=true` means shared OOB infrastructure is ready.
-2. Inspect infrastructure logs with `aith logs oob --lines 80` when status is
+2. Inspect infrastructure logs with `vigil logs oob --lines 80` when status is
    partial, callbacks are missing, or FRP/auth health is unclear.
-3. Start, list, and stop named per-agent listener clients with `aith oob client
+3. Start, list, and stop named per-agent listener clients with `vigil oob client
    start|list|stop`. Per-agent interactsh clients are correlation handles, not
    shared tunnel infrastructure, so specialists can manage them directly.
-4. Get correlated callback hits with `aith oob poll --client <name>` — mint a
-   nonce-tagged URL per payload with `aith oob mint`, then `poll` matches each
-   probe to its callback. `aith oob client logs <name> --lines 80` and `aith
+4. Get correlated callback hits with `vigil oob poll --client <name>` — mint a
+   nonce-tagged URL per payload with `vigil oob mint`, then `poll` matches each
+   probe to its callback. `vigil oob client logs <name> --lines 80` and `vigil
    logs oob --lines 80` are raw listener-log tails for server/FRP debugging only,
    never for correlation.
 
@@ -263,9 +263,9 @@ When exploitation requires a reverse-shell listener or tunnel exposure:
    listener commands.
 3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for OOB
    readiness, per-agent clients, tunnel exposure, and log interpretation.
-4. Proceed after the listener URL file or `aith oob` client is available; do not
-   block on the operator for checks that `aith oob status`, `aith oob poll`, or
-   the raw-debug tails (`aith logs oob`, `aith oob client logs`) can answer
+4. Proceed after the listener URL file or `vigil oob` client is available; do not
+   block on the operator for checks that `vigil oob status`, `vigil oob poll`, or
+   the raw-debug tails (`vigil logs oob`, `vigil oob client logs`) can answer
    directly.
 
 Starting, stopping, or restarting shared listener, tunnel, and OOB server processes
@@ -278,7 +278,7 @@ equivalent network listener processes.
 
 ## 2b. Coverage Check Before Probing
 
-Every `aith assess kali` call records its command, argv, tool, agent, phase,
+Every `vigil assess kali` call records its command, argv, tool, agent, phase,
 technique, intent, probe_kind, destructive flag, exit code, timeout state,
 timings, and an output preview (or artifact ref) to the orchestrator backend.
 Treat that history as a **coverage map** — a record of what's already been
@@ -288,7 +288,7 @@ Before issuing a probing, scanning, fuzzing, or credential-testing command,
 search for prior work on this surface:
 
 ```bash
-aith assess list-command-runs --q <keyword> --show-matches
+vigil assess list-command-runs --q <keyword> --show-matches
 ```
 
 Default to an unscoped fuzzy search so finding aliases, nearby metadata, every
@@ -324,7 +324,7 @@ the audit-flag set on every variant (`--technique`, `--intent`, `--probe-kind`,
 specialist's coverage check sees it.
 
 When a prior run genuinely covers your current question, cite its id in your
-output — but first fetch the preview with `aith assess get-command-run <id>`
+output — but first fetch the preview with `vigil assess get-command-run <id>`
 and confirm the stored evidence actually answers that question. A row with
 `success=true` only means `return_code=0`, not that the output is on-point.
 Open the preview to rule out soft-failure pages, WAF intercepts, and
@@ -348,9 +348,9 @@ truth.
 ## 3. Use Skills and References — They Are the Methodology
 
 **Step 1 — Load the skill(s) named in your dispatch prompt.** The operator selects skills via
-`aith assess list-skills` (compact name + one-line "Use when:") and includes the path(s) in the
+`vigil assess list-skills` (compact name + one-line "Use when:") and includes the path(s) in the
 dispatch prompt. Read each named `agent/skills/<name>/SKILL.md` in full before doing anything else.
-If no skill was named and you believe one exists, run `aith assess list-skills` to discover it
+If no skill was named and you believe one exists, run `vigil assess list-skills` to discover it
 yourself and report back rather than improvising — skill selection is the operator's job, but
 discovery is fast (~200 tokens) and usually faster than guessing.
 
@@ -376,9 +376,9 @@ Only improvise after confirming the reference set is genuinely insufficient.
 
 ## 4. Finding IDs and Recording
 
-**MANDATORY: Every finding MUST be recorded via `aith assess record-finding`.** Never hand-allocate
+**MANDATORY: Every finding MUST be recorded via `vigil assess record-finding`.** Never hand-allocate
 finding IDs. Never write findings only to markdown. Never skip the recording step. If you
-produce a finding in any output section, you MUST also call `aith assess record-finding` before your
+produce a finding in any output section, you MUST also call `vigil assess record-finding` before your
 task is complete. Findings that exist only in your output text and were not recorded via the
 script are considered lost data.
 
@@ -407,15 +407,15 @@ Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous
 
 If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
 
-**Deduplication:** Before recording, query existing findings via `aith assess fetch findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
+**Deduplication:** Before recording, query existing findings via `vigil assess fetch findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
 
 Record every finding with:
 ```
-aith assess record-finding <agent-name> <finding-json-file>
+vigil assess record-finding <agent-name> <finding-json-file>
 ```
 
 The JSON payload must match `schemas/finding-record.schema.json`. Findings are always JSON — convert from markdown before recording.
-Run `aith assess contract record-finding` for the canonical field list and examples.
+Run `vigil assess contract record-finding` for the canonical field list and examples.
 `record-finding` fills the initial finding lifecycle defaults — use those rather than setting lifecycle fields manually.
 
 **CVSS and remediation** go in `details` as structured fields:
@@ -452,9 +452,9 @@ proved the finding. The field allows up to 20 KB. If the operator or another age
 reproduce the finding later, the notes field alone should be sufficient without re-discovering
 the request format, session tokens, or tool parameters.
 
-**Failure to use `aith assess record-finding` is the single most common subagent defect.** If you
+**Failure to use `vigil assess record-finding` is the single most common subagent defect.** If you
 produce `#### Findings` output, each finding payload in that section must have been recorded
-via `aith assess record-finding` during your session. Do not defer recording to the operator.
+via `vigil assess record-finding` during your session. Do not defer recording to the operator.
 
 ---
 
@@ -462,7 +462,7 @@ via `aith assess record-finding` during your session. Do not defer recording to 
 
 When your output includes `#### Surface Candidates`, record each one directly:
 ```
-aith assess record-surface <type> <target> <source> [--rationale TEXT] [--status STATUS]
+vigil assess record-surface <type> <target> <source> [--rationale TEXT] [--status STATUS]
 ```
 
 Use only the supported `record-surface` types: `account_recovery`, `api_documentation`,
@@ -480,7 +480,7 @@ Return structured output using these section headers when relevant to your role:
 
 Use `#### Decision` and `#### Action` for validation output (vulnerability-analyst).
 
-Every `#### Findings` block must contain finding payloads ready for `aith assess record-finding`,
+Every `#### Findings` block must contain finding payloads ready for `vigil assess record-finding`,
 not prose descriptions.
 
 ---
@@ -525,7 +525,7 @@ API security: `agent/references/api-security/`
 
 ## 9. Script Path Convention
 
-All assessment operations use `aith assess <subcommand>` resolved from the agent workspace
+All assessment operations use `vigil assess <subcommand>` resolved from the agent workspace
 root after `cd agent`. JSON payloads are always in files, never inline shell arguments.
 
 Use `ENGAGEMENT_DIR` or `--engagement-dir` for path resolution — hardcoded absolute paths break across environments.
@@ -534,15 +534,15 @@ Use `ENGAGEMENT_DIR` or `--engagement-dir` for path resolution — hardcoded abs
 
 ## 10. Chain, Credential, and Coverage State
 
-Record state immediately using `aith assess` with JSON files:
+Record state immediately using `vigil assess` with JSON files:
 
-- **Attack chains:** `aith assess record-chain <agent-name> <chain-json-file>`
-- **Credentials:** `aith assess post credentials <credential-json-file>`
-- **Credential tests:** `aith assess post credential-tests <json-file>`
-- **Access records:** `aith assess post access-records <json-file>`
-- **Coverage updates:** `aith assess patch coverage-items/<id> <json-file>`
-- **Blocked techniques:** `aith assess post blocked-techniques <json-file>`
-- **Probe runs:** `aith assess post probe-runs <json-file>`
+- **Attack chains:** `vigil assess record-chain <agent-name> <chain-json-file>`
+- **Credentials:** `vigil assess post credentials <credential-json-file>`
+- **Credential tests:** `vigil assess post credential-tests <json-file>`
+- **Access records:** `vigil assess post access-records <json-file>`
+- **Coverage updates:** `vigil assess patch coverage-items/<id> <json-file>`
+- **Blocked techniques:** `vigil assess post blocked-techniques <json-file>`
+- **Probe runs:** `vigil assess post probe-runs <json-file>`
 
 Write payloads to `/tmp/<type>-<slug>.json` before calling — inline JSON shell arguments cause escaping damage and are not auditable.
 
@@ -556,9 +556,9 @@ canonical backend state and avoids writing duplicate rows.
 
 Engagement artifacts live at one physical location on disk but have two names depending on where the command runs.
 
-- **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR`. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local file work, `aith assess` calls, and any script running on the host.
-- **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount managed by `aith runtime start`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so commands inside the runtime can resolve it.
-- **`aith assess kali ...` invocations MUST reference paths as `/engagements/$ENGAGEMENT_KEY/...`** in their command argv — the host path `$DIR` is not valid inside the container, and writing to `/tmp` or `/data` for engagement-scoped artifacts loses them outside the shared-infra conventions.
+- **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR`. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local file work, `vigil assess` calls, and any script running on the host.
+- **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount managed by `vigil runtime start`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so commands inside the runtime can resolve it.
+- **`vigil assess kali ...` invocations MUST reference paths as `/engagements/$ENGAGEMENT_KEY/...`** in their command argv — the host path `$DIR` is not valid inside the container, and writing to `/tmp` or `/data` for engagement-scoped artifacts loses them outside the shared-infra conventions.
 
 ---
 
@@ -573,17 +573,17 @@ failures or runs the script against the wrong file system.
 
 - **Authoring on the host** — write scripts under
   `$DIR/scripts/<name>.py` (host path) or `$ENGAGEMENT_DIR/scripts/<name>.py`.
-  The host path is what the operator and reviewers see, what `aith assess`
+  The host path is what the operator and reviewers see, what `vigil assess`
   recording references when capturing artifacts, and what shows up in commit
   diffs.
-- **Executing inside Kali** — invoke the script through `aith assess kali exec`
+- **Executing inside Kali** — invoke the script through `vigil assess kali exec`
   using its container-side path
   `/engagements/$ENGAGEMENT_KEY/scripts/<name>.py`. The container sees the
   bind-mounted directory at `/engagements/<engagement_key>`, so the host-side
   `$DIR` prefix is invalid inside the runtime and a literal `$DIR` in the argv
   resolves to nothing.
 - **Common pattern** — author at `$DIR/scripts/exploit.py`, then run
-  `aith assess kali exec --technique EXPLOIT --intent "..." --probe-kind exploit
+  `vigil assess kali exec --technique EXPLOIT --intent "..." --probe-kind exploit
   --phase exploit --timeout 600 -- python3
   /engagements/$ENGAGEMENT_KEY/scripts/exploit.py --target https://example`.
   The `--` separator forwards everything after it as raw argv to the in-container
@@ -612,24 +612,24 @@ well-known file:
 - `$DIR/.listener_url` — present when the operator has provisioned a reverse-shell listener / tunnel address. Read it to learn where shells should call back.
 
 Agents READ `.listener_url` (never write it). When `.listener_url` is missing
-and exploitation needs one, record a blocked technique via `aith assess post
+and exploitation needs one, record a blocked technique via `vigil assess post
 blocked-techniques <json-file>` instead of attempting to bind a port yourself.
 
 OOB callback domains are not engagement files. Get readiness and the configured
-base domain from `aith oob status --json`; create or reuse a named listener
-client with `aith oob client start <name> --engagement <key> --agent <agent>`;
-mint a nonce-tagged callback URL per payload with `aith oob mint` and embed its
-`http` host in the payload; then correlate each probe to its callback with `aith
-oob poll --client <name>`. `aith oob client logs <name> --lines 80` is a raw tail
+base domain from `vigil oob status --json`; create or reuse a named listener
+client with `vigil oob client start <name> --engagement <key> --agent <agent>`;
+mint a nonce-tagged callback URL per payload with `vigil oob mint` and embed its
+`http` host in the payload; then correlate each probe to its callback with `vigil
+oob poll --client <name>`. `vigil oob client logs <name> --lines 80` is a raw tail
 of that client's listener log for infra debugging only — it does NOT correlate
 nonces to probes, so never read it for hits. If OOB is unavailable, fall back to
 time-based detection and note the substitution in your output.
 
 Hit-checking is handled through the CLI surfaces that own those logs:
-- OOB callback correlation / evidence: `aith oob poll --client <name>` (matched probe<->callback pairs)
-- OOB raw listener-log tail (infra debugging only, not correlation): `aith oob client logs <name> --lines 80`
-- OOB infrastructure debugging: `aith logs oob --lines 80`
-- Shell listener session output: `aith runtime shell-exec "tail -80 /data/shell-<name>.log"`
+- OOB callback correlation / evidence: `vigil oob poll --client <name>` (matched probe<->callback pairs)
+- OOB raw listener-log tail (infra debugging only, not correlation): `vigil oob client logs <name> --lines 80`
+- OOB infrastructure debugging: `vigil logs oob --lines 80`
+- Shell listener session output: `vigil runtime shell-exec "tail -80 /data/shell-<name>.log"`
 
 Record the result in the relevant finding, probe-run, or handoff after reading
 logs; the log command itself is infrastructure observation, while durable
@@ -642,14 +642,14 @@ engagement state still belongs in the backend.
 When your output includes `#### Intelligence`, write each row as a structured JSON file matching the relevant `schemas/intel-*.schema.json` and record it via:
 
 ```
-aith assess record-intel <type> <json-file>
+vigil assess record-intel <type> <json-file>
 ```
 
 Valid `<type>` values: `tech-component`, `person`, `email`, `domain`, `cve`, `dns-record`, `social-profile`, `breach-record`, `org-fact`, `note`.
 
-Run `aith assess contract record-intel <type>` before authoring the JSON — intel schemas are strict (`additionalProperties=false`) and reject unknown fields.
+Run `vigil assess contract record-intel <type>` before authoring the JSON — intel schemas are strict (`additionalProperties=false`) and reject unknown fields.
 
-The backend deduplicates per-engagement on natural keys: tech stack on Component (+ Version), people on Name, emails on Address, domains on Identity + Kind, CVEs on `cve_id`. Credentials live in the assessment domain (`assessment_credentials`); use `aith assess post credentials`, not `record-intel`.
+The backend deduplicates per-engagement on natural keys: tech stack on Component (+ Version), people on Name, emails on Address, domains on Identity + Kind, CVEs on `cve_id`. Credentials live in the assessment domain (`assessment_credentials`); use `vigil assess post credentials`, not `record-intel`.
 
 Prose intel that doesn't fit a structured row goes to `record-intel note` — it is FTS-indexed and engagement-scoped.
 
@@ -685,19 +685,19 @@ roles that do.
 | Custom scripts/exploits | tools/ |
 | Background PIDs | pids/ |
 
-Root: `scope.json`, `report.md`, `auth.json`, and the transient worker buffer only. Activity log and intel live in the orchestrator backend — query via `aith assess fetch activity-entries` and `aith assess list-intel`.
+Root: `scope.json`, `report.md`, `auth.json`, and the transient worker buffer only. Activity log and intel live in the orchestrator backend — query via `vigil assess fetch activity-entries` and `vigil assess list-intel`.
 
 ---
 
 ## 16. Output Hygiene — Backend Is Canonical
 
 The backend stores the canonical, queryable state of the engagement: findings in
-the findings table (`aith assess record-finding`), intel rows in `intel_*` tables
+the findings table (`vigil assess record-finding`), intel rows in `intel_*` tables
 (`record-intel`), surface candidates in the surfaces table (`record-surface`),
 credentials and attack chains in their tables, and the cross-cutting handoff
 (summary / coverage gaps / next steps / runtime issues / working artifacts /
 open questions / specialty extras) in `assessment_dispatch_handoffs`
-(`aith assess agent handoff --from-json <path>`).
+(`vigil assess agent handoff --from-json <path>`).
 
 The operator queries those tables through bounded primitives — `resume-brief`,
 `render-handoff <agent-id>`, `artifact search/get`, `fetch findings`,
@@ -713,26 +713,26 @@ local notes first.
 Write durable state to backend tables and linked artifacts immediately — hidden
 markdown notes break resume, report readiness, and cross-agent handoff because
 future agents cannot query or verify them. Any `.md` file under `notes/` that
-matters after the current command must be registered with `aith assess artifact
+matters after the current command must be registered with `vigil assess artifact
 register <path> --finding <slug>` (or another entity link) before the dispatch
 closes. Unlinked markdown notes are scratch only and are not valid resume or
-report input — the operator can confirm a note is scratch with `aith assess
+report input — the operator can confirm a note is scratch with `vigil assess
 artifact mark-scratch <path>` (single) or `--under <prefix>` (bulk). A
 `check-report-readiness` `unlinked_markdown_note` blocker names the exact fix
 per row.
 
 ### Mandatory closing sequence (every specialist runs this before returning)
 
-1. `aith assess record-finding <agent-name> <finding-json>` per finding.
-2. `aith assess record-intel <type> <intel-json>` per intel row.
-3. `aith assess record-surface <type> <target> <source> [--rationale TEXT]` per surface candidate.
-4. `aith assess agent handoff --from-json <path>` — use the exact
+1. `vigil assess record-finding <agent-name> <finding-json>` per finding.
+2. `vigil assess record-intel <type> <intel-json>` per intel row.
+3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` per surface candidate.
+4. `vigil assess agent handoff --from-json <path>` — use the exact
    `agent_id`, `agent_role`, and `phase` values from the **Runtime Identity block**
    the operator placed at the top of your dispatch prompt. The handoff row is keyed
    on `agent_id`; using a different value creates an orphaned row the operator cannot render.
    Set `handoff_status` to `ready` when the operator can close the dispatch, or
    `blocked` when the objective could not complete.
-5. `aith assess agent render-handoff <agent_id>` — run after step 4 as a self-check.
+5. `vigil assess agent render-handoff <agent_id>` — run after step 4 as a self-check.
    Exit only after the render succeeds. A 404 means the `agent_id` in step 4 did not
    match the registered dispatch.
 

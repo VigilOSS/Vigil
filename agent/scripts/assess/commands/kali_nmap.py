@@ -1,4 +1,4 @@
-"""aith assess kali nmap-scan — typed wrapper around nmap inside the runtime."""
+"""vigil assess kali nmap-scan — typed wrapper around nmap inside the runtime."""
 from __future__ import annotations
 
 import sys

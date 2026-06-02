@@ -1,6 +1,6 @@
-"""Root-level smoke tests for `aith` runtime helpers.
+"""Root-level smoke tests for `vigil` runtime helpers.
 
-These tests exercise the `aith runtime resources` helper against a stub Docker
+These tests exercise the `vigil runtime resources` helper against a stub Docker
 runner and skip cleanly when the host has no docker CLI on PATH. The deeper
 CLI test surface lives in `orchestrator/backend/tests/test_aith_cli.py`; this
 file is a contract guard so the runtime helper stays callable from the
@@ -20,17 +20,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 
-def test_aith_runtime_resources_helper_renders_against_stub_container(monkeypatch, capsys):
-    from ai_threat_hunting_cli.docker import DockerResult
-    from ai_threat_hunting_cli.runtime import aith_runtime_resources
+def test_vigil_runtime_resources_helper_renders_against_stub_container(monkeypatch, capsys):
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import vigil_runtime_resources
 
-    monkeypatch.setenv("AITH_RUNTIME_MEMORY_GB", "8")
-    monkeypatch.setenv("AITH_RUNTIME_CPUS", "4")
+    monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
+    monkeypatch.setenv("VIGIL_RUNTIME_CPUS", "4")
 
     def runner(argv, **_):
         if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "security-research\n", "")
-        if argv[:3] == ["docker", "exec", "security-research"]:
+            return DockerResult(0, "vigil\n", "")
+        if argv[:3] == ["docker", "exec", "vigil"]:
             return DockerResult(
                 0,
                 "/sys/fs/cgroup/memory.max=max\n"
@@ -40,19 +40,19 @@ def test_aith_runtime_resources_helper_renders_against_stub_container(monkeypatc
             )
         return DockerResult(0, "", "")
 
-    aith_runtime_resources(runner=runner)
+    vigil_runtime_resources(runner=runner)
     output = capsys.readouterr().out
     assert "configured\tmemory=8g" in output
     assert "memory.max=max" in output
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not installed on host")
-def test_aith_runtime_resources_helper_handles_real_docker_cli_gracefully(capsys):
-    """When docker is on PATH but no `security-research` container is running, the helper
+def test_vigil_runtime_resources_helper_handles_real_docker_cli_gracefully(capsys):
+    """When docker is on PATH but no `vigil` container is running, the helper
     reports `running=False` and prints `live\tcontainer not running` rather than crashing."""
-    from ai_threat_hunting_cli.runtime import aith_runtime_resources
+    from vigil_cli.runtime import vigil_runtime_resources
 
-    aith_runtime_resources(container_name="security-research-stub-nonexistent")
+    vigil_runtime_resources(container_name="vigil-stub-nonexistent")
     output = capsys.readouterr().out
     assert "running=False" in output
     assert "container not running" in output
@@ -65,14 +65,14 @@ def _seed_engagement(eng_dir: Path) -> None:
 
 
 def test_doctor_failed_audit(tmp_path, monkeypatch):
-    """`aith doctor` must surface orphaned `<run_uuid>.failed-audit` markers.
+    """`vigil doctor` must surface orphaned `<run_uuid>.failed-audit` markers.
 
     Without this signal, a long engagement can accumulate dozens of markers
-    silently — each one is an `aith assess kali` invocation whose audit row
+    silently — each one is an `vigil assess kali` invocation whose audit row
     never reached the orchestrator backend, so coverage drifts behind the
     runtime evidence.
     """
-    from ai_threat_hunting_cli.status import (
+    from vigil_cli.status import (
         _failed_audit_marker_check,
         list_failed_audit_markers,
     )
@@ -83,7 +83,7 @@ def test_doctor_failed_audit(tmp_path, monkeypatch):
     _seed_engagement(eng_dir)
 
     # Quiet env so unrelated checks (frp token) don't leak state into the test.
-    monkeypatch.delenv("AI_THREAT_HUNTING_FRP_TOKEN", raising=False)
+    monkeypatch.delenv("VIGIL_FRP_TOKEN", raising=False)
 
     # Empty case: no scans/kali dir → check returns OK with quiet message.
     assert list_failed_audit_markers(eng_dir) == []
@@ -110,7 +110,7 @@ def test_doctor_failed_audit(tmp_path, monkeypatch):
 
 def test_doctor_failed_audit_no_engagements_dir(tmp_path):
     """When the install root has no engagements directory yet, the check returns OK."""
-    from ai_threat_hunting_cli.status import _failed_audit_marker_check
+    from vigil_cli.status import _failed_audit_marker_check
 
     result = _failed_audit_marker_check(tmp_path)
     assert result.name == "failed-audit-markers"
@@ -119,7 +119,7 @@ def test_doctor_failed_audit_no_engagements_dir(tmp_path):
 
 def test_readyz_http_error_preserves_readiness_payload(tmp_path, monkeypatch):
     """HTTP 503 from /readyz is a reachable not-ready state, not a transport failure."""
-    from ai_threat_hunting_cli import status as status_module
+    from vigil_cli import status as status_module
 
     body = (
         b'{"status":"not_ready","database_connected":true,'

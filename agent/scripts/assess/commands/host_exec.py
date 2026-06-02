@@ -1,8 +1,8 @@
-"""aith assess host-exec — audited host-machine command execution for blue and non-kali red flows.
+"""vigil assess host-exec — audited host-machine command execution for blue and non-kali red flows.
 
 Wraps an arbitrary host-machine command (gam, gcloud, az, splunk, crowdstrike,
 defender, jq, python3, ...) with the same audit pipeline that backs
-``aith assess kali ...`` — every invocation lands in ``assessment_command_runs``
+``vigil assess kali ...`` — every invocation lands in ``assessment_command_runs``
 via the orchestrator's ``record_command_run()`` writer. Distinguished from
 kali-runtime rows by ``route='host_exec'``.
 """
@@ -90,7 +90,7 @@ def register(subparsers) -> None:
         "--agent-name",
         dest="agent_name",
         default=None,
-        help="Agent name for audit attribution (defaults to AITH_AGENT_NAME, AGENT_NAME, then operator).",
+        help="Agent name for audit attribution (defaults to VIGIL_AGENT_NAME, AGENT_NAME, then operator).",
     )
     p.add_argument(
         "--scope-host",
@@ -256,7 +256,7 @@ def _build_notes(scope_host: str) -> str:
 def _resolve_agent_name(args: argparse.Namespace) -> str:
     for value in (
         getattr(args, "agent_name", None),
-        os.environ.get("AITH_AGENT_NAME"),
+        os.environ.get("VIGIL_AGENT_NAME"),
         os.environ.get("AGENT_NAME"),
         "operator",
     ):

@@ -1,4 +1,4 @@
-"""Tests for the aith assess command-run audit API."""
+"""Tests for the vigil assess command-run audit API."""
 from __future__ import annotations
 
 import json
@@ -630,10 +630,10 @@ def test_host_exec_accepts_cli_audit_source_values(client, isolate_settings, aud
 
 def test_list_command_runs_filters_by_route_lane(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
-    # Container/kali typed-verb row — route is stamped 'aith assess kali/<tool>'.
+    # Container/kali typed-verb row — route is stamped 'vigil assess kali/<tool>'.
     assert _post(
         client,
-        _base_payload(command="kali nmap run", argv=["nmap", "x"], route="aith assess kali/nmap"),
+        _base_payload(command="kali nmap run", argv=["nmap", "x"], route="vigil assess kali/nmap"),
     ).status_code == 201
     # Host-native row via the host-exec endpoint — server forces route='host_exec'.
     assert client.post(
@@ -657,7 +657,7 @@ def test_list_command_runs_filters_by_route_lane(client, isolate_settings):
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?route=kali"
     ).json()
     assert len(kali_rows) == 1
-    assert kali_rows[0]["route"].startswith("aith assess kali/")
+    assert kali_rows[0]["route"].startswith("vigil assess kali/")
 
 
 def test_artifact_dir_defaults_to_engagement_root_when_omitted(client, isolate_settings):

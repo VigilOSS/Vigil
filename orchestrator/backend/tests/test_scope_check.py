@@ -65,7 +65,7 @@ def test_scope_check_allows_audited_kali_exec_with_raw_tool_name(tmp_path: Path)
     )
 
     result = _run_scope_check(
-        "aith assess kali exec --technique HEALTH --intent tooling --probe-kind fingerprint --phase recon --timeout 30 -- curl -sS https://target.example",
+        "vigil assess kali exec --technique HEALTH --intent tooling --probe-kind fingerprint --phase recon --timeout 30 -- curl -sS https://target.example",
         engagement_dir,
     )
 
@@ -105,7 +105,7 @@ def test_scope_check_blocks_recursive_force_delete(tmp_path: Path) -> None:
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
 
-    result = _run_scope_check("rm -rf /tmp/aith-engagement-scratch", engagement_dir)
+    result = _run_scope_check("rm -rf /tmp/vigil-engagement-scratch", engagement_dir)
 
     assert result.returncode == 2
     assert "recursive delete" in result.stderr.lower()
@@ -122,7 +122,7 @@ def test_scope_check_blocks_destructive_disk_operation(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Wildcard-includes-apex semantics — `aith assess filter-scope` regressions (1F.1)
+# Wildcard-includes-apex semantics — `vigil assess filter-scope` regressions (1F.1)
 # ---------------------------------------------------------------------------
 
 
@@ -394,7 +394,7 @@ def test_apex_match_with_explicit_entry(monkeypatch, tmp_path: Path, capsys) -> 
 
 
 # ---------------------------------------------------------------------------
-# Wildcard-includes-apex semantics — `aith assess ingest-endpoints` regressions
+# Wildcard-includes-apex semantics — `vigil assess ingest-endpoints` regressions
 # ---------------------------------------------------------------------------
 
 

@@ -61,8 +61,8 @@ Before any tenant-facing pull:
 - [ ] `agent/rules/triage.md`, `agent/rules/ir-evidence.md`, and `agent/shared-constraints-blue.md` loaded
 - [ ] The platform skill named in the dispatch is loaded — exactly one. Multiple platform skills in one dispatch is a dispatch-mode violation; halt and return a `blocked` handoff naming the conflict.
 - [ ] Every tenant ref path in `scope.json:tenant_reference_paths[]` exists on disk and is loaded; customer slug matches the dispatch
-- [ ] You ran `aith assess resume-brief --finding <slug>` and reviewed prior dispatches against this actor / target / IOC. Resume-brief surfaces parallel investigations the L1 dispatch may not have known about.
-- [ ] You read the L1 handoff via `aith assess agent render-handoff <l1-agent-id>` — NOT by re-reading the L1 dispatch's response text. The handoff row is canonical.
+- [ ] You ran `vigil assess resume-brief --finding <slug>` and reviewed prior dispatches against this actor / target / IOC. Resume-brief surfaces parallel investigations the L1 dispatch may not have known about.
+- [ ] You read the L1 handoff via `vigil assess agent render-handoff <l1-agent-id>` — NOT by re-reading the L1 dispatch's response text. The handoff row is canonical.
 - [ ] You confirmed `host-exec` is available. If not, return a blocked handoff and name the missing audit path in `runtime_issues`; do not run tenant-facing commands outside `host-exec`.
 
 If any item is unchecked, STOP and load it now or return a `blocked` handoff.
@@ -78,7 +78,7 @@ If any item is unchecked, STOP and load it now or return a `blocked` handoff.
 
 ## Inputs
 
-- L1 handoff JSON (read via `aith assess agent render-handoff <l1-agent-id>`)
+- L1 handoff JSON (read via `vigil assess agent render-handoff <l1-agent-id>`)
 - `scope.json` — `customer`, `platforms`, `tenant_reference_paths[]`
 - The tenant ref(s) — load in full
 - The platform skill named in the dispatch
@@ -89,19 +89,19 @@ If any item is unchecked, STOP and load it now or return a `blocked` handoff.
 | Field | Value |
 |-------|-------|
 | Finding | `status=active`, `verification_state=unreviewed`, severity per `agent/rules/triage.md` §2, `details.timeline[]` (UTC ISO-8601 with `source_file` and `command_run_id` citations per `agent/rules/ir-evidence.md` rule 3), `details.iocs[]`, `details.mitre_techniques[]`, `details.confidence`, `details.severity_rationale` |
-| Intel rows | `aith assess record-intel <type>` for each new IOC; `<type>` ∈ `{domain, email, dns-record, cve, breach-record, note}` |
+| Intel rows | `vigil assess record-intel <type>` for each new IOC; `<type>` ∈ `{domain, email, dns-record, cve, breach-record, note}` |
 | Finding↔intel links | `assessment_finding_links` rows created automatically by `record-intel --finding <slug>` |
 | Artifacts | Every raw pull registered under `ir/reports/`; every derived analysis under `ir/evidence/`; PII-bearing exports marked `--sensitive` |
 | Handoff JSON | `disposition=null` (L2 NEVER sets disposition), `evidence_refs[]` (artifact IDs), `coverage_gaps[]`, `mitre_techniques[]`, `tenant_ref_paths_consulted[]`, `cross_platform_correlation_notes` when `platforms.length > 1` |
 
 ## Telemetry Pull Discipline
 
-Every tenant-facing platform command runs through `aith assess host-exec` (Unit 9
+Every tenant-facing platform command runs through `vigil assess host-exec` (Unit 9
 verb) so the command lands in `assessment_command_runs` with intent, technique,
 and phase metadata:
 
 ```bash
-aith assess host-exec \
+vigil assess host-exec \
   --tool <gam|gcloud|az|splunk|crowdstrike|defender|jq|python3|...> \
   --intent "<one-line purpose>" \
   --technique <MITRE-id-or-IR-tag> \
@@ -121,7 +121,7 @@ Forbidden — bypasses audit pipeline (`agent/shared-constraints-blue.md` §6):
 
 No `host-exec` required (no tenant data): `jq` over a registered artifact,
 `sqlite3` over the orchestrator backend, `python3` over an artifact file,
-`aith assess` helpers themselves.
+`vigil assess` helpers themselves.
 
 ## Default 30-Day Look-Back
 
@@ -182,7 +182,7 @@ on the multi-platform finding.
 ## IOC Enrichment
 
 Every IOC in `details.iocs[]` (IP, domain, email, file hash, OAuth client_id,
-URL) gets an `intel_*` row via `aith assess record-intel`. Run enrichment
+URL) gets an `intel_*` row via `vigil assess record-intel`. Run enrichment
 inline for small dispatches; hand off in parallel to `osint-analyst` when:
 
 - Five or more new IOCs need enrichment
@@ -191,7 +191,7 @@ inline for small dispatches; hand off in parallel to `osint-analyst` when:
 - Dispatch budget is tight and parallelism saves wall-clock time
 
 Linking is automatic via `record-intel --finding <slug>`; verify with
-`aith assess fetch finding-links --slug <slug>`.
+`vigil assess fetch finding-links --slug <slug>`.
 
 ## Required Behavior
 
@@ -203,7 +203,7 @@ Linking is automatic via `record-intel --finding <slug>`; verify with
   - `low` = single signal; suggestive but not corroborated
 - Severity follows the MITRE technique and proved impact, not the alert's `severity_hint`. A `high` finding must satisfy the `high` row of `agent/rules/triage.md` §2
 - Cross-tenant artifacts NEVER enter the engagement evidence tree. Cross-tenant indicators surface as redacted `intel-note` cross-tenant claims
-- Stay read-only. WRITE-class actions (containment, account state mutations, mailbox-rule deletions) belong to L4 via `aith blue propose-contain` and operator-approved execution. An L2 dispatch that runs a WRITE has destroyed evidence
+- Stay read-only. WRITE-class actions (containment, account state mutations, mailbox-rule deletions) belong to L4 via `vigil blue propose-contain` and operator-approved execution. An L2 dispatch that runs a WRITE has destroyed evidence
 - Leave `verification_state=unreviewed`. If you want to set it, you have crossed into L3's lane — record the evidence ladder and stop
 
 ## Mandatory Closing Sequence
@@ -213,7 +213,7 @@ Before your dispatch returns, run in this order:
 1. **Register every durable artifact.** Raw pulls under `ir/reports/<feed>_<target>_<window>.{json,csv}`; derived analyses under `ir/evidence/<topic>.md`; exported timelines, IOC dumps:
 
    ```bash
-   aith assess artifact register <path> \
+   vigil assess artifact register <path> \
      --kind <ir_log|ir_evidence|timeline|ioc_dump> \
      --finding <finding-slug> \
      --agent-id <id> \
@@ -229,25 +229,25 @@ Before your dispatch returns, run in this order:
 2. **Mark transient working notes as scratch.**
 
    ```bash
-   aith assess artifact mark-scratch --under notes/scratch/
+   vigil assess artifact mark-scratch --under notes/scratch/
    ```
 
-3. **Promote the L1 draft finding.** `aith assess update-finding <slug> --inline '{"status":"active","details":{"timeline":[...],"iocs":[...],"mitre_techniques":[...],"confidence":"...","severity_rationale":"..."}}'`. `verification_state` stays `unreviewed` — do not include it in the inline payload.
+3. **Promote the L1 draft finding.** `vigil assess update-finding <slug> --inline '{"status":"active","details":{"timeline":[...],"iocs":[...],"mitre_techniques":[...],"confidence":"...","severity_rationale":"..."}}'`. `verification_state` stays `unreviewed` — do not include it in the inline payload.
 
-4. **Record intel rows for every IOC** via `aith assess record-intel <type> <intel-json> --finding <slug>`. The link to the finding is created automatically.
+4. **Record intel rows for every IOC** via `vigil assess record-intel <type> <intel-json> --finding <slug>`. The link to the finding is created automatically.
 
 5. **Record activity entries** for state-changing events:
    ```bash
-   aith assess log investigator "investigation pass completed" investigation_pass_completed "<summary>" \
+   vigil assess log investigator "investigation pass completed" investigation_pass_completed "<summary>" \
      --actor-kind agent \
      --metadata-inline '{"tier":"L2","finding_slug":"<slug>","platform":"<platform>","confidence":"<low|medium|high>"}'
    ```
 
-6. **Emit the handoff JSON** via `aith assess agent handoff --from-json <path>`. `evidence_refs[]` is the artifact IDs returned by `register`. `disposition=null`. `cross_platform_correlation_notes` is non-empty when `platforms.length > 1`. `coverage_gaps[]` names every open question.
+6. **Emit the handoff JSON** via `vigil assess agent handoff --from-json <path>`. `evidence_refs[]` is the artifact IDs returned by `register`. `disposition=null`. `cross_platform_correlation_notes` is non-empty when `platforms.length > 1`. `coverage_gaps[]` names every open question.
 
-7. **Self-check.** `aith assess agent render-handoff <agent_id>` — exit only after it succeeds.
+7. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only after it succeeds.
 
-`aith assess agent handoff` is idempotent — checkpoint after each major step
+`vigil assess agent handoff` is idempotent — checkpoint after each major step
 (after the initial pull set lands, after the corroboration pass, after IOC
 enrichment), not only at the end.
 

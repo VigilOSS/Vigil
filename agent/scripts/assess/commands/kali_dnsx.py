@@ -1,4 +1,4 @@
-"""aith assess kali dnsx — typed wrapper around dnsx inside the runtime."""
+"""vigil assess kali dnsx — typed wrapper around dnsx inside the runtime."""
 from __future__ import annotations
 
 import argparse

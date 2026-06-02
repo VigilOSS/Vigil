@@ -1,12 +1,12 @@
 ---
 name: dns-tunneling-detection
 description: Detect and execute DNS tunneling for C2 and data exfiltration — tiered detection methodology, attacker evasion techniques, offensive tool configuration, and false positive elimination
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # DNS Tunneling Detection
 
-> **`aith assess kali` audit flags:** use `--technique RECON`; this skill's offensive side operates against in-scope DNS infrastructure, so `RECON` fits better than `OSINT` (which is passive external-zone lookups).
+> **`vigil assess kali` audit flags:** use `--technique RECON`; this skill's offensive side operates against in-scope DNS infrastructure, so `RECON` fits better than `OSINT` (which is passive external-zone lookups).
 
 ## Adversarial Context
 
@@ -346,7 +346,7 @@ index=dns earliest=-24h
 ## Kill Signals — Stop Hunting When
 - Tier 1 signature match found (known tool pattern) → HIGH confidence, record as intelligence finding, escalate to operator
 - Tier 2-3 anomalies found but all resolve to legitimate services (CDN, DKIM, SaaS) after false positive elimination → no tunneling, move on
-- No DNS logs available via `aith assess kali exec --technique LOG-READ --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout 30 -- ...` or Splunk → cannot perform this analysis, skip skill entirely
+- No DNS logs available via `vigil assess kali exec --technique LOG-READ --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout 30 -- ...` or Splunk → cannot perform this analysis, skip skill entirely
 - Tunnel confirmed with C2 domain identified → record finding, provide domain IOC to operator for firewall blocking
 
 ## Escalate When

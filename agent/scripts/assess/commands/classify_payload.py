@@ -1,4 +1,4 @@
-"""aith assess classify-payload — deterministic value-type classifier + mutation oracle.
+"""vigil assess classify-payload — deterministic value-type classifier + mutation oracle.
 
 Classifies a single parameter value into a semantic type and (with
 ``--mutations``) generates semantically-aware attack variant sets keyed by

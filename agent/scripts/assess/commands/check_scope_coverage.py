@@ -1,4 +1,4 @@
-"""aith assess check-scope-coverage — per-scope-entry coverage audit.
+"""vigil assess check-scope-coverage — per-scope-entry coverage audit.
 
 This is a higher-level sibling of `check-coverage`: where that command audits
 the backend's `assessment_surfaces` table for surface-level resolution,
@@ -174,7 +174,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "service / decision tables; this gate NEVER queries assessment_command_runs. "
             "Unmet objectives WARN but do not block (use --force on transition-phase "
             "if needed). Record an explicit skip via "
-            "`aith assess agent decision --kind coverage_deferral --payload-json "
+            "`vigil assess agent decision --kind coverage_deferral --payload-json "
             "'{\"host\": \"...\", \"deferred_objectives\": [\"directory_fuzz\"], \"reason\": \"...\"}' "
             "--surfaced-to-user`."
         ),
@@ -188,7 +188,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "ready-to-run next-dispatch RECOMMENDATION (role + scope-host + "
             "dispatch-mode + skills) plus a task skeleton stating the coverage "
             "gap. This NEVER fires a dispatch — the interactive operator runs "
-            "the printed `aith assess agent start ...` line. Requires "
+            "the printed `vigil assess agent start ...` line. Requires "
             "--require-stage (the stage that failed selects the role); a "
             "no-op note is emitted if no stage is set. Skill selection for a "
             "consumption gap is data-driven off the host's untested pending "
@@ -262,13 +262,13 @@ _OBJECTIVE_DISPATCH_HINTS: dict[str, str] = {
     "waf_tier": (
         f"dispatch {_HINT_RECON_SPECIALIST} with skill web-recon (records "
         "intel_tech_components via wafw00f / httpx --tech-detect / whatweb), "
-        "OR record `aith assess agent decision --kind coverage_deferral "
+        "OR record `vigil assess agent decision --kind coverage_deferral "
         "--payload-json '{{\"host\": \"{host}\", \"deferred_objectives\": "
         "[\"waf_tier\"], \"reason\": \"...\"}}' --surfaced-to-user`"
     ),
     "service_inventory": (
         f"dispatch {_HINT_RECON_SPECIALIST} (records assessment_services / "
-        "assessment_surfaces) or ingest endpoints via `aith assess "
+        "assessment_surfaces) or ingest endpoints via `vigil assess "
         "ingest-endpoints`, OR record a coverage_deferral for the host"
     ),
     "directory_fuzz": (
@@ -294,7 +294,7 @@ _OBJECTIVE_DISPATCH_HINTS: dict[str, str] = {
 # --auto-redispatch — turn a coverage gap into a ready-to-run RECOMMENDATION
 # ---------------------------------------------------------------------------
 #
-# This command NEVER fires a dispatch. It prints the `aith assess agent start`
+# This command NEVER fires a dispatch. It prints the `vigil assess agent start`
 # line the interactive operator runs by hand. The maps below mirror the
 # operator phase model; `agent/operator-core.md` is the human source of truth
 # (the "role default dispatch-mode" list near "Dispatch-Mode Declaration" and
@@ -708,7 +708,7 @@ def _format_start_command(
     skills: list[str],
 ) -> str:
     parts = [
-        "aith assess agent start",
+        "vigil assess agent start",
         f"--role {role}",
         f"--scope-host {scope_host}",
         f"--dispatch-mode {mode}",
@@ -874,7 +874,7 @@ def _fetch_prior_dispatches(
     """Fetch ACTIVE prior dispatches for dedup. Returns ``(rows, degraded)``.
 
     Reuses ``AssessmentClient.list_dispatches`` — the same method the
-    ``aith assess agent list`` path uses — but constrains the fetch to
+    ``vigil assess agent list`` path uses — but constrains the fetch to
     in-flight dispatches so dedup only suppresses against work that is still
     running. The backend ``GET /dispatches`` accepts a single ``status`` query
     param (exact match); ``in-progress`` is the only non-terminal status, so
@@ -1005,7 +1005,7 @@ def run(args: argparse.Namespace) -> None:
         for host, vendor in vendor_saas_pending:
             overall_gaps.append(
                 f"vendor-saas: {host} (vendor={vendor}) has no scope_decision recorded "
-                f"(record via `aith assess agent decision --kind scope_decision --host {host} --vendor {vendor} --choice ...`)"
+                f"(record via `vigil assess agent decision --kind scope_decision --host {host} --vendor {vendor} --choice ...`)"
             )
     ready = not overall_gaps
 
@@ -1499,7 +1499,7 @@ def _render_text(report: dict[str, Any], *, verbose: bool) -> None:
         for row in vendor_saas_pending:
             print(
                 f"  - {row['host']} (vendor={row['vendor']}) — record a "
-                f"scope_decision via `aith assess agent decision "
+                f"scope_decision via `vigil assess agent decision "
                 f"--kind scope_decision --host {row['host']} --vendor {row['vendor']} "
                 f"--choice ...` before recon dispatch"
             )

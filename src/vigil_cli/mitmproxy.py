@@ -12,7 +12,7 @@ from .paths import container_host_url, resolve_orchestrator_base_url
 _PORT_WAIT_ATTEMPTS = 30
 _PORT_WAIT_DELAY_SECONDS = 0.2
 
-_CONTAINER_NAME = "security-research-proxy"
+_CONTAINER_NAME = "vigil-proxy"
 _RELOAD_SENTINEL = ".mitmproxy-reload-requested"
 _ROUTES_CACHE = ".mitmproxy-routes.json"
 
@@ -23,14 +23,14 @@ class MitmproxyOptions:
     engagements_root: Path
     mode: str = "docker"
     port: int = 8080
-    image: str = "security-research-proxy:latest"
+    image: str = "vigil-proxy:latest"
     container_name: str = _CONTAINER_NAME
     volume_name: str = "mitmproxy-ca"
 
 
 def build_image(
     install_root: Path,
-    image: str = "security-research-proxy:latest",
+    image: str = "vigil-proxy:latest",
     *,
     force: bool = False,
     runner: docker.Runner = docker.run_command,
@@ -130,7 +130,7 @@ def start_proxy(
             tail = _container_log_tail(options.container_name, runner=runner)
             raise SystemExit(
                 f"mitmproxy container exited during startup. Last log lines:\n{tail}\n"
-                f"Re-run `aith mitmproxy build --force` if the addon imports changed."
+                f"Re-run `vigil mitmproxy build --force` if the addon imports changed."
             )
         raise SystemExit(f"mitmproxy container started but port {options.port} is not reachable on 127.0.0.1")
     # The port can come up before the addon finishes its lifespan. If the
@@ -162,7 +162,7 @@ def proxy_status_payload(
     *,
     port: int = 8080,
     container_name: str = _CONTAINER_NAME,
-    image: str = "security-research-proxy:latest",
+    image: str = "vigil-proxy:latest",
     volume_name: str = "mitmproxy-ca",
     runner: docker.Runner = docker.run_command,
 ) -> dict:

@@ -1,7 +1,7 @@
 ---
 name: ssti-testing
 description: Server-side template injection detection, engine identification, and RCE
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Server-Side Template Injection (SSTI) Testing
@@ -16,7 +16,7 @@ origin: AI Threat Hunting
 
 - curl / Burp Suite Repeater
 - SSTImap (automated SSTI detection and exploitation — active successor to tplmap)
-- `aith oob mint` / `aith oob poll` (mint a nonce-tagged callback URL and correlate blind-SSTI hits — see §5 Blind SSTI; replaces reading the listener log by hand)
+- `vigil oob mint` / `vigil oob poll` (mint a nonce-tagged callback URL and correlate blind-SSTI hits — see §5 Blind SSTI; replaces reading the listener log by hand)
 - Custom polyglot payloads
 
 ## Methodology
@@ -91,8 +91,8 @@ When `{{7*7}}` evaluates server-side but the result is not reflected back (rende
 - [ ] Time-based: inject sleep or heavy computation
 - [ ] **Out-of-band (preferred):** mint a nonce-tagged callback, embed it in an engine-specific RCE gadget so template execution fires the callback, then poll for the correlated hit:
       ```bash
-      aith oob status --json   # confirm readiness
-      aith oob mint --technique ssti --target-url "https://target/profile" --param bio --probe-kind http
+      vigil oob status --json   # confirm readiness
+      vigil oob mint --technique ssti --target-url "https://target/profile" --param bio --probe-kind http
       # -> http  http://<prefix>-<token>.oob.example.com/
       ```
       Embed the minted host in the gadget for the fingerprinted engine and deliver via the kali exec wrapper:
@@ -103,7 +103,7 @@ When `{{7*7}}` evaluates server-side but the result is not reflected back (rende
       ```
       Then correlate instead of grepping the listener log:
       ```bash
-      aith oob poll --client <name> --json
+      vigil oob poll --client <name> --json
       ```
       A non-empty `matched` array for your nonce confirms blind RCE — each match ties the callback (`protocol`, `remote_address`) to the recorded probe (`technique`, `target_url`). A DNS-only callback (use `--probe-kind dns` and `nslookup`/`$(hostname).<host>` gadgets where curl is stripped) still confirms execution and can exfil one label of data. Empty `matched` after the payload lands → fall back to time-based/error-based and record a runtime issue.
 - [ ] Error-based: force errors that leak data

@@ -21,8 +21,8 @@ ULIMIT_NPROC_RECOMMENDED = 8192
 @dataclass(frozen=True, slots=True)
 class RuntimeOptions:
     install_root: Path
-    image: str = "security-research:latest"
-    container_name: str = "security-research"
+    image: str = "vigil:latest"
+    container_name: str = "vigil"
     recreate: bool = False
     allow_oversubscribe: bool = False
 
@@ -31,7 +31,7 @@ def build_runtime(install_root: Path, *, variant: str = "full", dev: bool = Fals
     if variant == "lightweight" and not dev:
         raise SystemExit("The lightweight runtime is development-only. Re-run with --dev to build it.")
     dockerfile = install_root / "agent" / "docker" / ("runtime-lightweight" if variant == "lightweight" else "runtime-full") / "Dockerfile"
-    image = "security-research-lightweight:latest" if variant == "lightweight" else "security-research:latest"
+    image = "vigil-lightweight:latest" if variant == "lightweight" else "vigil:latest"
     argv = ["docker", "build", "-t", image, "-f", str(dockerfile), str(install_root)]
     docker.require_success(runner(argv), argv)
 
@@ -51,10 +51,10 @@ def start_runtime(
 
     if not docker.image_exists(options.image, runner=runner):
         raise SystemExit(
-            f"Missing runtime image: {options.image}. Run `aith runtime build` first.\n"
+            f"Missing runtime image: {options.image}. Run `vigil runtime build` first.\n"
             "The runtime is only needed for target-facing Kali tools. Backend state reads/writes "
-            "use the orchestrator service; run `aith orchestrator status` or "
-            "`aith orchestrator start` if that is what you need."
+            "use the orchestrator service; run `vigil orchestrator status` or "
+            "`vigil orchestrator start` if that is what you need."
         )
 
     if docker.container_running(options.container_name, runner=runner) and not options.recreate:
@@ -110,12 +110,12 @@ def start_runtime(
     _check_runtime_ulimits(options.container_name, runner=runner)
 
 
-def stop_runtime(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> None:
+def stop_runtime(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> None:
     if docker.container_exists(container_name, runner=runner):
         runner(["docker", "rm", "-f", container_name])
 
 
-def runtime_status(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> str:
+def runtime_status(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> str:
     return "running" if docker.container_running(container_name, runner=runner) else "stopped"
 
 
@@ -124,12 +124,12 @@ def _already_running_message(container_name: str, install_root: Path) -> str:
         "Runtime container is already running.\n"
         f"  container: {container_name}\n"
         f"  install root: {install_root}\n"
-        "Use `aith runtime status` or `aith runtime resources` to inspect it.\n"
-        "Use `aith runtime restart` to recreate it, or `aith runtime stop` to stop it."
+        "Use `vigil runtime status` or `vigil runtime resources` to inspect it.\n"
+        "Use `vigil runtime restart` to recreate it, or `vigil runtime stop` to stop it."
     )
 
 
-def runtime_mounts_ok(install_root: Path, container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> bool:
+def runtime_mounts_ok(install_root: Path, container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> bool:
     install_root = install_root.expanduser().resolve()
     data_dir = Path(os.environ.get("KALI_MCP_DATA_DIR", install_root / ".runtime-data"))
     engagements_dir = install_root / "agent" / "engagements"
@@ -140,7 +140,7 @@ def runtime_mounts_ok(install_root: Path, container_name: str = "security-resear
     return True
 
 
-def runtime_resource_state(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
+def runtime_resource_state(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
     """Return configured runtime resources merged with live cgroup state from the container."""
     configured = runtime_resources()
     state: dict[str, object] = {
@@ -160,7 +160,7 @@ def runtime_resource_state(container_name: str = "security-research", *, runner:
     return state
 
 
-def aith_runtime_resources(container_name: str = "security-research", *, runner: docker.Runner = docker.run_command, json_output: bool = False) -> None:
+def vigil_runtime_resources(container_name: str = "vigil", *, runner: docker.Runner = docker.run_command, json_output: bool = False) -> None:
     state = runtime_resource_state(container_name, runner=runner)
     if json_output:
         print(json.dumps(state, indent=2))
@@ -207,7 +207,7 @@ def _validate_image_current(options: RuntimeOptions, *, runner: docker.Runner) -
     configured_id = docker.image_id(options.image, runner=runner)
     if container_id and configured_id and container_id != configured_id:
         raise SystemExit(
-            "Runtime container image drift detected. Recreate with `aith runtime restart`."
+            "Runtime container image drift detected. Recreate with `vigil runtime restart`."
         )
 
 
@@ -235,7 +235,7 @@ def _check_runtime_ulimits(container_name: str, *, runner: docker.Runner) -> Non
         warnings.append(f"nproc={nproc} (recommend >={ULIMIT_NPROC_RECOMMENDED})")
     if warnings:
         print(
-            "[aith] WARN: dockerd default ulimits are low: "
+            "[vigil] WARN: dockerd default ulimits are low: "
             + ", ".join(warnings)
             + ". See README 'Container resource limits' for the daemon.json fix.",
             file=sys.stderr,
@@ -259,7 +259,7 @@ def _validate_tools(container_name: str, *, runner: docker.Runner) -> None:
             raise SystemExit(f"Runtime tool validation failed; missing {tool}")
     result = runner(["docker", "exec", container_name, "test", "-d", "/engagements"])
     if result.returncode != 0:
-        raise SystemExit("Runtime /engagements mount missing. Recreate with `aith runtime restart`.")
+        raise SystemExit("Runtime /engagements mount missing. Recreate with `vigil runtime restart`.")
 
 
 def _validate_mounts(container_name: str, data_dir: Path, engagements_dir: Path, *, runner: docker.Runner) -> None:
@@ -271,11 +271,11 @@ def _validate_mounts(container_name: str, data_dir: Path, engagements_dir: Path,
     for destination, expected_source in expected.items():
         actual_source = mounts.get(destination)
         if not actual_source:
-            raise SystemExit(f"Runtime mount drift detected: missing {destination}. Recreate with `aith runtime restart`.")
+            raise SystemExit(f"Runtime mount drift detected: missing {destination}. Recreate with `vigil runtime restart`.")
         if Path(actual_source).expanduser().resolve() != expected_source:
             raise SystemExit(
                 f"Runtime mount drift detected for {destination}: {actual_source} != {expected_source}. "
-                "Recreate with `aith runtime restart`."
+                "Recreate with `vigil runtime restart`."
             )
 
 
@@ -297,7 +297,7 @@ def _preflight_shared_vm(
     fixed allocation co-located with whatever else the user runs — including, in
     one engagement, production databases). Reading actual VM capacity from
     ``docker info`` lets us refuse a tier that would OOM-kill neighbors, instead
-    of trusting AITH_RUNTIME_* blindly. Fails OPEN: when capacity is unreadable we
+    of trusting VIGIL_RUNTIME_* blindly. Fails OPEN: when capacity is unreadable we
     fall back to the host-RAM undersizing hint and proceed (never hard-fail on an
     unreadable probe).
     """
@@ -322,7 +322,7 @@ def _preflight_shared_vm(
             f"Refusing to start runtime: memory tier {resources.memory_gb} GB is "
             f"{frac:.0%} of the Docker VM's {vm_mem_gb:.1f} GB{detail}.\n"
             "  This oversubscribes a shared VM and can OOM-kill co-located containers.\n"
-            "  Lower AITH_RUNTIME_MEMORY_GB / AITH_RUNTIME_CPUS, stop co-tenant containers,\n"
+            "  Lower VIGIL_RUNTIME_MEMORY_GB / VIGIL_RUNTIME_CPUS, stop co-tenant containers,\n"
             "  use a dedicated Docker context/VM, or pass --allow-oversubscribe to override."
         )
 
@@ -357,7 +357,7 @@ def _maybe_warn_tier_undersized(resources: RuntimeResources) -> None:
     if host_gb >= HEAVY_TIER_HOST_GB_THRESHOLD and resources.memory_gb < HEAVY_TIER_TARGET_GB:
         print(
             f"hint\thost has {host_gb} GB RAM but runtime is set to {resources.memory_gb} GB; "
-            "consider AITH_RUNTIME_MEMORY_GB=16 (or 32) for better parallelism. "
+            "consider VIGIL_RUNTIME_MEMORY_GB=16 (or 32) for better parallelism. "
             "See README Resource Sizing."
         )
 

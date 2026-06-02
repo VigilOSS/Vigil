@@ -241,8 +241,8 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "detail": (
                             f"markdown note '{artifact_path}' is indexed but not linked to a finding, chain, "
                             "surface, request_variant, command_run, or producing agent. Fix with one of: "
-                            f"`aith assess artifact register {artifact_path} --finding <slug>` to link, or "
-                            f"`aith assess artifact mark-scratch {artifact_path}` to dismiss as scratch."
+                            f"`vigil assess artifact register {artifact_path} --finding <slug>` to link, or "
+                            f"`vigil assess artifact mark-scratch {artifact_path}` to dismiss as scratch."
                         ),
                     }
                 )
@@ -264,9 +264,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                             "detail": (
                                 f"finding {slug} evidence artifact id={evidence_artifact_id} is indexed "
                                 f"but the file is missing on disk. Restore the file and re-register with "
-                                f"`aith assess artifact register {linked_evidence_artifact.get('relative_path', '')} --finding {slug}`, "
+                                f"`vigil assess artifact register {linked_evidence_artifact.get('relative_path', '')} --finding {slug}`, "
                                 f"or repoint the finding via "
-                                f"`aith assess update-finding {slug} --evidence-ref <relative-path>`."
+                                f"`vigil assess update-finding {slug} --evidence-ref <relative-path>`."
                             ),
                         }
                     )
@@ -280,7 +280,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "title": row.get("title", ""),
                         "detail": (
                             f"active/reportable finding {slug} has no evidence_ref. "
-                            f"Fix with `aith assess update-finding {slug} --evidence-ref <relative-path>` "
+                            f"Fix with `vigil assess update-finding {slug} --evidence-ref <relative-path>` "
                             "after writing the evidence artifact to disk."
                         ),
                     }
@@ -296,7 +296,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "title": row.get("title", ""),
                         "detail": (
                             f"finding {slug} evidence_ref={evidence_ref!r} is not in the artifact index. "
-                            f"Fix with `aith assess artifact register {indexed_evidence_ref} --finding {slug}`."
+                            f"Fix with `vigil assess artifact register {indexed_evidence_ref} --finding {slug}`."
                         ),
                     }
                 )
@@ -309,9 +309,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "detail": (
                             f"finding {slug} evidence_ref={evidence_ref!r} is indexed but the file is "
                             f"missing on disk. Restore the file and re-register with "
-                            f"`aith assess artifact register {indexed_evidence_ref} --finding {slug}`, "
+                            f"`vigil assess artifact register {indexed_evidence_ref} --finding {slug}`, "
                             f"or repoint the finding via "
-                            f"`aith assess update-finding {slug} --evidence-ref <relative-path>`."
+                            f"`vigil assess update-finding {slug} --evidence-ref <relative-path>`."
                         ),
                     }
                 )
@@ -329,7 +329,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                             f"id={artifact.get('id')}, but evidence_artifact_id points to "
                             f"id={evidence_artifact_id} ({linked_evidence_artifact.get('relative_path', '')!r}). "
                             f"Refresh the finding link with "
-                            f"`aith assess update-finding {slug} --evidence-ref {indexed_evidence_ref}`."
+                            f"`vigil assess update-finding {slug} --evidence-ref {indexed_evidence_ref}`."
                         ),
                     }
                 )
@@ -417,9 +417,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     "detail": (
                         f"{row['agent_role']} dispatch {row['agent_id']} has a "
                         f"{row['handoff_status']!r} handoff but is still in-progress. "
-                        f"Close with `aith assess agent close {row['agent_id']}` "
+                        f"Close with `vigil assess agent close {row['agent_id']}` "
                         "or bulk-close ready/blocked stales with "
-                        "`aith assess agent reconcile-stale`."
+                        "`vigil assess agent reconcile-stale`."
                     ),
                 }
             )

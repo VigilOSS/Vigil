@@ -1,4 +1,4 @@
-"""Runtime tooling contract — verify the `aith-threat-hunting` runtime container has every
+"""Runtime tooling contract — verify the `vigil-threat-hunting` runtime container has every
 binary the subdomain-enumeration pipeline assumes.
 
 puredns silently fails when massdns is missing (zero output, exit code 0); the dnsx fallback
@@ -31,7 +31,7 @@ RUNTIME_FULL_DOCKERFILE = REPO_ROOT / "agent" / "docker" / "runtime-full" / "Doc
 
 
 # Binaries the subdomain-enumeration SKILL preflights via
-# `aith assess kali exec -- which alterx asnmap bbot cero dnsx massdns puredns shuffledns subfinder`.
+# `vigil assess kali exec -- which alterx asnmap bbot cero dnsx massdns puredns shuffledns subfinder`.
 # Order is alphabetical (F22 — keep aligned with operator-core.md and
 # subdomain-enumeration/SKILL.md).
 SUBDOMAIN_ENUM_BINARIES = (
@@ -158,11 +158,11 @@ def test_runtime_full_container_has_subdomain_enum_binaries():
     - The default pytest invocation is used (`addopts = -m 'not integration'` in
       `pyproject.toml` deselects the `integration` mark).
     - `docker` is not on PATH.
-    - The container `security-research` is not running (we report the missing container as
+    - The container `vigil` is not running (we report the missing container as
       a `pytest.skip` rather than a failure, since a pre-engagement state without the runtime
       up is legitimate at handoff time).
     """
-    container = "security-research"
+    container = "vigil"
     ps = subprocess.run(
         ["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{container}$"],
         capture_output=True,
@@ -172,7 +172,7 @@ def test_runtime_full_container_has_subdomain_enum_binaries():
     if ps.returncode != 0 or container not in ps.stdout:
         pytest.skip(
             f"runtime container `{container}` is not running; start it with "
-            "`aith runtime start` before running the integration tooling contract test"
+            "`vigil runtime start` before running the integration tooling contract test"
         )
 
     expected = (*SUBDOMAIN_ENUM_BINARIES, *PORT_SCAN_BINARIES, *ANDROID_APK_BINARIES)
@@ -190,5 +190,5 @@ def test_runtime_full_container_has_subdomain_enum_binaries():
     assert not missing, (
         f"runtime container `{container}` is missing subdomain-enum / port-scan binaries: {missing}. "
         f"Resolved: {resolved}. Image drift — rebuild `agent/docker/runtime-full/Dockerfile` "
-        f"and run `aith runtime restart`."
+        f"and run `vigil runtime restart`."
     )

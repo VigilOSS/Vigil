@@ -1,7 +1,7 @@
 ---
 name: idor-testing
 description: Insecure direct object reference testing for broken access control
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # IDOR Testing (Insecure Direct Object Reference)
@@ -47,14 +47,14 @@ origin: AI Threat Hunting
 
 ### 4. ID Manipulation Techniques
 
-Do not hand-pick the variants. Feed the captured ID to `aith assess classify-payload`,
+Do not hand-pick the variants. Feed the captured ID to `vigil assess classify-payload`,
 which recognises the type (`sequential_id`, `uuid`, `integer`, `base64`, `hex`, ...) and
 emits intent-keyed attack variants so you cover neighbor/boundary/escalation/format/empty
 systematically:
 
 ```bash
 # Numeric / auto-increment ID → neighbours, boundaries, escalation IDs, type-confusion
-aith assess classify-payload 1042 --mutations
+vigil assess classify-payload 1042 --mutations
 #   type:  sequential_id
 #   neighbor:   '1043' '1041' '1044' '1040' '2084'        ← adjacent objects (horizontal IDOR)
 #   boundary:   '0' '-1' '1' '99999999' '2147483647'      ← edge IDs (first record / overflow)
@@ -63,7 +63,7 @@ aith assess classify-payload 1042 --mutations
 #   empty:      '' 'null' 'undefined' ' ' '\x00'
 
 # UUID → increment last group, all-zeros / all-Fs, first-user GUID, case + no-hyphen confusion
-aith assess classify-payload 550e8400-e29b-41d4-a716-446655440000 --mutations --json
+vigil assess classify-payload 550e8400-e29b-41d4-a716-446655440000 --mutations --json
 ```
 
 - [ ] Run `classify-payload --mutations` on each captured ID; fire the `neighbor` and
@@ -126,7 +126,7 @@ or JSON-array file and rank the outliers:
 
 ```bash
 # one {url,status,content_length} object per swept ID → idor_sweep.jsonl, then:
-aith assess anomaly-score idor_sweep.jsonl --top 5
+vigil assess anomaly-score idor_sweep.jsonl --top 5
 #   #1  score=4.17  status=200  len=1561  url=.../api/users/1   ← the ID that returned a record
 #       ^ status='200'  ^ length_bucket='len_512_4096'          while the rest 403/404'd
 ```

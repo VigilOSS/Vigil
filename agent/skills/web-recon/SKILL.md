@@ -1,7 +1,7 @@
 ---
 name: web-recon
 description: Enumerate web technologies, headers, endpoints, and metadata from a target
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Web Reconnaissance
@@ -76,7 +76,7 @@ of the dispatch.
    entirely when no trigger fires — nuclei already covers the common-case web-vuln
    surface.
 
-Run each sweep synchronously — one blocking `aith assess kali <verb> … --timeout N` at a time. Specialists do NOT background target traffic or use `aith assess kali job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f nmap`) — it stomps sibling agents' processes in the shared runtime. See
+Run each sweep synchronously — one blocking `vigil assess kali <verb> … --timeout N` at a time. Specialists do NOT background target traffic or use `vigil assess kali job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f nmap`) — it stomps sibling agents' processes in the shared runtime. See
 `agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for the full
 pattern.
 
@@ -90,12 +90,12 @@ hypotheses to the next skill or phase for validation.
 
 ```bash
 # Single host
-aith assess kali wafw00f https://TARGET \
+vigil assess kali wafw00f https://TARGET \
   --technique RECON --intent "WAF tier identification, drives rate-limit choice for later tools" \
   --probe-kind fingerprint --phase recon --timeout 300
 
 # Multi-host batch
-aith assess kali wafw00f -i /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
+vigil assess kali wafw00f -i /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
   --technique RECON --intent "WAF tier sweep across in-scope live hosts" \
   --probe-kind fingerprint --phase recon --timeout 1200
 ```
@@ -126,7 +126,7 @@ and nuclei against a blocked egress burns a full dispatch with no signal.
 Catch the block once:
 
 ```bash
-aith assess kali exec --technique RECON \
+vigil assess kali exec --technique RECON \
   --intent "egress reputation sample (CDN-IP-block detection)" \
   --probe-kind fingerprint --phase recon --timeout 300 -- bash -c '
 REPRS=$(head -10 /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt)
@@ -170,14 +170,14 @@ the four mitigation options, and the give-up-vs-escalate rule live in
 
 If a subset of representative hosts returned 100% 403, write those host
 strings into `$DIR/scans/egress_blocked_hosts.txt` so subsequent
-`aith assess ingest-endpoints --egress-blocked-hosts <file>` invocations
+`vigil assess ingest-endpoints --egress-blocked-hosts <file>` invocations
 defer URLs to those hosts with `cluster_key=deferred:egress-blocked`
 instead of polluting the work buffer.
 
 ### Step 1 — Port + Service Scan
 
 ```bash
-aith assess kali nmap-scan --target www.example.com \
+vigil assess kali nmap-scan --target www.example.com \
   --ports top-1000 --scripts safe --extra-args "-T3 --max-rate 200 --max-retries 2 --host-timeout 300s" \
   -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_top1000 \
   --technique RECON --intent "cautious rate (CDN/WAF-fronted) initial nmap pass" \
@@ -214,7 +214,7 @@ routinely surface staging hosts and adjacent services that passive sources miss.
 ### Step 2 — httpx Fingerprint
 
 ```bash
-aith assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
+vigil assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
   -tech-detect -title -tls-grab -status-code \
   --extra-args "-server -content-length -follow-redirects" \
   -o /engagements/$ENGAGEMENT_KEY/scans/httpx_fingerprint.jsonl \
@@ -227,10 +227,10 @@ status-code patterns — those are the trigger inputs for the conditional nikto 
 
 ```bash
 # Compare headers across unauthenticated, error, and alternate routes
-aith assess kali exec --technique RECON --intent "header diff across routes" \
+vigil assess kali exec --technique RECON --intent "header diff across routes" \
   --probe-kind fingerprint --phase recon --timeout 60 -- \
   curl -sI -L https://TARGET
-aith assess kali exec --technique RECON --intent "OPTIONS for DAV / methods detection" \
+vigil assess kali exec --technique RECON --intent "OPTIONS for DAV / methods detection" \
   --probe-kind fingerprint --phase recon --timeout 60 -- \
   curl -sI -X OPTIONS https://TARGET
 ```
@@ -241,7 +241,7 @@ and auth enforcement boundaries.
 ### Step 3 — whatweb (verify httpx tech)
 
 ```bash
-aith assess kali exec --technique RECON --intent "whatweb deep technology fingerprint" \
+vigil assess kali exec --technique RECON --intent "whatweb deep technology fingerprint" \
   --probe-kind fingerprint --phase recon --timeout 300 -- \
   whatweb -a 3 https://TARGET
 ```
@@ -267,7 +267,7 @@ as required, not as the optional "broad scan before exploitation" of older runbo
 ### Step 5 — Directory Fuzzing (mandatory L1 wordlist + tech extensions)
 
 ```bash
-aith assess kali ffuf -u https://TARGET/FUZZ \
+vigil assess kali ffuf -u https://TARGET/FUZZ \
   -w /usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt \
   --extra-args "-e .php,.html,.js,.txt,.bak,.old,.conf,.xml,.json,.yml,.env,.log,.sql,.zip -ac" \
   -o /engagements/$ENGAGEMENT_KEY/scans/ffuf_dirs.json -of json \
@@ -292,7 +292,7 @@ Evaluate the trigger fingerprints from `agent/references/tools/recon/nikto.md` a
 the httpx + whatweb output. Run nikto only when at least one trigger fires:
 
 ```bash
-aith assess kali nikto --host www.example.com --ssl \
+vigil assess kali nikto --host www.example.com --ssl \
   -Tuning x60 -Pause 2 -maxtime 300 \
   -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_www.json \
   --technique INFO-DISCLOSURE --intent "nikto on legacy IIS/7.5 fingerprint" \
@@ -309,7 +309,7 @@ When httpx/whatweb identifies a CMS, the targeted probes still fire (these are q
 and not redundant with nuclei `technologies/`):
 
 ```bash
-aith assess kali exec --technique RECON --intent "CMS detection probes" \
+vigil assess kali exec --technique RECON --intent "CMS detection probes" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -s https://TARGET/wp-login.php -o /dev/null -w "%{http_code}\n"     # WordPress
   curl -s https://TARGET/wp-json/wp/v2/users
@@ -322,7 +322,7 @@ aith assess kali exec --technique RECON --intent "CMS detection probes" \
 ### Step 8 — SSL/TLS Analysis
 
 ```bash
-aith assess kali exec --technique RECON --intent "TLS cert SAN/CN/issuer extraction" \
+vigil assess kali exec --technique RECON --intent "TLS cert SAN/CN/issuer extraction" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   echo | openssl s_client -connect TARGET:443 -servername TARGET 2>/dev/null \
     | openssl x509 -noout -text \
@@ -373,12 +373,12 @@ headers reflect the vendor's hardened defaults or the installer-template
 defaults. Run this step before leaving Phase 1.
 
 ```bash
-aith assess kali exec --technique INFO-DISCLOSURE --intent "vendor-template CSP/CORS re-baseline header capture" \
+vigil assess kali exec --technique INFO-DISCLOSURE --intent "vendor-template CSP/CORS re-baseline header capture" \
   --probe-kind fingerprint --phase recon --timeout 30 -- \
   curl -sSI 'https://TARGET/' \
   > /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
 
-aith assess kali exec --technique INFO-DISCLOSURE --intent "vendor-template placeholder grep" \
+vigil assess kali exec --technique INFO-DISCLOSURE --intent "vendor-template placeholder grep" \
   --probe-kind payload --phase recon --timeout 60 -- bash -c '
   grep -inE "example\.(com|org|net|test)|domain-here\.tld|your-domain\.tld|your\.domain|placeholder|change-?me|REPLACE_ME|TODO|FIXME|localhost|127\.0\.0\.1|::1" \
     /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
@@ -416,7 +416,7 @@ sweep helper script live in `agent/references/payloads/csp-default-grep.md`.
 ### Step 9 — Well-Known Files
 
 ```bash
-aith assess kali exec --technique RECON --intent "well-known file checklist" \
+vigil assess kali exec --technique RECON --intent "well-known file checklist" \
   --probe-kind fingerprint --phase recon --timeout 120 -- bash -c '
   curl -s https://TARGET/robots.txt
   curl -s https://TARGET/sitemap.xml | head -50
@@ -431,7 +431,7 @@ aith assess kali exec --technique RECON --intent "well-known file checklist" \
 ### Step 10 — JS / HTML Surface (deferred to source-analyzer)
 
 ```bash
-aith assess kali exec --technique RECON --intent "JS extraction for source-analyzer handoff" \
+vigil assess kali exec --technique RECON --intent "JS extraction for source-analyzer handoff" \
   --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
   curl -sL https://TARGET | grep -oE "src=\"[^\"]*\\.js\"" | sed "s/src=\"//;s/\"//"
 '
@@ -447,7 +447,7 @@ stay as follow-up notes or surface candidates, not queue inputs.
 ### Step 11 — API Surface Discovery
 
 ```bash
-aith assess kali exec --technique RECON --intent "OpenAPI / Swagger / GraphQL endpoint sweep" \
+vigil assess kali exec --technique RECON --intent "OpenAPI / Swagger / GraphQL endpoint sweep" \
   --probe-kind fingerprint --phase recon --timeout 120 -- bash -c '
   for path in /swagger.json /openapi.json /api-docs /swagger/v1/swagger.json /v2/api-docs /v3/api-docs; do
     code=$(curl -s -o /dev/null -w "%{http_code}" "https://TARGET$path")
@@ -491,7 +491,7 @@ aith assess kali exec --technique RECON --intent "OpenAPI / Swagger / GraphQL en
 ## Output Contract
 
 The skill produces these structured sections in the recon-specialist's return payload.
-Backend writes (`record-finding`, `record-intel`, `record-surface`, `aith assess agent handoff`) are
+Backend writes (`record-finding`, `record-intel`, `record-surface`, `vigil assess agent handoff`) are
 the durable record; this contract names what each markdown section should hold so
 downstream specialists can parse the output consistently.
 
@@ -499,9 +499,9 @@ downstream specialists can parse the output consistently.
 |---|---|
 | `#### Summary` | One-paragraph engagement-level summary of what was scanned, the WAF tier picked, and the headline take (live host count, WAF tier, vendor-SaaS hits, egress block %). |
 | `#### Live Hosts` | Confirmed live in-scope hosts with status code, title, server banner, and tech-detect output. Source for downstream phases. |
-| `#### Findings` | Decisive findings the recon pass already proved (e.g., exposed admin panel, default-creds login, public bucket). Each must also be recorded via `aith assess record-finding`. |
-| `#### Surface Candidates` | Routes / endpoints / hosts evidenced by a real response or artifact, ready for `aith assess record-surface`. |
-| `#### Intelligence` | Tech components (framework, CMS, server, WAF, CDN), TLS / SAN intel, rDNS vendor identification, version strings, vendor-template CSP / CORS placeholders, build-version constants — each row landed via `aith assess record-intel <type>`. |
+| `#### Findings` | Decisive findings the recon pass already proved (e.g., exposed admin panel, default-creds login, public bucket). Each must also be recorded via `vigil assess record-finding`. |
+| `#### Surface Candidates` | Routes / endpoints / hosts evidenced by a real response or artifact, ready for `vigil assess record-surface`. |
+| `#### Intelligence` | Tech components (framework, CMS, server, WAF, CDN), TLS / SAN intel, rDNS vendor identification, version strings, vendor-template CSP / CORS placeholders, build-version constants — each row landed via `vigil assess record-intel <type>`. |
 | `#### Coverage Gaps` | Every mandatory step that did not complete, every conditional step that fired and why, every dispatch-mode-authorized skip with rationale, and every shared-frontend-trigger sub-procedure that was skipped because the trigger did not fire. The operator reads this section to decide whether to re-dispatch. |
 | `#### Recommended Phase 3 Ordering` | Risk-ranked surface clusters and the recommended specialist + skill for each. The handoff renderer feeds this to surface-collector and downstream specialists. |
 

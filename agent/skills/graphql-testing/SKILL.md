@@ -1,12 +1,12 @@
 ---
 name: graphql-testing
 description: GraphQL security testing — introspection, injection, auth bypass, DoS
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # GraphQL Security Testing
 
-> **`aith assess kali` audit flags:** use `--technique RECON` for introspection and schema discovery; when sending attack payloads via resolvers, switch to the matching vuln class (`SQLI` / `AUTH` / `IDOR` / `INFO-DISCLOSURE`).
+> **`vigil assess kali` audit flags:** use `--technique RECON` for introspection and schema discovery; when sending attack payloads via resolvers, switch to the matching vuln class (`SQLI` / `AUTH` / `IDOR` / `INFO-DISCLOSURE`).
 
 ## When to Activate
 
@@ -16,13 +16,13 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (all target-facing GraphQL requests must go through the kali exec wrapper; use `--technique RECON --probe-kind fingerprint --phase consume-test --timeout 30` for introspection, and the appropriate class (`SQLI`, `AUTH`, `IDOR`, `INFO-DISCLOSURE`) for payload probes)
+- `vigil assess kali exec -- curl ...` (all target-facing GraphQL requests must go through the kali exec wrapper; use `--technique RECON --probe-kind fingerprint --phase consume-test --timeout 30` for introspection, and the appropriate class (`SQLI`, `AUTH`, `IDOR`, `INFO-DISCLOSURE`) for payload probes)
 - Burp Suite Repeater / Altair GraphQL Client (use to craft requests, then replay via kali exec for audit pipeline coverage)
 - InQL (Burp extension for GraphQL)
 - graphql-voyager (schema visualization — host-side analysis)
 - BatchQL (batch query testing)
 - CrackQL (brute-force via GraphQL)
-- `aith oob mint` / `aith oob poll` — when a resolver argument reaches a downstream SQL/NoSQL/OS/SSRF sink, mint a nonce-tagged callback host (`aith oob mint --technique <t> --target-url <graphql-url> --param <arg>`), embed its `http` host in the string argument, then `aith oob poll --client <name>` returns the matched probe<->callback pair (check readiness with `aith oob status --json`; `aith oob client logs` is raw infra debug, not correlation). Defer to the wired injection skills — `agent/skills/sqli-testing/SKILL.md`, `agent/skills/command-injection/SKILL.md`, `agent/skills/ssrf-testing/SKILL.md` — for the full mint→fire→poll loop on the matched sink.
+- `vigil oob mint` / `vigil oob poll` — when a resolver argument reaches a downstream SQL/NoSQL/OS/SSRF sink, mint a nonce-tagged callback host (`vigil oob mint --technique <t> --target-url <graphql-url> --param <arg>`), embed its `http` host in the string argument, then `vigil oob poll --client <name>` returns the matched probe<->callback pair (check readiness with `vigil oob status --json`; `vigil oob client logs` is raw infra debug, not correlation). Defer to the wired injection skills — `agent/skills/sqli-testing/SKILL.md`, `agent/skills/command-injection/SKILL.md`, `agent/skills/ssrf-testing/SKILL.md` — for the full mint→fire→poll loop on the matched sink.
 
 ## Methodology
 

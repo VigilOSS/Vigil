@@ -2,7 +2,7 @@
 
 This module is the single source of truth for the priority/cluster assignments
 that `db_insert_work_item()` writes inline at insert time and that
-`aith assess classify-work` re-applies idempotently. Keeping the logic in one
+`vigil assess classify-work` re-applies idempotently. Keeping the logic in one
 place ensures the two paths cannot drift — operators forgetting to run
 `classify-work` after an ingest used to leave the work buffer unscored, which
 broke priority-mode dispatch silently.

@@ -1,12 +1,12 @@
 ---
 name: cache-poisoning
 description: Detect and exploit web cache poisoning and cache deception vulnerabilities
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Cache Poisoning Testing
 
-> **`aith assess kali` audit flags:** use `--technique OTHER` (cache poisoning spans web-cache-deception, CPDoS, and unkeyed-header abuse — no dedicated enum class). Switch to `REQUEST-SMUGGLING` when the poisoning rides on a smuggled request.
+> **`vigil assess kali` audit flags:** use `--technique OTHER` (cache poisoning spans web-cache-deception, CPDoS, and unkeyed-header abuse — no dedicated enum class). Switch to `REQUEST-SMUGGLING` when the poisoning rides on a smuggled request.
 
 ## When to Activate
 
@@ -16,9 +16,9 @@ origin: AI Threat Hunting
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (header injection probing and cache behavior analysis — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30` for probing calls)
-- `aith assess anomaly-score` — for unkeyed-input discovery (§2/§3): record one response per candidate header/cookie and let it rank which injected input actually shifted the response, instead of diffing curl bodies by eye.
-- `aith oob mint` / `aith oob poll` — for redirect-based poisoning (§9) where the poisoned `Location` points at attacker infra: mint a nonce-tagged host, force it into the cached redirect, then `poll` to confirm a victim followed it. Replaces reading the raw listener log. Readiness: `aith oob status --json`.
+- `vigil assess kali exec -- curl ...` (header injection probing and cache behavior analysis — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30` for probing calls)
+- `vigil assess anomaly-score` — for unkeyed-input discovery (§2/§3): record one response per candidate header/cookie and let it rank which injected input actually shifted the response, instead of diffing curl bodies by eye.
+- `vigil oob mint` / `vigil oob poll` — for redirect-based poisoning (§9) where the poisoned `Location` points at attacker infra: mint a nonce-tagged host, force it into the cached redirect, then `poll` to confirm a victim followed it. Replaces reading the raw listener log. Readiness: `vigil oob status --json`.
 - `Param Miner` (Burp extension for unkeyed header/parameter discovery)
 - Browser (verify poisoned responses served to other users)
 
@@ -47,7 +47,7 @@ curl -sI https://target/ | grep -iE "x-cache|age|cf-cache|via|vary|cdn|akamai|va
     read -r code len <<<"$(curl -s -o /dev/null -w '%{http_code} %{size_download}' -H "$h" "https://target/?cb=$cb")"
     printf '{"url":"%s","status":%s,"content_length":%s}\n' "${h%%:*}" "$code" "$len"
   done
-} | aith assess anomaly-score --top 8
+} | vigil assess anomaly-score --top 8
 ```
 - [ ] The top-ranked record names the header whose response broke from the baseline cluster — confirm the injected value is reflected (links, redirects, meta tags, scripts) in that response's body.
 - [ ] If reflected, remove the cache buster and re-send to poison the real cache entry.
@@ -108,12 +108,12 @@ curl -H "Accept-Encoding: gzip" -H "X-Forwarded-Host: evil.example" https://targ
 ### 9. Redirect-Based Poisoning
 - [ ] Poison redirect target via `X-Forwarded-Scheme: http` / `X-Forwarded-Host` forcing a 301/302 to an attacker-controlled location. Point the poisoned redirect at a minted callback host so a victim following the cached redirect is provably attributable — `poll` turns "the redirect points at attacker.example" into "a real client followed the poisoned redirect":
 ```bash
-aith oob mint --technique cache-poison --target-url "https://target/" \
+vigil oob mint --technique cache-poison --target-url "https://target/" \
   --param X-Forwarded-Host --probe-kind redirect-poison
 # Poison: force the cached Location to the minted host
 curl -H "X-Forwarded-Host: <nonce>.oob.example.com" -H "X-Forwarded-Scheme: https" https://target/
 # Confirm: a victim (or your own clean fetch of the cached entry) followed it
-aith oob poll --client <name>     # matched row = the poisoned redirect was followed
+vigil oob poll --client <name>     # matched row = the poisoned redirect was followed
 ```
 - [ ] If the 301/302 is cached, every user who hits the entry follows the poisoned redirect — a matched callback from a request that did NOT carry your header proves cross-user impact, not just that you can set your own Location.
 
@@ -122,7 +122,7 @@ aith oob poll --client <name>     # matched row = the poisoned redirect was foll
 - Cache layer identified (CDN, reverse proxy, product name and version if known)
 - Unkeyed input that influences response (header, cookie, body) — the `anomaly-score` ranking that isolated it from the baseline is good corroborating evidence
 - Exact request that poisons the cache
-- Evidence that poisoned response is served to other users (second request without the unkeyed input) — confirming the primitive exists is not enough; you must show the **attacker outcome**: what a victim receives when they hit the poisoned cache entry (e.g., malicious script executes in victim's browser, victim is redirected to attacker-controlled domain, victim's sensitive data is served to an unauthenticated requester). For a redirect poison, the matched probe<->callback from `aith oob poll --client <name> --json` on a header-free request IS that cross-user proof.
+- Evidence that poisoned response is served to other users (second request without the unkeyed input) — confirming the primitive exists is not enough; you must show the **attacker outcome**: what a victim receives when they hit the poisoned cache entry (e.g., malicious script executes in victim's browser, victim is redirected to attacker-controlled domain, victim's sensitive data is served to an unauthenticated requester). For a redirect poison, the matched probe<->callback from `vigil oob poll --client <name> --json` on a header-free request IS that cross-user proof.
 - Impact: XSS via poisoned response, redirect to attacker domain, sensitive data exposure via cache deception
 - Full request/response pairs for both poisoning and victim requests
 

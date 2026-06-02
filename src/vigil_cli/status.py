@@ -32,18 +32,18 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
     rows = list_engagements(install_root)
     # C36: surface legacy engagement_type=both engagements that predate
     # dual-track phase tracking. They are not broken — they just have no
-    # `code_phase` field, which makes `aith assess transition-phase --track
-    # code` confusing. `aith engagement migrate-scope` sets the default.
+    # `code_phase` field, which makes `vigil assess transition-phase --track
+    # code` confusing. `vigil engagement migrate-scope` sets the default.
     from .engagements import _both_engagements_missing_code_phase
     legacy_both_missing_code_phase = [
         eng_dir.name for eng_dir in _both_engagements_missing_code_phase(install_root)
     ]
     runtime_state = runtime_status(runner=runner)
-    mitm_running = docker.container_running("security-research-proxy", runner=runner)
+    mitm_running = docker.container_running("vigil-proxy", runner=runner)
     backup = latest_backup(install_root)
-    oob_token_configured = bool(os.environ.get("AI_THREAT_HUNTING_FRP_TOKEN") or get_config_value("oob.frp_token"))
+    oob_token_configured = bool(os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token"))
     oob_domain = (
-        os.environ.get("AI_THREAT_HUNTING_OOB_DOMAIN")
+        os.environ.get("VIGIL_OOB_DOMAIN")
         or get_config_value("oob.domain", DEFAULT_OOB_DOMAIN)
         or DEFAULT_OOB_DOMAIN
     )
@@ -58,13 +58,13 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
         },
         "runtime": {
             "state": runtime_state,
-            "image_exists": docker.image_exists("security-research:latest", runner=runner),
+            "image_exists": docker.image_exists("vigil:latest", runner=runner),
             "mounts_ok": runtime_mounts_ok(install_root, runner=runner) if runtime_state == "running" else None,
             "resources": runtime_resource_state(runner=runner),
         },
         "mitmproxy": {
             "state": "running" if mitm_running else "stopped",
-            "image_exists": docker.image_exists("security-research-proxy:latest", runner=runner),
+            "image_exists": docker.image_exists("vigil-proxy:latest", runner=runner),
             "ca_volume": docker.volume_exists("mitmproxy-ca", runner=runner),
         },
         "oob": oob_status(oob_domain=oob_domain, runner=runner) | {"frp_token_configured": oob_token_configured},
@@ -120,7 +120,7 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
         preview = ", ".join(legacy_keys[:3]) + (" ..." if len(legacy_keys) > 3 else "")
         print(
             f"warn\t{len(legacy_keys)} legacy `engagement_type=both` engagement(s) "
-            f"missing `code_phase` ({preview}); run `aith engagement migrate-scope`"
+            f"missing `code_phase` ({preview}); run `vigil engagement migrate-scope`"
         )
 
 
@@ -139,12 +139,12 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
     checks.append(_database_check(data_dir / "orchestrator.sqlite3"))
     if binary_status.get("docker") == "OK":
         checks.append(Check("docker-daemon", "OK" if docker.daemon_available(runner=runner) else "FAIL"))
-        checks.append(Check("runtime-image", "OK" if docker.image_exists("security-research:latest", runner=runner) else "MISSING"))
-        checks.append(Check("mitmproxy-image", "OK" if docker.image_exists("security-research-proxy:latest", runner=runner) else "MISSING"))
+        checks.append(Check("runtime-image", "OK" if docker.image_exists("vigil:latest", runner=runner) else "MISSING"))
+        checks.append(Check("mitmproxy-image", "OK" if docker.image_exists("vigil-proxy:latest", runner=runner) else "MISSING"))
         if runtime_status(runner=runner) == "running":
             checks.append(Check("runtime-mounts", "OK" if runtime_mounts_ok(install_root, runner=runner) else "FAIL"))
             for tool in ("dtach", "tmux", "frpc", "interactsh-server", "interactsh-client"):
-                result = runner(["docker", "exec", "security-research", "sh", "-lc", f"command -v {tool} >/dev/null"])
+                result = runner(["docker", "exec", "vigil", "sh", "-lc", f"command -v {tool} >/dev/null"])
                 checks.append(Check(f"runtime-tool:{tool}", "OK" if result.returncode == 0 else "MISSING"))
     else:
         detail = "docker CLI not found" if binary_status.get("docker") == "MISSING" else "docker --version failed"
@@ -165,7 +165,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
     backup = latest_backup(install_root)
     checks.append(Check("backup-latest", "OK" if backup else "MISSING", str(backup.path) if backup else ""))
     checks.append(_failed_audit_marker_check(install_root))
-    checks.append(Check("oob.frp_token", "OK" if os.environ.get("AI_THREAT_HUNTING_FRP_TOKEN") or get_config_value("oob.frp_token") else "MISSING"))
+    checks.append(Check("oob.frp_token", "OK" if os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token") else "MISSING"))
     return checks
 
 
@@ -274,7 +274,7 @@ def list_failed_audit_markers(engagement_dir: Path) -> list[Path]:
 def _failed_audit_marker_check(install_root: Path) -> Check:
     """Surface orphaned ``<run_uuid>.failed-audit`` markers across engagements.
 
-    The marker is the only on-disk signal that an ``aith assess kali`` run
+    The marker is the only on-disk signal that an ``vigil assess kali`` run
     proceeded without a backend audit row. Nothing else inspects them —
     ``sweep-orphans`` ignores them, the runtime never re-tries the POST —
     so they accumulate silently. Surface a WARN with per-engagement counts

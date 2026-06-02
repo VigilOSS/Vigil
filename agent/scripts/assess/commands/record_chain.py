@@ -1,4 +1,4 @@
-"""aith assess record-chain — POST attack chain + emit event."""
+"""vigil assess record-chain — POST attack chain + emit event."""
 from __future__ import annotations
 
 import json

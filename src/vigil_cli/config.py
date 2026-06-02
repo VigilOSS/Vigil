@@ -6,8 +6,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-CONFIG_ENV = "AI_THREAT_HUNTING_CONFIG"
-CONFIG_DIR = Path.home() / ".config" / "security-research"
+CONFIG_ENV = "VIGIL_CONFIG"
+CONFIG_DIR = Path.home() / ".config" / "vigil"
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.json"
 
 DEFAULT_RUNTIME_MEMORY_GB = 8
@@ -26,10 +26,10 @@ class RuntimeResources:
 
 def runtime_resources() -> RuntimeResources:
     return RuntimeResources(
-        memory_gb=_int_env("AITH_RUNTIME_MEMORY_GB", DEFAULT_RUNTIME_MEMORY_GB),
-        cpus=_float_env("AITH_RUNTIME_CPUS", DEFAULT_RUNTIME_CPUS),
-        pids_limit=_int_env("AITH_RUNTIME_PIDS_LIMIT", DEFAULT_RUNTIME_PIDS_LIMIT),
-        shm_size=os.environ.get("AITH_RUNTIME_SHM_SIZE", DEFAULT_RUNTIME_SHM_SIZE).strip() or DEFAULT_RUNTIME_SHM_SIZE,
+        memory_gb=_int_env("VIGIL_RUNTIME_MEMORY_GB", DEFAULT_RUNTIME_MEMORY_GB),
+        cpus=_float_env("VIGIL_RUNTIME_CPUS", DEFAULT_RUNTIME_CPUS),
+        pids_limit=_int_env("VIGIL_RUNTIME_PIDS_LIMIT", DEFAULT_RUNTIME_PIDS_LIMIT),
+        shm_size=os.environ.get("VIGIL_RUNTIME_SHM_SIZE", DEFAULT_RUNTIME_SHM_SIZE).strip() or DEFAULT_RUNTIME_SHM_SIZE,
     )
 
 
@@ -76,9 +76,9 @@ def load_config(path: Path | None = None) -> dict[str, str]:
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"Invalid aith config JSON at {target}: {exc}") from exc
+        raise SystemExit(f"Invalid vigil config JSON at {target}: {exc}") from exc
     if not isinstance(payload, dict):
-        raise SystemExit(f"Invalid aith config at {target}: expected a JSON object")
+        raise SystemExit(f"Invalid vigil config at {target}: expected a JSON object")
     return {str(key): str(value) for key, value in payload.items()}
 
 

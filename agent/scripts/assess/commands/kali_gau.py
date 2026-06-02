@@ -1,4 +1,4 @@
-"""aith assess kali gau — typed wrapper around gau inside the runtime."""
+"""vigil assess kali gau — typed wrapper around gau inside the runtime."""
 from __future__ import annotations
 
 import sys

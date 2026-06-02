@@ -1,4 +1,4 @@
-"""Tests for `aith assess check-scope-coverage`.
+"""Tests for `vigil assess check-scope-coverage`.
 
 The CLI reads scope.json, calls the backend for services and surfaces, and
 reads the local cases.db work_items table. We drive it in-process via a
@@ -1722,7 +1722,7 @@ def test_auto_redispatch_enum_gap_recommends_recon(monkeypatch, tmp_path: Path, 
     assert rec["skills"] == ["web-recon", "subdomain-enumeration"]
     assert rec["parallel_role"] == "source-analyzer"
     # The ready-to-run command line must encode the role/scope-host/mode/skills.
-    assert "aith assess agent start" in rec["command"]
+    assert "vigil assess agent start" in rec["command"]
     assert "--role recon-specialist" in rec["command"]
     assert "--scope-host target.example" in rec["command"]
     assert "--dispatch-mode hypothesis-driven" in rec["command"]
@@ -2285,7 +2285,7 @@ def test_auto_redispatch_human_output_is_recommendation_only(
         )
     out = capsys.readouterr().out
     assert "RECOMMENDATION-ONLY" in out
-    assert "aith assess agent start --role recon-specialist" in out
+    assert "vigil assess agent start --role recon-specialist" in out
     assert "--scope-host target.example" in out
     # The parallel-role note and the task skeleton are both present.
     assert "source-analyzer" in out

@@ -25,7 +25,7 @@ _FRONTEND_MISSING_HELP = (
     "Frontend build not found at "
     f"{settings.frontend_dist_dir}. The backend was started without first "
     "building the frontend (likely a direct `uv run uvicorn ...` instead of "
-    "`aith up` or `aith orchestrator start`). Run `aith orchestrator build` "
+    "`vigil up` or `vigil orchestrator start`). Run `vigil orchestrator build` "
     "to build the install-side frontend in place, then refresh."
 )
 
@@ -92,7 +92,7 @@ def frontend_app(full_path: str):
     if not settings.frontend_dist_dir.exists():
         return JSONResponse(
             status_code=503,
-            content={"detail": _FRONTEND_MISSING_HELP, "fix": "aith orchestrator build"},
+            content={"detail": _FRONTEND_MISSING_HELP, "fix": "vigil orchestrator build"},
         )
 
     requested_path = settings.frontend_dist_dir / full_path
@@ -105,5 +105,5 @@ def frontend_app(full_path: str):
 
     return JSONResponse(
         status_code=503,
-        content={"detail": _FRONTEND_MISSING_HELP, "fix": "aith orchestrator build"},
+        content={"detail": _FRONTEND_MISSING_HELP, "fix": "vigil orchestrator build"},
     )

