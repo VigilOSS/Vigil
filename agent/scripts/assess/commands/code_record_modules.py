@@ -139,10 +139,10 @@ def run(args) -> None:
         result = client.post('code/modules', payload)
 
     if isinstance(result, list):
-        print(f"=== Code Modules Summary ===")
+        print("=== Code Modules Summary ===")
         print(f"Modules created: {len(result)}")
         for mod in result:
             print(f"  [{mod.get('id', '?')}] {mod.get('module_key', '?')}: {mod.get('name', '?')}")
     else:
-        print(f"=== Code Modules Summary ===")
+        print("=== Code Modules Summary ===")
         print(json.dumps(result, indent=2, ensure_ascii=False))

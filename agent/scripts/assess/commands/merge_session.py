@@ -110,7 +110,7 @@ def run(args) -> None:
             elif ptype == "probe_run":
                 response = client.post("probe-runs", payload)
                 if not (response.get("id") or (response.get("probe_run") or {}).get("id")):
-                    print(f"merge-session: backend did not accept probe proposal", file=sys.stderr)
+                    print("merge-session: backend did not accept probe proposal", file=sys.stderr)
                     sys.exit(1)
 
             elif ptype == "attack_chain":

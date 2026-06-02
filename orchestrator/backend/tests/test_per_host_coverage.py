@@ -13,9 +13,7 @@ real fixtures and assert the abstraction holds against a hostile regression
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
-from app import db as db_module
 from app.services import state_manager
 from tests.test_engagements_api import write_engagement
 
@@ -286,7 +284,7 @@ def test_per_host_coverage_deferral_lookup_not_capped_at_500(client, isolate_set
 
 def test_per_host_coverage_resolved_deferral_no_longer_satisfies(client, isolate_settings):
     """A resolved coverage_deferral (the operator un-deferred) returns the host to unmet status."""
-    eng_id = _seed(client, isolate_settings)
+    _seed(client, isolate_settings)
     _create_service(client, endpoint="api.target.example")
 
     response = client.post(
@@ -633,7 +631,7 @@ def test_per_host_coverage_embeds_scope_hosts_when_scope_json_present(
 ):
     """The /coverage-readiness/by-host endpoint surfaces the raw scope.json
     hosts list so the frontend can render the scope-literals-only toggle."""
-    eng_id = _seed(client, isolate_settings)
+    _seed(client, isolate_settings)
     # _seed writes a scope.json — verify the response carries it back.
     body = client.get(f"{ASSESSMENT_BASE}/coverage-readiness/by-host").json()
     assert "scope_hosts" in body

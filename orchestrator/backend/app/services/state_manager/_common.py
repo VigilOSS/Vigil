@@ -10,8 +10,12 @@ from typing import Any
 from urllib.parse import urlparse
 from fastapi import HTTPException, status
 
-from ...db import get_connection
-from ..events import _engagement_or_404
+# Re-exported for the package seam: sibling modules reach these as
+# ``_common.get_connection()`` and ``_common._engagement_or_404``, and the
+# package __init__ re-exports them again. The redundant ``as`` aliases mark the
+# imports as intentional re-exports so they are not pruned as unused.
+from ...db import get_connection as get_connection
+from ..events import _engagement_or_404 as _engagement_or_404
 from ..search import (
     canonical_finding_alias,
     is_canonical_finding_slug,

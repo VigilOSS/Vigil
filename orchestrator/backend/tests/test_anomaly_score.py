@@ -17,7 +17,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-import tempfile
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -553,7 +552,6 @@ class TestLoadRecordsParseGuard:
 
     def test_cli_exits_nonzero_on_malformed_array(self, monkeypatch, capsys):
         """run() must write to stderr and call sys.exit(1) for malformed input."""
-        import json as _json
 
         bad = '[\n{"a":1},\n{"b":2}\n'
         fake_stdin = __import__("io").StringIO(bad)
@@ -589,7 +587,6 @@ def test_assess_cli_imports_anomaly_score() -> None:
 
 def test_assess_cli_registers_anomaly_score() -> None:
     """The registration loop in cli.py must include the anomaly_score module."""
-    import ast
 
     repo_root = Path(__file__).resolve().parents[3]
     path = repo_root / "agent" / "scripts" / "assess" / "cli.py"

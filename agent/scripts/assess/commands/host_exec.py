@@ -380,7 +380,7 @@ def run(args) -> None:
     record_run_id: int | str = ""
     audit_record_failed = False
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        endpoint = f"command-runs/host-exec"
+        endpoint = "command-runs/host-exec"
         try:
             response = client.post(endpoint, payload)
         except AssessError as exc:

@@ -1392,7 +1392,7 @@ def test_by_host_without_flag_skips_per_host_section(monkeypatch, tmp_path: Path
     assert client is not None
     assert "coverage-readiness/by-host" not in client.calls
     # Report must NOT carry a per_host_coverage key when --by-host is not set.
-    out = capsys.readouterr().out  # already drained; redrain produces ""
+    capsys.readouterr()  # already drained; redrain produces ""
     # Re-run to actually capture stdout via JSON path.
     _run(
         monkeypatch,

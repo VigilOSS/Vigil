@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-from .config import Config, load_config
+from .config import Config
 
 
 _DEFAULT_MAX_CACHE_AGE_HOURS = 24

@@ -23,14 +23,13 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from urllib.parse import quote, urlencode
 
-from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.client import AssessError, AssessmentClient, default_runtime_container
 from assess.lib.config import load_config
 
 
-_DEFAULT_CONTAINER_NAME = "vigil"
+_DEFAULT_CONTAINER_NAME = default_runtime_container()
 _DEFAULT_MAX_AGE_SECONDS = 3600
 
 # Statuses that are still in-flight (worth probing for liveness). Anything else

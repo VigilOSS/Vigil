@@ -16,7 +16,7 @@ from .config import get_config_value
 from .engagements import list_engagements
 from .oob import DEFAULT_OOB_DOMAIN, oob_status
 from .orchestrator import orchestrator_status
-from .paths import engagements_root, resolve_orchestrator_base_url
+from .paths import default_runtime_container, engagements_root, resolve_orchestrator_base_url
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
 
 
@@ -84,7 +84,8 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     orchestrator_blk = status["orchestrator"]  # type: ignore[index]
     runtime = status["runtime"]  # type: ignore[index]
     mitmproxy = status["mitmproxy"]  # type: ignore[index]
-    oob = status["oob"]  # type: ignore[index]
+    oob_block = status["oob"]
+    oob = oob_block if isinstance(oob_block, dict) else {}
     backup = status["backup"]  # type: ignore[index]
     readiness = orchestrator_blk.get("readiness") if isinstance(orchestrator_blk, dict) else None
     ready_bits = ""
@@ -113,7 +114,10 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
             )
         print(f"runtime-tier\t{configured_str}{live_str}")
     print(f"mitmproxy\t{mitmproxy['state']}\tca_volume={mitmproxy['ca_volume']}")  # type: ignore[index]
-    print(f"oob\t{oob['state']}\tclients={len(oob['clients'])}\tdomain={oob.get('domain') or '-'}")  # type: ignore[index]
+    print(
+        f"oob\t{oob.get('state', '-')}\tclients={len(oob.get('clients') or [])}"
+        f"\tdomain={oob.get('domain') or '-'}"
+    )
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
     legacy_keys = status.get("legacy_both_missing_code_phase") or []
     if isinstance(legacy_keys, list) and legacy_keys:
@@ -144,7 +148,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         if runtime_status(runner=runner) == "running":
             checks.append(Check("runtime-mounts", "OK" if runtime_mounts_ok(install_root, runner=runner) else "FAIL"))
             for tool in ("dtach", "tmux", "frpc", "interactsh-server", "interactsh-client"):
-                result = runner(["docker", "exec", "vigil", "sh", "-lc", f"command -v {tool} >/dev/null"])
+                result = runner(["docker", "exec", default_runtime_container(), "sh", "-lc", f"command -v {tool} >/dev/null"])
                 checks.append(Check(f"runtime-tool:{tool}", "OK" if result.returncode == 0 else "MISSING"))
     else:
         detail = "docker CLI not found" if binary_status.get("docker") == "MISSING" else "docker --version failed"
