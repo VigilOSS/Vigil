@@ -296,6 +296,46 @@ class SurfaceUpdateRequest(BaseModel):
     followup_condition: str | None = Field(default=None, max_length=500)
 
 
+class OobProbeRecordRequest(BaseModel):
+    """Record an OAST probe minted by ``aith oob mint``.
+
+    The ``nonce`` is the unique random subdomain label that doubles as the
+    correlation token routed through the shared interactsh/frp transport.
+    Metadata (target_url / param / technique / probe_kind / request_hash)
+    describes the payload so a later blind callback auto-maps back to it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    nonce: str = Field(min_length=1, max_length=256)
+    target_url: str = Field(default="", max_length=4096)
+    param: str = Field(default="", max_length=512)
+    technique: str = Field(default="", max_length=128)
+    probe_kind: str = Field(default="", max_length=64)
+    request_hash: str = Field(default="", max_length=128)
+    oob_domain: str = Field(default="", max_length=256)
+    notes: str = Field(default="", max_length=4096)
+    status: Literal["pending", "fired", "confirmed", "expired", "ignored"] = "pending"
+
+
+class OobInteractionRecordRequest(BaseModel):
+    """Correlate a single observed OAST callback to its probe by ``nonce``.
+
+    Driven by ``aith oob poll`` after it parses the interactsh-client log.
+    An unknown nonce is not an error — the backend reports ``matched=False``
+    so the poller can surface it under "unmatched interactions".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    nonce: str = Field(min_length=1, max_length=256)
+    protocol: str = Field(default="", max_length=32)
+    remote_address: str = Field(default="", max_length=256)
+    query_type: str = Field(default="", max_length=32)
+    raw_request: str = Field(default="", max_length=20000)
+    observed_at: str = Field(default="", max_length=64)
+
+
 class AttackChainLinkRequest(BaseModel):
     relation: str = Field(default="step", min_length=1, max_length=64)
     entity_kind: str = Field(min_length=1, max_length=64)
@@ -937,6 +977,28 @@ def get_surfaces(engagement_key: str) -> list[dict[str, Any]]:
     return state_manager.list_surfaces(engagement.id)
 
 
+@router.get("/oob-probes")
+def get_oob_probes(
+    engagement_key: str,
+    status_filter: str | None = Query(default=None, alias="status"),
+) -> list[dict[str, Any]]:
+    """List OAST probes for the engagement (newest first).
+
+    Each row carries an ``interaction_count`` and ``last_interaction_at`` so
+    ``aith oob poll`` can render matched probe↔callback pairs without a
+    second round-trip per probe.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_oob_probes(engagement.id, status_value=status_filter)
+
+
+@router.get("/oob-probes/{nonce}")
+def get_oob_probe(engagement_key: str, nonce: str) -> dict[str, Any]:
+    """Fetch one OAST probe by nonce with its full interaction history."""
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_oob_probe_by_nonce(engagement.id, nonce)
+
+
 @router.get("/findings")
 def get_findings(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
@@ -1209,6 +1271,53 @@ async def patch_job(
     )
     await _broadcast(engagement.key, "job", record)
     return record
+
+
+@router.post("/oob-probes", status_code=status.HTTP_201_CREATED)
+async def create_oob_probe(engagement_key: str, request: OobProbeRecordRequest) -> dict[str, Any]:
+    """Record an OAST probe (called by ``aith oob mint``).
+
+    Idempotent on ``nonce`` — re-minting the same nonce returns the existing
+    row rather than erroring, so a retried CLI call is safe.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.record_oob_probe(
+        engagement.id,
+        nonce=request.nonce,
+        target_url=request.target_url,
+        param=request.param,
+        technique=request.technique,
+        probe_kind=request.probe_kind,
+        request_hash=request.request_hash,
+        oob_domain=request.oob_domain,
+        notes=request.notes,
+        status_value=request.status,
+    )
+    await _broadcast(engagement.key, "oob_probe", record)
+    return record
+
+
+@router.post("/oob-probes/interactions")
+async def record_oob_interaction(engagement_key: str, request: OobInteractionRecordRequest) -> dict[str, Any]:
+    """Correlate one observed OAST callback to its probe by nonce (``aith oob poll``).
+
+    Returns ``{matched, duplicate, probe, interaction}``. An unknown nonce
+    yields ``matched=False`` with HTTP 200 so the poller can collect stray
+    callbacks under an "unmatched interactions" section instead of aborting.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    result = state_manager.correlate_oob_interaction(
+        engagement.id,
+        nonce=request.nonce,
+        protocol=request.protocol,
+        remote_address=request.remote_address,
+        query_type=request.query_type,
+        raw_request=request.raw_request,
+        observed_at=request.observed_at,
+    )
+    if result.get("matched") and result.get("probe") and not result.get("duplicate"):
+        await _broadcast(engagement.key, "oob_probe", result["probe"])
+    return result
 
 
 @router.post("/surfaces", status_code=status.HTTP_201_CREATED)

@@ -425,6 +425,8 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "assessment_dispatches",
     "assessment_dispatch_handoffs",
     "assessment_dispatch_decisions",
+    "assessment_oob_probes",
+    "assessment_oob_interactions",
 }
 
 
@@ -2348,6 +2350,67 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_oob_correlation_tables(connection: sqlite3.Connection) -> None:
+    # OAST (out-of-band) auto-correlation. ``aith oob mint`` records a probe
+    # with a unique random ``nonce`` subdomain label; that label IS the
+    # correlation token routed through the shared interactsh/frp transport
+    # (see src/ai_threat_hunting_cli/oob.py). ``aith oob poll`` parses the
+    # interactsh-client log, extracts the nonce from each callback host, and
+    # records the matching interaction here so a blind callback auto-maps to
+    # the payload that caused it. The interaction child table keeps one row
+    # per observed callback (a single probe can fire multiple times).
+    #
+    # Constraint enforcement on status / probe_kind / protocol lives in the
+    # Pydantic layer so the enums can evolve without a schema rebuild.
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS assessment_oob_probes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                nonce TEXT NOT NULL UNIQUE,
+                target_url TEXT NOT NULL DEFAULT '',
+                param TEXT NOT NULL DEFAULT '',
+                technique TEXT NOT NULL DEFAULT '',
+                probe_kind TEXT NOT NULL DEFAULT '',
+                request_hash TEXT NOT NULL DEFAULT '',
+                oob_domain TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_oob_probes_engagement_status "
+        "ON assessment_oob_probes(engagement_id, status)"
+    )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS assessment_oob_interactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                probe_id INTEGER NOT NULL,
+                protocol TEXT NOT NULL DEFAULT '',
+                remote_address TEXT NOT NULL DEFAULT '',
+                query_type TEXT NOT NULL DEFAULT '',
+                raw_request TEXT NOT NULL DEFAULT '',
+                interaction_hash TEXT NOT NULL DEFAULT '',
+                observed_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(probe_id, interaction_hash),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(probe_id) REFERENCES assessment_oob_probes(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_oob_interactions_probe "
+        "ON assessment_oob_interactions(probe_id)"
+    )
+
+
 def _create_intel_and_activity_fts(connection: sqlite3.Connection) -> None:
 
     # FTS5 virtual tables + rebuild-on-drift guard follow the pattern
@@ -2572,6 +2635,7 @@ def init_db() -> None:
         _create_intel_tables(connection)
         _create_activity_table(connection)
         _create_dispatch_tables(connection)
+        _create_oob_correlation_tables(connection)
         _create_intel_and_activity_fts(connection)
         _run_data_migrations(connection)
 
