@@ -150,7 +150,7 @@ def run(args) -> None:
         metadata={"command": "code-record-analysis", "count": len(results)},
     )
 
-    print(f"\n=== Analysis Results Summary ===")
+    print("\n=== Analysis Results Summary ===")
     print(f"Results recorded: {created}")
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
 

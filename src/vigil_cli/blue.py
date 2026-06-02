@@ -416,7 +416,7 @@ def _cmd_customers(args: argparse.Namespace, install_root: Path) -> None:
         )
 
 
-def _discover_blue_customers(install_root: Path) -> list[dict[str, object]]:
+def _discover_blue_customers(install_root: Path) -> list[dict[str, str | list[str]]]:
     tenant_dir = install_root / "agent" / "references" / "tenants"
     if not tenant_dir.is_dir():
         return []
@@ -438,7 +438,7 @@ def _discover_blue_customers(install_root: Path) -> list[dict[str, object]]:
             grouped.setdefault(customer, {})[platform] = str(path)
             break
 
-    rows: list[dict[str, object]] = []
+    rows: list[dict[str, str | list[str]]] = []
     for customer in sorted(grouped):
         platforms = sorted(grouped[customer])
         rows.append(

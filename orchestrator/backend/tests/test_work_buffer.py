@@ -1106,7 +1106,6 @@ def test_defer_cluster_rejects_empty_reason(tmp_path: Path, capsys) -> None:
 
 
 def _classify_buckets():
-    root = str(_scripts_root()) if "_scripts_root" in globals() else None
     import sys as _sys
     from pathlib import Path as _Path
     scripts = _Path(__file__).resolve().parents[3] / "agent" / "scripts"

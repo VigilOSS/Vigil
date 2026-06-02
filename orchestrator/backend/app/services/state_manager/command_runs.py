@@ -1197,7 +1197,12 @@ def list_command_runs(
         # prefix match, 'host_exec' an exact match, and any other value an exact
         # match against the stored route string.
         if route == "kali":
-            filters.append(("r.route LIKE 'vigil assess kali/%'", []))
+            # Transitional back-compat: rows recorded before the aith->vigil
+            # rename are stamped route='aith assess kali/<tool>'. Match both
+            # the new prefix and the old one so pre-rename rows still return.
+            filters.append(
+                ("(r.route LIKE 'vigil assess kali/%' OR r.route LIKE 'aith assess kali/%')", [])
+            )
         else:
             filters.append(("r.route = ?", [route]))
     if success is not None:

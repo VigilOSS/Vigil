@@ -828,7 +828,6 @@ def test_nuclei_lock_rejects_concurrent_invocation(monkeypatch, fake_engagement)
     `vigil assess kali nuclei` invocations from corrupting each other's output.
     Acquire the lock once, then attempt to reacquire under the same engagement
     and verify the second attempt raises AssessError with a clear message."""
-    import importlib.util
 
     repo_root = Path(__file__).resolve().parents[3]
     scripts_root = repo_root / "agent" / "scripts"
@@ -853,7 +852,6 @@ def test_nuclei_lock_rejects_concurrent_invocation(monkeypatch, fake_engagement)
 def test_nuclei_lock_recovers_from_stale_pid(monkeypatch, fake_engagement, capsys):
     """C32: if the lockfile records a PID that is no longer alive (crashed
     prior run), the next invocation auto-recovers and acquires the lock."""
-    import importlib.util
 
     repo_root = Path(__file__).resolve().parents[3]
     scripts_root = repo_root / "agent" / "scripts"
@@ -2218,7 +2216,7 @@ def test_kali_job_start_validates_audit_metadata_and_resolves_agent(
     optional but warned), and it must resolve agent name from $AGENT_NAME
     when --agent-name is omitted."""
     cli = _import("assess.cli")
-    kali_jobs = _import("assess.lib.kali_jobs")
+    _import("assess.lib.kali_jobs")
     monkeypatch.setenv("AGENT_NAME", "vulnerability-analyst")
 
     captured: dict = {}

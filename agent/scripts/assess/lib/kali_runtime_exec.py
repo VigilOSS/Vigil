@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import subprocess
 
-from .client import AssessError
+from .client import AssessError, default_runtime_container
 
 
-_DEFAULT_CONTAINER_NAME = "vigil"
+_DEFAULT_CONTAINER_NAME = default_runtime_container()
 
 
 def _container_pid_file(run_uuid: str) -> str:
