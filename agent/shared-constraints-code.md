@@ -354,6 +354,11 @@ Before your dispatch returns, run in this order:
 `aith assess agent handoff` is idempotent; checkpoint after each major phase of work, not only at the end.
 Schema: `agent/references/runtime-guides/handoff-schema.md`.
 
+On long runs, at each handoff checkpoint also re-emit a compact plan-state digest in your
+response — objective / done so far / still pending / immediate next step (~3-5 lines) — so the
+objective does not drift to the bottom of a long context. This is additive to the handoff write,
+not a separate ceremony.
+
 ---
 
 ## 12. Coverage Integrity

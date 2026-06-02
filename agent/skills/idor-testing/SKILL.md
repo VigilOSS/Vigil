@@ -47,11 +47,34 @@ origin: AI Threat Hunting
 
 ### 4. ID Manipulation Techniques
 
-- [ ] Numeric: increment/decrement (`123` → `124`, `122`)
-- [ ] UUID: try UUID of another user's object (obtained via other endpoint)
-- [ ] Base64: decode, modify, re-encode
-- [ ] Hashed/encoded: check if predictable (MD5 of sequential number)
-- [ ] Negative or zero IDs: `-1`, `0`
+Do not hand-pick the variants. Feed the captured ID to `aith assess classify-payload`,
+which recognises the type (`sequential_id`, `uuid`, `integer`, `base64`, `hex`, ...) and
+emits intent-keyed attack variants so you cover neighbor/boundary/escalation/format/empty
+systematically:
+
+```bash
+# Numeric / auto-increment ID → neighbours, boundaries, escalation IDs, type-confusion
+aith assess classify-payload 1042 --mutations
+#   type:  sequential_id
+#   neighbor:   '1043' '1041' '1044' '1040' '2084'        ← adjacent objects (horizontal IDOR)
+#   boundary:   '0' '-1' '1' '99999999' '2147483647'      ← edge IDs (first record / overflow)
+#   escalation: '1' '0' '2' 'admin' 'root'                ← likely-privileged IDs
+#   format:     '"1042"' '[1042]' '{"id": 1042}' 'null'   ← type confusion (string/array/object)
+#   empty:      '' 'null' 'undefined' ' ' '\x00'
+
+# UUID → increment last group, all-zeros / all-Fs, first-user GUID, case + no-hyphen confusion
+aith assess classify-payload 550e8400-e29b-41d4-a716-446655440000 --mutations --json
+```
+
+- [ ] Run `classify-payload --mutations` on each captured ID; fire the `neighbor` and
+      `boundary` variants for **horizontal** access (adjacent / first objects) and the
+      `escalation` variants (`1`, `0`, `00000000-...-000000000001`, `admin`) for **vertical** access
+- [ ] UUID: also try the real UUID of another user's object (obtained via another endpoint) —
+      `classify-payload` covers the structural guesses, not values you can only observe
+- [ ] Use the `format` variants for type-confusion (int as `"1042"` string / `[1042]` array /
+      `{"id":1042}` object) — some authz checks only validate the scalar shape
+- [ ] Base64 / hex IDs: `classify-payload` classifies them and the `format`/`boundary` intents
+      emit decode-modify-reencode and truncation variants; confirm whether the value is predictable
 - [ ] Array injection: `id[]=1&id[]=2` — may return multiple objects
 - [ ] Wildcard or special values: `*`, `all`, `null`
 
@@ -95,6 +118,24 @@ On shared/SaaS platforms, test whether object IDs are scoped to the current acco
 - [ ] Test header and parameter overrides: `X-Account-Id`, `?account_id=`, `Host` header
 - [ ] Test webhook/integration callbacks — does event-triggered execution stay within the correct account's data?
 - [ ] Check 404 vs 403 — a 403 on an out-of-account ID confirms the object exists (ID oracle)
+
+When you sweep a *batch* of IDs (a `classify-payload` neighbor set, a `seq` range, or a list of
+out-of-account IDs), do not eyeball every response for the one that leaked. Capture each response
+as a record (`url`, `status`, `content_length`, optionally `title`/`words`/`lines`) into a JSONL
+or JSON-array file and rank the outliers:
+
+```bash
+# one {url,status,content_length} object per swept ID → idor_sweep.jsonl, then:
+aith assess anomaly-score idor_sweep.jsonl --top 5
+#   #1  score=4.17  status=200  len=1561  url=.../api/users/1   ← the ID that returned a record
+#       ^ status='200'  ^ length_bucket='len_512_4096'          while the rest 403/404'd
+```
+
+The record that breaks from the population (a `200` among `403`s, a larger body bucket, a
+different `title`) is the candidate leak — pull it and confirm the data belongs to another
+account. The oracle clusters near-equal sizes into buckets, so it surfaces *category* outliers
+(status flip, size-class jump, title change), not sub-bucket byte deltas — for two-response
+ownership confirmation use the direct read in §8 below.
 
 ### 8. Bulk / Mass Assignment
 

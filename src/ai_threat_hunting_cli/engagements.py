@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -9,6 +10,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from . import docker
@@ -668,6 +670,350 @@ def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
         html_path.unlink(missing_ok=True)
 
     return output
+
+
+# ── Engagement export: git-diff-able per-finding markdown tree ────────────
+#
+# `aith engagement export --format markdown-tree` materializes one directory
+# per finding under an output root, each holding three files:
+#
+#   draft.md   — the raw finding as the backend stores it (every persisted
+#                field, including details_json contents flattened out).
+#   debate.md  — the verification-narrative artifact (Phase 3:
+#                kind="verification-narrative") linked to the finding, if one
+#                was registered; otherwise a short placeholder.
+#   report.md  — the report-ready rendering (the report-findings projection
+#                with report_id numbering and root-cause grouping context).
+#
+# The point is review-without-a-running-backend: once exported, an engagement's
+# findings become a stable directory tree that diffs cleanly in git across
+# re-runs, so reviewers can see exactly what changed in draft/debate/report
+# prose between two passes without standing the orchestrator back up.
+#
+# Findings are sourced over the same read API the rest of the CLI uses. The
+# `client` parameter is duck-typed to ``AssessmentClient.get`` (see
+# agent/scripts/assess/lib/client.py) so tests can inject a FastAPI TestClient
+# adapter and exercise the whole renderer deterministically without a live LLM
+# or a real socket.
+
+EXPORT_FORMATS = {"markdown-tree"}
+
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+class FindingReader(Protocol):
+    """Minimal read surface this exporter needs from an assessment client.
+
+    ``AssessmentClient.get(endpoint)`` returns the parsed JSON body for
+    ``/engagements/{key}/assessment/{endpoint}``; that single method is all the
+    markdown-tree export consumes, which keeps the production path and the
+    test adapter trivially interchangeable.
+    """
+
+    def get(self, endpoint: str) -> Any: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ExportedEngagement:
+    output_root: Path
+    finding_count: int
+    finding_dirs: list[Path]
+
+
+def _finding_render():
+    """Import the shared ``assess.lib.finding_render`` module.
+
+    The finding->markdown block is rendered by a single shared module that
+    physically lives under ``agent/scripts/assess/lib`` so the assess
+    ``export-findings`` command can import it directly. This installable ``src``
+    package reaches it through the same import bridge it already uses for
+    ``assess.lib.client`` / ``assess.lib.db`` (see ``paths.add_assess_import_path``
+    and ``_init_cases_db``): the production ``aith engagement export`` path puts
+    ``agent/scripts`` on ``sys.path`` before this runs (via
+    ``_build_assessment_client``), but tests and any direct caller may not — so
+    fall back to discovering the repo root from this module's own location and
+    bridging the path ourselves before retrying.
+    """
+    try:
+        from assess.lib import finding_render  # type: ignore[import-not-found]
+
+        return finding_render
+    except ImportError:
+        from .paths import agent_root, find_repo_root
+
+        repo_root = find_repo_root(Path(__file__))
+        if repo_root is not None:
+            scripts_dir = agent_root(repo_root) / "scripts"
+            if str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+        from assess.lib import finding_render  # type: ignore[import-not-found]
+
+        return finding_render
+
+
+def _string_list(values: object) -> list[str]:
+    return _finding_render().string_list(values)
+
+
+def _finding_dir_name(finding: dict) -> str:
+    """Stable, filesystem-safe directory name for one finding.
+
+    Slug-first so the tree sorts by the canonical finding id (VA-001, …) and
+    so two exports of the same engagement produce identical paths — that
+    stability is the whole reason this is git-diff-able. Falls back to the
+    title, then a generic label, when a slug is somehow absent.
+    """
+    raw = str(finding.get("slug") or finding.get("title") or "finding").strip()
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-._")
+    return cleaned or "finding"
+
+
+def _render_finding_draft(finding: dict) -> str:
+    """Render the raw finding (draft.md) — every persisted field, flattened.
+
+    Uses the shared ``assess.lib.finding_render.render_finding`` so a single
+    finding's draft block is identical to its section in the engagement-wide
+    ``findings.md`` (export-findings), but scoped to one finding per file. The
+    root-cause grouping bullets that export-findings includes inline are omitted
+    here because each finding's grouping context is rendered separately into its
+    own ``report.md`` (see ``_render_finding_report``). The shared renderer
+    returns the newline-stripped block; draft.md is newline-terminated so the
+    tree diffs cleanly.
+    """
+    return _finding_render().render_finding(finding, include_root_cause_group=False) + "\n"
+
+
+def _render_finding_report(record: dict, *, group: dict | None = None) -> str:
+    """Render the report-ready view (report.md) for a single finding.
+
+    ``record`` is one entry from the report-findings projection (it carries a
+    ``report_id`` and details already flattened to the top level). ``group``,
+    when present, is the root-cause group this record roots, so the report
+    rendering can note sibling findings the way the report-writer consumes
+    them.
+    """
+    report_id = str(record.get("report_id") or "---")
+    slug = str(record.get("slug") or "")
+    title = str(record.get("title") or "(untitled)")
+    severity = str(record.get("severity") or "info").upper()
+    header = f"# {report_id} — {title}"
+    lines = [header, ""]
+    meta = f"- **ID**: {report_id}"
+    if slug:
+        meta += f" (`{slug}`)"
+    lines.append(meta)
+    lines.append(f"- **Severity**: {severity}")
+    location = record.get("canonical_location") or ""
+    if location:
+        lines.append(f"- **Location**: {location}")
+    cwe_id = record.get("cwe_id") or ""
+    if cwe_id:
+        lines.append(f"- **CWE**: {cwe_id}")
+    owasp_category = record.get("owasp_category") or ""
+    if owasp_category:
+        lines.append(f"- **OWASP**: {owasp_category}")
+    cvss_vector = record.get("cvss_vector") or ""
+    if cvss_vector:
+        cvss_score = record.get("cvss_score")
+        score_str = f" ({cvss_score})" if cvss_score is not None else ""
+        lines.append(f"- **CVSS**: {cvss_vector}{score_str}")
+
+    impact = record.get("impact") or record.get("summary") or ""
+    if impact:
+        lines.extend(["", "## Impact", "", str(impact)])
+    evidence = record.get("evidence_detail") or record.get("evidence_ref") or ""
+    if evidence:
+        lines.extend(["", "## Evidence", "", str(evidence)])
+    steps = _string_list(record.get("steps_to_reproduce"))
+    if steps:
+        lines.extend(["", "## Steps to Reproduce", ""])
+        for i, step in enumerate(steps, 1):
+            lines.append(f"{i}. {step}")
+    remediation = record.get("remediation") or ""
+    if remediation:
+        lines.extend(["", "## Remediation", "", str(remediation)])
+
+    if group and group.get("siblings"):
+        lines.extend(["", "## Root-Cause Group", ""])
+        sibling_count = group.get("sibling_count", len(group.get("siblings", [])))
+        lines.append(f"Root of a root-cause group with {sibling_count} sibling finding(s):")
+        for sibling in group.get("siblings", []):
+            effect = sibling.get("root_cause_effect", "eliminates_finding")
+            marker = "residual attack path" if effect == "eliminates_attack_path" else "resolved by fixing this root"
+            lines.append(
+                f"- `{sibling.get('slug', '')}` [{str(sibling.get('severity', 'info')).upper()}] "
+                f"{sibling.get('title', '')} — {marker}"
+            )
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _placeholder_debate(finding: dict) -> str:
+    slug = str(finding.get("slug") or finding.get("title") or "this finding")
+    return (
+        f"# Verification Debate — {slug}\n\n"
+        "No verification-narrative artifact (kind=\"verification-narrative\") is "
+        "linked to this finding yet.\n\n"
+        "Register one during verification with:\n"
+        "    aith assess verify-finding "
+        f"{finding.get('slug', '<slug>')} --disposition <disposition> "
+        "--reason \"...\" --narrative <path-to-debate.md>\n"
+    )
+
+
+def _fetch_debate_narrative(client: FindingReader, slug: str, finding: dict) -> str:
+    """Resolve debate.md content for one finding.
+
+    Searches the artifact index for a ``verification-narrative`` artifact
+    linked to ``slug`` (Phase 3 registers these via `aith assess
+    verify-finding --narrative`). When found, the top hit's full content is
+    read back via the per-artifact GET (which inlines ``content`` for textual
+    files). Any miss — no artifact, an unreadable id, or a transport hiccup —
+    degrades to the placeholder so a single broken narrative never aborts the
+    whole export.
+    """
+    if not slug:
+        return _placeholder_debate(finding)
+    try:
+        hits = client.get(f"artifacts/search?finding={slug}&kind=verification-narrative")
+    except Exception:
+        return _placeholder_debate(finding)
+    if not isinstance(hits, list) or not hits:
+        return _placeholder_debate(finding)
+    top = hits[0]
+    if not isinstance(top, dict):
+        return _placeholder_debate(finding)
+    artifact_id = top.get("id")
+    rel_path = str(top.get("relative_path") or "")
+    content = ""
+    if artifact_id is not None:
+        try:
+            full = client.get(f"artifacts/{artifact_id}")
+        except Exception:
+            full = None
+        if isinstance(full, dict):
+            content = str(full.get("content") or "")
+    if not content:
+        # The file exceeded the inline-content cap, or the search row already
+        # carried an indexed/preview excerpt — fall back to whichever excerpt
+        # we have so debate.md is never silently empty.
+        content = str(top.get("indexed_text") or top.get("preview_text") or "")
+    if not content.strip():
+        return _placeholder_debate(finding)
+    suffix = "" if content.endswith("\n") else "\n"
+    return f"<!-- source artifact: {rel_path} -->\n{content}{suffix}"
+
+
+def export_engagement_tree(
+    client: FindingReader,
+    output_root: Path,
+    *,
+    fmt: str = "markdown-tree",
+) -> ExportedEngagement:
+    """Write a git-diff-able per-finding markdown tree under ``output_root``.
+
+    Returns the output root, the finding count, and the per-finding directories
+    written (sorted by directory name). ``client`` is any object exposing the
+    ``AssessmentClient.get`` read surface.
+    """
+    if fmt not in EXPORT_FORMATS:
+        raise SystemExit(f"--format must be one of: {', '.join(sorted(EXPORT_FORMATS))}")
+
+    findings = client.get("findings")
+    if not isinstance(findings, list):
+        raise SystemExit("export: unexpected response from backend for findings")
+
+    # report-findings (draft mode) is the report-ready projection: report_id
+    # numbering + flattened details + root-cause grouping. Index both the
+    # grouped roots and standalone records by slug so each finding's report.md
+    # can be rendered from its own projection record.
+    report = client.get("report-findings?mode=draft")
+    report_by_slug: dict[str, dict] = {}
+    group_by_root_slug: dict[str, dict] = {}
+    if isinstance(report, dict):
+        for group in report.get("groups", []) or []:
+            if not isinstance(group, dict):
+                continue
+            root = group.get("root")
+            if isinstance(root, dict) and root.get("slug"):
+                root_slug = str(root["slug"])
+                report_by_slug[root_slug] = root
+                group_by_root_slug[root_slug] = group
+            for sibling in group.get("siblings", []) or []:
+                if isinstance(sibling, dict) and sibling.get("slug"):
+                    report_by_slug[str(sibling["slug"])] = sibling
+        for record in report.get("standalone", []) or []:
+            if isinstance(record, dict) and record.get("slug"):
+                report_by_slug[str(record["slug"])] = record
+
+    output_root = output_root.expanduser()
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    ordered = sorted(
+        findings,
+        key=lambda f: (
+            _SEVERITY_ORDER.get(str(f.get("severity") or "medium").lower(), 99),
+            str(f.get("slug") or ""),
+        ),
+    )
+
+    written: list[Path] = []
+    used_names: dict[str, int] = {}
+    for finding in ordered:
+        if not isinstance(finding, dict):
+            continue
+        slug = str(finding.get("slug") or "")
+        base_name = _finding_dir_name(finding)
+        # Guard against two findings collapsing to the same on-disk name
+        # (e.g. slugless findings with identical titles): suffix collisions so
+        # the tree never silently drops a finding.
+        count = used_names.get(base_name, 0)
+        used_names[base_name] = count + 1
+        dir_name = base_name if count == 0 else f"{base_name}-{count + 1}"
+
+        finding_dir = output_root / dir_name
+        finding_dir.mkdir(parents=True, exist_ok=True)
+
+        (finding_dir / "draft.md").write_text(_render_finding_draft(finding), encoding="utf-8")
+        (finding_dir / "debate.md").write_text(
+            _fetch_debate_narrative(client, slug, finding), encoding="utf-8"
+        )
+        report_record = report_by_slug.get(slug)
+        if report_record is None:
+            # Finding excluded from the report projection (merged /
+            # false-positive / disputed / pending_runtime_proof holding): fall
+            # back to the raw finding so report.md still exists and stays
+            # diff-able, with a one-line note.
+            report_md = (
+                f"# {finding.get('slug') or '---'} — {finding.get('title') or '(untitled)'}\n\n"
+                "_Not included in the current report projection "
+                "(merged, false-positive, disputed, or pending_runtime_proof)._\n\n"
+                + _render_finding_draft(finding)
+            )
+        else:
+            report_md = _render_finding_report(
+                report_record, group=group_by_root_slug.get(slug)
+            )
+        (finding_dir / "report.md").write_text(report_md, encoding="utf-8")
+        written.append(finding_dir)
+
+    # Prune stale finding directories from a prior export: re-exporting into a
+    # stable output_root must not retain dirs for findings that were since
+    # merged, renamed, or removed. Only remove dirs THIS exporter created —
+    # identified by the draft.md + report.md marker files — never unrelated
+    # content that happens to share output_root.
+    current_names = {p.name for p in written}
+    for child in sorted(output_root.iterdir()):
+        if not child.is_dir() or child.name in current_names:
+            continue
+        if (child / "draft.md").is_file() and (child / "report.md").is_file():
+            shutil.rmtree(child)
+
+    return ExportedEngagement(
+        output_root=output_root.resolve(),
+        finding_count=len(written),
+        finding_dirs=sorted(written),
+    )
 
 
 def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, target: str, repos: list[dict[str, str]], date_label: str) -> None:

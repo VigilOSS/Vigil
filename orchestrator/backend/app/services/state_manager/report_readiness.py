@@ -1,0 +1,594 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+from fastapi import HTTPException, status
+
+from ..events import _engagement_or_404
+from ..artifact_index import _normalize_relative_path
+
+from . import _common
+from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _json_object, _serialize_finding_record
+from .links import _root_cause_link_metadata
+from .coverage import coverage_readiness
+
+
+
+def _normalize_report_evidence_ref(root: Path, evidence_ref: str) -> str:
+    try:
+        return _normalize_relative_path(root, evidence_ref)
+    except HTTPException:
+        return evidence_ref
+
+def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND status NOT IN ('merged', 'false_positive')
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (engagement.id,),
+        ).fetchall()
+    return [_serialize_finding_record(row) for row in rows]
+
+def report_readiness(engagement_id: int) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    is_blue = str(getattr(engagement, "engagement_type", "") or "").lower() == "blue"
+    engagement_root = Path(engagement.engagement_root).expanduser().resolve()
+    coverage = coverage_readiness(engagement_id)
+    blockers: list[dict[str, Any]] = []
+    if not coverage["ready"]:
+        blockers.append(
+            {
+                "kind": "coverage",
+                "detail": "Coverage blockers remain",
+                "blocker_count": coverage["blocker_count"],
+            }
+        )
+
+    reportable_statuses = {"active", "blocked", "exploited", "contained", "eradicated", "recovered", "reported"}
+    candidates = [
+        row
+        for row in _report_candidate_records(engagement_id)
+        if row.get("workflow_status") in reportable_statuses
+    ]
+    candidate_slugs = {str(row.get("slug", "")) for row in candidates if row.get("slug")}
+    with _common.get_connection() as connection:
+        root_link_rows = connection.execute(
+            """
+            SELECT links.*, findings.slug AS finding_slug
+            FROM assessment_finding_links AS links
+            JOIN assessment_findings AS findings ON findings.id = links.finding_id
+            WHERE links.engagement_id = ?
+              AND links.link_kind = ?
+              AND links.target_kind = 'finding'
+            """,
+            (engagement_id, ROOT_CAUSE_LINK_KIND),
+        ).fetchall()
+    root_link_by_slug = {
+        str(row["finding_slug"]): str(row["target_ref"])
+        for row in root_link_rows
+        if str(row["finding_slug"]) in candidate_slugs
+    }
+
+    for row in candidates:
+        if row.get("verification_state") != "verified":
+            blockers.append(
+                {
+                    "kind": "finding_verification_state",
+                    "slug": row.get("slug", ""),
+                    "title": row.get("title", ""),
+                    "detail": f"verification_state={row.get('verification_state', 'unknown')}",
+                }
+            )
+            continue
+        if row.get("verification_disposition") not in {"confirmed", "downgraded"}:
+            blockers.append(
+                {
+                    "kind": "finding_verification_disposition",
+                    "slug": row.get("slug", ""),
+                    "title": row.get("title", ""),
+                    "detail": f"verification_disposition={row.get('verification_disposition', 'unknown')}",
+                }
+            )
+
+    for row in candidates:
+        if row.get("verification_state") != "verified":
+            continue
+        if row.get("verification_disposition") not in {"confirmed", "downgraded"}:
+            continue
+        slug = row.get("slug", "")
+        title = row.get("title", "")
+        details = _json_object(row.get("details_json", "{}"))
+        missing_fields: list[str] = []
+        if is_blue:
+            mitre = details.get("mitre_techniques")
+            if not isinstance(mitre, list) or not mitre:
+                missing_fields.append("mitre_techniques")
+        else:
+            if not details.get("cvss_score") and details.get("cvss_score") != 0:
+                missing_fields.append("cvss_score")
+            if not details.get("cvss_vector"):
+                missing_fields.append("cvss_vector")
+            if not details.get("steps_to_reproduce"):
+                missing_fields.append("steps_to_reproduce")
+            if not details.get("remediation"):
+                missing_fields.append("remediation")
+        if not details.get("impact"):
+            missing_fields.append("impact")
+        if not details.get("evidence"):
+            missing_fields.append("evidence")
+        if missing_fields:
+            blockers.append(
+                {
+                    "kind": "finding_field_quality",
+                    "slug": slug,
+                    "title": title,
+                    "detail": f"missing structured fields: {', '.join(missing_fields)}",
+                }
+            )
+        cvss_score = details.get("cvss_score")
+        severity = str(row.get("severity", "")).lower()
+        if not is_blue and cvss_score is not None and severity:
+            try:
+                score = float(cvss_score)
+            except (TypeError, ValueError):
+                score = -1
+            expected = (
+                "critical" if score >= 9.0
+                else "high" if score >= 7.0
+                else "medium" if score >= 4.0
+                else "low" if score >= 0.1
+                else "info"
+            )
+            if score >= 0 and severity != expected:
+                blockers.append(
+                    {
+                        "kind": "severity_cvss_mismatch",
+                        "slug": slug,
+                        "title": title,
+                        "detail": f"severity={severity} but cvss_score={score} expects {expected}",
+                    }
+                )
+
+    for slug, root_slug in sorted(root_link_by_slug.items()):
+        if root_slug not in candidate_slugs:
+            blockers.append(
+                {
+                    "kind": "root_cause_root_not_reportable",
+                    "slug": slug,
+                    "detail": f"root_cause_slug={root_slug} is not reportable",
+                }
+            )
+
+    duplicate_groups: dict[tuple[str, str], list[str]] = {}
+    root_cause_groups: dict[str, list[str]] = {}
+    for row in candidates:
+        slug = str(row.get("slug", ""))
+        root_cause_key = str(row.get("root_cause_key", "") or "").strip()
+        if root_cause_key:
+            root_cause_groups.setdefault(root_cause_key, []).append(slug)
+        location = str(row.get("canonical_location", "") or "").strip()
+        defect_family = str(row.get("defect_family", "") or "").strip()
+        if location and defect_family:
+            duplicate_groups.setdefault((location, defect_family), []).append(slug)
+
+    for root_cause_key, slugs in root_cause_groups.items():
+        if len(slugs) > 1:
+            grouped_roots = {
+                root_link_by_slug.get(slug, slug)
+                for slug in slugs
+            }
+            if len(grouped_roots) == 1:
+                continue
+            blockers.append(
+                {
+                    "kind": "duplicate_root_cause",
+                    "slugs": sorted(slugs),
+                    "detail": f"root_cause_key={root_cause_key}",
+                }
+            )
+    for (location, defect_family), slugs in duplicate_groups.items():
+        if len(slugs) > 1:
+            blockers.append(
+                {
+                    "kind": "duplicate_location_family",
+                    "slugs": sorted(slugs),
+                    "detail": f"{defect_family} @ {location}",
+                }
+            )
+
+    with _common.get_connection() as connection:
+        artifact_rows = {
+            str(row["relative_path"]): dict(row)
+            for row in connection.execute(
+                "SELECT * FROM assessment_artifacts WHERE engagement_id = ?",
+                (engagement_id,),
+            ).fetchall()
+        }
+        for artifact_path, artifact in artifact_rows.items():
+            lower_path = artifact_path.lower()
+            if not (lower_path.startswith("notes/") and lower_path.endswith((".md", ".markdown"))):
+                continue
+            if not bool(artifact.get("present")):
+                continue
+            if bool(artifact.get("scratch")):
+                # Operator explicitly marked this as scratch — outside the
+                # report-readiness contract by design.
+                continue
+            linked = any(
+                artifact.get(field)
+                for field in (
+                    "related_finding_slug",
+                    "related_chain_key",
+                    "related_surface_id",
+                    "related_request_variant_id",
+                    "producer_agent_id",
+                    "producer_command_run_id",
+                )
+            )
+            if not linked:
+                blockers.append(
+                    {
+                        "kind": "unlinked_markdown_note",
+                        "artifact_id": artifact.get("id"),
+                        "path": artifact_path,
+                        "detail": (
+                            f"markdown note '{artifact_path}' is indexed but not linked to a finding, chain, "
+                            "surface, request_variant, command_run, or producing agent. Fix with one of: "
+                            f"`aith assess artifact register {artifact_path} --finding <slug>` to link, or "
+                            f"`aith assess artifact mark-scratch {artifact_path}` to dismiss as scratch."
+                        ),
+                    }
+                )
+        artifact_rows_by_id = {int(a["id"]): a for a in artifact_rows.values() if a.get("id")}
+        for row in candidates:
+            slug = str(row.get("slug", ""))
+            evidence_ref = str(row.get("evidence_ref", "") or "").strip()
+            evidence_artifact_id = row.get("evidence_artifact_id")
+            linked_evidence_artifact = None
+
+            if evidence_artifact_id is not None:
+                linked_evidence_artifact = artifact_rows_by_id.get(int(evidence_artifact_id))
+                if linked_evidence_artifact is not None and not bool(linked_evidence_artifact.get("present")):
+                    blockers.append(
+                        {
+                            "kind": "finding_evidence_missing_artifact",
+                            "slug": slug,
+                            "title": row.get("title", ""),
+                            "detail": (
+                                f"finding {slug} evidence artifact id={evidence_artifact_id} is indexed "
+                                f"but the file is missing on disk. Restore the file and re-register with "
+                                f"`aith assess artifact register {linked_evidence_artifact.get('relative_path', '')} --finding {slug}`, "
+                                f"or repoint the finding via "
+                                f"`aith assess update-finding {slug} --evidence-ref <relative-path>`."
+                            ),
+                        }
+                    )
+                    continue
+
+            if not evidence_ref:
+                blockers.append(
+                    {
+                        "kind": "finding_missing_evidence_ref",
+                        "slug": slug,
+                        "title": row.get("title", ""),
+                        "detail": (
+                            f"active/reportable finding {slug} has no evidence_ref. "
+                            f"Fix with `aith assess update-finding {slug} --evidence-ref <relative-path>` "
+                            "after writing the evidence artifact to disk."
+                        ),
+                    }
+                )
+                continue
+            indexed_evidence_ref = _normalize_report_evidence_ref(engagement_root, evidence_ref)
+            artifact = artifact_rows.get(indexed_evidence_ref)
+            if artifact is None:
+                blockers.append(
+                    {
+                        "kind": "finding_evidence_unindexed",
+                        "slug": slug,
+                        "title": row.get("title", ""),
+                        "detail": (
+                            f"finding {slug} evidence_ref={evidence_ref!r} is not in the artifact index. "
+                            f"Fix with `aith assess artifact register {indexed_evidence_ref} --finding {slug}`."
+                        ),
+                    }
+                )
+            elif not bool(artifact.get("present")):
+                blockers.append(
+                    {
+                        "kind": "finding_evidence_missing_artifact",
+                        "slug": slug,
+                        "title": row.get("title", ""),
+                        "detail": (
+                            f"finding {slug} evidence_ref={evidence_ref!r} is indexed but the file is "
+                            f"missing on disk. Restore the file and re-register with "
+                            f"`aith assess artifact register {indexed_evidence_ref} --finding {slug}`, "
+                            f"or repoint the finding via "
+                            f"`aith assess update-finding {slug} --evidence-ref <relative-path>`."
+                        ),
+                    }
+                )
+            elif (
+                linked_evidence_artifact is not None
+                and int(linked_evidence_artifact.get("id") or 0) != int(artifact.get("id") or 0)
+            ):
+                blockers.append(
+                    {
+                        "kind": "finding_evidence_artifact_mismatch",
+                        "slug": slug,
+                        "title": row.get("title", ""),
+                        "detail": (
+                            f"finding {slug} evidence_ref={evidence_ref!r} resolves to artifact "
+                            f"id={artifact.get('id')}, but evidence_artifact_id points to "
+                            f"id={evidence_artifact_id} ({linked_evidence_artifact.get('relative_path', '')!r}). "
+                            f"Refresh the finding link with "
+                            f"`aith assess update-finding {slug} --evidence-ref {indexed_evidence_ref}`."
+                        ),
+                    }
+                )
+
+        chain_links = connection.execute(
+            """
+            SELECT chains.chain_key, links.entity_kind, links.entity_ref
+            FROM assessment_attack_chain_links AS links
+            JOIN assessment_attack_chains AS chains ON chains.id = links.chain_id
+            WHERE links.engagement_id = ?
+            """,
+            (engagement_id,),
+        ).fetchall()
+        for link in chain_links:
+            if str(link["entity_kind"]) != "finding":
+                blockers.append(
+                    {
+                        "kind": "chain_step_not_finding_linked",
+                        "chain_key": link["chain_key"],
+                        "detail": f"chain step entity_kind={link['entity_kind']} must link to a finding slug",
+                    }
+                )
+                continue
+            entity_ref = str(link["entity_ref"] or "")
+            if not entity_ref or entity_ref not in candidate_slugs:
+                blockers.append(
+                    {
+                        "kind": "chain_step_missing_finding",
+                        "chain_key": link["chain_key"],
+                        "detail": f"finding step {entity_ref or '<empty>'} is not reportable",
+                    }
+                )
+
+        handoff_rows = connection.execute(
+            """
+            SELECT agent_id, finding_slugs_json
+            FROM assessment_dispatch_handoffs
+            WHERE engagement_id = ? AND finding_slugs_json IS NOT NULL
+            """,
+            (engagement_id,),
+        ).fetchall()
+        known_slugs = {
+            str(row["slug"])
+            for row in connection.execute(
+                "SELECT slug FROM assessment_findings WHERE engagement_id = ?",
+                (engagement_id,),
+            ).fetchall()
+        }
+        for handoff in handoff_rows:
+            try:
+                handoff_slugs = json.loads(handoff["finding_slugs_json"] or "[]")
+            except json.JSONDecodeError:
+                handoff_slugs = []
+            if not isinstance(handoff_slugs, list):
+                continue
+            missing = [str(slug) for slug in handoff_slugs if str(slug) not in known_slugs]
+            if missing:
+                blockers.append(
+                    {
+                        "kind": "handoff_unknown_finding",
+                        "agent_id": handoff["agent_id"],
+                        "slugs": missing,
+                        "detail": "handoff references finding slugs not present in backend",
+                    }
+                )
+
+        stale_ready = connection.execute(
+            """
+            SELECT dispatches.agent_id, dispatches.agent_role, handoffs.handoff_status
+            FROM assessment_dispatches AS dispatches
+            JOIN assessment_dispatch_handoffs AS handoffs
+              ON handoffs.engagement_id = dispatches.engagement_id
+             AND handoffs.agent_id = dispatches.agent_id
+            WHERE dispatches.engagement_id = ?
+              AND dispatches.status = 'in-progress'
+              AND handoffs.handoff_status IN ('ready', 'blocked')
+            """,
+            (engagement_id,),
+        ).fetchall()
+        for row in stale_ready:
+            blockers.append(
+                {
+                    "kind": "stale_dispatch_ready_handoff",
+                    "agent_id": row["agent_id"],
+                    "detail": (
+                        f"{row['agent_role']} dispatch {row['agent_id']} has a "
+                        f"{row['handoff_status']!r} handoff but is still in-progress. "
+                        f"Close with `aith assess agent close {row['agent_id']}` "
+                        "or bulk-close ready/blocked stales with "
+                        "`aith assess agent reconcile-stale`."
+                    ),
+                }
+            )
+
+    return {
+        "ready": len(blockers) == 0,
+        "blocker_count": len(blockers),
+        "blockers": blockers,
+        "coverage": coverage,
+    }
+
+def _report_record(record: dict[str, Any], report_id: str) -> dict[str, Any]:
+    item = dict(record)
+    details = _json_object(item.get("details_json", "{}"))
+    item["report_id"] = report_id
+    item["cvss_vector"] = details.get("cvss_vector", "")
+    item["cvss_score"] = details.get("cvss_score")
+    item["remediation"] = details.get("remediation", "")
+    item["steps_to_reproduce"] = details.get("steps_to_reproduce", [])
+    item["cwe_id"] = details.get("cwe_id", "")
+    item["owasp_category"] = details.get("owasp_category", "")
+    item["impact"] = details.get("impact", item.get("summary", ""))
+    item["evidence_detail"] = details.get("evidence", "")
+    item["entry_point"] = details.get("entry_point", "")
+    item["sink"] = details.get("sink", "")
+    item["poc_code"] = details.get("poc_code", "")
+    raw_req = details.get("poc_request")
+    item["poc_request"] = raw_req if isinstance(raw_req, dict) else None
+    raw_resp = details.get("poc_response")
+    item["poc_response"] = raw_resp if isinstance(raw_resp, dict) else None
+    raw_refs = details.get("references", [])
+    item["references"] = raw_refs if isinstance(raw_refs, list) else []
+    return item
+
+def _report_finding_records(engagement_id: int, *, mode: str = "draft") -> list[dict[str, Any]]:
+    rows = _report_candidate_records(engagement_id)
+    if mode == "draft":
+        # Exclude disputed findings, and exclude the sticky holding disposition
+        # ``pending_runtime_proof`` (strong-but-unproven). The latter carries
+        # ``verification_state == "verified"`` so the disputed filter alone would
+        # leak it into draft reports; mirror how ``final`` mode keeps only
+        # {confirmed, downgraded} dispositions. There is no chain_required bypass
+        # in ``final`` — a held finding is never report-durable.
+        rows = [
+            row
+            for row in rows
+            if row.get("verification_state") != "disputed"
+            and row.get("verification_disposition") != "pending_runtime_proof"
+        ]
+    elif mode == "final":
+        rows = [
+            row
+            for row in rows
+            if row.get("workflow_status") in {"active", "blocked", "exploited", "contained", "eradicated", "recovered", "reported"}
+            and row.get("verification_state") == "verified"
+            and row.get("verification_disposition") in {"confirmed", "downgraded"}
+        ]
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"unsupported report mode: {mode}")
+
+    rows.sort(
+        key=lambda row: (
+            {
+                "critical": 0,
+                "high": 1,
+                "medium": 2,
+                "low": 3,
+                "info": 4,
+            }.get(str(row.get("severity", "")), 5),
+            {
+                "exploited": 0,
+                "contained": 1,
+                "eradicated": 2,
+                "recovered": 3,
+                "active": 4,
+                "reported": 5,
+                "blocked": 6,
+                "draft": 7,
+            }.get(str(row.get("workflow_status", "")), 5),
+            -int(row.get("id", 0)),
+        )
+    )
+    return [_report_record(row, f"{idx:03d}") for idx, row in enumerate(rows, start=1)]
+
+def list_report_findings(engagement_id: int, *, mode: str = "draft") -> list[dict[str, Any]]:
+    """Return findings formatted for report generation.
+
+    Excludes merged and false-positive findings, orders by severity (critical
+    first), and extracts structured fields from the ``details_json`` blob so
+    the report-writer has them at the top level without manual JSON parsing:
+    CVSS, remediation, steps_to_reproduce, CWE, OWASP, impact, evidence,
+    entry_point, sink, poc_code, poc_request, poc_response, and references.
+    """
+    return _report_finding_records(engagement_id, mode=mode)
+
+def list_report_finding_groups(engagement_id: int, *, mode: str = "draft") -> dict[str, Any]:
+    records = _report_finding_records(engagement_id, mode=mode)
+    by_slug = {str(record.get("slug", "")): record for record in records if record.get("slug")}
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT links.*, findings.slug AS finding_slug
+            FROM assessment_finding_links AS links
+            JOIN assessment_findings AS findings ON findings.id = links.finding_id
+            WHERE links.engagement_id = ?
+              AND links.link_kind = ?
+              AND links.target_kind = 'finding'
+            """,
+            (engagement_id, ROOT_CAUSE_LINK_KIND),
+        ).fetchall()
+    groups: dict[str, dict[str, Any]] = {}
+    linked_siblings: set[str] = set()
+    for row in rows:
+        link = dict(row)
+        sibling_slug = str(link.get("finding_slug", "") or "")
+        root_slug = str(link.get("target_ref", "") or "")
+        sibling = by_slug.get(sibling_slug)
+        root = by_slug.get(root_slug)
+        if sibling is None or root is None:
+            continue
+        sibling_record = dict(sibling)
+        sibling_record.update(_root_cause_link_metadata(link))
+        group = groups.setdefault(
+            root_slug,
+            {
+                "root": root,
+                "siblings": [],
+                "sibling_count": 0,
+                "residual_path_count": 0,
+                "highest_severity": root.get("severity", "info"),
+            },
+        )
+        group["siblings"].append(sibling_record)
+        linked_siblings.add(sibling_slug)
+
+    for group in groups.values():
+        siblings = group["siblings"]
+        siblings.sort(
+            key=lambda item: (
+                item.get("sibling_order") if item.get("sibling_order") is not None else 999999,
+                -SEVERITY_RANK.get(str(item.get("severity", "info")), 0),
+                str(item.get("slug", "")),
+            )
+        )
+        group["sibling_count"] = len(siblings)
+        group["residual_path_count"] = sum(
+            1 for item in siblings if item.get("root_cause_effect") == "eliminates_attack_path"
+        )
+        severities = [str(group["root"].get("severity", "info"))] + [str(item.get("severity", "info")) for item in siblings]
+        group["highest_severity"] = max(severities, key=lambda sev: SEVERITY_RANK.get(sev, 0))
+
+    groups_list = sorted(
+        groups.values(),
+        key=lambda group: (
+            -SEVERITY_RANK.get(str(group.get("highest_severity", "info")), 0),
+            str(group["root"].get("report_id", "")),
+        ),
+    )
+    grouped_roots = {str(group["root"].get("slug", "")) for group in groups_list}
+    standalone = [
+        record for record in records
+        if str(record.get("slug", "")) not in linked_siblings
+        and str(record.get("slug", "")) not in grouped_roots
+    ]
+    return {
+        "mode": mode,
+        "groups": groups_list,
+        "standalone": standalone,
+        "group_count": len(groups_list),
+        "standalone_count": len(standalone),
+        "finding_count": len(records),
+    }

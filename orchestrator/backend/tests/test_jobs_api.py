@@ -282,7 +282,7 @@ def test_patch_job_terminal_update_uses_preterminal_compare_and_swap(
         with real_get_connection() as connection:
             yield _StaleReadConnection(connection)
 
-    monkeypatch.setattr(state_manager, "get_connection", stale_read_connection)
+    monkeypatch.setattr(state_manager._common, "get_connection", stale_read_connection)
 
     response = client.patch(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
@@ -291,7 +291,7 @@ def test_patch_job_terminal_update_uses_preterminal_compare_and_swap(
 
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["existing"]["status"] == "completed"
-    monkeypatch.setattr(state_manager, "get_connection", real_get_connection)
+    monkeypatch.setattr(state_manager._common, "get_connection", real_get_connection)
     current = client.get(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}"
     ).json()

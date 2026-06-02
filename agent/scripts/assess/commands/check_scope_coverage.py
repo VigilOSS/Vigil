@@ -55,6 +55,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from assess.lib.classify_buckets import BUCKET_SKILLS, classify_from_fields
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.scope import (
@@ -179,6 +180,39 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     p.add_argument(
+        "--auto-redispatch",
+        dest="auto_redispatch",
+        action="store_true",
+        help=(
+            "For every scope entry that FAILS a --require-stage gate, emit a "
+            "ready-to-run next-dispatch RECOMMENDATION (role + scope-host + "
+            "dispatch-mode + skills) plus a task skeleton stating the coverage "
+            "gap. This NEVER fires a dispatch — the interactive operator runs "
+            "the printed `aith assess agent start ...` line. Requires "
+            "--require-stage (the stage that failed selects the role); a "
+            "no-op note is emitted if no stage is set. Skill selection for a "
+            "consumption gap is data-driven off the host's untested pending "
+            "work-item buckets; ambiguous buckets yield a low-confidence "
+            "shortlist. Recommendations whose (role, scope-host) already has an "
+            "ACTIVE (in-progress) prior dispatch covering the gap are "
+            "suppressed; a host whose only prior dispatch already terminated "
+            "(completed/failed/aborted/blocked) is NOT suppressed so the needed "
+            "retry is still recommended."
+        ),
+    )
+    p.add_argument(
+        "--max-recommendations",
+        dest="max_recommendations",
+        type=int,
+        default=10,
+        help=(
+            "Cap the number of --auto-redispatch recommendations emitted "
+            "(default 10). Failing entries past the cap are summarized as a "
+            "single 'N more' note so a large wildcard fan-out does not bury the "
+            "operator."
+        ),
+    )
+    p.add_argument(
         "--include-discovered",
         dest="include_discovered",
         action="store_true",
@@ -256,6 +290,617 @@ _OBJECTIVE_DISPATCH_HINTS: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# --auto-redispatch — turn a coverage gap into a ready-to-run RECOMMENDATION
+# ---------------------------------------------------------------------------
+#
+# This command NEVER fires a dispatch. It prints the `aith assess agent start`
+# line the interactive operator runs by hand. The maps below mirror the
+# operator phase model; `agent/operator-core.md` is the human source of truth
+# (the "role default dispatch-mode" list near "Dispatch-Mode Declaration" and
+# the Phase 1/2/3 specialist roster). Keep these in lockstep with that doc.
+
+# stage gap -> base role. Mirrors the phase model: enum is recon's job,
+# collection is the surface-collector's, consumption is the vulnerability
+# analyst's. `_STAGE_PARALLEL_ROLE` records the role that runs in PARALLEL with
+# the base role for a stage (recon-specialist + source-analyzer in Phase 1) so
+# the recommendation can name it as a note without emitting a second command.
+_STAGE_TO_ROLE: dict[str, str] = {
+    "enum": "recon-specialist",
+    "collection": "surface-collector",
+    "consumption": "vulnerability-analyst",
+}
+_STAGE_PARALLEL_ROLE: dict[str, str] = {
+    "enum": "source-analyzer",
+}
+
+# role -> default dispatch-mode. Mirrors the per-role defaults in
+# operator-core.md ("If the operator omits the mode, the agent picks the safest
+# default for its role"). `fuzzer` is included because a high-volume / fuzzing-
+# shaped consumption gap swaps the base vulnerability-analyst for a fuzzer.
+_ROLE_TO_MODE: dict[str, str] = {
+    "recon-specialist": "hypothesis-driven",
+    "source-analyzer": "item-iterating",
+    "surface-collector": "item-iterating",
+    "vulnerability-analyst": "item-iterating",
+    "fuzzer": "variant-rotation",
+}
+
+# Fixed skills for the non-data-driven stages. Enum/collection gaps don't have a
+# bucket tally to key off — the next move is always the same recon / collection
+# skill set, so the mapping is fixed here (validated on disk like every other
+# recommended skill).
+_ENUM_SKILLS: tuple[str, ...] = ("web-recon", "subdomain-enumeration")
+_COLLECTION_SKILLS: tuple[str, ...] = ("surface-collection", "gau-triage")
+
+# Buckets whose dominant presence means "we can't confidently name one vuln
+# class". These are generic / trust-delegation / environment buckets that don't
+# map to a single testing skill (intentionally absent from BUCKET_SKILLS). When
+# the dominant bucket is one of these, OR when the pending items split roughly
+# evenly across >= 3 buckets, the recommendation degrades to a ranked
+# shortlist flagged confidence=low rather than forcing one guess.
+_AMBIGUOUS_BUCKETS: frozenset[str] = frozenset(
+    {
+        "interestingparams",
+        "interestingext",
+        "trust_surface",
+        "debug_logic",
+    }
+)
+
+# gap token (from _build_entry_report) -> stage name. A single entry can carry
+# several gap tokens; the deepest failing stage is the one we recommend for
+# (consumption implies enum+collection are listed too, but the operator's next
+# move is the earliest unmet stage). Ordered earliest-first.
+_GAP_TO_STAGE: tuple[tuple[str, str], ...] = (
+    ("no-enum", "enum"),
+    ("no-collection", "collection"),
+    ("pending-work-remains", "consumption"),
+)
+
+# A high-volume consumption gap (many untested pending items concentrated on a
+# single dominant bucket) is fuzzing-shaped: rotate payloads with the fuzzer
+# rather than iterate items with the vulnerability-analyst. The threshold is a
+# soft heuristic — operators can always re-pick the role.
+_FUZZER_VOLUME_THRESHOLD = 100
+
+
+def _bucket_of_cluster_key(cluster_key: str) -> str:
+    """Map a stored ``cluster_key`` to its gf bucket name, or ``""``.
+
+    classify_buckets stamps ``gf:<bucket>`` for matched rows; ``path:``,
+    ``type:host_root``, and ``type:<inert>`` carry no vuln-class bucket.
+    """
+    key = (cluster_key or "").strip()
+    if key.startswith("gf:"):
+        return key[len("gf:"):]
+    return ""
+
+
+def _pending_buckets_for_host(
+    db_path: Path,
+    entry: dict[str, Any],
+) -> dict[str, int]:
+    """Tally untested pending work-item buckets for a scope entry's host(s).
+
+    "Untested pending" mirrors the consumption gate's definition: ``status =
+    'pending'`` AND no ``terminal_reason`` (classify-work has not deferred it)
+    AND ``type != 'host_root'`` (crawl seeds are not consumable work). For each
+    such row we reuse the stored ``cluster_key`` (``gf:<bucket>``) when present,
+    falling back to re-classifying the row's fields via classify_buckets so the
+    tally is correct even on a buffer that predates classify-work. Rows whose
+    bucket is empty (``path:`` fallback, no gf match) are tallied under the
+    empty-string key so the caller can still see "N unbucketed pending".
+
+    Returns ``{bucket_name: count}`` summed across every host the entry matches
+    (wildcards fold in all subdomains). A missing DB yields ``{}``.
+    """
+    if not db_path.is_file():
+        return {}
+
+    tally: dict[str, int] = {}
+    conn = sqlite3.connect(str(db_path), timeout=5.0)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        cursor = conn.execute(
+            """
+            SELECT url, url_path, query_params, body_params, path_params,
+                   type, cluster_key
+            FROM work_items
+            WHERE status = 'pending'
+              AND (terminal_reason IS NULL OR terminal_reason = '')
+              AND type != 'host_root'
+            """
+        )
+        for row in cursor.fetchall():
+            url = str(row[0] or "")
+            host = _endpoint_host(url)
+            if not host or not entry_matches_host(entry, host):
+                continue
+            bucket = _bucket_of_cluster_key(str(row[6] or ""))
+            if not bucket:
+                assignment = classify_from_fields(
+                    case_type=str(row[5] or "unknown"),
+                    url_path=str(row[1] or ""),
+                    query_params=str(row[2] or "{}"),
+                    body_params=str(row[3] or "{}"),
+                    path_params=str(row[4] or "{}"),
+                )
+                bucket = _bucket_of_cluster_key(str(assignment.get("cluster_key") or ""))
+            tally[bucket] = tally.get(bucket, 0) + 1
+    finally:
+        conn.close()
+    return tally
+
+
+def _skill_resolves(skills_root: Path | None, name: str) -> bool:
+    """True when ``agent/skills/<name>/SKILL.md`` exists on disk.
+
+    A ``None``/missing skills root means we cannot verify — treat as resolving
+    (don't drop a real skill just because the repo layout is unusual). The
+    common case (root present) does the real path check so a typo'd or removed
+    skill is dropped with a note rather than recommended.
+    """
+    if skills_root is None or not skills_root.is_dir():
+        return True
+    return (skills_root / name / "SKILL.md").is_file()
+
+
+def _validate_skills(
+    skills_root: Path | None,
+    names: tuple[str, ...],
+) -> tuple[list[str], list[str]]:
+    """Split ``names`` into (resolved, dropped) by on-disk SKILL.md presence."""
+    resolved: list[str] = []
+    dropped: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        if _skill_resolves(skills_root, name):
+            resolved.append(name)
+        else:
+            dropped.append(name)
+    return resolved, dropped
+
+
+def _agent_skills_root_for_recommendations() -> Path | None:
+    """Resolve ``agent/skills`` for skill validation, reusing contracts' logic.
+
+    Imported lazily so the command stays importable in contexts where the
+    contracts module's transitive imports are unavailable; a failure to import
+    just disables on-disk validation (every skill is then kept).
+    """
+    try:
+        from assess.lib.contracts import _agent_skills_root
+    except Exception:
+        return None
+    try:
+        root = _agent_skills_root()
+    except Exception:
+        return None
+    return root if root.is_dir() else None
+
+
+def _consumption_skill_selection(
+    bucket_tally: dict[str, int],
+) -> dict[str, Any]:
+    """Pick role + skills + confidence for a consumption gap from the tally.
+
+    Returns a dict with ``role``, ``skills`` (pre-validation), ``confidence``
+    (``high`` / ``low``), ``dominant_bucket``, ``dominant_count``,
+    ``pending_total``, and a human ``reason`` string. The ambiguity rules:
+
+    - No bucketed pending at all (every pending row is ``path:``/unbucketed):
+      ``confidence=low``, empty skills (nothing to test-skill on yet) — the
+      operator likely needs more triage, not a vuln specialist.
+    - Dominant bucket is generic/ambiguous (interestingparams, trust_surface,
+      ...): ``confidence=low`` shortlist across the mapped buckets present.
+    - Pending split roughly evenly across >= 3 distinct mapped buckets:
+      ``confidence=low`` ranked shortlist (top buckets by count).
+    - A single clearly-dominant mapped bucket: ``confidence=high``, that
+      bucket's skill(s).
+    """
+    pending_total = sum(bucket_tally.values())
+    # Buckets that actually map to a testing skill, ranked by count desc then
+    # name for determinism.
+    mapped = sorted(
+        (
+            (bucket, count)
+            for bucket, count in bucket_tally.items()
+            if bucket in BUCKET_SKILLS
+        ),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+
+    if not mapped:
+        # Pending exists but nothing maps to a vuln class (all unbucketed /
+        # ambiguous). Don't guess a testing skill.
+        return {
+            "role": "vulnerability-analyst",
+            "skills": (),
+            "confidence": "low",
+            "dominant_bucket": None,
+            "dominant_count": 0,
+            "pending_total": pending_total,
+            "reason": (
+                "no pending item maps to a recognizable vuln class "
+                "(all unbucketed/generic) — triage the buffer or pick a skill "
+                "by hand"
+            ),
+        }
+
+    top_bucket, top_count = mapped[0]
+    distinct_mapped = len(mapped)
+    second_count = mapped[1][1] if distinct_mapped > 1 else 0
+
+    # "Roughly even across >= 3 buckets": at least three mapped buckets and the
+    # runner-up is within ~half the leader (no single bucket dominates).
+    split_evenly = distinct_mapped >= 3 and second_count * 2 >= top_count
+
+    if split_evenly:
+        # Ranked shortlist: each present mapped bucket's first skill, ordered.
+        shortlist: list[str] = []
+        for bucket, _ in mapped:
+            for skill in BUCKET_SKILLS[bucket]:
+                if skill not in shortlist:
+                    shortlist.append(skill)
+                    break
+        return {
+            "role": "vulnerability-analyst",
+            "skills": tuple(shortlist),
+            "confidence": "low",
+            "dominant_bucket": None,
+            "dominant_count": top_count,
+            "pending_total": pending_total,
+            "reason": (
+                "pending items split roughly evenly across "
+                f"{distinct_mapped} buckets ("
+                + ", ".join(f"{b}:{c}" for b, c in mapped)
+                + ") — ranked shortlist, pick per surface"
+            ),
+        }
+
+    # Single dominant mapped bucket — high confidence. A high-volume single
+    # bucket is fuzzing-shaped: swap to the fuzzer.
+    role = "vulnerability-analyst"
+    if top_count >= _FUZZER_VOLUME_THRESHOLD:
+        role = "fuzzer"
+    return {
+        "role": role,
+        "skills": tuple(BUCKET_SKILLS[top_bucket]),
+        "confidence": "high",
+        "dominant_bucket": top_bucket,
+        "dominant_count": top_count,
+        "pending_total": pending_total,
+        "reason": (
+            f"dominant pending bucket '{top_bucket}' ({top_count} untested "
+            f"item(s))"
+            + (
+                f"; high volume (>= {_FUZZER_VOLUME_THRESHOLD}) -> fuzzer"
+                if role == "fuzzer"
+                else ""
+            )
+        ),
+    }
+
+
+def _ambiguous_dominant(bucket_tally: dict[str, int]) -> bool:
+    """True when the single largest bucket is a generic/ambiguous one.
+
+    Used to force a low-confidence shortlist when e.g. ``trust_surface`` or
+    ``interestingparams`` is the most common pending bucket even though a
+    smaller mapped bucket also exists.
+    """
+    if not bucket_tally:
+        return False
+    ranked = sorted(bucket_tally.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ranked[0][0] in _AMBIGUOUS_BUCKETS
+
+
+def _gap_stage_for_entry(entry: dict[str, Any]) -> str | None:
+    """Return the earliest unmet stage for an entry, or ``None`` if clean.
+
+    A failing entry can carry several gap tokens; the operator's next move is
+    the earliest unmet stage (you must enumerate before you can collect before
+    you can consume). ``no-live-hosts`` is informational and never selects a
+    stage.
+    """
+    gaps = set(entry.get("gaps", []))
+    for token, stage in _GAP_TO_STAGE:
+        if token in gaps:
+            return stage
+    return None
+
+
+def _build_recommendation(
+    *,
+    entry: dict[str, Any],
+    stage: str,
+    db_path: Path,
+    skills_root: Path | None,
+) -> dict[str, Any]:
+    """Build a single recommendation dict for a failing scope entry+stage."""
+    host = entry["host"]
+    dropped_skills: list[str] = []
+
+    if stage == "consumption":
+        bucket_tally = _pending_buckets_for_host(db_path, entry)
+        selection = _consumption_skill_selection(bucket_tally)
+        # An ambiguous-but-dominant generic bucket overrides a would-be
+        # high-confidence pick: surface the shortlist of mapped buckets present.
+        if selection["confidence"] == "high" and _ambiguous_dominant(bucket_tally):
+            shortlist: list[str] = []
+            for bucket, _ in sorted(
+                ((b, c) for b, c in bucket_tally.items() if b in BUCKET_SKILLS),
+                key=lambda kv: (-kv[1], kv[0]),
+            ):
+                for skill in BUCKET_SKILLS[bucket]:
+                    if skill not in shortlist:
+                        shortlist.append(skill)
+                        break
+            selection = {
+                **selection,
+                "skills": tuple(shortlist),
+                "confidence": "low",
+                "dominant_bucket": None,
+                "reason": (
+                    "dominant pending bucket is generic/ambiguous "
+                    f"({sorted(bucket_tally.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]})"
+                    " — ranked shortlist, pick per surface"
+                ),
+            }
+        role = selection["role"]
+        raw_skills = selection["skills"]
+        confidence = selection["confidence"]
+        dominant_bucket = selection["dominant_bucket"]
+        pending_total = selection["pending_total"]
+        reason = selection["reason"]
+    else:
+        role = _STAGE_TO_ROLE[stage]
+        raw_skills = _ENUM_SKILLS if stage == "enum" else _COLLECTION_SKILLS
+        confidence = "high"
+        dominant_bucket = None
+        pending_total = int(entry.get("work_queued", {}).get("pending", 0))
+        reason = (
+            "no enumeration evidence under this entry"
+            if stage == "enum"
+            else "no collection evidence (surfaces/work_items) under this entry"
+        )
+
+    skills, dropped_skills = _validate_skills(skills_root, tuple(raw_skills))
+    mode = _ROLE_TO_MODE.get(role, "item-iterating")
+    parallel_role = _STAGE_PARALLEL_ROLE.get(stage)
+
+    command = _format_start_command(role=role, scope_host=host, mode=mode, skills=skills)
+    task_skeleton = _format_task_skeleton(
+        host=host,
+        stage=stage,
+        dominant_bucket=dominant_bucket,
+        pending_total=pending_total,
+        confidence=confidence,
+    )
+
+    return {
+        "scope_entry": entry["scope_entry"],
+        "scope_host": host,
+        "stage": stage,
+        "role": role,
+        "parallel_role": parallel_role,
+        "dispatch_mode": mode,
+        "skills": skills,
+        "dropped_skills": dropped_skills,
+        "confidence": confidence,
+        "dominant_bucket": dominant_bucket,
+        "pending_count": pending_total,
+        "reason": reason,
+        "command": command,
+        "task_skeleton": task_skeleton,
+    }
+
+
+def _format_start_command(
+    *,
+    role: str,
+    scope_host: str,
+    mode: str,
+    skills: list[str],
+) -> str:
+    parts = [
+        "aith assess agent start",
+        f"--role {role}",
+        f"--scope-host {scope_host}",
+        f"--dispatch-mode {mode}",
+    ]
+    if skills:
+        parts.append(f"--skills {','.join(skills)}")
+    return " ".join(parts)
+
+
+def _format_task_skeleton(
+    *,
+    host: str,
+    stage: str,
+    dominant_bucket: str | None,
+    pending_total: int,
+    confidence: str,
+) -> str:
+    if stage == "enum":
+        return (
+            f"Enumerate {host}: no enumeration evidence recorded. Establish live "
+            "services / surfaces so collection and consumption have real data."
+        )
+    if stage == "collection":
+        return (
+            f"Collect URLs/surfaces for {host}: enumeration produced hosts but no "
+            "collection evidence (surfaces/work_items). Populate the work buffer."
+        )
+    # consumption
+    if dominant_bucket:
+        return (
+            f"Test {host}: {pending_total} untested pending item(s), dominant "
+            f"cluster '{dominant_bucket}'. Validate the surface, produce durable "
+            "evidence, defer the rest with a reason."
+        )
+    return (
+        f"Test {host}: {pending_total} untested pending item(s) with no single "
+        f"dominant vuln class (confidence={confidence}). Triage the shortlisted "
+        "skills against the actual surfaces before committing."
+    )
+
+
+def _build_recommendations(
+    *,
+    entries: list[dict[str, Any]],
+    db_path: Path,
+    skills_root: Path | None,
+    prior_dispatches: list[dict[str, Any]] | None,
+    dedup_degraded: bool,
+    max_recommendations: int,
+) -> dict[str, Any]:
+    """Assemble the full --auto-redispatch recommendation block.
+
+    Walks every entry with a failing stage gap, builds one recommendation each,
+    suppresses any whose (role, scope_host) already has a prior dispatch
+    covering the gap, and caps the surfaced list at ``max_recommendations``
+    (summarizing the overflow). ``dedup_degraded`` records that the prior-
+    dispatch fetch failed so the operator knows the suppression is best-effort.
+    """
+    prior_index = _index_prior_dispatches(prior_dispatches or [])
+    recommendations: list[dict[str, Any]] = []
+    suppressed: list[dict[str, Any]] = []
+
+    for entry in entries:
+        stage = _gap_stage_for_entry(entry)
+        if stage is None:
+            continue
+        rec = _build_recommendation(
+            entry=entry, stage=stage, db_path=db_path, skills_root=skills_root
+        )
+        key = (rec["role"], rec["scope_host"])
+        if key in prior_index:
+            suppressed.append(
+                {
+                    "scope_host": rec["scope_host"],
+                    "role": rec["role"],
+                    "stage": rec["stage"],
+                    "reason": (
+                        f"prior dispatch already exists for role={rec['role']} "
+                        f"scope_host={rec['scope_host']} "
+                        f"(agent_id={prior_index[key]})"
+                    ),
+                }
+            )
+            continue
+        recommendations.append(rec)
+
+    overflow = 0
+    # Define `cap` unconditionally so the overflow note's f-string can never hit
+    # a NameError on a code path where `max_recommendations is None`. Clamp
+    # negatives to 0 so a negative cap means "show none" (overflow is still
+    # summarized) rather than silently disabling the cap.
+    cap = max(0, int(max_recommendations)) if max_recommendations is not None else 10
+    if max_recommendations is not None and len(recommendations) > cap:
+        overflow = len(recommendations) - cap
+        recommendations = recommendations[:cap]
+
+    notes: list[str] = []
+    if dedup_degraded:
+        notes.append(
+            "dedup degraded: prior-dispatch fetch failed; recommendations are "
+            "NOT de-duplicated against existing dispatches"
+        )
+    if overflow:
+        notes.append(
+            f"{overflow} more failing entr(y/ies) past --max-recommendations "
+            f"({cap}) not shown"
+        )
+    dropped_any = sorted(
+        {s for rec in recommendations for s in rec.get("dropped_skills", [])}
+    )
+    if dropped_any:
+        notes.append(
+            "dropped non-resolving skill(s) (no SKILL.md on disk): "
+            + ", ".join(dropped_any)
+        )
+
+    return {
+        "recommendations": recommendations,
+        "suppressed": suppressed,
+        "overflow": overflow,
+        "notes": notes,
+    }
+
+
+def _index_prior_dispatches(rows: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
+    """Map ``(role, scope_host) -> agent_id`` for prior dispatch rows.
+
+    A prior dispatch "covers the gap" when it shares the recommended role and
+    scope-host. Role+host is the dedup key the design specifies — re-recommending
+    a vulnerability-analyst against a host that already has one in flight is the
+    duplicate we suppress. Empty role/host rows are skipped.
+    """
+    index: dict[tuple[str, str], str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("agent_role") or row.get("role") or "").strip()
+        scope_host = host_from_token(str(row.get("scope_host") or ""))
+        if not role or not scope_host:
+            continue
+        key = (role, scope_host)
+        if key not in index:
+            index[key] = str(row.get("agent_id") or row.get("id") or "")
+    return index
+
+
+# Dispatch lifecycle status values, mirrored from the backend
+# ``_DISPATCH_STATUS`` / ``_DISPATCH_TERMINAL_STATUS`` literals in
+# ``orchestrator/backend/app/api/assessment.py``. A dispatch is "active"
+# (in-flight) only while ``in-progress``; the rest are terminal. Dedup must
+# only suppress against ACTIVE dispatches — a host whose earlier dispatch
+# already terminated (completed/failed/aborted/blocked) and STILL fails the
+# gate needs a fresh retry recommended, not permanent suppression.
+_DISPATCH_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"completed", "failed", "aborted", "blocked"}
+)
+_DISPATCH_ACTIVE_STATUSES: frozenset[str] = frozenset({"in-progress"})
+
+
+def _fetch_prior_dispatches(
+    client: AssessmentClient,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Fetch ACTIVE prior dispatches for dedup. Returns ``(rows, degraded)``.
+
+    Reuses ``AssessmentClient.list_dispatches`` — the same method the
+    ``aith assess agent list`` path uses — but constrains the fetch to
+    in-flight dispatches so dedup only suppresses against work that is still
+    running. The backend ``GET /dispatches`` accepts a single ``status`` query
+    param (exact match); ``in-progress`` is the only non-terminal status, so
+    one server-side filter expresses "all active". A defensive client-side
+    pass drops any terminal row the backend might still return (e.g. a future
+    status the server filter doesn't know to exclude). A backend failure
+    degrades gracefully: ``([], True)`` so the audit emits un-deduped
+    recommendations with a note instead of crashing.
+    """
+    try:
+        rows = client.list_dispatches(limit=1000, status="in-progress")
+    except AssessError:
+        return [], True
+    rows = rows if isinstance(rows, list) else []
+    active = [
+        row
+        for row in rows
+        if not (
+            isinstance(row, dict)
+            and str(row.get("status") or "").strip().lower()
+            in _DISPATCH_TERMINAL_STATUSES
+        )
+    ]
+    return active, False
+
+
 def run(args: argparse.Namespace) -> None:
     cfg = load_config(args.engagement_dir)
     scope_path = Path(cfg.engagement_dir) / "scope.json"
@@ -278,6 +923,10 @@ def run(args: argparse.Namespace) -> None:
     entries = [e for e in entries if e is not None]
 
     scope_metadata = _extract_scope_metadata(scope_data)
+
+    auto_redispatch = bool(getattr(args, "auto_redispatch", False))
+    prior_dispatches: list[dict[str, Any]] = []
+    dedup_degraded = False
 
     by_host_payload: dict[str, Any] | None = None
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -302,6 +951,12 @@ def run(args: argparse.Namespace) -> None:
                     file=sys.stderr,
                 )
                 sys.exit(1)
+        # Prior dispatches power --auto-redispatch dedup. Fetched here so it
+        # rides the same keep-alive connection as services/surfaces. A backend
+        # failure degrades gracefully (un-deduped + note) — never crashes the
+        # audit.
+        if auto_redispatch:
+            prior_dispatches, dedup_degraded = _fetch_prior_dispatches(client)
 
     services_list = services if isinstance(services, list) else []
     surfaces_list = surfaces if isinstance(surfaces, list) else []
@@ -379,12 +1034,41 @@ def run(args: argparse.Namespace) -> None:
         report["per_host_coverage"] = by_host_section
         report["per_host_warnings"] = per_host_warnings
 
+    redispatch_block: dict[str, Any] | None = None
+    if auto_redispatch:
+        if args.require_stage is None:
+            # No stage gate -> no per-entry gaps -> nothing to recommend. Emit a
+            # no-op block with a note rather than silently producing nothing.
+            redispatch_block = {
+                "recommendations": [],
+                "suppressed": [],
+                "overflow": 0,
+                "notes": [
+                    "--auto-redispatch is a no-op without --require-stage: a "
+                    "stage gate is what marks entries as failing. Re-run with "
+                    "--require-stage enum|collection|consumption."
+                ],
+            }
+        else:
+            skills_root = _agent_skills_root_for_recommendations()
+            redispatch_block = _build_recommendations(
+                entries=report_entries,
+                db_path=db_path,
+                skills_root=skills_root,
+                prior_dispatches=prior_dispatches,
+                dedup_degraded=dedup_degraded,
+                max_recommendations=int(getattr(args, "max_recommendations", 10)),
+            )
+        report["redispatch"] = redispatch_block
+
     if args.as_json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         _render_text(report, verbose=args.verbose)
         if by_host_section is not None:
             _render_per_host_section(by_host_section, per_host_warnings)
+        if redispatch_block is not None:
+            _render_redispatch_section(redispatch_block)
 
     if not ready:
         sys.exit(1)
@@ -1038,3 +1722,42 @@ def _render_per_host_section(section: dict[str, Any], warnings: list[str]) -> No
         print("per-host-warnings (WARN-only; does not block phase advance):")
         for line in warnings:
             print(f"  ! {line}")
+
+
+# ---------------------------------------------------------------------------
+# --auto-redispatch rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_redispatch_section(block: dict[str, Any]) -> None:
+    """Emit the human-readable --auto-redispatch recommendations.
+
+    RECOMMENDATION-ONLY: the ready-to-run command is printed for the operator
+    to run by hand. This command never fires a dispatch.
+    """
+    recommendations = block.get("recommendations", [])
+    suppressed = block.get("suppressed", [])
+    notes = block.get("notes", [])
+    print("")
+    print("auto-redispatch recommendations (RECOMMENDATION-ONLY — nothing was dispatched):")
+    if not recommendations and not suppressed and not notes:
+        print("  (no failing scope entries — nothing to recommend)")
+        return
+    for rec in recommendations:
+        print(
+            f"  - {rec['scope_host']} [{rec['stage']} gap] "
+            f"confidence={rec['confidence']} role={rec['role']}"
+        )
+        print(f"      {rec['command']}")
+        if rec.get("parallel_role"):
+            print(f"      note: run {rec['parallel_role']} in parallel for this stage")
+        print(f"      task: {rec['task_skeleton']}")
+        print(f"      why: {rec['reason']}")
+    if suppressed:
+        print("  suppressed (prior dispatch already covers the gap):")
+        for row in suppressed:
+            print(f"    - {row['reason']}")
+    if notes:
+        print("  notes:")
+        for note in notes:
+            print(f"    ! {note}")
