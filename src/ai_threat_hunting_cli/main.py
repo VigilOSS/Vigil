@@ -43,8 +43,13 @@ from .oob import (
     DEFAULT_OOB_DOMAIN,
     OOB_ROOT,
     OobOptions,
+    callback_urls,
     list_oob_clients,
+    match_interactions_to_nonces,
+    mint_nonce,
     oob_status,
+    parse_interactsh_log,
+    read_client_log,
     sanitize_name,
     start_oob,
     start_oob_client,
@@ -310,6 +315,32 @@ def main(argv: list[str] | None = None) -> None:
     oob_status_p = oob_sub.add_parser("status")
     oob_status_p.add_argument("--json", action="store_true")
     oob_sub.add_parser("test")
+    oob_mint = oob_sub.add_parser(
+        "mint",
+        help="Mint a unique OAST nonce callback URL and record a probe to the backend.",
+    )
+    oob_mint.add_argument("--engagement")
+    oob_mint.add_argument("--select", action="store_true")
+    oob_mint.add_argument("--target-url", default="", help="URL/endpoint the payload targets (for correlation context).")
+    oob_mint.add_argument("--param", default="", help="Injected parameter/slot name.")
+    oob_mint.add_argument("--technique", default="", help="e.g. ssrf, blind-xss, cmdi, xxe.")
+    oob_mint.add_argument("--probe-kind", default="", help="Free-form probe classifier.")
+    oob_mint.add_argument("--request-hash", default="", help="Hash of the request that carries the payload.")
+    oob_mint.add_argument("--notes", default="")
+    oob_mint.add_argument("--json", action="store_true", help="Emit the minted probe + URLs as JSON.")
+    oob_poll = oob_sub.add_parser(
+        "poll",
+        help="Parse the interactsh-client log and correlate callbacks to recorded probes.",
+    )
+    oob_poll.add_argument("--engagement")
+    oob_poll.add_argument("--select", action="store_true")
+    oob_poll.add_argument(
+        "--client",
+        required=True,
+        help="OOB client name whose interaction log to read (see `aith oob client list`).",
+    )
+    oob_poll.add_argument("--lines", type=int, default=2000, help="Tail this many log lines (default 2000).")
+    oob_poll.add_argument("--json", action="store_true", help="Emit matched/unmatched correlation result as JSON.")
     oob_client = oob_sub.add_parser("client")
     oob_client_sub = oob_client.add_subparsers(dest="oob_client_command", required=True)
     oob_client_start = oob_client_sub.add_parser("start")
@@ -845,6 +876,10 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
             )
     elif args.oob_command == "test":
         test_oob(options, runner=docker_run_command)
+    elif args.oob_command == "mint":
+        _oob_mint(args, install_root, options)
+    elif args.oob_command == "poll":
+        _oob_poll(args, install_root, options)
     elif args.oob_command == "client":
         _oob_client(args, install_root, options)
 
@@ -881,6 +916,136 @@ def _oob_client(args: argparse.Namespace, install_root: Path, options: OobOption
             alive = _tmux_has_oob_client(client)
             status = "running" if alive else "dead"
             print(f"{client}\t{status}")
+
+
+# Test seam: deterministic nonce minting. Tests monkeypatch this to a
+# fixed token_factory; production leaves it None so `mint_nonce` draws from
+# `secrets`. Kept at module scope so `aith oob mint` stays seedable without
+# threading a factory argument through argparse.
+_oob_nonce_token_factory = None
+
+
+def _build_assessment_client(install_root: Path, engagement_key: str):
+    """Construct an AssessmentClient (used as a context manager) for the
+    given engagement, reusing the same orchestrator base-url resolution as
+    the rest of the CLI and the assess library shipped under agent/scripts.
+
+    The import is deferred and path-bridged exactly like
+    ``engagements._init_cases_db`` so the installable ``src`` package keeps a
+    single source of truth for the HTTP client without a hard dependency on
+    the agent tree at import time.
+    """
+    from .paths import add_assess_import_path, resolve_orchestrator_base_url
+
+    eng_dir = resolve_engagement_path(install_root, engagement_key)
+    base_url = resolve_orchestrator_base_url(install_root, eng_dir)
+    add_assess_import_path(install_root)
+    try:
+        from assess.lib.client import AssessmentClient  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - defensive
+        raise SystemExit(
+            "Cannot import the assessment HTTP client (assess.lib.client). "
+            "Run from a source checkout or a completed `aith install`."
+        ) from exc
+    return AssessmentClient(base_url, engagement_key)
+
+
+def _oob_mint(args: argparse.Namespace, install_root: Path, options: OobOptions) -> None:
+    engagement_path = _resolve_command_engagement(install_root, args)
+    engagement_key = engagement_path.name
+    nonce = mint_nonce(prefix=sanitize_name(engagement_key), token_factory=_oob_nonce_token_factory)
+    urls = callback_urls(nonce, options.oob_domain)
+    with _build_assessment_client(install_root, engagement_key) as client:
+        record = client.post(
+            "oob-probes",
+            {
+                "nonce": nonce,
+                "target_url": args.target_url,
+                "param": args.param,
+                "technique": args.technique,
+                "probe_kind": args.probe_kind,
+                "request_hash": args.request_hash,
+                "oob_domain": options.oob_domain,
+                "notes": args.notes,
+            },
+        )
+    if args.json:
+        print(json.dumps({"nonce": nonce, "urls": urls, "probe": record}, indent=2))
+        return
+    print(f"nonce\t{nonce}")
+    print(f"http\t{urls['http']}")
+    print(f"dns\t{urls['dns']}")
+    print(f"probe\tid={record.get('id')}\tstatus={record.get('status')}\ttechnique={record.get('technique') or '-'}")
+
+
+def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions) -> None:
+    engagement_path = _resolve_command_engagement(install_root, args)
+    engagement_key = engagement_path.name
+    log_text = read_client_log(args.client, runner=docker_run_command, lines=args.lines)
+    interactions = parse_interactsh_log(log_text)
+    with _build_assessment_client(install_root, engagement_key) as client:
+        probes = client.get("oob-probes")
+        nonces = [str(p.get("nonce", "")) for p in probes if p.get("nonce")]
+        matched_interactions, unmatched_interactions = match_interactions_to_nonces(interactions, nonces)
+        matched_pairs: list[dict] = []
+        for interaction in matched_interactions:
+            result = client.post(
+                "oob-probes/interactions",
+                {
+                    "nonce": interaction.nonce,
+                    "protocol": interaction.protocol,
+                    "remote_address": interaction.remote_address,
+                    "query_type": interaction.query_type,
+                    "raw_request": interaction.raw_line,
+                    "observed_at": interaction.observed_at,
+                },
+            )
+            matched_pairs.append({"interaction": interaction, "result": result})
+
+    if args.json:
+        payload = {
+            "client": sanitize_name(args.client),
+            "parsed": len(interactions),
+            "matched": [
+                {
+                    "nonce": pair["interaction"].nonce,
+                    "protocol": pair["interaction"].protocol,
+                    "remote_address": pair["interaction"].remote_address,
+                    "observed_at": pair["interaction"].observed_at,
+                    "duplicate": bool(pair["result"].get("duplicate")),
+                    "probe": pair["result"].get("probe"),
+                }
+                for pair in matched_pairs
+            ],
+            "unmatched": [
+                {
+                    "protocol": item.protocol,
+                    "full_host": item.full_host,
+                    "remote_address": item.remote_address,
+                    "observed_at": item.observed_at,
+                }
+                for item in unmatched_interactions
+            ],
+        }
+        print(json.dumps(payload, indent=2))
+        return
+
+    print(f"parsed\t{len(interactions)} interaction(s) from client {sanitize_name(args.client)}")
+    print(f"matched\t{len(matched_pairs)}\tunmatched\t{len(unmatched_interactions)}")
+    if matched_pairs:
+        print("matched probe<->callback pairs:")
+        for pair in matched_pairs:
+            interaction = pair["interaction"]
+            probe = pair["result"].get("probe") or {}
+            dup = " (duplicate)" if pair["result"].get("duplicate") else ""
+            print(
+                f"  {interaction.nonce}\t{interaction.protocol}\tfrom={interaction.remote_address or '-'}"
+                f"\ttechnique={probe.get('technique') or '-'}\ttarget={probe.get('target_url') or '-'}{dup}"
+            )
+    if unmatched_interactions:
+        print("unmatched interactions:")
+        for item in unmatched_interactions:
+            print(f"  {item.full_host}\t{item.protocol}\tfrom={item.remote_address or '-'}")
 
 
 def _oob_options(install_root: Path) -> OobOptions:

@@ -19,3 +19,12 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pytest.ini_options]
+# Mirrors orchestrator/backend/pyproject.toml: integration tests need a live
+# runtime container (operator-controlled frp + interactsh) and are deselected
+# by default. Run them explicitly with `pytest -m integration`.
+markers = [
+    "integration: end-to-end tests that require a live runtime container; deselected by default and run via `pytest -m integration` after image rebuild.",
+]
+addopts = "-m 'not integration'"
+
