@@ -320,7 +320,8 @@ Validated, copy-and-parametrize single-file Python probes for the
 exploit-developer, fuzzer. Paired with `agent/skills/write-probe-script/SKILL.md`
 (the authoring loop) and `agent/skills/kali-exec/SKILL.md` (probes run via
 `aith assess kali exec -- python3 <script>`). Scaffold a fresh probe into an
-engagement with `aith assess scaffold-probe <name>`.
+engagement with `aith assess scaffold-probe <name>` (add `--finding <slug>` to
+link the registered probe artifact to a finding at scaffold time).
 
 | File | Probe shape |
 |------|-------------|

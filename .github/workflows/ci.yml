@@ -44,7 +44,11 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
       - name: Run backend test suite
-        run: uv run --directory orchestrator/backend pytest
+        # --extra dev installs pytest/httpx (declared under
+        # [project.optional-dependencies].dev); `uv run` does NOT install
+        # extras by default, so omitting this fails with "Failed to spawn: pytest"
+        # in a clean CI env (passes locally only with a warm .venv).
+        run: uv run --directory orchestrator/backend --extra dev pytest
 
   sync-lint:
     name: markdown-vs-CLI sync-lint (blocking)
@@ -56,7 +60,7 @@ jobs:
       # Explicit, isolated run of the sync-lint so a failure points straight
       # at doc/CLI drift. It is also exercised by the full backend-tests job.
       - name: Run markdown-vs-CLI sync-lint
-        run: uv run --directory orchestrator/backend pytest tests/test_skill_cli_sync.py -q
+        run: uv run --directory orchestrator/backend --extra dev pytest tests/test_skill_cli_sync.py -q
 
   eval:
     name: deterministic eval (blocking)
@@ -68,7 +72,7 @@ jobs:
       # ABSOLUTE path on purpose — see header note about the false-green trap
       # when a relative path is resolved against --directory's cwd.
       - name: Run deterministic eval harness
-        run: uv run --directory orchestrator/backend pytest "${GITHUB_WORKSPACE}/tests/eval" -q
+        run: uv run --directory orchestrator/backend --extra dev pytest "${GITHUB_WORKSPACE}/tests/eval" -q
 
   ruff:
     name: ruff (non-blocking)

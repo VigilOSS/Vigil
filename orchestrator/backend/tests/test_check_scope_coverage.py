@@ -189,6 +189,12 @@ class FakeClient:
         # method --auto-redispatch dedup reuses. `dispatches_error=True`
         # simulates a backend failure so the graceful-degrade path can be
         # exercised.
+        #
+        # Mirrors the real backend's exact-match `status` filter (aliased from
+        # `status_value` in GET /dispatches) so the server-side
+        # `status="in-progress"` dedup fetch is exercised faithfully: terminal
+        # rows are filtered OUT here just as the backend would, proving the
+        # active-only dedup contract end to end.
         self.calls.append("dispatches")
         if self._dispatches_error:
             from assess.lib.client import AssessError
@@ -198,6 +204,9 @@ class FakeClient:
         role = filters.get("role")
         if role:
             rows = [r for r in rows if r.get("agent_role") == role or r.get("role") == role]
+        status = filters.get("status")
+        if status:
+            rows = [r for r in rows if r.get("status") == status]
         return rows
 
     def close(self) -> None:
@@ -1963,6 +1972,112 @@ def test_auto_redispatch_dedup_suppresses_when_prior_dispatch_exists(
     assert suppressed[0]["scope_host"] == "target.example"
     assert suppressed[0]["role"] == "vulnerability-analyst"
     assert "va-001" in suppressed[0]["reason"]
+
+
+@pytest.mark.parametrize("terminal_status", ["completed", "failed", "aborted", "blocked"])
+def test_auto_redispatch_terminal_prior_dispatch_does_not_suppress_retry(
+    monkeypatch, tmp_path: Path, capsys, terminal_status: str
+) -> None:
+    """A host whose ONLY prior dispatch already TERMINATED (completed/failed/
+    aborted/blocked) and still fails the gate must STILL get a retry
+    recommendation — terminal dispatches no longer suppress dedup.
+
+    Regression for the Codex P2 bug where the dedup fetch pulled ALL dispatches
+    (no status filter) and suppressed against terminal rows, permanently
+    starving a host of the retry it needs. The fetch now constrains to
+    in-progress server-side (the FakeClient mirrors the backend's exact-match
+    `status` filter), so a terminal-only row is never returned and never
+    suppresses.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db, queue_key="idor:0", url="https://target.example/api/profile/0",
+        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+    )
+
+    # The only prior dispatch for this (role, host) already terminated.
+    dispatches = [
+        {
+            "agent_id": "va-terminal",
+            "agent_role": "vulnerability-analyst",
+            "scope_host": "target.example",
+            "status": terminal_status,
+        }
+    ]
+
+    with pytest.raises(SystemExit):
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+            dispatches=dispatches,
+        )
+
+    report = json.loads(capsys.readouterr().out)
+    block = _redispatch(report)
+    # The retry IS recommended (not suppressed) because the prior dispatch is
+    # terminal, not active.
+    rec = _rec_for_host(report, "target.example")
+    assert rec["role"] == "vulnerability-analyst"
+    assert rec["stage"] == "consumption"
+    assert block["suppressed"] == []
+
+
+def test_auto_redispatch_active_prior_dispatch_without_agent_id_suppresses(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """The dedup index falls back to the `id` field when `agent_id` is absent.
+
+    An ACTIVE (in-progress) prior dispatch row that carries only `id` (no
+    `agent_id`) must still suppress the recommendation, and the suppression
+    reason must surface that `id` value. Exercises the
+    `row.get("agent_id") or row.get("id")` fallback in
+    `_index_prior_dispatches`.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+    _insert_work_item(
+        db, queue_key="idor:0", url="https://target.example/api/profile/0",
+        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+    )
+
+    # In-flight dispatch keyed by `id` only (no `agent_id`).
+    dispatches = [
+        {
+            "id": "dispatch-42",
+            "agent_role": "vulnerability-analyst",
+            "scope_host": "target.example",
+            "status": "in-progress",
+        }
+    ]
+
+    with pytest.raises(SystemExit):
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+            dispatches=dispatches,
+        )
+
+    report = json.loads(capsys.readouterr().out)
+    block = _redispatch(report)
+    assert not any(r["scope_host"] == "target.example" for r in block["recommendations"])
+    suppressed = block["suppressed"]
+    assert len(suppressed) == 1
+    assert suppressed[0]["scope_host"] == "target.example"
+    # The id-only fallback is reflected in the reason string.
+    assert "dispatch-42" in suppressed[0]["reason"]
 
 
 def test_auto_redispatch_dedup_degrades_gracefully_on_backend_error(

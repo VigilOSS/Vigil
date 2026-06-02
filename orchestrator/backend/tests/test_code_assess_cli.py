@@ -837,6 +837,84 @@ def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys
     assert "\"verified_false_positive\"" in capsys.readouterr().out
 
 
+def test_verify_finding_narrative_relative_path_resolves_under_engagement_dir(
+    monkeypatch, tmp_path, capsys
+):
+    """A relative --narrative path is resolved under the engagement root (how the
+    artifact endpoint resolves it), NOT the caller's CWD — so the supported
+    ``--engagement-dir … --narrative notes/debate.md`` flow is accepted, while a
+    genuinely-missing path is still rejected fast before any POST.
+    """
+    module = _load_verify_finding_module()
+
+    # Narrative lives under the engagement dir, not the test's CWD.
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "debate.md").write_text("# debate\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    posts: list[str] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict):
+            posts.append(endpoint)
+            return {"slug": "VA-001"}
+
+        def close(self) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    args = SimpleNamespace(
+        engagement_dir=tmp_path,
+        finding_slug="VA-001",
+        payload=None,
+        inline_payload=None,
+        disposition="pending_runtime_proof",
+        reason_text="Strong but awaiting runtime proof.",
+        reason_code="",
+        new_severity=None,
+        evidence_ref="",
+        artifact_ref="",
+        narrative="notes/debate.md",  # relative — exists under engagement dir only
+        notes="",
+        source_name="vulnerability-analyst",
+        details_inline=None,
+        provenance_inline=None,
+        kill_reason=None,
+        kill_check=None,
+    )
+
+    module.run(args)
+    # Resolved under the engagement dir → both the verify and the artifact POST fire.
+    assert posts == ["findings/VA-001/verify", "artifacts"]
+
+    # A genuinely-missing relative path is rejected before ANY POST.
+    posts.clear()
+    args.narrative = "notes/missing.md"
+    with pytest.raises(SystemExit):
+        module.run(args)
+    assert posts == []
+
+
 def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypatch, tmp_path, capsys):
     module = _load_code_dispatch_module()
 

@@ -193,9 +193,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "no-op note is emitted if no stage is set. Skill selection for a "
             "consumption gap is data-driven off the host's untested pending "
             "work-item buckets; ambiguous buckets yield a low-confidence "
-            "shortlist. Recommendations whose (role, scope-host) already has a "
-            "prior dispatch covering the gap are suppressed (dedup checks the "
-            "most recent 1000 dispatches)."
+            "shortlist. Recommendations whose (role, scope-host) already has an "
+            "ACTIVE (in-progress) prior dispatch covering the gap are "
+            "suppressed; a host whose only prior dispatch already terminated "
+            "(completed/failed/aborted/blocked) is NOT suppressed so the needed "
+            "retry is still recommended."
         ),
     )
     p.add_argument(
@@ -794,13 +796,14 @@ def _build_recommendations(
         recommendations.append(rec)
 
     overflow = 0
-    if max_recommendations is not None:
-        # Clamp negatives to 0 so a negative cap means "show none" (overflow is
-        # still summarized) rather than silently disabling the cap.
-        cap = max(0, int(max_recommendations))
-        if len(recommendations) > cap:
-            overflow = len(recommendations) - cap
-            recommendations = recommendations[:cap]
+    # Define `cap` unconditionally so the overflow note's f-string can never hit
+    # a NameError on a code path where `max_recommendations is None`. Clamp
+    # negatives to 0 so a negative cap means "show none" (overflow is still
+    # summarized) rather than silently disabling the cap.
+    cap = max(0, int(max_recommendations)) if max_recommendations is not None else 10
+    if max_recommendations is not None and len(recommendations) > cap:
+        overflow = len(recommendations) - cap
+        recommendations = recommendations[:cap]
 
     notes: list[str] = []
     if dedup_degraded:
@@ -852,21 +855,50 @@ def _index_prior_dispatches(rows: list[dict[str, Any]]) -> dict[tuple[str, str],
     return index
 
 
+# Dispatch lifecycle status values, mirrored from the backend
+# ``_DISPATCH_STATUS`` / ``_DISPATCH_TERMINAL_STATUS`` literals in
+# ``orchestrator/backend/app/api/assessment.py``. A dispatch is "active"
+# (in-flight) only while ``in-progress``; the rest are terminal. Dedup must
+# only suppress against ACTIVE dispatches — a host whose earlier dispatch
+# already terminated (completed/failed/aborted/blocked) and STILL fails the
+# gate needs a fresh retry recommended, not permanent suppression.
+_DISPATCH_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"completed", "failed", "aborted", "blocked"}
+)
+_DISPATCH_ACTIVE_STATUSES: frozenset[str] = frozenset({"in-progress"})
+
+
 def _fetch_prior_dispatches(
     client: AssessmentClient,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Fetch prior dispatches for dedup. Returns ``(rows, degraded)``.
+    """Fetch ACTIVE prior dispatches for dedup. Returns ``(rows, degraded)``.
 
     Reuses ``AssessmentClient.list_dispatches`` — the same method the
-    ``aith assess agent list`` path uses. A backend failure degrades
-    gracefully: ``([], True)`` so the audit emits un-deduped recommendations
-    with a note instead of crashing.
+    ``aith assess agent list`` path uses — but constrains the fetch to
+    in-flight dispatches so dedup only suppresses against work that is still
+    running. The backend ``GET /dispatches`` accepts a single ``status`` query
+    param (exact match); ``in-progress`` is the only non-terminal status, so
+    one server-side filter expresses "all active". A defensive client-side
+    pass drops any terminal row the backend might still return (e.g. a future
+    status the server filter doesn't know to exclude). A backend failure
+    degrades gracefully: ``([], True)`` so the audit emits un-deduped
+    recommendations with a note instead of crashing.
     """
     try:
-        rows = client.list_dispatches(limit=1000)
+        rows = client.list_dispatches(limit=1000, status="in-progress")
     except AssessError:
         return [], True
-    return (rows if isinstance(rows, list) else []), False
+    rows = rows if isinstance(rows, list) else []
+    active = [
+        row
+        for row in rows
+        if not (
+            isinstance(row, dict)
+            and str(row.get("status") or "").strip().lower()
+            in _DISPATCH_TERMINAL_STATUSES
+        )
+    ]
+    return active, False
 
 
 def run(args: argparse.Namespace) -> None:

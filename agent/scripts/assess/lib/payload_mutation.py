@@ -42,8 +42,10 @@ _RE_EMAIL = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 # URL: must have scheme://
 _RE_URL = re.compile(r'^https?://', re.IGNORECASE)
 
-# File path: starts with / or ./ or ../ or contains path separators
+# File path: starts with / or ./ or ../ (absolute or explicit relative).
 _RE_PATH = re.compile(r'^\.{0,2}/', )
+# Bare relative path: any remaining value containing a / or \ separator.
+_RE_PATH_SEP = re.compile(r'[/\\]')
 
 # Pure integer (decimal, optional leading minus, no leading zeros beyond "0")
 _RE_INTEGER = re.compile(r'^-?(?:0|[1-9]\d*)$')
@@ -93,10 +95,16 @@ def _looks_like_base64(value: str) -> bool:
     # Genuine base64 payloads (tokens, keys, blobs) are typically >= 32 chars.
     if len(value) < 32 and "=" not in value and "+" not in value and "/" not in value:
         return False
-    # Try decoding
+    # Try decoding. URL-safe values (containing '-' or '_') must be decoded with
+    # the URL-safe alphabet; using the standard decoder would silently misdecode
+    # or raise. Use validate=True so non-base64 input fails loudly rather than
+    # being silently accepted.
     try:
         pad = value + "=" * (-len(value) % 4)
-        decoded = base64.b64decode(pad, validate=False)
+        if "-" in value or "_" in value:
+            decoded = base64.urlsafe_b64decode(pad)
+        else:
+            decoded = base64.b64decode(pad, validate=True)
         return len(decoded) >= 8
     except Exception:
         return False
@@ -116,20 +124,20 @@ def classify_value(value: str) -> str:
 
     stripped = value.strip()
 
-    # 1. JWT — checked before base64url because JWT segments are base64url
+    # 1. JWT — checked before base64url because JWT segments are base64url.
+    #    Only classify as JWT when the first segment actually decodes to a JSON
+    #    object carrying an 'alg' (or 'typ') field; a bare 3-segment string like
+    #    "1.2.3" or "foo.bar.baz" must fall through to the remaining checks.
     if _RE_JWT.match(stripped):
-        # Validate it looks JWT-ish: first segment decodes to JSON-like object
         try:
             parts = stripped.split(".")
             pad = parts[0] + "=" * (-len(parts[0]) % 4)
-            header = base64.b64decode(pad.encode(), validate=False)
+            header = base64.urlsafe_b64decode(pad.encode())
             obj = json.loads(header)
             if isinstance(obj, dict) and ("alg" in obj or "typ" in obj):
                 return "jwt"
         except Exception:
             pass
-        # Accept as JWT even without valid header if it has 3 well-formed segments
-        return "jwt"
 
     # 2. UUID
     if _RE_UUID.match(stripped):
@@ -143,8 +151,12 @@ def classify_value(value: str) -> str:
     if _RE_URL.match(stripped):
         return "url"
 
-    # 5. Path
+    # 5. Path — absolute / ./ / ../ forms, or any bare relative value containing
+    #    a / or \ separator that is not better explained as base64 (the standard
+    #    base64 alphabet also includes '/').
     if _RE_PATH.match(stripped):
+        return "path"
+    if _RE_PATH_SEP.search(stripped) and not _looks_like_base64(stripped):
         return "path"
 
     # 6. Boolean
@@ -214,8 +226,11 @@ def _mutate_neighbor(value: str, vtype: str, max_n: int) -> list[str]:
         if len(parts) == 5:
             try:
                 last = int(parts[4], 16)
+                # Mask to 48 bits so incrementing the all-ffff group wraps
+                # instead of overflowing to a 13-hex-digit (malformed) group.
+                inc = (last + 1) & 0xffffffffffff
                 variants.append(
-                    "{}-{}-{}-{}-{:012x}".format(parts[0], parts[1], parts[2], parts[3], last + 1)
+                    "{}-{}-{}-{}-{:012x}".format(parts[0], parts[1], parts[2], parts[3], inc)
                 )
                 variants.append(
                     "{}-{}-{}-{}-{:012x}".format(parts[0], parts[1], parts[2], parts[3], max(0, last - 1))
@@ -238,8 +253,12 @@ def _mutate_neighbor(value: str, vtype: str, max_n: int) -> list[str]:
     elif vtype == "hex":
         try:
             n = int(value, 16)
-            fmt = f"0{len(value)}x"
-            variants.append(format(n + 1, fmt))
+            width = len(value)
+            fmt = f"0{width}x"
+            # Skip the increment when it would widen past the input length
+            # (all-f input at max value overflows to width+1 hex digits).
+            if n + 1 <= int("f" * width, 16):
+                variants.append(format(n + 1, fmt))
             variants.append(format(max(0, n - 1), fmt))
         except ValueError:
             pass

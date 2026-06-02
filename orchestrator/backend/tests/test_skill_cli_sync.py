@@ -164,7 +164,14 @@ def test_registries_are_non_trivial(assess_registries, oob_registries):
     assess_verbs, kali_verbs = assess_registries
     oob_verbs, oob_client_verbs = oob_registries
     # Anchor on a few stable verbs that must always exist.
-    assert {"record-finding", "kali", "log", "transition-phase"} <= assess_verbs
+    assert {
+        "record-finding",
+        "kali",
+        "log",
+        "transition-phase",
+        "eval-capture",
+        "scaffold-probe",
+    } <= assess_verbs
     assert {"nmap-scan", "exec", "httpx"} <= kali_verbs
     assert {"mint", "poll", "client", "status"} <= oob_verbs
     assert {"logs", "list", "start", "stop"} <= oob_client_verbs

@@ -205,8 +205,8 @@ def db_exec_returning(db_path: str, sql: str, params: tuple = ()) -> list[dict[s
 
     Used for ``UPDATE ... RETURNING *`` claims where the caller needs the
     mutated rows as dicts. Opens a Row-factory connection, runs the statement,
-    commits, and returns ``[dict(row) ...]``. The commit happens before the
-    rows are read out of the cursor object, matching the prior inline
+    and returns ``[dict(row) ...]``. The rows are read out of the cursor with
+    ``fetchall()`` first and the commit happens after, matching the prior inline
     ``conn.execute(...).fetchall(); conn.commit()`` ordering.
     """
     conn = sqlite3.connect(db_path, timeout=5.0)

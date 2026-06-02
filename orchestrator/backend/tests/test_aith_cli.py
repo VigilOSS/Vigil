@@ -7594,6 +7594,47 @@ def test_engagement_export_markdown_tree_is_idempotent(
     assert snapshot == after
 
 
+def test_engagement_export_markdown_tree_prunes_stale_finding_dirs(
+    client, isolate_settings, tmp_path: Path
+) -> None:
+    """A re-export removes dirs for findings no longer present, but never
+    touches unrelated content sharing the output root.
+
+    Re-exporting into a stable root after a finding is merged/renamed/removed
+    must not leave orphan dirs. The marker-file guard (draft.md + report.md)
+    ensures only this exporter's own dirs are pruned.
+    """
+    from ai_threat_hunting_cli.engagements import export_engagement_tree
+
+    _seed_export_engagement(client, isolate_settings)
+    adapter = _TestClientGetAdapter(client, _EXPORT_ENGAGEMENT_KEY)
+    out_root = tmp_path / "export-tree"
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    # A prior export's orphan: a finding dir (with this exporter's marker
+    # files) for a finding that no longer exists in the backend.
+    stale = out_root / "VA-OLD"
+    stale.mkdir()
+    (stale / "draft.md").write_text("stale", encoding="utf-8")
+    (stale / "report.md").write_text("stale", encoding="utf-8")
+    (stale / "debate.md").write_text("stale", encoding="utf-8")
+
+    # Unrelated content sharing the root must be preserved (no marker files).
+    keep_dir = out_root / "keepme"
+    keep_dir.mkdir()
+    (keep_dir / "notes.txt").write_text("keep", encoding="utf-8")
+    (out_root / "README.md").write_text("keep", encoding="utf-8")
+
+    result = export_engagement_tree(adapter, out_root, fmt="markdown-tree")
+
+    names = {p.name for p in out_root.iterdir()}
+    assert "VA-OLD" not in names  # stale finding dir pruned
+    assert {"VA-001", "VA-002"}.issubset(names)  # current findings written
+    assert "keepme" in names and (keep_dir / "notes.txt").exists()  # preserved
+    assert "README.md" in names  # non-dir preserved
+    assert result.finding_count == 2
+
+
 def test_engagement_export_markdown_tree_rejects_unknown_format(
     client, isolate_settings, tmp_path: Path
 ) -> None:

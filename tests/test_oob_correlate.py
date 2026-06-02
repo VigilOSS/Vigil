@@ -357,6 +357,46 @@ def test_oob_poll_cli_correlates_matched_and_unmatched(monkeypatch, tmp_path, ca
     assert correlate_posts[0][1]["protocol"] == "dns"
 
 
+# ── interaction dedup hash is collision-safe across `|`-placement ──────────
+
+
+def _interaction_hash(nonce, protocol, remote_address, query_type, observed_at, raw_request):
+    """Mirror of the backend correlate dedup hash (state_manager/oob.py).
+
+    The dedup key hashes a JSON-encoded field list rather than a ``|``-joined
+    string so an attacker who controls a free-text field (e.g. ``raw_request``)
+    cannot shift a ``|`` to forge a colliding key and suppress a real callback.
+    """
+    import hashlib
+    import json
+
+    return hashlib.sha256(
+        json.dumps(
+            [nonce, protocol, remote_address, query_type, observed_at, raw_request],
+            sort_keys=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def test_interaction_dedup_hash_distinguishes_pipe_placement():
+    # Two interactions that differ ONLY in where a `|` falls between adjacent
+    # fields (protocol/remote_address here). Under the old `"|".join(...)`
+    # scheme both collapse to the same joined string and collide; the JSON
+    # encoding keeps the field boundaries unambiguous, so the digests differ.
+    fields_a = ("nonce1", "dns|1.2.3.4", "q", "b", "t", "raw")  # `|` inside protocol
+    fields_b = ("nonce1", "dns", "1.2.3.4|q", "b", "t", "raw")  # `|` was the real separator
+    a = _interaction_hash(*fields_a)
+    b = _interaction_hash(*fields_b)
+    assert a != b
+
+    # Sanity: the OLD ambiguous join genuinely collided (documents the bug
+    # this fix closes — an attacker shifting a `|` forged a duplicate key).
+    assert "|".join(fields_a) == "|".join(fields_b)
+
+    # Identical fields still hash identically (dedup of true duplicates holds).
+    assert b == _interaction_hash(*fields_b)
+
+
 @pytest.mark.integration
 def test_oob_mint_poll_live_round_trip():
     """End-to-end OAST correlation over the live interactsh/frp transport.
