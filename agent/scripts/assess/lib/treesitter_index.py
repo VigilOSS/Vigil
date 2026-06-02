@@ -8,7 +8,6 @@ sites.  All tree-sitter imports are guarded so the module remains importable
 from __future__ import annotations
 
 import re
-import sys
 import warnings
 from pathlib import Path
 from typing import Any
@@ -146,7 +145,6 @@ def _get_parser(language: str) -> Any | None:
 
     # TypeScript needs special handling: the grammar module exposes
     # language_typescript() and language_tsx() as separate entry points.
-    ts_lang = language
     if language == "typescript":
         gram = _GRAMMAR_MODULES.get("typescript")
         if gram is None:
@@ -1110,8 +1108,6 @@ def _detect_call_sites(
     whether the call forwards any of the caller's parameter names as
     arguments -- a lightweight signal for data-flow propagation.
     """
-    known_names = {f["name"] for f in functions}
-
     # Common language keywords to exclude from call-site detection
     noise = frozenset({
         "if", "else", "for", "while", "switch", "case", "return", "throw",

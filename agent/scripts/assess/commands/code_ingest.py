@@ -726,7 +726,7 @@ def run(args) -> None:
 
     # Print summary
     analyzable = len([f for f in files if f['language']])
-    print(f"\n=== Code Ingest Summary ===")
+    print("\n=== Code Ingest Summary ===")
     print(f"Repository: {repo_name} (id: {repo_id})")
     print(f"Total files: {len(files)} ({skipped} skipped)")
     print(f"Analyzable files: {analyzable}")
@@ -739,7 +739,7 @@ def run(args) -> None:
     if churn_scores:
         # Top 10 highest-churn files
         sorted_churn = sorted(churn_scores.items(), key=lambda x: x[1], reverse=True)[:10]
-        print(f"\nTop 10 highest-churn files (last year):")
+        print("\nTop 10 highest-churn files (last year):")
         for path, score in sorted_churn:
             marker = " [security-history]" if path in security_files else ""
             print(f"  {score:>6}  {path}{marker}")

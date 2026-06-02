@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from assess.lib.schema_validation import collect_validation_errors, load_schema
 

@@ -229,7 +229,8 @@ def _docker_inspect_summary(container_name: str, *, runner: docker.Runner) -> di
         return {"exists": False}
     if not isinstance(doc, dict):
         return {"exists": False}
-    state = doc.get("State") if isinstance(doc.get("State"), dict) else {}
+    state_value = doc.get("State")
+    state = state_value if isinstance(state_value, dict) else {}
     cid = str(doc.get("Id") or "")
     exit_code = state.get("ExitCode")
     return {
@@ -249,8 +250,10 @@ def _container_host_port(container: dict) -> int | None:
 
 
 def _published_host_port(inspect_doc: dict) -> int | None:
-    network = inspect_doc.get("NetworkSettings") if isinstance(inspect_doc.get("NetworkSettings"), dict) else {}
-    ports = network.get("Ports") if isinstance(network.get("Ports"), dict) else {}
+    network_value = inspect_doc.get("NetworkSettings")
+    network = network_value if isinstance(network_value, dict) else {}
+    ports_value = network.get("Ports")
+    ports = ports_value if isinstance(ports_value, dict) else {}
     bindings = ports.get("8080/tcp")
     if not isinstance(bindings, list):
         return None

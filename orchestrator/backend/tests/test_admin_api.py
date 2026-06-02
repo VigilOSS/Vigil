@@ -4,7 +4,6 @@ engagement directory.
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 from test_engagements_api import write_engagement
 

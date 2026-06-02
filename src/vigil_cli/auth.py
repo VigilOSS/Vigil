@@ -30,8 +30,10 @@ def write_auth(engagement_dir: Path, payload: dict[str, object]) -> None:
 
 def status_line(engagement_dir: Path) -> str:
     payload = read_auth(engagement_dir)
-    cookies = payload.get("cookies") if isinstance(payload.get("cookies"), dict) else {}
-    headers = payload.get("headers") if isinstance(payload.get("headers"), dict) else {}
+    cookies_value = payload.get("cookies")
+    cookies = cookies_value if isinstance(cookies_value, dict) else {}
+    headers_value = payload.get("headers")
+    headers = headers_value if isinstance(headers_value, dict) else {}
     expires_at = payload.get("expires_at")
     stale = _is_stale(str(expires_at)) if expires_at else False
     return (
