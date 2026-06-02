@@ -11,18 +11,86 @@ from __future__ import annotations
 
 import subprocess
 
-from .client import AssessError, default_runtime_container
-
-
-_DEFAULT_CONTAINER_NAME = default_runtime_container()
+from .client import AssessError
 
 
 def _container_pid_file(run_uuid: str) -> str:
     """Path inside the container where the wrapper shell records the user
     command's PID. Sharing the engagement-wide ``run_uuid`` here means the
     audit row and this pid file key on the same identifier — the operator
-    can grep one ID across both."""
+    can grep one ID across both.
+
+    Canonical home for the pid-file path formula — ``kali_jobs`` and
+    ``kali_sweep_orphans`` import this rather than re-deriving the literal."""
     return f"/tmp/vigil-pid-{run_uuid}.pid"
+
+
+def _docker_ps_names_filter_argv(container_name: str) -> list[str]:
+    """Canonical ``docker ps`` exact-name filter argv.
+
+    Single source of truth for the ``--filter name=^<name>$`` idiom shared by
+    the raising :func:`_check_container_running` and the boolean
+    :func:`_container_running`. Returning the argv (not running it) lets each
+    caller keep its own error handling — raise vs bool — without duplicating
+    the literal command."""
+    return ["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{container_name}$"]
+
+
+def _container_running(container_name: str) -> bool:
+    """Boolean liveness check: True iff the exact-named container is in
+    ``docker ps`` output. Swallows docker-unreachable as ``False`` (callers
+    that need to distinguish unreachable from absent use
+    :func:`_check_container_running`, which raises)."""
+    try:
+        result = subprocess.run(
+            _docker_ps_names_filter_argv(container_name),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return container_name in (result.stdout or "").splitlines()
+
+
+def _cat_container_pid_file(container_name: str, pid_file: str) -> tuple[int | None, str]:
+    """Core ``docker exec cat <pid_file>`` reader shared by every pid-read
+    helper. Returns ``(pid, reason)`` where ``pid`` is ``None`` for any failure
+    mode and ``reason`` is a stable diagnostic tag:
+
+    - ``pid-probe-failed:<ExcName>`` — docker unreachable (FileNotFound/Timeout)
+    - ``pid-file-missing``           — rc!=0 and stderr names a missing file
+    - ``pid-probe-failed``           — rc!=0 for any other reason
+    - ``pid-file-empty``             — file read but empty
+    - ``pid-file-invalid``           — contents not an int
+    - ``pid-read``                   — success
+
+    Callers that only need ``int | None`` take ``[0]``; ``kali_sweep_orphans``
+    maps the full tuple into its ``_PidReadResult`` so its richer dry-run
+    reason strings are preserved."""
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container_name, "cat", pid_file],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return None, f"pid-probe-failed:{exc.__class__.__name__}"
+    if result.returncode != 0:
+        stderr = (result.stderr or "").lower()
+        if "no such file" in stderr or "cannot open" in stderr:
+            return None, "pid-file-missing"
+        return None, "pid-probe-failed"
+    raw = (result.stdout or "").strip().splitlines()
+    if not raw:
+        return None, "pid-file-empty"
+    try:
+        return int(raw[0]), "pid-read"
+    except ValueError:
+        return None, "pid-file-invalid"
 
 
 def _build_docker_exec(
@@ -94,26 +162,7 @@ def _read_container_pid(container_name: str, run_uuid: str) -> int | None:
     Returns ``None`` for any failure mode — empty file, container gone, race
     where the wrapper exec'd but hadn't yet written the file. Callers should
     fall back to host-side ``os.killpg`` when this returns ``None``."""
-    pid_file = _container_pid_file(run_uuid)
-    try:
-        result = subprocess.run(
-            ["docker", "exec", container_name, "cat", pid_file],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    raw = (result.stdout or "").strip().splitlines()
-    if not raw:
-        return None
-    try:
-        return int(raw[0])
-    except ValueError:
-        return None
+    return _cat_container_pid_file(container_name, _container_pid_file(run_uuid))[0]
 
 
 def _kill_in_container(container_name: str, pid: int, signal_name: str) -> None:
@@ -148,7 +197,7 @@ def _cleanup_container_pid_file(container_name: str, run_uuid: str) -> None:
 def _check_container_running(container_name: str) -> None:
     try:
         result = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{container_name}$"],
+            _docker_ps_names_filter_argv(container_name),
             check=False,
             capture_output=True,
             text=True,

@@ -4,7 +4,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from assess.lib.client import AssessError
+from assess.lib.client import AssessError, default_runtime_container
 from assess.lib.kali import (
     add_passthrough_args_flag,
     add_required_kali_flags,
@@ -13,7 +13,6 @@ from assess.lib.kali import (
     kali_args_to_kwargs,
     kali_exec,
 )
-from assess.lib.kali_runtime_exec import _DEFAULT_CONTAINER_NAME
 
 # asnmap's data path is gated behind a ProjectDiscovery Cloud (PDCP) API key.
 # Without it the tool exits 0 with EMPTY output — indistinguishable from "this
@@ -31,7 +30,7 @@ _PDCP_FALLBACK_GUIDANCE = (
 )
 
 
-def _runtime_has_pdcp_key(container_name: str = _DEFAULT_CONTAINER_NAME):
+def _runtime_has_pdcp_key(container_name: str | None = None):
     """Probe the runtime for a PDCP API key.
 
     Returns True if PDCP_API_KEY (env) or a non-empty pdcp credentials file is
@@ -39,6 +38,9 @@ def _runtime_has_pdcp_key(container_name: str = _DEFAULT_CONTAINER_NAME):
     itself could not run (docker unreachable / container down) — in which case
     the caller should not block, only warn.
     """
+    # Resolve at call time so VIGIL_RUNTIME_CONTAINER is honoured even if it was
+    # set after import; default stays "vigil" when unset.
+    container_name = container_name or default_runtime_container()
     probe = (
         'test -n "$PDCP_API_KEY"'
         ' || test -s "${HOME:-/root}/.config/pdcp/credentials.yaml"'

@@ -301,6 +301,15 @@ class TestMissingFields:
         ranked = self.mod.score_population(records)
         assert ranked[0]["url"] == "uX"
 
+    def test_negative_length_buckets_to_len_unknown(self):
+        """A negative content_length (e.g. the ``-1`` chunked/streaming
+        sentinel) is not a real size and must bucket to ``len_unknown`` rather
+        than falling through into the largest (>1MB) bucket — otherwise a tiny
+        streaming response would look like a huge blob to the anomaly oracle."""
+        assert self.mod._bucket_length(-1) == "len_unknown"
+        # And it must NOT collapse into the >1MB overflow bucket.
+        assert self.mod._bucket_length(-1) != self.mod._bucket_length(2_000_000)
+
 
 # ---------------------------------------------------------------------------
 # (d2) Sparse attribute — rarity denominator must be the PRESENT count, not the

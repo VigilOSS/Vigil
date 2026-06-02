@@ -17,30 +17,20 @@ from typing import Any
 
 from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
+from .kali_runtime_exec import _cat_container_pid_file, _container_running
 
-
-_DEFAULT_CONTAINER_NAME = default_runtime_container()
 _DEFAULT_DTACH_DIR = "/tmp/vigil-jobs"
 _JOB_PID_DIR = "/tmp/vigil-jobs"
 _JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
 
+# ``_container_running`` is imported from kali_runtime_exec (canonical home for
+# the ``docker ps`` exact-name filter idiom) and re-bound here as a module
+# attribute so existing tests can ``monkeypatch.setattr(kali_jobs,
+# "_container_running", ...)`` exactly as before.
+
 
 def _job_pid_file(job_uuid: str) -> str:
     return f"{_JOB_PID_DIR}/{job_uuid}.pid"
-
-
-def _container_running(container_name: str) -> bool:
-    try:
-        result = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}", "--filter", f"name=^{container_name}$"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-    return container_name in (result.stdout or "").splitlines()
 
 
 def _check_dtach_in_container(container_name: str) -> None:
@@ -82,7 +72,7 @@ def start_job(
     *,
     audit_meta: dict[str, Any],
     engagement_dir: Path | None = None,
-    container_name: str = _DEFAULT_CONTAINER_NAME,
+    container_name: str | None = None,
     dtach_socket_dir: str = _DEFAULT_DTACH_DIR,
     parent_command_run_id: int | None = None,
     config: Config | None = None,
@@ -91,6 +81,9 @@ def start_job(
 
     Returns the backend job record (with `dtach_socket_path` populated).
     """
+    # Resolve the container name at call time so VIGIL_RUNTIME_CONTAINER is read
+    # now, not when this module was imported. Default stays "vigil" when unset.
+    container_name = container_name or default_runtime_container()
     cfg = config or load_config(str(engagement_dir) if engagement_dir else None)
     eng_dir = Path(engagement_dir).resolve() if engagement_dir is not None else Path(cfg.engagement_dir).resolve()
     if not _container_running(container_name):
@@ -193,6 +186,16 @@ def start_job(
     except Exception:
         if spawned:
             _cleanup_spawned_job(container_name, socket_path, pid_file)
+            # The dtach process was spawned and then something failed (most
+            # commonly the status=running PATCH itself). Mark the backend row
+            # 'failed' before re-raising — otherwise the row is stuck at
+            # 'queued' forever (no sweeper covers assessment_jobs). Best-effort,
+            # mirroring the CalledProcessError path: a failing PATCH here must
+            # not mask the original error.
+            try:
+                client.patch(f"jobs/{job_id}", {"status": "failed"})
+            except Exception:
+                pass
         raise
     finally:
         client.close()
@@ -251,28 +254,22 @@ def job_tail(job_id: int, *, follow: bool = False, config: Config | None = None)
 
 
 def _read_job_pid(container_name: str, pid_file: str) -> int | None:
-    try:
-        result = subprocess.run(
-            ["docker", "exec", container_name, "cat", pid_file],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    raw = (result.stdout or "").strip().splitlines()
-    if not raw:
-        return None
-    try:
-        return int(raw[0])
-    except ValueError:
-        return None
+    """Thin wrapper over the shared ``docker exec cat`` core in
+    kali_runtime_exec; preserves this call site's ``int | None`` semantics
+    (the diagnostic ``reason`` tag is dropped — only the job-stop dry-run path
+    in kali_sweep_orphans needs it)."""
+    return _cat_container_pid_file(container_name, pid_file)[0]
 
 
-def _job_pid_alive(container_name: str, pid: int) -> bool:
+def _job_pid_alive(container_name: str, pid: int) -> bool | None:
+    """Three-state liveness probe via ``docker exec kill -0``.
+
+    Returns True when the PID is alive (rc=0), False when the in-container kill
+    reports the PID is gone (rc=1), and None when Docker probing itself failed
+    (docker unreachable / timeout / any other rc). The None case must NOT be
+    collapsed to False: a transient docker blip during ``job_stop`` would
+    otherwise mark a still-running job 'killed'. Mirrors
+    ``kali_sweep_orphans._pid_alive_in_container``."""
     try:
         result = subprocess.run(
             ["docker", "exec", container_name, "kill", "-0", str(pid)],
@@ -281,8 +278,12 @@ def _job_pid_alive(container_name: str, pid: int) -> bool:
             timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
         return False
-    return result.returncode == 0
+    return None
 
 
 def _signal_job_pid(container_name: str, pid: int, signal_name: str) -> None:
@@ -303,15 +304,26 @@ def _wait_for_pid_exit(
     *,
     timeout_seconds: float,
     poll_interval: float = 0.25,
-) -> bool:
+) -> bool | None:
     """Poll ``kill -0 pid`` inside the container until the PID is gone or the
-    deadline passes. Returns True if the process is confirmed dead."""
+    deadline passes.
+
+    Three-state result so a docker blip is never mistaken for a confirmed exit:
+    - ``True``  — the PID was observed gone (``kill -0`` rc=1). Confirmed dead.
+    - ``False`` — deadline reached with the PID still alive (last probe rc=0).
+    - ``None``  — deadline reached but the last probe could not reach docker, so
+      liveness is unknown. Callers must not finalize a definitive ``killed`` on
+      ``None`` (see ``job_stop``)."""
     deadline = time.monotonic() + timeout_seconds
     while True:
-        if not _job_pid_alive(container_name, pid):
+        alive = _job_pid_alive(container_name, pid)
+        if alive is False:
             return True
         if time.monotonic() >= deadline:
-            return False
+            # alive is True (still running) or None (probe unreachable): surface
+            # the distinction so the caller knows whether the PID is verified
+            # alive or merely unverifiable.
+            return False if alive is True else None
         time.sleep(poll_interval)
 
 
@@ -351,9 +363,12 @@ def _cleanup_spawned_job(container_name: str, socket_path: str, pid_file: str) -
 def job_stop(
     job_id: int,
     *,
-    container_name: str = _DEFAULT_CONTAINER_NAME,
+    container_name: str | None = None,
     config: Config | None = None,
 ) -> dict[str, Any]:
+    # Resolve the container name at call time so VIGIL_RUNTIME_CONTAINER is read
+    # now, not when this module was imported. Default stays "vigil" when unset.
+    container_name = container_name or default_runtime_container()
     cfg = config or load_config(None)
     record = job_status(job_id, config=cfg)
     current_status = str(record.get("status") or "").strip()
@@ -387,12 +402,26 @@ def job_stop(
             )
         else:
             _signal_job_pid(container_name, pid, "TERM")
-            confirmed_dead = _wait_for_pid_exit(container_name, pid, timeout_seconds=10.0)
-            if not confirmed_dead:
+            # _wait_for_pid_exit is three-state: True=confirmed gone,
+            # False=still alive at deadline, None=docker unreachable (liveness
+            # unknown). Escalate to SIGKILL unless already confirmed dead.
+            wait_result = _wait_for_pid_exit(container_name, pid, timeout_seconds=10.0)
+            if wait_result is not True:
                 _signal_job_pid(container_name, pid, "KILL")
-                confirmed_dead = _wait_for_pid_exit(container_name, pid, timeout_seconds=5.0)
-            if confirmed_dead:
+                wait_result = _wait_for_pid_exit(container_name, pid, timeout_seconds=5.0)
+            if wait_result is True:
                 final_status = "killed"
+            elif wait_result is None:
+                # Docker became unreachable mid-stop: we cannot confirm the PID
+                # exited, so do NOT finalize a definitive 'killed' on a transient
+                # blip against a possibly-still-running job. Record stop_failed
+                # so the operator re-checks rather than trusting a false kill.
+                final_status = "stop_failed"
+                failure_message = (
+                    f"job {job_id}: docker became unreachable while verifying the in-container "
+                    "process exit; liveness is unknown so status=stop_failed was recorded rather "
+                    "than a false 'killed'. Re-run stop or investigate the runtime."
+                )
             else:
                 final_status = "stop_failed"
                 failure_message = (

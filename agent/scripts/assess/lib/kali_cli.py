@@ -18,10 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from .audit_enums import PROBE_KIND_ENUM, TECHNIQUE_ENUM
-from .client import AssessError
+from .client import AssessError, default_runtime_container
 from .kali_audit import ALLOWED_PHASES, _INTENT_MAX_LEN
 from .kali_output import KaliResult
-from .kali_runtime_exec import _DEFAULT_CONTAINER_NAME
 
 
 def add_required_kali_flags(parser) -> None:
@@ -89,11 +88,14 @@ def add_required_kali_flags(parser) -> None:
             "'operator'; specialists should pass this explicitly if wrapper env is missing."
         ),
     )
+    # default_runtime_container() is called at parse time (not bound to a
+    # frozen module constant) so VIGIL_RUNTIME_CONTAINER is read when the parser
+    # is built, not when this module was first imported.
     parser.add_argument(
         "--container-name",
         dest="container_name",
-        default=_DEFAULT_CONTAINER_NAME,
-        help=f"Docker container to exec into (default: {_DEFAULT_CONTAINER_NAME}).",
+        default=default_runtime_container(),
+        help=f"Docker container to exec into (default: {default_runtime_container()}).",
     )
 
 
@@ -167,7 +169,7 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "timeout": int(args.timeout),
         "agent_name": getattr(args, "kali_agent_name", None),
         "force": bool(getattr(args, "force", False)),
-        "container_name": getattr(args, "container_name", _DEFAULT_CONTAINER_NAME),
+        "container_name": getattr(args, "container_name", None),
     }
     if explicit_dir:
         kwargs["engagement_dir"] = Path(explicit_dir).expanduser().resolve()

@@ -293,10 +293,14 @@ def _scaffold_definition(records: list[dict], fixture_basename: str) -> str:
     matches the existing definitions and stays diff-friendly.
     """
     count = len(records)
+    # Quote the fixture value as a JSON string (a valid YAML double-quoted
+    # scalar) so a basename containing YAML-significant characters (``#``, ``:``)
+    # does not corrupt the emitted definition. YAML strips the quotes on load,
+    # so ``defn["fixture"]`` round-trips to the bare basename.
     lines = [
         f"# Eval definition scaffolded by `vigil assess eval-capture` from {fixture_basename}",
         "# Green-by-construction: thresholds derived from the captured snapshot.",
-        f"fixture: {fixture_basename}",
+        f"fixture: {json.dumps(fixture_basename)}",
         "",
         "assertions:",
         "  - kind: min_findings",
