@@ -39,8 +39,7 @@ def register(subparsers) -> None:
 
 
 def _fetch_code_files(cfg) -> list[dict]:
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         rows: list[dict] = []
         offset = 0
         while True:
@@ -53,8 +52,6 @@ def _fetch_code_files(cfg) -> list[dict]:
                 result = rows
                 break
             offset += _CODE_FILE_LOOKUP_PAGE_SIZE
-    finally:
-        client.close()
     if not isinstance(result, list):
         print("Could not fetch code files for path resolution", file=sys.stderr)
         sys.exit(1)
@@ -217,11 +214,8 @@ def run(args) -> None:
     else:
         normalized_payload = _strip_local_fields(payload)
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/files/bulk-classify', {'classifications': normalized_payload})
-    finally:
-        client.close()
 
     classified_count = result.get('updated', len(normalized_payload))
 

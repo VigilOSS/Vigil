@@ -1,0 +1,40 @@
+# Eval definition for golden_engagement_01.json
+# Web-app assessment: 3 findings (high SQLi, medium XSS, low brute-force)
+fixture: golden_engagement_01.json
+
+assertions:
+  # Finding count bounds
+  - kind: min_findings
+    value: 3
+    mode: strict
+
+  - kind: max_findings
+    value: 6
+    mode: strict
+
+  # Expected CWE coverage (read from details.cwe_id)
+  - kind: expected_cwes
+    value:
+      - CWE-89
+      - CWE-79
+      - CWE-307
+    mode: strict
+
+  # Severity distribution — at least one high finding
+  - kind: expected_severities
+    value:
+      - high
+      - medium
+      - low
+    mode: strict
+
+  # Severity distribution check: must have at least one high
+  - kind: severity_distribution
+    value:
+      high:
+        min: 1
+    mode: strict
+
+  # Attacker-outcome discipline: every finding's details.impact must be non-empty
+  - kind: attacker_outcome_present
+    mode: strict

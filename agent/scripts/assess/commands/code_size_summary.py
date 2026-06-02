@@ -85,8 +85,7 @@ def run(args) -> None:
 def _fetch_code_files(cfg, *, repo_id: int | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     offset = 0
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         while True:
             endpoint = f"code/files?limit={_PAGE_SIZE}&offset={offset}"
             if repo_id is not None:
@@ -99,8 +98,6 @@ def _fetch_code_files(cfg, *, repo_id: int | None = None) -> list[dict[str, Any]
             if len(page) < _PAGE_SIZE:
                 return rows
             offset += _PAGE_SIZE
-    finally:
-        client.close()
 
 
 def summarize_code_size(

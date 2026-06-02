@@ -1,0 +1,106 @@
+[
+  {
+    "title": "Blind SQL injection in search",
+    "severity": "high",
+    "defect_family": "sql-injection",
+    "canonical_location": "https://target.example/search?q",
+    "summary": "Boolean-blind SQL injection on the search endpoint",
+    "evidence_ref": "scans/sqlmap.txt",
+    "notes": "curl 'https://target.example/search?q=test%27+AND+1%3D1--+-' -> 200 with results",
+    "details": {
+      "owasp_category": "A03:2021 Injection",
+      "cwe_id": "CWE-89",
+      "request_method": "GET",
+      "parameter": "q",
+      "evidence": "Replayable request/response pair in scans/sqlmap.txt",
+      "impact": "Anonymous attackers can extract arbitrary data from the backing store",
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "cvss_score": 7.5,
+      "remediation": "Use parameterized queries for all search input",
+      "steps_to_reproduce": [
+        "Send GET /search?q=test'+AND+1=1--+-",
+        "Observe normal search results returned"
+      ],
+      "chain_required": false,
+      "references": ["https://cwe.mitre.org/data/definitions/89.html"],
+      "discovered_by": "vulnerability-analyst"
+    },
+    "workflow_status": "active",
+    "verification_state": "unreviewed",
+    "verification_disposition": "none",
+    "root_cause_key": "",
+    "auth_context": "anonymous",
+    "source_name": "vulnerability-analyst",
+    "provenance": {"agent_name": "vulnerability-analyst"},
+    "links": []
+  },
+  {
+    "title": "Stored XSS in user profile bio field",
+    "severity": "medium",
+    "defect_family": "cross-site-scripting",
+    "canonical_location": "https://target.example/api/users/profile",
+    "summary": "Bio field accepts and reflects arbitrary HTML/JS without sanitization",
+    "evidence_ref": "scans/xss_poc.txt",
+    "notes": "",
+    "details": {
+      "cwe_id": "CWE-79",
+      "request_method": "PUT",
+      "parameter": "bio",
+      "evidence": "Stored payload executed in victim session; captured in scans/xss_poc.txt",
+      "impact": "Authenticated attacker can steal session cookies or perform actions as any viewing user",
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N",
+      "cvss_score": 5.4,
+      "remediation": "Apply HTML output encoding and Content-Security-Policy",
+      "steps_to_reproduce": [
+        "Log in as low-privilege user",
+        "PUT /api/users/profile with bio containing script tag",
+        "View profile as victim"
+      ],
+      "chain_required": false,
+      "references": ["https://cwe.mitre.org/data/definitions/79.html"],
+      "discovered_by": "vulnerability-analyst"
+    },
+    "workflow_status": "active",
+    "verification_state": "unreviewed",
+    "verification_disposition": "none",
+    "root_cause_key": "",
+    "auth_context": "authenticated",
+    "source_name": "vulnerability-analyst",
+    "provenance": {"agent_name": "vulnerability-analyst"},
+    "links": []
+  },
+  {
+    "title": "Missing rate limiting on authentication endpoint",
+    "severity": "low",
+    "defect_family": "brute-force",
+    "canonical_location": "https://target.example/api/auth/login",
+    "summary": "Login endpoint has no rate limiting; brute-force enumeration is possible",
+    "evidence_ref": "scans/ffuf_brute.txt",
+    "notes": "",
+    "details": {
+      "cwe_id": "CWE-307",
+      "request_method": "POST",
+      "parameter": "password",
+      "evidence": "1000 requests in 10s returned no rate-limit response; ffuf run in scans/ffuf_brute.txt",
+      "impact": "Attacker can brute-force credentials with no throttling or lockout",
+      "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+      "cvss_score": 5.3,
+      "remediation": "Add rate limiting (e.g. 5 attempts per minute) and account lockout with CAPTCHA",
+      "steps_to_reproduce": [
+        "Run ffuf -w wordlist.txt -u https://target.example/api/auth/login -X POST -d '{\"username\":\"admin\",\"password\":\"FUZZ\"}'",
+        "Observe no 429 responses"
+      ],
+      "chain_required": false,
+      "references": ["https://cwe.mitre.org/data/definitions/307.html"],
+      "discovered_by": "vulnerability-analyst"
+    },
+    "workflow_status": "active",
+    "verification_state": "unreviewed",
+    "verification_disposition": "none",
+    "root_cause_key": "",
+    "auth_context": "anonymous",
+    "source_name": "vulnerability-analyst",
+    "provenance": {"agent_name": "vulnerability-analyst"},
+    "links": []
+  }
+]

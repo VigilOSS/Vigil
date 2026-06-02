@@ -279,9 +279,8 @@ def run(args: argparse.Namespace) -> None:
 
     scope_metadata = _extract_scope_metadata(scope_data)
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     by_host_payload: dict[str, Any] | None = None
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         try:
             services = client.get("services")
         except AssessError as exc:
@@ -303,8 +302,6 @@ def run(args: argparse.Namespace) -> None:
                     file=sys.stderr,
                 )
                 sys.exit(1)
-    finally:
-        client.close()
 
     services_list = services if isinstance(services, list) else []
     surfaces_list = surfaces if isinstance(surfaces, list) else []

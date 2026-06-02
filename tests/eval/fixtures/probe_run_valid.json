@@ -1,0 +1,14 @@
+{
+  "attack_family": "sqli",
+  "tool_name": "sqlmap",
+  "agent_name": "vulnerability-analyst",
+  "auth_context": "anonymous",
+  "input_slot": "GET-param",
+  "payload_family": "boolean-blind",
+  "payload_value": "' AND 1=1-- -",
+  "result_status": "finding",
+  "observed_http_status": 200,
+  "signal_type": "differential-response",
+  "evidence_ref": "scans/sqlmap.txt",
+  "notes": "Boolean-blind injection confirmed via differential response on /search?q parameter"
+}

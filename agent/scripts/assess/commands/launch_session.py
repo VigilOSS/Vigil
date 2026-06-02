@@ -51,11 +51,8 @@ def run(args) -> None:
         sys.exit(1)
 
     # Fetch findings from backend
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         findings = client.get("findings")
-    finally:
-        client.close()
 
     findings_by_slug = {row["slug"]: row for row in findings if row.get("slug")}
     missing = [slug for slug in requested_slugs if slug not in findings_by_slug]

@@ -122,8 +122,7 @@ def run(args) -> None:
     repo_id = int(args.repo_id)
 
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         existing_modules = client.get(f"code/modules?repo_id={repo_id}")
         if not isinstance(existing_modules, list):
             print(f"Unexpected response while fetching existing modules: {type(existing_modules)}", file=sys.stderr)
@@ -138,8 +137,6 @@ def run(args) -> None:
             'modules': modules,
         }
         result = client.post('code/modules', payload)
-    finally:
-        client.close()
 
     if isinstance(result, list):
         print(f"=== Code Modules Summary ===")

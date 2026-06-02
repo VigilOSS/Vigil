@@ -429,6 +429,11 @@ class _FakeIngestClient:
 
     def close(self) -> None:
         self.closed = True
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
 
 def _ingest_setup(

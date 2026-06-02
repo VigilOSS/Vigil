@@ -238,11 +238,8 @@ def _render_table(rows: list[dict]) -> str:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    try:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         rows = client.get(_build_query(args))
-    finally:
-        client.close()
 
     if not isinstance(rows, list):
         print(json.dumps(rows, indent=2, ensure_ascii=False))

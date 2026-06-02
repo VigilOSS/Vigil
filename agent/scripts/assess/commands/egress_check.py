@@ -163,8 +163,7 @@ def run(args) -> None:
             print(f"egress-check: wrote {len(blackholed)} blackholed host(s) to {blocked_path} "
                   f"(pipe into `ingest-endpoints --egress-blocked-hosts`).", file=sys.stderr)
         if not args.no_record:
-            client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-            try:
+            with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
                 client.record_decision({
                     "kind": "egress_decision",
                     "surfaced_to_user": True,
@@ -177,7 +176,5 @@ def run(args) -> None:
                         "blackholed_hosts": blackholed,
                     },
                 })
-            finally:
-                client.close()
             print("egress-check: recorded an advisory egress_decision. Stop dispatching to this "
                   "cluster until a fresh egress-check returns 'reachable'.", file=sys.stderr)
