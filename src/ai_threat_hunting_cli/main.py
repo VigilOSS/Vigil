@@ -180,8 +180,10 @@ def main(argv: list[str] | None = None) -> None:
         "export",
         help=(
             "Export an engagement. Default packs the engagement dir as a "
-            "tar.gz; --format markdown-tree writes a git-diff-able per-finding "
-            "tree (draft.md / debate.md / report.md) sourced from the backend."
+            "tar.gz; --format markdown-tree writes a diffable per-finding tree "
+            "(one dir per finding: draft.md / debate.md / report.md) sourced "
+            "from the backend. For a single consolidated findings.md report doc "
+            "instead, use `aith assess export-findings`."
         ),
     )
     export_p.add_argument("key", nargs="?")
@@ -191,7 +193,11 @@ def main(argv: list[str] | None = None) -> None:
         dest="export_format",
         choices=["tar.gz", "markdown-tree"],
         default="tar.gz",
-        help="Export format (default: tar.gz archive).",
+        help=(
+            "Export format (default: tar.gz archive). markdown-tree = diffable "
+            "per-finding tree (vs `aith assess export-findings` = single "
+            "findings.md report doc)."
+        ),
     )
     export_p.add_argument("--output")
     export_pdf_p = engagement_sub.add_parser("export-pdf", help="Export report.md as a PDF using pandoc + Chrome headless")

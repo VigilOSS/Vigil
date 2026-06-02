@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
@@ -138,6 +139,23 @@ def run(args) -> None:
     producer_role = str(payload.get("source_name") or getattr(args, "source_name", "") or "")
 
     cfg = load_config(args.engagement_dir)
+
+    # Validate the narrative artifact path before any POST so a typo fails fast
+    # instead of silently registering a dangling artifact reference. The
+    # artifact endpoint resolves a relative path under the engagement root, so
+    # anchor it there too — a CWD-relative check would wrongly reject the
+    # supported `--engagement-dir … --narrative notes/debate.md` workflow.
+    if narrative_path:
+        narrative_file = Path(narrative_path)
+        if not narrative_file.is_absolute():
+            narrative_file = Path(cfg.engagement_dir) / narrative_path
+        if not narrative_file.exists():
+            print(
+                f"--narrative path does not exist: {narrative_path}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post(f"findings/{args.finding_slug}/verify", payload)
         if narrative_path:

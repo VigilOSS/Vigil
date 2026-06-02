@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 from fastapi import HTTPException, status
 
@@ -104,6 +105,11 @@ def list_oob_probes(engagement_id: int, *, status_value: str | None = None) -> l
     """Return OAST probes for an engagement, newest first, with their
     interaction count and most recent observed callback time embedded."""
     engagement = _engagement_or_404(engagement_id)
+    if status_value is not None and status_value not in _OOB_PROBE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid oob probe status '{status_value}'; allowed: {sorted(_OOB_PROBE_STATUSES)}",
+        )
     with _common.get_connection() as connection:
         if status_value is not None:
             rows = connection.execute(
@@ -195,7 +201,7 @@ def correlate_oob_interaction(
             return {"matched": False, "probe": None, "interaction": None, "duplicate": False}
         probe = dict(probe_row)
         interaction_hash = hashlib.sha256(
-            "|".join(
+            json.dumps(
                 [
                     nonce,
                     str(protocol or ""),
@@ -203,7 +209,8 @@ def correlate_oob_interaction(
                     str(query_type or ""),
                     str(observed_at or ""),
                     str(raw_request or ""),
-                ]
+                ],
+                sort_keys=False,
             ).encode("utf-8")
         ).hexdigest()
         existing = connection.execute(

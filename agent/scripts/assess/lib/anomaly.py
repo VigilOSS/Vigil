@@ -256,9 +256,13 @@ def _score_record(
         if count == 0:
             continue
 
-        # Rarity score: 1.0 when count==1 (appears once), 0.0 when count==pop
-        # Using (1 - count/population_size) gives linear rarity.  Clamp to [0,1].
-        rarity = max(0.0, 1.0 - count / population_size)
+        # Rarity score relative to the records where this attribute is PRESENT,
+        # not the whole population: records missing the attribute do not appear
+        # in the frequency table, so dividing by population_size would inflate
+        # the rarity of values that are in fact ubiquitous among present records.
+        present_total = sum(table.values())
+        # Rarity: 1.0 when count==1 (appears once), 0.0 when count==present_total.
+        rarity = max(0.0, 1.0 - count / present_total)
         contribution = weight * rarity
         if contribution > 0.0:
             total_score += contribution
@@ -298,8 +302,9 @@ def score_population(records: list[dict]) -> list[dict]:
         annotated = dict(rec)
         annotated["anomaly_score"] = round(score, 6)
         annotated["anomalous_attributes"] = anomalous
-        # Store original index for stable tie-break
-        annotated["_orig_idx"] = idx
+        # Store original index for stable tie-break under an un-collidable key so
+        # a record that legitimately carries an "_orig_idx" field is not clobbered.
+        annotated["__anomaly_sort_idx__"] = idx
         scored.append(annotated)
 
     # Sort: descending score, then ascending url (or original index for stability)
@@ -307,12 +312,12 @@ def score_population(records: list[dict]) -> list[dict]:
         key=lambda r: (
             -r["anomaly_score"],
             str(r.get("url", "")),
-            r["_orig_idx"],
+            r["__anomaly_sort_idx__"],
         )
     )
 
     # Remove internal sort key
     for r in scored:
-        del r["_orig_idx"]
+        del r["__anomaly_sort_idx__"]
 
     return scored

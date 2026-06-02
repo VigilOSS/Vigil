@@ -720,44 +720,39 @@ class ExportedEngagement:
     finding_dirs: list[Path]
 
 
-def _details_object(finding: dict) -> dict:
-    """Return the finding's structured details as a dict.
+def _finding_render():
+    """Import the shared ``assess.lib.finding_render`` module.
 
-    The backend stores extended fields in a ``details_json`` text column; the
-    serialized read payloads can carry it either as a JSON string or as an
-    already-parsed object depending on the endpoint, so handle both.
+    The finding->markdown block is rendered by a single shared module that
+    physically lives under ``agent/scripts/assess/lib`` so the assess
+    ``export-findings`` command can import it directly. This installable ``src``
+    package reaches it through the same import bridge it already uses for
+    ``assess.lib.client`` / ``assess.lib.db`` (see ``paths.add_assess_import_path``
+    and ``_init_cases_db``): the production ``aith engagement export`` path puts
+    ``agent/scripts`` on ``sys.path`` before this runs (via
+    ``_build_assessment_client``), but tests and any direct caller may not — so
+    fall back to discovering the repo root from this module's own location and
+    bridging the path ourselves before retrying.
     """
-    details_json = finding.get("details_json")
-    if isinstance(details_json, str):
-        try:
-            parsed = json.loads(details_json)
-        except (json.JSONDecodeError, TypeError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return details_json if isinstance(details_json, dict) else {}
+    try:
+        from assess.lib import finding_render  # type: ignore[import-not-found]
 
+        return finding_render
+    except ImportError:
+        from .paths import agent_root, find_repo_root
 
-def _detail_value(finding: dict, key: str, default: Any = "") -> Any:
-    value = finding.get(key)
-    if value not in (None, "", []):
-        return value
-    return _details_object(finding).get(key, default)
+        repo_root = find_repo_root(Path(__file__))
+        if repo_root is not None:
+            scripts_dir = agent_root(repo_root) / "scripts"
+            if str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+        from assess.lib import finding_render  # type: ignore[import-not-found]
+
+        return finding_render
 
 
 def _string_list(values: object) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    return [str(value) for value in values if value not in (None, "")]
-
-
-def _header_lines(headers: object) -> list[str]:
-    if isinstance(headers, dict):
-        return [f"{key}: {value}" for key, value in headers.items() if key not in (None, "") and value is not None]
-    if isinstance(headers, str):
-        return [headers] if headers else []
-    if isinstance(headers, list):
-        return [str(value) for value in headers if value not in (None, "")]
-    return []
+    return _finding_render().string_list(values)
 
 
 def _finding_dir_name(finding: dict) -> str:
@@ -776,112 +771,16 @@ def _finding_dir_name(finding: dict) -> str:
 def _render_finding_draft(finding: dict) -> str:
     """Render the raw finding (draft.md) — every persisted field, flattened.
 
-    Mirrors the field selection of agent/scripts/assess/commands/
-    export_findings.py:_render_finding so a single finding's draft block looks
-    identical to its section in the engagement-wide findings.md, but scoped to
-    one finding per file.
+    Uses the shared ``assess.lib.finding_render.render_finding`` so a single
+    finding's draft block is identical to its section in the engagement-wide
+    ``findings.md`` (export-findings), but scoped to one finding per file. The
+    root-cause grouping bullets that export-findings includes inline are omitted
+    here because each finding's grouping context is rendered separately into its
+    own ``report.md`` (see ``_render_finding_report``). The shared renderer
+    returns the newline-stripped block; draft.md is newline-terminated so the
+    tree diffs cleanly.
     """
-    slug = str(finding.get("slug") or "")
-    title = str(finding.get("title") or "(untitled)")
-    severity = str(finding.get("severity") or "medium").upper()
-    workflow_status = finding.get("workflow_status") or "active"
-    verification_state = finding.get("verification_state") or "unreviewed"
-    verification_disposition = finding.get("verification_disposition") or "none"
-    source_name = finding.get("source_name") or finding.get("discovered_by") or "unknown"
-    defect_family = finding.get("defect_family") or ""
-    location = finding.get("canonical_location") or ""
-    auth_context = finding.get("auth_context") or ""
-    evidence = finding.get("evidence_detail") or finding.get("evidence_ref") or ""
-    impact = finding.get("impact") or finding.get("summary") or ""
-    owasp_category = str(_detail_value(finding, "owasp_category", "") or "")
-    cwe_id = str(_detail_value(finding, "cwe_id", "") or "")
-    cvss_vector = str(_detail_value(finding, "cvss_vector", "") or "")
-    cvss_score = finding.get("cvss_score")
-    if cvss_score is None:
-        cvss_score = _detail_value(finding, "cvss_score", None)
-    remediation = finding.get("remediation") or str(_detail_value(finding, "remediation", "") or "")
-    if not impact:
-        impact = str(_detail_value(finding, "impact", "") or "")
-    if not evidence:
-        evidence = str(_detail_value(finding, "evidence", "") or "")
-    steps = _string_list(_detail_value(finding, "steps_to_reproduce", []))
-    notes = (finding.get("notes") or "").strip()
-    request_method = _details_object(finding).get("request_method") or ""
-
-    header = f"## [{slug}] {title}" if slug else f"## {title}"
-    lines = [
-        header,
-        f"- **Discovered by**: {source_name}",
-        f"- **Severity**: {severity}",
-        f"- **Workflow**: {workflow_status}",
-        f"- **Verification**: {verification_state} / {verification_disposition}",
-    ]
-    if defect_family:
-        lines.append(f"- **Type**: {defect_family}")
-    if owasp_category:
-        lines.append(f"- **OWASP**: {owasp_category}")
-    if cwe_id:
-        lines.append(f"- **CWE**: {cwe_id}")
-    if location:
-        loc = f"{request_method} {location}" if request_method else location
-        lines.append(f"- **Location**: {loc}")
-    if auth_context:
-        lines.append(f"- **Auth Context**: {auth_context}")
-    if cvss_vector:
-        score_str = f" ({cvss_score})" if cvss_score is not None else ""
-        lines.append(f"- **CVSS**: {cvss_vector}{score_str}")
-    if evidence:
-        lines.append(f"- **Evidence**: {evidence}")
-    if impact:
-        lines.append(f"- **Impact**: {impact}")
-    if remediation:
-        lines.append(f"- **Remediation**: {remediation}")
-    if finding.get("merged_into_slug"):
-        lines.append(f"- **Merged Into**: {finding['merged_into_slug']}")
-
-    entry_point = str(_detail_value(finding, "entry_point", "") or "")
-    sink = str(_detail_value(finding, "sink", "") or "")
-    references = _string_list(_detail_value(finding, "references", []))
-    poc_code = str(_detail_value(finding, "poc_code", "") or "")
-    if entry_point:
-        lines.append(f"- **Entry Point**: {entry_point}")
-    if sink:
-        lines.append(f"- **Sink**: {sink}")
-    if references:
-        lines.append(f"- **References**: {', '.join(references)}")
-
-    if steps:
-        lines.append("")
-        lines.append("**Steps to Reproduce:**")
-        for i, step in enumerate(steps, 1):
-            lines.append(f"{i}. {step}")
-    if poc_code:
-        lines.append("")
-        lines.append("**PoC Code:**")
-        lines.append(f"```\n{poc_code}\n```")
-    poc_request = _detail_value(finding, "poc_request")
-    if isinstance(poc_request, dict):
-        lines.append("")
-        lines.append("**PoC Request:**")
-        lines.append(f"```\n{poc_request.get('method', '')} {poc_request.get('url', '')}")
-        lines.extend(_header_lines(poc_request.get("headers")))
-        if poc_request.get("body"):
-            lines.append(f"\n{poc_request['body']}")
-        lines.append("```")
-    poc_response = _detail_value(finding, "poc_response")
-    if isinstance(poc_response, dict):
-        lines.append("")
-        lines.append("**PoC Response:**")
-        lines.append(f"```\nHTTP {poc_response.get('status', '')}")
-        lines.extend(_header_lines(poc_response.get("headers")))
-        if poc_response.get("body_excerpt"):
-            lines.append(f"\n{poc_response['body_excerpt']}")
-        lines.append("```")
-
-    block = "\n".join(lines).rstrip()
-    if notes:
-        block = f"{block}\n\n{notes}"
-    return block.strip() + "\n"
+    return _finding_render().render_finding(finding, include_root_cause_group=False) + "\n"
 
 
 def _render_finding_report(record: dict, *, group: dict | None = None) -> str:
@@ -1082,12 +981,13 @@ def export_engagement_tree(
         report_record = report_by_slug.get(slug)
         if report_record is None:
             # Finding excluded from the report projection (merged /
-            # false-positive / disputed): fall back to the raw finding so
-            # report.md still exists and stays diff-able, with a one-line note.
+            # false-positive / disputed / pending_runtime_proof holding): fall
+            # back to the raw finding so report.md still exists and stays
+            # diff-able, with a one-line note.
             report_md = (
                 f"# {finding.get('slug') or '---'} — {finding.get('title') or '(untitled)'}\n\n"
                 "_Not included in the current report projection "
-                "(merged, false-positive, or disputed)._\n\n"
+                "(merged, false-positive, disputed, or pending_runtime_proof)._\n\n"
                 + _render_finding_draft(finding)
             )
         else:
@@ -1096,6 +996,18 @@ def export_engagement_tree(
             )
         (finding_dir / "report.md").write_text(report_md, encoding="utf-8")
         written.append(finding_dir)
+
+    # Prune stale finding directories from a prior export: re-exporting into a
+    # stable output_root must not retain dirs for findings that were since
+    # merged, renamed, or removed. Only remove dirs THIS exporter created —
+    # identified by the draft.md + report.md marker files — never unrelated
+    # content that happens to share output_root.
+    current_names = {p.name for p in written}
+    for child in sorted(output_root.iterdir()):
+        if not child.is_dir() or child.name in current_names:
+            continue
+        if (child / "draft.md").is_file() and (child / "report.md").is_file():
+            shutil.rmtree(child)
 
     return ExportedEngagement(
         output_root=output_root.resolve(),

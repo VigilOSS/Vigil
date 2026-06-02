@@ -457,7 +457,18 @@ def _report_record(record: dict[str, Any], report_id: str) -> dict[str, Any]:
 def _report_finding_records(engagement_id: int, *, mode: str = "draft") -> list[dict[str, Any]]:
     rows = _report_candidate_records(engagement_id)
     if mode == "draft":
-        rows = [row for row in rows if row.get("verification_state") != "disputed"]
+        # Exclude disputed findings, and exclude the sticky holding disposition
+        # ``pending_runtime_proof`` (strong-but-unproven). The latter carries
+        # ``verification_state == "verified"`` so the disputed filter alone would
+        # leak it into draft reports; mirror how ``final`` mode keeps only
+        # {confirmed, downgraded} dispositions. There is no chain_required bypass
+        # in ``final`` — a held finding is never report-durable.
+        rows = [
+            row
+            for row in rows
+            if row.get("verification_state") != "disputed"
+            and row.get("verification_disposition") != "pending_runtime_proof"
+        ]
     elif mode == "final":
         rows = [
             row

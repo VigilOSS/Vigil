@@ -2666,3 +2666,175 @@ def test_deleted_session_is_pruned_from_database(client, isolate_settings):
     response = client.get("/engagements/2026-03-30-120000-example/sessions")
     assert response.status_code == 200
     assert response.json() == []
+
+
+def _all_report_finding_slugs(report_body: dict) -> set[str]:
+    """Flatten a /report-findings group response into the set of slugs it exposes."""
+    slugs: set[str] = set()
+    for record in report_body.get("standalone", []):
+        if record.get("slug"):
+            slugs.add(record["slug"])
+    for group in report_body.get("groups", []):
+        root = group.get("root") or {}
+        if root.get("slug"):
+            slugs.add(root["slug"])
+        for sibling in group.get("siblings", []):
+            if sibling.get("slug"):
+                slugs.add(sibling["slug"])
+    return slugs
+
+
+def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate_settings):
+    # Regression: the draft report projection (mode=draft, the default, which feeds
+    # `aith engagement export --format markdown-tree`) used to filter only
+    # `verification_state == "disputed"`. A pending_runtime_proof finding is
+    # verification_state="verified", so it leaked into draft reports despite being a
+    # non-durable HOLDING finding. Draft must now exclude it exactly like `final` does.
+    write_engagement(isolate_settings["engagements_dir"])
+
+    # A genuinely confirmed finding that MUST remain in the draft projection.
+    confirmed = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "VA-070",
+            "title": "Confirmed durable finding",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "auth-bypass",
+            "root_cause_key": "confirmed-durable",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/confirmed",
+            "summary": "Proven and durable.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "code review", "impact": "account takeover"},
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert confirmed.status_code == 201
+    confirmed_verify = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings/VA-070/verify",
+        json={
+            "disposition": "confirmed",
+            "reason_code": "runtime-proven",
+            "reason_text": "Runtime PoC reproduced.",
+            "source_name": "vulnerability-analyst",
+            "evidence_ref": "findings.md",
+        },
+    )
+    assert confirmed_verify.status_code == 200
+
+    # A strong-but-unproven HOLDING finding that MUST be excluded from the report.
+    held = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "VA-071",
+            "title": "Held finding pending runtime proof",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "auth-bypass",
+            "root_cause_key": "held-pending-runtime",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/held-report",
+            "summary": "Strong static evidence, runtime proof outstanding.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "code review", "impact": "pending runtime"},
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert held.status_code == 201
+    held_verify = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings/VA-071/verify",
+        json={
+            "disposition": "pending_runtime_proof",
+            "reason_code": "static-accepted",
+            "reason_text": "Static evidence accepted; runtime proof outstanding.",
+            "source_name": "vulnerability-analyst",
+            "evidence_ref": "findings.md",
+        },
+    )
+    assert held_verify.status_code == 200
+    assert held_verify.json()["finding"]["verification_disposition"] == "pending_runtime_proof"
+    assert held_verify.json()["finding"]["verification_state"] == "verified"
+
+    # Default mode is draft (the markdown-tree source).
+    draft = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/report-findings?mode=draft"
+    )
+    assert draft.status_code == 200
+    draft_slugs = _all_report_finding_slugs(draft.json())
+    assert "VA-071" not in draft_slugs, draft.json()
+    assert "VA-070" in draft_slugs, draft.json()
+    # Exactly one durable finding survives the draft projection.
+    assert draft.json()["finding_count"] == 1, draft.json()
+
+    # The implicit default (no mode param) must match explicit draft.
+    default = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/report-findings"
+    )
+    assert default.status_code == 200
+    assert _all_report_finding_slugs(default.json()) == draft_slugs
+
+
+def test_markdown_tree_draft_projection_excludes_pending_runtime_proof(client, isolate_settings):
+    # The markdown-tree exporter joins each on-disk finding against the draft
+    # report projection by slug (report_by_slug). A pending_runtime_proof finding
+    # must be ABSENT from that projection so the exporter renders it with the
+    # "not included in the current report projection" fallback rather than as a
+    # durable report finding. This guards the exact data the CLI consumes.
+    write_engagement(isolate_settings["engagements_dir"])
+
+    held = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json={
+            "slug": "VA-072",
+            "title": "Held finding for markdown-tree projection",
+            "severity": "critical",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "auth-bypass",
+            "root_cause_key": "held-markdown-tree",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/held-tree",
+            "summary": "Held; must fall back in markdown-tree.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "code review", "impact": "pending runtime"},
+            "provenance": {"agent_name": "vulnerability-analyst"},
+            "links": [],
+        },
+    )
+    assert held.status_code == 201
+    held_verify = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings/VA-072/verify",
+        json={
+            "disposition": "pending_runtime_proof",
+            "reason_code": "static-accepted",
+            "reason_text": "Static evidence accepted; runtime proof outstanding.",
+            "source_name": "vulnerability-analyst",
+            "evidence_ref": "findings.md",
+        },
+    )
+    assert held_verify.status_code == 200
+
+    # The held finding still exists in the raw finding list the exporter iterates...
+    findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
+    assert findings.status_code == 200
+    assert any(item["slug"] == "VA-072" for item in findings.json())
+
+    # ...but is excluded from the draft report projection it joins against, so the
+    # exporter's report_by_slug.get("VA-072") returns None -> fallback note path.
+    draft = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/report-findings?mode=draft"
+    )
+    assert draft.status_code == 200
+    assert "VA-072" not in _all_report_finding_slugs(draft.json()), draft.json()
+    assert draft.json()["finding_count"] == 0, draft.json()

@@ -156,7 +156,6 @@ def test_every_emitted_record_validates_and_is_clean(seeded_rows: list[dict]) ->
         "updated_at",
         "evidence_artifact_id",
         "slug",
-        "status",
     }
     for record in records:
         assert collect_validation_errors(record, schema) == [], record
@@ -166,6 +165,57 @@ def test_every_emitted_record_validates_and_is_clean(seeded_rows: list[dict]) ->
         assert leak_keys.isdisjoint(record.keys()), f"leaked DB columns: {leak_keys & record.keys()}"
 
     # The unconditional guard must accept a clean capture without raising.
+    eval_capture._validate_or_die(records)
+
+
+def test_pending_runtime_proof_disposition_captures_and_validates(
+    client, isolate_settings
+) -> None:
+    """Regression (Codex P2): a finding verified to ``pending_runtime_proof``
+    must survive the capture transform + validate-before-write guard.
+
+    Phase 3 added ``pending_runtime_proof`` to the backend
+    (FindingVerifyRequest + VerificationDisposition StrEnum + the DB column), so
+    GET /findings now serializes that value on findings in the holding state. If
+    finding-record.schema.json's ``verification_disposition`` enum omits it, the
+    unconditional ``_validate_or_die`` guard rejects the captured row. This test
+    drives the exact scenario: seed -> verify(pending_runtime_proof) -> GET ->
+    capture -> validate, asserting the record carries the disposition, VALIDATES,
+    and the guard does not raise.
+    """
+    _write_engagement(isolate_settings["engagements_dir"])
+    rows = _seed(client)
+    slug = rows[0]["slug"]
+
+    verified = client.post(
+        f"{BASE}/findings/{slug}/verify",
+        json={
+            "disposition": "pending_runtime_proof",
+            "reason_text": "Static taint path confirmed; runtime proof outstanding.",
+            "source_name": "verifier",
+        },
+    )
+    assert verified.status_code == 200, verified.text
+
+    # GET /findings is the exact production source eval-capture consumes. The
+    # holding-state row must serialize the new disposition (state -> verified,
+    # disposition sticks) — this is the value that previously failed validation.
+    refreshed = client.get(f"{BASE}/findings")
+    assert refreshed.status_code == 200, refreshed.text
+    raw_rows = refreshed.json()
+    holding = next(r for r in raw_rows if r["slug"] == slug)
+    assert holding["verification_disposition"] == "pending_runtime_proof"
+    assert holding["verification_state"] == "verified"
+
+    records = eval_capture._capture_records(raw_rows, _default_args())
+    captured = next(
+        r for r in records if r["verification_disposition"] == "pending_runtime_proof"
+    )
+
+    schema = load_schema("finding-record.schema.json")
+    assert collect_validation_errors(captured, schema) == [], captured
+    # The exact failure Codex flagged: the unconditional guard must NOT raise on
+    # a holding-state row now that the enum includes the new disposition.
     eval_capture._validate_or_die(records)
 
 
@@ -225,9 +275,10 @@ def test_capture_replays_green_in_eval_harness(
 ) -> None:
     """A captured fixture + scaffolded definition pass the real eval scorer.
 
-    Imports tests/eval/test_quality.py, redirects its _FIXTURES_DIR /
-    _DEFINITIONS_DIR to tmp_path (supported at test_quality.py:316-322), and
-    runs _run_definition → must not raise AssertionError.
+    Imports tests/eval/test_quality.py, redirects its _FIXTURES_DIR to tmp_path
+    (supported at test_quality.py:316-322) so _load_fixture resolves our inline
+    fixture by name, and runs _run_definition(def_path) — which takes an
+    explicit definition path — → must not raise AssertionError.
     """
     records = eval_capture._capture_records(seeded_rows, _default_args())
 
@@ -247,8 +298,12 @@ def test_capture_replays_green_in_eval_harness(
     finally:
         sys.path.remove(str(eval_dir))
 
+    # Only _FIXTURES_DIR matters here: _run_definition(def_path) resolves the
+    # definition from the explicit path we pass, then resolves the fixture by
+    # name via _load_fixture (which reads _FIXTURES_DIR). _DEFINITIONS_DIR is
+    # only consulted by the directory-glob discovery path, which this call does
+    # not exercise, so it is intentionally left unpatched.
     monkeypatch.setattr(test_quality, "_FIXTURES_DIR", tmp_path)
-    monkeypatch.setattr(test_quality, "_DEFINITIONS_DIR", tmp_path)
 
     # No AssertionError == replay-green.
     test_quality._run_definition(def_path)
