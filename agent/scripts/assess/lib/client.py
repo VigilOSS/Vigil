@@ -3,11 +3,26 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import socket
 import sys
 import time
 from typing import Any
 from urllib.parse import urlparse
+
+
+def default_runtime_container() -> str:
+    """Shared source of truth for the runtime container name.
+
+    Lives in this lowest-level module so every assess-lib caller
+    (``kali_runtime_exec``, ``kali_jobs``, ``kali_sweep_orphans``, and the
+    ``kali job`` CLI via re-export) imports the same definition rather than
+    hardcoding the literal independently — which previously let vigil_cli and
+    the assess lib silently drift. Mirrors ``vigil_cli.paths`` so the env
+    override is honoured on both sides of the contract. Default stays
+    ``"vigil"``.
+    """
+    return os.environ.get("VIGIL_RUNTIME_CONTAINER", "vigil")
 
 
 class AssessError(Exception):

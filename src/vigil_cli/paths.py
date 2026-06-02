@@ -10,6 +10,16 @@ from .config import get_config_value
 DEFAULT_INSTALL_ROOT = Path.home() / "vigil"
 CONFIG_DIR = Path.home() / ".config" / "vigil"
 DEFAULT_SOURCE_REPO = "https://github.com/vigil-oss/vigil.git"
+
+
+def default_runtime_container() -> str:
+    """Shared source of truth for the runtime container name on the CLI side.
+
+    Mirrors ``assess.lib.client.default_runtime_container`` so vigil_cli and the
+    assess lib resolve the same ``VIGIL_RUNTIME_CONTAINER`` env override and can
+    no longer silently drift. Default stays ``"vigil"``.
+    """
+    return os.environ.get("VIGIL_RUNTIME_CONTAINER", "vigil")
 # Hardcoded fallback for ``ORCHESTRATOR_BASE_URL`` — last layer of the
 # resolution chain in ``resolve_orchestrator_base_url`` and the value the
 # engagement-creation flow compares against to decide whether

@@ -16,7 +16,7 @@ from .config import get_config_value
 from .engagements import list_engagements
 from .oob import DEFAULT_OOB_DOMAIN, oob_status
 from .orchestrator import orchestrator_status
-from .paths import engagements_root, resolve_orchestrator_base_url
+from .paths import default_runtime_container, engagements_root, resolve_orchestrator_base_url
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
 
 
@@ -148,7 +148,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         if runtime_status(runner=runner) == "running":
             checks.append(Check("runtime-mounts", "OK" if runtime_mounts_ok(install_root, runner=runner) else "FAIL"))
             for tool in ("dtach", "tmux", "frpc", "interactsh-server", "interactsh-client"):
-                result = runner(["docker", "exec", "vigil", "sh", "-lc", f"command -v {tool} >/dev/null"])
+                result = runner(["docker", "exec", default_runtime_container(), "sh", "-lc", f"command -v {tool} >/dev/null"])
                 checks.append(Check(f"runtime-tool:{tool}", "OK" if result.returncode == 0 else "MISSING"))
     else:
         detail = "docker CLI not found" if binary_status.get("docker") == "MISSING" else "docker --version failed"
