@@ -19,7 +19,7 @@ origin: AI Threat Hunting
 - `aith assess kali exec -- curl ...` (manual OAuth flow manipulation and token probing — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique AUTH --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools (intercept redirects, capture authorization codes, inspect tokens)
 - `jwt_tool` / `jwt.io` (decode and tamper with ID tokens and access tokens — host-side analysis, not target-facing)
-- OOB callbacks to capture leaked tokens via redirect_uri: check readiness with `aith oob status --json`; start a named client with `aith oob client start <name> --engagement <key> --agent <agent>`; read captured tokens with `aith oob client logs <name> --lines 80`
+- `aith oob mint` / `aith oob poll` — capture authorization codes / tokens leaked via a hijacked `redirect_uri`. Mint a nonce-tagged callback host (`aith oob mint --technique AUTH --target-url <authorize-url> --param redirect_uri`), submit its `http` host as the `redirect_uri` (or the rebinding/path-confusion variant you are testing), and when the IdP redirects the victim's browser there the code/token rides along; `aith oob poll --client <name>` then returns the matched probe<->callback pair carrying the captured request. Check readiness with `aith oob status --json`; if no named client is running, start one with `aith oob client start <name> --engagement <key> --agent <agent>`. (`aith oob client logs <name> --lines 80` is a raw listener tail for infra debugging only, not correlation.)
 
 ## Methodology
 

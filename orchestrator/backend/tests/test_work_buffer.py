@@ -60,7 +60,7 @@ def _load_list_clusters_module():
 def _load_dispatch_module():
     return _load_script_module(
         "test_dispatch_module",
-        "agent/scripts/assess/commands/dispatch.py",
+        "agent/scripts/assess/commands/dispatch/__init__.py",
     )
 
 
@@ -301,6 +301,114 @@ def test_schema_migration_adds_priority_columns(tmp_path: Path) -> None:
         assert "idx_work_items_priority" in indexes
     finally:
         conn.close()
+
+
+def test_db_exec_returning_commits_and_returns_dict_rows(tmp_path: Path) -> None:
+    """db_exec_returning runs an UPDATE ... RETURNING, commits, and returns the
+    mutated rows as dicts (the contract _fetch relies on)."""
+    db_module = _load_db_module()
+    db_path = tmp_path / "ret.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, status TEXT, note TEXT)")
+        conn.execute("INSERT INTO t (id, status, note) VALUES (1, 'pending', 'a')")
+        conn.execute("INSERT INTO t (id, status, note) VALUES (2, 'pending', 'b')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    rows = db_module.db_exec_returning(
+        str(db_path),
+        "UPDATE t SET status = 'done' WHERE status = 'pending' RETURNING *",
+    )
+    assert isinstance(rows, list)
+    assert all(isinstance(r, dict) for r in rows)
+    assert sorted(r["id"] for r in rows) == [1, 2]
+    assert {r["status"] for r in rows} == {"done"}
+
+    # The mutation must be durably committed: a fresh connection sees 'done'.
+    conn = sqlite3.connect(str(db_path))
+    try:
+        persisted = {r[0]: r[1] for r in conn.execute("SELECT id, status FROM t").fetchall()}
+    finally:
+        conn.close()
+    assert persisted == {1: "done", 2: "done"}
+
+
+def test_db_exec_returning_empty_match_returns_empty_list(tmp_path: Path) -> None:
+    """A RETURNING statement that matches no rows returns []."""
+    db_module = _load_db_module()
+    db_path = tmp_path / "ret_empty.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, status TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    rows = db_module.db_exec_returning(
+        str(db_path),
+        "UPDATE t SET status = 'done' WHERE status = 'pending' RETURNING *",
+    )
+    assert rows == []
+
+
+def test_db_connect_yields_row_factory_and_supports_explicit_txn(tmp_path: Path) -> None:
+    """db_connect yields a Row-factory connection the caller can drive a
+    BEGIN IMMEDIATE transaction on, and closes it on exit."""
+    db_module = _load_db_module()
+    db_path = tmp_path / "conn.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, status TEXT)")
+        conn.execute("INSERT INTO t (id, status) VALUES (1, 'pending')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    captured = {}
+    with db_module.db_connect(str(db_path)) as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT * FROM t WHERE id = 1").fetchone()
+        # Row factory => mapping access by column name works.
+        assert row["status"] == "pending"
+        c.execute("UPDATE t SET status = 'processing' WHERE id = 1")
+        c.commit()
+        captured["conn"] = c
+
+    # Connection is closed after the context manager exits.
+    import pytest as _pytest
+
+    with _pytest.raises(sqlite3.ProgrammingError):
+        captured["conn"].execute("SELECT 1")
+
+    # The committed change is visible to a fresh connection.
+    conn = sqlite3.connect(str(db_path))
+    try:
+        assert conn.execute("SELECT status FROM t WHERE id = 1").fetchone()[0] == "processing"
+    finally:
+        conn.close()
+
+
+def test_db_connect_closes_connection_on_exception(tmp_path: Path) -> None:
+    """An exception inside the with-block still closes the connection."""
+    db_module = _load_db_module()
+    db_path = tmp_path / "conn_exc.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    leaked = {}
+    with __import__("pytest").raises(RuntimeError):
+        with db_module.db_connect(str(db_path)) as c:
+            leaked["conn"] = c
+            raise RuntimeError("boom")
+
+    with __import__("pytest").raises(sqlite3.ProgrammingError):
+        leaked["conn"].execute("SELECT 1")
 
 
 def test_classify_work_assigns_ssrf_bucket(tmp_path: Path, capsys) -> None:
@@ -1552,7 +1660,7 @@ def test_stamp_liveness_marks_claimed_rows(monkeypatch, tmp_path):
             self.close()
             return False
 
-    monkeypatch.setattr(module, "AssessmentClient", _FakeClient)
+    monkeypatch.setattr(module.work_items, "AssessmentClient", _FakeClient)
     module._stamp_liveness(conn, result, SimpleNamespace(base_url="http://x", engagement_key="eng"))
 
     # a got stamped (540s -> 9m); b had no ledger row -> untouched.
@@ -1582,7 +1690,7 @@ def test_stamp_liveness_best_effort_skips(monkeypatch, tmp_path):
         def __exit__(self, *exc):
             self.close()
             return False
-    monkeypatch.setattr(module, "AssessmentClient", _Boom)
+    monkeypatch.setattr(module.work_items, "AssessmentClient", _Boom)
     module._stamp_liveness(conn, result, SimpleNamespace(base_url="http://x", engagement_key="eng"))
     assert "live_status" not in result[0]   # swallowed, no raise
 
@@ -1664,6 +1772,6 @@ def test_stamp_liveness_clamps_negative_age(monkeypatch):
             self.close()
             return False
 
-    monkeypatch.setattr(module, "AssessmentClient", _C)
+    monkeypatch.setattr(module.work_items, "AssessmentClient", _C)
     module._stamp_liveness(conn, result, SimpleNamespace(base_url="x", engagement_key="e"))
     assert result[0]["live_status"] == "live"   # negative age → no nonsense @-NNNm suffix

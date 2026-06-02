@@ -19,6 +19,8 @@ origin: AI Threat Hunting
 - smuggler.py (automated detection)
 - HTTP Request Smuggler (Burp extension)
 - Custom scripts for precise byte-level control
+- `aith assess anomaly-score` — desync triage (§2/§3): replay each TE/CL obfuscation variant, record its status/length/timing, and let it rank the variant whose response broke from the pack (the desync candidate) instead of staring at near-identical responses.
+- `aith oob mint` / `aith oob poll` — for the cache-poisoning exploitation path (§6): smuggle a prefix whose poisoned response redirects/loads from a minted host, then `poll` to prove a *different* user's connection followed it. Replaces reading the raw listener log. Readiness: `aith oob status --json`.
 
 ## Methodology
 
@@ -74,6 +76,17 @@ origin: AI Threat Hunting
 - [ ] Mixed case: `TrAnSfEr-EnCoDiNg: chunked`
 - [ ] Line folding: `Transfer-Encoding:\n chunked`
 
+**Triage the variant sweep deterministically.** Replaying ten obfuscation variants produces ten near-identical responses where the desync hides in a small status/length/timing delta. Record one response object per variant and rank the outlier rather than diffing by eye:
+
+```bash
+# After replaying each TE/CL variant, capture {status, content_length} per variant
+# (include the timeout/timing as a record field if you measured it) into a JSONL
+# file, one object per line, then:
+aith assess anomaly-score variant_responses.jsonl --top 5
+```
+
+The top-ranked record names the obfuscation that broke from the aligned-parser baseline (e.g. one variant returns a 200 + body where the rest 400, or one hangs producing a truncated/zero length). That divergence is your CL.TE/TE.CL candidate — confirm it with the timing differential in §9 before declaring. A flat ranking (all scores ~0) means every variant parsed identically: the chain is aligned on this technique, move to the next.
+
 ### 5. Exploitation — Access Control Bypass
 
 - [ ] Smuggle request to internal-only endpoint
@@ -82,9 +95,16 @@ origin: AI Threat Hunting
 
 ### 6. Exploitation — Web Cache Poisoning
 
-- [ ] Smuggle request that poisons cached response
-- [ ] Victim receives attacker-controlled content from cache
-- [ ] Inject malicious JavaScript via poisoned response
+- [ ] Smuggle a request whose poisoned response redirects or loads a resource from a minted callback host — that nonce host is how you prove a *victim's* connection (not yours) consumed the poisoned entry:
+```bash
+aith oob mint --technique request-smuggling --target-url https://target/ \
+  --param smuggled-prefix --probe-kind cache-poison
+# Smuggle the prefix so the cached response points at <nonce>.researcher.example,
+# then poll — a matched hit from another connection = cross-user cache poisoning.
+aith oob poll --client <name>
+```
+- [ ] Victim receives attacker-controlled content from cache — a matched callback originating from a request you did not send is the cross-user proof, not just that you could set the cached body.
+- [ ] Inject malicious JavaScript via poisoned response (point the injected `src` at the minted host to confirm execution lands).
 
 ### 7. Exploitation — Credential Theft
 
@@ -118,7 +138,7 @@ origin: AI Threat Hunting
 - Smuggling type: CL.TE, TE.CL, H2.CL, or H2.TE
 - Exact request bytes used for detection
 - TE obfuscation technique that worked
-- Exploitation achieved (access bypass, cache poison, credential theft)
+- Exploitation achieved (access bypass, cache poison, credential theft) — for a cache poison, attach the matched probe<->callback from `aith oob poll --client <name> --json` proving a cross-user connection followed the poisoned response
 - Severity: Critical (credential theft, cache poisoning) or High (access bypass)
 - Remediation: normalize CL/TE handling, use HTTP/2 end-to-end, reject ambiguous requests
 

@@ -75,6 +75,32 @@ uuid             (UUID-based)
 pk, primary_key  (Django-style)
 ```
 
+### 1.3 Generate the Body-ID Payload Set
+
+You always have your own object's ID and (ideally) the victim's. To probe the divergence
+thoroughly — not just the bare victim ID but case/format/structure confusions that may slip past
+a `body._id === req.params.id` equality check — classify your own ID and reuse its variants in
+the body slot:
+
+```bash
+# Mongo ObjectId (24-char hex) → format + boundary confusions to try in the body
+aith assess classify-payload 6512a1f4e3b9c8a7d2f01b3e --mutations
+#   type: hex
+#   format:   '"6512a1f4e3b9c8a7d2f01b3e"'  '6512a1f4e3b9c8a7d2f01b3e=='  (truncated)  null
+#   boundary: '' 'a' (255×a)
+
+# Numeric or UUID id → escalation variants surface the first/admin object directly
+aith assess classify-payload 1042 --mutations          # escalation: '1' '0' 'admin' ...
+```
+
+- The **victim's real ID** is your primary body payload (Phase 2) — `classify-payload` cannot
+  guess an opaque value you can only observe, but its `escalation` intent does surface the
+  well-known first/admin object IDs (`1`, `00000000-...-000000000001`) worth trying when you have
+  no second account.
+- The `format` variants (`"id"` as string, `[id]` array, `null`) test whether the server's
+  ID-equality guard only compares scalars — a string-vs-number mismatch can defeat
+  `body._id === req.params.id` while still resolving the same object in the database layer.
+
 ---
 
 ## Phase 2: Divergence Testing
