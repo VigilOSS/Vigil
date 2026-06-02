@@ -229,6 +229,29 @@ aith assess kali ffuf \
      -o /engagements/$ENGAGEMENT_KEY/scans/phone_enum.json -of json
 ```
 
+**Triage the result set without guessing a filter.** A single `-fr`/`-fs` filter assumes you
+already know the valid-user response shape. When you don't (or want to confirm the filter caught
+everything), feed the whole ffuf result population to `aith assess anomaly-score` and let it rank
+the candidates that broke from the not-found cluster. ffuf's JSON `results` entries already carry
+`status`, `length`, `words`, `lines`, `url` — exactly the fields the oracle reads — so reshape and
+score:
+
+```bash
+# ffuf writes {"results":[{input,status,length,words,lines,url,...}]}.
+# Project to the records anomaly-score wants (its 'content_type' uses an underscore, so rename it):
+jq '[.results[] | {url, status, length, words, lines, content_type: .["content-type"]}]' \
+  /engagements/$ENGAGEMENT_KEY/scans/user_enum.json > /tmp/enum_pop.json
+
+aith assess anomaly-score /tmp/enum_pop.json --top 10
+#   #1  score=4.17  status=200  len=1561  url=.../login   ← FUZZ=admin: the existing-user response
+#       ^ status='200'  ^ length_bucket=...  ^ words_bucket=...   while every invalid user clustered
+```
+
+The records at the top of the ranking are the existing users (their response diverged in status,
+size bucket, word/line count, or error title); the flat low-scoring tail is the not-found cluster.
+This works on any of the sweeps above (username/email/phone). Pull the high-scoring inputs as your
+confirmed-valid list.
+
 ### 8. OTP / Verification Code Abuse
 
 ```bash
@@ -305,6 +328,25 @@ For ANY protocol or interface not covered above, the method is the same:
 
 This applies to gRPC, SMTP VRFY/RCPT, LDAP bind, custom TCP protocols, or any
 other interface. The protocol doesn't matter — the differential response does.
+
+When you have **more than a couple** of probes — a handful of candidate identifiers, or a full
+wordlist sweep — stop pairwise-`diff`ing and rank the population instead. Capture one record per
+probe (`url`, `status`, `content_length`, and `title`/`words`/`lines` when the body carries the
+distinguishing text) into a JSONL file and let the oracle find the odd-one-out:
+
+```bash
+# one HTTP-response record per probed identifier → enum_records.jsonl, then:
+aith assess anomaly-score enum_records.jsonl --top 10
+#   #1  score=4.17  status=302  len=120  url=.../login?u=admin   ← the valid user (redirected)
+#       ^ status='302'  ^ title='redirecting'                     the invalid users all 200'd identically
+```
+
+The oracle buckets near-equal sizes/word-counts, so it surfaces *category* differences — a status
+flip, a size-class jump, a changed error title, a redirect — which is exactly the enumeration
+signal. Identifiers whose records float to the top are your enumerated-existing set; a flat ranking
+where nothing scores above the cluster means the interface is **not** enumerable on the attributes
+captured (re-check timing, which the oracle does not model — see §6). This is the N-probe
+generalisation of the two-request `diff` shown in §2–§5.
 
 ## What to Record
 

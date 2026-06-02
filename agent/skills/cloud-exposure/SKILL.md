@@ -22,7 +22,7 @@ A public bucket is not automatically critical. Severity rides on **what is in th
 
 - `aith assess kali exec -- curl ...` for the bucket listing and sample object pulls (use `--technique INFO-DISCLOSURE --probe-kind fingerprint --phase recon --timeout 60`)
 - `aith assess kali exec -- aws s3 ls s3://<bucket> --no-sign-request` and `aws s3 cp` for AWS listings (or `gsutil ls` / `az storage blob list` for GCS/Azure)
-- `aith assess kali trufflehog filesystem <dir>` for offline secret scanning over a downloaded sample (host-side tool, not target-facing)
+- `aith assess kali exec -- trufflehog filesystem <dir>` for offline secret scanning over a downloaded sample (host-side tool, not target-facing)
 - `aith assess agent start-swarm` for fanning corpus-scale source review out to many parallel `code-vuln-hunter` workers — see "Swarm Dispatch" below
 
 ---

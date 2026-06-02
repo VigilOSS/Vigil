@@ -16,7 +16,7 @@ Keep it light:
 ## Root
 
 - `README.md` - operator/install guide. Why: defines the supported runtime model and engagement startup flow.
-- `AGENTS.md` - maintainer workflow. Why: local development rules, verification steps, and prompt regeneration requirements live here.
+- `AGENTS.md` - maintainer workflow. Why: the clone-to-first-dispatch newcomer walkthrough, the "add a skill / `aith assess` verb / oracle / eval case" recipes, local development rules, verification steps, and prompt regeneration requirements live here.
 - `pyproject.toml` and `src/ai_threat_hunting_cli/` - universal CLI package. Why: `aith` / `security-research` owns install/update, config, doctor/status, centralized logs, engagement creation/listing/selection (including Android APK artifact-only scope creation, blue incident engagement scaffolding through `aith blue`, and per-engagement Codex/Claude roster links), all-up local stack startup via `aith up`, orchestrator lifecycle, Kali runtime lifecycle (including resource-tier env vars and the `aith runtime resources` introspection subcommand), non-interactive `runtime shell-exec`, mitmproxy capture startup, OOB/frp/interactsh control, backup/auth helpers, and `aith assess` pass-through. The Wave 1 cutover (2026-04-26) replaced Kali MCP with `aith assess kali` host-side subcommands; `aith mcp install/status/remove/repair` is a deprecation stub that exits 2 with a pointer at the new vocabulary.
 - `docker/callback_listener.py` and `docker/start-callback.sh` - optional callback sink. Why: support OOB and exploit validation outside the main orchestrator path.
 

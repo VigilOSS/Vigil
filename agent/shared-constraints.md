@@ -247,11 +247,14 @@ Agents do their own readiness and evidence checks through `aith`:
    `server=true` and `frpc=true` means shared OOB infrastructure is ready.
 2. Inspect infrastructure logs with `aith logs oob --lines 80` when status is
    partial, callbacks are missing, or FRP/auth health is unclear.
-3. Start, list, read, and stop named per-agent clients with `aith oob client
-   start|list|logs|stop`. Per-agent interactsh clients are correlation handles,
-   not shared tunnel infrastructure, so specialists can manage them directly.
-4. Check correlated callback hits with `aith oob client logs <name> --lines 80`.
-   Use `aith logs oob --lines 80` only for raw server/FRP debugging.
+3. Start, list, and stop named per-agent listener clients with `aith oob client
+   start|list|stop`. Per-agent interactsh clients are correlation handles, not
+   shared tunnel infrastructure, so specialists can manage them directly.
+4. Get correlated callback hits with `aith oob poll --client <name>` — mint a
+   nonce-tagged URL per payload with `aith oob mint`, then `poll` matches each
+   probe to its callback. `aith oob client logs <name> --lines 80` and `aith
+   logs oob --lines 80` are raw listener-log tails for server/FRP debugging only,
+   never for correlation.
 
 When exploitation requires a reverse-shell listener or tunnel exposure:
 1. Provide the exact listener or tunnel commands in your output using `# MANUAL:`
@@ -261,8 +264,9 @@ When exploitation requires a reverse-shell listener or tunnel exposure:
 3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for OOB
    readiness, per-agent clients, tunnel exposure, and log interpretation.
 4. Proceed after the listener URL file or `aith oob` client is available; do not
-   block on the operator for checks that `aith oob status`, `aith logs oob`, or
-   `aith oob client logs` can answer directly.
+   block on the operator for checks that `aith oob status`, `aith oob poll`, or
+   the raw-debug tails (`aith logs oob`, `aith oob client logs`) can answer
+   directly.
 
 Starting, stopping, or restarting shared listener, tunnel, and OOB server processes
 belongs to the operator — these are global runtime state whose disruption breaks
@@ -612,14 +616,18 @@ and exploitation needs one, record a blocked technique via `aith assess post
 blocked-techniques <json-file>` instead of attempting to bind a port yourself.
 
 OOB callback domains are not engagement files. Get readiness and the configured
-base domain from `aith oob status --json`; create or reuse a named correlation
+base domain from `aith oob status --json`; create or reuse a named listener
 client with `aith oob client start <name> --engagement <key> --agent <agent>`;
-read the unique callback URL and hits with `aith oob client logs <name> --lines
-80`. If OOB is unavailable, fall back to time-based detection and note the
-substitution in your output.
+mint a nonce-tagged callback URL per payload with `aith oob mint` and embed its
+`http` host in the payload; then correlate each probe to its callback with `aith
+oob poll --client <name>`. `aith oob client logs <name> --lines 80` is a raw tail
+of that client's listener log for infra debugging only — it does NOT correlate
+nonces to probes, so never read it for hits. If OOB is unavailable, fall back to
+time-based detection and note the substitution in your output.
 
 Hit-checking is handled through the CLI surfaces that own those logs:
-- OOB client evidence: `aith oob client logs <name> --lines 80`
+- OOB callback correlation / evidence: `aith oob poll --client <name>` (matched probe<->callback pairs)
+- OOB raw listener-log tail (infra debugging only, not correlation): `aith oob client logs <name> --lines 80`
 - OOB infrastructure debugging: `aith logs oob --lines 80`
 - Shell listener session output: `aith runtime shell-exec "tail -80 /data/shell-<name>.log"`
 
@@ -734,6 +742,12 @@ from lifecycle closure.
 
 `agent handoff` is idempotent — call it as a checkpoint after each major step, not
 only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md` "Checkpointing".
+
+On long runs, at each handoff checkpoint — and also whenever the working context
+grows long mid-task, even between checkpoints — re-emit a compact plan-state
+digest in your response — objective / done so far / still pending / immediate
+next step (~3-5 lines) — so the objective does not drift to the bottom of a long
+context. This is additive to the handoff write, not a separate ceremony.
 
 ### Reasoning quality > response brevity
 

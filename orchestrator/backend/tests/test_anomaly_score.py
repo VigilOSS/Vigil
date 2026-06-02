@@ -304,6 +304,87 @@ class TestMissingFields:
 
 
 # ---------------------------------------------------------------------------
+# (d2) Sparse attribute — rarity denominator must be the PRESENT count, not the
+#      full population. A value shared by all records that HAVE the attribute is
+#      not rare just because most of the population omits the attribute.
+# ---------------------------------------------------------------------------
+
+class TestSparseAttributeDenominator:
+    def setup_method(self):
+        self.mod = _load_lib()
+
+    def _build_sparse_population(self):
+        """10 records identical on every attribute EXCEPT `title`, which is
+        present on only 3 of them: 2 share "common-title", 1 has "rare-title".
+        The other 7 records carry no title at all.
+
+        With the (buggy) population-size denominator, the common-title value's
+        rarity would be 1 - 2/10 = 0.8 — wrongly inflated because 7 records
+        merely *lack* the attribute.  With the correct present-count denominator
+        (3 records have a title) it is 1 - 2/3 ≈ 0.333.
+        """
+        records = []
+        for i in range(10):
+            rec = {
+                "url": f"https://example.com/page{i}",
+                "status": "200",
+                "content_length": 4096,
+                "content_type": "text/html",
+                "words": 300,
+                "lines": 80,
+                "headers": {"server": "nginx"},
+            }
+            if i in (0, 1):
+                rec["title"] = "common-title"
+            elif i == 2:
+                rec["title"] = "rare-title"
+            # i in 3..9 → no title key at all
+            records.append(rec)
+        return records
+
+    def test_common_among_present_scores_low_rarity(self):
+        """A title shared by all-but-one of the records that HAVE a title must
+        score low — well below what the buggy population denominator would give
+        (0.8).  The fixed present-count denominator yields ~0.333.
+        """
+        population = self._build_sparse_population()
+        ranked = self.mod.score_population(population)
+        by_url = {r["url"]: r for r in ranked}
+
+        common = by_url["https://example.com/page0"]
+        # title is the only varying attribute (weight 1.0 for a 2-value split),
+        # so the score is exactly the rarity. Under the present-count denominator
+        # that is 1 - 2/3 ≈ 0.333; the buggy 1 - 2/10 = 0.8 would fail this bound.
+        assert common["anomaly_score"] < 0.5, (
+            "Common-among-present title scored too high — denominator is using "
+            f"population size, not the present count. score={common['anomaly_score']}"
+        )
+
+    def test_rare_value_still_ranks_above_common(self):
+        """Relative ranking must be preserved: the genuinely-rare title (count 1
+        of 3 present) still outranks the common one (count 2 of 3 present).
+        """
+        population = self._build_sparse_population()
+        ranked = self.mod.score_population(population)
+        by_url = {r["url"]: r for r in ranked}
+        rare = by_url["https://example.com/page2"]
+        common = by_url["https://example.com/page0"]
+        assert rare["anomaly_score"] > common["anomaly_score"], (
+            "Rare value must score higher than the common-among-present value"
+        )
+
+    def test_records_lacking_attribute_unaffected_by_it(self):
+        """Records that omit `title` get no title contribution (None → skip);
+        with title as the only varying attribute they score 0.
+        """
+        population = self._build_sparse_population()
+        ranked = self.mod.score_population(population)
+        by_url = {r["url"]: r for r in ranked}
+        no_title = by_url["https://example.com/page5"]
+        assert no_title["anomaly_score"] == 0.0
+
+
+# ---------------------------------------------------------------------------
 # (e) CLI smoke tests — file input and stdin
 # ---------------------------------------------------------------------------
 

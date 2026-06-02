@@ -29,7 +29,15 @@ from app.api.assessment import (  # noqa: E402
     ProbeRunRecordRequest,
 )
 from app.api.code_analysis import AnalysisResultRecord, CodeFileClassification  # noqa: E402
+from app.services.state_manager._common import VerificationDisposition  # noqa: E402
 from assess.lib.contracts import get_contract  # noqa: E402
+
+
+# Sourced from the canonical backend StrEnum so the agent-side overlay can never
+# drift from the values the backend actually persists + serializes on GET
+# /findings (e.g. ``pending_runtime_proof``). Enum iteration order is stable, so
+# this keeps the generated schema deterministic.
+_VERIFICATION_DISPOSITION_VALUES = [member.value for member in VerificationDisposition]
 
 
 @dataclass(frozen=True)
@@ -338,7 +346,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "enum": ["unreviewed", "verified", "disputed"],
                     },
                     "verification_disposition": {
-                        "enum": ["none", "confirmed", "downgraded", "false_positive"],
+                        "enum": list(_VERIFICATION_DISPOSITION_VALUES),
                     },
                     "defect_family": {"maxLength": 128},
                     "root_cause_key": {"maxLength": 256},

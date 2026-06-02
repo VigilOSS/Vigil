@@ -104,22 +104,31 @@ rather than restating canonical state.
 
 ## OOB Callback Confirmation
 
-When fuzzing blind injection surfaces with OOB payloads, check OOB readiness and
-callback logs through `aith` after each batch. This keeps routine client/log
-checks with the specialist while leaving shared FRP/server repair with the
-operator.
+When fuzzing blind injection surfaces with OOB payloads, run the **mint → fire →
+poll** loop through `aith` after each batch — do not eyeball the raw listener
+log. This keeps routine mint/poll correlation with the specialist while leaving
+shared FRP/server repair with the operator.
 
 ```bash
-# Shared infrastructure readiness
+# 1. Confirm shared infrastructure is healthy, then ensure a named client is up
 aith oob status --json
-aith logs oob --lines 80
+aith oob client list
+aith oob client start <name> --engagement <engagement-key> --agent fuzzer
 
-# Correlated hits only
-aith oob client logs <name> --lines 80
+# 2. MINT a nonce-tagged callback URL per probe and record its correlation
+#    context. Capture the http URL it prints and substitute it into the payload.
+aith oob mint --technique <t> --target-url <url> --param <p>
+
+# 3. POLL — parse the client's interaction log and correlate probe<->callback.
+aith oob poll --client <name>
 ```
 
-Use the unique callback URL from `aith oob client logs <name> --lines 80` in
-blind payloads. A callback hit in that client log confirms the vulnerability.
+`aith oob poll --client <name>` prints `matched <N> unmatched <M>` then one line
+per correlated hit carrying the technique + target you minted with, so a hit is
+self-documenting and names the surface that fired. A matched probe<->callback
+pair confirms the vulnerability. `aith oob client logs <name> --lines 80` (and
+`aith logs oob --lines 80`) is a raw tail of the listener log for infra
+debugging only — never read it for correlation.
 
 If OOB is unavailable, fall back to time-based detection (sleep payloads). If
 time-based also fails and OOB would have been decisive, record a runtime issue

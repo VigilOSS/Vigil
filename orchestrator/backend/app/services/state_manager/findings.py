@@ -1,0 +1,1183 @@
+from __future__ import annotations
+
+from typing import Any
+from fastapi import HTTPException, status
+
+from ..events import _engagement_or_404
+from ..search import (
+    canonical_finding_alias,
+    is_canonical_finding_slug,
+)
+
+from . import _common
+from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, VERIFICATION_DISPOSITION_RANK, VERIFICATION_STATE_RANK, WORKFLOW_STATUS_RANK, VerificationDisposition, VerificationState, WorkflowStatus, _finding_confidence_tuple, _finding_not_found, _json_object, _json_text, _merge_object_text, _normalize_severity, _normalize_verification_disposition, _normalize_verification_state, _normalize_workflow_status, _require_canonical_finding_slug, _resolve_existing_finding_slug, _row_verification_disposition, _row_verification_state, _row_workflow_status, _serialize_finding_record, _slugify, _stronger_severity
+from .links import _is_root_cause_link, _upsert_finding_link
+
+
+
+_FINDING_PREFIX_BY_SOURCE = {
+    "exploit-developer": "EX",
+    "vulnerability-analyst": "VA",
+    "source-analyzer": "SA",
+    "recon-specialist": "RE",
+    "fuzzer": "FZ",
+    "osint-analyst": "OS",
+    "code-architect": "CA",
+    "code-vuln-hunter": "CH",
+    "code-variant-hunter": "CV",
+    "code-vuln-verifier": "VF",
+    "surface-collector": "SC",
+    "code-fuzz-engineer": "CF",
+    "operator": "OP",
+    "operator-review": "OR",
+}
+
+def _coalesce_workflow_status(existing: str, incoming: str, *, explicit_workflow_override: bool = False) -> WorkflowStatus:
+    existing_normalized = _normalize_workflow_status(existing)
+    incoming_normalized = _normalize_workflow_status(incoming)
+    if existing_normalized == "merged":
+        return existing_normalized
+    if explicit_workflow_override:
+        return incoming_normalized
+    if incoming_normalized == "merged":
+        return incoming_normalized
+    if incoming_normalized == "false_positive":
+        return incoming_normalized
+    if existing_normalized == "false_positive" and not explicit_workflow_override:
+        # Keep prior verifier suppression sticky for semantic rediscovery so the same
+        # location/family does not silently resurrect as a new live finding.
+        return existing_normalized
+    return (
+        incoming_normalized
+        if WORKFLOW_STATUS_RANK[incoming_normalized] >= WORKFLOW_STATUS_RANK[existing_normalized]
+        else existing_normalized
+    )
+
+def _coalesce_verification_state(existing: str, incoming: str, *, explicit_override: bool = False) -> VerificationState:
+    existing_normalized = _normalize_verification_state(existing)
+    incoming_normalized = _normalize_verification_state(incoming)
+    if explicit_override:
+        return incoming_normalized
+    return (
+        incoming_normalized
+        if VERIFICATION_STATE_RANK[incoming_normalized] >= VERIFICATION_STATE_RANK[existing_normalized]
+        else existing_normalized
+    )
+
+def _coalesce_verification_disposition(existing: str, incoming: str, *, explicit_override: bool = False) -> VerificationDisposition:
+    existing_normalized = _normalize_verification_disposition(existing)
+    incoming_normalized = _normalize_verification_disposition(incoming)
+    if incoming_normalized == "false_positive":
+        return incoming_normalized
+    if existing_normalized == "false_positive" and not explicit_override:
+        return existing_normalized
+    if explicit_override:
+        return incoming_normalized
+    return (
+        incoming_normalized
+        if VERIFICATION_DISPOSITION_RANK[incoming_normalized] >= VERIFICATION_DISPOSITION_RANK[existing_normalized]
+        else existing_normalized
+    )
+
+def _raise_stale_finding_conflict() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="finding changed since it was loaded; refetch and retry",
+    )
+
+def _finding_state_snapshot(row: dict[str, Any] | Any) -> dict[str, str]:
+    if isinstance(row, dict):
+        severity_value = row.get("severity", "info")
+    else:
+        severity_value = row["severity"]
+    return {
+        "workflow_status": _row_workflow_status(row),
+        "verification_state": _row_verification_state(row),
+        "verification_disposition": _row_verification_disposition(row),
+        "severity": _normalize_severity(str(severity_value)),
+    }
+
+def _finding_state_changed(before: dict[str, str] | None, after: dict[str, str]) -> bool:
+    if before is None:
+        return True
+    return any(before[key] != after[key] for key in after)
+
+def _infer_transition_action(before: dict[str, str] | None, after: dict[str, str]) -> str:
+    if before is None:
+        return "created"
+    if after["workflow_status"] == "merged" and before["workflow_status"] != "merged":
+        return "workflow_merged"
+    if after["workflow_status"] == "reported" and before["workflow_status"] != "reported":
+        return "workflow_reported"
+    if after["workflow_status"] == "blocked" and before["workflow_status"] != "blocked":
+        return "workflow_blocked"
+    if (
+        after["verification_state"] == "verified"
+        and after["verification_disposition"] == "false_positive"
+        and (
+            before["verification_disposition"] != "false_positive"
+            or before["workflow_status"] != "false_positive"
+        )
+    ):
+        return "verified_false_positive"
+    if (
+        before["workflow_status"] == "false_positive"
+        or before["verification_disposition"] == "false_positive"
+    ) and (
+        after["workflow_status"] != "false_positive"
+        and after["verification_disposition"] != "false_positive"
+    ):
+        return "operator_override"
+    if after["verification_state"] == "disputed" and before["verification_state"] != "disputed":
+        return "verification_disputed"
+    if after["verification_disposition"] == "downgraded" and before["verification_disposition"] != "downgraded":
+        return "verified_downgraded"
+    if (
+        after["verification_state"] == "verified"
+        and after["verification_disposition"] == "confirmed"
+        and (
+            before["verification_state"] != "verified"
+            or before["verification_disposition"] != "confirmed"
+        )
+    ):
+        return "verified_confirmed"
+    if (
+        after["verification_disposition"] == "pending_runtime_proof"
+        and before["verification_disposition"] != "pending_runtime_proof"
+    ):
+        return "verified_pending_runtime_proof"
+    return "operator_override"
+
+def _default_transition_reason(action: str, after: dict[str, str]) -> str:
+    if action == "created":
+        return "Finding created."
+    if action == "verified_confirmed":
+        return "Verification confirmed the finding."
+    if action == "verified_pending_runtime_proof":
+        return "Verification accepted static evidence; runtime proof outstanding."
+    if action == "verified_downgraded":
+        return "Verification downgraded the finding severity."
+    if action == "verified_false_positive":
+        return "Verification marked the finding as a false positive."
+    if action == "verification_disputed":
+        return "Verification disputed the current finding assessment."
+    if action == "workflow_reported":
+        return "Finding included in report output."
+    if action == "workflow_merged":
+        return "Finding merged into another canonical record."
+    if action == "workflow_blocked":
+        return "Finding workflow moved to blocked."
+    return f"Finding state updated to {after['workflow_status']}."
+
+def _record_finding_transition(
+    connection,
+    *,
+    engagement_id: int,
+    finding_id: int,
+    actor: str,
+    action: str,
+    before: dict[str, str] | None,
+    after: dict[str, str],
+    reason_code: str,
+    reason_text: str,
+    artifact_ref: str,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    cursor = connection.execute(
+        """
+        INSERT INTO assessment_finding_transitions (
+            engagement_id, finding_id, actor, action,
+            from_workflow_status, to_workflow_status,
+            from_verification_state, to_verification_state,
+            from_verification_disposition, to_verification_disposition,
+            from_severity, to_severity,
+            reason_code, reason_text, artifact_ref, metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            engagement_id,
+            finding_id,
+            actor,
+            action,
+            None if before is None else before["workflow_status"],
+            after["workflow_status"],
+            None if before is None else before["verification_state"],
+            after["verification_state"],
+            None if before is None else before["verification_disposition"],
+            after["verification_disposition"],
+            None if before is None else before["severity"],
+            after["severity"],
+            reason_code,
+            reason_text,
+            artifact_ref,
+            _json_text(metadata),
+        ),
+    )
+    row = connection.execute("SELECT * FROM assessment_finding_transitions WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    assert row is not None
+    return dict(row)
+
+def _finding_slug(
+    connection,
+    engagement_id: int,
+    slug: str | None,
+    title: str,
+    canonical_location: str,
+    source_name: str,
+) -> str:
+    if slug:
+        _require_canonical_finding_slug(slug, field="slug")
+        return slug
+    prefix = _FINDING_PREFIX_BY_SOURCE.get(str(source_name or "").strip())
+    if not prefix:
+        base = _slugify(f"{title}-{canonical_location}")
+        candidate = base
+        suffix = 2
+        while connection.execute(
+            "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement_id, candidate),
+        ).fetchone():
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        return candidate
+    rows = connection.execute(
+        "SELECT slug FROM assessment_findings WHERE engagement_id = ? AND slug LIKE ?",
+        (engagement_id, f"{prefix}-%"),
+    ).fetchall()
+    max_id = 0
+    for row in rows:
+        row_slug = str(row["slug"] or "")
+        if is_canonical_finding_slug(row_slug) and row_slug.startswith(f"{prefix}-"):
+            max_id = max(max_id, int(row_slug.rsplit("-", 1)[1]))
+    return f"{prefix}-{max_id + 1:03d}"
+
+def _ensure_finding_slugs_exist(connection, engagement_id: int, slugs: list[str] | None) -> None:
+    if not slugs:
+        return
+    for slug in slugs:
+        if not connection.execute(
+            "SELECT 1 FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement_id, slug),
+        ).fetchone():
+            raise _finding_not_found(connection, engagement_id, slug)
+
+def _semantic_finding_match(
+    connection,
+    engagement_id: int,
+    *,
+    slug: str | None,
+    defect_family: str,
+    root_cause_key: str,
+    canonical_location: str,
+    auth_context: str,
+    title: str,
+) -> dict[str, Any] | None:
+    if slug:
+        row = connection.execute(
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement_id, slug),
+        ).fetchone()
+        if row is not None:
+            return dict(row)
+    if defect_family and root_cause_key:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND status != 'merged'
+              AND defect_family = ?
+              AND root_cause_key = ?
+              AND auth_context = ?
+              AND canonical_location = ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (engagement_id, defect_family, root_cause_key, auth_context, canonical_location),
+        ).fetchone()
+        if row is not None:
+            return dict(row)
+    row = connection.execute(
+        (
+            """
+            SELECT *
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND status != 'merged'
+              AND title = ?
+              AND canonical_location = ?
+              AND auth_context = ?
+            """
+            + (" AND defect_family = ?" if defect_family else "")
+            + """
+            ORDER BY CASE WHEN status = 'false_positive' THEN 0 ELSE 1 END, id ASC
+            LIMIT 1
+            """
+        ),
+        (
+            (engagement_id, title, canonical_location, auth_context, defect_family)
+            if defect_family
+            else (engagement_id, title, canonical_location, auth_context)
+        ),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+def create_finding(
+    engagement_id: int,
+    *,
+    slug: str | None,
+    title: str,
+    severity: str,
+    workflow_status: str,
+    verification_state: str,
+    verification_disposition: str,
+    defect_family: str,
+    root_cause_key: str,
+    auth_context: str,
+    canonical_location: str,
+    summary: str,
+    evidence_ref: str,
+    notes: str,
+    source_name: str,
+    details: dict[str, Any] | None,
+    provenance: dict[str, Any] | None,
+    evidence_type: str | None = None,
+    request_variant_id: int | None,
+    service_id: int | None,
+    surface_id: int | None,
+    links: list[dict[str, Any]] | None,
+    explicit_workflow_override: bool = False,
+    explicit_verification_state_override: bool = False,
+    explicit_verification_disposition_override: bool = False,
+    explicit_severity_override: bool = False,
+    allow_existing_noncanonical_slug: bool = False,
+    transition_action: str | None = None,
+    transition_reason_code: str = "",
+    transition_reason_text: str = "",
+    transition_artifact_ref: str = "",
+    transition_metadata: dict[str, Any] | None = None,
+    expected_updated_at: str | None = None,
+    notes_mode: str = "append",
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    if slug:
+        slug = str(slug).strip()
+        if not allow_existing_noncanonical_slug:
+            slug = _require_canonical_finding_slug(slug, field="slug")
+    incoming_workflow_status = _normalize_workflow_status(workflow_status)
+    incoming_verification_state = _normalize_verification_state(verification_state)
+    incoming_verification_disposition = _normalize_verification_disposition(verification_disposition)
+    incoming_severity = _normalize_severity(severity)
+    with _common.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        existing = _semantic_finding_match(
+            connection,
+            engagement.id,
+            slug=slug,
+            defect_family=defect_family,
+            root_cause_key=root_cause_key,
+            canonical_location=canonical_location,
+            auth_context=auth_context,
+            title=title,
+        )
+        before_state = _finding_state_snapshot(existing) if existing is not None else None
+        if existing is None:
+            resolved_slug = _finding_slug(connection, engagement.id, slug, title, canonical_location, source_name)
+            cursor = connection.execute(
+                """
+                INSERT INTO assessment_findings (
+                    engagement_id, slug, title, severity, status, verification_state, verification_disposition, defect_family, root_cause_key, auth_context,
+                    canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    engagement.id,
+                    resolved_slug,
+                    title,
+                    incoming_severity,
+                    incoming_workflow_status,
+                    incoming_verification_state,
+                    incoming_verification_disposition,
+                    defect_family,
+                    root_cause_key,
+                    auth_context,
+                    canonical_location,
+                    source_name,
+                    summary,
+                    evidence_ref,
+                    notes,
+                    _json_text(details),
+                    _json_text(provenance),
+                    evidence_type,
+                ),
+            )
+            row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        else:
+            if expected_updated_at is not None and str(existing["updated_at"]) != expected_updated_at:
+                _raise_stale_finding_conflict()
+            existing_workflow = _row_workflow_status(existing)
+            existing_verification_state = _row_verification_state(existing)
+            existing_verification_disposition = _row_verification_disposition(existing)
+            connection.execute(
+                """
+                UPDATE assessment_findings
+                SET title = ?,
+                    severity = ?,
+                    status = ?,
+                    verification_state = ?,
+                    verification_disposition = ?,
+                    defect_family = COALESCE(NULLIF(?, ''), defect_family),
+                    root_cause_key = COALESCE(NULLIF(?, ''), root_cause_key),
+                    auth_context = COALESCE(NULLIF(?, ''), auth_context),
+                    canonical_location = COALESCE(NULLIF(?, ''), canonical_location),
+                    source_name = COALESCE(NULLIF(?, ''), source_name),
+                    summary = CASE WHEN ? = '' THEN summary ELSE ? END,
+                    evidence_ref = COALESCE(NULLIF(?, ''), evidence_ref),
+                    notes = ?,
+                    details_json = ?,
+                    provenance_json = ?,
+                    evidence_type = COALESCE(?, evidence_type),
+                    last_seen_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    title,
+                    incoming_severity if explicit_severity_override else _stronger_severity(existing["severity"], incoming_severity),
+                    _coalesce_workflow_status(
+                        existing_workflow,
+                        incoming_workflow_status,
+                        explicit_workflow_override=explicit_workflow_override,
+                    ),
+                    _coalesce_verification_state(
+                        existing_verification_state,
+                        incoming_verification_state,
+                        explicit_override=explicit_verification_state_override,
+                    ),
+                    _coalesce_verification_disposition(
+                        existing_verification_disposition,
+                        incoming_verification_disposition,
+                        explicit_override=explicit_verification_disposition_override,
+                    ),
+                    defect_family,
+                    root_cause_key,
+                    auth_context,
+                    canonical_location,
+                    source_name,
+                    summary,
+                    summary,
+                    evidence_ref,
+                    # Default appends (record-finding/verify-finding checkpoints);
+                    # notes_mode="replace" overwrites so stale text can be scrubbed.
+                    notes if notes_mode == "replace" else _common._append_notes(existing["notes"], notes),
+                    _merge_object_text(existing["details_json"], details),
+                    _merge_object_text(existing["provenance_json"], provenance),
+                    evidence_type,
+                    existing["id"],
+                ),
+            )
+            row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (existing["id"],)).fetchone()
+        assert row is not None
+        finding = dict(row)
+        after_state = _finding_state_snapshot(finding)
+        derived_links = list(links or [])
+        if request_variant_id is not None:
+            derived_links.append({"link_kind": "related", "target_kind": "request_variant", "target_id": request_variant_id, "target_ref": "", "notes": "", "provenance": provenance or {}})
+        if service_id is not None:
+            derived_links.append({"link_kind": "related", "target_kind": "service", "target_id": service_id, "target_ref": "", "notes": "", "provenance": provenance or {}})
+        if surface_id is not None:
+            derived_links.append({"link_kind": "related", "target_kind": "surface", "target_id": surface_id, "target_ref": "", "notes": "", "provenance": provenance or {}})
+        if evidence_ref:
+            derived_links.append({"link_kind": "evidence", "target_kind": "evidence_artifact", "target_id": None, "target_ref": evidence_ref, "notes": "", "provenance": provenance or {}})
+        finding_links = [
+            _upsert_finding_link(
+                connection,
+                engagement.id,
+                finding_id=finding["id"],
+                link_kind=str(item.get("link_kind", "related")),
+                target_kind=str(item.get("target_kind", "unknown")),
+                target_id=item.get("target_id"),
+                target_ref=str(item.get("target_ref", "")),
+                notes=str(item.get("notes", "")),
+                provenance=item.get("provenance"),
+            )
+            for item in derived_links
+        ]
+        transition = None
+        if _finding_state_changed(before_state, after_state):
+            action = transition_action or _infer_transition_action(before_state, after_state)
+            actor = source_name or str((provenance or {}).get("agent_name", "") or (provenance or {}).get("verified_by", "") or (provenance or {}).get("reviewed_by", ""))
+            transition = _record_finding_transition(
+                connection,
+                engagement_id=engagement.id,
+                finding_id=int(finding["id"]),
+                actor=actor,
+                action=action,
+                before=before_state,
+                after=after_state,
+                reason_code=transition_reason_code,
+                reason_text=transition_reason_text or notes or _default_transition_reason(action, after_state),
+                artifact_ref=transition_artifact_ref or evidence_ref,
+                metadata=transition_metadata,
+            )
+    if evidence_ref:
+        artifact_id = _common._register_artifact_reference(
+            engagement.id,
+            evidence_ref,
+            kind="evidence",
+            producer_agent_role=source_name or None,
+            related_finding_slug=str(finding["slug"]),
+        )
+        with _common.get_connection() as connection:
+            connection.execute(
+                "UPDATE assessment_findings SET evidence_artifact_id = ? WHERE id = ?",
+                (artifact_id, int(finding["id"])),
+            )
+            finding = connection.execute(
+                "SELECT * FROM assessment_findings WHERE id = ?",
+                (int(finding["id"]),),
+            ).fetchone()
+    for link in finding_links:
+        if str(link.get("target_kind") or "") in {"evidence_artifact", "artifact"} and link.get("target_ref"):
+            _common._register_artifact_reference(
+                engagement.id,
+                str(link.get("target_ref") or ""),
+                kind="evidence",
+                producer_agent_role=source_name or None,
+                related_finding_slug=str(finding["slug"]),
+            )
+    return {
+        "finding": _serialize_finding_record(finding),
+        "links": finding_links,
+        "transition": transition,
+    }
+
+def update_finding(
+    engagement_id: int,
+    *,
+    slug: str,
+    title: str,
+    severity: str,
+    workflow_status: str,
+    verification_state: str,
+    verification_disposition: str,
+    defect_family: str,
+    root_cause_key: str,
+    auth_context: str,
+    canonical_location: str,
+    summary: str,
+    evidence_ref: str,
+    notes: str,
+    source_name: str,
+    details: dict[str, Any] | None,
+    provenance: dict[str, Any] | None,
+    evidence_type: str | None = None,
+) -> dict[str, Any]:
+    result = create_finding(
+        engagement_id,
+        slug=slug,
+        title=title,
+        severity=severity,
+        workflow_status=workflow_status,
+        verification_state=verification_state,
+        verification_disposition=verification_disposition,
+        defect_family=defect_family,
+        root_cause_key=root_cause_key,
+        auth_context=auth_context,
+        canonical_location=canonical_location,
+        summary=summary,
+        evidence_ref=evidence_ref,
+        notes=notes,
+        source_name=source_name,
+        details=details,
+        provenance=provenance,
+        evidence_type=evidence_type,
+        request_variant_id=None,
+        service_id=None,
+        surface_id=None,
+        links=None,
+        explicit_workflow_override=workflow_status is not None,
+        explicit_verification_state_override=verification_state is not None,
+        explicit_verification_disposition_override=verification_disposition is not None,
+        explicit_severity_override=severity is not None,
+        allow_existing_noncanonical_slug=True,
+    )
+    return result["finding"]
+
+def patch_finding(
+    engagement_id: int,
+    *,
+    slug: str,
+    title: str | None = None,
+    severity: str | None = None,
+    workflow_status: str | None = None,
+    verification_state: str | None = None,
+    verification_disposition: str | None = None,
+    defect_family: str | None = None,
+    root_cause_key: str | None = None,
+    auth_context: str | None = None,
+    canonical_location: str | None = None,
+    summary: str | None = None,
+    evidence_ref: str | None = None,
+    notes: str | None = None,
+    source_name: str | None = None,
+    details: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None,
+    evidence_type: str | None = None,
+    transition_action: str | None = None,
+    transition_reason_code: str = "",
+    transition_reason_text: str = "",
+    transition_artifact_ref: str = "",
+    transition_metadata: dict[str, Any] | None = None,
+    allow_verification_mutation: bool = False,
+    expected_updated_at: str | None = None,
+    notes_mode: str = "append",
+) -> dict[str, Any]:
+    if notes_mode == "replace" and notes is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="notes_mode='replace' requires notes",
+        )
+
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
+        existing = connection.execute(
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, slug),
+        ).fetchone()
+
+    existing_workflow = _row_workflow_status(existing)
+    current_updated_at = str(existing["updated_at"])
+
+    if not allow_verification_mutation:
+        if verification_state is not None or verification_disposition is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="verification lifecycle changes must use POST /findings/{slug}/verify",
+            )
+        if workflow_status in {"false_positive", "merged"}:
+            detail = (
+                "false_positive workflow changes must use POST /findings/{slug}/verify"
+                if workflow_status == "false_positive"
+                else "merged workflow changes must use POST /findings/merge"
+            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+        if existing_workflow == "merged" and workflow_status is not None and workflow_status != "merged":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="merged findings cannot be reopened via patch",
+            )
+        if existing_workflow == "false_positive" and workflow_status is not None and workflow_status != "false_positive":
+            verification_state = "unreviewed"
+            verification_disposition = "none"
+
+    return create_finding(
+        engagement.id,
+        slug=slug,
+        title=title if title is not None else str(existing["title"]),
+        severity=severity if severity is not None else str(existing["severity"]),
+        workflow_status=workflow_status if workflow_status is not None else _row_workflow_status(existing),
+        verification_state=verification_state if verification_state is not None else _row_verification_state(existing),
+        verification_disposition=verification_disposition if verification_disposition is not None else _row_verification_disposition(existing),
+        defect_family=defect_family or "",
+        root_cause_key=root_cause_key or "",
+        auth_context=auth_context or "",
+        canonical_location=canonical_location or "",
+        summary="" if summary is None else summary,
+        evidence_ref=evidence_ref or "",
+        notes="" if notes is None else notes,
+        source_name=source_name or "",
+        details=details,
+        provenance=provenance,
+        evidence_type=evidence_type,
+        request_variant_id=None,
+        service_id=None,
+        surface_id=None,
+        links=None,
+        explicit_workflow_override=workflow_status is not None,
+        explicit_verification_state_override=verification_state is not None,
+        explicit_verification_disposition_override=verification_disposition is not None,
+        explicit_severity_override=severity is not None,
+        allow_existing_noncanonical_slug=True,
+        transition_action=transition_action,
+        transition_reason_code=transition_reason_code,
+        transition_reason_text=transition_reason_text,
+        transition_artifact_ref=transition_artifact_ref,
+        transition_metadata=transition_metadata,
+        expected_updated_at=expected_updated_at or current_updated_at,
+        notes_mode=notes_mode,
+    )
+
+def verify_finding(
+    engagement_id: int,
+    *,
+    slug: str,
+    disposition: str,
+    reason_code: str,
+    reason_text: str,
+    source_name: str,
+    evidence_ref: str,
+    notes: str,
+    details: dict[str, Any] | None,
+    provenance: dict[str, Any] | None,
+    artifact_ref: str,
+    new_severity: str | None = None,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    if disposition == "disputed":
+        normalized_disposition = "none"
+    else:
+        normalized_disposition = _normalize_verification_disposition(disposition)
+    if normalized_disposition == "none" and disposition != "disputed":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="verification disposition cannot be none")
+
+    with _common.get_connection() as connection:
+        slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
+        existing = connection.execute(
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, slug),
+        ).fetchone()
+
+    expected_updated_at = str(existing["updated_at"])
+    existing_workflow = _row_workflow_status(existing)
+    if existing_workflow == "merged":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="merged findings cannot be re-verified")
+    target_workflow = existing_workflow if existing_workflow not in {"false_positive", "merged"} else "active"
+    target_verification_state = "verified"
+    target_severity = str(existing["severity"])
+    transition_action = "verified_confirmed"
+    transition_metadata: dict[str, Any] = {}
+    details_payload = dict(details or {})
+
+    if normalized_disposition == "downgraded":
+        if not new_severity:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="downgraded verification requires new_severity")
+        normalized_new_severity = _normalize_severity(new_severity)
+        if SEVERITY_RANK[normalized_new_severity] >= SEVERITY_RANK[_normalize_severity(str(existing["severity"]))]:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="new_severity must be lower than the current severity")
+        target_severity = normalized_new_severity
+        transition_action = "verified_downgraded"
+        transition_metadata["previous_severity"] = _normalize_severity(str(existing["severity"]))
+    elif normalized_disposition == "false_positive":
+        if not details_payload.get("kill_reason") or details_payload.get("kill_check") is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="false_positive verification requires details.kill_reason and details.kill_check",
+            )
+        target_workflow = "false_positive"
+        transition_action = "verified_false_positive"
+    elif normalized_disposition == "confirmed":
+        transition_action = "verified_confirmed"
+    elif normalized_disposition == "pending_runtime_proof":
+        # Analyst accepted the static/code evidence; only runtime proof is
+        # outstanding. Mark verified so it leaves the unreviewed DoD queue while
+        # report-readiness still excludes it on disposition (pending != confirmed
+        # /downgraded), keeping it in the holding area until proven.
+        target_verification_state = "verified"
+        transition_action = "verified_pending_runtime_proof"
+    else:
+        target_verification_state = "disputed"
+        normalized_disposition = "none"
+        transition_action = "verification_disputed"
+
+    result = patch_finding(
+        engagement.id,
+        slug=slug,
+        severity=target_severity,
+        workflow_status=target_workflow,
+        verification_state=target_verification_state,
+        verification_disposition=normalized_disposition,
+        evidence_ref=evidence_ref or None,
+        notes=notes,
+        source_name=source_name or None,
+        details=details_payload,
+        provenance=provenance,
+        transition_action=transition_action,
+        transition_reason_code=reason_code,
+        transition_reason_text=reason_text,
+        transition_artifact_ref=artifact_ref or evidence_ref,
+        transition_metadata=transition_metadata or None,
+        allow_verification_mutation=True,
+        expected_updated_at=expected_updated_at,
+    )
+    if artifact_ref:
+        _common._register_artifact_reference(
+            engagement.id,
+            artifact_ref,
+            kind="verification-artifact",
+            producer_agent_role=source_name or None,
+            related_finding_slug=slug,
+        )
+    return result
+
+def merge_findings(
+    engagement_id: int,
+    *,
+    source_slug: str,
+    target_slug: str,
+    reason: str,
+    source_name: str,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        source = connection.execute(
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, source_slug),
+        ).fetchone()
+        target = connection.execute(
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, target_slug),
+        ).fetchone()
+        if source is None or target is None:
+            missing = source_slug if source is None else target_slug
+            raise _finding_not_found(connection, engagement.id, missing)
+        if source["id"] == target["id"]:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="cannot merge a finding into itself")
+        if _row_workflow_status(target) == "false_positive" and _row_workflow_status(source) != "false_positive":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="cannot merge a live finding into a false_positive target",
+            )
+        source_children = connection.execute(
+            """
+            SELECT findings.slug
+            FROM assessment_finding_links AS links
+            JOIN assessment_findings AS findings ON findings.id = links.finding_id
+            WHERE links.engagement_id = ?
+              AND links.link_kind = ?
+              AND links.target_kind = 'finding'
+              AND links.target_ref = ?
+              AND findings.status != 'merged'
+            """,
+            (engagement.id, ROOT_CAUSE_LINK_KIND, source_slug),
+        ).fetchall()
+        if source_children:
+            child_slugs = ", ".join(str(row["slug"]) for row in source_children)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"cannot merge root cause {source_slug} while siblings remain linked: {child_slugs}",
+            )
+        source_root_link = connection.execute(
+            """
+            SELECT target_ref
+            FROM assessment_finding_links
+            WHERE engagement_id = ?
+              AND finding_id = ?
+              AND link_kind = ?
+              AND target_kind = 'finding'
+            LIMIT 1
+            """,
+            (engagement.id, int(source["id"]), ROOT_CAUSE_LINK_KIND),
+        ).fetchone()
+        if source_root_link is not None and str(source_root_link["target_ref"]) != target_slug:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"cannot merge sibling {source_slug} into {target_slug}; "
+                    f"clear or relink its root cause first"
+                ),
+            )
+        source_confidence = _finding_confidence_tuple(source)
+        target_confidence = _finding_confidence_tuple(target)
+        source_updated_at = str(source["updated_at"])
+        target_updated_at = str(target["updated_at"])
+        source_stronger = source_confidence > target_confidence
+        source_workflow = _row_workflow_status(source)
+        target_workflow = _row_workflow_status(target)
+        source_verification_state = _row_verification_state(source)
+        target_verification_state = _row_verification_state(target)
+        source_verification_disposition = _row_verification_disposition(source)
+        target_verification_disposition = _row_verification_disposition(target)
+        source_before = _finding_state_snapshot(source)
+        target_before = _finding_state_snapshot(target)
+        merged_notes = _common._append_notes(
+            _common._append_notes(target["notes"], f"Merged {source_slug}: {reason}"),
+            source["notes"],
+        )
+        merged_details = _merge_object_text(target["details_json"], _json_object(source["details_json"]))
+        merged_provenance_payload = _json_object(target["provenance_json"])
+        merged_provenance_payload.update(_json_object(source["provenance_json"]))
+        merged_provenance_payload["merge"] = {
+            "source_slug": source_slug,
+            "target_slug": target_slug,
+            "reason": reason,
+            "source_name": source_name,
+        }
+        source_links = connection.execute(
+            "SELECT * FROM assessment_finding_links WHERE engagement_id = ? AND finding_id = ?",
+            (engagement.id, source["id"]),
+        ).fetchall()
+        source_cursor = connection.execute(
+            """
+            UPDATE assessment_findings
+            SET status = 'merged',
+                verification_state = 'unreviewed',
+                verification_disposition = 'none',
+                merged_into_finding_id = ?,
+                notes = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND updated_at = ?
+            """,
+            (target["id"], _common._append_notes(source["notes"], reason), source["id"], source_updated_at),
+        )
+        if source_cursor.rowcount != 1:
+            _raise_stale_finding_conflict()
+        target_cursor = connection.execute(
+            """
+            UPDATE assessment_findings
+            SET severity = ?,
+                status = ?,
+                verification_state = ?,
+                verification_disposition = ?,
+                source_name = CASE
+                    WHEN ? = '' THEN source_name
+                    WHEN ? = 1 THEN ?
+                    ELSE source_name
+                END,
+                summary = CASE
+                    WHEN summary = '' THEN ?
+                    WHEN ? = 1 AND ? != '' THEN ?
+                    ELSE summary
+                END,
+                evidence_ref = CASE
+                    WHEN evidence_ref = '' THEN ?
+                    WHEN ? = 1 AND ? != '' THEN ?
+                    ELSE evidence_ref
+                END,
+                notes = ?,
+                details_json = ?,
+                provenance_json = ?,
+                updated_at = CURRENT_TIMESTAMP,
+                last_seen_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND updated_at = ?
+            """,
+            (
+                _stronger_severity(target["severity"], source["severity"]),
+                (
+                    target_workflow
+                    if source_workflow == "false_positive" and target_workflow != "false_positive"
+                    else _coalesce_workflow_status(target_workflow, source_workflow)
+                ),
+                (
+                    target_verification_state
+                    if source_workflow == "false_positive" and target_workflow != "false_positive"
+                    else _coalesce_verification_state(target_verification_state, source_verification_state)
+                ),
+                (
+                    target_verification_disposition
+                    if source_verification_disposition == "false_positive"
+                    and target_verification_disposition != "false_positive"
+                    else _coalesce_verification_disposition(
+                        target_verification_disposition,
+                        source_verification_disposition,
+                    )
+                ),
+                source["source_name"],
+                1 if source_stronger else 0,
+                source["source_name"],
+                source["summary"],
+                1 if source_stronger else 0,
+                source["summary"],
+                source["summary"],
+                source["evidence_ref"],
+                1 if source_stronger else 0,
+                source["evidence_ref"],
+                source["evidence_ref"],
+                merged_notes,
+                merged_details,
+                _json_text(merged_provenance_payload),
+                target["id"],
+                target_updated_at,
+            ),
+        )
+        if target_cursor.rowcount != 1:
+            _raise_stale_finding_conflict()
+        for row in source_links:
+            if _is_root_cause_link(row):
+                continue
+            _upsert_finding_link(
+                connection,
+                engagement.id,
+                finding_id=target["id"],
+                link_kind=row["link_kind"],
+                target_kind=row["target_kind"],
+                target_id=row["target_id"],
+                target_ref=row["target_ref"],
+                notes=row["notes"],
+                provenance=_json_object(row["provenance_json"]),
+            )
+        connection.execute(
+            "DELETE FROM assessment_finding_links WHERE engagement_id = ? AND finding_id = ?",
+            (engagement.id, source["id"]),
+        )
+        link = _upsert_finding_link(
+            connection,
+            engagement.id,
+            finding_id=target["id"],
+            link_kind="merged_from",
+            target_kind="finding",
+            target_id=source["id"],
+            target_ref=source_slug,
+            notes=reason,
+            provenance={"source_name": source_name},
+        )
+        source_row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (source["id"],)).fetchone()
+        target_row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (target["id"],)).fetchone()
+        assert source_row is not None and target_row is not None
+        source_after = _finding_state_snapshot(source_row)
+        target_after = _finding_state_snapshot(target_row)
+        if _finding_state_changed(source_before, source_after):
+            _record_finding_transition(
+                connection,
+                engagement_id=engagement.id,
+                finding_id=int(source["id"]),
+                actor=source_name,
+                action="workflow_merged",
+                before=source_before,
+                after=source_after,
+                reason_code="merge",
+                reason_text=reason,
+                artifact_ref="",
+                metadata={"target_slug": target_slug},
+            )
+        if _finding_state_changed(target_before, target_after):
+            _record_finding_transition(
+                connection,
+                engagement_id=engagement.id,
+                finding_id=int(target["id"]),
+                actor=source_name,
+                action="operator_override",
+                before=target_before,
+                after=target_after,
+                reason_code="merge",
+                reason_text=f"Merged {source_slug} into {target_slug}: {reason}",
+                artifact_ref="",
+                metadata={"source_slug": source_slug},
+            )
+    return {
+        "source": _serialize_finding_record(source_row),
+        "target": _serialize_finding_record(target_row),
+        "link": link,
+    }
+
+def list_findings(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT findings.*, merged.slug AS merged_into_slug
+            FROM assessment_findings AS findings
+            LEFT JOIN assessment_findings AS merged ON merged.id = findings.merged_into_finding_id
+            WHERE findings.engagement_id = ?
+            ORDER BY
+                CASE findings.status
+                    WHEN 'exploited' THEN 0
+                    WHEN 'active' THEN 1
+                    WHEN 'blocked' THEN 2
+                    WHEN 'reported' THEN 3
+                    WHEN 'draft' THEN 4
+                    WHEN 'false_positive' THEN 5
+                    WHEN 'merged' THEN 6
+                    ELSE 7
+                END,
+                CASE findings.verification_state
+                    WHEN 'verified' THEN 0
+                    WHEN 'disputed' THEN 1
+                    ELSE 2
+                END,
+                findings.updated_at DESC,
+                findings.id DESC
+            """,
+            (engagement.id,),
+        ).fetchall()
+    return [_serialize_finding_record(row) for row in rows]
+
+def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    slug = canonical_finding_alias(slug) or slug
+    with _common.get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT findings.*, merged.slug AS merged_into_slug
+            FROM assessment_findings AS findings
+            LEFT JOIN assessment_findings AS merged ON merged.id = findings.merged_into_finding_id
+            WHERE findings.engagement_id = ? AND findings.slug = ?
+            """,
+            (engagement.id, slug),
+        ).fetchone()
+        if row is None:
+            raise _finding_not_found(connection, engagement.id, slug)
+    return _serialize_finding_record(row)
+
+def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM assessment_findings
+            WHERE engagement_id = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (engagement.id,),
+        ).fetchall()
+
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        record = _serialize_finding_record(row)
+        workflow_status = record.get("workflow_status", "draft")
+        if workflow_status in {"merged", "false_positive", "reported", "exploited"}:
+            continue
+        if record.get("verification_state") != "verified":
+            continue
+        if record.get("verification_disposition") not in {"confirmed", "downgraded"}:
+            continue
+        details = _json_object(record.get("details_json", "{}"))
+        severity = _normalize_severity(str(record.get("severity", "info")))
+        chain_required = details.get("chain_required") is True
+        if SEVERITY_RANK[severity] < SEVERITY_RANK["medium"] and not chain_required:
+            continue
+        if chain_required and SEVERITY_RANK[severity] < SEVERITY_RANK["medium"]:
+            candidate_reason = "verified_chain_required"
+        else:
+            candidate_reason = f"verified_{severity}"
+        record["candidate_reason"] = candidate_reason
+        record["chain_required"] = chain_required
+        candidates.append(record)
+
+    return sorted(
+        candidates,
+        key=lambda row: (
+            {
+                "verified_critical": 0,
+                "verified_high": 1,
+                "verified_medium": 2,
+                "verified_chain_required": 3,
+            }.get(str(row.get("candidate_reason", "")), 99),
+            str(row.get("slug", "")),
+        ),
+    )
+
+def list_finding_transitions(engagement_id: int, *, slug: str) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    slug = canonical_finding_alias(slug) or slug
+    with _common.get_connection() as connection:
+        finding = connection.execute(
+            "SELECT id FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, slug),
+        ).fetchone()
+        if finding is None:
+            raise _finding_not_found(connection, engagement.id, slug)
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM assessment_finding_transitions
+            WHERE engagement_id = ? AND finding_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (engagement.id, int(finding["id"])),
+        ).fetchall()
+    return [dict(row) for row in rows]

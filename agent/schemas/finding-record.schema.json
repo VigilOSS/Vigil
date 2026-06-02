@@ -67,6 +67,7 @@
       "type": "string",
       "enum": [
         "none",
+        "pending_runtime_proof",
         "confirmed",
         "downgraded",
         "false_positive"

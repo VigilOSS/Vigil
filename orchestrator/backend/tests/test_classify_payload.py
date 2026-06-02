@@ -99,10 +99,35 @@ class TestClassifyValue:
     def test_path_relative(self):
         assert self.cv("../etc/passwd") == "path"
 
+    def test_path_bare_relative(self):
+        # A bare relative path with no leading slash or dot-slash must still
+        # classify as 'path' (regression: previously fell through to 'opaque').
+        assert self.cv("images/avatar.png") == "path"
+
+    def test_path_bare_relative_no_extension(self):
+        # api/v1/users has only [A-Za-z0-9/] but is a path, not base64/opaque.
+        assert self.cv("api/v1/users") == "path"
+
     def test_base64(self):
         import base64
         encoded = base64.b64encode(b"hello world this is a secret").decode()
         assert self.cv(encoded) == "base64"
+
+    def test_base64_urlsafe(self):
+        # URL-safe base64 (alphabet uses '-' and '_') must decode with the
+        # URL-safe decoder and classify as base64, not misclassify/raise.
+        import base64
+        raw = b"\xfb\xff\xbe\x00secret payload bytes here!!"
+        encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        # Ensure the fixture actually exercises the URL-safe alphabet.
+        assert "-" in encoded or "_" in encoded, "fixture must contain - or _"
+        assert self.cv(encoded) == "base64"
+
+    def test_three_segment_non_jwt_is_not_jwt(self):
+        # A bare 3-dot-segment string whose first segment is not a JSON header
+        # with an 'alg'/'typ' must NOT be classified as jwt.
+        assert self.cv("1.2.3") != "jwt"
+        assert self.cv("foo.bar.baz") != "jwt"
 
     def test_hex(self):
         # 32 hex chars (128-bit, like MD5)
@@ -244,6 +269,9 @@ class TestMutate:
 
     # JWT alg:none in escalation
     def test_jwt_escalation_contains_alg_none_variant(self):
+        import base64 as _b64
+        import json as _json
+
         jwt = (
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
             ".eyJzdWIiOiIxMjM0NTY3ODkwIn0"
@@ -251,8 +279,23 @@ class TestMutate:
         )
         result = self.mutate(jwt)
         esc = result["intents"]["escalation"]
-        # At least one escalation variant should contain the alg:none header
-        assert any("none" in v.lower() or "alg" in v.lower() or "." in v for v in esc)
+
+        def _decodes_to_alg_none(variant: str) -> bool:
+            # The alg:none escalation encodes the header as base64url; decode the
+            # first dot-segment and assert it really declares "alg":"none".
+            seg = variant.split(".", 1)[0]
+            if not seg:
+                return False
+            try:
+                pad = seg + "=" * (-len(seg) % 4)
+                header = _json.loads(_b64.urlsafe_b64decode(pad.encode()))
+            except Exception:
+                return False
+            return isinstance(header, dict) and str(header.get("alg", "")).lower() == "none"
+
+        assert any(_decodes_to_alg_none(v) for v in esc), (
+            f"No escalation variant carried a decoded alg:none header; got: {esc}"
+        )
 
     # -----------------------------------------------------------------
     # Bug-fix regression guards — max-codepoint clamp + non-str coercion

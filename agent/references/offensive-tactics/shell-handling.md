@@ -127,7 +127,7 @@ Agents **MUST NOT:**
 
 Agents **CAN:**
 - Read listener log files with `aith runtime shell-exec "tail -80 /data/shell-<name>.log"`, then record the meaningful result in the backend
-- Read correlated OOB hits with `aith oob client logs <name> --lines 80`
+- Read correlated OOB hits with `aith oob poll --client <name> --json` (the nonce↔probe matches); `aith oob client logs <name> --lines 80` is the raw per-client listener tail, not correlation
 - Read raw OOB infrastructure logs with `aith logs oob --lines 80`
 - Provide reverse shell payloads for the operator to deploy
 - Verify that a shell connected by checking log output

@@ -28,6 +28,7 @@ Elasticsearch injection in 2025 primarily targets `query_string` and `simple_que
 ## Tools
 
 - `aith assess kali exec -- curl ...` for all probing (mandatory audit pipeline)
+- `aith assess anomaly-score <responses.jsonl>` (triage a blind `$regex`-range / `_exists_` sweep — rank the search-response population to find the range that flipped the result count; see Phase 4)
 - Browser DevTools for observing search request/response shapes
 - `jq` for parsing JSONL search responses
 
@@ -184,6 +185,15 @@ search=admin_password:/^[a-m].*/  → results → first char is a-m
 search=admin_password:/^[a-g].*/  → no results → first char is h-m
 search=admin_password:/^[h-j].*/  → results → first char is h-j
 ```
+
+**Triaging the range sweep mechanically.** When you fan out a batch of range probes and the "results vs no results" signal is buried in `hits.total` deltas across near-identical JSON bodies, capture each response (include the hit count as `words` or `content_length`, plus `status`) and let the anomaly oracle pick the range that flipped:
+
+```bash
+# one JSONL line per range probe: {"url":"...:/^[a-m].*/","status":200,"content_length":18840,"words":150,"lines":1}
+aith assess anomaly-score es_ranges.jsonl --top 5
+```
+
+The range that matched (returned the full result set) lands in a different `length_bucket`/`words_bucket` than the empty-result probes, so the oracle ranks it first — that is your "true" branch; recurse into it. (The oracle scores only the response-shape attributes it understands — `status`, `length_bucket`, `content_type`, header/title/words/lines buckets — so a volatile `took`/`_scroll_id` in the raw JSON is simply ignored; record the stable `hits.total` as `content_length` or `words` to give it a signal.) A flat ranking means no range flipped the count: the field does not exist or is not searchable on this signal. Same pass works for triaging an `_exists_:<field>` field-enumeration sweep — feed all candidate-field responses in and investigate the outlier (the field that exists) first.
 
 ### Timing-Based Blind via Regex Complexity
 

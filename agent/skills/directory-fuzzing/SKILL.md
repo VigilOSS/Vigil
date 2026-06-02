@@ -173,7 +173,30 @@ aith assess kali ffuf \
   --probe-kind payload --phase consume-test --timeout 1800
 ```
 
-### 10. Output and Verification
+### 10. Triage, Output and Verification
+
+Status/size filters (`-fc`, `-fs`, `-ac`) thin the noise but cannot catch a soft-200 that returns
+a `200` with a custom-error body, or an admin page that differs only in size class from the bulk of
+hits. After a sweep, rank the surviving results with `aith assess anomaly-score` to surface the
+genuine odd-ones-out. ffuf's JSON `results` carry `status`, `length`, `words`, `lines`, `url` —
+exactly the oracle's fields (rename only the hyphenated `content-type`):
+
+```bash
+# Rank the ffuf hit set written by §2–§9 (e.g. ffuf_common.json):
+jq '[.results[] | {url, status, length, words, lines, content_type: .["content-type"]}]' \
+  /engagements/$ENGAGEMENT_KEY/scans/ffuf_common.json > /tmp/dir_pop.json
+aith assess anomaly-score /tmp/dir_pop.json --top 15
+#   #1  score=4.17  status=200  len=8800  url=https://TARGET/admin   ← off-cluster: big body, unique title
+#       ^ length_bucket=...  ^ title='admin login'  ^ words_bucket=...
+```
+
+The high-scoring paths are the ones that broke from the bulk response shape — an unusually large
+body, a distinct title, a lone redirect, a rare status — i.e. the admin panels, debug pages, and
+soft-200s worth manual review. A path's content-type or notable-headers (`set-cookie`,
+`www-authenticate`, `location`) being rare in the set also lifts its score. Because the oracle
+buckets sizes, near-identical boilerplate pages cluster and stop drowning the signal; it surfaces
+category outliers, not byte-level deltas. Then verify the top hits by hand:
+
 ```bash
 # Main output (embedded in every ffuf call above via -o / -of json)
 # Verify a discovered path:

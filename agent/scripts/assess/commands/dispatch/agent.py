@@ -1,0 +1,544 @@
+"""Backend agent lifecycle verbs.
+
+Internal action names register / update-status / abort-duplicate / list / get /
+record-decision / record-handoff — backend-table writes via the orchestrator
+API (assessment_dispatches + assessment_dispatch_handoffs +
+assessment_dispatch_decisions). These are dbless: they take no cases.db path.
+The operator-facing surface routes here through ``aith assess agent``.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+from assess.lib.client import AssessmentClient, AssessError
+from assess.lib.config import load_config
+from assess.lib.contracts import validate_specialist_dispatch_contract
+
+from assess.commands.dispatch._shared import (
+    _utcnow_iso,
+    _split_csv,
+    _load_json_arg,
+)
+
+
+# Actions that don't need a cases.db (work-buffer SQLite). When the first
+# positional arg matches one of these names, we treat it as the action and
+# leave db_path empty rather than forcing the operator to pass a useless path.
+# Round 9: internal action names register/update-status/list/get/record-decision/
+# record-handoff (plus render-handoff) hit the orchestrator backend, not the work buffer.
+# Operator CLI maps these to ``aith assess agent start|done|list|get|handoff|decision|...``.
+_DBLESS_ACTIONS = (
+    "render-handoff",
+    "register",
+    "update-status",
+    "abort-duplicate",
+    "list",
+    "get",
+    "record-decision",
+    "record-handoff",
+)
+
+
+def _client_for(args) -> tuple[AssessmentClient, Any]:
+    cfg = load_config(getattr(args, "engagement_dir", None))
+    return AssessmentClient(cfg.base_url, cfg.engagement_key), cfg
+
+
+def _emit_scope_rejection_telemetry(args, payload: dict, scope_errors: list[str]) -> None:
+    """Item 11: record a kind='scope_rejection' decision row when the
+    validator rejects a dispatch for scope_host reasons. Audited per
+    engagement so the C7 gate's false-positive rate is queryable via
+    the existing dispatch-decisions list endpoint.
+
+    Best-effort: the caller wraps this in try/except so a failed telemetry
+    write does not block the original rejection error. No network failure
+    path here raises through to the caller.
+    """
+    client, _cfg = _client_for(args)
+    try:
+        scope_entries_summary: list[str] = []
+        scope_path = Path(_cfg.engagement_dir) / "scope.json"
+        if scope_path.is_file():
+            try:
+                scope = json.loads(scope_path.read_text(encoding="utf-8"))
+                raw_hosts = scope.get("hosts") or []
+                if isinstance(raw_hosts, list):
+                    scope_entries_summary = [
+                        str(entry) for entry in raw_hosts if isinstance(entry, (str, int))
+                    ]
+            except (OSError, ValueError):
+                scope_entries_summary = []
+        body = {
+            "kind": "scope_rejection",
+            "payload": {
+                "host": payload.get("scope_host"),
+                "role": payload.get("agent_role") or payload.get("role"),
+                "scope_entries": scope_entries_summary,
+                "reason": scope_errors[0] if scope_errors else "scope_host not in scope.json",
+                "rejected_at": _utcnow_iso(),
+            },
+            "surfaced_to_user": True,
+        }
+        client.record_decision(body)
+    finally:
+        client.close()
+
+
+def _build_register_payload(args) -> dict:
+    payload: dict[str, Any] = {}
+    if getattr(args, "from_json", None):
+        loaded = _load_json_arg(args.from_json)
+        if not isinstance(loaded, dict):
+            print("agent start --from-json: file must contain a JSON object", file=sys.stderr)
+            sys.exit(1)
+        payload.update(loaded)
+    # CLI flags override / supplement the JSON payload.
+    cli_fields = {
+        "agent_id": getattr(args, "agent_id", None),
+        "agent_role": getattr(args, "agent_role", None),
+        "task": getattr(args, "task", None),
+        "scope_host": getattr(args, "scope_host", None),
+        "requested_model": getattr(args, "dispatch_model", None),
+        "requested_reasoning": getattr(args, "reasoning", None),
+        "dispatch_mode": getattr(args, "dispatch_mode_arg", None),
+        "skills": getattr(args, "skills", None),
+        "tier": getattr(args, "tier", None),
+    }
+    for k, v in cli_fields.items():
+        if v is not None:
+            payload[k] = v
+    finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
+    if finding_slugs:
+        payload["finding_slugs"] = finding_slugs
+    if not payload.get("agent_id"):
+        print("agent start: --agent-id is required (or include 'agent_id' in --from-json)", file=sys.stderr)
+        sys.exit(1)
+    if not payload.get("agent_role"):
+        print("agent start: --agent-role is required (or include 'agent_role' in --from-json)", file=sys.stderr)
+        sys.exit(1)
+    # Engagement dir lets the validator check scope_host against scope.json
+    # for vulnerability-analyst / exploit-developer dispatches.
+    try:
+        _cfg_for_validation = load_config(getattr(args, "engagement_dir", None))
+        _eng_dir_for_validation = _cfg_for_validation.engagement_dir
+    except Exception:
+        _eng_dir_for_validation = None
+    errors, warnings = validate_specialist_dispatch_contract(
+        payload,
+        engagement_dir=_eng_dir_for_validation,
+    )
+    for warning in warnings:
+        print(f"WARN agent start: {warning}", file=sys.stderr)
+    if errors:
+        # Item 11: when the scope_host gate is the cause of rejection, record
+        # a dispatch decision row (kind='scope_rejection') so the C7 gate's
+        # false-positive rate is auditable across engagements. Best-effort —
+        # failures here do NOT block the original rejection error.
+        scope_errors = [e for e in errors if "not in scope.json" in e]
+        if scope_errors and _eng_dir_for_validation:
+            try:
+                _emit_scope_rejection_telemetry(args, payload, scope_errors)
+            except Exception as telemetry_exc:  # noqa: BLE001
+                print(
+                    f"WARN agent start: scope-rejection telemetry write failed: "
+                    f"{telemetry_exc}",
+                    file=sys.stderr,
+                )
+        for error in errors:
+            print(f"agent start: {error}", file=sys.stderr)
+        sys.exit(1)
+    skills_value = payload.get("skills")
+    if isinstance(skills_value, list):
+        payload["skills"] = ",".join(str(skill).strip() for skill in skills_value)
+    return payload
+
+
+def _register_dispatch(args) -> None:
+    payload = _build_register_payload(args)
+    client, _ = _client_for(args)
+    try:
+        if not getattr(args, "allow_duplicate", False):
+            _warn_on_overlapping_dispatch(client, payload)
+        row = client.record_dispatch(payload)
+    finally:
+        client.close()
+    print(json.dumps({
+        "id": row.get("id"),
+        "agent_id": row.get("agent_id"),
+        "status": row.get("status"),
+    }, ensure_ascii=False))
+
+
+def _warn_on_overlapping_dispatch(client: AssessmentClient, payload: dict[str, Any]) -> None:
+    """Emit an advisory warning for exact structured overlap.
+
+    This intentionally does not block. Parallel dispatches often share a role,
+    host, or prose objective for legitimate reasons; only concrete overlap on
+    refs or an exact copied task gets surfaced.
+    """
+    role = str(payload.get("agent_role") or "")
+    if not role:
+        return
+    try:
+        rows = client.list_dispatches(role=role, status="in-progress", limit=1000)
+    except AssessError as exc:
+        print(f"WARN agent start: duplicate-overlap check skipped: {exc}", file=sys.stderr)
+        return
+    current_agent_id = str(payload.get("agent_id") or "")
+    overlaps: list[tuple[dict[str, Any], str]] = []
+    for row in rows:
+        if str(row.get("agent_id") or "") == current_agent_id:
+            continue
+        reason = _dispatch_overlap_reason(payload, row)
+        if reason:
+            overlaps.append((row, reason))
+    if not overlaps:
+        return
+    print(
+        "WARN agent start: active dispatch rows appear to overlap this dispatch. "
+        "Registration will continue; use --allow-duplicate to suppress this advisory "
+        "when the overlap is intentional.",
+        file=sys.stderr,
+    )
+    for row, reason in overlaps[:5]:
+        print(
+            f"  - {row.get('agent_id', '?')} ({row.get('agent_role', '?')}): {reason}",
+            file=sys.stderr,
+        )
+
+
+def _dispatch_overlap_reason(payload: dict[str, Any], row: dict[str, Any]) -> str:
+    finding_overlap = _set_overlap(payload.get("finding_slugs"), row.get("finding_slugs"))
+    if finding_overlap:
+        return "same finding_slugs: " + ",".join(sorted(finding_overlap))
+    task = _norm_text(payload.get("task"))
+    if task and task == _norm_text(row.get("task")):
+        return "exact same task text"
+    return ""
+
+
+def _norm_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _set_overlap(left: Any, right: Any) -> set[str]:
+    return _string_set(left) & _string_set(right)
+
+
+def _string_set(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        return set()
+    return {str(item).strip() for item in items if str(item).strip()}
+
+
+def _update_dispatch_status(args, extra: list[str]) -> None:
+    agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
+    if not agent_id:
+        print("Usage: aith assess agent done <agent-id> --status ...", file=sys.stderr)
+        sys.exit(1)
+    patch: dict[str, Any] = {}
+    if getattr(args, "dispatch_status", None):
+        patch["status"] = args.dispatch_status
+        if args.dispatch_status in ("completed", "failed", "aborted", "blocked"):
+            patch["completed_at"] = getattr(args, "completed_at", None) or _utcnow_iso()
+    elif getattr(args, "completed_at", None):
+        patch["completed_at"] = args.completed_at
+    finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
+    if finding_slugs:
+        patch["finding_slugs"] = finding_slugs
+    if not patch:
+        print(
+            "agent done: pass at least one of --status, --completed-at, --finding-slugs",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    client, _ = _client_for(args)
+    try:
+        row = client.update_dispatch(agent_id, patch)
+    finally:
+        client.close()
+    print(json.dumps(row, ensure_ascii=False))
+
+
+def _abort_duplicate_dispatch(args, extra: list[str]) -> None:
+    agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
+    replacement = (getattr(args, "replacement_agent_id", "") or "").strip()
+    reason = (getattr(args, "reason", "") or "").strip()
+    if not agent_id or not replacement or not reason:
+        print(
+            "Usage: aith assess agent abort-duplicate <agent-id> "
+            "--replacement-agent-id <agent-id> --reason TEXT",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if agent_id == replacement:
+        print(
+            "abort-duplicate: --replacement-agent-id must point at the dispatch to keep, "
+            "not the duplicate being aborted.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    client, _ = _client_for(args)
+    now = _utcnow_iso()
+    try:
+        replacement_row = client.get_dispatch(replacement)
+        if replacement_row is None:
+            print(
+                f"abort-duplicate: replacement dispatch '{replacement}' was not found; "
+                "register the canonical replacement before aborting the duplicate.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        row = client.update_dispatch(agent_id, {"status": "aborted", "completed_at": now})
+        decision = client.record_decision(
+            {
+                "kind": "dispatch_duplicate",
+                "payload": {
+                    "aborted_agent_id": agent_id,
+                    "replacement_agent_id": replacement,
+                    "reason": reason,
+                },
+                "surfaced_to_user": False,
+            }
+        )
+    finally:
+        client.close()
+    print(json.dumps({"dispatch": row, "decision": decision}, ensure_ascii=False))
+
+
+def _list_dispatches(args) -> None:
+    filters: dict[str, Any] = {}
+    role = getattr(args, "filter_role", None)
+    if role:
+        filters["role"] = role
+    status_value = getattr(args, "dispatch_status", None)
+    if status_value:
+        filters["status"] = status_value
+    since = getattr(args, "filter_since", None)
+    if since:
+        filters["since"] = since
+    task_q = getattr(args, "task_q", None)
+    if task_q:
+        filters["task_q"] = task_q
+    limit = getattr(args, "dispatch_limit", None)
+    if limit:
+        filters["limit"] = int(limit)
+    client, _ = _client_for(args)
+    try:
+        rows = client.list_dispatches(**filters)
+    finally:
+        client.close()
+    for row in rows:
+        print(json.dumps(row, ensure_ascii=False))
+
+
+def _get_dispatch(args, extra: list[str]) -> None:
+    agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
+    if not agent_id:
+        print("Usage: aith assess agent get <agent-id>", file=sys.stderr)
+        sys.exit(1)
+    client, _ = _client_for(args)
+    try:
+        row = client.get_dispatch(agent_id)
+    finally:
+        client.close()
+    if row is None:
+        print(f"agent get: agent_id '{agent_id}' not found", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps(row, ensure_ascii=False))
+
+
+def _record_decision(args) -> None:
+    kind = getattr(args, "decision_kind", None)
+    if not kind:
+        print("agent decision: --kind is required", file=sys.stderr)
+        sys.exit(1)
+    payload_json = getattr(args, "payload_json", None)
+    if payload_json:
+        loaded = _load_json_arg(payload_json)
+        if not isinstance(loaded, dict):
+            print("agent decision --payload-json: must produce a JSON object", file=sys.stderr)
+            sys.exit(1)
+        payload = dict(loaded)
+    else:
+        # Build payload from friendly flags. The fields we collect depend on
+        # the kind, but we do not enforce strict per-kind shape — the backend
+        # accepts any dict. Operators can always fall back to --payload-json.
+        payload = {}
+        host = getattr(args, "decision_host", None)
+        vendor = getattr(args, "decision_vendor", None)
+        choice = getattr(args, "decision_choice", None)
+        note = getattr(args, "decision_note", None)
+        reason = getattr(args, "reason", None)
+        phase = getattr(args, "decision_phase", None)
+        if host:
+            payload["host"] = host
+        if vendor:
+            payload["vendor"] = vendor
+        if choice:
+            payload["choice"] = choice
+        if note:
+            payload["note"] = note
+        if reason:
+            payload["reason"] = reason
+        if phase:
+            payload["phase"] = phase
+        if not payload:
+            print(
+                "agent decision: pass --payload-json or at least one of "
+                "--host/--vendor/--choice/--note/--reason/--phase",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    body = {
+        "kind": kind,
+        "payload": payload,
+        "surfaced_to_user": bool(getattr(args, "surfaced_to_user", False)),
+    }
+    client, _ = _client_for(args)
+    try:
+        row = client.record_decision(body)
+    finally:
+        client.close()
+    print(json.dumps(row, ensure_ascii=False))
+
+
+def _build_handoff_payload(args) -> dict:
+    if getattr(args, "from_json", None):
+        loaded = _load_json_arg(args.from_json)
+        if not isinstance(loaded, dict):
+            print("agent handoff --from-json: file must contain a JSON object", file=sys.stderr)
+            sys.exit(1)
+        # When --from-json is given we honour it as the authoritative shape,
+        # but explicit identity flags are integrity checks. A mismatch usually
+        # means the handoff is about to be written under a label that the
+        # operator cannot retrieve by the actual spawned agent id.
+        for key, val in (
+            ("agent_id", getattr(args, "agent_id", None)),
+            ("agent_role", getattr(args, "agent_role", None)),
+            ("summary", getattr(args, "hf_summary", None)),
+        ):
+            if not val:
+                continue
+            existing = loaded.get(key)
+            if existing and str(existing) != str(val):
+                print(
+                    f"agent handoff: --from-json {key}={existing!r} does not match "
+                    f"explicit --{key.replace('_', '-')} {val!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            loaded[key] = val
+        return loaded
+
+    payload: dict[str, Any] = {}
+    agent_id = getattr(args, "agent_id", None)
+    agent_role = getattr(args, "agent_role", None)
+    summary = getattr(args, "hf_summary", None)
+    if not agent_id or not agent_role or not summary:
+        print(
+            "agent handoff: --agent-id, --agent-role, and --summary are required "
+            "(or pass --from-json with a payload that supplies them)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    payload["agent_id"] = agent_id
+    payload["agent_role"] = agent_role
+    payload["summary"] = summary
+    if getattr(args, "hf_confidence", None):
+        payload["confidence"] = args.hf_confidence
+    finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
+    if finding_slugs:
+        payload["finding_slugs"] = finding_slugs
+    next_steps_raw = getattr(args, "hf_next_steps", None) or []
+    if next_steps_raw:
+        payload["next_steps"] = [{"action": item} for item in next_steps_raw]
+    coverage_raw = getattr(args, "hf_coverage_gaps", None) or []
+    if coverage_raw:
+        coverage_rows = []
+        for item in coverage_raw:
+            area, _, reason = item.partition(":")
+            coverage_rows.append({"area": area.strip(), "reason": reason.strip()})
+        payload["coverage_gaps"] = coverage_rows
+    runtime_raw = getattr(args, "hf_runtime_issues", None) or []
+    if runtime_raw:
+        runtime_rows = []
+        for item in runtime_raw:
+            kind_part, _, detail = item.partition(":")
+            runtime_rows.append({
+                "kind": kind_part.strip(),
+                "detail": detail.strip(),
+                "severity": "info",
+            })
+        payload["runtime_issues"] = runtime_rows
+    artifacts_raw = getattr(args, "hf_working_artifacts", None) or []
+    if artifacts_raw:
+        payload["working_artifacts"] = [{"path": p} for p in artifacts_raw]
+    open_qs = getattr(args, "hf_open_questions", None) or []
+    if open_qs:
+        payload["open_questions"] = list(open_qs)
+    if getattr(args, "hf_recommended_next_agent", None):
+        payload["recommended_next_agent"] = args.hf_recommended_next_agent
+    if getattr(args, "hf_handoff_status", None):
+        payload["handoff_status"] = args.hf_handoff_status
+    if getattr(args, "hf_closed_dispatch_status", None):
+        payload["closed_dispatch_status"] = args.hf_closed_dispatch_status
+    extras_json = getattr(args, "hf_extras_json", None)
+    if extras_json:
+        loaded = _load_json_arg(extras_json)
+        if not isinstance(loaded, dict):
+            print("agent handoff --extras-json: must produce a JSON object", file=sys.stderr)
+            sys.exit(1)
+        payload["extras"] = loaded
+    return payload
+
+
+def _record_handoff(args) -> None:
+    # If both --from-json and flag-based content are given, honour --from-json
+    # but warn so the operator notices they're mixing modes (the JSON wins).
+    has_flag_based = any(
+        getattr(args, name, None)
+        for name in (
+            "hf_summary",
+            "hf_confidence",
+            "hf_next_steps",
+            "hf_coverage_gaps",
+            "hf_runtime_issues",
+            "hf_working_artifacts",
+            "hf_open_questions",
+            "hf_recommended_next_agent",
+            "hf_handoff_status",
+            "hf_closed_dispatch_status",
+            "hf_extras_json",
+        )
+    )
+    if getattr(args, "from_json", None) and has_flag_based:
+        print(
+            "agent handoff: --from-json is set and flag-based content was also "
+            "supplied; flag-based fields are ignored except as fallback for "
+            "agent_id / agent_role / summary.",
+            file=sys.stderr,
+        )
+    payload = _build_handoff_payload(args)
+    client, _ = _client_for(args)
+    try:
+        # Idempotent by design: agents call record-handoff after every major
+        # step in their methodology, so the same (engagement, agent_id) tuple
+        # collides on each subsequent call. The client retries the POST as a
+        # PATCH on 409 transparently.
+        row = client.record_handoff(payload, upsert=True)
+    finally:
+        client.close()
+    print(json.dumps({
+        "id": row.get("id"),
+        "agent_id": row.get("agent_id"),
+    }, ensure_ascii=False))
