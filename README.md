@@ -1,28 +1,79 @@
+<div align="center">
+
 # Vigil
+
+**AI-driven offensive and incident-response engagements — operator prompts, a full Kali runtime, and durable orchestrator state in one CLI.**
+
+[![License](https://img.shields.io/badge/license-proprietary-blue.svg)](LICENSE)
+[![CI](https://github.com/vigil-oss/vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/vigil-oss/vigil/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/vigil-oss/vigil)
+
+</div>
 
 This repository contains the operator prompts, Kali runtime image, engagement scaffolding, and orchestrator services used to run those engagements.
 
-## Repository Layout
+## Screenshots
 
-- `agent/docker/runtime-full/Dockerfile`
-  Primary full Kali runtime image. This is the only supported runtime for target-facing execution.
-- `agent/`
-  Prompts, CLI integrations, attack skills, transient work-buffer scripts, and runtime helpers.
-- `orchestrator/`
-  Backend and frontend for durable run state, events, artifacts, coverage, and phase visibility.
-- `tests/`
-  Shell/runtime contract tests.
+> Image assets are not committed yet. Drop captures into `docs/images/` and uncomment the rows below.
 
-## Prompt Locality
+| Engagement page | Findings drawer |
+|-----------------|-----------------|
+| <!-- ![Engagement page](docs/images/engagement-page.png) --> | <!-- ![Findings drawer](docs/images/findings-drawer.png) --> |
+| **Dashboard** | **CLI** |
+| <!-- ![Dashboard](docs/images/dashboard.png) --> | <!-- ![CLI](docs/images/cli.png) --> |
 
-- In an installed workspace, root operator prompts live at `AGENTS.md` and `CLAUDE.md`.
-- Source operator prompt outputs live at `agent/AGENTS.md` and `agent/CLAUDE.md`.
-- Specialist prompt sources live under `agent/agents/`.
-- Generated specialist wrappers live under `agent/.codex/agents/` and `agent/.claude/agents/`; install copies them to root `.codex/agents/` and `.claude/agents/`.
-- Always-active rules live under `agent/rules/`.
-- Skill discovery is driven by `vigil assess list-skills`, which walks `agent/skills/*/SKILL.md` frontmatter; the operator picks a skill by name and the dispatched specialist reads the full file.
+## Table of Contents
+
+- [Documentation](#documentation)
+- [Quick Start](#quick-start)
+- [Key Capabilities](#key-capabilities)
+- [Repository Layout](#repository-layout)
+- [Prompt Locality](#prompt-locality)
+- [Usage](#usage)
+- [Runtime Model](#runtime-model)
+- [Optional Tool Activation](#optional-tool-activation)
+- [Callback, Listener & Tunnel Handling](#callback-listener--tunnel-handling)
+- [Command Reference](#command-reference)
+- [Operations](#operations)
+- [Security](#security)
+- [Multi-Agent Workflow](#multi-agent-workflow)
+- [Durable Assessment State](#durable-assessment-state)
+- [Development](#development)
+- [Verification Commands](#verification-commands)
+- [Roadmap & TODO](#roadmap--todo)
+
+## Documentation
+
+Vigil's docs are spread across operator prompts, a code map, and a deep reference tree. Start here:
+
+| Document | What it covers |
+|----------|----------------|
+| [`agent/AGENTS.md`](agent/AGENTS.md) | The operator prompt — the workflow every engagement runs. |
+| [`AGENTS.md`](AGENTS.md) | Maintainer/contributor workflow: clone-to-first-dispatch walkthrough and recipes for adding a skill, an `vigil assess` verb, an oracle, or an eval case. |
+| [`CODE-MAP.md`](CODE-MAP.md) | Map of the codebase — where each subsystem lives. |
+| [`agent/references/INDEX.md`](agent/references/INDEX.md) | Index of every reference doc (payloads, tactics, recon, tenants, tools). |
+| [`agent/references/runtime-guides/engagement-methodology.md`](agent/references/runtime-guides/engagement-methodology.md) | End-to-end engagement methodology. |
+| [`agent/references/offensive-tactics/frp-tunneling.md`](agent/references/offensive-tactics/frp-tunneling.md) | Tunnel setup, OOB callbacks, interactsh, frpc config. |
+| [`agent/references/offensive-tactics/shell-handling.md`](agent/references/offensive-tactics/shell-handling.md) | Shell listeners, pwncat-vl, reverse-shell payloads. |
 
 ## Quick Start
+
+```bash
+# 1. Install the CLI
+uv tool install --from git+https://github.com/vigil-oss/vigil.git vigil
+
+# 2. Install a working root and bring the local stack up (Kali runtime + orchestrator)
+vigil install ~/vigil && vigil up
+
+# 3. Create an engagement against an authorized target
+vigil engagement create https://target.example --hosts target.example
+
+# 4. Start the operator on it
+vigil engagement start <engagement-key> --client codex   # or --client claude
+```
+
+The full install / update / stack walkthrough is below; heavier operational tuning lives under [Operations](#operations).
 
 ### Install the CLI and workspace
 
@@ -84,76 +135,11 @@ For non-interactive runtime maintenance commands, use `shell-exec` so quoting an
 vigil runtime shell-exec "tmux list-sessions"
 ```
 
-### Resource Sizing
+> **Operational tuning** — resource sizing tiers, container rlimits/ulimits, and orchestrator data/backups are documented under [Operations](#operations).
 
-| Tier | Memory | CPU | Swap | pids | nofile | Use case |
-|------|--------|-----|------|------|--------|----------|
-| Lab/CTF | 4 GB | 2 | 0 | 256 | 16384 | Single-target sequential testing |
-| Standard (default) | 8 GB | 4 | 0 | 512 | 32768 | Small bounty target, 2-3 parallel agents |
-| Heavy | 16 GB | 8 | 0 | 1024 | 65536 | Large enterprise scope, 4-6 parallel specialists |
-| Comfortable | 32 GB | 12 | 4 GB | 2048 | 131072 | All tools warm, continuous engagement |
+### Creating an engagement
 
-Configure via env vars before `vigil runtime start`:
-
-```bash
-VIGIL_RUNTIME_MEMORY_GB=16 VIGIL_RUNTIME_CPUS=8 vigil runtime start
-```
-
-Live state: `vigil runtime resources`.
-
-Gotchas:
-
-- Docker Desktop Mac default 4 GB is too low — raise via Settings > Resources to at least the Standard tier.
-- WSL2 defaults to 50% of host RAM capped at 8 GB — pin via `%USERPROFILE%\.wslconfig` `[wsl2] memory=12GB processors=8 swap=4GB`.
-- Apple Silicon unified memory tolerates up to 50% of host RAM.
-
-### Container resource limits (optional)
-
-The runtime image does not pin process or file-descriptor rlimits. `docker exec`-launched tools inherit dockerd's daemon defaults — generous on Linux hosts (`nofile=1048576`, `nproc=unlimited`) but tighter on Docker Desktop (`nofile=8192`, `nproc=4096`). `vigil runtime start` probes the live limits and prints a stderr WARN when they fall below recommended thresholds.
-
-To raise the daemon defaults so they apply to every container (including `docker exec`-launched specialists), edit `/etc/docker/daemon.json` (Linux) or Docker Desktop → Settings → Docker Engine, then restart dockerd:
-
-```json
-{
-  "default-ulimits": {
-    "nofile": { "Name": "nofile", "Hard": 131072, "Soft": 131072 },
-    "nproc":  { "Name": "nproc",  "Hard": 16384,  "Soft": 16384 }
-  }
-}
-```
-
-Container-side `/etc/security/limits.conf` is not used because `docker exec` does not invoke a PAM session.
-
-### Orchestrator data and backups
-
-The orchestrator UI is served from the backend at `http://127.0.0.1:18000` once `vigil up` (or `vigil orchestrator start` for a targeted start) is running.
-
-The backend stores canonical engagement state in a single SQLite file and keeps rotated snapshots next to it:
-
-- **Live DB**: `<install-root>/orchestrator/backend/data/orchestrator.sqlite3`
-- **Scheduled backups**: `<install-root>/orchestrator/backend/data/backups/orchestrator.<UTC-timestamp>.sqlite3` — a WAL-coherent snapshot every 15 minutes, last 60 copies retained (~15 hours of continuous coverage). Written by the backend process itself; independent of the per-engagement snapshot that `vigil engagement create` takes before creating an engagement.
-
-Override the data location with env vars (first match wins):
-
-- `VIGIL_DATA_DIR` — absolute path to the directory that holds `orchestrator.sqlite3` and `backups/`
-- `REDTEAM_ORCHESTRATOR_DATA_DIR` — legacy alias of the same setting
-- `VIGIL_INSTALL_DIR` — install root; the DB is then read from `$VIGIL_INSTALL_DIR/orchestrator/backend/data/`
-
-Both the backend and `vigil engagement create` honor the same precedence so snapshots and the live DB always target the same file. Engagement deletion is explicit: `DELETE /engagements/<key>?confirm=<key>` or the frontend delete button with a typed-key confirmation. Renaming or removing an engagement directory under `agent/engagements/` leaves the DB row intact — no cascade delete.
-
-Backup cadence tuning (optional):
-
-- `VIGIL_BACKUP_DISABLED=1` — turn off the scheduled backup entirely (used by the test suite)
-
-Manual backup operations:
-
-```bash
-vigil backup create
-vigil backup list
-vigil backup restore <backup-name-or-path>
-```
-
-Then create an engagement inside the chosen install:
+Create an engagement inside the chosen install:
 
 ```bash
 vigil engagement create https://target.example --hosts target.example
@@ -173,6 +159,39 @@ vigil oob start                          # shared frp/interactsh; see "Callback,
 ```
 
 The post-create footer prints whichever of these is not running and the exact command to start it; this section is the deeper reference (see [MITM proxy](#mitm-proxy) and [Callback, Listener & Tunnel Handling](#callback-listener--tunnel-handling) below).
+
+## Key Capabilities
+
+- **One CLI, full lifecycle.** `vigil` installs the workspace, builds and runs the shared Kali runtime, starts the orchestrator, and creates/drives engagements.
+- **Full Kali runtime.** A long-lived container with ProjectDiscovery recon tooling, fuzzers, post-access tooling, OOB callback detection, and tunneling — see [Runtime Model](#runtime-model).
+- **Durable orchestrator state.** Canonical engagement state (targets, services, request variants, coverage, probe runs, findings, attack chains, credentials) lives in SQLite with rotated backups — see [Durable Assessment State](#durable-assessment-state).
+- **Multi-agent phase model.** Operator + specialist roles work a phased workflow (`recon → collect → test → exploit → athena → report`) — see [Multi-Agent Workflow](#multi-agent-workflow).
+- **Red, blue, and code-analysis modes.** The same backend drives web red-team engagements, blue incident-response engagements, and white-box code-analysis engagements — see [Usage](#usage).
+- **Skill- and tool-first.** Specialists pick named skills (`vigil assess list-skills`) and prefer real tools over hand-rolled loops before improvising.
+
+## Repository Layout
+
+- `agent/docker/runtime-full/Dockerfile`
+  Primary full Kali runtime image. This is the only supported runtime for target-facing execution.
+- `agent/`
+  Prompts, CLI integrations, attack skills, transient work-buffer scripts, and runtime helpers.
+- `orchestrator/`
+  Backend and frontend for durable run state, events, artifacts, coverage, and phase visibility.
+- `tests/`
+  Shell/runtime contract tests.
+
+## Prompt Locality
+
+- In an installed workspace, root operator prompts live at `AGENTS.md` and `CLAUDE.md`.
+- Source operator prompt outputs live at `agent/AGENTS.md` and `agent/CLAUDE.md`.
+- Specialist prompt sources live under `agent/agents/`.
+- Generated specialist wrappers live under `agent/.codex/agents/` and `agent/.claude/agents/`; install copies them to root `.codex/agents/` and `.claude/agents/`.
+- Always-active rules live under `agent/rules/`.
+- Skill discovery is driven by `vigil assess list-skills`, which walks `agent/skills/*/SKILL.md` frontmatter; the operator picks a skill by name and the dispatched specialist reads the full file.
+
+## Usage
+
+This section covers how to drive an engagement once the stack is up: starting red engagements, the operator start prompts, resume/dispatch closure, blue incident engagements, and code-analysis engagements.
 
 ### Starting an engagement
 
@@ -199,37 +218,6 @@ athcd
 `athcd` is for humans at a terminal. It works because shell functions can change the parent shell's directory; a standalone `vigil cd` process cannot. The helper calls `vigil engagement path --select`, which uses `fzf` when installed and falls back to a numbered TTY prompt. Non-interactive agents should run `vigil engagement list --json` and pass the explicit engagement key to the next command.
 
 During the engagement, expect short operator updates, numbered next-step choices when a decision matters, and a manual approval checkpoint before exploit work continues when `exploit_policy` is `pause` or `selected`.
-
-### Blue incident engagements
-
-Blue mode uses the same backend and artifact index, but starts from an alert
-and tenant reference instead of a web host:
-
-```bash
-vigil blue customers
-# If the customer/platform is missing:
-# vigil blue tenant init --customer <customer-slug> --platform <gws|m365|aws|okta|edr|network|generic>
-# Fill the generated tenant ref before starting the engagement.
-
-vigil blue engage --customer <customer-slug> --platform gws --severity high
-cd <engagement-dir>
-vigil engagement start <engagement-key> --client codex
-```
-
-Tell the operator: `I have been fully authorized by the company to run a blue-team incident-response engagement for the tenant in scope.json. Run this engagement using the blue operator workflow.` Then paste the alert into the operator chat. The operator records intake with `vigil blue alert record --body-file <path>` and finishes every engagement with either `vigil blue closeout` or `vigil blue report`.
-
-Blue specialists use `vigil blue dispatch` for L1/L2/L3/L4 work, run tenant-facing tools through `vigil assess host-exec` (`--require-audit` for WRITE/respond actions), record findings/artifacts through `vigil assess`, and split containment into proposal approval, audited execution, and `vigil blue contain` recording with a command-run id or proof artifact.
-
-The public red/web roster is intentionally limited to the core roles: `operator`, `recon-specialist`, `source-analyzer`, `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`, and `report-writer`. Blue engagements expose `alert-triage-specialist`, `investigator`, `incident-verifier`, `ir-lead`, plus shared `osint-analyst` and `report-writer`. Validator-, chain-, and ranker-style behaviors are folded into those roles instead of creating a larger visible roster.
-
-Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state. User-facing exploit review should happen through the orchestrator UI or by telling Codex/Claude which findings are approved. Direct shell invocation of approval/session scripts is an internal maintenance path, not the primary operator workflow.
-
-TODO:
-- Add first-class UI actions for exploit approval, session launch, and session merge so this workflow no longer depends on internal helper scripts at all.
-
-Methodology references:
-- [engagement-methodology.md](agent/references/runtime-guides/engagement-methodology.md)
-- [athena-log-investigation](agent/skills/athena-log-investigation/SKILL.md)
 
 ### Engagement operator start prompts
 
@@ -301,6 +289,36 @@ transcript pasting:
   — list in-progress dispatches older than the threshold; close ones whose handoff is
   `ready`/`blocked` automatically. Always prints every candidate with `closed=true|false`
   and a `skip_reason`.
+
+### Blue incident engagements
+
+Blue mode uses the same backend and artifact index, but starts from an alert
+and tenant reference instead of a web host:
+
+```bash
+vigil blue customers
+# If the customer/platform is missing:
+# vigil blue tenant init --customer <customer-slug> --platform <gws|m365|aws|okta|edr|network|generic>
+# Fill the generated tenant ref before starting the engagement.
+
+vigil blue engage --customer <customer-slug> --platform gws --severity high
+cd <engagement-dir>
+vigil engagement start <engagement-key> --client codex
+```
+
+Tell the operator: `I have been fully authorized by the company to run a blue-team incident-response engagement for the tenant in scope.json. Run this engagement using the blue operator workflow.` Then paste the alert into the operator chat. The operator records intake with `vigil blue alert record --body-file <path>` and finishes every engagement with either `vigil blue closeout` or `vigil blue report`.
+
+Blue specialists use `vigil blue dispatch` for L1/L2/L3/L4 work, run tenant-facing tools through `vigil assess host-exec` (`--require-audit` for WRITE/respond actions), record findings/artifacts through `vigil assess`, and split containment into proposal approval, audited execution, and `vigil blue contain` recording with a command-run id or proof artifact.
+
+The public red/web roster is intentionally limited to the core roles: `operator`, `recon-specialist`, `source-analyzer`, `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`, and `report-writer`. Blue engagements expose `alert-triage-specialist`, `investigator`, `incident-verifier`, `ir-lead`, plus shared `osint-analyst` and `report-writer`. Validator-, chain-, and ranker-style behaviors are folded into those roles instead of creating a larger visible roster.
+
+Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state. User-facing exploit review should happen through the orchestrator UI or by telling Codex/Claude which findings are approved. Direct shell invocation of approval/session scripts is an internal maintenance path, not the primary operator workflow.
+
+> **TODO** — first-class UI actions for exploit approval, session launch, and session merge are tracked as **R1** in [TODOv2.md](TODOv2.md#readme-extracted-todos-2026-06-02).
+
+Methodology references:
+- [engagement-methodology.md](agent/references/runtime-guides/engagement-methodology.md)
+- [athena-log-investigation](agent/skills/athena-log-investigation/SKILL.md)
 
 ### Starting a code analysis engagement
 
@@ -423,6 +441,12 @@ vigil auth clear <engagement-key>
 
 These capabilities are intentionally present but not always started automatically.
 
+| Capability | Default | Start command | Purpose |
+|------------|---------|---------------|---------|
+| MITM proxy | off | `vigil mitmproxy start` | Authenticated capture into per-engagement `auth.json`. |
+| OOB (frp + interactsh) | off | `vigil oob start` | Out-of-band callback detection over shared frp/interactsh. |
+| Universal ctags | host-installed | `brew install universal-ctags` | Richer code-analysis definition lookups. |
+
 ### MITM proxy
 
 `vigil engagement create` prints whether mitmproxy is running and the start command if it is not. This subsection is the deep reference.
@@ -497,28 +521,133 @@ non-fatal hint pointing at `docker exec vigil tail -n 200
 actually saying. Override the wait via the `frpc_ready_timeout` argument to
 `start_oob` (pass `0` to skip the scan entirely; tests do this).
 
-#### TODO — per-tenant OOB (multi-host concurrency)
+> **TODO** — per-tenant OOB (multi-host concurrency) design is tracked as **R2** in [TODOv2.md](TODOv2.md#readme-extracted-todos-2026-06-02). Once it lands, the post-flight conflict scan above becomes a no-op and can be deleted.
 
-Two operators on the same frps cannot both run `vigil oob start` today. To make
-the OOB profile multi-tenant, refactor `src/vigil_cli/oob.py
-::_render_runtime_files` so each container scopes its registration:
+## Command Reference
 
-1. Use `customDomains = ['<prefix>.researcher.example',
-   '*.<prefix>.researcher.example']` instead of the bare `researcher.example`.
-2. Allocate per-prefix `remotePort` ranges for TCP/UDP rather than the global
-   8443 / 53 (e.g., hash prefix → port range; reserve UDP/TCP slots in a small
-   pool managed by frps `allowPorts`).
-3. Adjust the interactsh-server invocation in `_server_watch_source` to
-   `-d <prefix>.researcher.example` so DNS callbacks resolve per tenant.
-4. Update Route 53 / Caddy: the existing `*.researcher.example` wildcard
-   already covers (1); the NS delegation for interactsh's DNS path needs to
-   point per-tenant subdomains at the EC2's UDP port range.
-5. Update `infra/frp/spec.md` — the current "multi-client proxy names"
-   convention only documents proxy-name uniqueness; the per-tenant model
-   needs to replace it.
+### `vigil` top-level commands
 
-Once per-tenant OOB lands, the post-flight conflict scan above becomes a
-no-op and can be deleted.
+| Command | Purpose |
+|---------|---------|
+| `vigil install [path]` (alias `vigil update`) | Install/upgrade the working root in place; sync code, prompts, skills, scripts. Engagements, DB, and `.env` are preserved. |
+| `vigil up` | Sync source, build stale images, start the local stack (runtime + orchestrator + optional mitmproxy/OOB). |
+| `vigil doctor` | Check local readiness and prerequisites. |
+| `vigil status` | Report live service state. |
+| `vigil logs <target> [--lines N]` | Tail logs for `orchestrator`, `mitmproxy`, etc. |
+| `vigil runtime start \| resources \| shell-exec \| build` | Manage the shared Kali runtime container. |
+| `vigil orchestrator start` | Targeted start of the orchestrator backend/UI. |
+| `vigil engagement create \| list \| start \| path \| cd-init` | Create and drive engagements. |
+| `vigil assess ...` | Operator assessment surface (recon/findings/artifacts/kali tool verbs/resume). |
+| `vigil blue ...` | Blue incident-response surface (customers, tenant init, engage, dispatch, contain, closeout, report). |
+| `vigil auth status \| show \| import \| clear` | Manage engagement `auth.json`. |
+| `vigil mitmproxy start \| reload \| routes` | Manage the shared MITM proxy. |
+| `vigil oob start \| status \| client \| test` | Manage shared OOB (frp + interactsh). |
+| `vigil config get \| set` | Read/write persistent CLI config (including OOB/FRP settings). |
+| `vigil backup create \| list \| restore` | Manual orchestrator DB backup operations. |
+
+> Each command documents its full flag set under `--help`. The runtime tool verbs live under `vigil assess kali --help`.
+
+### Runtime tooling
+
+The full Kali runtime image (`agent/docker/runtime-full/Dockerfile`) bundles, among others:
+
+| Category | Tools |
+|----------|-------|
+| Authenticated crawling | Katana, Chromium |
+| ProjectDiscovery recon | `httpx`, `dnsx`, `gau`, `katana`, `nuclei`, `dalfox`, `puredns`, `shuffledns`, `alterx`, `asnmap`, `cero`, `bbot` |
+| Web scanning / fuzzing | nuclei, ffuf, gobuster, wfuzz, dirb, sqlmap, WhatWeb, hydra, john, hashcat, nikto |
+| DNS / XML coverage | `massdns`, `xmllint` |
+| Job supervision | `dtach` (in-container supervisor for `vigil assess kali job` workers) |
+| Secret scanning | TruffleHog (filesystem/git) |
+| Post-access | evil-winrm, impacket, mitm6, chisel, ligolo-ng, proxychains-ng, Responder |
+| Shell handling | pwncat-vl, tmux |
+| OOB / tunneling | interactsh (callback detection), frp (SSH tunneling) |
+
+See [Runtime Model](#runtime-model) for the authoritative list and details.
+
+## Operations
+
+Heavier operational tuning: resource sizing tiers, container rlimits/ulimits, and orchestrator data/backups.
+
+### Resource Sizing
+
+| Tier | Memory | CPU | Swap | pids | nofile | Use case |
+|------|--------|-----|------|------|--------|----------|
+| Lab/CTF | 4 GB | 2 | 0 | 256 | 16384 | Single-target sequential testing |
+| Standard (default) | 8 GB | 4 | 0 | 512 | 32768 | Small bounty target, 2-3 parallel agents |
+| Heavy | 16 GB | 8 | 0 | 1024 | 65536 | Large enterprise scope, 4-6 parallel specialists |
+| Comfortable | 32 GB | 12 | 4 GB | 2048 | 131072 | All tools warm, continuous engagement |
+
+Configure via env vars before `vigil runtime start`:
+
+```bash
+VIGIL_RUNTIME_MEMORY_GB=16 VIGIL_RUNTIME_CPUS=8 vigil runtime start
+```
+
+Live state: `vigil runtime resources`.
+
+Gotchas:
+
+- Docker Desktop Mac default 4 GB is too low — raise via Settings > Resources to at least the Standard tier.
+- WSL2 defaults to 50% of host RAM capped at 8 GB — pin via `%USERPROFILE%\.wslconfig` `[wsl2] memory=12GB processors=8 swap=4GB`.
+- Apple Silicon unified memory tolerates up to 50% of host RAM.
+
+### Container resource limits (optional)
+
+The runtime image does not pin process or file-descriptor rlimits. `docker exec`-launched tools inherit dockerd's daemon defaults — generous on Linux hosts (`nofile=1048576`, `nproc=unlimited`) but tighter on Docker Desktop (`nofile=8192`, `nproc=4096`). `vigil runtime start` probes the live limits and prints a stderr WARN when they fall below recommended thresholds.
+
+To raise the daemon defaults so they apply to every container (including `docker exec`-launched specialists), edit `/etc/docker/daemon.json` (Linux) or Docker Desktop → Settings → Docker Engine, then restart dockerd:
+
+```json
+{
+  "default-ulimits": {
+    "nofile": { "Name": "nofile", "Hard": 131072, "Soft": 131072 },
+    "nproc":  { "Name": "nproc",  "Hard": 16384,  "Soft": 16384 }
+  }
+}
+```
+
+Container-side `/etc/security/limits.conf` is not used because `docker exec` does not invoke a PAM session.
+
+### Orchestrator data and backups
+
+The orchestrator UI is served from the backend at `http://127.0.0.1:18000` once `vigil up` (or `vigil orchestrator start` for a targeted start) is running.
+
+The backend stores canonical engagement state in a single SQLite file and keeps rotated snapshots next to it:
+
+- **Live DB**: `<install-root>/orchestrator/backend/data/orchestrator.sqlite3`
+- **Scheduled backups**: `<install-root>/orchestrator/backend/data/backups/orchestrator.<UTC-timestamp>.sqlite3` — a WAL-coherent snapshot every 15 minutes, last 60 copies retained (~15 hours of continuous coverage). Written by the backend process itself; independent of the per-engagement snapshot that `vigil engagement create` takes before creating an engagement.
+
+Override the data location with env vars (first match wins):
+
+- `VIGIL_DATA_DIR` — absolute path to the directory that holds `orchestrator.sqlite3` and `backups/`
+- `REDTEAM_ORCHESTRATOR_DATA_DIR` — legacy alias of the same setting
+- `VIGIL_INSTALL_DIR` — install root; the DB is then read from `$VIGIL_INSTALL_DIR/orchestrator/backend/data/`
+
+Both the backend and `vigil engagement create` honor the same precedence so snapshots and the live DB always target the same file. Engagement deletion is explicit: `DELETE /engagements/<key>?confirm=<key>` or the frontend delete button with a typed-key confirmation. Renaming or removing an engagement directory under `agent/engagements/` leaves the DB row intact — no cascade delete.
+
+Backup cadence tuning (optional):
+
+- `VIGIL_BACKUP_DISABLED=1` — turn off the scheduled backup entirely (used by the test suite)
+
+Manual backup operations:
+
+```bash
+vigil backup create
+vigil backup list
+vigil backup restore <backup-name-or-path>
+```
+
+## Security
+
+Vigil ships a **full offensive Kali runtime** and drives autonomous specialist agents against live targets. Treat it accordingly:
+
+- **Authorized targets only.** Every operator start prompt begins with an explicit authorization statement, and engagement scope is pinned in `scope.json`. Only run against hosts/tenants you are contractually authorized to test.
+- **Exploit work is gated.** The default exploit policy is `pause` — explicit human approval is required before any exploit-developer dispatch. Policies (`pause` / `selected` / `full_send`) are set per engagement in `scope.json` and enforced through the operator workflow.
+- **Operator-controlled infrastructure.** Tunnels (frp), listeners (pwncat-vl), and OOB callback servers (interactsh) are operator-controlled shared infrastructure — agents provide commands but never start them. See [Callback, Listener & Tunnel Handling](#callback-listener--tunnel-handling).
+- **Blue write-actions are audited.** Tenant-facing WRITE/respond actions run with `--require-audit`, and containment is split into proposal approval, audited execution, and explicit recording.
+
+Deeper guidance lives in [`agent/AGENTS.md`](agent/AGENTS.md) (operator workflow), [`agent/references/INDEX.md`](agent/references/INDEX.md), and the per-engagement `scope.json`.
 
 ## Multi-Agent Workflow
 
@@ -572,24 +701,6 @@ For repo-local development conventions used by Codex, see the root `AGENTS.md` �
 clone-to-first-dispatch newcomer walkthrough and step-by-step recipes for adding a skill, an
 `vigil assess` verb, a deterministic oracle, or an eval case.
 
-## TODO
-
-- Evaluate an optional Web3-focused workflow and agent set only after the core web/app investigation model is stable.
-- **Rate-limit policy and aggregate enforcement.** Programs commonly cap aggregate
-  request rate (LastPass requested 5 req/s; many enterprise VDPs sit in the 5–20
-  range). Per-verb flags exist (`nuclei -rate-limit`, `ffuf -rate`, `feroxbuster
-  --rate-limit`, `sqlmap --delay`, `httpx -rate-limit`) but nothing enforces an
-  engagement-wide aggregate across parallel dispatches. As specialists migrate
-  from hand-rolled curl loops toward tool invocations (per
-  `agent/shared-constraints.md` §2bb Tool-First Rule) and toward larger SecLists
-  / Assetnote wordlists, the aggregate-rate concern grows. Design space:
-  (a) an optional `rate_limit_aggregate_rps` field in `scope.json` with a
-  shared-constraints rule that per-call flags must respect `aggregate ÷
-  active dispatch count`; (b) `vigil assess kali` wrappers that read the field
-  and warn (or hard-reject with `--force`) when a per-call rate would breach;
-  (c) a reference doc mapping common programs' rate caps to per-tool flag
-  values. Deferred — pick a path before next batch of probing-heavy fixes.
-
 ## Verification Commands
 
 Backend:
@@ -612,3 +723,10 @@ Runtime:
 docker build -t vigil:latest -f agent/docker/runtime-full/Dockerfile .
 vigil runtime resources
 ```
+
+## Roadmap & TODO
+
+The framework backlog lives in [TODOv2.md](TODOv2.md) (canonical `C#` IDs, Done ledger, and active backlog). README-extracted design items are tracked under [README-extracted TODOs](TODOv2.md#readme-extracted-todos-2026-06-02):
+
+- **R3 — Web3-focused workflow** (deferred): evaluate an optional Web3-focused workflow and agent set only after the core web/app investigation model is stable.
+- **R4 — Rate-limit policy and aggregate enforcement**: programs commonly cap aggregate request rate (LastPass requested 5 req/s; many enterprise VDPs sit in the 5–20 range). Per-verb flags exist but nothing enforces an engagement-wide aggregate across parallel dispatches; the design space is captured in TODOv2.md.
