@@ -1,5 +1,6 @@
 ---
 description: Semantic context escaping, multi-stage sanitization failures, protocol injection
+skill: code-vulnerability-analysis
 languages: C/C++, Python, JS
 ---
 

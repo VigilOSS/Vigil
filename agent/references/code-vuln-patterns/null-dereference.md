@@ -1,5 +1,6 @@
 ---
 description: Cross-function NULL propagation, optional field assumptions, race-to-NULL
+skill: code-vulnerability-analysis
 languages: C/C++, Python, JS
 ---
 

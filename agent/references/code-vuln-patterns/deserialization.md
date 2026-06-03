@@ -1,5 +1,6 @@
 ---
 description: Trust-boundary object materialization, type-tag abuse, post-decode gadget reachability
+skill: code-vulnerability-analysis
 languages: C/C++, Python, JS, Java
 ---
 

@@ -1,5 +1,6 @@
 ---
 description: Prompt injection, MCP tool poisoning, RAG poisoning, unsafe tool execution, cross-user context leakage
+skill: code-vulnerability-analysis
 languages: Python, JS, Java
 ---
 

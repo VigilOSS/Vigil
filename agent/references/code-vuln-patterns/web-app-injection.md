@@ -1,5 +1,6 @@
 ---
 description: ORM bypass, second-order injection, template injection, deserialization in web contexts, NoSQL injection
+skill: code-vulnerability-analysis
 languages: Python, JS, Java, Ruby
 ---
 

@@ -1,5 +1,6 @@
 ---
 description: Middleware ordering, decorator bypass, role check logic, path normalization, OAuth implementation flaws
+skill: code-vulnerability-analysis
 languages: C/C++, Python, JS, Java, Go
 ---
 
