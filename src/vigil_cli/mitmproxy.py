@@ -289,8 +289,6 @@ def request_proxy_reload(engagements_root: Path) -> None:
 
 def read_proxy_routes(engagements_root: Path) -> dict | None:
     """Return the addon's last-written routing snapshot, or None if absent."""
-    import json
-
     cache = engagements_root.expanduser().resolve() / _ROUTES_CACHE
     if not cache.is_file():
         return None

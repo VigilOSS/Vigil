@@ -883,6 +883,76 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
     assert "2. 2" in findings_md
 
 
+def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_path: Path, capsys) -> None:
+    """``export-findings`` joins per-finding blocks with a blank line (``\\n\\n``)
+    so consecutive ``##`` headings are not glued onto the previous section's
+    last line (which most Markdown renderers collapse into one finding)."""
+    module = _load_script_module(
+        "test_export_findings_blank_line_module",
+        "agent/scripts/assess/commands/export_findings.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    monkeypatch.setattr(module, "load_scope", lambda engagement_dir: {"engagement_name": "Demo"})
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            if endpoint == "finding-groups":
+                return []
+            assert endpoint == "findings"
+            return [
+                {
+                    "slug": "finding-aaa",
+                    "title": "First",
+                    "severity": "high",
+                    "summary": "first summary",
+                    "details_json": json.dumps({}),
+                },
+                {
+                    "slug": "finding-bbb",
+                    "title": "Second",
+                    "severity": "high",
+                    "summary": "second summary",
+                    "details_json": json.dumps({}),
+                },
+            ]
+
+        def close(self) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(SimpleNamespace(engagement_dir=engagement_dir))
+
+    findings_md = (engagement_dir / "findings.md").read_text(encoding="utf-8")
+    # The second section header must be preceded by a blank line, i.e. the two
+    # blocks are joined by "\n\n" rather than a bare "\n".
+    assert "\n\n## [finding-bbb] Second" in findings_md
+    # And the two headers must not be glued together on adjacent lines.
+    assert "\n## [finding-aaa] First\n## [finding-bbb] Second" not in findings_md
+
+
 def test_list_report_findings_uses_grouped_projection(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_list_report_findings_module",
@@ -981,6 +1051,40 @@ def test_export_findings_preserves_legacy_non_mapping_poc_headers() -> None:
     assert "**PoC Response:**" in rendered
     assert "HTTP 200" in rendered
     assert "Content-Type: text/plain" in rendered
+
+
+def test_render_finding_widens_fence_when_poc_code_contains_backtick_run() -> None:
+    """``_fence_for`` must widen the markdown code fence past the longest
+    backtick run inside the fenced content. A ``poc_code`` that itself contains
+    a triple-backtick run would otherwise close the block early; the emitted
+    fence must therefore be >= 4 backticks so the embedded content cannot break
+    out of the fence."""
+    module = _load_script_module(
+        "test_export_findings_fence_module",
+        "agent/scripts/assess/commands/export_findings.py",
+    )
+
+    poc_code = "before\n```\nnested fenced block\n```\nafter"
+    rendered = module._render_finding(
+        {
+            "slug": "finding-001",
+            "title": "Fence escaping",
+            "details_json": json.dumps({"poc_code": poc_code}),
+        }
+    )
+
+    assert "**PoC Code:**" in rendered
+    lines = rendered.splitlines()
+    poc_idx = lines.index("**PoC Code:**")
+    # The fence line is the first non-empty line after the "**PoC Code:**" label.
+    fence_line = next(line for line in lines[poc_idx + 1:] if line.strip())
+    fence = fence_line.strip()
+    assert set(fence) == {"`"}, f"expected an all-backtick fence, got {fence!r}"
+    # >= 4 backticks: one longer than the triple-backtick run embedded in poc_code.
+    assert len(fence) >= 4
+    # The widened fence must appear as the closing fence too, so the block is
+    # balanced and the embedded ``` cannot terminate it.
+    assert rendered.count(f"\n{fence}") >= 2
 
 
 def test_code_index_sync_requires_repo_id_for_multi_repo_engagement(monkeypatch, tmp_path: Path, capsys) -> None:

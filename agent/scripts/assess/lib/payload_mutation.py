@@ -247,8 +247,13 @@ def _mutate_neighbor(value: str, vtype: str, max_n: int) -> list[str]:
                 variants.append(adj)
 
     elif vtype in ("short_token", "opaque"):
-        # Append a digit suffix
-        variants.extend([value + "1", value + "2", value[:-1] + chr(min(0x10FFFF, ord(value[-1]) + 1)) if value else ""])
+        # Append a digit suffix.
+        variants.extend([value + "1", value + "2"])
+        # Bump the last character — only meaningful for a non-empty value.
+        # ``classify_value("")`` returns "opaque", so guard explicitly rather
+        # than indexing ``value[-1]`` (which would IndexError on "").
+        if value:
+            variants.append(value[:-1] + chr(min(0x10FFFF, ord(value[-1]) + 1)))
 
     elif vtype == "hex":
         try:
@@ -288,8 +293,6 @@ def _mutate_boundary(value: str, vtype: str, max_n: int) -> list[str]:
             "1",
             "-1",
         ]
-    elif vtype == "string":
-        candidates = ["", " ", "a" * 255, "a" * 65535]
     elif vtype in ("short_token", "opaque", "base64", "hex", "jwt"):
         candidates = ["", "a", "a" * 255]
     elif vtype == "url":
@@ -345,10 +348,9 @@ def _mutate_escalation(value: str, vtype: str, max_n: int) -> list[str]:
     elif vtype == "boolean":
         candidates = ["true", "1", "yes", "on", "True"]
     elif vtype == "jwt":
-        # alg:none bypass
-        import base64 as _b64
-        header = _b64.b64encode(b'{"alg":"none","typ":"JWT"}').decode().rstrip("=")
-        payload_part = _b64.b64encode(b'{"role":"admin","sub":"1"}').decode().rstrip("=")
+        # alg:none bypass (base64 is imported at module level).
+        header = base64.b64encode(b'{"alg":"none","typ":"JWT"}').decode().rstrip("=")
+        payload_part = base64.b64encode(b'{"role":"admin","sub":"1"}').decode().rstrip("=")
         candidates = [f"{header}.{payload_part}.", value.rsplit(".", 1)[0] + ".AAAA"]
     else:
         candidates = ["admin", "1", "root", "0"]
