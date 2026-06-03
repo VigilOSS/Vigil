@@ -48,6 +48,19 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
             "SELECT status, COUNT(*) AS total FROM assessment_findings WHERE engagement_id = ? GROUP BY status ORDER BY status ASC",
             (engagement.id,),
         ).fetchall()
+        # Severity rollup for the Overview donut. Mirror the ``finding_count``
+        # WHERE clause exactly (merged/false_positive excluded) so the donut
+        # total always equals ``finding_count``.
+        finding_severity_rows = connection.execute(
+            """
+            SELECT severity, COUNT(*) AS total
+            FROM assessment_findings
+            WHERE engagement_id = ? AND status NOT IN ('merged', 'false_positive')
+            GROUP BY severity
+            ORDER BY severity ASC
+            """,
+            (engagement.id,),
+        ).fetchall()
         verification_state_rows = connection.execute(
             """
             SELECT verification_state, COUNT(*) AS total
@@ -163,6 +176,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         "coverage_count": coverage_count,
         "probe_count": probe_count,
         "finding_count": finding_count,
+        "finding_severities": {row["severity"]: int(row["total"]) for row in finding_severity_rows},
         "open_surface_count": open_surface_count,
         "credential_count": credential_count,
         "access_count": access_count,

@@ -52,10 +52,14 @@ export function CopyInline({
   text,
   children,
   ariaLabel,
+  onCopied,
 }: {
   text: string;
   children?: ReactNode;
   ariaLabel?: string;
+  // Optional post-copy hook (e.g. fire a toast). Kept optional so existing
+  // non-drawer callers (IntelTab provenance) are unaffected.
+  onCopied?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const onCopy = () => {
@@ -63,6 +67,7 @@ export function CopyInline({
       void navigator.clipboard.writeText(text);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1200);
+      onCopied?.();
     } catch {
       /* best-effort */
     }
@@ -225,17 +230,20 @@ export function CodeBlock({
   label,
   text,
   copyable = true,
+  onCopied,
 }: {
   label?: string;
   text: string;
   copyable?: boolean;
+  // Forwarded to CopyInline so drawer callers can toast on copy.
+  onCopied?: () => void;
 }) {
   return (
     <div>
       {(label || copyable) && (
         <div className="code-block-header">
           {label ? <span className="code-block-label">{label}</span> : <span />}
-          {copyable && <CopyInline text={text} />}
+          {copyable && <CopyInline text={text} onCopied={onCopied} />}
         </div>
       )}
       <pre className="code-block">{text}</pre>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AssessmentAttackChainDetail,
   AssessmentAttackChainLink,
@@ -13,11 +13,37 @@ import type {
   FindingProvenance,
   FindingReference,
 } from "../lib/api";
+import { Check, Copy, Link as LinkIcon, List, Table2 } from "lucide-react";
 import { listAssessmentFindingGroups, listAssessmentFindingLinks, listAssessmentFindingTransitions } from "../lib/api";
 import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
 import { useBodyScrollLock } from "../lib/modalScrollLock";
 import { CodeBlock, NotesBody, ProvenanceBlock, isCurlLike } from "./formatting";
+import { KV, Prose, ProseModeToggle, SectionHead } from "./drawer/DrawerKit";
+import type { ProseMode, ToastFn } from "./drawer/DrawerKit";
+import { Skeleton, TableSkeleton } from "./Skeletons";
+
+// Optional flat table view — lazy-loaded ag-grid (code-split chunk).
+// The grouped root-cause list remains the default and is NOT lazy.
+const FindingsGrid = lazy(() => import("./FindingsGrid"));
+
+// Grouped-view pagination. One "page item" is a top-level entry: a root-cause
+// group (root + its siblings) OR a standalone finding. Only the grouped view
+// paginates — the Table view is ag-grid, which virtualizes its own rows.
+const GROUPED_PAGE_SIZE = 25;
+
+// View toggle, persisted in localStorage alongside findings.selected.
+type FindingsView = "grouped" | "table";
+const FINDINGS_VIEW_KEY = "findings.view";
+function readFindingsView(): FindingsView {
+  try {
+    return window.localStorage.getItem(FINDINGS_VIEW_KEY) === "table" ? "table" : "grouped";
+  } catch {
+    return "grouped";
+  }
+}
+import { useToast } from "../contexts/ToastContext";
+import { findingToMarkdown } from "../lib/findingMarkdown";
 
 // ── Types & helpers ───────────────────────────────────────────────────
 
@@ -30,6 +56,14 @@ type FindingsTabProps = {
   chains: AssessmentAttackChainDetail[];
   chainLinks: AssessmentAttackChainLink[];
   assessmentRefreshVersion: number;
+  // Deep-link entry: slug to auto-select + open once findings load. Unknown
+  // slugs are silently ignored. Honored once per slug value (see effect).
+  initialFindingSlug?: string;
+  // Deep-link entry: which drawer tab (?dtab=…) to open the auto-opened
+  // finding on. Validated against the finding's visible tabs; falls back to
+  // "overview" when absent / invalid / hidden. Only applies to the deep-link
+  // auto-open, not to later manual drawer navigation.
+  initialDrawerTab?: string;
 };
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
@@ -38,11 +72,11 @@ const SEV_RANK: Record<string, number> = Object.fromEntries(
   SEVERITY_ORDER.map((s, i) => [s, i]),
 );
 const SEV_COLORS: Record<string, string> = {
-  critical: "#991b1b",
-  high: "#c64d15",
-  medium: "#a16207",
-  low: "#17354c",
-  info: "#9a988d",
+  critical: "var(--sev-critical)",
+  high: "var(--sev-high)",
+  medium: "var(--sev-medium)",
+  low: "var(--sev-low)",
+  info: "var(--sev-info)",
 };
 
 const KNOWN_DETAIL_KEYS = new Set<string>([
@@ -139,7 +173,7 @@ function workflowLabel(finding: FindingLike): string {
   return WORKFLOW_LABELS[finding.workflow_status] || finding.workflow_status;
 }
 
-function relTime(iso: string | undefined | null): string {
+export function relTime(iso: string | undefined | null): string {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
@@ -154,8 +188,8 @@ function relTime(iso: string | undefined | null): string {
   return d.toISOString().slice(0, 10);
 }
 
-function sevDotColor(sev: string): string {
-  return SEV_COLORS[sev] || "#9a988d";
+export function sevDotColor(sev: string): string {
+  return SEV_COLORS[sev] || "var(--sev-info)";
 }
 
 function extractHost(url: string): string {
@@ -265,7 +299,7 @@ type DerivedLink = {
   id?: number;
 };
 
-type Derived = {
+export type Derived = {
   finding: FindingLike;
   slug: string;
   title: string;
@@ -550,8 +584,14 @@ export function FindingsTab({
   chains,
   chainLinks,
   assessmentRefreshVersion,
+  initialFindingSlug,
+  initialDrawerTab,
 }: FindingsTabProps) {
   const allFindingsRaw = findings.length > 0 ? findings : fallbackFindings;
+  const { toast } = useToast();
+  // The active drawer-tab is owned by the Drawer, but FindingsTab needs it to
+  // write the deep-link hash, so the Drawer reports it up via onTabChange.
+  const [drawerTab, setDrawerTab] = useState<TabId>("overview");
 
   const [allFindingLinks, setAllFindingLinks] = useState<AssessmentFindingLink[]>([]);
   const [allFindingGroups, setAllFindingGroups] = useState<AssessmentFindingGroup[]>([]);
@@ -575,6 +615,9 @@ export function FindingsTab({
       return null;
     }
   });
+  // Grouped (default) vs flat table view. Persisted via the same
+  // localStorage idiom as findings.selected below.
+  const [view, setView] = useState<FindingsView>(() => readFindingsView());
   // Detail-modal open state. See CommandsTab.tsx for design notes.
   // Intentionally does NOT mirror the persisted `selected` — we don't
   // want the modal to pop open automatically on a page refresh.
@@ -593,6 +636,24 @@ export function FindingsTab({
       // ignore
     }
   }, [selected]);
+
+  // Persist chosen view (grouped | table).
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(FINDINGS_VIEW_KEY, view);
+    } catch {
+      // ignore
+    }
+  }, [view]);
+
+  // Tracks which deep-linked slug we've already auto-opened (see the
+  // auto-open effect placed after derivedBySlug is in scope, below).
+  const consumedInitialSlugRef = useRef<string | null>(null);
+  // The drawer-tab the deep-link auto-open should land on (resolved against the
+  // finding's visible tabs) plus the slug it applies to. Handed to the Drawer
+  // so it opens that finding on the intended pane; null = overview / no pending
+  // deep-link. Cleared on manual open + close so it can't leak.
+  const pendingDrawerTabRef = useRef<{ slug: string; tab: TabId } | null>(null);
 
   // Fetch finding links
   useEffect(() => {
@@ -758,7 +819,12 @@ export function FindingsTab({
         evidence: details.evidence,
         kill_reason: details.kill_reason,
         kill_check: typeof details.kill_check === "number" ? details.kill_check : undefined,
-        steps_to_reproduce: details.steps_to_reproduce,
+        // Coerce list-typed detail fields: agents occasionally record these as
+        // a single string instead of an array (e.g. a numbered multi-step block).
+        // Without coercion the search-corpus builder's `(x || []).join(...)` and
+        // the PoC pane's `.map(...)` throw on a truthy non-array, which crashes
+        // the entire derivedList useMemo and white-screens the Findings tab.
+        steps_to_reproduce: toStringArray(details.steps_to_reproduce),
         parameter: details.parameter,
         request_method: details.request_method,
         discovered_by: details.discovered_by,
@@ -769,7 +835,7 @@ export function FindingsTab({
         references: details.references || [],
         chain_required: details.chain_required,
         chain_rationale: details.chain_rationale,
-        required_followup: details.required_followup,
+        required_followup: toStringArray(details.required_followup),
         slot_type: details.slot_type,
         entry_point: details.entry_point,
         sink: details.sink,
@@ -968,6 +1034,70 @@ export function FindingsTab({
     return { groups: groupList, standalone };
   }, [filtered, derivedBySlug]);
 
+  // ── Grouped-view pagination ──
+  // Flatten the grouped render into the EXACT order it draws: every group (in
+  // its sorted order) is one top-level entry, then every standalone finding (in
+  // its sorted order) is one top-level entry. Each entry is one "page item".
+  type GroupEntry = { kind: "group"; group: (typeof groupedFiltered.groups)[number] };
+  type StandaloneEntry = { kind: "standalone"; finding: Derived };
+  type DisplayEntry = GroupEntry | StandaloneEntry;
+  const displayEntries = useMemo<DisplayEntry[]>(() => {
+    const entries: DisplayEntry[] = [];
+    for (const group of groupedFiltered.groups) entries.push({ kind: "group", group });
+    for (const finding of groupedFiltered.standalone) entries.push({ kind: "standalone", finding });
+    return entries;
+  }, [groupedFiltered]);
+
+  // Map every finding slug (a group's root + siblings, or a standalone) to the
+  // index of its top-level entry, so a deep-linked / keyboard-selected finding
+  // can be paged into view no matter which entry it lives in.
+  const entryIndexBySlug = useMemo(() => {
+    const m = new Map<string, number>();
+    displayEntries.forEach((entry, i) => {
+      if (entry.kind === "group") {
+        m.set(entry.group.root.slug, i);
+        for (const sib of entry.group.siblings) m.set(sib.slug, i);
+      } else {
+        m.set(entry.finding.slug, i);
+      }
+    });
+    return m;
+  }, [displayEntries]);
+
+  const pageCount = Math.max(1, Math.ceil(displayEntries.length / GROUPED_PAGE_SIZE));
+  const [groupedPage, setGroupedPage] = useState(0);
+
+  // Reset to the first page whenever the filtered result set changes (search /
+  // chips). Depending on `displayEntries` identity ties the reset to the same
+  // memo the render reads, so it fires exactly when the visible list changes.
+  useEffect(() => {
+    setGroupedPage(0);
+  }, [displayEntries]);
+
+  // Clamp if the page count shrinks (e.g. WebSocket refresh drops entries)
+  // without otherwise changing identity in a way that resets the page.
+  const safePage = Math.min(groupedPage, pageCount - 1);
+
+  // Window the entry list for the current page, then split the contiguous slice
+  // back into { groups, standalone } so GroupedFindingsList renders unchanged.
+  // Because groups always precede standalones in displayEntries, a contiguous
+  // window holds trailing groups then leading standalones — no reordering.
+  const pagedGrouped = useMemo(() => {
+    const start = safePage * GROUPED_PAGE_SIZE;
+    const slice = displayEntries.slice(start, start + GROUPED_PAGE_SIZE);
+    const groups: typeof groupedFiltered.groups = [];
+    const standalone: Derived[] = [];
+    for (const entry of slice) {
+      if (entry.kind === "group") groups.push(entry.group);
+      else standalone.push(entry.finding);
+    }
+    return { groups, standalone };
+  }, [displayEntries, safePage, groupedFiltered.groups]);
+
+  // Windowed range for the "Showing a–b of N" label (1-based, inclusive).
+  const pageRangeStart = displayEntries.length === 0 ? 0 : safePage * GROUPED_PAGE_SIZE + 1;
+  const pageRangeEnd = Math.min((safePage + 1) * GROUPED_PAGE_SIZE, displayEntries.length);
+
   // Keep selection valid — if the persisted slug no longer exists in
   // the filtered set, fall through to the first row so j/k still has
   // an anchor. We no longer auto-select the first row on mount: the
@@ -980,6 +1110,64 @@ export function FindingsTab({
   }, [derivedList, derivedBySlug, selected]);
 
   const selectedDerived = selected ? derivedBySlug.get(selected) ?? null : null;
+
+  // Auto-jump the grouped page to keep the selected finding reachable. This is
+  // the single guarantee that (a) a deep-linked / clicked finding's source row
+  // is on the visible page so the drawer has an anchor, and (b) keyboard nav
+  // (j/k/[/]) — which walks the flat `filtered` order, not the paged grouped
+  // order — never lands on an off-page row the user can't see: we follow it to
+  // its page instead of clamping. No-ops in Table view (ag-grid is unpaged) and
+  // when the selected slug isn't a visible grouped entry.
+  useEffect(() => {
+    if (view !== "grouped" || !selected) return;
+    const entryIdx = entryIndexBySlug.get(selected);
+    if (entryIdx == null) return;
+    const targetPage = Math.floor(entryIdx / GROUPED_PAGE_SIZE);
+    setGroupedPage((cur) => (cur === targetPage ? cur : targetPage));
+  }, [selected, view, entryIndexBySlug]);
+
+  // Deep-link auto-open: when arriving with ?finding={slug}, select + open
+  // that finding's drawer once it exists in the loaded set. We track the
+  // last-consumed slug VALUE (not a boolean) so closing the drawer doesn't
+  // immediately re-open it, while re-deep-linking to a DIFFERENT finding
+  // (a new slug) while still mounted re-arms and re-opens. Unknown slugs are
+  // ignored silently. The drawer-tab is resolved from ?dtab= against the
+  // finding's visible tabs (invalid/hidden → overview) and handed to the
+  // Drawer via pendingDrawerTabRef so it opens on the intended pane.
+  useEffect(() => {
+    if (!initialFindingSlug) return;
+    if (consumedInitialSlugRef.current === initialFindingSlug) return;
+    const target = derivedBySlug.get(initialFindingSlug);
+    if (!target) return; // wait for load / ignore unknown
+    consumedInitialSlugRef.current = initialFindingSlug;
+    const resolvedDrawerTab =
+      isDrawerTabId(initialDrawerTab) && drawerTabVisible(target, initialDrawerTab)
+        ? initialDrawerTab
+        : "overview";
+    pendingDrawerTabRef.current = { slug: initialFindingSlug, tab: resolvedDrawerTab };
+    setSelected(initialFindingSlug);
+    lastFocusSlugRef.current = initialFindingSlug;
+    setDrawerTab(resolvedDrawerTab);
+    setDetailOpen(true);
+  }, [initialFindingSlug, initialDrawerTab, derivedBySlug]);
+
+  // Reflect drawer open-state + active drawer-tab in the URL via
+  // history.replaceState (silent — no `hashchange`, so App never re-routes
+  // and there is no loop). On close we drop the `finding`/`dtab` params but
+  // keep the findings tab. Back/forward still work because we never pushState.
+  useEffect(() => {
+    const base = `#/engagements/${encodeURIComponent(engagementKey)}`;
+    const params = new URLSearchParams();
+    params.set("tab", "findings");
+    if (detailOpen && selected) {
+      params.set("finding", selected);
+      if (drawerTab !== "overview") params.set("dtab", drawerTab);
+    }
+    const next = `${base}?${params.toString()}`;
+    if (window.location.hash !== next) {
+      window.history.replaceState(null, "", next);
+    }
+  }, [engagementKey, detailOpen, selected, drawerTab]);
 
   // Transitions fetch
   useEffect(() => {
@@ -1122,6 +1310,17 @@ export function FindingsTab({
   const activeFilterCount =
     sevFilters.size + workflowFilters.size + verifFilters.size + (query ? 1 : 0);
 
+  // Shared open-drawer handler used by BOTH the grouped list and the flat
+  // table view, so the drawer / deep-link flow is identical in either view.
+  const openFinding = useCallback((slug: string) => {
+    // A manual open always lands on Overview — drop any pending deep-link
+    // drawer-tab so it can't leak into a hand-clicked finding.
+    pendingDrawerTabRef.current = null;
+    setSelected(slug);
+    lastFocusSlugRef.current = slug;
+    setDetailOpen(true);
+  }, []);
+
   return (
     <div className="findings-redesign">
       <div className="page-head">
@@ -1163,6 +1362,29 @@ export function FindingsTab({
             <span className="search-kbd">/</span>
           </div>
           <div className="toolbar-right">
+            {/* Grouped (default) | Table view toggle. The grouped root-cause
+                list is the differentiator we keep; Table is the optional
+                flat ag-grid view over the same filtered rows. */}
+            <div className="view-toggle" role="group" aria-label="Findings view">
+              <button
+                type="button"
+                className={view === "grouped" ? "is-active" : ""}
+                aria-pressed={view === "grouped"}
+                onClick={() => setView("grouped")}
+                title="Grouped by root cause"
+              >
+                <List aria-hidden /> Grouped
+              </button>
+              <button
+                type="button"
+                className={view === "table" ? "is-active" : ""}
+                aria-pressed={view === "table"}
+                onClick={() => setView("table")}
+                title="Flat table"
+              >
+                <Table2 aria-hidden /> Table
+              </button>
+            </div>
             <button
               type="button"
               className="qa-btn"
@@ -1273,17 +1495,43 @@ export function FindingsTab({
               )}
             </div>
           )}
-          <GroupedFindingsList
-            groups={groupedFiltered.groups}
-            standalone={groupedFiltered.standalone}
-            selected={selected}
-            onOpen={(slug) => {
-              setSelected(slug);
-              lastFocusSlugRef.current = slug;
-              setDetailOpen(true);
-            }}
-            freeTerms={parsedQuery.freeTerms}
-          />
+          {view === "grouped" && pageCount > 1 ? (
+            <div className="pager">
+              <button
+                type="button"
+                className="pager-button"
+                disabled={safePage === 0}
+                onClick={() => setGroupedPage(Math.max(0, safePage - 1))}
+              >
+                Prev
+              </button>
+              <span className="meta-text">
+                Page {safePage + 1} of {pageCount} · Showing {pageRangeStart}–{pageRangeEnd} of{" "}
+                {displayEntries.length}
+              </span>
+              <button
+                type="button"
+                className="pager-button"
+                disabled={safePage >= pageCount - 1}
+                onClick={() => setGroupedPage(Math.min(pageCount - 1, safePage + 1))}
+              >
+                Next
+              </button>
+            </div>
+          ) : null}
+          {view === "table" ? (
+            <Suspense fallback={<TableSkeleton rows={10} showHeader={false} />}>
+              <FindingsGrid rows={filtered} selected={selected} onOpen={openFinding} />
+            </Suspense>
+          ) : (
+            <GroupedFindingsList
+              groups={pagedGrouped.groups}
+              standalone={pagedGrouped.standalone}
+              selected={selected}
+              onOpen={openFinding}
+              freeTerms={parsedQuery.freeTerms}
+            />
+          )}
         </section>
       </div>
 
@@ -1291,6 +1539,13 @@ export function FindingsTab({
         <DetailModal
           onClose={() => {
             setDetailOpen(false);
+            // Reset the drawer-tab so a stale `dtab` doesn't linger in the
+            // URL/state after close (the URL effect drops it once detailOpen
+            // is false, but keeping state honest avoids a flash on re-open).
+            setDrawerTab("overview");
+            // Drop any consumed deep-link drawer-tab so a re-open lands on
+            // Overview rather than the previously deep-linked pane.
+            pendingDrawerTabRef.current = null;
             const el =
               lastFocusSlugRef.current != null
                 ? rowRefs.current.get(lastFocusSlugRef.current)
@@ -1314,6 +1569,9 @@ export function FindingsTab({
               setSelected(slug);
               if (slug) lastFocusSlugRef.current = slug;
             }}
+            onTabChange={setDrawerTab}
+            initialTab={pendingDrawerTabRef.current?.tab}
+            initialTabSlug={pendingDrawerTabRef.current?.slug}
             titleId="findings-detail-modal-title"
           />
         </DetailModal>
@@ -1344,6 +1602,9 @@ export function FindingsTab({
         <CommandPalette
           derivedList={derivedList}
           onSelect={(slug) => {
+            // Manual jump-to-finding lands on Overview; drop any pending
+            // deep-link drawer-tab so it can't leak into this open.
+            pendingDrawerTabRef.current = null;
             setSelected(slug);
             lastFocusSlugRef.current = slug;
             setCmdOpen(false);
@@ -1528,10 +1789,65 @@ type DrawerProps = {
   transitionsLoading: boolean;
   transitionsError: string | null;
   onSelect: (slug: string | null) => void;
+  // Report the active drawer-tab up so FindingsTab can mirror it in the URL.
+  onTabChange?: (tab: TabId) => void;
+  // Deep-link (?dtab=…) drawer-tab + the finding slug it applies to. Already
+  // validated by the caller. The drawer opens on `initialTab` whenever its
+  // current finding is `initialTabSlug` (mount OR a same-mount re-deep-link to
+  // that finding); every other finding resets to "overview".
+  initialTab?: TabId;
+  initialTabSlug?: string;
   titleId?: string;
 };
 
 type TabId = "overview" | "poc" | "code" | "links" | "history" | "intel";
+
+const DRAWER_TAB_IDS: readonly TabId[] = [
+  "overview",
+  "poc",
+  "code",
+  "links",
+  "history",
+  "intel",
+] as const;
+
+function isDrawerTabId(value: string | undefined): value is TabId {
+  return value != null && (DRAWER_TAB_IDS as readonly string[]).includes(value);
+}
+
+// Which drawer tabs are visible for a finding. Mirrors the `hidden` rules in
+// Drawer's `tabs` array (code/links/intel are conditionally hidden; overview /
+// poc / history are always shown). Used to validate a deep-linked ?dtab= so we
+// only honor a tab that actually exists for the finding.
+function drawerTabVisible(d: Derived, tab: TabId): boolean {
+  switch (tab) {
+    case "code":
+      return !!d.slot_type;
+    case "links": {
+      const count =
+        d.links.filter((l) => l.target_kind === "finding").length +
+        d.links.filter((l) => l.target_kind === "chain").length;
+      return count > 0;
+    }
+    case "intel": {
+      const hasProvenance = !!(
+        d.provenance &&
+        (d.provenance.agent_name ||
+          d.provenance.captured_at ||
+          d.provenance.artifact_ref ||
+          d.provenance.evidence_quote)
+      );
+      return (d.references?.length ?? 0) + (hasProvenance ? 1 : 0) > 0;
+    }
+    default:
+      // overview / poc / history are always visible.
+      return true;
+  }
+}
+
+// ProseMode + the prose primitives (CopyChip / SectionHead / Prose / KV /
+// ProseModeToggle) now live in ./drawer/DrawerKit and are shared verbatim
+// with the Intel + Surface drawers.
 
 function Drawer({
   d,
@@ -1542,11 +1858,36 @@ function Drawer({
   transitionsLoading,
   transitionsError,
   onSelect,
+  onTabChange,
+  initialTab,
+  initialTabSlug,
   titleId,
 }: DrawerProps) {
-  const [tab, setTab] = useState<TabId>("overview");
+  const { toast } = useToast();
+  // The drawer-tab for the deep-linked finding. Already validated by the
+  // caller against this finding's visible tabs, so an invalid/hidden value
+  // never reaches here. Applies only when the current finding IS the
+  // deep-linked one (mount OR same-mount re-deep-link); else "overview".
+  const deepLinkTab: TabId =
+    initialTab && d?.slug === initialTabSlug ? initialTab : "overview";
+  const [tab, setTabState] = useState<TabId>(deepLinkTab);
+  const [proseMode, setProseMode] = useState<ProseMode>("rendered");
+  const [mdCopied, setMdCopied] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const setTab = (next: TabId) => {
+    setTabState(next);
+    onTabChange?.(next);
+  };
   useEffect(() => {
-    setTab("overview");
+    // On each finding change, land on the deep-linked tab if this is the
+    // deep-linked finding, otherwise reset to "overview". Mirror it up so the
+    // URL stays in sync. (deepLinkTab is recomputed per render from the props.)
+    setTabState(deepLinkTab);
+    onTabChange?.(deepLinkTab);
+    // Reset prose mode per finding so a raw-mode toggle doesn't leak across
+    // navigations. (onTabChange identity is stable from the parent.)
+    setProseMode("rendered");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [d?.slug]);
 
   const linkedFindings = d.links.filter((l) => l.target_kind === "finding");
@@ -1567,11 +1908,10 @@ function Drawer({
   const codeCount = d.slot_type ? 1 : 0;
   const linksCount = linkedFindings.length + linkedChains.length;
   const historyCount = transitions.length;
-  // Intel count must match exactly what IntelPane will render:
-  // references + (provenance ? 1 : 0). The pane also drops empty
-  // provenance objects, so mirror that here (fixes VA-004,
-  // which showed "Intel 1" for a finding with an empty provenance
-  // object and no refs).
+  // The Intel tab is VISIBLE when there are references OR any provenance
+  // field (so a provenance-only finding still gets the tab). The empty
+  // provenance object is dropped here too (fixes VA-004, which used to show
+  // an Intel tab for an empty provenance object with no refs).
   const hasProvenance = !!(
     d.provenance &&
     (d.provenance.agent_name ||
@@ -1579,21 +1919,55 @@ function Drawer({
       d.provenance.artifact_ref ||
       d.provenance.evidence_quote)
   );
-  const intelCount = (d.references?.length ?? 0) + (hasProvenance ? 1 : 0);
+  const intelVisible = (d.references?.length ?? 0) > 0 || hasProvenance;
+  // The badge counts ONLY references — provenance is a single supplementary
+  // block, not an "intel item", so folding it in made the badge misleading
+  // (e.g. "Intel 3" for 2 refs + provenance).
+  const intelBadge = d.references?.length ?? 0;
 
   const tabs: { id: TabId; label: string; count?: number; hidden?: boolean }[] = [
     { id: "overview", label: "Overview" },
-    { id: "poc", label: "Proof of Concept", count: pocCount },
+    // "PoC" rather than "Proof of Concept": the audience knows the acronym
+    // and the long label crowds the tab bar at ~1100px.
+    { id: "poc", label: "PoC", count: pocCount },
     { id: "code", label: "Code", count: codeCount, hidden: !d.slot_type },
     { id: "links", label: "Links", count: linksCount, hidden: linksCount === 0 },
     { id: "history", label: "History", count: historyCount },
-    { id: "intel", label: "Intel", count: intelCount, hidden: intelCount === 0 },
+    { id: "intel", label: "Intel", count: intelBadge || undefined, hidden: !intelVisible },
   ];
   const visibleTabs = tabs.filter((t) => !t.hidden);
 
   const copySlug = () => {
     try {
       void navigator.clipboard?.writeText(d.slug);
+      toast("Copied", "success");
+    } catch {
+      // ignore
+    }
+  };
+
+  // Copy-finding-as-markdown (reference-project ReportView pattern, adapted to our
+  // fields via lib/findingMarkdown). Flips the icon to a Check for 1.5s.
+  const copyMarkdown = () => {
+    try {
+      void navigator.clipboard?.writeText(findingToMarkdown(d));
+      setMdCopied(true);
+      window.setTimeout(() => setMdCopied(false), 1500);
+      toast("Copied finding as Markdown", "success");
+    } catch {
+      // ignore
+    }
+  };
+
+  // Copy the deep-link URL. The parent's replaceState effect has already
+  // rewritten location.hash to include ?finding={slug}, so window.location.href
+  // is the canonical link to this finding's open drawer.
+  const copyLink = () => {
+    try {
+      void navigator.clipboard?.writeText(window.location.href);
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 1500);
+      toast("Link copied", "success");
     } catch {
       // ignore
     }
@@ -1614,8 +1988,26 @@ function Drawer({
               <IconCopy />
             </button>
           </div>
-          {/* Maximize retired with the move to a centred modal. The
-              modal's own × close button handles dismissal. */}
+          <div className="drawer-header-actions">
+            <button
+              type="button"
+              className="copy-btn"
+              onClick={copyMarkdown}
+              title="Copy finding as Markdown"
+              aria-label="Copy finding as Markdown"
+            >
+              {mdCopied ? <Check size={13} /> : <Copy size={13} />}
+            </button>
+            <button
+              type="button"
+              className="copy-btn"
+              onClick={copyLink}
+              title="Copy link to this finding"
+              aria-label="Copy link to this finding"
+            >
+              {linkCopied ? <Check size={13} /> : <LinkIcon size={13} />}
+            </button>
+          </div>
         </div>
         <h2 id={titleId} className="drawer-title">{d.title}</h2>
         <div className="hero-meta">
@@ -1649,11 +2041,20 @@ function Drawer({
             {t.count != null && <span className="count">{t.count}</span>}
           </button>
         ))}
+        {/* Prose view-mode toggle — a single drawer-wide control (Eye =
+            rendered markdown, Code = raw mono <pre>) applied to every prose
+            section. Only meaningful on tabs that render prose. */}
+        {(tab === "overview" || tab === "poc") && (
+          <div className="prose-mode-wrap">
+            <span className="prose-mode-label">View</span>
+            <ProseModeToggle mode={proseMode} onChange={setProseMode} />
+          </div>
+        )}
       </div>
       <div className="drawer-body">
-        {tab === "overview" && <OverviewPane d={d} />}
-        {tab === "poc" && <PocPane d={d} />}
-        {tab === "code" && <CodePane d={d} />}
+        {tab === "overview" && <OverviewPane d={d} proseMode={proseMode} toast={toast} />}
+        {tab === "poc" && <PocPane d={d} proseMode={proseMode} toast={toast} />}
+        {tab === "code" && <CodePane d={d} toast={toast} />}
         {tab === "links" && (
           <LinksPane
             d={d}
@@ -1678,18 +2079,11 @@ function Drawer({
 }
 
 // ── Panes ─────────────────────────────────────────────────────────────
+//
+// CopyChip / SectionHead / Prose / KV + the ToastFn / ProseMode types are
+// imported from ./drawer/DrawerKit (shared with the Intel + Surface drawers).
 
-function KV({ k, v, mono }: { k: string; v: unknown; mono?: boolean }) {
-  if (v === undefined || v === null || v === "") return null;
-  return (
-    <div className="kv">
-      <p className="k">{k}</p>
-      <p className={`v ${mono ? "mono" : ""}`}>{String(v)}</p>
-    </div>
-  );
-}
-
-function OverviewPane({ d }: { d: Derived }) {
+function OverviewPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMode; toast: ToastFn }) {
   const additionalDetailKeys = Object.keys(d.details).filter(
     (key) => !KNOWN_DETAIL_KEYS.has(key),
   );
@@ -1697,20 +2091,32 @@ function OverviewPane({ d }: { d: Derived }) {
     <>
       {d.summary && (
         <div className="section">
-          <p className="section-title">Summary</p>
-          <p>{d.summary}</p>
+          <SectionHead title="Summary" copyText={d.summary} toast={toast} />
+          <Prose text={d.summary} mode={proseMode} />
         </div>
       )}
       {d.impact && (
         <div className="callout impact">
-          <p className="section-title">Impact</p>
-          <p>{d.impact}</p>
+          <SectionHead title="Impact" copyText={d.impact} toast={toast} />
+          <Prose text={d.impact} mode={proseMode} />
         </div>
       )}
       {d.remediation && (
         <div className="callout remediation">
-          <p className="section-title">Remediation</p>
-          <p>{d.remediation}</p>
+          <SectionHead title="Remediation" copyText={d.remediation} toast={toast} />
+          <Prose text={d.remediation} mode={proseMode} />
+        </div>
+      )}
+      {/* Notes is analyst commentary — it belongs near Summary/Impact/
+          Remediation, not buried after admin Metadata. Render it right
+          after Remediation, ahead of Root Cause Group / Metadata. */}
+      {d.notes && (
+        <div className="section">
+          <SectionHead title="Notes" copyText={d.notes} toast={toast} />
+          {/* Notes follow the drawer-wide prose toggle: rendered markdown by
+              default, raw mono <pre> when toggled. NotesBody is retained for
+              non-drawer usages (e.g. IntelTab). */}
+          <Prose text={d.notes} mode={proseMode} />
         </div>
       )}
       {d.root_cause_role && (
@@ -1745,7 +2151,7 @@ function OverviewPane({ d }: { d: Derived }) {
       <div className="section">
         <p className="section-title">Metadata</p>
         <div className="kv-grid">
-          <KV k="Location" v={d.canonical_location} mono />
+          <KV k="Location" v={d.canonical_location} mono toast={toast} />
           <KV k="Method" v={d.request_method} />
           <KV k="Parameter" v={d.parameter} mono />
           <KV k="Auth context" v={d.auth_context} />
@@ -1753,10 +2159,10 @@ function OverviewPane({ d }: { d: Derived }) {
           <KV k="Discovered by" v={d.discovered_by} mono />
           <KV k="Defect family" v={d.defect_family} />
           <KV k="Dedupe key" v={d.root_cause_key} mono />
+          {/* OWASP stays — it's not in the hero. CWE / CVSS score / CVSS
+              vector are dropped here: the hero already surfaces cwe_id (tag)
+              and cvss_score (cvss-chip), so repeating them is duplication. */}
           <KV k="OWASP" v={d.owasp_category} />
-          <KV k="CWE" v={d.cwe_id} />
-          <KV k="CVSS vector" v={d.cvss_vector} mono />
-          <KV k="CVSS score" v={d.cvss_score} />
           {d.merged_into_slug && (
             <KV k="Merged into" v={d.merged_into_slug} mono />
           )}
@@ -1784,7 +2190,11 @@ function OverviewPane({ d }: { d: Derived }) {
        * a remediation pointer, not a reproduction artifact. */}
       {d.required_followup && d.required_followup.length > 0 && (
         <div className="section">
-          <p className="section-title">Required follow-up</p>
+          <SectionHead
+            title="Required follow-up"
+            copyText={d.required_followup.map((s, i) => `${i + 1}. ${s}`).join("\n")}
+            toast={toast}
+          />
           <ul className="steps">
             {d.required_followup.map((s, i) => (
               <li key={i}>{s}</li>
@@ -1794,7 +2204,11 @@ function OverviewPane({ d }: { d: Derived }) {
       )}
       {(d.variant_of || d.original_pattern) && (
         <div className="section">
-          <p className="section-title">Variant</p>
+          <SectionHead
+            title="Variant"
+            copyText={d.original_pattern || d.variant_of || ""}
+            toast={toast}
+          />
           {d.variant_of && (
             <p>
               <span style={{ color: "var(--muted)", fontSize: "0.82rem" }}>
@@ -1806,12 +2220,6 @@ function OverviewPane({ d }: { d: Derived }) {
           {d.original_pattern && (
             <pre className="pre">{d.original_pattern}</pre>
           )}
-        </div>
-      )}
-      {d.notes && (
-        <div className="section">
-          <p className="section-title">Notes</p>
-          <NotesBody text={d.notes} />
         </div>
       )}
       {additionalDetailKeys.length > 0 && (
@@ -1833,7 +2241,7 @@ function OverviewPane({ d }: { d: Derived }) {
   );
 }
 
-function PocPane({ d }: { d: Derived }) {
+function PocPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMode; toast: ToastFn }) {
   const hasSteps = !!(d.steps_to_reproduce && d.steps_to_reproduce.length > 0);
   const hasAny =
     hasSteps ||
@@ -1862,7 +2270,11 @@ function PocPane({ d }: { d: Derived }) {
     <>
       {hasSteps && (
         <div className="section">
-          <p className="section-title">Steps to reproduce</p>
+          <SectionHead
+            title="Steps to reproduce"
+            copyText={d.steps_to_reproduce!.map((s, i) => `${i + 1}. ${s}`).join("\n")}
+            toast={toast}
+          />
           <ol className="steps">
             {d.steps_to_reproduce!.map((s, i) => (
               <li key={i}>{s}</li>
@@ -1871,14 +2283,16 @@ function PocPane({ d }: { d: Derived }) {
         </div>
       )}
       {ev && (
-        <div className="section">
-          <p className="section-title">Evidence</p>
-          {evidenceMode === "http" ? (
+        // Evidence ("how we know") gets a callout so it reads as distinct
+        // from Steps-to-reproduce ("how to reproduce"), which keep .section.
+        <div className="callout evidence">
+          <SectionHead title="Evidence" copyText={ev} toast={toast} />
+          {evidenceMode === "http" || proseMode === "raw" ? (
             <pre className="pre resp">{ev}</pre>
           ) : evidenceMode === "quote" ? (
             <blockquote className="evidence-inline">{ev}</blockquote>
           ) : (
-            <NotesBody text={ev} />
+            <Prose text={ev} mode={proseMode} />
           )}
         </div>
       )}
@@ -1889,18 +2303,18 @@ function PocPane({ d }: { d: Derived }) {
             {d.poc_language && <span className="count">{d.poc_language}</span>}
             {pocCodeIsCurl && <span className="count">curl</span>}
           </p>
-          <CodeBlock text={d.poc_code} />
+          <CodeBlock text={d.poc_code} onCopied={() => toast("Copied", "success")} />
         </div>
       )}
       {reqText && (
         <div className="section">
-          <p className="section-title">Request</p>
+          <SectionHead title="Request" copyText={reqText} toast={toast} />
           <pre className="pre req">{reqText}</pre>
         </div>
       )}
       {respText && (
         <div className="section">
-          <p className="section-title">Response</p>
+          <SectionHead title="Response" copyText={respText} toast={toast} />
           <pre className="pre resp">{respText}</pre>
         </div>
       )}
@@ -1911,51 +2325,148 @@ function PocPane({ d }: { d: Derived }) {
   );
 }
 
-function CodePane({ d }: { d: Derived }) {
+// One step row in the taint flow: a numbered bubble (IN / index / ⚠ sink)
+// plus the step text, with a connector below every row but the last.
+function TaintStep({
+  step,
+  i,
+  total,
+}: {
+  step: string;
+  i: number;
+  total: number;
+}) {
+  const isFirst = i === 0;
+  const isLast = i === total - 1;
+  return (
+    <div style={{ display: "contents" }}>
+      <div className={`taint-row ${isFirst ? "taint-first" : ""} ${isLast ? "taint-last" : ""}`}>
+        <span className="taint-bubble">{isFirst ? "IN" : isLast ? "⚠" : i}</span>
+        <span className="taint-line">{step}</span>
+      </div>
+      {!isLast && <div className="taint-link" />}
+    </div>
+  );
+}
+
+// Renders the taint flow over discrete steps. Caps very long paths: when
+// there are more than ~12 steps, show the first 5, a "… N more" expander,
+// then the last 2 (entry + sink) so an 18-step path can't overflow the
+// drawer body. The expander reveals the elided middle in place.
+const TAINT_CAP = 12;
+const TAINT_HEAD = 5;
+const TAINT_TAIL = 2;
+function TaintFlow({ steps }: { steps: string[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const total = steps.length;
+  const capped = total > TAINT_CAP && !expanded;
+  if (!capped) {
+    return (
+      <div className="taint">
+        {steps.map((step, i) => (
+          <TaintStep key={i} step={step} i={i} total={total} />
+        ))}
+      </div>
+    );
+  }
+  const hiddenCount = total - TAINT_HEAD - TAINT_TAIL;
+  const head = steps.slice(0, TAINT_HEAD);
+  const tail = steps.slice(total - TAINT_TAIL);
+  return (
+    <div className="taint">
+      {head.map((step, i) => (
+        <TaintStep key={`h-${i}`} step={step} i={i} total={total} />
+      ))}
+      <div className="taint-link" />
+      <div className="taint-row taint-more-row">
+        <span className="taint-bubble taint-more-bubble">⋯</span>
+        <button
+          type="button"
+          className="taint-more"
+          onClick={() => setExpanded(true)}
+        >
+          … {hiddenCount} more {hiddenCount === 1 ? "step" : "steps"}
+        </button>
+      </div>
+      <div className="taint-link" />
+      {tail.map((step, i) => {
+        const realIdx = total - TAINT_TAIL + i;
+        return <TaintStep key={`t-${i}`} step={step} i={realIdx} total={total} />;
+      })}
+    </div>
+  );
+}
+
+function CodePane({ d, toast }: { d: Derived; toast: ToastFn }) {
+  // taint_path arrives (via toStringArray) often as a SINGLE-element array
+  // whose one string is a ` -> `-delimited path. Split that case into real
+  // steps so the bubble/flow visualization works; otherwise use the array
+  // as-is (already a per-step list).
+  const taintSteps =
+    d.taint_path && d.taint_path.length === 1 && d.taint_path[0].includes(" -> ")
+      ? d.taint_path[0].split(" -> ").map((s) => s.trim()).filter(Boolean)
+      : d.taint_path ?? [];
+
   return (
     <>
       <div className="section">
         <p className="section-title">Slot</p>
-        <div className="kv-grid">
-          <KV k="Slot type" v={d.slot_type} mono />
-          <KV k="Entry point" v={d.entry_point} mono />
-          <KV k="Sink" v={d.sink} mono />
-        </div>
+        {/* slot_type stays a compact mono line; entry_point / sink are long
+            prose so they get their own section + copy affordance below. */}
+        {d.slot_type && (
+          <p className="mono code-slot-type">{d.slot_type}</p>
+        )}
       </div>
-      {d.taint_path && d.taint_path.length > 0 && (
+      {d.entry_point && (
         <div className="section">
-          <p className="section-title">Taint path</p>
-          <div className="taint">
-            {d.taint_path.map((step, i, arr) => (
-              <div key={i} style={{ display: "contents" }}>
-                <div className="taint-row">
-                  <span className="taint-bubble">
-                    {i === 0 ? "IN" : i === arr.length - 1 ? "⚠" : i}
-                  </span>
-                  <span className="taint-line">{step}</span>
-                </div>
-                {i < arr.length - 1 && <div className="taint-link" />}
-              </div>
-            ))}
-          </div>
+          <SectionHead title="Entry point" copyText={d.entry_point} toast={toast} />
+          <pre className="pre">{d.entry_point}</pre>
+        </div>
+      )}
+      {d.sink && (
+        <div className="section">
+          <SectionHead title="Sink" copyText={d.sink} toast={toast} />
+          <pre className="pre">{d.sink}</pre>
+        </div>
+      )}
+      {taintSteps.length > 0 && (
+        <div className="section">
+          <SectionHead
+            title="Taint path"
+            copyText={taintSteps.join("\n")}
+            toast={toast}
+          />
+          <TaintFlow steps={taintSteps} />
         </div>
       )}
       {d.guards_evaluated != null && (
         <div className="section">
-          <p className="section-title">Guards evaluated</p>
-          {Array.isArray(d.guards_evaluated) ? (
-            <ul className="steps mono">
-              {d.guards_evaluated.map((g, i) => (
-                <li key={i}>
-                  {typeof g === "string" ? g : JSON.stringify(g)}
-                </li>
-              ))}
-            </ul>
-          ) : typeof d.guards_evaluated === "string" ? (
-            <pre className="pre">{d.guards_evaluated}</pre>
-          ) : (
-            <JsonTree value={toJsonValue(d.guards_evaluated)} defaultOpen />
-          )}
+          {(() => {
+            const guards = d.guards_evaluated!;
+            const guardsCopyText = Array.isArray(guards)
+              ? guards.map((g) => (typeof g === "string" ? g : JSON.stringify(g))).join("\n")
+              : typeof guards === "string"
+                ? guards
+                : JSON.stringify(guards, null, 2);
+            return (
+              <>
+                <SectionHead title="Guards evaluated" copyText={guardsCopyText} toast={toast} />
+                {Array.isArray(guards) ? (
+                  <ul className="steps mono">
+                    {guards.map((g, i) => (
+                      <li key={i}>
+                        {typeof g === "string" ? g : JSON.stringify(g)}
+                      </li>
+                    ))}
+                  </ul>
+                ) : typeof guards === "string" ? (
+                  <pre className="pre">{guards}</pre>
+                ) : (
+                  <JsonTree value={toJsonValue(guards)} defaultOpen />
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
     </>
@@ -2075,7 +2586,7 @@ function LinksPane({
                             m.slug === d.slug
                               ? {
                                   borderColor: "var(--accent)",
-                                  background: "rgba(23,53,76,0.06)",
+                                  background: "var(--accent-muted)",
                                 }
                               : undefined
                           }
@@ -2111,7 +2622,17 @@ function HistoryPane({
   loading: boolean;
   error: string | null;
 }) {
-  if (loading) return <p className="empty">Loading transition history…</p>;
+  if (loading)
+    return (
+      <div className="timeline" aria-busy="true">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div key={i} style={{ display: "grid", gap: 6, marginBottom: 12 }}>
+            <Skeleton width="35%" height={10} />
+            <Skeleton width="70%" height={9} />
+          </div>
+        ))}
+      </div>
+    );
   if (error) return <p className="empty">{error}</p>;
   if (!transitions.length)
     return <p className="empty">No transition history recorded.</p>;
@@ -2135,8 +2656,8 @@ function HistoryPane({
             </div>
             <div className="tl-detail">
               {(isCreation || workflowChanged) && (
-                <span>
-                  workflow:{" "}
+                <span className="tl-change">
+                  <span className="tl-change-label">Workflow</span>
                   {!isCreation && (
                     <>
                       <span className={`pill pill-${t.from_workflow_status}`}>
@@ -2151,8 +2672,8 @@ function HistoryPane({
                 </span>
               )}
               {sevChanged && (
-                <span>
-                  severity:{" "}
+                <span className="tl-change">
+                  <span className="tl-change-label">Severity</span>
                   <span
                     className={`hero-sev ${t.from_severity}`}
                     style={{ fontSize: "0.65rem", padding: "1px 7px" }}
@@ -2169,8 +2690,8 @@ function HistoryPane({
                 </span>
               )}
               {verifChanged && (
-                <span>
-                  verif:{" "}
+                <span className="tl-change">
+                  <span className="tl-change-label">Verification</span>
                   <span className={`pill pill-${t.from_verification_state}`}>
                     {t.from_verification_state}
                   </span>
@@ -2197,13 +2718,12 @@ function IntelPane({ d }: { d: Derived }) {
   // only counts when at least one of the surfaced fields is present.
   // If the pane has nothing to show, the Intel tab is hidden upstream.
   const prov = d.provenance;
-  const hasProvenance = !!(
-    prov &&
-    (prov.agent_name ||
-      prov.captured_at ||
-      prov.artifact_ref ||
-      prov.evidence_quote)
-  );
+  const provFieldCount = prov
+    ? [prov.agent_name, prov.captured_at, prov.artifact_ref, prov.evidence_quote].filter(
+        Boolean,
+      ).length
+    : 0;
+  const hasProvenance = provFieldCount > 0;
   return (
     <>
       {refs.length > 0 && (
@@ -2214,16 +2734,24 @@ function IntelPane({ d }: { d: Derived }) {
           <ul className="ref-list">
             {refs.map((r, i) => {
               const { label, href } = normalizeReference(r);
+              const host = href ? extractHost(href) : "";
+              // Lead with a human label (title, else hostname) in normal ink;
+              // demote the full URL to muted, truncated secondary text.
+              const primary = href ? label && label !== href ? label : host || href : label;
               return (
                 <li key={i}>
                   {href ? (
                     <a href={href} target="_blank" rel="noopener noreferrer">
-                      {label || href}
-                      <IconExternal />
-                      <span className="host">{extractHost(href)}</span>
+                      <span className="ref-primary">
+                        {primary}
+                        <IconExternal />
+                      </span>
+                      <span className="ref-url" title={href}>
+                        {href}
+                      </span>
                     </a>
                   ) : (
-                    <span>{label}</span>
+                    <span className="ref-primary">{label}</span>
                   )}
                 </li>
               );
@@ -2231,7 +2759,7 @@ function IntelPane({ d }: { d: Derived }) {
           </ul>
         </div>
       )}
-      {hasProvenance && prov && (
+      {hasProvenance && prov && provFieldCount > 1 && (
         <div className="section">
           <p className="section-title">Provenance</p>
           <ProvenanceBlock
@@ -2241,6 +2769,15 @@ function IntelPane({ d }: { d: Derived }) {
             evidenceQuote={prov.evidence_quote}
           />
         </div>
+      )}
+      {/* Single-field provenance (only agent_name) reads as a heavy,
+          mostly-empty "PROVENANCE" section. Render it as a compact
+          one-line footer instead; keep the full block when 2+ fields
+          exist. */}
+      {hasProvenance && prov && provFieldCount === 1 && prov.agent_name && (
+        <p className="prov-footer">
+          Discovered by <span className="agent-chip">{prov.agent_name}</span>
+        </p>
       )}
       {refs.length === 0 && !hasProvenance && (
         <p className="empty">No intel captured for this finding.</p>

@@ -1804,7 +1804,7 @@ _COVERAGE_DEFERRAL_OBJECTIVES = (
     "waf_tier",
     "service_inventory",
     "directory_fuzz",
-    "nikto_trigger",
+    "tech_fingerprint",
     "osint",
 )
 
@@ -1829,7 +1829,7 @@ class CoverageDeferralPayload(BaseModel):
             "waf_tier",
             "service_inventory",
             "directory_fuzz",
-            "nikto_trigger",
+            "tech_fingerprint",
             "osint",
         ]
     ] = Field(
@@ -1855,7 +1855,7 @@ class CoverageDeferralPayload(BaseModel):
 
     # Objectives that legitimately apply to an entire engagement (a
     # program-wide scope rule, vendor-confirmed CDN/WAF, OSINT carve-out).
-    # `service_inventory` and `nikto_trigger` are intentionally per-host —
+    # `service_inventory` and `tech_fingerprint` are intentionally per-host —
     # an engagement-wide deferral on those would silence every host's
     # gate signal without a per-host justification, which is the failure
     # mode the audit ledger is designed to prevent.
