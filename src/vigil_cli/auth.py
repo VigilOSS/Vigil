@@ -62,7 +62,10 @@ def import_auth(engagement_dir: Path, source: str | None) -> None:
         raw = os.read(0, 1_000_000).decode()
     else:
         raw = Path(source).expanduser().read_text(encoding="utf-8")
-    incoming = json.loads(raw)
+    try:
+        incoming = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid JSON: {exc}") from exc
     if not isinstance(incoming, dict):
         raise SystemExit("Auth import expects a JSON object")
     payload = read_auth(engagement_dir)

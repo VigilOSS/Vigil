@@ -229,3 +229,34 @@ def test_finding_evidence_type_patch_via_update(client, isolate_settings):
     )
     assert patched.status_code == 200, patched.text
     assert _finding_field(patched.json(), "evidence_type") == "code-inferred"
+
+
+def test_report_findings_draft_mode_excludes_draft_workflow_status(client, isolate_settings):
+    """report_readiness draft projection must drop ``workflow_status == "draft"``
+    findings: report_readiness() never gates draft (it is not a reportable
+    status) and ``final`` mode already excludes it, so it must not leak into the
+    draft projection either."""
+    _seed(client, isolate_settings)
+
+    active_payload = _finding("RP-001", "Reportable active finding", root_key="rp-active")
+    draft_payload = _finding("RP-002", "Still-draft finding", root_key="rp-draft")
+    draft_payload["workflow_status"] = "draft"
+
+    for payload in (active_payload, draft_payload):
+        response = client.post(
+            f"/engagements/{ENGAGEMENT_KEY}/assessment/findings", json=payload
+        )
+        assert response.status_code in {200, 201}, response.text
+
+    draft_report = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-findings?mode=draft"
+    )
+    assert draft_report.status_code == 200, draft_report.text
+    body = draft_report.json()
+
+    # Both findings are ungrouped, so they would land in ``standalone``; the
+    # draft-status one must have been filtered out entirely.
+    standalone_slugs = {record.get("slug") for record in body["standalone"]}
+    assert "RP-001" in standalone_slugs
+    assert "RP-002" not in standalone_slugs
+    assert body["finding_count"] == 1

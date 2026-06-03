@@ -211,7 +211,7 @@ def _is_suppressed_workflow_status(workflow_status: str) -> bool:
     return _normalize_workflow_status(workflow_status) in {"merged", "false_positive"}
 
 def _serialize_finding_record(row: dict[str, Any] | Any) -> dict[str, Any]:
-    record = dict(row) if not isinstance(row, dict) else dict(row)
+    record = dict(row)
     # Read-path serialization must not crash on invalid DB values.
     # Validation belongs on write paths; here we pass through raw data
     # so the frontend can still display the finding.

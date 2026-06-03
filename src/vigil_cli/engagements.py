@@ -662,7 +662,7 @@ def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
         subprocess.run(
             [chrome, "--headless", "--disable-gpu", "--no-sandbox",
              f"--print-to-pdf={output}", "--print-to-pdf-no-header",
-             f"file://{html_path}"],
+             html_path.resolve().as_uri()],
             check=True,
             capture_output=True,
         )
@@ -765,6 +765,9 @@ def _finding_dir_name(finding: dict) -> str:
     """
     raw = str(finding.get("slug") or finding.get("title") or "finding").strip()
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-._")
+    # Cap below the 255-byte filename limit, leaving room for a `-NN` collision
+    # suffix; re-strip so we never end on a separator after truncation.
+    cleaned = cleaned[:240].strip("-._")
     return cleaned or "finding"
 
 

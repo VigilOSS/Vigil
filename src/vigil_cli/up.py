@@ -11,7 +11,7 @@ from . import config as config_module
 from . import docker
 from .install import InstallOptions, install_from_source
 from .mitmproxy import MitmproxyOptions, start_proxy
-from .oob import OobOptions, oob_status, start_oob
+from .oob import OobOptions, oob_options as _oob_options, oob_status, start_oob
 from .orchestrator import OrchestratorOptions, start_orchestrator
 from .paths import default_runtime_container, resolve_source_root
 from .runtime import RuntimeOptions, build_runtime, start_runtime, stop_runtime
@@ -169,17 +169,6 @@ def _prompt_frp_token() -> str:
     if not sys.stdin.isatty():
         return ""
     return getpass.getpass("OOB FRP token: ").strip()
-
-
-def _oob_options(install_root: Path) -> OobOptions:
-    from .oob import DEFAULT_FRP_HOST, DEFAULT_FRP_PORT, DEFAULT_OOB_DOMAIN
-    import os
-
-    token = os.environ.get("VIGIL_FRP_TOKEN") or config_module.get_config_value("oob.frp_token") or ""
-    host = os.environ.get("VIGIL_FRP_HOST") or config_module.get_config_value("oob.frp_host", DEFAULT_FRP_HOST) or DEFAULT_FRP_HOST
-    port = int(os.environ.get("VIGIL_FRP_PORT") or config_module.get_config_value("oob.frp_port", str(DEFAULT_FRP_PORT)) or DEFAULT_FRP_PORT)
-    domain = os.environ.get("VIGIL_OOB_DOMAIN") or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN) or DEFAULT_OOB_DOMAIN
-    return OobOptions(install_root=install_root, frp_host=host, frp_port=port, frp_token=token, oob_domain=domain)
 
 
 def _runtime_image_inputs(install_root: Path) -> list[Path]:

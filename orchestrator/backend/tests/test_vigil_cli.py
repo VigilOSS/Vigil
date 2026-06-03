@@ -377,6 +377,28 @@ def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkey
         assert connection.execute("SELECT value FROM marker").fetchone() == ("custom",)
 
 
+def test_resolve_runtime_data_dir_honours_vigil_then_legacy_then_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.runtime import _resolve_runtime_data_dir
+
+    install_root = tmp_path / "install"
+
+    # VIGIL_DATA_DIR wins over everything.
+    monkeypatch.setenv("VIGIL_DATA_DIR", "/mnt/vigil-data")
+    monkeypatch.setenv("KALI_MCP_DATA_DIR", "/mnt/legacy-data")
+    assert _resolve_runtime_data_dir(install_root) == Path("/mnt/vigil-data")
+
+    # Legacy KALI_MCP_DATA_DIR is honoured when VIGIL_DATA_DIR is unset, so a
+    # pre-rename install that relocated runtime state keeps working post-upgrade.
+    monkeypatch.delenv("VIGIL_DATA_DIR", raising=False)
+    assert _resolve_runtime_data_dir(install_root) == Path("/mnt/legacy-data")
+
+    # Neither env var set -> default under the install root.
+    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
+    assert _resolve_runtime_data_dir(install_root) == install_root / ".runtime-data"
+
+
 def test_resolve_source_root_prefers_cached_source_before_install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from vigil_cli import paths as paths_module
 

@@ -35,6 +35,13 @@ def _bucket_length(n: int) -> str:
     fragments (<512 B), page responses (<4 KB / <32 KB / <128 KB), and large
     blobs cluster together rather than spreading across 1000 distinct sizes.
     """
+    # Negative content_length is not a real size — e.g. "-1" is the chunked/
+    # streaming sentinel some tools emit when the length is unknown. Give it a
+    # distinct bucket so it does not fall through and get mislabelled as the
+    # largest (>1MB) bucket, which would make a tiny streaming response look
+    # like a huge blob to the anomaly oracle.
+    if n < 0:
+        return "len_unknown"
     for lo, hi in zip(_LENGTH_BUCKET_BOUNDARIES, _LENGTH_BUCKET_BOUNDARIES[1:]):
         if lo <= n < hi:
             return f"len_{lo}_{hi}"
