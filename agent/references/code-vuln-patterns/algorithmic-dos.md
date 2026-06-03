@@ -1,3 +1,8 @@
+---
+description: Hash collision, ReDoS, parser bombs, unbounded allocation, zip bombs
+languages: C/C++, Python, JS
+---
+
 # Algorithmic Denial of Service — Complexity Attacks
 
 > Target: Algorithmic DoS bugs (CWE-400, CWE-1333, CWE-776) that survive SAST because

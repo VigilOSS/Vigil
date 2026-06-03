@@ -1,3 +1,8 @@
+---
+description: URL parser confusion, DNS rebinding, internal metadata reachability, cross-protocol fetches
+languages: C/C++, Python, JS
+---
+
 # SSRF — URL Parser Confusion, Internal Reachability, and Cross-Protocol Fetches
 
 > Target: Server-side outbound fetch paths where attacker-controlled destinations can reach

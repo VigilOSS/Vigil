@@ -1,3 +1,7 @@
+---
+description: API unhooking, direct syscalls, AV bypass, UPX packing
+---
+
 # AV/EDR Bypass Techniques
 
 ## API Unhooking

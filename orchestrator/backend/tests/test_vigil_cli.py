@@ -5090,6 +5090,105 @@ def test_list_skills_uses_directory_names_for_dispatch_audit(
     assert google["name"] == "google-workspaces"
 
 
+def test_list_references_uses_path_slugs_and_repo_paths(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assess_main = _load_assess_main()
+
+    assess_main(["list-references", "--json"])
+
+    rows = json.loads(capsys.readouterr().out)
+    sqli = next(
+        row for row in rows if row["path"] == "agent/references/payloads/sqli-payloads.md"
+    )
+    # `name` is the path relative to references/ minus .md — the references analogue
+    # of list-skills using the directory name.
+    assert sqli["name"] == "payloads/sqli-payloads"
+    assert sqli["description"]
+    assert sqli["skill"] == "sqli-testing"
+
+
+def test_list_references_skill_filter_returns_paired_refs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assess_main = _load_assess_main()
+
+    assess_main(["list-references", "--skill", "idor-testing", "--json"])
+
+    rows = json.loads(capsys.readouterr().out)
+    names = {row["name"] for row in rows}
+    assert "access-control/idor-modern-architectures" in names
+    # Every returned row must actually be paired to the requested skill.
+    for row in rows:
+        pairs = {s.strip() for s in row["skill"].split(",")}
+        assert "idor-testing" in pairs
+
+
+def test_list_references_every_file_has_a_description(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Completeness guard: a reference added without frontmatter (or with an empty
+    description) must fail CI rather than silently render '(no description)'."""
+    assess_main = _load_assess_main()
+
+    assess_main(["list-references", "--json"])
+
+    rows = json.loads(capsys.readouterr().out)
+    missing = [
+        row["name"]
+        for row in rows
+        if not row["description"] or row["description"] == "(no description)"
+    ]
+    assert not missing, f"references missing a frontmatter description: {missing}"
+
+
+def test_list_references_skill_pairings_name_real_skills(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every `skill:` pairing must resolve to a real agent/skills/<name>/ directory,
+    so a typo can never silently break `--skill` filtering or a dispatch audit."""
+    assess_main = _load_assess_main()
+
+    assess_main(["list-references", "--json"])
+
+    rows = json.loads(capsys.readouterr().out)
+    valid_skills = {
+        path.name for path in (repo_root / "agent" / "skills").iterdir() if path.is_dir()
+    }
+    bad = [
+        (row["name"], name)
+        for row in rows
+        for name in (s.strip() for s in row["skill"].split(",") if s.strip())
+        if name not in valid_skills
+    ]
+    assert not bad, f"references paired to non-existent skills: {bad}"
+
+
+def test_references_index_md_is_retired() -> None:
+    """The legacy references/INDEX.md is replaced by `vigil assess list-references`.
+    Guard against it being reintroduced and against operator prompts pointing back at it."""
+    references_dir = repo_root / "agent" / "references"
+    assert not (references_dir / "INDEX.md").exists(), (
+        "agent/references/INDEX.md was reintroduced; references are now discovered via "
+        "`vigil assess list-references` (self-registering frontmatter)"
+    )
+    doc_files = [
+        repo_root / "agent" / "AGENTS.md",
+        repo_root / "agent" / "operator-core.md",
+        repo_root / "agent" / "operator-core-blue.md",
+        repo_root / "agent" / "operator-core-code.md",
+        repo_root / "agent" / "shared-constraints.md",
+        repo_root / "README.md",
+        repo_root / "CODE-MAP.md",
+    ]
+    offenders = [
+        str(path.relative_to(repo_root))
+        for path in doc_files
+        if path.exists() and "references/INDEX.md" in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, f"docs still point at the deleted references/INDEX.md: {offenders}"
+
+
 def test_validate_dispatch_contract_accepts_list_skills_canonical_name(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -1,3 +1,8 @@
+---
+description: CORS, debug endpoints, verbose errors
+skill: web-recon
+---
+
 # API8:2023 — Security Misconfiguration
 
 > Skill: `web-recon`

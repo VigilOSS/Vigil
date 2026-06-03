@@ -1,3 +1,9 @@
+---
+description: "ServiceNow GlideRecord deep-enum: well-known table probe list, `sysparm_query` DSL, `sysparm_display_value=true` chain-walk pattern, IDOR boundedness test"
+skill: vendor-platform-enum
+source: Custom — compiled from ServiceNow REST API documentation and table-ACL research.
+---
+
 # ServiceNow GlideRecord — Deep-Enum Payloads
 
 > Source: Custom — compiled from ServiceNow REST API documentation and table-ACL research.

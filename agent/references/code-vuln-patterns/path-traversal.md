@@ -1,3 +1,8 @@
+---
+description: Canonicalization bypass, archive extraction writes, symlink and separator confusion
+languages: C/C++, Python, JS
+---
+
 # Path Traversal — Canonicalization, Archive Writes, and Indirect Filesystem Reachability
 
 > Target: Filesystem access bugs where attacker-controlled path components survive normalization,

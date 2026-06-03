@@ -1,3 +1,7 @@
+---
+description: Web technology fingerprinting
+---
+
 # whatweb
 
 **Purpose:** Web technology fingerprinting

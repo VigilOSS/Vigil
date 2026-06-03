@@ -1,3 +1,8 @@
+---
+description: State machine bugs, async refactoring artifacts, signal handler races
+languages: C/C++, Python, JS
+---
+
 # Race Conditions — State Machine & Async Bugs
 
 > Target: Race conditions that survive SAST because they involve state machine transitions,

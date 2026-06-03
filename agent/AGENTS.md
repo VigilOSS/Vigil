@@ -15,7 +15,8 @@ When a session starts, display:
 - Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 - Skill discovery: `vigil assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
-- References: `agent/references/INDEX.md`
+- Reference discovery: `vigil assess list-references` (compact name + one-line description + paired skill; `--skill <name>` for a skill's paired refs).
+- Detailed references: `agent/references/**/*.md`
 
 ## Agent Roster
 
@@ -98,7 +99,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
    4. Pass the bare `name(s)` (not paths) to `--skills` on `vigil assess agent start` for audit — the validator resolves names against `agent/skills/<name>/SKILL.md` on disk.
    5. The sub-agent reads and follows the skill(s); the operator's job is selection, not procedure — pulling the skill body into the operator context defeats the division of labor.
 
-   Then check `agent/references/INDEX.md` for payload and checklist depth — references are not a fallback, they are the methodology library.
+   Then run `vigil assess list-references` (add `--skill <name>` to see the references paired with a skill) for payload and checklist depth — references are not a fallback, they are the methodology library.
    - **Phase 1 (Recon):** `recon-specialist` → `agent/skills/web-recon/SKILL.md`; `source-analyzer` → `agent/skills/source-analysis/SKILL.md`
    - **Phase 2 (Collect):** `surface-collector` → `agent/skills/surface-collection/SKILL.md` for URL collection, triage, and work-buffer population
    - **Phase 3 (Test):** `vulnerability-analyst` → pick the vuln-class skill via `vigil assess list-skills` matching the candidate (e.g., `sqli-testing`, `idor-testing`, `xss-testing`); `fuzzer` → `agent/skills/directory-fuzzing/SKILL.md` or `agent/skills/parameter-fuzzing/SKILL.md`
@@ -395,7 +396,7 @@ Before every dispatch, verify:
 - [ ] Full skill path(s) `agent/skills/<name>/SKILL.md` included in dispatch prompt with explicit enforcement instruction:
       "You MUST read and follow `agent/skills/<name>/SKILL.md` before beginning work. If a skill contradicts this prompt, the skill wins for procedural steps."
 - [ ] Bare skill `name(s)` (e.g. `surface-collection,gau-triage`, NOT the full path) passed to `--skills` on `vigil assess agent start` for audit. The validator resolves each name against `agent/skills/<name>/SKILL.md`.
-- [ ] Matching skill's paired references identified from `agent/references/INDEX.md`
+- [ ] Matching skill's paired references identified via `vigil assess list-references --skill <name>`
 - [ ] Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
 - [ ] Activity log checked for duplicate dispatch — `vigil assess fetch activity-entries` (DEDUP rule)
 - [ ] Command history checked — `vigil assess list-command-runs --q <keyword> --show-matches` reviewed for prior runs that map coverage. Default to an unscoped fuzzy search so finding aliases and adjacent command metadata are included; narrow with exact filters only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, open its preview with `vigil assess get-command-run <id>` — `success=true` only means return_code=0, not that the output answers the current question
@@ -830,4 +831,4 @@ When all ten gates pass, dispatch `report-writer` for the final pass and then cl
 
 After an engagement, review generated tools in `agent/engagements/<...>/tools/`:
 1. Identify reusable tools -> create a skill in `agent/skills/<name>/SKILL.md`
-2. Add the new skill to `agent/references/INDEX.md` and note it in the relevant Claude/Codex instructions
+2. Skills and references self-register — `vigil assess list-skills` / `list-references` discover new files from their frontmatter, so there is no index to update; just note the new skill in the relevant Claude/Codex instructions if it needs workflow wiring

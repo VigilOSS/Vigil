@@ -1,3 +1,7 @@
+---
+description: "Mitmproxy session capture: setup, CA cert install, FoxyProxy config, login capture workflow, troubleshooting"
+---
+
 # Mitmproxy Session Capture
 
 Intercept browser traffic to capture authenticated sessions (cookies, tokens, headers) into `auth.json` for use by engagement agents.

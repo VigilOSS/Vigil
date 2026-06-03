@@ -1,3 +1,8 @@
+---
+description: External entity fetches, SSRF/file-read pivots, parser configuration regressions
+languages: Python, JS, Java, Go
+---
+
 # XXE — External Entity Fetches, File Read Pivots, and Parser Configuration Regressions
 
 > Target: XML parsing paths where external entities, DTD processing, or expansion behavior can

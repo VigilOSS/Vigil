@@ -1,3 +1,8 @@
+---
+description: void* casts, union abuse, tagged union errors, inheritance downcasts
+languages: C/C++, Python, JS
+---
+
 # Type Confusion — Cross-Boundary Type Misinterpretation
 
 > Target: Type confusion bugs (CWE-843) that survive SAST because the type cast and the

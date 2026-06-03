@@ -1,3 +1,9 @@
+---
+description: URL schemas, IP bypass, cloud metadata (AWS/GCP/Azure)
+skill: ssrf-testing
+source: PayloadsAllTheThings — Server Side Request Forgery
+---
+
 # SSRF (Server-Side Request Forgery) Payloads
 
 > Source: PayloadsAllTheThings — Server Side Request Forgery

@@ -1,3 +1,8 @@
+---
+description: Middleware ordering, decorator bypass, role check logic, path normalization, OAuth implementation flaws
+languages: C/C++, Python, JS, Java, Go
+---
+
 # Web Application Authentication & Authorization — Logic-Level Gaps in Frameworks
 
 > Target: Auth bugs in web frameworks that survive SAST because the auth mechanism is

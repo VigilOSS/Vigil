@@ -1,3 +1,8 @@
+---
+description: Redirect validation bypass, OAuth redirect theft, local-vs-absolute URL confusion
+languages: Python, JS, Java, Go
+---
+
 # Open Redirect — Redirect Validation Gaps and OAuth Theft Chains
 
 > Target: Redirect flows where attacker-controlled destinations survive relative/absolute URL

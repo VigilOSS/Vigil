@@ -1,3 +1,8 @@
+---
+description: TLS SAN scraper (Phase 3); asnmap → cero CIDR-feed pattern
+skill: subdomain-enumeration
+---
+
 # cero
 
 **Purpose:** TLS Subject Alternative Name (SAN) scraper — opens TLS handshakes against domains or CIDRs and extracts SAN fields from the cert. Catches subdomains that never appear in CT logs because they were issued by a private CA but TLS-handshakable on internet-exposed IPs.

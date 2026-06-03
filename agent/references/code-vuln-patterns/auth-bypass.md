@@ -1,3 +1,8 @@
+---
+description: Generic/C auth gaps, fallback bypasses, token validation gaps. Framework-specific → see `web-app-auth.md`
+languages: C/C++ (frameworks → web-app-auth)
+---
+
 # Authentication Bypass — Logic-Level Authentication Gaps
 
 > For web framework-specific auth bypass patterns (Django, Flask, FastAPI, Express, Next.js, NestJS, Spring),

@@ -1,3 +1,8 @@
+---
+description: Object-identifier prediction (ObjectId/UUIDv1-v7/ULID/Snowflake/KSUID/NanoID/Stripe) and ID-harvesting techniques
+skill: idor-testing
+---
+
 # IDOR/BOLA Identifier Prediction & Harvesting
 
 > Skill: `idor-testing`

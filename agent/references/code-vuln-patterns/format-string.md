@@ -1,3 +1,8 @@
+---
+description: Indirect format control, multi-source format construction, callback chains
+languages: C/C++, Python, JS
+---
+
 # Format String Vulnerabilities — Indirect Format Control
 
 > Target: Format string bugs that survive SAST because the user-controlled data does not

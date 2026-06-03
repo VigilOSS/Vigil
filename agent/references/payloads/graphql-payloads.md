@@ -1,3 +1,9 @@
+---
+description: Introspection, batching, field suggestion, injection in variables
+skill: graphql-testing
+source: PayloadsAllTheThings — GraphQL Injection
+---
+
 # GraphQL Injection Payloads
 
 > Source: PayloadsAllTheThings — GraphQL Injection

@@ -1,3 +1,9 @@
+---
+description: "Salesforce Aura / Lightning Communities deep-enum: POST envelope shape, SObject namespace probe list, tenant-singleton Id prefixes, chain-walk reference fields, IDOR boundedness test"
+skill: vendor-platform-enum
+source: Custom — compiled from the Aura framework, Salesforce platform documentation, and Site Guest profile research.
+---
+
 # Salesforce Aura / Lightning Communities — Deep-Enum Payloads
 
 > Source: Custom — compiled from the Aura framework, Salesforce platform documentation, and Site Guest profile research.

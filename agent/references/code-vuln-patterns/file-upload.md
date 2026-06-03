@@ -1,3 +1,8 @@
+---
+description: Validation/storage drift, archive smuggling, upload-to-parser and upload-to-execution chains
+languages: Python, JS, Java, Go
+---
+
 # File Upload — Validation/Storage Drift and Upload-to-Execution Chains
 
 > Target: Upload paths where filename, content, archive contents, or downstream processing let

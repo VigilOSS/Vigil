@@ -1,3 +1,7 @@
+---
+description: Scaffold tenant reference for alert investigations on a tenant or platform without a dedicated template
+---
+
 # <CUSTOMER> — Generic Tenant Reference
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**

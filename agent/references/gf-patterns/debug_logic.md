@@ -2,6 +2,8 @@
 name: gf-patterns:debug_logic
 description: Privileged, admin, and debug path patterns that signal exposed management surface
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+bucket: debug_logic
+weight: 30
 ---
 
 # gf: debug_logic

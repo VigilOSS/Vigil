@@ -1,3 +1,8 @@
+---
+description: Directory/file, DNS, and vhost brute-forcing
+skill: directory-fuzzing
+---
+
 # gobuster
 
 **Purpose:** Directory, DNS, and vhost brute-forcing

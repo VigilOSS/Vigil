@@ -1,3 +1,7 @@
+---
+description: DLL hijacking, unquoted paths, weak services, token manipulation, named pipes
+---
+
 # Windows Privilege Escalation
 
 ## DLL Hijacking (T1574.001)
