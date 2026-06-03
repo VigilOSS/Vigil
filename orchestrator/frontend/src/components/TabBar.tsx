@@ -5,11 +5,16 @@
 //                they attack surfaces or dig into findings
 //   Findings   — the primary deliverable, high up
 //   Surfaces   — what we can attack (bridges intel → findings)
+//   HTTP       — observed request traffic (one row per request variant);
+//                surface-adjacent because a variant IS an attackable
+//                endpoint, so it sits right after Surfaces
 //   Coverage   — where we've tested (quantitative companion to Surfaces)
 //   Code       — code-analysis results, own domain
 //   Commands   — vigil assess command-run audit; a deeper cut of Activity that
 //                exposes per-tool exit codes, output retention, and argv
 //                so operators can audit what actually ran
+//   OAST       — out-of-band callback probes + interactions; execution
+//                evidence like Commands, so it sits right after it
 //   Activity   — structured state-change timeline
 //   Log        — narrative prose activity (sits next to Activity so the
 //                two log-style tabs are adjacent)
@@ -19,9 +24,11 @@ export const TABS = [
   { key: "intel", label: "Intel" },
   { key: "findings", label: "Findings" },
   { key: "surfaces", label: "Surfaces" },
+  { key: "http", label: "HTTP" },
   { key: "coverage", label: "Coverage" },
   { key: "code", label: "Code" },
   { key: "commands", label: "Commands" },
+  { key: "oast", label: "OAST" },
   { key: "activity", label: "Activity" },
   { key: "log", label: "Log" },
   { key: "artifacts", label: "Artifacts" },

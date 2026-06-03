@@ -26,10 +26,16 @@
   --accent: #17354c;
   --accent-muted: rgba(23, 53, 76, 0.35);
   --accent-soft: #f4a259;
+  /* Ink used on --accent-soft backgrounds (warm dark ink; same value both themes) */
+  --accent-soft-ink: #2a1a08;
   --ok: #2f7f52;
   --warn: #c64d15;
   --pending: #8c7b62;
   --danger: #991b1b;
+  /* Disputed status (amber; dark theme uses lighter amber) */
+  --disputed: #8a5a1f;
+  /* Chain tag ink (amber-dark on warm tinted bg) */
+  --tag-chain-ink: #7a3a11;
 
   /* ── Severity + chip palette (light) ────────────────────── */
   --sev-critical: #991b1b;
@@ -75,6 +81,24 @@
   --count-bg-active: rgba(23, 53, 76, 0.14);
   --count-ink-active: #17354c;
 
+  /* HTTP method / status + OAST protocol colors (light).
+     Mapped onto our palette (the reference-project reference used its own method and
+     status tokens). Consumed by the HTTP and OAST tab method, status, and
+     protocol badges plus filter chips; redefined under the dark block. */
+  --m-get: #2f7f52;     /* green   — safe reads */
+  --m-post: #17354c;    /* navy    — creates */
+  --m-put: #0d6b6b;     /* teal    — replaces */
+  --m-patch: #a16207;   /* amber   — partial update */
+  --m-delete: #991b1b;  /* red     — destructive */
+  --m-head: #6b685d;    /* muted   — metadata */
+  --m-options: #7c3aed; /* purple  — preflight */
+  --m-other: #4b5563;   /* slate   — fallback */
+  --s-2xx: #2f7f52;     /* green */
+  --s-3xx: #0d6b6b;     /* teal */
+  --s-4xx: #a16207;     /* amber */
+  --s-5xx: #991b1b;     /* red */
+  --s-1xx: #6b685d;     /* muted */
+
   background:
     radial-gradient(circle at top left, var(--page-bg-gradient-1), transparent 34%),
     radial-gradient(circle at top right, var(--page-bg-gradient-2), transparent 30%),
@@ -111,10 +135,13 @@
   --accent: #79a9d4;
   --accent-muted: rgba(121, 169, 212, 0.4);
   --accent-soft: #f7bb7b;
+  --accent-soft-ink: #2a1a08;
   --ok: #5fc08a;
   --warn: #f08a52;
   --pending: #b8ab92;
   --danger: #e56c6c;
+  --disputed: #ebc47e;
+  --tag-chain-ink: #f4b092;
 
   --sev-critical: #e56c6c;
   --sev-high: #f08a52;
@@ -154,6 +181,23 @@
   --count-ink: #b6d2ea;
   --count-bg-active: rgba(121, 169, 212, 0.28);
   --count-ink-active: #e6e8ee;
+
+  /* ── HTTP method / status + OAST protocol colors (dark) ───
+   * Brighter, higher-chroma variants so the badges read on the dark
+   * panel; same token names as the light block (see notes there). */
+  --m-get: #5fc08a;
+  --m-post: #79a9d4;
+  --m-put: #4fc4c4;
+  --m-patch: #d8a23a;
+  --m-delete: #e56c6c;
+  --m-head: #a0a6b5;
+  --m-options: #b08bf0;
+  --m-other: #8a93a3;
+  --s-2xx: #5fc08a;
+  --s-3xx: #4fc4c4;
+  --s-4xx: #d8a23a;
+  --s-5xx: #e56c6c;
+  --s-1xx: #a0a6b5;
 }
 
 * {
@@ -320,8 +364,8 @@ input {
 
 .tab-count {
   font-size: 0.74rem;
-  background: rgba(23, 53, 76, 0.08);
-  color: var(--accent);
+  background: var(--count-bg);
+  color: var(--count-ink);
   border-radius: 999px;
   padding: 1px 7px;
   font-weight: 600;
@@ -464,13 +508,27 @@ input {
 
 .secondary-button {
   background: var(--accent-soft);
-  color: #1f160d;
+  color: var(--accent-soft-ink);
 }
 
 .ghost-button {
   background: rgba(255, 255, 255, 0.72);
   color: var(--accent);
   border: 1px solid var(--border);
+}
+
+/* Export-report header control: align the lucide FileDown icon with its
+ * label and dim it while a draft export is in flight. Additive — leaves the
+ * base .ghost-button shape (pill, padding, border) untouched. */
+.export-report-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.export-report-button:disabled {
+  opacity: 0.6;
+  cursor: progress;
 }
 
 /* ── Timeline ───────────────────────────────────────────── */
@@ -558,28 +616,28 @@ input {
 /* ── Severity badges ────────────────────────────────────── */
 
 .severity-critical {
-  background: rgba(153, 27, 27, 0.14);
-  color: #991b1b;
+  background: color-mix(in srgb, var(--sev-critical) 14%, transparent);
+  color: var(--sev-critical);
 }
 
 .severity-high {
-  background: rgba(198, 77, 21, 0.14);
-  color: var(--warn);
+  background: color-mix(in srgb, var(--sev-high) 14%, transparent);
+  color: var(--sev-high);
 }
 
 .severity-medium {
-  background: rgba(161, 98, 7, 0.14);
-  color: #a16207;
+  background: color-mix(in srgb, var(--sev-medium) 14%, transparent);
+  color: var(--sev-medium);
 }
 
 .severity-low {
-  background: rgba(23, 53, 76, 0.1);
-  color: var(--accent);
+  background: color-mix(in srgb, var(--sev-low) 10%, transparent);
+  color: var(--sev-low);
 }
 
 .severity-info {
-  background: rgba(23, 53, 76, 0.06);
-  color: #5a584f;
+  background: color-mix(in srgb, var(--sev-info) 10%, transparent);
+  color: var(--sev-info);
 }
 
 /* ── Event type badges ──────────────────────────────────── */
@@ -590,8 +648,8 @@ input {
 }
 
 .event-type-chain {
-  background: rgba(153, 27, 27, 0.14);
-  color: #991b1b;
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
 }
 
 .event-type-surface {
@@ -625,8 +683,8 @@ input {
 }
 
 .status-false_positive {
-  background: rgba(84, 88, 96, 0.12);
-  color: #4b5563;
+  background: color-mix(in srgb, var(--chip-slate) 12%, transparent);
+  color: var(--chip-slate);
 }
 
 .status-running,
@@ -650,14 +708,14 @@ input {
 }
 
 .status-disputed {
-  background: rgba(117, 79, 31, 0.16);
-  color: #8a5a1f;
+  background: color-mix(in srgb, var(--disputed) 16%, transparent);
+  color: var(--disputed);
 }
 
 .status-failed,
 .status-blocked {
-  background: rgba(153, 27, 27, 0.14);
-  color: #991b1b;
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
 }
 
 /* ── Filter bar ─────────────────────────────────────────── */
@@ -708,7 +766,7 @@ input {
 
 .filter-active {
   border-color: var(--accent);
-  background: rgba(23, 53, 76, 0.08);
+  background: var(--count-bg);
   color: var(--accent);
   font-weight: 500;
 }
@@ -1091,7 +1149,7 @@ input {
 .panel code {
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
   font-size: 0.86em;
-  background: rgba(23, 53, 76, 0.07);
+  background: var(--count-bg);
   border-radius: 6px;
   padding: 1px 6px;
 }
@@ -1319,7 +1377,7 @@ input {
 
 .code-phase-completed .code-phase-indicator { color: var(--ok); }
 .code-phase-active .code-phase-indicator { color: var(--warn); }
-.code-phase-pending .code-phase-indicator { color: #b8b4a8; }
+.code-phase-pending .code-phase-indicator { color: var(--muted); }
 
 .code-phase-label {
   font-size: 0.78rem;
@@ -1383,12 +1441,12 @@ input {
 .code-segment-done { background: var(--ok); }
 .code-segment-processing { background: var(--accent-soft); }
 .code-segment-needs-context { background: var(--pending); }
-.code-segment-error { background: #991b1b; }
+.code-segment-error { background: var(--danger); }
 
 .code-dot-done { background: var(--ok); }
 .code-dot-processing { background: var(--accent-soft); }
 .code-dot-needs-context { background: var(--pending); }
-.code-dot-error { background: #991b1b; }
+.code-dot-error { background: var(--danger); }
 .code-dot-pending { background: rgba(23, 53, 76, 0.25); }
 
 .code-classification-grid {
@@ -1439,8 +1497,8 @@ input {
 }
 
 .code-gate-fail {
-  background: rgba(153, 27, 27, 0.14);
-  color: #991b1b;
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
 }
 
 .code-gate-reasons {
@@ -1526,12 +1584,12 @@ input {
 .code-disposition-skipped { background: rgba(23, 53, 76, 0.06); color: var(--muted); }
 
 .code-confidence-high { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
-.code-confidence-medium { background: rgba(161, 98, 7, 0.14); color: #a16207; }
+.code-confidence-medium { background: color-mix(in srgb, var(--sev-medium) 14%, transparent); color: var(--sev-medium); }
 .code-confidence-low { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
 
 .code-status-ingested { background: rgba(23, 53, 76, 0.08); color: var(--accent); }
 .code-status-classified { background: rgba(244, 162, 89, 0.15); color: var(--warn); }
-.code-status-context_built { background: rgba(161, 98, 7, 0.14); color: #a16207; }
+.code-status-context_built { background: color-mix(in srgb, var(--sev-medium) 14%, transparent); color: var(--sev-medium); }
 .code-status-queued { background: rgba(140, 123, 98, 0.12); color: var(--pending); }
 .code-status-in_progress { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
 .code-status-analyzed { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
@@ -1569,7 +1627,7 @@ input {
 }
 
 .error-text {
-  color: #991b1b;
+  color: var(--danger);
   font-size: 0.9rem;
 }
 
@@ -1662,8 +1720,8 @@ input {
 
 .engagement-delete-button {
   background: transparent;
-  color: #f08a8a;
-  border: 1px solid rgba(240, 138, 138, 0.6);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 60%, transparent);
   border-radius: 6px;
   padding: 5px 12px;
   font-size: 12px;
@@ -1673,8 +1731,8 @@ input {
 }
 
 .engagement-delete-button:hover:not(:disabled) {
-  background: rgba(240, 138, 138, 0.14);
-  color: #ffb4b4;
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
 }
 
 .engagement-delete-button:disabled {
@@ -1691,8 +1749,8 @@ input {
 .delete-confirm-label input {
   padding: 8px 10px;
   border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(9, 11, 18, 0.6);
+  border: 1px solid var(--border);
+  background: var(--panel-strong);
   color: inherit;
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
 }
@@ -1880,11 +1938,11 @@ input {
   color: var(--accent);
   font-weight: 500;
 }
-.findings-redesign .filter-chip.is-active.sev-critical { border-color: #991b1b; background: rgba(153,27,27,0.1); color: #991b1b; }
-.findings-redesign .filter-chip.is-active.sev-high     { border-color: var(--warn); background: rgba(198,77,21,0.1); color: var(--warn); }
-.findings-redesign .filter-chip.is-active.sev-medium   { border-color: #a16207; background: rgba(161,98,7,0.1); color: #a16207; }
-.findings-redesign .filter-chip.is-active.sev-low      { border-color: var(--accent); background: rgba(23,53,76,0.08); color: var(--accent); }
-.findings-redesign .filter-chip.is-active.sev-info     { border-color: #5a584f; background: rgba(90,88,79,0.1); color: #5a584f; }
+.findings-redesign .filter-chip.is-active.sev-critical { border-color: var(--sev-critical); background: color-mix(in srgb, var(--sev-critical) 10%, transparent); color: var(--sev-critical); }
+.findings-redesign .filter-chip.is-active.sev-high     { border-color: var(--sev-high);     background: color-mix(in srgb, var(--sev-high) 10%, transparent);     color: var(--sev-high); }
+.findings-redesign .filter-chip.is-active.sev-medium   { border-color: var(--sev-medium);   background: color-mix(in srgb, var(--sev-medium) 10%, transparent);   color: var(--sev-medium); }
+.findings-redesign .filter-chip.is-active.sev-low      { border-color: var(--sev-low);      background: color-mix(in srgb, var(--sev-low) 8%, transparent);       color: var(--sev-low); }
+.findings-redesign .filter-chip.is-active.sev-info     { border-color: var(--sev-info);     background: color-mix(in srgb, var(--sev-info) 10%, transparent);     color: var(--sev-info); }
 .findings-redesign .filter-count {
   font-size: 0.68rem;
   opacity: 0.75;
@@ -1993,11 +2051,11 @@ input {
   width: 6px;
   margin-left: 0;
 }
-.findings-redesign .sevbar-critical { background: #991b1b; }
-.findings-redesign .sevbar-high { background: var(--warn); }
-.findings-redesign .sevbar-medium { background: #a16207; }
-.findings-redesign .sevbar-low { background: var(--accent); }
-.findings-redesign .sevbar-info { background: #9a988d; }
+.findings-redesign .sevbar-critical { background: var(--sev-critical); }
+.findings-redesign .sevbar-high { background: var(--sev-high); }
+.findings-redesign .sevbar-medium { background: var(--sev-medium); }
+.findings-redesign .sevbar-low { background: var(--sev-low); }
+.findings-redesign .sevbar-info { background: var(--sev-info); }
 .findings-redesign .sev-dot {
   width: 10px; height: 10px; border-radius: 3px;
   display: inline-block;
@@ -2011,11 +2069,11 @@ input {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
-.findings-redesign .frow-sev.critical { color: #991b1b; }
-.findings-redesign .frow-sev.high { color: var(--warn); }
-.findings-redesign .frow-sev.medium { color: #a16207; }
-.findings-redesign .frow-sev.low { color: var(--accent); }
-.findings-redesign .frow-sev.info { color: var(--muted); }
+.findings-redesign .frow-sev.critical { color: var(--sev-critical); }
+.findings-redesign .frow-sev.high { color: var(--sev-high); }
+.findings-redesign .frow-sev.medium { color: var(--sev-medium); }
+.findings-redesign .frow-sev.low { color: var(--sev-low); }
+.findings-redesign .frow-sev.info { color: var(--sev-info); }
 .findings-redesign .frow-main { min-width: 0; display: grid; gap: 3px; }
 .findings-redesign .frow-title {
   font-size: 0.94rem;
@@ -2074,10 +2132,10 @@ input {
 }
 .findings-redesign .tag.cwe { background: rgba(23, 53, 76, 0.08); }
 .findings-redesign .tag.owasp { background: rgba(244, 162, 89, 0.16); color: var(--warn); }
-.findings-redesign .tag.cve { background: rgba(153, 27, 27, 0.1); color: #991b1b; }
-.findings-redesign .tag.chain { background: rgba(244, 162, 89, 0.2); color: #7a3a11; }
+.findings-redesign .tag.cve { background: color-mix(in srgb, var(--chip-red) 10%, transparent); color: var(--chip-red); }
+.findings-redesign .tag.chain { background: rgba(244, 162, 89, 0.2); color: var(--tag-chain-ink); }
 .findings-redesign .tag.root { background: rgba(23, 53, 76, 0.1); color: var(--accent); }
-.findings-redesign .tag.warning { background: rgba(161, 98, 7, 0.14); color: #a16207; }
+.findings-redesign .tag.warning { background: color-mix(in srgb, var(--sev-medium) 14%, transparent); color: var(--sev-medium); }
 
 .findings-redesign .pill {
   display: inline-flex;
@@ -2092,14 +2150,14 @@ input {
 }
 .findings-redesign .pill-active     { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
 .findings-redesign .pill-reported   { background: rgba(47, 127, 82, 0.16); color: var(--ok); }
-.findings-redesign .pill-exploited  { background: rgba(153, 27, 27, 0.14); color: #991b1b; }
-.findings-redesign .pill-blocked    { background: rgba(153, 27, 27, 0.14); color: #991b1b; }
+.findings-redesign .pill-exploited  { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.findings-redesign .pill-blocked    { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
 .findings-redesign .pill-merged     { background: rgba(23, 53, 76, 0.1); color: var(--accent); }
-.findings-redesign .pill-false_positive { background: rgba(84, 88, 96, 0.12); color: #4b5563; }
+.findings-redesign .pill-false_positive { background: color-mix(in srgb, var(--chip-slate) 12%, transparent); color: var(--chip-slate); }
 .findings-redesign .pill-confirmed  { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
 .findings-redesign .pill-unreviewed { background: rgba(140, 123, 98, 0.15); color: var(--pending); }
 .findings-redesign .pill-downgraded { background: rgba(23, 53, 76, 0.12); color: var(--accent); }
-.findings-redesign .pill-disputed   { background: rgba(117, 79, 31, 0.16); color: #8a5a1f; }
+.findings-redesign .pill-disputed   { background: color-mix(in srgb, var(--disputed) 16%, transparent); color: var(--disputed); }
 
 /* Pager */
 .findings-redesign .list-footer {
@@ -2269,11 +2327,11 @@ input {
   left: 0; top: 0; bottom: 0;
   width: 4px;
 }
-.findings-redesign .drawer-hero.sev-critical::before { background: #991b1b; }
-.findings-redesign .drawer-hero.sev-high::before     { background: var(--warn); }
-.findings-redesign .drawer-hero.sev-medium::before   { background: #a16207; }
-.findings-redesign .drawer-hero.sev-low::before      { background: var(--accent); }
-.findings-redesign .drawer-hero.sev-info::before     { background: #9a988d; }
+.findings-redesign .drawer-hero.sev-critical::before { background: var(--sev-critical); }
+.findings-redesign .drawer-hero.sev-high::before     { background: var(--sev-high); }
+.findings-redesign .drawer-hero.sev-medium::before   { background: var(--sev-medium); }
+.findings-redesign .drawer-hero.sev-low::before      { background: var(--sev-low); }
+.findings-redesign .drawer-hero.sev-info::before     { background: var(--sev-info); }
 .findings-redesign .drawer-top {
   display: flex;
   justify-content: space-between;
@@ -2343,11 +2401,11 @@ input {
   padding: 4px 10px;
   border-radius: 999px;
 }
-.findings-redesign .hero-sev.critical { background: rgba(153,27,27,0.14); color: #991b1b; }
-.findings-redesign .hero-sev.high     { background: rgba(198,77,21,0.14); color: var(--warn); }
-.findings-redesign .hero-sev.medium   { background: rgba(161,98,7,0.14); color: #a16207; }
-.findings-redesign .hero-sev.low      { background: rgba(23,53,76,0.10); color: var(--accent); }
-.findings-redesign .hero-sev.info     { background: rgba(23,53,76,0.06); color: #5a584f; }
+.findings-redesign .hero-sev.critical { background: color-mix(in srgb, var(--sev-critical) 14%, transparent); color: var(--sev-critical); }
+.findings-redesign .hero-sev.high     { background: color-mix(in srgb, var(--sev-high) 14%, transparent);     color: var(--sev-high); }
+.findings-redesign .hero-sev.medium   { background: color-mix(in srgb, var(--sev-medium) 14%, transparent);   color: var(--sev-medium); }
+.findings-redesign .hero-sev.low      { background: color-mix(in srgb, var(--sev-low) 10%, transparent);      color: var(--sev-low); }
+.findings-redesign .hero-sev.info     { background: color-mix(in srgb, var(--sev-info) 10%, transparent);     color: var(--sev-info); }
 .findings-redesign .cvss-chip {
   display: inline-flex;
   align-items: center;
@@ -2384,7 +2442,7 @@ input {
 }
 .findings-redesign .qa-btn:hover { border-color: var(--accent); background: white; }
 .findings-redesign .qa-btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
-.findings-redesign .qa-btn.primary:hover { background: #0f2537; }
+.findings-redesign .qa-btn.primary:hover { background: color-mix(in srgb, var(--accent) 80%, #000); }
 
 /* Drawer tabs
  *
@@ -2546,8 +2604,8 @@ input {
  * against neighboring plain sections. The section-title's ::before bar
  * inside a callout picks up the callout's accent color. */
 .findings-redesign .callout.impact {
-  border-left: 4px solid #991b1b;
-  background: rgba(153, 27, 27, 0.05);
+  border-left: 4px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 5%, transparent);
 }
 .findings-redesign .callout.remediation {
   border-left: 4px solid var(--ok);
@@ -2557,10 +2615,16 @@ input {
   border-left: 4px solid var(--pending);
   background: rgba(140, 123, 98, 0.06);
 }
-.findings-redesign .callout.impact .section-title::before      { background: #991b1b; }
+/* Evidence ("how we know") — a neutral-muted callout so it reads as
+ * distinct from the plain Steps-to-reproduce section ("how to reproduce")
+ * without competing with the tinted Impact/Remediation callouts. */
+.findings-redesign .callout.evidence {
+  border-left: 4px solid var(--muted);
+}
+.findings-redesign .callout.impact .section-title::before      { background: var(--danger); }
 .findings-redesign .callout.remediation .section-title::before { background: var(--ok); }
 .findings-redesign .callout.kill .section-title::before        { background: var(--pending); }
-.findings-redesign .callout.impact .section-title      { color: #991b1b; }
+.findings-redesign .callout.impact .section-title      { color: var(--danger); }
 .findings-redesign .callout.remediation .section-title { color: var(--ok); }
 .findings-redesign .callout.kill .section-title        { color: var(--pending); }
 
@@ -2613,8 +2677,8 @@ input {
   color: white;
   background: var(--accent);
 }
-.findings-redesign .taint-row:first-child .taint-bubble { background: var(--accent-soft); color: #2a1a08; }
-.findings-redesign .taint-row:last-child .taint-bubble { background: #991b1b; }
+.findings-redesign .taint-row:first-child .taint-bubble { background: var(--accent-soft); color: var(--accent-soft-ink); }
+.findings-redesign .taint-row:last-child .taint-bubble { background: var(--danger); }
 .findings-redesign .taint-line {
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
   font-size: 0.84rem;
@@ -2629,6 +2693,36 @@ input {
   height: 10px;
   border-left: 2px dashed rgba(23, 53, 76, 0.3);
   margin-left: 10px;
+}
+:root[data-theme="dark"] .findings-redesign .taint-link {
+  border-left-color: rgba(255, 255, 255, 0.2);
+}
+/* "… N more" expander used to collapse very long taint paths. */
+.findings-redesign .taint-more-bubble {
+  background: var(--panel-soft);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+.findings-redesign .taint-more {
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-family: inherit;
+  font-size: 0.8rem;
+  color: var(--muted);
+  cursor: pointer;
+  justify-self: start;
+}
+.findings-redesign .taint-more:hover {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+/* slot_type as a compact mono line (was a KV cell). */
+.findings-redesign .code-slot-type {
+  font-size: 0.84rem;
+  color: var(--ink-2);
+  margin: 0;
 }
 
 /* Linked findings */
@@ -2705,7 +2799,7 @@ input {
   gap: 5px;
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
   font-size: 0.76rem;
-  background: white;
+  background: var(--elevated);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 3px 7px;
@@ -2741,7 +2835,7 @@ input {
   top: 12px;
   width: 10px; height: 10px;
   border-radius: 50%;
-  background: white;
+  background: var(--elevated);
   border: 2px solid var(--accent);
 }
 .findings-redesign .tl-row.action-created::before { border-color: var(--pending); }
@@ -2749,8 +2843,8 @@ input {
 .findings-redesign .tl-row.action-confirmed::before { border-color: var(--ok); }
 .findings-redesign .tl-row.action-reported::before { border-color: var(--ok); background: var(--ok); }
 .findings-redesign .tl-row.action-exploited::before,
-.findings-redesign .tl-row.action-blocked::before { border-color: #991b1b; background: #991b1b; }
-.findings-redesign .tl-row.action-suppressed::before { border-color: #8c7b62; background: #8c7b62; }
+.findings-redesign .tl-row.action-blocked::before { border-color: var(--danger); background: var(--danger); }
+.findings-redesign .tl-row.action-suppressed::before { border-color: var(--pending); background: var(--pending); }
 .findings-redesign .tl-row.action-merged::before { border-color: var(--accent); background: var(--accent); }
 .findings-redesign .tl-row.action-downgraded::before { border-color: var(--accent); }
 
@@ -2787,6 +2881,22 @@ input {
   align-items: center;
 }
 .findings-redesign .transition-arrow { color: var(--muted); }
+/* Each change category (workflow / severity / verification) is one inline
+ * group prefixed by a small uppercase muted label so the change-type is
+ * scannable when a row carries several changes. Matches the KV `.k` look. */
+.findings-redesign .tl-change {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.findings-redesign .tl-change-label {
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
 .findings-redesign .tl-reason {
   font-size: 0.86rem;
   margin: 6px 0 0;
@@ -2795,20 +2905,33 @@ input {
 }
 
 /* Refs */
-.findings-redesign .ref-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; }
+.findings-redesign .ref-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+/* Lead with the human label/host (normal-ink, clickable); demote the full
+ * URL to a muted, truncated second line. */
 .findings-redesign .ref-list a {
-  font-size: 0.86rem;
-  color: var(--accent);
   text-decoration: none;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.findings-redesign .ref-list a:hover .ref-primary { text-decoration: underline; }
+.findings-redesign .ref-list .ref-primary {
+  font-size: 0.9rem;
+  color: var(--ink);
+  font-weight: 500;
   display: inline-flex;
   gap: 6px;
-  align-items: baseline;
+  align-items: center;
 }
-.findings-redesign .ref-list a:hover { text-decoration: underline; }
-.findings-redesign .ref-list .host {
+.findings-redesign .ref-list .ref-primary svg { color: var(--accent); }
+.findings-redesign .ref-list .ref-url {
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
   font-size: 0.72rem;
   color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 /* Command palette (rendered inside .findings-redesign wrapper) */
@@ -3038,76 +3161,76 @@ input {
  * else uses a type-based accent so the tab isn't a sea of gray. Keep colors
  * in sync with ITYPE_COLORS in IntelTab.tsx.
  */
-.findings-redesign .ibar-tech_component  { background: #17354c; }
-.findings-redesign .ibar-person          { background: #7c3aed; }
-.findings-redesign .ibar-email           { background: #2f7f52; }
-.findings-redesign .ibar-domain          { background: #0d6b6b; }
-.findings-redesign .ibar-credentials     { background: #c64d15; }
-.findings-redesign .ibar-cve             { background: #991b1b; }
-.findings-redesign .ibar-dns_record      { background: #4b5563; }
-.findings-redesign .ibar-social_profile  { background: #be185d; }
-.findings-redesign .ibar-breach_record   { background: #6b0d0d; }
-.findings-redesign .ibar-org_fact        { background: #a16207; }
-.findings-redesign .ibar-note            { background: #8c7b62; }
+.findings-redesign .ibar-tech_component  { background: var(--chip-navy); }
+.findings-redesign .ibar-person          { background: var(--chip-purple); }
+.findings-redesign .ibar-email           { background: var(--chip-green); }
+.findings-redesign .ibar-domain          { background: var(--chip-teal); }
+.findings-redesign .ibar-credentials     { background: var(--chip-orange); }
+.findings-redesign .ibar-cve             { background: var(--chip-red); }
+.findings-redesign .ibar-dns_record      { background: var(--chip-slate); }
+.findings-redesign .ibar-social_profile  { background: var(--chip-pink); }
+.findings-redesign .ibar-breach_record   { background: var(--chip-maroon); }
+.findings-redesign .ibar-org_fact        { background: var(--chip-ochre); }
+.findings-redesign .ibar-note            { background: var(--chip-muted); }
 
-.findings-redesign .frow-sev.itype-tech_component  { color: #17354c; }
-.findings-redesign .frow-sev.itype-person          { color: #7c3aed; }
-.findings-redesign .frow-sev.itype-email           { color: #2f7f52; }
-.findings-redesign .frow-sev.itype-domain          { color: #0d6b6b; }
-.findings-redesign .frow-sev.itype-credentials     { color: #c64d15; }
-.findings-redesign .frow-sev.itype-cve             { color: #991b1b; }
-.findings-redesign .frow-sev.itype-dns_record      { color: #4b5563; }
-.findings-redesign .frow-sev.itype-social_profile  { color: #be185d; }
-.findings-redesign .frow-sev.itype-breach_record   { color: #6b0d0d; }
-.findings-redesign .frow-sev.itype-org_fact        { color: #a16207; }
-.findings-redesign .frow-sev.itype-note            { color: #8c7b62; }
+.findings-redesign .frow-sev.itype-tech_component  { color: var(--chip-navy); }
+.findings-redesign .frow-sev.itype-person          { color: var(--chip-purple); }
+.findings-redesign .frow-sev.itype-email           { color: var(--chip-green); }
+.findings-redesign .frow-sev.itype-domain          { color: var(--chip-teal); }
+.findings-redesign .frow-sev.itype-credentials     { color: var(--chip-orange); }
+.findings-redesign .frow-sev.itype-cve             { color: var(--chip-red); }
+.findings-redesign .frow-sev.itype-dns_record      { color: var(--chip-slate); }
+.findings-redesign .frow-sev.itype-social_profile  { color: var(--chip-pink); }
+.findings-redesign .frow-sev.itype-breach_record   { color: var(--chip-maroon); }
+.findings-redesign .frow-sev.itype-org_fact        { color: var(--chip-ochre); }
+.findings-redesign .frow-sev.itype-note            { color: var(--chip-muted); }
 
-.findings-redesign .drawer-hero.itype-tech_component::before  { background: #17354c; }
-.findings-redesign .drawer-hero.itype-person::before          { background: #7c3aed; }
-.findings-redesign .drawer-hero.itype-email::before           { background: #2f7f52; }
-.findings-redesign .drawer-hero.itype-domain::before          { background: #0d6b6b; }
-.findings-redesign .drawer-hero.itype-credentials::before     { background: #c64d15; }
-.findings-redesign .drawer-hero.itype-cve::before             { background: #991b1b; }
-.findings-redesign .drawer-hero.itype-dns_record::before      { background: #4b5563; }
-.findings-redesign .drawer-hero.itype-social_profile::before  { background: #be185d; }
-.findings-redesign .drawer-hero.itype-breach_record::before   { background: #6b0d0d; }
-.findings-redesign .drawer-hero.itype-org_fact::before        { background: #a16207; }
-.findings-redesign .drawer-hero.itype-note::before            { background: #8c7b62; }
+.findings-redesign .drawer-hero.itype-tech_component::before  { background: var(--chip-navy); }
+.findings-redesign .drawer-hero.itype-person::before          { background: var(--chip-purple); }
+.findings-redesign .drawer-hero.itype-email::before           { background: var(--chip-green); }
+.findings-redesign .drawer-hero.itype-domain::before          { background: var(--chip-teal); }
+.findings-redesign .drawer-hero.itype-credentials::before     { background: var(--chip-orange); }
+.findings-redesign .drawer-hero.itype-cve::before             { background: var(--chip-red); }
+.findings-redesign .drawer-hero.itype-dns_record::before      { background: var(--chip-slate); }
+.findings-redesign .drawer-hero.itype-social_profile::before  { background: var(--chip-pink); }
+.findings-redesign .drawer-hero.itype-breach_record::before   { background: var(--chip-maroon); }
+.findings-redesign .drawer-hero.itype-org_fact::before        { background: var(--chip-ochre); }
+.findings-redesign .drawer-hero.itype-note::before            { background: var(--chip-muted); }
 
-.findings-redesign .hero-sev.itype-tech_component  { background: rgba(23,53,76,0.10);  color: #17354c; }
-.findings-redesign .hero-sev.itype-person          { background: rgba(124,58,237,0.12); color: #7c3aed; }
-.findings-redesign .hero-sev.itype-email           { background: rgba(47,127,82,0.14);  color: #2f7f52; }
-.findings-redesign .hero-sev.itype-domain          { background: rgba(13,107,107,0.12); color: #0d6b6b; }
-.findings-redesign .hero-sev.itype-credentials     { background: rgba(198,77,21,0.14);  color: #c64d15; }
-.findings-redesign .hero-sev.itype-cve             { background: rgba(153,27,27,0.14);  color: #991b1b; }
-.findings-redesign .hero-sev.itype-dns_record      { background: rgba(75,85,99,0.12);   color: #4b5563; }
-.findings-redesign .hero-sev.itype-social_profile  { background: rgba(190,24,93,0.12);  color: #be185d; }
-.findings-redesign .hero-sev.itype-breach_record   { background: rgba(107,13,13,0.14);  color: #6b0d0d; }
-.findings-redesign .hero-sev.itype-org_fact        { background: rgba(161,98,7,0.14);   color: #a16207; }
-.findings-redesign .hero-sev.itype-note            { background: rgba(140,123,98,0.12); color: #6b685d; }
+.findings-redesign .hero-sev.itype-tech_component  { background: color-mix(in srgb, var(--chip-navy) 10%, transparent);    color: var(--chip-navy); }
+.findings-redesign .hero-sev.itype-person          { background: color-mix(in srgb, var(--chip-purple) 12%, transparent);  color: var(--chip-purple); }
+.findings-redesign .hero-sev.itype-email           { background: color-mix(in srgb, var(--chip-green) 14%, transparent);   color: var(--chip-green); }
+.findings-redesign .hero-sev.itype-domain          { background: color-mix(in srgb, var(--chip-teal) 12%, transparent);    color: var(--chip-teal); }
+.findings-redesign .hero-sev.itype-credentials     { background: color-mix(in srgb, var(--chip-orange) 14%, transparent);  color: var(--chip-orange); }
+.findings-redesign .hero-sev.itype-cve             { background: color-mix(in srgb, var(--chip-red) 14%, transparent);     color: var(--chip-red); }
+.findings-redesign .hero-sev.itype-dns_record      { background: color-mix(in srgb, var(--chip-slate) 12%, transparent);   color: var(--chip-slate); }
+.findings-redesign .hero-sev.itype-social_profile  { background: color-mix(in srgb, var(--chip-pink) 12%, transparent);    color: var(--chip-pink); }
+.findings-redesign .hero-sev.itype-breach_record   { background: color-mix(in srgb, var(--chip-maroon) 14%, transparent);  color: var(--chip-maroon); }
+.findings-redesign .hero-sev.itype-org_fact        { background: color-mix(in srgb, var(--chip-ochre) 14%, transparent);   color: var(--chip-ochre); }
+.findings-redesign .hero-sev.itype-note            { background: color-mix(in srgb, var(--chip-muted) 12%, transparent);   color: var(--chip-muted); }
 
 /* Intel filter chips: active-state tints. Inactive chips keep their sev-dot
  * visible so you can scan the whole filter bar by color, not just by label.
  * Active state swaps border + bg + text to the dot's hue. */
-.findings-redesign .filter-chip.is-active.itype-tech_component  { border-color: #17354c; background: rgba(23,53,76,0.10);  color: #17354c; }
-.findings-redesign .filter-chip.is-active.itype-person          { border-color: #7c3aed; background: rgba(124,58,237,0.12); color: #7c3aed; }
-.findings-redesign .filter-chip.is-active.itype-email           { border-color: #2f7f52; background: rgba(47,127,82,0.14);  color: #2f7f52; }
-.findings-redesign .filter-chip.is-active.itype-domain          { border-color: #0d6b6b; background: rgba(13,107,107,0.12); color: #0d6b6b; }
-.findings-redesign .filter-chip.is-active.itype-credentials     { border-color: #c64d15; background: rgba(198,77,21,0.14);  color: #c64d15; }
-.findings-redesign .filter-chip.is-active.itype-cve             { border-color: #991b1b; background: rgba(153,27,27,0.12);  color: #991b1b; }
-.findings-redesign .filter-chip.is-active.itype-dns_record      { border-color: #4b5563; background: rgba(75,85,99,0.12);   color: #4b5563; }
-.findings-redesign .filter-chip.is-active.itype-social_profile  { border-color: #be185d; background: rgba(190,24,93,0.12);  color: #be185d; }
-.findings-redesign .filter-chip.is-active.itype-breach_record   { border-color: #6b0d0d; background: rgba(107,13,13,0.14);  color: #6b0d0d; }
-.findings-redesign .filter-chip.is-active.itype-org_fact        { border-color: #a16207; background: rgba(161,98,7,0.14);   color: #a16207; }
-.findings-redesign .filter-chip.is-active.itype-note            { border-color: #8c7b62; background: rgba(140,123,98,0.12); color: #6b685d; }
+.findings-redesign .filter-chip.is-active.itype-tech_component  { border-color: var(--chip-navy);   background: color-mix(in srgb, var(--chip-navy) 10%, transparent);   color: var(--chip-navy); }
+.findings-redesign .filter-chip.is-active.itype-person          { border-color: var(--chip-purple); background: color-mix(in srgb, var(--chip-purple) 12%, transparent); color: var(--chip-purple); }
+.findings-redesign .filter-chip.is-active.itype-email           { border-color: var(--chip-green);  background: color-mix(in srgb, var(--chip-green) 14%, transparent);  color: var(--chip-green); }
+.findings-redesign .filter-chip.is-active.itype-domain          { border-color: var(--chip-teal);   background: color-mix(in srgb, var(--chip-teal) 12%, transparent);   color: var(--chip-teal); }
+.findings-redesign .filter-chip.is-active.itype-credentials     { border-color: var(--chip-orange); background: color-mix(in srgb, var(--chip-orange) 14%, transparent); color: var(--chip-orange); }
+.findings-redesign .filter-chip.is-active.itype-cve             { border-color: var(--chip-red);    background: color-mix(in srgb, var(--chip-red) 12%, transparent);    color: var(--chip-red); }
+.findings-redesign .filter-chip.is-active.itype-dns_record      { border-color: var(--chip-slate);  background: color-mix(in srgb, var(--chip-slate) 12%, transparent);  color: var(--chip-slate); }
+.findings-redesign .filter-chip.is-active.itype-social_profile  { border-color: var(--chip-pink);   background: color-mix(in srgb, var(--chip-pink) 12%, transparent);   color: var(--chip-pink); }
+.findings-redesign .filter-chip.is-active.itype-breach_record   { border-color: var(--chip-maroon); background: color-mix(in srgb, var(--chip-maroon) 14%, transparent); color: var(--chip-maroon); }
+.findings-redesign .filter-chip.is-active.itype-org_fact        { border-color: var(--chip-ochre);  background: color-mix(in srgb, var(--chip-ochre) 14%, transparent);  color: var(--chip-ochre); }
+.findings-redesign .filter-chip.is-active.itype-note            { border-color: var(--chip-muted);  background: color-mix(in srgb, var(--chip-muted) 12%, transparent);  color: var(--chip-muted); }
 
-.findings-redesign .filter-chip.is-active.istatus-active         { border-color: #2f7f52; background: rgba(47,127,82,0.14);  color: #2f7f52; }
-.findings-redesign .filter-chip.is-active.istatus-blocked        { border-color: #991b1b; background: rgba(153,27,27,0.12);  color: #991b1b; }
-.findings-redesign .filter-chip.is-active.istatus-exploited      { border-color: #6b0d0d; background: rgba(107,13,13,0.14);  color: #6b0d0d; }
-.findings-redesign .filter-chip.is-active.istatus-false_positive { border-color: #8c7b62; background: rgba(140,123,98,0.12); color: #6b685d; }
-.findings-redesign .filter-chip.is-active.istatus-unreviewed     { border-color: #9a988d; background: rgba(154,152,141,0.16); color: #5a584f; }
+.findings-redesign .filter-chip.is-active.istatus-active         { border-color: var(--ok);               background: color-mix(in srgb, var(--ok) 14%, transparent);               color: var(--ok); }
+.findings-redesign .filter-chip.is-active.istatus-blocked        { border-color: var(--danger);            background: color-mix(in srgb, var(--danger) 12%, transparent);            color: var(--danger); }
+.findings-redesign .filter-chip.is-active.istatus-exploited      { border-color: var(--chip-maroon);       background: color-mix(in srgb, var(--chip-maroon) 14%, transparent);       color: var(--chip-maroon); }
+.findings-redesign .filter-chip.is-active.istatus-false_positive { border-color: var(--chip-muted);        background: color-mix(in srgb, var(--chip-muted) 12%, transparent);        color: var(--chip-muted); }
+.findings-redesign .filter-chip.is-active.istatus-unreviewed     { border-color: var(--chip-unreviewed);   background: color-mix(in srgb, var(--chip-unreviewed) 16%, transparent);   color: var(--chip-unreviewed-ink); }
 
-.findings-redesign .filter-chip.is-active.isource { border-color: #0d6b6b; background: rgba(13,107,107,0.12); color: #0d6b6b; }
+.findings-redesign .filter-chip.is-active.isource { border-color: var(--chip-teal); background: color-mix(in srgb, var(--chip-teal) 12%, transparent); color: var(--chip-teal); }
 
 /* Small screens — the detail modal shrinks via its own min() width cap.
  * The list shell is already single-column, no responsive override needed. */
@@ -3126,17 +3249,23 @@ input {
  *   suppressed #8c7b62  (muted)
  *   artifact   #0d6b6b  (teal)
  */
-.findings-redesign .cbar-success    { background: #2f7f52; }
-.findings-redesign .cbar-failed     { background: #991b1b; }
-.findings-redesign .cbar-timed_out  { background: #c64d15; }
-.findings-redesign .cbar-suppressed { background: #8c7b62; }
-.findings-redesign .cbar-artifact   { background: #0d6b6b; }
+.findings-redesign .cbar-success    { background: var(--chip-green); }
+.findings-redesign .cbar-failed     { background: var(--chip-red); }
+.findings-redesign .cbar-timed_out  { background: var(--chip-orange); }
+.findings-redesign .cbar-suppressed { background: var(--chip-muted); }
+.findings-redesign .cbar-artifact   { background: var(--chip-teal); }
 
-.findings-redesign .filter-chip.is-active.cstatus-success    { border-color: #2f7f52; background: rgba(47,127,82,0.14);  color: #2f7f52; }
-.findings-redesign .filter-chip.is-active.cstatus-failed     { border-color: #991b1b; background: rgba(153,27,27,0.12);  color: #991b1b; }
-.findings-redesign .filter-chip.is-active.cstatus-timed_out  { border-color: #c64d15; background: rgba(198,77,21,0.14);  color: #c64d15; }
-.findings-redesign .filter-chip.is-active.cstatus-suppressed { border-color: #8c7b62; background: rgba(140,123,98,0.14); color: #6b685d; }
-.findings-redesign .filter-chip.is-active.cstatus-artifact   { border-color: #0d6b6b; background: rgba(13,107,107,0.12); color: #0d6b6b; }
+/* Return-code tag classes used by CommandsGrid RcCell */
+.tag-rc-ok      { background: color-mix(in srgb, var(--ok) 16%, transparent);      color: var(--ok); }
+.tag-rc-warn    { background: color-mix(in srgb, var(--warn) 14%, transparent);    color: var(--warn); }
+.tag-rc-danger  { background: color-mix(in srgb, var(--danger) 14%, transparent);  color: var(--danger); }
+.tag-rc-pending { background: color-mix(in srgb, var(--pending) 12%, transparent); color: var(--pending); }
+
+.findings-redesign .filter-chip.is-active.cstatus-success    { border-color: var(--chip-green);  background: color-mix(in srgb, var(--chip-green) 14%, transparent);  color: var(--chip-green); }
+.findings-redesign .filter-chip.is-active.cstatus-failed     { border-color: var(--chip-red);    background: color-mix(in srgb, var(--chip-red) 12%, transparent);    color: var(--chip-red); }
+.findings-redesign .filter-chip.is-active.cstatus-timed_out  { border-color: var(--chip-orange); background: color-mix(in srgb, var(--chip-orange) 14%, transparent); color: var(--chip-orange); }
+.findings-redesign .filter-chip.is-active.cstatus-suppressed { border-color: var(--chip-muted);  background: color-mix(in srgb, var(--chip-muted) 14%, transparent);  color: var(--chip-muted); }
+.findings-redesign .filter-chip.is-active.cstatus-artifact   { border-color: var(--chip-teal);   background: color-mix(in srgb, var(--chip-teal) 12%, transparent);   color: var(--chip-teal); }
 
 /* Technique chip active state is driven by inline style from JS (hash
  * fallback means we can't enumerate every possible class name), but we
@@ -3150,12 +3279,12 @@ input {
  *   payload     #c64d15 (orange) | exploit  #991b1b (red)
  *   replay      #7c3aed (purple) | cleanup  #6b685d (muted)
  */
-.findings-redesign .filter-chip.is-active.cpk-fingerprint { border-color: #0d6b6b; background: rgba(13,107,107,0.12); color: #0d6b6b; }
-.findings-redesign .filter-chip.is-active.cpk-baseline    { border-color: #4b5563; background: rgba(75,85,99,0.12);   color: #4b5563; }
-.findings-redesign .filter-chip.is-active.cpk-payload     { border-color: #c64d15; background: rgba(198,77,21,0.14);  color: #c64d15; }
-.findings-redesign .filter-chip.is-active.cpk-exploit     { border-color: #991b1b; background: rgba(153,27,27,0.12);  color: #991b1b; }
-.findings-redesign .filter-chip.is-active.cpk-replay      { border-color: #7c3aed; background: rgba(124,58,237,0.12); color: #7c3aed; }
-.findings-redesign .filter-chip.is-active.cpk-cleanup     { border-color: #6b685d; background: rgba(107,104,93,0.14); color: #6b685d; }
+.findings-redesign .filter-chip.is-active.cpk-fingerprint { border-color: var(--chip-teal);     background: color-mix(in srgb, var(--chip-teal) 12%, transparent);     color: var(--chip-teal); }
+.findings-redesign .filter-chip.is-active.cpk-baseline    { border-color: var(--chip-slate);    background: color-mix(in srgb, var(--chip-slate) 12%, transparent);    color: var(--chip-slate); }
+.findings-redesign .filter-chip.is-active.cpk-payload     { border-color: var(--chip-orange);   background: color-mix(in srgb, var(--chip-orange) 14%, transparent);   color: var(--chip-orange); }
+.findings-redesign .filter-chip.is-active.cpk-exploit     { border-color: var(--chip-red);      background: color-mix(in srgb, var(--chip-red) 12%, transparent);      color: var(--chip-red); }
+.findings-redesign .filter-chip.is-active.cpk-replay      { border-color: var(--chip-purple);   background: color-mix(in srgb, var(--chip-purple) 12%, transparent);   color: var(--chip-purple); }
+.findings-redesign .filter-chip.is-active.cpk-cleanup     { border-color: var(--chip-muted-grey); background: color-mix(in srgb, var(--chip-muted-grey) 14%, transparent); color: var(--chip-muted-grey); }
 
 /* ──────────────────────────────────────────────────────────
  * Theme toggle button — lives in the page headers. Keeps the
@@ -3346,6 +3475,17 @@ body.detail-modal-open {
   color: var(--ink);
 }
 
+/* Compact one-line provenance footer for the single-field (agent-only)
+ * case — avoids a heavy "PROVENANCE" section wrapping one KV row. */
+.findings-redesign .prov-footer {
+  margin: 4px 0 0;
+  font-size: 0.84rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
 .findings-redesign .provenance-list {
   display: grid;
   /* Tightened from 12px — provenance rows already self-separate
@@ -3494,6 +3634,233 @@ body.detail-modal-open {
 }
 
 /* ──────────────────────────────────────────────────────────
+ * Drawer header actions + copy-as-markdown / copy-link buttons
+ * (Tier 1c). These reuse .copy-btn (slug copy) styling but sit
+ * on the right of .drawer-top. lucide icons size themselves via
+ * the size prop; the inherited .copy-btn svg rule keeps the
+ * 12px slug-copy icon size, so set an explicit size here.
+ * ────────────────────────────────────────────────────────── */
+.findings-redesign .drawer-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.findings-redesign .drawer-header-actions .copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.findings-redesign .drawer-header-actions .copy-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* Prose view-mode toggle (rendered/raw) — sits at the right end of the
+ * drawer-tabs bar. Compact segmented control; active segment picks up the
+ * accent like the active drawer-tab. */
+/* "View" label + the Eye/Code toggle, pinned to the right of the tabs bar.
+ * The label makes the toggle's purpose obvious instead of a bare icon pair. */
+.findings-redesign .prose-mode-wrap {
+  margin-left: auto;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.findings-redesign .prose-mode-label {
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+.findings-redesign .prose-mode-toggle {
+  display: inline-flex;
+  align-self: center;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--panel-soft);
+}
+.findings-redesign .prose-mode-btn {
+  background: none;
+  border: none;
+  padding: 4px 8px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  color: var(--muted);
+  transition: background 0.12s, color 0.12s;
+}
+.findings-redesign .prose-mode-btn:hover { color: var(--ink); }
+.findings-redesign .prose-mode-btn.is-active {
+  background: var(--accent);
+  color: #fff;
+}
+:root[data-theme="dark"] .findings-redesign .prose-mode-btn.is-active {
+  background: var(--accent);
+  color: var(--page-bg-color);
+}
+
+/* Section header row: title on the left, optional copy chip on the right. */
+.findings-redesign .section-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.findings-redesign .section-head-row .section-title { margin-bottom: 0; }
+.findings-redesign .copy-chip {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 2px 5px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  color: var(--muted);
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.findings-redesign .copy-chip:hover {
+  color: var(--ink);
+  border-color: var(--border);
+  background: var(--panel-soft);
+}
+.findings-redesign .copy-chip.is-copied { color: var(--ok); border-color: var(--ok); }
+/* Inline copy chip inside a .kv label (Location etc.) — nudge it next to
+ * the uppercase label without disturbing the value row. */
+.findings-redesign .kv .k .copy-chip {
+  margin-left: 6px;
+  padding: 0 3px;
+  vertical-align: middle;
+}
+
+/* Raw-mode prose: reuse .pre but force prose wrapping so a raw markdown
+ * blob doesn't scroll horizontally. */
+.findings-redesign .prose-raw {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ──────────────────────────────────────────────────────────
+ * Markdown body (Tier 1c) — rendered react-markdown output for
+ * finding prose (notes/summary/impact/remediation). Sized to fit
+ * inside the drawer; all colors via theme vars so light/dark both
+ * read. Tables get borders via --border; inline + fenced code use
+ * IBM Plex Mono on --panel-soft. NO raw HTML is rendered (see
+ * Markdown.tsx) — react-markdown's default escaping is the sanitizer.
+ * ────────────────────────────────────────────────────────── */
+.findings-redesign .md-body {
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.findings-redesign .md-body > :first-child { margin-top: 0; }
+.findings-redesign .md-body > :last-child { margin-bottom: 0; }
+.findings-redesign .md-body p { margin: 0 0 8px; }
+.findings-redesign .md-body h1,
+.findings-redesign .md-body h2,
+.findings-redesign .md-body h3,
+.findings-redesign .md-body h4,
+.findings-redesign .md-body h5,
+.findings-redesign .md-body h6 {
+  margin: 12px 0 6px;
+  line-height: 1.3;
+  color: var(--ink);
+  font-weight: 600;
+}
+.findings-redesign .md-body h1 { font-size: 1.08rem; }
+.findings-redesign .md-body h2 { font-size: 1.02rem; }
+.findings-redesign .md-body h3 { font-size: 0.96rem; }
+.findings-redesign .md-body h4,
+.findings-redesign .md-body h5,
+.findings-redesign .md-body h6 { font-size: 0.92rem; }
+.findings-redesign .md-body ul,
+.findings-redesign .md-body ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+  display: grid;
+  gap: 3px;
+}
+.findings-redesign .md-body li { line-height: 1.55; }
+.findings-redesign .md-body li > ul,
+.findings-redesign .md-body li > ol { margin: 3px 0 0; }
+.findings-redesign .md-body a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  word-break: break-word;
+}
+.findings-redesign .md-body a:hover { text-decoration-thickness: 2px; }
+.findings-redesign .md-body strong { font-weight: 700; color: var(--ink); }
+.findings-redesign .md-body em { font-style: italic; }
+.findings-redesign .md-body code {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.88em;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 5px;
+}
+.findings-redesign .md-body pre {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+.findings-redesign .md-body pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.82rem;
+}
+.findings-redesign .md-body blockquote {
+  margin: 0 0 8px;
+  padding: 4px 0 4px 12px;
+  border-left: 3px solid var(--accent-muted);
+  color: var(--ink-2);
+  font-style: italic;
+}
+.findings-redesign .md-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+.findings-redesign .md-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 8px;
+  font-size: 0.86rem;
+  display: block;
+  overflow-x: auto;
+}
+.findings-redesign .md-body th,
+.findings-redesign .md-body td {
+  border: 1px solid var(--border);
+  padding: 5px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+.findings-redesign .md-body th {
+  background: var(--panel-soft);
+  font-weight: 600;
+  color: var(--ink);
+}
+.findings-redesign .md-body img { max-width: 100%; height: auto; }
+
+/* ──────────────────────────────────────────────────────────
  * Dark-theme overrides for elements that still bake in white
  * `rgba(255, 255, 255, …)` backgrounds. These are localized
  * fix-ups rather than a wholesale rewrite of every rule —
@@ -3559,11 +3926,9 @@ body.detail-modal-open {
 :root[data-theme="dark"] .finding-row-active {
   background: var(--panel-hover);
 }
-:root[data-theme="dark"] .artifact-content {
-  background: var(--elevated);
-  color: var(--ink);
-  border: 1px solid var(--border);
-}
+/* .artifact-content keeps its terminal-dark aesthetic (rgba(16,18,26,0.96))
+ * in both light and dark themes so the near-white inner colors remain legible.
+ * The dark override that flipped it to --elevated is intentionally removed. */
 
 /* findings-redesign drawer/list elements that bake in white */
 :root[data-theme="dark"] .findings-redesign .drawer-panel,
@@ -3579,7 +3944,17 @@ body.detail-modal-open {
   background: rgba(255, 255, 255, 0.04);
 }
 :root[data-theme="dark"] .findings-redesign .taint-line {
-  background: rgba(255, 255, 255, 0.04);
+  /* Subtle surface tint instead of a near-white "island": match the dark
+   * panel, use primary ink, and a faint border so the card still reads. */
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--ink);
+  border-color: var(--border);
+}
+:root[data-theme="dark"] .findings-redesign .cvss-chip {
+  /* Same fix as .taint-line: the chip's hardcoded near-white background was a
+   * glaring light island in dark mode (and now the SOLE place CVSS appears,
+   * since it was dropped from the Metadata grid). Subtle tint instead. */
+  background: rgba(255, 255, 255, 0.07);
 }
 :root[data-theme="dark"] .findings-redesign .link-card {
   background: rgba(255, 255, 255, 0.03);
@@ -3616,57 +3991,12 @@ body.detail-modal-open {
   background: rgba(121, 169, 212, 0.08);
 }
 
-/* Chip maps that bake in hex — give them dark-mode tints. The inline
- * bars (cbar-/ibar- variants) already render the color in isolation,
- * so the severity-bar sidebars do not need fixing; the problematic
- * ones are the filter-chip.is-active tinted backgrounds that use
- * rgba over white, which look muddy on a dark surface. Swap the base
- * color for a slightly higher-alpha fill so the chip reads. */
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-tech_component  { background: rgba(121,169,212,0.18); color: #9ec5e8; border-color: #9ec5e8; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-person          { background: rgba(177,144,245,0.22); color: #c8b0ff; border-color: #c8b0ff; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-email           { background: rgba(95,192,138,0.22);  color: #9fdcb8; border-color: #9fdcb8; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-domain          { background: rgba(79,181,181,0.22);  color: #89d4d4; border-color: #89d4d4; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-credentials     { background: rgba(240,138,82,0.22);  color: #f4b092; border-color: #f4b092; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-cve             { background: rgba(229,108,108,0.22); color: #f09494; border-color: #f09494; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-dns_record      { background: rgba(142,154,176,0.22); color: #bcc4d3; border-color: #bcc4d3; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-social_profile  { background: rgba(229,115,169,0.22); color: #f198c1; border-color: #f198c1; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-breach_record   { background: rgba(214,133,133,0.22); color: #e4a5a5; border-color: #e4a5a5; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-org_fact        { background: rgba(224,176,74,0.22);  color: #ebc47e; border-color: #ebc47e; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.itype-note            { background: rgba(184,171,146,0.18); color: #cec3ae; border-color: #cec3ae; }
+/* itype/istatus/cstatus/cpk filter-chip.is-active rules now use color-mix(var(--chip-*))
+ * which resolve to the dark chip values automatically — no dark overrides needed. */
 
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.istatus-active         { background: rgba(95,192,138,0.22);  color: #9fdcb8; border-color: #9fdcb8; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.istatus-blocked        { background: rgba(229,108,108,0.22); color: #f09494; border-color: #f09494; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.istatus-exploited      { background: rgba(214,133,133,0.22); color: #e4a5a5; border-color: #e4a5a5; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.istatus-false_positive { background: rgba(184,171,146,0.18); color: #cec3ae; border-color: #cec3ae; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.istatus-unreviewed     { background: rgba(139,142,154,0.22); color: #c4c8d4; border-color: #c4c8d4; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.isource                { background: rgba(79,181,181,0.22);  color: #89d4d4; border-color: #89d4d4; }
-
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cstatus-success    { background: rgba(95,192,138,0.22);  color: #9fdcb8; border-color: #9fdcb8; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cstatus-failed     { background: rgba(229,108,108,0.22); color: #f09494; border-color: #f09494; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cstatus-timed_out  { background: rgba(240,138,82,0.22);  color: #f4b092; border-color: #f4b092; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cstatus-suppressed { background: rgba(184,171,146,0.18); color: #cec3ae; border-color: #cec3ae; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cstatus-artifact   { background: rgba(79,181,181,0.22);  color: #89d4d4; border-color: #89d4d4; }
-
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-fingerprint { background: rgba(79,181,181,0.22);  color: #89d4d4; border-color: #89d4d4; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-baseline    { background: rgba(142,154,176,0.22); color: #bcc4d3; border-color: #bcc4d3; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-payload     { background: rgba(240,138,82,0.22);  color: #f4b092; border-color: #f4b092; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-exploit     { background: rgba(229,108,108,0.22); color: #f09494; border-color: #f09494; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-replay      { background: rgba(177,144,245,0.22); color: #c8b0ff; border-color: #c8b0ff; }
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.cpk-cleanup     { background: rgba(154,160,174,0.22); color: #c4c8d4; border-color: #c4c8d4; }
-
-/* Severity pills and tags use rgba over white as background. Re-tint in
- * dark mode so they keep a visible fill without turning muddy. */
-:root[data-theme="dark"] .findings-redesign .hero-sev.high,
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.sev-high {
-  background: rgba(240,138,82,0.22); color: #f4b092; border-color: #f4b092;
-}
-:root[data-theme="dark"] .findings-redesign .hero-sev.low,
-:root[data-theme="dark"] .findings-redesign .filter-chip.is-active.sev-low {
-  background: rgba(121,169,212,0.18); color: #9ec5e8; border-color: #9ec5e8;
-}
-:root[data-theme="dark"] .findings-redesign .tag.owasp { background: rgba(240,138,82,0.22); color: #f4b092; }
-:root[data-theme="dark"] .findings-redesign .tag.cve    { background: rgba(229,108,108,0.2); color: #f09494; }
-:root[data-theme="dark"] .findings-redesign .tag.chain  { background: rgba(247,187,123,0.22); color: #f4b092; }
+/* .hero-sev.* and .filter-chip.is-active.sev-* now use color-mix(var(--sev-*))
+ * which resolves to dark values automatically — no dark overrides needed. */
+/* .tag.owasp, .tag.cve, .tag.chain now use chip/sev vars — no dark override needed. */
 
 :root[data-theme="dark"] .findings-redesign .pill-active     { background: rgba(240,138,82,0.22); color: #f4b092; }
 :root[data-theme="dark"] .findings-redesign .pill-reported   { background: rgba(95,192,138,0.22); color: #9fdcb8; }
@@ -3676,14 +4006,10 @@ body.detail-modal-open {
 :root[data-theme="dark"] .findings-redesign .pill-confirmed  { background: rgba(95,192,138,0.22); color: #9fdcb8; }
 :root[data-theme="dark"] .findings-redesign .pill-unreviewed { background: rgba(184,171,146,0.18); color: #cec3ae; }
 :root[data-theme="dark"] .findings-redesign .pill-downgraded { background: rgba(121,169,212,0.2); color: #9ec5e8; }
-:root[data-theme="dark"] .findings-redesign .pill-disputed   { background: rgba(224,176,74,0.22); color: #ebc47e; }
+/* .pill-disputed uses --disputed var (both themes) — no dark override needed. */
 :root[data-theme="dark"] .findings-redesign .pill-false_positive { background: rgba(184,171,146,0.18); color: #cec3ae; }
 
-:root[data-theme="dark"] .severity-critical { background: rgba(229,108,108,0.22); color: #f09494; }
-:root[data-theme="dark"] .severity-high     { background: rgba(240,138,82,0.22);  color: #f4b092; }
-:root[data-theme="dark"] .severity-medium   { background: rgba(224,176,74,0.22);  color: #ebc47e; }
-:root[data-theme="dark"] .severity-low      { background: rgba(121,169,212,0.18); color: #9ec5e8; }
-:root[data-theme="dark"] .severity-info     { background: rgba(154,160,174,0.22); color: #c4c8d4; }
+/* .severity-* now use color-mix(var(--sev-*)) — dark override no longer needed. */
 
 :root[data-theme="dark"] .status-queued,
 :root[data-theme="dark"] .status-pending,
@@ -3700,7 +4026,7 @@ body.detail-modal-open {
 :root[data-theme="dark"] .status-blocked,
 :root[data-theme="dark"] .status-failed     { background: rgba(229,108,108,0.22); color: #f09494; }
 :root[data-theme="dark"] .status-false_positive { background: rgba(142,154,176,0.22); color: #bcc4d3; }
-:root[data-theme="dark"] .status-disputed   { background: rgba(224,176,74,0.22); color: #ebc47e; }
+/* .status-disputed uses --disputed var (both themes) — no dark override needed. */
 
 :root[data-theme="dark"] .event-type-finding { background: rgba(95,192,138,0.22); color: #9fdcb8; }
 :root[data-theme="dark"] .event-type-chain   { background: rgba(229,108,108,0.22); color: #f09494; }
@@ -3709,18 +4035,793 @@ body.detail-modal-open {
 :root[data-theme="dark"] .event-type-phase   { background: rgba(184,171,146,0.18); color: #cec3ae; }
 :root[data-theme="dark"] .event-type-task    { background: rgba(121,169,212,0.18); color: #9ec5e8; }
 
-:root[data-theme="dark"] .tab-count {
-  background: rgba(121,169,212,0.15);
-  color: var(--accent);
-}
-/* .findings-redesign .count is now theme-aware via --count-bg /
+/* .tab-count and .findings-redesign .count are now theme-aware via --count-bg /
  * --count-ink variables defined on :root — no dark override needed. */
 :root[data-theme="dark"] .findings-redesign .hl {
   background: rgba(247,187,123,0.3);
   color: var(--ink);
 }
-:root[data-theme="dark"] .panel code,
+/* .panel code uses --count-bg which is theme-aware; only the page-crumbs
+ * scoped code element retains its own accent-color in dark mode. */
 :root[data-theme="dark"] .findings-redesign .page-crumbs code {
   background: rgba(121,169,212,0.12);
   color: var(--accent);
+}
+
+/* ---- toasts ---- */
+/* Fixed bottom-right stack. z-index 45 sits above the detail-modal overlay
+ * (40) and below the command palette (50). All colors reference theme vars so
+ * the stack reads correctly in both light and dark; the per-type accent is
+ * keyed off data-toast-type and only tints the left border + icon. */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.toast-viewport {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(380px, calc(100vw - 40px));
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 12px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+  line-height: 1.4;
+  animation: toast-in 0.2s ease-out;
+}
+
+.toast[data-toast-type="success"] { border-left-color: var(--ok); }
+.toast[data-toast-type="error"]   { border-left-color: var(--danger); }
+.toast[data-toast-type="info"]    { border-left-color: var(--accent); }
+
+.toast-icon { flex: none; }
+.toast[data-toast-type="success"] .toast-icon { color: var(--ok); }
+.toast[data-toast-type="error"] .toast-icon   { color: var(--danger); }
+.toast[data-toast-type="info"] .toast-icon    { color: var(--accent); }
+
+.toast-message {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.toast-dismiss {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.toast-dismiss:hover {
+  background: var(--panel-hover);
+  color: var(--ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
+}
+
+/* ---- skeletons ---- */
+/* Shimmering loading placeholders. Base fill is a faint color-mix of
+ * --border; the moving highlight is a color-mix of --muted so the sweep is
+ * visible in both themes without per-theme overrides. */
+@keyframes v-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.v-skeleton {
+  background-color: color-mix(in srgb, var(--border) 60%, transparent);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--muted) 18%, transparent) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: v-shimmer 1.4s linear infinite;
+  border-radius: 2px;
+  color: transparent;
+  user-select: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .v-skeleton { animation: none; }
+}
+
+.skeleton-table { width: 100%; }
+
+.skeleton-table-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.skeleton-table-head {
+  background: var(--panel-soft);
+}
+
+.skeleton-chart-donut {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.skeleton-chart-label {
+  margin-left: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.skeleton-chart-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.skeleton-chart-line {
+  position: relative;
+}
+
+.skeleton-card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-soft);
+}
+
+/* ---- overview charts ---- */
+/* Severity donut (SeverityDonut.tsx) + KPI stat bar (SummaryStatBar.tsx),
+ * surfaced on the engagement Overview "At a glance" panel above the Coverage
+ * stats-grid. Both rely solely on theme vars (--sev-*, --ink, --muted, --ok,
+ * --danger, --warn, --accent, --border) so they read correctly in light and
+ * dark. The donut segments animate their dash length in via the
+ * `.v-donut-segment` transition below, triggered by a one-shot rAF in the
+ * component. */
+
+.overview-charts-row {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  flex-wrap: wrap;
+}
+
+.overview-charts-donut {
+  flex: 0 0 auto;
+}
+
+.overview-charts-stats {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+/* Donut: segment sweep-in. The component flips each segment's dash length
+ * from 0 → full on the first frame; the transition animates that change.
+ * strokeDashoffset is included so re-orders glide rather than snap. */
+.v-donut-segment {
+  transition: stroke-dasharray 0.6s ease-out, stroke-dashoffset 0.6s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .v-donut-segment { transition: none; }
+}
+
+.v-donut-total {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.v-donut-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 0.78rem;
+}
+
+.v-donut-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.v-donut-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
+.v-donut-legend-label {
+  color: var(--ink-2);
+  text-transform: capitalize;
+  min-width: 64px;
+}
+
+.v-donut-legend-count {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.v-donut-legend-pct {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Stat bar: inline LABEL / big-mono-value pairs with `|` dividers, wrapping on
+ * narrow screens. */
+.v-statbar {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.v-statbar-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.v-statbar-divider {
+  color: var(--border-strong);
+  user-select: none;
+}
+
+.v-statbar-label {
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.v-statbar-value {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 1.3rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+/* ---- ag-grid theme ----
+ * CSS-var "legacy" theme class for ag-grid v35. Every --ag-* property is
+ * mapped onto our existing design tokens, so the grid flips light/dark
+ * automatically: the tokens (--panel, --border, --ink, --accent, …) are
+ * redefined under :root[data-theme="dark"] and these vars-of-vars
+ * re-resolve with no JS. The grid components pass theme="legacy" and
+ * className="ag-theme-vigil"; see src/lib/agGrid.ts for the decision.
+ *
+ * Additive only — nothing here overrides existing selectors.
+ *
+ * Selector is doubled (.ag-theme-vigil.ag-theme-vigil) on purpose: the
+ * lazy-loaded structural ag-grid stylesheet (ag-grid.css, code-split into
+ * its own chunk) ships defaults under `[class*=ag-theme-]` — a (0,1,0)
+ * selector equal in specificity to a single `.ag-theme-vigil`. Because that
+ * chunk is injected AFTER our app stylesheet, source order would otherwise
+ * let its `--ag-background-color:#fff` / `--ag-data-color:#000` win, leaving
+ * the grid a white island with black text in dark mode. Doubling the class
+ * raises us to (0,2,0) so OUR token mappings win regardless of load order. */
+.ag-theme-vigil.ag-theme-vigil {
+  /* Surfaces */
+  --ag-background-color: var(--panel);
+  --ag-header-background-color: var(--panel-strong);
+  --ag-odd-row-background-color: var(--panel-soft);
+  --ag-row-hover-color: var(--panel-hover);
+  --ag-selected-row-background-color: var(--accent-muted);
+  --ag-control-panel-background-color: var(--panel-strong);
+  --ag-modal-overlay-background-color: var(--overlay-bg);
+
+  /* Borders */
+  --ag-border-color: var(--border);
+  --ag-secondary-border-color: var(--border);
+  --ag-row-border-color: var(--divider);
+  --ag-header-column-separator-color: var(--border);
+  --ag-border-radius: 8px;
+  --ag-wrapper-border-radius: 8px;
+
+  /* Ink */
+  --ag-foreground-color: var(--ink);
+  --ag-data-color: var(--ink);
+  --ag-secondary-foreground-color: var(--muted);
+  --ag-header-foreground-color: var(--muted);
+  --ag-disabled-foreground-color: var(--muted);
+  --ag-input-focus-border-color: var(--accent);
+  --ag-range-selection-border-color: var(--accent);
+
+  /* Type + density — mirror our .list-header / .frow look. The grid body
+   * uses the sans stack; mono is applied per-cell via .ag-mono (below). */
+  --ag-font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --ag-font-size: 0.82rem;
+  --ag-row-height: 38px;
+  --ag-header-height: 34px;
+  --ag-cell-horizontal-padding: 14px;
+  --ag-cell-horizontal-border: none;
+}
+
+/* Header text matches the uppercase tracked .list-header treatment. */
+.ag-theme-vigil .ag-header-cell-text {
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* Mono cells (command / location / target) — opt in via cellClass. */
+.ag-theme-vigil .ag-mono {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.78rem;
+}
+
+/* Wrapping cells (long argv / descriptors / titles). Pair with
+ * wrapText + autoHeight on the colDef; this just relaxes line-height and
+ * vertical padding so wrapped rows breathe. */
+.ag-theme-vigil .ag-wrap-cell {
+  line-height: 1.45;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  word-break: break-word;
+}
+
+/* No-rows overlay uses our muted ink (the template injects .ag-vigil-empty). */
+.ag-theme-vigil .ag-vigil-empty {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+/* The grid lives inside a .list-panel-style card; keep its own border off
+ * so the panel's border is the only frame. */
+.ag-theme-vigil .ag-root-wrapper {
+  border: 0;
+  background: transparent;
+}
+
+/* ---- findings view toggle (Grouped | Table) ----
+ * Small segmented control sitting in the Findings toolbar-right. Reuses
+ * the chip/qa-btn visual language. */
+.findings-redesign .view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.findings-redesign .view-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: 0;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.findings-redesign .view-toggle button + button {
+  border-left: 1px solid var(--border);
+}
+.findings-redesign .view-toggle button:hover {
+  color: var(--ink);
+  background: var(--panel-hover);
+}
+.findings-redesign .view-toggle button.is-active {
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+.findings-redesign .view-toggle svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* The grid sits inside the list panel; give it a usable height. */
+.findings-redesign .grid-host {
+  min-height: 620px;
+  height: 72vh;
+  width: 100%;
+}
+
+/* ---- dashboard landing ---- */
+/* Cross-engagement landing dashboard (EngagementsPage). A KPI stat bar on top,
+ * a two-column charts row (severity donut + by-status CSS bars), then the
+ * existing engagement cards below, each enhanced with a severity mini-bar +
+ * finding-count badge. The staggered card fade-in keyframes are ported from the
+ * reference-project workbench globals.css (.v-card-enter / .v-stagger-N); they reuse the
+ * same .v-fade-in-up keyframe and are disabled under prefers-reduced-motion.
+ * Vars only (--sev-*, --ink, --ink-2, --muted, --accent, --ok, --danger,
+ * --border, --panel-soft) so both themes read correctly. */
+
+.dashboard-landing {
+  display: grid;
+  gap: 18px;
+  margin-bottom: 4px;
+}
+
+.dashboard-statbar-panel {
+  padding: 14px 18px;
+}
+
+.dashboard-charts-row {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);
+  gap: 18px;
+}
+
+@media (max-width: 720px) {
+  .dashboard-charts-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dashboard-chart-card {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+/* By-status breakdown: a simple list of label / proportional fill / count
+ * rows, mirroring the coverage/code breakdown bar treatment used elsewhere. */
+.dashboard-status-breakdown {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.dashboard-status-row {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.82rem;
+}
+
+.dashboard-status-label {
+  color: var(--ink-2);
+  text-transform: capitalize;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-status-track {
+  display: block;
+  height: 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 70%, transparent);
+  overflow: hidden;
+}
+
+.dashboard-status-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  min-width: 2px;
+}
+
+.dashboard-status-count {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* Per-engagement finding-count badge in the card heading. */
+.engagement-finding-badge {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Per-engagement severity mini-bar (SeverityMiniBar.tsx). A thin horizontal
+ * stacked bar; segment widths come from flex-grow set inline per severity. */
+.sev-minibar {
+  display: flex;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.sev-minibar-segment {
+  display: block;
+  height: 100%;
+}
+
+.sev-minibar-segment:first-child {
+  border-top-left-radius: 999px;
+  border-bottom-left-radius: 999px;
+}
+
+.sev-minibar-segment:last-child {
+  border-top-right-radius: 999px;
+  border-bottom-right-radius: 999px;
+}
+
+.sev-minibar-empty {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Staggered card fade-in (ported from reference-project workbench). */
+@keyframes v-fade-in-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.v-card-enter {
+  animation: v-fade-in-up 0.32s ease-out both;
+}
+
+.v-stagger-1 { animation-delay: 0ms; }
+.v-stagger-2 { animation-delay: 60ms; }
+.v-stagger-3 { animation-delay: 120ms; }
+.v-stagger-4 { animation-delay: 180ms; }
+.v-stagger-5 { animation-delay: 240ms; }
+.v-stagger-6 { animation-delay: 300ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .v-card-enter {
+    animation: none;
+  }
+}
+
+/* ── Overview tab scroll-length controls ─────────────────────
+ * Additive styling for the Overview tab's capping/collapsing UI: the
+ * attack-chains "Show all" expander, the per-host coverage matrix section
+ * collapse header, and the matrix row "Show all hosts" expander. All colors
+ * come from theme vars (--accent / --border) which are already defined for
+ * both light and dark themes, so no per-theme override is needed. The base
+ * shapes are inherited from the reused .timeline-show-more / .sessions-toggle
+ * classes; these rules only tune spacing/alignment. */
+.overview-show-more {
+  justify-self: start;
+}
+.readiness-matrix-collapse {
+  width: 100%;
+  justify-content: flex-start;
+}
+.readiness-matrix-collapse .sessions-count {
+  margin-left: auto;
+}
+
+/* ──────────────────────────────────────────────────────────
+ * Drawer kit — shared leaf primitives (DrawerKit.tsx)
+ *
+ * The Intel + Surface detail drawers now reuse the same leaf
+ * components as the Findings drawer (SectionHead / CopyChip / KV /
+ * Prose / ProseModeToggle). Almost all styling is inherited from the
+ * existing `.findings-redesign` drawer rules above; these few additive
+ * rules only cover the new affordances those drawers introduce:
+ *   1. a KV value rendered as an external link (href'd IDs/URLs)
+ *   2. a `.link-card` rendered as an <a> (Surface → linked finding
+ *      deep links) which must not show the default anchor underline
+ * All colors come from theme vars, so light + dark both read.
+ * ────────────────────────────────────────────────────────── */
+
+/* Href'd KV value: keep the value tier's typography, color it as a link,
+ * and let long URLs wrap (the .v.mono rule already break-all's monospace). */
+.findings-redesign .kv .v a {
+  color: var(--accent);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.findings-redesign .kv .v a:hover {
+  text-decoration: underline;
+}
+
+/* Link-card as an anchor (Surface drawer's linked-findings deep links).
+ * Strip the default underline + visited recoloring so it reads like the
+ * Findings drawer's <button> link cards; the inner .link-title / .link-sub
+ * keep their own colors. */
+.findings-redesign a.link-card,
+.findings-redesign a.link-card:visited {
+  text-decoration: none;
+  color: inherit;
+}
+.findings-redesign a.link-card:hover { text-decoration: none; }
+
+/* HTTP traffic + OAST tabs.
+   Read-only views over request variants (HTTP) and out-of-band probes
+   (OAST). Reuses the shared .findings-redesign toolbar / panel / grid /
+   drawer scaffolding; this block only adds the domain-specific colored
+   badges (HTTP method, response status, OAST status, callback protocol)
+   and the two drawer sub-list layouts. All colors are theme vars so both
+   light and dark read for free. */
+
+/* ---- HTTP method badges (grid cell + drawer hero + chip dots) ----
+ * Colored monospace pill. The .method-chip / .method-dot variants tint
+ * the filter chip + its leading dot with the same method color. */
+.findings-redesign .method-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.findings-redesign .method-badge.m-get     { color: var(--m-get);     background: color-mix(in srgb, var(--m-get) 14%, transparent); }
+.findings-redesign .method-badge.m-post    { color: var(--m-post);    background: color-mix(in srgb, var(--m-post) 14%, transparent); }
+.findings-redesign .method-badge.m-put     { color: var(--m-put);     background: color-mix(in srgb, var(--m-put) 14%, transparent); }
+.findings-redesign .method-badge.m-patch   { color: var(--m-patch);   background: color-mix(in srgb, var(--m-patch) 14%, transparent); }
+.findings-redesign .method-badge.m-delete  { color: var(--m-delete);  background: color-mix(in srgb, var(--m-delete) 14%, transparent); }
+.findings-redesign .method-badge.m-head    { color: var(--m-head);    background: color-mix(in srgb, var(--m-head) 14%, transparent); }
+.findings-redesign .method-badge.m-options { color: var(--m-options); background: color-mix(in srgb, var(--m-options) 14%, transparent); }
+.findings-redesign .method-badge.m-other   { color: var(--m-other);   background: color-mix(in srgb, var(--m-other) 14%, transparent); }
+
+/* Method filter-chip leading dot tinted to the method color. */
+.findings-redesign .method-dot.m-get     { background: var(--m-get); }
+.findings-redesign .method-dot.m-post    { background: var(--m-post); }
+.findings-redesign .method-dot.m-put     { background: var(--m-put); }
+.findings-redesign .method-dot.m-patch   { background: var(--m-patch); }
+.findings-redesign .method-dot.m-delete  { background: var(--m-delete); }
+.findings-redesign .method-dot.m-head    { background: var(--m-head); }
+.findings-redesign .method-dot.m-options { background: var(--m-options); }
+.findings-redesign .method-dot.m-other   { background: var(--m-other); }
+
+/* Active method chip border + tint follow the method color. */
+.findings-redesign .filter-chip.method-chip.is-active.m-get     { border-color: var(--m-get);     color: var(--m-get);     background: color-mix(in srgb, var(--m-get) 10%, transparent); }
+.findings-redesign .filter-chip.method-chip.is-active.m-post    { border-color: var(--m-post);    color: var(--m-post);    background: color-mix(in srgb, var(--m-post) 10%, transparent); }
+.findings-redesign .filter-chip.method-chip.is-active.m-put     { border-color: var(--m-put);     color: var(--m-put);     background: color-mix(in srgb, var(--m-put) 10%, transparent); }
+.findings-redesign .filter-chip.method-chip.is-active.m-patch   { border-color: var(--m-patch);   color: var(--m-patch);   background: color-mix(in srgb, var(--m-patch) 10%, transparent); }
+.findings-redesign .filter-chip.method-chip.is-active.m-delete  { border-color: var(--m-delete);  color: var(--m-delete);  background: color-mix(in srgb, var(--m-delete) 10%, transparent); }
+.findings-redesign .filter-chip.method-chip.is-active.m-head    { border-color: var(--m-head);    color: var(--m-head);    background: color-mix(in srgb, var(--m-head) 10%, transparent); }
+.findings-redesign .filter-chip.method-chip.is-active.m-options { border-color: var(--m-options); color: var(--m-options); background: color-mix(in srgb, var(--m-options) 10%, transparent); }
+.findings-redesign .filter-chip.method-chip.is-active.m-other   { border-color: var(--m-other);   color: var(--m-other);   background: color-mix(in srgb, var(--m-other) 10%, transparent); }
+
+/* ---- HTTP response-status badges (observation rows) ---- */
+.findings-redesign .status-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.findings-redesign .status-badge.s-1xx { color: var(--s-1xx); background: color-mix(in srgb, var(--s-1xx) 14%, transparent); }
+.findings-redesign .status-badge.s-2xx { color: var(--s-2xx); background: color-mix(in srgb, var(--s-2xx) 14%, transparent); }
+.findings-redesign .status-badge.s-3xx { color: var(--s-3xx); background: color-mix(in srgb, var(--s-3xx) 14%, transparent); }
+.findings-redesign .status-badge.s-4xx { color: var(--s-4xx); background: color-mix(in srgb, var(--s-4xx) 14%, transparent); }
+.findings-redesign .status-badge.s-5xx { color: var(--s-5xx); background: color-mix(in srgb, var(--s-5xx) 14%, transparent); }
+
+/* ---- HTTP drawer: request-schema grid + observation cards ---- */
+.findings-redesign .http-schema-grid {
+  display: grid;
+  gap: 12px;
+}
+.findings-redesign .http-obs-list {
+  display: grid;
+  gap: 10px;
+}
+.findings-redesign .http-obs-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+.findings-redesign .http-obs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.findings-redesign .http-obs-url {
+  font-size: 0.78rem;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.findings-redesign .http-obs-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* ---- OAST status badges (grid cell + drawer hero) ----
+ * fired/confirmed → ok (green), pending → warn, everything else → muted. */
+.findings-redesign .oob-status-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.findings-redesign .oob-status-badge.oob-fired   { color: var(--ok);      background: color-mix(in srgb, var(--ok) 16%, transparent); }
+.findings-redesign .oob-status-badge.oob-pending { color: var(--warn);    background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.findings-redesign .oob-status-badge.oob-muted   { color: var(--pending); background: color-mix(in srgb, var(--pending) 14%, transparent); }
+
+/* OAST status filter-chip dot + active state. */
+.findings-redesign .oob-status-dot.oob-fired   { background: var(--ok); }
+.findings-redesign .oob-status-dot.oob-pending { background: var(--warn); }
+.findings-redesign .oob-status-dot.oob-muted   { background: var(--pending); }
+.findings-redesign .filter-chip.oob-status-chip.is-active.oob-fired   { border-color: var(--ok);      color: var(--ok);      background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.findings-redesign .filter-chip.oob-status-chip.is-active.oob-pending { border-color: var(--warn);    color: var(--warn);    background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.findings-redesign .filter-chip.oob-status-chip.is-active.oob-muted   { border-color: var(--pending); color: var(--pending); background: color-mix(in srgb, var(--pending) 10%, transparent); }
+
+/* ---- OAST callback protocol badges (reuse method palette) ---- */
+.findings-redesign .oob-proto-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.findings-redesign .oob-proto-badge.p-dns   { color: var(--m-post);    background: color-mix(in srgb, var(--m-post) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-http  { color: var(--m-put);     background: color-mix(in srgb, var(--m-put) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-https { color: var(--m-get);     background: color-mix(in srgb, var(--m-get) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-ftp   { color: var(--m-options); background: color-mix(in srgb, var(--m-options) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-ldap  { color: var(--m-options); background: color-mix(in srgb, var(--m-options) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-smtp  { color: var(--m-patch);   background: color-mix(in srgb, var(--m-patch) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-other { color: var(--m-other);   background: color-mix(in srgb, var(--m-other) 14%, transparent); }
+
+/* ---- OAST drawer: interaction sub-list ---- */
+.findings-redesign .oob-interaction-list {
+  display: grid;
+  gap: 10px;
+}
+.findings-redesign .oob-interaction-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+.findings-redesign .oob-interaction-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.findings-redesign .oob-remote {
+  font-size: 0.78rem;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
 }

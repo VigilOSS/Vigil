@@ -1179,7 +1179,7 @@ def _per_host_payload(
 ) -> dict[str, Any]:
     return {
         "objectives": objectives
-        or ["waf_tier", "service_inventory", "directory_fuzz", "nikto_trigger", "osint"],
+        or ["waf_tier", "service_inventory", "directory_fuzz", "tech_fingerprint", "osint"],
         "hosts": hosts,
         "engagement_signals": engagement_signals or {},
     }
@@ -1211,7 +1211,7 @@ def test_by_host_renders_outcome_table_and_warns_on_unmet(monkeypatch, tmp_path:
                     "waf_tier": _outcome(met=False),
                     "service_inventory": _outcome(met=True, evidence=["services:1", "surfaces:1"]),
                     "directory_fuzz": _outcome(met=False),
-                    "nikto_trigger": _outcome(met=False),
+                    "tech_fingerprint": _outcome(met=False),
                     "osint": _outcome(met=False),
                 },
             },
@@ -1237,7 +1237,7 @@ def test_by_host_renders_outcome_table_and_warns_on_unmet(monkeypatch, tmp_path:
         "waf_tier",
         "service_inventory",
         "directory_fuzz",
-        "nikto_trigger",
+        "tech_fingerprint",
         "osint",
     ]
     by_host = {row["host"]: row for row in section["hosts"]}
@@ -1245,7 +1245,7 @@ def test_by_host_renders_outcome_table_and_warns_on_unmet(monkeypatch, tmp_path:
     row = by_host["api.target.example"]
     assert row["outcomes"]["service_inventory"]["met"] is True
     assert row["outcomes"]["waf_tier"]["met"] is False
-    assert set(row["unmet_objectives"]) == {"waf_tier", "directory_fuzz", "nikto_trigger", "osint"}
+    assert set(row["unmet_objectives"]) == {"waf_tier", "directory_fuzz", "tech_fingerprint", "osint"}
 
     warnings = report["per_host_warnings"]
     # One warning per unmet objective for the single host.
@@ -1278,7 +1278,7 @@ def test_by_host_deferral_clears_warning(monkeypatch, tmp_path: Path, capsys) ->
                     "waf_tier": _outcome(met=False, deferred=True),
                     "service_inventory": _outcome(met=True),
                     "directory_fuzz": _outcome(met=True),
-                    "nikto_trigger": _outcome(met=True),
+                    "tech_fingerprint": _outcome(met=True),
                     "osint": _outcome(met=True),
                 },
                 "deferrals": [
@@ -1339,7 +1339,7 @@ def test_by_host_does_not_query_command_runs_endpoint(monkeypatch, tmp_path: Pat
                     "waf_tier": _outcome(met=True, evidence=["Cloudflare"]),
                     "service_inventory": _outcome(met=True, evidence=["services:1"]),
                     "directory_fuzz": _outcome(met=True),
-                    "nikto_trigger": _outcome(met=True),
+                    "tech_fingerprint": _outcome(met=True),
                     "osint": _outcome(met=True),
                 },
             }
@@ -1456,7 +1456,7 @@ def test_by_host_default_filters_wildcard_discovered_into_summary(
                     "waf_tier": _outcome(met=True, evidence=["intel:1"]),
                     "service_inventory": _outcome(met=True, evidence=["services:1"]),
                     "directory_fuzz": _outcome(met=True, evidence=["surfaces:1"]),
-                    "nikto_trigger": _outcome(met=True),
+                    "tech_fingerprint": _outcome(met=True),
                     "osint": _outcome(met=True),
                 },
             },
@@ -1466,7 +1466,7 @@ def test_by_host_default_filters_wildcard_discovered_into_summary(
                     "waf_tier": _outcome(met=False),
                     "service_inventory": _outcome(met=False),
                     "directory_fuzz": _outcome(met=False),
-                    "nikto_trigger": _outcome(met=False),
+                    "tech_fingerprint": _outcome(met=False),
                     "osint": _outcome(met=False),
                 },
             },
@@ -1476,7 +1476,7 @@ def test_by_host_default_filters_wildcard_discovered_into_summary(
                     "waf_tier": _outcome(met=False),
                     "service_inventory": _outcome(met=True),
                     "directory_fuzz": _outcome(met=False),
-                    "nikto_trigger": _outcome(met=False),
+                    "tech_fingerprint": _outcome(met=False),
                     "osint": _outcome(met=True),
                 },
             },
@@ -1511,12 +1511,12 @@ def test_by_host_default_filters_wildcard_discovered_into_summary(
     assert summary["hosts_with_deferral_count"] == 0
     # top_unmet_objectives: most-frequent unmet across discovered.
     top_objectives = {entry["objective"] for entry in summary["top_unmet_objectives"]}
-    # waf_tier, directory_fuzz, nikto_trigger all unmet on both discovered hosts.
+    # waf_tier, directory_fuzz, tech_fingerprint all unmet on both discovered hosts.
     # service_inventory unmet on a but met on b → 1 instance.
     # osint unmet on a but met on b → 1 instance.
     assert "waf_tier" in top_objectives
     assert "directory_fuzz" in top_objectives
-    assert "nikto_trigger" in top_objectives
+    assert "tech_fingerprint" in top_objectives
 
 
 def test_by_host_include_discovered_keeps_full_matrix(
@@ -1536,7 +1536,7 @@ def test_by_host_include_discovered_keeps_full_matrix(
                     "waf_tier": _outcome(met=True),
                     "service_inventory": _outcome(met=True),
                     "directory_fuzz": _outcome(met=True),
-                    "nikto_trigger": _outcome(met=True),
+                    "tech_fingerprint": _outcome(met=True),
                     "osint": _outcome(met=True),
                 },
             },
@@ -1546,7 +1546,7 @@ def test_by_host_include_discovered_keeps_full_matrix(
                     "waf_tier": _outcome(met=False),
                     "service_inventory": _outcome(met=False),
                     "directory_fuzz": _outcome(met=False),
-                    "nikto_trigger": _outcome(met=False),
+                    "tech_fingerprint": _outcome(met=False),
                     "osint": _outcome(met=False),
                 },
             },
@@ -1593,7 +1593,7 @@ def test_by_host_wildcard_only_scope_skips_filtering(
                     "waf_tier": _outcome(met=False),
                     "service_inventory": _outcome(met=False),
                     "directory_fuzz": _outcome(met=False),
-                    "nikto_trigger": _outcome(met=False),
+                    "tech_fingerprint": _outcome(met=False),
                     "osint": _outcome(met=False),
                 },
             },
@@ -1631,7 +1631,7 @@ def test_by_host_no_discovered_hosts_skips_summary(
                     "waf_tier": _outcome(met=True),
                     "service_inventory": _outcome(met=True),
                     "directory_fuzz": _outcome(met=True),
-                    "nikto_trigger": _outcome(met=True),
+                    "tech_fingerprint": _outcome(met=True),
                     "osint": _outcome(met=True),
                 },
             },
@@ -1668,7 +1668,7 @@ def test_specialist_roster_substituted_into_hints():
     # `osint-analyst` should appear in the osint hint.
     assert "osint-analyst" in hints["osint"]
     # `recon-specialist` should appear in every non-osint hint.
-    for objective in ("waf_tier", "service_inventory", "directory_fuzz", "nikto_trigger"):
+    for objective in ("waf_tier", "service_inventory", "directory_fuzz", "tech_fingerprint"):
         assert "recon-specialist" in hints[objective], (
             f"objective={objective!r} missing recon-specialist reference"
         )
