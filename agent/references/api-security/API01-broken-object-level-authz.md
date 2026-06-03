@@ -1,3 +1,8 @@
+---
+description: IDOR on API endpoints
+skill: idor-testing
+---
+
 # API1:2023 — Broken Object Level Authorization
 
 > Skill: `idor-testing`

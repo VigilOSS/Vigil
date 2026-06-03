@@ -1,3 +1,8 @@
+---
+description: "SDK supply chain: BOM enumeration, CVE checking, malicious SDK detection (SpinOK/Goldoson), data exfiltration audit, permission scope analysis"
+skill: sdk-supply-chain-security
+---
+
 # SDK Supply Chain Security Testing Reference
 
 Third-party SDKs embedded in mobile apps create supply chain risk. This reference provides concrete test procedures for SDK inventory, CVE checking, malicious SDK detection, data exfiltration auditing, and permission scope analysis.

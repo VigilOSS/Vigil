@@ -1,3 +1,8 @@
+---
+description: Combinatorial arithmetic, signed/unsigned confusion across boundaries, encoding expansion
+languages: C/C++, Python, JS
+---
+
 # Integer Overflow — Combinatorial Arithmetic
 
 > Target: Arithmetic bugs that survive SAST because each individual operation looks correct.

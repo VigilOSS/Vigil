@@ -1,3 +1,8 @@
+---
+description: Cross-module lifetime reasoning, refcount errors, async cleanup races
+languages: C/C++, Python, JS
+---
+
 # Use-After-Free — Lifetime Reasoning Across Modules
 
 > Target: UAF bugs that survive SAST because the free and the use happen in different

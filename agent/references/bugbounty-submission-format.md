@@ -1,3 +1,9 @@
+---
+description: "Bug bounty submission format for Bugcrowd/HackerOne: per-finding submissions with POC, VRT, evidence"
+skill: report-generation
+category: Disclosure & Reporting Formats
+---
+
 # Bug Bounty Submission Format
 
 Use this format when the operator requests a bug bounty submission (Bugcrowd, HackerOne, or similar platform). Each finding is a standalone submission.

@@ -1,3 +1,7 @@
+---
+description: HTTP probing, tech detection, live host confirmation
+---
+
 # httpx
 
 **Purpose:** Fast multi-purpose HTTP toolkit — live host probing, tech detection, status codes, titles

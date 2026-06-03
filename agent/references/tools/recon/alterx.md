@@ -1,3 +1,8 @@
+---
+description: Subdomain permutation generator (Phase 2); always `-enrich -estimate` first, chains into puredns resolve
+skill: subdomain-enumeration
+---
+
 # alterx
 
 **Purpose:** Subdomain permutation generator — takes known subs and emits permutations using built-in `{{sub}}`, `{{word}}`, `{{suffix}}` patterns or custom DSL templates. Phase 2 candidate generator that always feeds puredns resolve (never a raw resolver — permutations are high-FP and need wildcard filtering).

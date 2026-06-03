@@ -1,3 +1,8 @@
+---
+description: "Example: LDAP injection bug bounty submission with working POC"
+category: Disclosure & Reporting Formats
+---
+
 **Title:** LDAP Filter Injection in AD Password Rotation Plugin allows vault record editor to take over any AD account
 
 **VRT:** Server-Side Injection > LDAP Injection

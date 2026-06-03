@@ -1,3 +1,7 @@
+---
+description: Web vulnerability scanner — **conditional, fingerprint-gated** (legacy/odd-stack triggers; nuclei is the primary web-vuln pass)
+---
+
 # nikto — Conditional Web Vulnerability Scanner
 
 `nikto` is a **conditional** tool in the recon methodology. The mandatory web-vuln pass is `kali nuclei` with the curated template set (`http/cves/`, `http/misconfiguration/`, `http/exposures/`, `http/default-logins/`, `http/exposed-panels/`, `http/technologies/`). Run `kali nikto` only when the httpx fingerprint matches one of the trigger patterns below — otherwise nikto duplicates nuclei coverage with a higher false-positive rate, slower execution, and no signature-freshness advantage.

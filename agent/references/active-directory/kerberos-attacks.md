@@ -1,3 +1,7 @@
+---
+description: Kerberoasting, AS-REP roasting, Golden/Silver Tickets, delegation abuse, RBCD, detection via Event ID 4769, hashcat modes
+---
+
 # Kerberos Attacks
 
 ## Kerberoasting (T1558.003)

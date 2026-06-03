@@ -1,3 +1,8 @@
+---
+description: Semantic context escaping, multi-stage sanitization failures, protocol injection
+languages: C/C++, Python, JS
+---
+
 # Injection — Semantic Context Escaping
 
 > Target: Injection bugs that survive SAST because the injection vector requires understanding

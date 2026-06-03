@@ -1,3 +1,8 @@
+---
+description: Prompt injection, MCP tool poisoning, RAG poisoning, unsafe tool execution, cross-user context leakage
+languages: Python, JS, Java
+---
+
 # AI/ML Application Security — Prompt Injection, Tool Poisoning, and RAG Abuse
 
 > Target: Security bugs in applications that integrate LLMs, MCP servers, RAG pipelines, or

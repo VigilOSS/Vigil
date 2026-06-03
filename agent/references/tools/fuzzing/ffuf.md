@@ -1,3 +1,7 @@
+---
+description: Web fuzzing (parameters, vhosts, targeted directory work)
+---
+
 # ffuf
 
 **Purpose:** Web fuzzing (directories, parameters, vhosts)

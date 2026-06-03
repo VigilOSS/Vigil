@@ -1,3 +1,7 @@
+---
+description: Structured handoff schema written by every specialist via vigil assess agent handoff --from-json <path> — fields, length caps, per-role examples, CLI usage
+---
+
 # Specialist Handoff Schema
 
 The structured handoff blob is the canonical "what was done, what's missing, what's

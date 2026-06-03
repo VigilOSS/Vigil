@@ -1,3 +1,8 @@
+---
+description: Historical URL discovery (Wayback, OTX, Common Crawl, URLScan); `vigil assess gau-endpoints` is the recommended wrapper (cache-aware, ingests in one shot), with `gau-secrets` and `gau-js-endpoints` for body capture and JS-extracted route recovery
+skill: gau-triage
+---
+
 # gau (Get All URLs)
 
 **Purpose:** Fetch known URLs from multiple archive sources (Wayback Machine, AlienVault OTX, Common Crawl, URLScan).

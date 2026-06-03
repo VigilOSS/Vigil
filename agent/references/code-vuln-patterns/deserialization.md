@@ -1,3 +1,8 @@
+---
+description: Trust-boundary object materialization, type-tag abuse, post-decode gadget reachability
+languages: C/C++, Python, JS, Java
+---
+
 # Deserialization — Trust-Boundary Object Materialization and Gadget Reachability
 
 > Target: Decode paths where attacker-controlled structured data becomes objects, executable

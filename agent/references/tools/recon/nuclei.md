@@ -1,3 +1,8 @@
+---
+description: Template-based vulnerability scanning (CVEs, misconfigs, exposures)
+skill: nuclei-scanning
+---
+
 # nuclei
 
 **Purpose:** Vulnerability scanning with community templates

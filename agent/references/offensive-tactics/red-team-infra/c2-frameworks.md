@@ -1,3 +1,8 @@
+---
+description: Cobalt Strike, PowerShell Empire, redirectors
+skill: cobalt-strike-analysis
+---
+
 # C2 Frameworks Quick Reference
 
 ## Cobalt Strike

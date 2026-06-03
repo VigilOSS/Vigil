@@ -1,3 +1,8 @@
+---
+description: YARA rules for Cobalt Strike beacon config, default cert, shellcode stager, XOR keys
+skill: cobalt-strike-analysis
+---
+
 # Cobalt Strike YARA Detection Rules
 
 ## Beacon Configuration Detection

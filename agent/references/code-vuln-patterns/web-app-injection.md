@@ -1,3 +1,8 @@
+---
+description: ORM bypass, second-order injection, template injection, deserialization in web contexts, NoSQL injection
+languages: Python, JS, Java, Ruby
+---
+
 # Web Application Injection — ORM Bypass, Template Escape, and Deserialization in Frameworks
 
 > Target: Injection bugs that survive SAST because the ORM/framework provides a safe API surface,

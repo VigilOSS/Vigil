@@ -1,3 +1,8 @@
+---
+description: libFuzzer/AFL++ harness templates, sanitizer flag reference, seed corpus construction, harness antipatterns, crash triage checklist
+languages: C/C++
+---
+
 # Fuzz Harness Patterns
 
 Reference for writing correct fuzz harnesses, compiling under sanitizers, and avoiding

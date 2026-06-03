@@ -1,3 +1,7 @@
+---
+description: DLL proxying, COM hijacking, .lnk modification
+---
+
 # Hijacking-Based Persistence
 
 ## DLL Hijacking / Proxying

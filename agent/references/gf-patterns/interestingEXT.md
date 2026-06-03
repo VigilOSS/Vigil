@@ -2,6 +2,8 @@
 name: gf-patterns:interestingEXT
 description: File extensions that signal backup, config, source, and sensitive-file exposure
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+bucket: interestingext
+weight: 10
 ---
 
 # gf: interestingEXT

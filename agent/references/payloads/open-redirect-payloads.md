@@ -1,3 +1,9 @@
+---
+description: URL parsing confusion, protocol-relative, unicode normalization
+skill: open-redirect-testing
+source: PayloadsAllTheThings — Open Redirect
+---
+
 # Open Redirect Payloads
 
 > Source: PayloadsAllTheThings — Open Redirect

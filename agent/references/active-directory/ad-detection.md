@@ -1,3 +1,7 @@
+---
+description: "AD attack detection: Pass-the-Ticket, Pass-the-Hash, Golden Ticket, Kerberoasting, DCSync — Event IDs, Splunk queries, Sigma rules"
+---
+
 # Active Directory Attack Detection
 
 Quick reference for detecting common AD attacks via Windows event logs.

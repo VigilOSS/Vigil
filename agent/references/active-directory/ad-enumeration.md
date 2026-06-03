@@ -1,3 +1,7 @@
+---
+description: BloodHound, PowerView, AD module, ACL/ACE abuse
+---
+
 # Active Directory Enumeration
 
 ## BloodHound

@@ -1,3 +1,8 @@
+---
+description: Lucene query_string injection, field enumeration (`_exists_`, wildcard fields), regex-based data extraction, cross-index access, source filtering override, direct API enumeration
+skill: elasticsearch-injection
+---
+
 # Elasticsearch / Lucene Injection Payloads
 
 Organized by attack phase: detection → field enumeration → data extraction → exploitation.

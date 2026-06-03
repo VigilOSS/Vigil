@@ -1,3 +1,8 @@
+---
+description: Subdomain enumeration tier table (subfinder/bbot/cero/alterx/puredns/dnsx), API-key value-for-cost, puredns rate guidance, alterx permutation chain, cero CIDR-feed, bbot passive preset, when-not-to-bruteforce signals
+skill: subdomain-enumeration
+---
+
 # Subdomain Enumeration Tooling
 
 Subdomain enumeration is layered. No single tool covers the surface — passive sources miss internal-only certs, TLS scraping misses pure-DNS subs, bruteforce misses real-but-unguessable names, active probing assumes a candidate list. The phases below compose; do not skip Phase A and start at C.

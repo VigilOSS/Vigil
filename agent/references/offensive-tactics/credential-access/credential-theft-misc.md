@@ -1,3 +1,7 @@
+---
+description: LSA secrets, WDigest, DPAPI, registry creds, password filter DLL
+---
+
 # Miscellaneous Credential Theft
 
 ## LSA Secrets

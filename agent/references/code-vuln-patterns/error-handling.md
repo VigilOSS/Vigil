@@ -1,3 +1,8 @@
+---
+description: Fail-open, unchecked returns, cleanup double-free, exception swallowing, resource leaks
+languages: C/C++, Python, JS
+---
+
 # Error Handling — Fail-Open and Recovery Bugs
 
 > Target: Error handling bugs (CWE-755, CWE-252, CWE-754) that survive SAST because the

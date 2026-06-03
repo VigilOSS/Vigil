@@ -52,7 +52,7 @@ Vigil's docs are spread across operator prompts, a code map, and a deep referenc
 | [`agent/AGENTS.md`](agent/AGENTS.md) | The operator prompt — the workflow every engagement runs. |
 | [`AGENTS.md`](AGENTS.md) | Maintainer/contributor workflow: clone-to-first-dispatch walkthrough and recipes for adding a skill, an `vigil assess` verb, an oracle, or an eval case. |
 | [`CODE-MAP.md`](CODE-MAP.md) | Map of the codebase — where each subsystem lives. |
-| [`agent/references/INDEX.md`](agent/references/INDEX.md) | Index of every reference doc (payloads, tactics, recon, tenants, tools). |
+| [`agent/references/`](agent/references/) | Reference library (payloads, tactics, recon, tenants, tools) — discover with `vigil assess list-references` (self-registering; `--skill <name>` filters to a skill's paired refs). |
 | [`agent/references/runtime-guides/engagement-methodology.md`](agent/references/runtime-guides/engagement-methodology.md) | End-to-end engagement methodology. |
 | [`agent/references/offensive-tactics/frp-tunneling.md`](agent/references/offensive-tactics/frp-tunneling.md) | Tunnel setup, OOB callbacks, interactsh, frpc config. |
 | [`agent/references/offensive-tactics/shell-handling.md`](agent/references/offensive-tactics/shell-handling.md) | Shell listeners, pwncat-vl, reverse-shell payloads. |
@@ -647,7 +647,7 @@ Vigil ships a **full offensive Kali runtime** and drives autonomous specialist a
 - **Operator-controlled infrastructure.** Tunnels (frp), listeners (pwncat-vl), and OOB callback servers (interactsh) are operator-controlled shared infrastructure — agents provide commands but never start them. See [Callback, Listener & Tunnel Handling](#callback-listener--tunnel-handling).
 - **Blue write-actions are audited.** Tenant-facing WRITE/respond actions run with `--require-audit`, and containment is split into proposal approval, audited execution, and explicit recording.
 
-Deeper guidance lives in [`agent/AGENTS.md`](agent/AGENTS.md) (operator workflow), [`agent/references/INDEX.md`](agent/references/INDEX.md), and the per-engagement `scope.json`.
+Deeper guidance lives in [`agent/AGENTS.md`](agent/AGENTS.md) (operator workflow), the reference library under [`agent/references/`](agent/references/) (browse with `vigil assess list-references`), and the per-engagement `scope.json`.
 
 ## Multi-Agent Workflow
 

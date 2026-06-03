@@ -1,3 +1,8 @@
+---
+description: Architecture-specific IDOR/BOLA tactics (GraphQL Relay-GID/batch, JWT claim-trust, signed/presigned refs, cloud datastores, AI/LLM apps, realtime/WS, microservice mesh, cache deception)
+skill: idor-testing
+---
+
 # IDOR / BOLA in Modern Architectures — Escalation Tactics
 
 > Skill: `idor-testing`

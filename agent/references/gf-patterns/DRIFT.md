@@ -1,3 +1,10 @@
+---
+name: gf-patterns:DRIFT
+description: Static upstream-only vs Python-only bucket review decisions
+origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+bucket: maintenance
+---
+
 # GF Pattern Drift Decisions
 
 This file records the static bucket-review decisions behind `agent/scripts/assess/lib/classify_buckets.py`. Upstream GF pattern repositories are effectively stable; the Python classifier intentionally narrows URL triage to buckets that can route work-buffer items, so this rationale is maintained by review rather than a sync script.

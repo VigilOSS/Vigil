@@ -1,3 +1,8 @@
+---
+description: Missing bot detection on critical flows
+skill: business-logic-testing
+---
+
 # API6:2023 — Unrestricted Access to Sensitive Business Flows
 
 > Skill: `business-logic-testing`
