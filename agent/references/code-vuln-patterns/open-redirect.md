@@ -1,5 +1,6 @@
 ---
 description: Redirect validation bypass, OAuth redirect theft, local-vs-absolute URL confusion
+skill: code-vulnerability-analysis
 languages: Python, JS, Java, Go
 ---
 

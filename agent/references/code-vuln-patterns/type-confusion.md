@@ -1,5 +1,6 @@
 ---
 description: void* casts, union abuse, tagged union errors, inheritance downcasts
+skill: code-vulnerability-analysis
 languages: C/C++, Python, JS
 ---
 

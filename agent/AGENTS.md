@@ -578,7 +578,7 @@ DB="$DIR/cases.db"
       - **Confirmed** — evidence reproduced, severity accurate → `vigil assess verify-finding <slug> --disposition confirmed --reason "..."`
       - **Upgraded** — real issue but severity is *understated* based on reproduced evidence → `vigil assess update-finding <slug> --severity <higher> --reason "severity upgrade: ..."` then `vigil assess verify-finding <slug> --disposition confirmed --reason "..."`
       - **Downgraded** — real issue but severity overstated → `vigil assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity <lower>`
-      - **Killed** — false positive, unreproducible, or stacked preconditions → `vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>`
+      - **Killed** — false positive, unreproducible, or stacked preconditions → `vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-6>`
    e. **Dedup pass**: check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker into the stronger:
       `vigil assess merge-finding <source-slug> <target-slug> "<reason>"`
    f. **Chain-only primitives stay in the normal finding table**: when a finding is real only as part of a proved or expected escalation path, update it with `vigil assess update-finding <slug> ...` so `details.chain_required`, `details.chain_rationale`, and `details.required_followup` are populated. Do not invent a chain-specific workflow status.

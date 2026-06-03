@@ -1,5 +1,6 @@
 ---
 description: Canonicalization bypass, archive extraction writes, symlink and separator confusion
+skill: code-vulnerability-analysis
 languages: C/C++, Python, JS
 ---
 

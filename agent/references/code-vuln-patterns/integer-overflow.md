@@ -1,5 +1,6 @@
 ---
 description: Combinatorial arithmetic, signed/unsigned confusion across boundaries, encoding expansion
+skill: code-vulnerability-analysis
 languages: C/C++, Python, JS
 ---
 

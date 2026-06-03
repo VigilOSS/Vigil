@@ -1,5 +1,6 @@
 ---
 description: Hash collision, ReDoS, parser bombs, unbounded allocation, zip bombs
+skill: code-vulnerability-analysis
 languages: C/C++, Python, JS
 ---
 

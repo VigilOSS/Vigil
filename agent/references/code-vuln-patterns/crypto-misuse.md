@@ -1,5 +1,6 @@
 ---
 description: Subtle mode/parameter misuse, timing leaks, non-obvious randomness issues
+skill: code-vulnerability-analysis
 languages: C/C++, Python, JS
 ---
 

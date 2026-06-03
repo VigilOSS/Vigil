@@ -1,5 +1,6 @@
 ---
 description: libFuzzer/AFL++ harness templates, sanitizer flag reference, seed corpus construction, harness antipatterns, crash triage checklist
+skill: code-vulnerability-analysis
 languages: C/C++
 ---
 
