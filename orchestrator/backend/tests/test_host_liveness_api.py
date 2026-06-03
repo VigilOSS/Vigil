@@ -121,6 +121,69 @@ def test_coverage_rollup_splits_by_reachability(client, isolate_settings):
     assert rollup["unprobed"] == 0
 
 
+def test_coverage_rollup_ipv6_bracket_fold_is_deterministic_newest_wins(client, isolate_settings):
+    """A bare ``::1`` and a bracketed ``[::1]`` liveness row for the same IPv6 literal
+    fold to one rollup key; the newest ``probed_at`` must win deterministically even
+    when the older row was inserted LAST (higher id). Without ``ORDER BY probed_at``
+    the higher-id row would win the dict fold and the bucket would be order-dependent."""
+    _seed(client, isolate_settings)
+    from app.services import state_manager
+
+    eid = _engagement_id(client)
+    with state_manager.get_connection() as conn:
+        # One coverage item whose host normalizes to the bare ``::1``.
+        cur = conn.execute(
+            "INSERT INTO assessment_request_variants "
+            "(engagement_id, scheme, host, port, method, normalized_path, "
+            "params_schema_hash, body_schema_hash) "
+            "VALUES (?, 'http', '::1', 8080, 'GET', '/', '', '')", (eid,))
+        rv_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO assessment_coverage_items "
+            "(engagement_id, request_variant_id, auth_context, input_slot, attack_family, status) "
+            "VALUES (?, ?, 'anonymous', 'query', 'fam', 'pending')", (eid, rv_id))
+        # Newest verdict (live) on the bare key, inserted FIRST (lower id)...
+        conn.execute(
+            "INSERT INTO assessment_host_liveness (engagement_id, host, reachability_class, probed_at) "
+            "VALUES (?, '::1', 'live', '2999-01-02T00:00:00Z')", (eid,))
+        # ...older verdict (blackholed) on the bracketed key, inserted LAST (higher id).
+        conn.execute(
+            "INSERT INTO assessment_host_liveness (engagement_id, host, reachability_class, probed_at) "
+            "VALUES (?, '[::1]', 'blackholed', '2999-01-01T00:00:00Z')", (eid,))
+
+    rollup = client.get(f"{BASE}/summary").json()["coverage_by_reachability"]
+    assert rollup["total"] == 1
+    assert rollup["reachable"] == 1  # newest (live) wins, not the higher-id blackholed row
+    assert rollup["blackholed"] == 0
+
+
+def test_coverage_rollup_matches_bracketed_ipv6_service_endpoint(client, isolate_settings):
+    """A service-only coverage item whose endpoint normalizes to ``[::1]`` must match a
+    bare ``::1`` liveness row — both sides strip brackets, so it is not miscounted
+    ``unprobed`` (regression guard: stripping only the liveness side broke this)."""
+    _seed(client, isolate_settings)
+    from app.services import state_manager
+
+    eid = _engagement_id(client)
+    with state_manager.get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO assessment_services (engagement_id, endpoint, port, protocol) "
+            "VALUES (?, '[::1]:8080', 8080, 'tcp')", (eid,))
+        svc = cur.lastrowid
+        conn.execute(
+            "INSERT INTO assessment_coverage_items "
+            "(engagement_id, service_id, auth_context, input_slot, attack_family, status) "
+            "VALUES (?, ?, 'anonymous', 'service', 'fam', 'pending')", (eid, svc))
+        conn.execute(
+            "INSERT INTO assessment_host_liveness (engagement_id, host, reachability_class, probed_at) "
+            "VALUES (?, '::1', 'live', '2999-01-01T00:00:00Z')", (eid,))
+
+    rollup = client.get(f"{BASE}/summary").json()["coverage_by_reachability"]
+    assert rollup["total"] == 1
+    assert rollup["reachable"] == 1  # bracketed service endpoint folds to ::1 and matches
+    assert rollup["unprobed"] == 0
+
+
 def test_null_incoming_probed_at_does_not_clobber_timestamped(client, isolate_settings):
     _seed(client, isolate_settings)
     _post(client, [{"host": "n.example.com", "reachability_class": "live",
