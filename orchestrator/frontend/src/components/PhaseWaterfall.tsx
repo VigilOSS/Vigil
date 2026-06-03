@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import type { EventRecord } from "../lib/api";
 
 const PHASES = ["recon", "collect", "consume-test", "exploit", "report"];
@@ -40,7 +41,18 @@ function phaseState(events: EventRecord[], phase: string, currentPhase: string) 
 }
 
 export function PhaseWaterfall({ events, currentPhase }: PhaseWaterfallProps) {
-  const hasStructuredEvents = events.some((event) => event.event_type.startsWith("task."));
+  // Memoize the multi-pass scans of the whole events array (hasStructuredEvents
+  // + a phaseState() filter per phase). On the 2s WebSocket refresh these
+  // recompute only when `events` / `currentPhase` actually change identity, so
+  // an unrelated refresh is a cache hit. Output is identical to the prior
+  // inline computation.
+  const { hasStructuredEvents, phaseStates } = useMemo(
+    () => ({
+      hasStructuredEvents: events.some((event) => event.event_type.startsWith("task.")),
+      phaseStates: PHASES.map((phase) => phaseState(events, phase, currentPhase)),
+    }),
+    [events, currentPhase],
+  );
   return (
     <section className="panel">
       <div className="panel-header">
@@ -50,8 +62,8 @@ export function PhaseWaterfall({ events, currentPhase }: PhaseWaterfallProps) {
         </p>
       </div>
       <div className="waterfall">
-        {PHASES.map((phase) => {
-          const state = phaseState(events, phase, currentPhase);
+        {PHASES.map((phase, i) => {
+          const state = phaseStates[i];
           return (
             <article key={phase} className={`phase-card phase-${state}`}>
               <p className="eyebrow">{state}</p>

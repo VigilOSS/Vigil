@@ -1,3 +1,8 @@
+---
+description: Scaffold tenant reference for AWS Organization alert investigations (account topology, aws/Athena/Detective IR context)
+skill: aws-cloudtrail-investigation
+---
+
 # <CUSTOMER> — AWS Organization Tenant Reference
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**

@@ -1,3 +1,8 @@
+---
+description: Mac ARM, emulators, simulators, owned devices, Docker, proxies, Frida, device farms, reset/data hygiene
+skill: mobile-lab-setup
+---
+
 # Mobile Lab Setup Reference
 
 ## Baseline Lab

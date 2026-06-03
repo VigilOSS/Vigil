@@ -1,3 +1,7 @@
+---
+description: Web fuzzer for parameters, headers, and paths
+---
+
 # wfuzz
 
 **Purpose:** Web fuzzing with advanced filtering and payload encoding

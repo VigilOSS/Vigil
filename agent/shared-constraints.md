@@ -354,7 +354,8 @@ If no skill was named and you believe one exists, run `vigil assess list-skills`
 yourself and report back rather than improvising — skill selection is the operator's job, but
 discovery is fast (~200 tokens) and usually faster than guessing.
 
-**Step 2 — Read `agent/references/INDEX.md`** after loading the skill. Identify the paired
+**Step 2 — Run `vigil assess list-references`** after loading the skill (add `--skill <name>` to
+filter to that skill's paired references). Identify the paired
 payload files, tool cheatsheets, and OWASP checklists that apply to your task and load them.
 
 **Complete both reads before target-facing work begins.** Improvising a technique that

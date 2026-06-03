@@ -324,6 +324,10 @@ export type AssessmentSummary = {
   coverage_count: number;
   probe_count: number;
   finding_count: number;
+  // Severity rollup over the same findings counted by finding_count
+  // (merged/false_positive excluded), so the donut total equals finding_count.
+  // Optional to tolerate older backend payloads that predate the field.
+  finding_severities?: Record<string, number>;
   open_surface_count: number;
   credential_count: number;
   access_count: number;
@@ -414,25 +418,43 @@ function formatPydanticErrors(entries: PydanticErrorEntry[]): string {
   return lines.join("\n");
 }
 
-async function readError(response: Response): Promise<string> {
+// Error thrown by request() on a non-ok response. Extends Error (so existing
+// `error instanceof Error` / `error.message` callers keep working unchanged)
+// and additionally exposes the HTTP `status` and the parsed JSON `body`, so
+// callers can branch on the numeric status instead of regexing the message.
+export class ApiError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+  constructor(message: string, status: number, body: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+// Reads a non-ok response once, returning both the human-readable message and
+// the parsed JSON body (or undefined if the body was empty / not JSON).
+async function readError(response: Response): Promise<{ message: string; body: unknown }> {
   const text = await response.text();
   if (!text) {
-    return `Request failed: ${response.status}`;
+    return { message: `Request failed: ${response.status}`, body: undefined };
   }
 
   try {
     const payload = JSON.parse(text) as { detail?: unknown };
     if (typeof payload.detail === "string") {
-      return payload.detail;
+      return { message: payload.detail, body: payload };
     }
     if (isPydanticErrorList(payload.detail)) {
-      return formatPydanticErrors(payload.detail);
+      return { message: formatPydanticErrors(payload.detail), body: payload };
     }
+    return { message: text, body: payload };
   } catch {
     // Fall back to raw body.
   }
 
-  return text;
+  return { message: text, body: undefined };
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -443,7 +465,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   const response = await fetch(resolveAppUrl(path), { ...init, headers });
   if (!response.ok) {
-    throw new Error(await readError(response));
+    const { message, body } = await readError(response);
+    throw new ApiError(message, response.status, body);
   }
   return response.json() as Promise<T>;
 }
@@ -454,6 +477,59 @@ export function listEngagements() {
 
 export function getEngagement(engagementKey: string) {
   return request<Engagement>(`/engagements/${engagementKey}`);
+}
+
+// ── Cross-engagement dashboard summary ──────────────────
+// Mirrors DashboardSummaryResponse in orchestrator/backend/app/api/dashboard.py.
+// Read-only aggregate across ALL engagements in the single DB. Optional on the
+// caller side: an older backend without /dashboard/summary 404s, so the landing
+// page must tolerate the fetch failing and hide the dashboard sections.
+
+export type DashboardEngagementCounts = {
+  total: number;
+  by_status: Record<string, number>;
+  by_type: Record<string, number>;
+  by_phase: Record<string, number>;
+};
+
+export type DashboardFindingTotals = {
+  total: number;
+  by_severity: Record<string, number>;
+};
+
+export type DashboardEngagement = {
+  key: string;
+  target: string;
+  status: string;
+  current_phase: string;
+  engagement_type: string | null;
+  customer: string | null;
+  updated_at: string;
+  finding_count: number;
+  finding_severities: Record<string, number>;
+};
+
+export type DashboardActivity = {
+  id: number;
+  engagement_key: string;
+  actor_kind: string;
+  actor_name: string;
+  title: string;
+  action: string;
+  result: string;
+  occurred_at: string;
+  created_at: string;
+};
+
+export type DashboardSummary = {
+  engagement_counts: DashboardEngagementCounts;
+  finding_totals: DashboardFindingTotals;
+  engagements: DashboardEngagement[];
+  recent_activity: DashboardActivity[];
+};
+
+export function getDashboardSummary() {
+  return request<DashboardSummary>("/dashboard/summary");
 }
 
 export function deleteEngagement(engagementKey: string) {
@@ -520,6 +596,37 @@ export function listArtifacts(engagementKey: string) {
 
 export function readArtifact(engagementKey: string, artifactName: string) {
   return request<ArtifactContent>(`/engagements/${engagementKey}/artifacts/${artifactName}`);
+}
+
+// ── Single-file report export ───────────────────────────
+
+export type ReportExportMode = "draft" | "final";
+
+export type ReportExportResult = {
+  artifact_id: number;
+  relative_path: string;
+  mode: ReportExportMode;
+  size_bytes: number;
+};
+
+// Generate a single-file HTML report and register it as an engagement
+// artifact. mode=final enforces the same report-readiness gate as
+// report-findings and returns 409 (readiness payload as the error) when the
+// engagement is not ready.
+export function exportReport(engagementKey: string, mode: ReportExportMode = "draft") {
+  return request<ReportExportResult>(
+    `/engagements/${encodeURIComponent(engagementKey)}/assessment/report-export`,
+    { method: "POST", body: JSON.stringify({ mode }) },
+  );
+}
+
+// Absolute, app-relative URL for the report download route. Used to point a
+// hidden <a download> at the file so the browser saves it directly (the
+// endpoint serves Content-Disposition: attachment).
+export function reportDownloadUrl(engagementKey: string, artifactId: number): string {
+  return resolveAppUrl(
+    `/engagements/${encodeURIComponent(engagementKey)}/assessment/report-export/${artifactId}/download`,
+  );
 }
 
 // ── Coverage & discovery types ──────────────────────────
@@ -689,6 +796,118 @@ export function listAssessmentCommandRuns(
 export function getAssessmentCommandRun(engagementKey: string, commandRunId: number) {
   return request<AssessmentCommandRunDetail>(
     `/engagements/${engagementKey}/assessment/command-runs/${commandRunId}`,
+  );
+}
+
+// ── HTTP traffic types ──────────────────────────────────
+// Mirrors `assessment_request_variants` / `assessment_request_observations`
+// in orchestrator/backend/app/db.py. The list endpoints return raw row
+// dicts (state_manager.list_request_variants / list_request_observations);
+// the schema_json fields are JSON-encoded strings the frontend parses for
+// pretty display. All read-only — no mutation routes exist for these.
+
+export type RequestVariant = {
+  id: number;
+  engagement_id: number;
+  auth_context: string;
+  scheme: string;
+  host: string;
+  port: number;
+  method: string;
+  normalized_path: string;
+  path_template: string;
+  canonical_url: string;
+  content_type_family: string;
+  query_schema_json: string;
+  body_schema_json: string;
+  path_schema_json: string;
+  cookie_schema_json: string;
+  header_schema_json: string;
+  params_schema_hash: string;
+  body_schema_hash: string;
+  discovery_source: string;
+  notes: string;
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
+export type RequestObservation = {
+  id: number;
+  engagement_id: number;
+  request_variant_id: number;
+  observed_url: string;
+  source_name: string;
+  response_status: number | null;
+  evidence_ref: string;
+  raw_payload: string;
+  created_at: string;
+};
+
+export function listRequestVariants(engagementKey: string) {
+  return request<RequestVariant[]>(
+    `/engagements/${engagementKey}/assessment/request-variants`,
+  );
+}
+
+export function listRequestObservations(engagementKey: string) {
+  return request<RequestObservation[]>(
+    `/engagements/${engagementKey}/assessment/request-observations`,
+  );
+}
+
+// ── OAST (out-of-band) types ────────────────────────────
+// Mirrors `assessment_oob_probes` / `assessment_oob_interactions` in
+// orchestrator/backend/app/db.py. The list endpoint embeds a derived
+// `interaction_count` + `last_interaction_at` per probe (LEFT JOIN rollup);
+// the detail endpoint (by nonce) additionally returns the full
+// `interactions[]` history. Read-only — `vigil oob mint`/`poll` own writes.
+
+export type OobProbe = {
+  id: number;
+  engagement_id: number;
+  nonce: string;
+  target_url: string;
+  param: string;
+  technique: string;
+  probe_kind: string;
+  request_hash: string;
+  oob_domain: string;
+  notes: string;
+  status: string; // pending | fired | confirmed | expired | ignored | unmatched
+  created_at: string;
+  updated_at: string;
+  // Derived by list_oob_probes (not stored). Detail-by-nonce omits these.
+  interaction_count?: number;
+  last_interaction_at?: string;
+};
+
+export type OobInteraction = {
+  id: number;
+  engagement_id: number;
+  probe_id: number;
+  protocol: string;
+  remote_address: string;
+  query_type: string;
+  raw_request: string;
+  interaction_hash: string;
+  observed_at: string;
+  created_at: string;
+};
+
+export type OobProbeDetail = OobProbe & {
+  interactions: OobInteraction[];
+};
+
+export function listOobProbes(engagementKey: string, status?: string) {
+  const qs = status ? `?${new URLSearchParams({ status }).toString()}` : "";
+  return request<OobProbe[]>(
+    `/engagements/${engagementKey}/assessment/oob-probes${qs}`,
+  );
+}
+
+export function getOobProbe(engagementKey: string, nonce: string) {
+  return request<OobProbeDetail>(
+    `/engagements/${engagementKey}/assessment/oob-probes/${encodeURIComponent(nonce)}`,
   );
 }
 

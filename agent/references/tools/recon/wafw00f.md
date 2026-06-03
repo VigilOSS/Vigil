@@ -1,3 +1,7 @@
+---
+description: WAF identification and fingerprinting
+---
+
 # wafw00f
 
 **Purpose:** Web Application Firewall identification and fingerprinting.

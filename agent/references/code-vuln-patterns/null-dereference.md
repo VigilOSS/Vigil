@@ -1,3 +1,9 @@
+---
+description: Cross-function NULL propagation, optional field assumptions, race-to-NULL
+skill: code-vulnerability-analysis
+languages: C/C++, Python, JS
+---
+
 # Null Dereference — Cross-Function Null Propagation
 
 > Target: Null pointer dereference bugs (CWE-476) that survive SAST because the null

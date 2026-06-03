@@ -1,3 +1,8 @@
+---
+description: App/API, file-format, IPC, WebView, native, Binder/AIDL, XPC/Mach fuzzing, corpus design, crash triage
+skill: mobile-fuzzing
+---
+
 # Mobile Fuzzing Reference
 
 ## Target Classes

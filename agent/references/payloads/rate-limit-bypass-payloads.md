@@ -1,3 +1,8 @@
+---
+description: IP spoofing headers by CDN, path variation, account rotation, parameter pollution
+skill: rate-limit-bypass
+---
+
 # Rate Limit Bypass Payloads
 
 ## IP Spoofing Headers by CDN

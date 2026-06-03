@@ -1,3 +1,8 @@
+---
+description: Agent-to-agent handoff rules and expected downstream actions
+category: Shared Runtime References
+---
+
 # Agent Handoff Protocols
 
 Quick-reference for processing each agent's return output. These rules are subordinate

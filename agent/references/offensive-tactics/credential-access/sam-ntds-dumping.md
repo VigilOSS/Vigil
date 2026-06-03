@@ -1,3 +1,7 @@
+---
+description: SAM registry dump, NTDS.dit via vssadmin, secretsdump
+---
+
 # SAM & NTDS.dit Dumping
 
 ## SAM via Registry

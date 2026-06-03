@@ -1,3 +1,9 @@
+---
+description: Conditional initialization, cross-function partial init, stack/heap info leaks
+skill: code-vulnerability-analysis
+languages: C/C++, Python, JS
+---
+
 # Uninitialized Memory — Cross-Function Initialization Gaps
 
 > Target: Uninitialized memory bugs (CWE-457, CWE-908) that survive SAST because the

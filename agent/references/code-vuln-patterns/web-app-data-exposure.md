@@ -1,3 +1,9 @@
+---
+description: IDOR in ORM queries, mass assignment, serializer over-exposure, GraphQL field auth, bulk endpoints
+skill: code-vulnerability-analysis
+languages: Python, JS, Java, Ruby, Go
+---
+
 # Web Application Data Exposure — IDOR in Code, Mass Assignment, and Response Over-Sharing
 
 > Target: Data exposure bugs where the code returns more data than the authenticated user should

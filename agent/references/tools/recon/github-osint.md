@@ -1,3 +1,8 @@
+---
+description: GitHub OSINT — org-name pattern enumeration (literal/parent/contractor variants), public-member listing, commit-author email mining, code-search cross-reference; rate-limit etiquette and `GITHUB_TOKEN` pattern
+skill: osint-recon
+---
+
 # GitHub OSINT — Org Enumeration & Commit-Author Email Mining
 
 GitHub's Search and REST APIs expose enough public data that an org-name pattern
@@ -205,4 +210,4 @@ before authoring the JSON; intel schemas reject guessed aliases.
 
 - `agent/skills/osint-recon/SKILL.md` — methodology section "Org-name pattern enumeration"
 - `agent/references/payloads/version-fingerprint-probes.md` — package-registry probes for vendor exact-version triangulation
-- `agent/references/INDEX.md` — references library index
+- `vigil assess list-references` — the reference library index (run it; `--skill <name>` filters to a skill's paired refs)

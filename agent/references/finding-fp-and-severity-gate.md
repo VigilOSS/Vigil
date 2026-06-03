@@ -1,3 +1,8 @@
+---
+description: "General FP + severity-downgrade gate (C1–C6) run at Phase-4 verification: data-sensitivity / public-data / boundary-crossing / id-enumerability checks, per-metric CVSS-vector discipline, orphan-write read-back, kill-trigger catalog, severity ladder. The live/web analog of code-finding-verification."
+category: Finding Verification Gates
+---
+
 # Finding FP & Severity-Downgrade Gate — real-world impact, not CVSS-fitting
 
 > Run during Phase 4 verification (`vulnerability-analyst`), before a finding is recorded

@@ -1,3 +1,8 @@
+---
+description: SSRF via third-party integrations
+skill: ssrf-testing
+---
+
 # API10:2023 — Unsafe Consumption of APIs
 
 > Skill: `ssrf-testing`

@@ -1,3 +1,7 @@
+---
+description: VBA macros, DDE, XLM 4.0, remote .dotm template injection
+---
+
 # Office Macro Phishing Techniques
 
 ## VBA Macros (T1204.002)

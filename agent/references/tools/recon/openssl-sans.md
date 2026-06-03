@@ -1,3 +1,8 @@
+---
+description: Per-host TLS SAN extraction (openssl s_client + x509 -ext subjectAltName), cross-host SAN collision detection (shared multi-tenant cert flag), vhost / cert mismatch detection, multi-time DNS resolution (split-VIP detection), dnsx live-host confirmation of SAN-discovered names — paired with `agent/skills/tls-vhost-correlation/SKILL.md`
+skill: tls-vhost-correlation
+---
+
 # openssl s_client — Per-Host SAN Extraction and Cross-Host Collision Detection
 
 > Purpose: Extract Subject Alternative Name (SAN) hosts from per-host TLS certs, detect cross-host SAN collisions (shared multi-tenant certs), check vhost / cert mismatch, and feed the discovered names back into subdomain enumeration via dnsx.

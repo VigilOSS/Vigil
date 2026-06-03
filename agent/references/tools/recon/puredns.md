@@ -1,3 +1,8 @@
+---
+description: Active DNS brute-force with wildcard filtering — massdns hard-dependency, tier-aware rate-limit profiles, `--wildcard-batch` / `--wildcard-tests` tuning
+skill: subdomain-enumeration
+---
+
 # puredns
 
 **Purpose:** Fast domain resolver and DNS brute-forcer with accurate wildcard filtering

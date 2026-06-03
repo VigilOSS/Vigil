@@ -1,3 +1,8 @@
+---
+description: Pixel/reference-device setup, bootloader/AVB/root caveats, Cuttlefish, Binder/AIDL, SELinux, HAL/vendor boundaries
+skill: mobile-lab-setup
+---
+
 # Android Platform And Device Lab Reference
 
 ## Authorization Gate

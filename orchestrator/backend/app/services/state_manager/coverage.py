@@ -1119,7 +1119,7 @@ PER_HOST_OBJECTIVES: tuple[str, ...] = (
     "waf_tier",
     "service_inventory",
     "directory_fuzz",
-    "nikto_trigger",
+    "tech_fingerprint",
     "osint",
 )
 
@@ -1365,7 +1365,7 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
        Specialists running ffuf / feroxbuster / dirsearch record their
        findings as surfaces (via ``record-surface``) so the gate cares about
        the surface row, not the binary that produced it.
-    4. ``nikto_trigger`` — at least one ``intel_tech_components`` row whose
+    4. ``tech_fingerprint`` — at least one ``intel_tech_components`` row whose
        ``source_name`` plausibly came from a fingerprinting scanner (whatweb,
        httpx, wappalyzer, nuclei, nmap, nikto, recon-specialist, etc.). The
        trigger is "did fingerprinting happen", which the operator can satisfy
@@ -1482,8 +1482,8 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
     waf_rows = [row for row in live_tech_components if _row_is_waf_classification(row)]
     engagement_has_waf_intel = bool(waf_rows)
 
-    nikto_trigger_rows = [row for row in live_tech_components if _row_is_tech_scan_evidence(row)]
-    engagement_has_nikto_trigger = bool(nikto_trigger_rows)
+    tech_fingerprint_rows = [row for row in live_tech_components if _row_is_tech_scan_evidence(row)]
+    engagement_has_tech_fingerprint = bool(tech_fingerprint_rows)
 
     host_outcomes: list[dict[str, Any]] = []
     for host in sorted(hosts):
@@ -1526,18 +1526,18 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
         if host_surfaces:
             dirfuzz_evidence.append(f"surfaces:{len(host_surfaces)}")
 
-        # nikto_trigger — any fingerprinting-equivalent intel row, host-specific
+        # tech_fingerprint — any fingerprinting-equivalent intel row, host-specific
         # preferred but engagement-level acceptable.
-        nikto_host_specific = any(
-            _intel_row_references_host(row, host) for row in nikto_trigger_rows
+        tech_fingerprint_host_specific = any(
+            _intel_row_references_host(row, host) for row in tech_fingerprint_rows
         )
-        nikto_met = nikto_host_specific or engagement_has_nikto_trigger
-        nikto_evidence: list[str] = []
-        for row in nikto_trigger_rows:
+        tech_fingerprint_met = tech_fingerprint_host_specific or engagement_has_tech_fingerprint
+        tech_fingerprint_evidence: list[str] = []
+        for row in tech_fingerprint_rows:
             label = str(row.get("source_name") or "").strip() or "unknown"
             host_specific = _intel_row_references_host(row, host)
-            nikto_evidence.append(f"{label}{'(host)' if host_specific else ''}")
-            if len(nikto_evidence) >= 5:
+            tech_fingerprint_evidence.append(f"{label}{'(host)' if host_specific else ''}")
+            if len(tech_fingerprint_evidence) >= 5:
                 break
 
         deferral_rows = deferrals_by_host.get(host, [])
@@ -1565,10 +1565,10 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
                 "evidence": dirfuzz_evidence,
                 "deferred": "directory_fuzz" in deferred_objectives,
             },
-            "nikto_trigger": {
-                "met": nikto_met,
-                "evidence": nikto_evidence,
-                "deferred": "nikto_trigger" in deferred_objectives,
+            "tech_fingerprint": {
+                "met": tech_fingerprint_met,
+                "evidence": tech_fingerprint_evidence,
+                "deferred": "tech_fingerprint" in deferred_objectives,
             },
             "osint": {
                 "met": osint_met,
@@ -1606,7 +1606,7 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
         "hosts": host_outcomes,
         "engagement_signals": {
             "waf_intel_count": len(waf_rows),
-            "tech_scan_intel_count": len(nikto_trigger_rows),
+            "tech_scan_intel_count": len(tech_fingerprint_rows),
             "osint_intel_total": len(live_tech_components) + int(people_count) + int(breach_count),
         },
     }

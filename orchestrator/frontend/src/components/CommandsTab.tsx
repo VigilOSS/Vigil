@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AssessmentCommandRun,
   AssessmentCommandRunDetail,
@@ -7,8 +7,13 @@ import {
   getAssessmentCommandRun,
   listAssessmentCommandRuns,
 } from "../lib/api";
-import { useResizableColumns } from "../lib/useResizableColumns";
 import { useBodyScrollLock } from "../lib/modalScrollLock";
+import { Skeleton, TableSkeleton } from "./Skeletons";
+
+// ag-grid is heavy (~470 kB). Lazy-load the grid so it lands in a
+// code-split chunk and never bloats the main entry bundle. The Suspense
+// fallback reuses the existing TableSkeleton gate.
+const CommandsGrid = lazy(() => import("./CommandsGrid"));
 
 // ── Props ─────────────────────────────────────────────────────────────
 type CommandsTabProps = {
@@ -16,31 +21,21 @@ type CommandsTabProps = {
 };
 
 // ── Constants ─────────────────────────────────────────────────────────
-const PAGE_SIZE = 40;
-
 // Initial fetch cap. Findings/Intel follow the same approach: pull a
 // page wide enough to cover every realistic engagement and filter
 // client-side. Anything past this cap is lost to the initial view;
 // in practice a single engagement's command-run count lives well under.
 const INITIAL_FETCH_LIMIT = 1000;
 
-// Default column widths (px). Order matches the list-header / row below:
-//   [color-bar, time, tool, agent, phase, target, command, duration, dup, rc]
-const CMDS_LIST_DEFAULTS = [10, 80, 100, 140, 100, 160, 1, 70, 50, 50];
-const CMDS_LIST_MINS = [8, 60, 60, 80, 60, 100, 200, 50, 40, 40];
-// Wrinkle: one column holds fr units in the header. useResizableColumns
-// emits pure px, so we hard-code the command column's base px width too.
-const CMDS_LIST_DEFAULTS_PX = [10, 80, 100, 140, 100, 160, 520, 70, 50, 50];
-
 // Status color map — drives the row-left bar, status pill, filter chips,
 // and sparkline bars. Five buckets: success (green), failed (red),
 // timed_out (amber), suppressed (muted), artifact (teal).
-const STATUS_COLORS: Record<string, string> = {
-  success: "#2f7f52",
-  failed: "#991b1b",
-  timed_out: "#c64d15",
-  suppressed: "#8c7b62",
-  artifact: "#0d6b6b",
+export const STATUS_COLORS: Record<string, string> = {
+  success: "var(--chip-green)",
+  failed: "var(--chip-red)",
+  timed_out: "var(--chip-orange)",
+  suppressed: "var(--chip-muted)",
+  artifact: "var(--chip-teal)",
 };
 const STATUS_ORDER = ["success", "failed", "timed_out", "suppressed", "artifact"] as const;
 type StatusBucket = (typeof STATUS_ORDER)[number];
@@ -49,44 +44,44 @@ type StatusBucket = (typeof STATUS_ORDER)[number];
 // tools the operator might pipe through. Anything missing falls back to
 // a hash-derived color so colors are stable across reloads.
 const TOOL_COLORS: Record<string, string> = {
-  nmap: "#0d6b6b",
-  curl: "#17354c",
-  wget: "#17354c",
-  sqlmap: "#991b1b",
-  ffuf: "#c64d15",
-  gobuster: "#c64d15",
-  dirb: "#c64d15",
-  katana: "#7c3aed",
-  gau: "#7c3aed",
-  nikto: "#be185d",
-  hydra: "#6b0d0d",
-  john: "#6b0d0d",
-  wpscan: "#2f7f52",
-  enum4linux: "#a16207",
-  dig: "#4b5563",
-  host: "#4b5563",
-  whois: "#4b5563",
-  trufflehog: "#a16207",
-  git: "#4b5563",
-  bash: "#6b685d",
-  sh: "#6b685d",
-  python: "#2f7f52",
-  python3: "#2f7f52",
+  nmap: "var(--chip-teal)",
+  curl: "var(--chip-navy)",
+  wget: "var(--chip-navy)",
+  sqlmap: "var(--chip-red)",
+  ffuf: "var(--chip-orange)",
+  gobuster: "var(--chip-orange)",
+  dirb: "var(--chip-orange)",
+  katana: "var(--chip-purple)",
+  gau: "var(--chip-purple)",
+  nikto: "var(--chip-pink)",
+  hydra: "var(--chip-maroon)",
+  john: "var(--chip-maroon)",
+  wpscan: "var(--chip-green)",
+  enum4linux: "var(--chip-ochre)",
+  dig: "var(--chip-slate)",
+  host: "var(--chip-slate)",
+  whois: "var(--chip-slate)",
+  trufflehog: "var(--chip-ochre)",
+  git: "var(--chip-slate)",
+  bash: "var(--chip-muted-grey)",
+  sh: "var(--chip-muted-grey)",
+  python: "var(--chip-green)",
+  python3: "var(--chip-green)",
 };
 
 // Small hand-tuned palette for the hash fallback so colors stay within the
 // existing design language.
 const TOOL_HASH_PALETTE = [
-  "#17354c",
-  "#0d6b6b",
-  "#2f7f52",
-  "#7c3aed",
-  "#c64d15",
-  "#a16207",
-  "#991b1b",
-  "#be185d",
-  "#4b5563",
-  "#6b0d0d",
+  "var(--chip-navy)",
+  "var(--chip-teal)",
+  "var(--chip-green)",
+  "var(--chip-purple)",
+  "var(--chip-orange)",
+  "var(--chip-ochre)",
+  "var(--chip-red)",
+  "var(--chip-pink)",
+  "var(--chip-slate)",
+  "var(--chip-maroon)",
 ];
 
 function hashString(s: string): number {
@@ -97,32 +92,32 @@ function hashString(s: string): number {
   return h;
 }
 
-function toolColor(bin: string): string {
+export function toolColor(bin: string): string {
   const key = (bin || "").toLowerCase();
   if (TOOL_COLORS[key]) return TOOL_COLORS[key];
-  if (!key) return "#6b685d";
+  if (!key) return "var(--chip-muted-grey)";
   return TOOL_HASH_PALETTE[hashString(key) % TOOL_HASH_PALETTE.length];
 }
 
 // Agent role color map. Keyed on a substring of the agent name so renames
 // to `recon-analyst`, `recon-v2`, etc. still get the recon hue.
 const AGENT_ROLE_COLORS: { key: string; color: string }[] = [
-  { key: "recon", color: "#17354c" },
-  { key: "surface", color: "#0d6b6b" },
-  { key: "vuln", color: "#c64d15" },
-  { key: "exploit", color: "#991b1b" },
-  { key: "fuzz", color: "#7c3aed" },
-  { key: "osint", color: "#2f7f52" },
-  { key: "operator", color: "#6b685d" },
-  { key: "code", color: "#a16207" },
+  { key: "recon", color: "var(--chip-navy)" },
+  { key: "surface", color: "var(--chip-teal)" },
+  { key: "vuln", color: "var(--chip-orange)" },
+  { key: "exploit", color: "var(--chip-red)" },
+  { key: "fuzz", color: "var(--chip-purple)" },
+  { key: "osint", color: "var(--chip-green)" },
+  { key: "operator", color: "var(--chip-muted-grey)" },
+  { key: "code", color: "var(--chip-ochre)" },
 ];
 
-function agentColor(name: string): string {
+export function agentColor(name: string): string {
   const n = (name || "").toLowerCase();
   for (const { key, color } of AGENT_ROLE_COLORS) {
     if (n.includes(key)) return color;
   }
-  if (!n) return "#6b685d";
+  if (!n) return "var(--chip-muted-grey)";
   return TOOL_HASH_PALETTE[hashString(n) % TOOL_HASH_PALETTE.length];
 }
 
@@ -134,40 +129,40 @@ function agentColor(name: string): string {
 // without needing a frontend redeploy.
 const TECHNIQUE_COLORS: Record<string, string> = {
   // Red tier — classic high-severity web/app injection + exec.
-  SSRF: "#991b1b",
-  XSS: "#991b1b",
-  XXE: "#991b1b",
-  SSTI: "#991b1b",
-  CMDI: "#991b1b",
-  RCE: "#991b1b",
+  SSRF: "var(--chip-red)",
+  XSS: "var(--chip-red)",
+  XXE: "var(--chip-red)",
+  SSTI: "var(--chip-red)",
+  CMDI: "var(--chip-red)",
+  RCE: "var(--chip-red)",
   // Orange tier — injection + smuggling + redirect families.
-  SQLI: "#c64d15",
-  NOSQLI: "#c64d15",
-  LFI: "#c64d15",
-  RFI: "#c64d15",
-  "REQUEST-SMUGGLING": "#c64d15",
-  "OPEN-REDIRECT": "#c64d15",
+  SQLI: "var(--chip-orange)",
+  NOSQLI: "var(--chip-orange)",
+  LFI: "var(--chip-orange)",
+  RFI: "var(--chip-orange)",
+  "REQUEST-SMUGGLING": "var(--chip-orange)",
+  "OPEN-REDIRECT": "var(--chip-orange)",
   // Purple tier — authz / session / CSRF-family.
-  IDOR: "#7c3aed",
-  AUTH: "#7c3aed",
-  JWT: "#7c3aed",
-  CSRF: "#7c3aed",
-  CORS: "#7c3aed",
+  IDOR: "var(--chip-purple)",
+  AUTH: "var(--chip-purple)",
+  JWT: "var(--chip-purple)",
+  CSRF: "var(--chip-purple)",
+  CORS: "var(--chip-purple)",
   // Teal tier — discovery / validation (non-attack probes).
-  RECON: "#0d6b6b",
-  DISCOVERY: "#0d6b6b",
-  OSINT: "#0d6b6b",
-  FUZZ: "#0d6b6b",
-  "CVE-VALIDATION": "#0d6b6b",
+  RECON: "var(--chip-teal)",
+  DISCOVERY: "var(--chip-teal)",
+  OSINT: "var(--chip-teal)",
+  FUZZ: "var(--chip-teal)",
+  "CVE-VALIDATION": "var(--chip-teal)",
   // Muted tier — catch-all / miscellaneous.
-  "INFO-DISCLOSURE": "#6b685d",
-  "RATE-LIMIT": "#6b685d",
-  "EXPLOIT-CHAIN": "#6b685d",
-  OTHER: "#6b685d",
+  "INFO-DISCLOSURE": "var(--chip-muted-grey)",
+  "RATE-LIMIT": "var(--chip-muted-grey)",
+  "EXPLOIT-CHAIN": "var(--chip-muted-grey)",
+  OTHER: "var(--chip-muted-grey)",
 };
 
 function techniqueColor(t: string | null | undefined): string {
-  if (!t) return "#6b685d";
+  if (!t) return "var(--chip-muted-grey)";
   const up = t.toUpperCase();
   if (TECHNIQUE_COLORS[up]) return TECHNIQUE_COLORS[up];
   return TOOL_HASH_PALETTE[hashString(up) % TOOL_HASH_PALETTE.length];
@@ -185,22 +180,29 @@ const PROBE_KIND_ORDER = [
 type ProbeKind = (typeof PROBE_KIND_ORDER)[number];
 
 const PROBE_KIND_COLORS: Record<ProbeKind, string> = {
-  fingerprint: "#0d6b6b", // teal — low-touch recon probes
-  baseline: "#4b5563", // slate — control requests
-  payload: "#c64d15", // orange — attack payload
-  exploit: "#991b1b", // red — attacker-outcome proof
-  replay: "#7c3aed", // purple — lateral primitive use
-  cleanup: "#6b685d", // muted — post-op tidy
+  fingerprint: "var(--chip-teal)",    // teal — low-touch recon probes
+  baseline: "var(--chip-slate)",      // slate — control requests
+  payload: "var(--chip-orange)",      // orange — attack payload
+  exploit: "var(--chip-red)",         // red — attacker-outcome proof
+  replay: "var(--chip-purple)",       // purple — lateral primitive use
+  cleanup: "var(--chip-muted-grey)",  // muted — post-op tidy
 };
 
 function probeKindColor(pk: string | null | undefined): string {
-  if (!pk) return "#6b685d";
+  if (!pk) return "var(--chip-muted-grey)";
   const k = pk.toLowerCase() as ProbeKind;
-  return PROBE_KIND_COLORS[k] || "#6b685d";
+  return PROBE_KIND_COLORS[k] || "var(--chip-muted-grey)";
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
-function relTime(iso: string | undefined | null): string {
+// Build a translucent tint from a CSS var color token without appending
+// hex-alpha digits (which break when the value is var(--chip-*)).
+// pct ≈ 10 reproduces the old "1a" alpha; pct ≈ 13 reproduces "22".
+function tint(color: string, pct = 10): string {
+  return `color-mix(in srgb, ${color} ${pct}%, transparent)`;
+}
+
+export function relTime(iso: string | undefined | null): string {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
@@ -216,7 +218,7 @@ function relTime(iso: string | undefined | null): string {
   return d.toISOString().slice(0, 10);
 }
 
-function fmtDuration(ms: number): string {
+export function fmtDuration(ms: number): string {
   if (!ms || ms <= 0) return "—";
   if (ms < 1000) return `${ms}ms`;
   const s = ms / 1000;
@@ -411,7 +413,7 @@ function parseQuery(q: string): ParsedQuery {
 //   - Typing in the search box becomes instant (no re-fetch).
 //   - Tradeoff: stdout/stderr preview matches only kick in after the
 //     drawer pulls the detail fetch. That's acceptable for v1.
-type Derived = {
+export type Derived = {
   row: AssessmentCommandRun;
   id: number;
   bucket: StatusBucket;
@@ -480,30 +482,6 @@ function derive(row: AssessmentCommandRun): Derived {
     destructive,
     searchCorpus: corpusParts.filter(Boolean).join(" \n ").toLowerCase(),
   };
-}
-
-// ── Highlight helper ─────────────────────────────────────────────────
-function highlight(text: string | undefined, freeTerms: string[]): React.ReactNode {
-  if (!text) return text ?? "";
-  if (!freeTerms || !freeTerms.length) return text;
-  const lower = text.toLowerCase();
-  let bestIdx = -1;
-  let bestLen = 0;
-  for (const t of freeTerms) {
-    const i = lower.indexOf(t);
-    if (i >= 0 && (bestIdx < 0 || i < bestIdx)) {
-      bestIdx = i;
-      bestLen = t.length;
-    }
-  }
-  if (bestIdx < 0) return text;
-  return (
-    <>
-      {text.slice(0, bestIdx)}
-      <mark className="hl">{text.slice(bestIdx, bestIdx + bestLen)}</mark>
-      {text.slice(bestIdx + bestLen)}
-    </>
-  );
 }
 
 // ── Icons ────────────────────────────────────────────────────────────
@@ -604,7 +582,6 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
   const [statusFilters, setStatusFilters] = useState<Set<StatusBucket>>(new Set());
   const [techniqueFilters, setTechniqueFilters] = useState<Set<string>>(new Set());
   const [probeKindFilters, setProbeKindFilters] = useState<Set<string>>(new Set());
-  const [page, setPage] = useState(0);
   const [cmdOpen, setCmdOpen] = useState(false);
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -623,16 +600,6 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
     () => new Map(),
   );
   const [detailLoading, setDetailLoading] = useState<Set<number>>(() => new Set());
-
-  const {
-    gridTemplate: listGridTemplate,
-    startResize: startListResize,
-    resetColumn: resetListColumn,
-  } = useResizableColumns(
-    "commands.col-widths",
-    CMDS_LIST_DEFAULTS_PX,
-    CMDS_LIST_MINS,
-  );
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
@@ -883,17 +850,6 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
     }
     return m;
   }, [filtered]);
-
-  // Reset page when filters/search change.
-  useEffect(() => {
-    setPage(0);
-  }, [toolFilters, agentFilters, statusFilters, techniqueFilters, probeKindFilters, query]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  useEffect(() => {
-    setPage((p) => Math.min(p, totalPages - 1));
-  }, [totalPages]);
-  const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   // Keep selection valid — if the current selected row drops out of the
   // filtered set (filters changed, rows removed), pick the first
@@ -1151,7 +1107,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
                     onClick={() => toggle(toolFilters, setToolFilters, bin)}
                     style={
                       toolFilters.has(bin)
-                        ? { borderColor: color, background: `${color}1a`, color }
+                        ? { borderColor: color, background: tint(color), color }
                         : undefined
                     }
                   >
@@ -1176,7 +1132,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
                     onClick={() => toggle(agentFilters, setAgentFilters, name)}
                     style={
                       agentFilters.has(name)
-                        ? { borderColor: color, background: `${color}1a`, color }
+                        ? { borderColor: color, background: tint(color), color }
                         : undefined
                     }
                   >
@@ -1220,7 +1176,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
                     onClick={() => toggle(techniqueFilters, setTechniqueFilters, tech)}
                     style={
                       techniqueFilters.has(tech)
-                        ? { borderColor: color, background: `${color}1a`, color }
+                        ? { borderColor: color, background: tint(color), color }
                         : undefined
                     }
                   >
@@ -1272,137 +1228,38 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
       {/* List (detail renders as a centred modal below) */}
       <div className="findings-shell">
         <section className="list-panel panel">
-          <div className="list-scroll-x">
-          <div
-            className="list-header"
-            style={{ gridTemplateColumns: listGridTemplate, minWidth: "fit-content" }}
-          >
-            <span />
-            <span className="col-sticky">
-              Time
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(1, e)}
-                onDoubleClick={() => resetListColumn(1)}
-              />
-            </span>
-            <span>
-              Tool
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(2, e)}
-                onDoubleClick={() => resetListColumn(2)}
-              />
-            </span>
-            <span>
-              Agent
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(3, e)}
-                onDoubleClick={() => resetListColumn(3)}
-              />
-            </span>
-            <span>
-              Phase
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(4, e)}
-                onDoubleClick={() => resetListColumn(4)}
-              />
-            </span>
-            <span>
-              Target
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(5, e)}
-                onDoubleClick={() => resetListColumn(5)}
-              />
-            </span>
-            <span>
-              Command
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(6, e)}
-                onDoubleClick={() => resetListColumn(6)}
-              />
-            </span>
-            <span>
-              Dur
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(7, e)}
-                onDoubleClick={() => resetListColumn(7)}
-              />
-            </span>
-            <span>
-              Dup
-              <span
-                className="col-resize-handle"
-                onPointerDown={(e) => startListResize(8, e)}
-                onDoubleClick={() => resetListColumn(8)}
-              />
-            </span>
-            <span style={{ textAlign: "right" }}>RC</span>
-          </div>
-          <div className="list-scroll">
-            {loading ? (
-              <div className="empty">Loading command runs…</div>
-            ) : pageRows.length === 0 ? (
-              <div className="empty">
-                No command runs match.
-                <div style={{ marginTop: 10 }}>
-                  <button type="button" className="qa-btn" onClick={clearAll}>
-                    Clear filters
-                  </button>
-                </div>
-              </div>
-            ) : (
-              pageRows.map((d) => (
-                <CommandRow
-                  key={d.id}
-                  d={d}
-                  selected={selectedId === d.id}
-                  onClick={() => {
-                    setSelectedId(d.id);
-                    lastFocusIdRef.current = d.id;
-                    setDetailOpen(true);
-                  }}
-                  onTargetClick={(target) => setQuery(`target:${target}`)}
-                  onDupClick={(hash) => setQuery(`hash:${hash.slice(0, 12)}`)}
-                  dupCount={dupCounts.get(d.row.command_hash) || 0}
-                  freeTerms={parsedQuery.freeTerms}
-                  gridTemplate={listGridTemplate}
-                  registerRef={(id, el) => {
-                    if (el) rowRefs.current.set(id, el);
-                    else rowRefs.current.delete(id);
-                  }}
+          {loading ? (
+            <TableSkeleton
+              rows={8}
+              showHeader={false}
+              columns={["8%", "10%", "30%", "12%", "12%", "10%", "8%", "10%"]}
+            />
+          ) : (
+            <Suspense
+              fallback={
+                <TableSkeleton
+                  rows={8}
+                  showHeader={false}
+                  columns={["8%", "10%", "30%", "12%", "12%", "10%", "8%", "10%"]}
                 />
-              ))
-            )}
-          </div>
-          </div>
+              }
+            >
+              <CommandsGrid
+                rows={filtered}
+                dupCounts={dupCounts}
+                selectedId={selectedId}
+                onRowOpen={(id) => {
+                  setSelectedId(id);
+                  lastFocusIdRef.current = id;
+                  setDetailOpen(true);
+                }}
+                onTargetClick={(target) => setQuery(`target:${target}`)}
+                onDupClick={(hash) => setQuery(`hash:${hash.slice(0, 12)}`)}
+              />
+            </Suspense>
+          )}
           <div className="list-footer">
-            <span>
-              {filtered.length} runs · page {page + 1} / {totalPages}
-            </span>
-            <div className="pager-group">
-              <button
-                type="button"
-                className="pager-btn"
-                disabled={page === 0}
-                onClick={() => setPage((p) => p - 1)}
-              >
-                Prev
-              </button>
-              <button
-                type="button"
-                className="pager-btn"
-                disabled={page >= totalPages - 1}
-                onClick={() => setPage((p) => p + 1)}
-              >
-                Next
-              </button>
-            </div>
+            <span>{filtered.length} runs</span>
           </div>
         </section>
 
@@ -1497,125 +1354,6 @@ function StatusSpark({ counts }: { counts: Record<StatusBucket, number> }) {
         })}
       </div>
     </div>
-  );
-}
-
-// ── CommandRow ────────────────────────────────────────────────────────
-function CommandRow({
-  d,
-  selected,
-  onClick,
-  onTargetClick,
-  onDupClick,
-  dupCount,
-  freeTerms,
-  gridTemplate,
-  registerRef,
-}: {
-  d: Derived;
-  selected: boolean;
-  onClick: () => void;
-  onTargetClick: (target: string) => void;
-  onDupClick: (hash: string) => void;
-  dupCount: number;
-  freeTerms: string[];
-  gridTemplate?: string;
-  registerRef?: (id: number, el: HTMLButtonElement | null) => void;
-}) {
-  const bucket = d.bucket;
-  const color = STATUS_COLORS[bucket];
-  const toolClr = toolColor(d.toolBin);
-  const agentClr = agentColor(d.agentName);
-  const command = midTruncate(d.commandPreview, 160);
-  const rc = d.row.return_code;
-  const rcBucket = d.rcBucket;
-  return (
-    <button
-      type="button"
-      className={`frow ${selected ? "is-selected" : ""}`}
-      onClick={onClick}
-      data-id={d.id}
-      ref={(el) => registerRef?.(d.id, el)}
-      style={gridTemplate ? { gridTemplateColumns: gridTemplate, minWidth: "fit-content" } : { minWidth: "fit-content" }}
-    >
-      <span className={`frow-sevbar cbar-${bucket}`} style={{ background: color }} />
-      <span className="frow-main col-sticky" style={{ gridTemplateColumns: "unset" }}>
-        <span className="mono" style={{ fontSize: "0.76rem", color: "var(--muted)" }}>
-          {relTime(d.row.created_at || d.row.started_at)}
-        </span>
-      </span>
-      <span className="mono" style={{ color: toolClr, fontWeight: 600, fontSize: "0.84rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {d.toolBin || "(unknown)"}
-      </span>
-      <span style={{ color: agentClr, fontSize: "0.84rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {d.agentName}
-      </span>
-      <span style={{ fontSize: "0.82rem", color: "var(--ink-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {d.phase}
-      </span>
-      <span
-        className="mono"
-        style={{ fontSize: "0.78rem", color: "var(--ink-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: d.target ? "pointer" : "default" }}
-        onClick={(e) => {
-          if (!d.target) return;
-          e.stopPropagation();
-          onTargetClick(d.target);
-        }}
-        title={d.target ? `Filter by target:${d.target}` : undefined}
-      >
-        {d.target || "—"}
-      </span>
-      <span
-        className="mono"
-        style={{ fontSize: "0.78rem", color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-        title={d.commandPreview}
-      >
-        {highlight(command, freeTerms)}
-      </span>
-      <span className="mono" style={{ fontSize: "0.76rem", color: "var(--muted)", whiteSpace: "nowrap" }}>
-        {fmtDuration(d.row.duration_ms)}
-      </span>
-      <span style={{ display: "flex", justifyContent: "flex-start" }}>
-        {dupCount > 1 && (
-          <span
-            className="tag"
-            onClick={(e) => {
-              e.stopPropagation();
-              if (d.row.command_hash) onDupClick(d.row.command_hash);
-            }}
-            style={{ cursor: "pointer", background: "rgba(23,53,76,0.08)", color: "var(--accent)" }}
-            title={`${dupCount} rows share this command_hash — click to filter`}
-          >
-            ×{dupCount}
-          </span>
-        )}
-      </span>
-      <span style={{ display: "flex", justifyContent: "flex-end" }}>
-        <span
-          className="tag"
-          style={{
-            background:
-              rcBucket === "zero"
-                ? "rgba(47,127,82,0.16)"
-                : rcBucket === "timeout"
-                ? "rgba(198,77,21,0.14)"
-                : rcBucket === "nonzero"
-                ? "rgba(153,27,27,0.14)"
-                : "rgba(140,123,98,0.12)",
-            color:
-              rcBucket === "zero"
-                ? "#2f7f52"
-                : rcBucket === "timeout"
-                ? "#c64d15"
-                : rcBucket === "nonzero"
-                ? "#991b1b"
-                : "#6b685d",
-          }}
-        >
-          {rcBucket === "timeout" ? "t/o" : rc == null ? "—" : String(rc)}
-        </span>
-      </span>
-    </button>
   );
 }
 
@@ -1717,7 +1455,7 @@ function Drawer({
         <div className="hero-meta">
           <span
             className="hero-sev"
-            style={{ background: `${color}22`, color }}
+            style={{ background: tint(color, 13), color }}
           >
             <span className="sev-dot" style={{ background: color }} />
             {d.bucketLabel}
@@ -1725,7 +1463,7 @@ function Drawer({
           {d.agentName && (
             <span
               className="tag"
-              style={{ color: agentColor(d.agentName), background: `${agentColor(d.agentName)}1a` }}
+              style={{ color: agentColor(d.agentName), background: tint(agentColor(d.agentName)) }}
             >
               {d.agentName}
             </span>
@@ -1826,7 +1564,7 @@ function TechniqueKV({ technique }: { technique: string }) {
       <p className="v">
         <span
           className="pill"
-          style={{ background: `${color}1a`, color, letterSpacing: "0.06em" }}
+          style={{ background: tint(color), color, letterSpacing: "0.06em" }}
         >
           <span className="sev-dot" style={{ background: color }} />
           {technique}
@@ -1852,7 +1590,7 @@ function ProbeKindKV({ probeKind }: { probeKind: string }) {
       <p className="v">
         <span
           className={`pill cpk-${probeKind}`}
-          style={{ background: `${color}1a`, color }}
+          style={{ background: tint(color), color }}
         >
           <span className="sev-dot" style={{ background: color }} />
           {probeKind}
@@ -1881,7 +1619,7 @@ function IntentKV({ intent }: { intent: string }) {
         <span
           className="pill"
           style={{
-            background: "rgba(23,53,76,0.08)",
+            background: "var(--count-bg)",
             color: "var(--accent)",
             textTransform: "none",
             letterSpacing: 0,
@@ -2046,7 +1784,11 @@ function StreamPane({
   return (
     <div className="section">
       {detailLoading && !detail ? (
-        <p className="empty" style={{ textAlign: "left" }}>Loading {kind}…</p>
+        <div aria-busy="true" aria-label={`Loading ${kind}`} style={{ display: "grid", gap: 6 }}>
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} width={i === 3 ? "55%" : "90%"} height={9} />
+          ))}
+        </div>
       ) : detail ? (
         <pre className="pre">{preview || "(empty preview)"}</pre>
       ) : (

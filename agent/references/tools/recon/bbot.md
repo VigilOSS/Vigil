@@ -1,3 +1,8 @@
+---
+description: Multi-module passive preset (Phase 0 deep); `subdomain-enum -rf passive`, `--allow-deadly` gated behind `--destructive`
+skill: subdomain-enumeration
+---
+
 # bbot
 
 **Purpose:** Multi-module passive recon orchestrator. The `subdomain-enum` preset chains 50+ passive sources (CT, DNS aggregators, security feeds, GitHub) in one invocation. High-coverage but slow (15-30 min wall-clock per target).

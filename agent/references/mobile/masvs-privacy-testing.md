@@ -1,3 +1,8 @@
+---
+description: "MASVS-PRIVACY: identifier audit (IDFA/GAID/IMEI/MAC), ATT compliance, Privacy Sandbox, data deletion verification, privacy label vs behavior, analytics/telemetry over-collection"
+skill: masvs-privacy-testing
+---
+
 # MASVS-PRIVACY Testing Reference
 
 OWASP MASVS v2 added MASVS-PRIVACY as a top-level category. This reference provides concrete test procedures for identifier auditing, tracking transparency, privacy sandbox, data deletion, privacy label verification, and analytics/telemetry assessment.
