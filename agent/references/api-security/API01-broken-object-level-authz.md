@@ -73,28 +73,22 @@ Iterability is the severity multiplier — predictable/enumerable IDs escalate e
 - [ ] Test older API versions for missing auth checks: `/v1/users/ID` vs `/v2/users/ID`
 - [ ] Check if deprecated endpoints still accessible and lack newer security controls
 
-## Modern Methodology
+## Beyond the REST checklist
 
-- [ ] Per-verb authz matrix: replay GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS — authz is often wired to one verb only
-- [ ] 403→IDOR bypass ladder: JSON type-confusion, array/object wrapping, path mangling (`%00` / `../` / trailing `;` / `.json` / wildcard), Content-Type swap, version-prefix swap
-- [ ] Two-session differential replay with content-length/body-fingerprint oracle (Autorize / Auth-Analyzer model); caveat: request-level automation HINTS at but can't CONFIRM BOLA, and 404 ≠ safe
-- [ ] ID harvesting when IDs are opaque → see `agent/references/access-control/idor-identifier-prediction.md`
-- [ ] Blind-IDOR confirmation via observable side effects / OOB callback
-- [ ] Second-order / workflow-resume tests + client-supplied owner/tenant field tampering
-- [ ] Web-cache-deception delivery of another user's authorized response
+The checklist above is the REST/CRUD baseline. Modern methodology and architecture-specific tactics
+have canonical homes — load them rather than re-deriving the detail here:
 
-## Modern architectures
-
-One-line probes per architecture; full probes in `agent/references/access-control/idor-modern-architectures.md`.
-
-- [ ] GraphQL Relay global-ID / batch — decode and swap base64 GIDs, alias-batch sibling objects
-- [ ] JWT claim-trust — server trusts `sub`/`tenant`/`role` claim instead of re-checking ownership
-- [ ] Presigned-URL / signed-ref — tamper the signed object reference or reuse across principals
-- [ ] Cloud datastore RLS — row-level-security gaps in Firestore/Supabase/RLS-backed APIs
-- [ ] AI/LLM conversation + RAG — cross-user conversation IDs, retrieved-doc references leaking other tenants
-- [ ] Realtime / WebSocket — per-message authz missing after the connection handshake
-- [ ] Microservice header trust — internal `X-User-Id`/`X-Tenant` headers injectable at the edge
-- [ ] gRPC-web — object references in metadata/protobuf bypassing the REST authz layer
+- **Operator workflow** → `agent/skills/idor-testing/SKILL.md`: per-verb authz matrix, 403→IDOR
+  bypass ladder, two-session differential replay (content-length/body-fingerprint oracle; automation
+  *hints* at BOLA but can't *confirm* it, 404 ≠ safe), blind-IDOR side-effect/OOB confirmation,
+  second-order / workflow-resume, client-supplied owner/tenant tampering, web-cache-deception.
+- **Architecture tactics** → `agent/references/access-control/idor-modern-architectures.md`: GraphQL
+  (Relay global-ID forge, batch/alias enumeration, mutation BOLA), JWT claim-trust, signed/presigned
+  refs, cloud-datastore RLS (Firebase/Supabase), AI/LLM conversation+RAG, realtime/WebSocket,
+  microservice header trust, gRPC-web, cache deception.
+- **Opaque identifiers** → `agent/references/access-control/idor-identifier-prediction.md`: predicting
+  or harvesting ids (ObjectId/UUIDv1-7/ULID/Snowflake/KSUID/NanoID/Stripe) when sequential
+  enumeration is dead.
 
 ---
 > Cross-reference: `idor-testing` skill, `agent/skills/split-brain-idor/SKILL.md`, `agent/references/access-control/idor-modern-architectures.md`, `agent/references/access-control/idor-identifier-prediction.md`, `agent/references/code-vuln-patterns/web-app-data-exposure.md`, `agent/references/api-security/API03-broken-property-authz.md` (BOPLA), `agent/references/api-security/API05-broken-function-authz.md` (BFLA)

@@ -1193,7 +1193,7 @@ def test_b1_orphan_cleanup_via_live_runtime():
     )
     assert pgrep.returncode != 0, (
         f"nmap orphans survived inside container after timeout:\n"
-        f"vigil stdout: {proc.stdout}\naith stderr: {proc.stderr}\n"
+        f"vigil stdout: {proc.stdout}\nvigil stderr: {proc.stderr}\n"
         f"pgrep stdout: {pgrep.stdout}"
     )
 
@@ -1262,7 +1262,7 @@ def test_b1_timeout_kills_sigterm_trapping_in_container_pid():
 
     assert not survivors, (
         f"SIGTERM-trapping victim survived the cascade — SIGKILL leg broken.\n"
-        f"vigil stdout: {proc.stdout}\naith stderr: {proc.stderr}\n"
+        f"vigil stdout: {proc.stdout}\nvigil stderr: {proc.stderr}\n"
         f"pgrep stdout: {pgrep.stdout}"
     )
     for pid_path, recorded in leftover_pids:
@@ -2167,6 +2167,78 @@ def test_job_start_marks_failed_when_running_patch_raises(monkeypatch, fake_enga
     )
     assert failed_idx > running_idx
     assert fake_client.patches[failed_idx] == ("jobs/30", {"status": "failed"})
+
+
+def test_job_start_marks_failed_when_dtach_spawn_times_out(monkeypatch, fake_engagement):
+    """If the dtach ``docker exec`` spawn raises ``TimeoutExpired`` (escaping the
+    inner ``CalledProcessError`` handler with ``spawned`` still False), ``start_job``
+    must still mark the already-created backend row ``failed`` — otherwise it is
+    stuck at 'queued' forever (no sweeper covers assessment_jobs)."""
+    kali_jobs = _import("assess.lib.kali_jobs")
+
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+            agent_root=str(fake_engagement.parent.parent),
+        ),
+    )
+
+    cleanup_calls: list[str] = []
+
+    class _RecordingClient(_FakeClient):
+        def post(self, endpoint, payload):
+            self.posts.append((endpoint, payload))
+            return {"id": 31, "status": "queued"}
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": 31, "status": "queued", **payload}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    fake_client = _RecordingClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
+    monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda name: None)
+    monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda name, path: None)
+    # Cleanup is gated on spawned=True; record any call so the assertion below can
+    # prove it does NOT run for a spawn that never succeeded.
+    monkeypatch.setattr(
+        kali_jobs,
+        "_cleanup_spawned_job",
+        lambda *a, **k: cleanup_calls.append("cleanup"),
+    )
+
+    def _raise_timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="docker exec ... dtach", timeout=10)
+
+    monkeypatch.setattr(kali_jobs.subprocess, "run", _raise_timeout)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        kali_jobs.start_job(
+            ["nuclei", "-l", "hosts.txt"],
+            audit_meta={
+                "technique": "RECON",
+                "intent": "long sweep",
+                "probe_kind": "fingerprint",
+                "phase": "recon",
+            },
+            container_name="vigil",
+        )
+
+    # The row was POSTed (queued) then must be marked failed despite never spawning.
+    assert ("jobs/31", {"status": "failed"}) in fake_client.patches
+    # Not spawned -> the spawned-job cleanup must not run.
+    assert cleanup_calls == []
 
 
 # ──────────────────────────────────────────────────────────────────────────

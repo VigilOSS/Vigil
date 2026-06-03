@@ -1860,16 +1860,28 @@ def coverage_rollup(engagement_id: int) -> dict[str, Any]:
             (engagement_id,),
         ).fetchall()
         liveness_rows = connection.execute(
-            "SELECT host, reachability_class FROM assessment_host_liveness WHERE engagement_id = ?",
+            "SELECT host, reachability_class FROM assessment_host_liveness "
+            "WHERE engagement_id = ? ORDER BY probed_at, id",
             (engagement_id,),
         ).fetchall()
+    # IPv6-consistent liveness map. Liveness rows can be stored bare (``::1``) or
+    # bracketed (``[::1]``, from a bracketed httpx ingest); request-variant item hosts
+    # are always bare while service endpoints normalize to ``[::1]``. Strip brackets on
+    # BOTH sides (here and in the item loop below) so every IPv6 form folds to one bare
+    # key. When a bare and a bracketed liveness row exist for one literal they collapse
+    # to a single key; ``ORDER BY probed_at, id`` makes the newest verdict win
+    # deterministically (it is the last write into the dict).
     liveness = {
-        str(r["host"]): str(r["reachability_class"] or "unprobed")
+        str(r["host"]).strip("[]"): str(r["reachability_class"] or "unprobed")
         for r in liveness_rows
     }
     counts: dict[str, int] = {}
     for item in item_rows:
-        host = _normalize_liveness_host(str(item["rv_host"] or item["endpoint"] or ""))
+        # Strip brackets here too so a service endpoint that normalizes to ``[::1]``
+        # matches the bracket-stripped liveness key. Residual: a service endpoint stored
+        # as the ambiguous bare ``::1:8080`` (no brackets) keeps its port and still can't
+        # be matched — disambiguating that needs a write-side fix.
+        host = _normalize_liveness_host(str(item["rv_host"] or item["endpoint"] or "")).strip("[]")
         klass = liveness.get(host, "unprobed") if host else "unprobed"
         counts[klass] = counts.get(klass, 0) + 1
     return {
