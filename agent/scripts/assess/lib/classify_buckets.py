@@ -24,6 +24,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -102,10 +103,36 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
     ),
     (
         "idor",
+        # Object-reference parameter keys. Expanded beyond the original upstream
+        # gf slice (`id,user,account,number,doc,email,group,profile,order,report`)
+        # to cover the *_id family, tenant/org/workspace scoping keys (cross-tenant
+        # BOLA), and the modern chat/agent object refs (conversation/thread/message)
+        # that 2024-2026 IDOR research flags as primary surfaces. Path-embedded
+        # object references (`/users/1024/profile`) are handled separately by the
+        # `_PATH_OBJECT_REF_SEGMENT` rule in `classify_row`, not by path fragments
+        # here, because they need id-shape detection (numeric/UUID/hex) rather than
+        # a fixed substring.
         35,
         frozenset({
+            # original upstream slice
             "id", "user", "account", "number", "doc", "email", "group",
             "profile", "order", "report",
+            # user / identity references
+            "uid", "userid", "user_id", "owner", "owner_id", "member",
+            "member_id", "customer", "customer_id", "account_id", "accountid",
+            # tenant / org scoping (cross-tenant BOLA)
+            "org", "org_id", "organization", "organization_id", "tenant",
+            "tenant_id", "workspace", "workspace_id",
+            # generic object handles
+            "object", "object_id", "objectid", "oid", "record", "record_id",
+            "ref", "reference", "uuid", "guid", "gid", "node", "pid",
+            # domain objects
+            "order_id", "orderid", "invoice", "invoice_id", "document_id",
+            "doc_id", "file_id", "fileid", "transaction", "transaction_id",
+            "payment", "payment_id", "ticket", "ticket_id", "case_id",
+            # modern chat / agent object refs
+            "conversation", "conversation_id", "thread", "thread_id",
+            "message_id", "msg_id",
         }),
         (),
     ),
@@ -196,6 +223,27 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             ".pem", ".key", ".log",
         ),
     ),
+)
+
+# Weight of the `idor` bucket, resolved from the table above so the
+# path-object-reference rule in `classify_row` cannot drift from the declared
+# bucket weight if it is ever retuned.
+_IDOR_WEIGHT: int = next(weight for name, weight, _, _ in _BUCKETS if name == "idor")
+
+# A URL path segment shaped like an object identifier: a pure-numeric segment,
+# a canonical UUID, or a long hex string (Mongo ObjectId and friends). Mirrors
+# the dynamic-segment detection in `assess.lib.params.extract_path_params` and is
+# kept local so this module stays dependency-light (it is imported inline at
+# insert time by `db_insert_work_item`). Matched against the lowercased path, so
+# `/users/1024/profile`, `/orders/000000000000000000001000`, and
+# `/files/550e8400-e29b-41d4-a716-446655440000` all register an object reference
+# that the param-key buckets cannot see. Numeric segments also match benign
+# year/page paths (e.g. `/2024/`, `/page/2`) — an accepted low-cost false
+# positive: idor's weight (35) only affects triage ordering, never skip/include.
+_PATH_OBJECT_REF_SEGMENT = re.compile(
+    r"/(?:[0-9]+"
+    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|[0-9a-f]{24,})(?:/|$)"
 )
 
 # gf-bucket -> vulnerability-class skill(s). SINGLE SOURCE OF TRUTH for the
@@ -334,8 +382,20 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
         }
 
     url_path = row["url_path"] or ""
+    url_path_lower = url_path.lower()
     keys = collect_keys(row["query_params"], row["body_params"], row["path_params"])
-    matches = bucket_matches(url_path.lower(), keys)
+    matches = bucket_matches(url_path_lower, keys)
+
+    # Path-embedded object references (`/users/1024/profile`, `/files/<uuid>`)
+    # carry an IDOR surface even when no query/body parameter names an id — the
+    # identifier lives in a path segment the param-key buckets cannot see. If the
+    # path embeds an id-shaped segment, route the row to the idor specialist too,
+    # deduped against an existing key-based idor match so the reason chain never
+    # lists `gf:idor` twice.
+    if _PATH_OBJECT_REF_SEGMENT.search(url_path_lower) and not any(
+        name == "idor" for name, _ in matches
+    ):
+        matches.append(("idor", _IDOR_WEIGHT))
 
     if matches:
         best_weight = max(weight for _, weight in matches)

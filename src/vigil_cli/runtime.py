@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import docker
 from .config import RuntimeResources, runtime_resources
-from .paths import container_host_url, default_runtime_container, resolve_orchestrator_base_url
+from .paths import container_host_url, default_runtime_container, read_env_file, resolve_orchestrator_base_url
 
 
 HEAVY_TIER_HOST_GB_THRESHOLD = 32
@@ -19,16 +19,30 @@ ULIMIT_NPROC_RECOMMENDED = 8192
 
 
 def _resolve_runtime_data_dir(install_root: Path) -> Path:
-    """Resolve the runtime container's data dir.
+    """Resolve the runtime container's host-side ``/data`` mount dir.
 
-    Honours ``VIGIL_DATA_DIR``, falling back to the legacy ``KALI_MCP_DATA_DIR``
-    so pre-rename installs that relocated runtime state onto a custom disk keep
-    working after an upgrade; otherwise ``<install>/.runtime-data``. ``start_runtime``
-    and ``runtime_mounts_ok`` must resolve this identically or a running container's
-    mount check will spuriously fail after an upgrade.
+    Precedence: ``VIGIL_RUNTIME_DATA_DIR`` (or legacy ``KALI_MCP_DATA_DIR``) from the
+    process environment, then the same keys from the install-root ``.env`` — the file
+    ``vigil runtime start`` hands to ``docker --env-file``, so a value set there is
+    honoured host-side too rather than silently only inside the container — else
+    ``<install>/.runtime-data``. A relative value resolves against ``install_root``.
+    Deliberately distinct from the orchestrator DB dir's ``VIGIL_DATA_DIR``
+    (``paths.resolve_orchestrator_data_dir``): separate directories with separate
+    defaults, so one env var must not relocate both. ``start_runtime`` and
+    ``runtime_mounts_ok`` must resolve this identically or a running container's mount
+    check will spuriously fail after an upgrade.
     """
-    env_value = os.environ.get("VIGIL_DATA_DIR") or os.environ.get("KALI_MCP_DATA_DIR")
-    return Path(env_value) if env_value else install_root / ".runtime-data"
+    dotenv = read_env_file(install_root / ".env")
+    value = (
+        os.environ.get("VIGIL_RUNTIME_DATA_DIR")
+        or os.environ.get("KALI_MCP_DATA_DIR")
+        or dotenv.get("VIGIL_RUNTIME_DATA_DIR")
+        or dotenv.get("KALI_MCP_DATA_DIR")
+    )
+    if not value:
+        return install_root / ".runtime-data"
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else install_root / path
 
 
 @dataclass(frozen=True, slots=True)
