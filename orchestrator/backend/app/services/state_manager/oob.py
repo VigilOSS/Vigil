@@ -189,6 +189,12 @@ def correlate_oob_interaction(
     engagement = _engagement_or_404(engagement_id)
     nonce = str(nonce or "").strip()
     with _common.get_connection() as connection:
+        # Serialize concurrent same-nonce polls: take the write lock up front so the
+        # SELECT-check / INSERT-interaction / pending->fired UPDATE run atomically.
+        # Without it, two `vigil oob poll` runs racing the same callback can both
+        # pass the existing-interaction check and one then hits the
+        # UNIQUE(probe_id, interaction_hash) constraint mid-write.
+        connection.execute("BEGIN IMMEDIATE")
         probe_row = connection.execute(
             "SELECT * FROM assessment_oob_probes WHERE engagement_id = ? AND nonce = ?",
             (engagement.id, nonce),

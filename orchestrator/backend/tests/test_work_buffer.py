@@ -472,6 +472,79 @@ def test_upload_rows_prefer_upload_fields_over_generic_lfi(tmp_path: Path) -> No
     assert row[2] == "gf:lfi+gf:upload_fields"
 
 
+def _classify_one(db_path: Path, queue_key: str):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return conn.execute(
+            "SELECT cluster_key, priority_score, priority_reason, terminal_reason "
+            "FROM work_items WHERE queue_key = ?",
+            (queue_key,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def test_classify_idor_path_embedded_numeric_id(tmp_path: Path) -> None:
+    """A numeric object id in the URL path (no query/body param) buckets as idor."""
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="idor:path-num",
+        url_path="/api/users/1024/profile",
+    )
+    _run_classify(db_path)
+    row = _classify_one(db_path, "idor:path-num")
+    assert row[0] == "gf:idor"
+    assert row[1] == 35
+    assert row[2] is not None and "gf:idor" in row[2]
+    assert row[3] is None
+
+
+def test_classify_idor_path_embedded_uuid(tmp_path: Path) -> None:
+    """A UUID object id in the URL path buckets as idor."""
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="idor:path-uuid",
+        url_path="/files/550e8400-e29b-41d4-a716-446655440000",
+    )
+    _run_classify(db_path)
+    row = _classify_one(db_path, "idor:path-uuid")
+    assert row[0] == "gf:idor"
+    assert row[1] == 35
+
+
+def test_classify_idor_expanded_param_key_workspace(tmp_path: Path) -> None:
+    """A tenant/workspace scoping key (cross-tenant BOLA) buckets as idor."""
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="idor:workspace",
+        url_path="/api/list",
+        query_params={"workspace_id": "acme"},
+    )
+    _run_classify(db_path)
+    row = _classify_one(db_path, "idor:workspace")
+    assert row[0] == "gf:idor"
+    assert row[1] == 35
+    assert row[2] is not None and "gf:idor" in row[2]
+
+
+def test_classify_non_object_path_is_not_idor(tmp_path: Path) -> None:
+    """A static, id-free path stays in the path: fallback — no spurious idor."""
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="static:about",
+        url_path="/about/company/history",
+    )
+    _run_classify(db_path)
+    row = _classify_one(db_path, "static:about")
+    assert row[0] == "path:/about/company"
+    assert row[1] == 0
+    assert row[2] is None
+
+
 def test_classify_work_deterministic(tmp_path: Path, capsys) -> None:
     db_path = _make_fresh_db(tmp_path)
     _insert_work_item(

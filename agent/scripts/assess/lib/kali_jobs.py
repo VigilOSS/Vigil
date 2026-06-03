@@ -101,6 +101,7 @@ def start_job(
 
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     spawned = False
+    job_id: int | None = None
     try:
         created = client.post(
             "jobs",
@@ -186,12 +187,16 @@ def start_job(
     except Exception:
         if spawned:
             _cleanup_spawned_job(container_name, socket_path, pid_file)
-            # The dtach process was spawned and then something failed (most
-            # commonly the status=running PATCH itself). Mark the backend row
-            # 'failed' before re-raising — otherwise the row is stuck at
-            # 'queued' forever (no sweeper covers assessment_jobs). Best-effort,
-            # mirroring the CalledProcessError path: a failing PATCH here must
-            # not mask the original error.
+        # Mark the backend row 'failed' before re-raising whenever it was already
+        # created — otherwise ANY failure after the POST leaves it stuck at
+        # 'queued' forever (no sweeper covers assessment_jobs). This covers the
+        # status=running PATCH (spawned=True), but ALSO the failures that escape
+        # the inner CalledProcessError handler with spawned still False: the paths
+        # PATCH raising, a dtach spawn TimeoutExpired, or docker missing
+        # (FileNotFoundError). A spawn timeout may leave an orphaned dtach process;
+        # that is reconciled separately by kali_sweep_orphans. Best-effort: a
+        # failing PATCH here must not mask the original error.
+        if job_id is not None:
             try:
                 client.patch(f"jobs/{job_id}", {"status": "failed"})
             except Exception:
