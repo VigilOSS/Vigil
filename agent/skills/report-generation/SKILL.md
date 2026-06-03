@@ -57,6 +57,10 @@ standalone paths.
 
 Use these structured fields directly. Recalculate CVSS or remediation only when the
 proved impact at report time materially differs from what was recorded at validation.
+The verifier owns the evidence/impact/remediation story (per `agent/references/finding-fp-and-severity-gate.md`
+and the Four Validation Gates in `agent/agents/vulnerability-analyst.md`); the report-writer **formats**
+that authored story and does not re-derive the impact analysis — the narrow recalculation above (proved
+impact materially changed at report time) is the only exception.
 
 ## Severity Definitions
 

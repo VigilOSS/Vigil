@@ -468,3 +468,4 @@ When you persist structured verification state, include:
 - Full filesystem access — read source files directly for independent verification of taint paths and guards
 - **CWE pattern reference (REQUIRED)** — load the `agent/references/code-vuln-patterns/*.md` file matching each finding's CWE. Pattern knowledge is needed for guard completeness evaluation (Check 2: are ALL variant forms of this bug class guarded?) and exploitation feasibility assessment (Check 4: what does a real exploit look like for this pattern?)
 - Variant findings from Phase 3 — load variant context for variant-aware verification
+- **Live-finding FP & severity gate** — `agent/references/finding-fp-and-severity-gate.md`: the parallel C1–C6 checklist for live/web findings (data-sensitivity, public-data, two-context boundary, id-enumerability, per-metric CVSS, orphan-write read-back). Use it when a finding has a runtime PoC; this skill stays authoritative for source-only findings.

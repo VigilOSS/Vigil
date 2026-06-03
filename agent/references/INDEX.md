@@ -337,6 +337,14 @@ link the registered probe artifact to a finding at scaffold time).
 | `probe-scripts/http_differential.py` | Parametrized HTTP differential (control vs test request; decide on status / length / marker / latency delta) — the shape for IDOR boundaries, auth differentials, and any check that is inconclusive from one request. Stdlib-only; finding-return JSON verdict on the last stdout line. |
 | `probe-scripts/blind_callback_timing.py` | Blind OOB callback + timing fallback (carry a minted `vigil oob mint` nonce host, measure baseline-vs-payload latency) — the shape for blind SSRF / XXE / command-injection / blind SQLi. Authoritative confirmation is `vigil oob poll` on the nonce; timing is the egress-blocked fallback. |
 
+## Finding Verification Gates
+
+Verify-time false-positive and severity-downgrade gates. Used by: vulnerability-analyst, operator.
+
+| File | Purpose |
+|------|---------|
+| `finding-fp-and-severity-gate.md` | General FP + severity-downgrade gate (C1–C6) run at Phase-4 verification: data-sensitivity / public-data / boundary-crossing / id-enumerability checks, per-metric CVSS-vector discipline, orphan-write read-back, kill-trigger catalog, severity ladder. The live/web analog of `code-finding-verification`. |
+
 ## reporting/ — Disclosure & Reporting Formats
 
 | File | Purpose |

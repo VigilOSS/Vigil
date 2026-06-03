@@ -39,6 +39,10 @@ miss obvious and the fix complete. The reasons IDOR ships:
 11. **Object-level pass, property-level fail (BOPLA).** The right object is loaded and ownership
     verified, but the response over-exposes properties or the update over-writes properties the
     caller shouldn't control.
+12. **Upload/create that doesn't validate the parent object exists → orphan-write / storage-pollution.**
+    The write returns `success` for a nonexistent parent id, producing an unlinked artifact rather
+    than impact on a real record (and the resulting blob may still be downloadable — see the
+    object-store IDOR tactic in `agent/references/access-control/idor-modern-architectures.md`).
 
 > **Standing CVE-citation caveat.** Product-named CVE roundups are frequently mis-attributed —
 > always read the NVD description and state the precise CWE + the *missing check*, never trust the

