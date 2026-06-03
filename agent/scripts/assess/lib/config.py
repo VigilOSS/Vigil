@@ -219,6 +219,7 @@ def _verify_backend(cfg: Config) -> None:
     port = parsed.port or (443 if is_https else 80)
     path = f"{(parsed.path or '').rstrip('/')}/engagements/{cfg.engagement_key}/assessment/summary"
 
+    conn: http.client.HTTPConnection | None = None
     try:
         if is_https:
             conn = http.client.HTTPSConnection(host, port, timeout=2)
@@ -227,7 +228,6 @@ def _verify_backend(cfg: Config) -> None:
         conn.request("GET", path)
         resp = conn.getresponse()
         body = resp.read().decode("utf-8", errors="replace")
-        conn.close()
 
         if resp.status == 404:
             print(
@@ -247,3 +247,6 @@ def _verify_backend(cfg: Config) -> None:
     except Exception:
         # Backend unreachable — not fatal, local-only mode is valid
         pass
+    finally:
+        if conn is not None:
+            conn.close()

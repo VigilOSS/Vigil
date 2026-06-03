@@ -377,26 +377,47 @@ def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkey
         assert connection.execute("SELECT value FROM marker").fetchone() == ("custom",)
 
 
-def test_resolve_runtime_data_dir_honours_vigil_then_legacy_then_default(
+def test_resolve_runtime_data_dir_honours_runtime_then_legacy_then_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli.runtime import _resolve_runtime_data_dir
 
     install_root = tmp_path / "install"
 
-    # VIGIL_DATA_DIR wins over everything.
-    monkeypatch.setenv("VIGIL_DATA_DIR", "/mnt/vigil-data")
+    # VIGIL_RUNTIME_DATA_DIR wins over everything.
+    monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", "/mnt/runtime-data")
     monkeypatch.setenv("KALI_MCP_DATA_DIR", "/mnt/legacy-data")
-    assert _resolve_runtime_data_dir(install_root) == Path("/mnt/vigil-data")
+    assert _resolve_runtime_data_dir(install_root) == Path("/mnt/runtime-data")
 
-    # Legacy KALI_MCP_DATA_DIR is honoured when VIGIL_DATA_DIR is unset, so a
-    # pre-rename install that relocated runtime state keeps working post-upgrade.
-    monkeypatch.delenv("VIGIL_DATA_DIR", raising=False)
+    # Legacy KALI_MCP_DATA_DIR is honoured when VIGIL_RUNTIME_DATA_DIR is unset, so
+    # a pre-rename install that relocated runtime state keeps working post-upgrade.
+    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
     assert _resolve_runtime_data_dir(install_root) == Path("/mnt/legacy-data")
 
     # Neither env var set -> default under the install root.
     monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     assert _resolve_runtime_data_dir(install_root) == install_root / ".runtime-data"
+
+    # The orchestrator's VIGIL_DATA_DIR must NOT relocate the runtime dir — the two
+    # are deliberately decoupled (regression guard for the env-collision fix).
+    monkeypatch.setenv("VIGIL_DATA_DIR", "/mnt/orchestrator-data")
+    assert _resolve_runtime_data_dir(install_root) == install_root / ".runtime-data"
+
+    # A value in the install-root .env is honoured host-side, not silently only inside
+    # the container (Codex P2: docker --env-file never reaches this resolver).
+    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
+    install_root.mkdir(parents=True, exist_ok=True)
+    (install_root / ".env").write_text("VIGIL_RUNTIME_DATA_DIR=/mnt/from-dotenv\n")
+    assert _resolve_runtime_data_dir(install_root) == Path("/mnt/from-dotenv")
+
+    # An exported env var still overrides the .env file.
+    monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", "/mnt/from-export")
+    assert _resolve_runtime_data_dir(install_root) == Path("/mnt/from-export")
+    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
+
+    # A relative .env value resolves against the install root, not CWD.
+    (install_root / ".env").write_text("VIGIL_RUNTIME_DATA_DIR=custom-data\n")
+    assert _resolve_runtime_data_dir(install_root) == install_root / "custom-data"
 
 
 def test_resolve_source_root_prefers_cached_source_before_install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

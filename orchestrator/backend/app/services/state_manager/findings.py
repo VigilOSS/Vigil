@@ -526,8 +526,9 @@ def create_finding(
         # NOTE (atomicity): this runs in a separate transaction from the finding
         # INSERT/UPDATE above, and intentionally so. ``_register_artifact_reference``
         # opens its OWN ``get_connection()`` to write the artifact-index row, and
-        # the database is WAL (single writer) with no busy_timeout — calling it
-        # inside the still-open ``BEGIN IMMEDIATE`` finding transaction would hit
+        # the database is WAL (single writer); the nested connection inherits
+        # sqlite3's default 5 s busy-timeout, so calling it inside the still-open
+        # ``BEGIN IMMEDIATE`` finding transaction would block ~5 s and then hit
         # "database is locked". So the index write cannot be folded into the
         # finding transaction. The ``evidence_artifact_id`` back-fill below could in
         # principle ride the finding transaction, but only by registering the
