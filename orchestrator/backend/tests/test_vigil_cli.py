@@ -5164,6 +5164,85 @@ def test_list_references_skill_pairings_name_real_skills(
     assert not bad, f"references paired to non-existent skills: {bad}"
 
 
+def test_list_references_cited_skills_have_paired_references(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Forward direction of the skill<->reference pairing audit.
+
+    `test_list_references_skill_pairings_name_real_skills` covers the inverse
+    (every `skill: X` in a reference resolves to `agent/skills/X/`). This guards
+    the forward gap: when operator docs dispatch a skill with `--skills` and that
+    skill's SKILL.md cites `agent/references/`, at least one reference file must
+    carry `skill: <name>` in frontmatter — otherwise
+    `vigil assess list-references --skill <name>` silently returns []."""
+    import re
+
+    assess_main = _load_assess_main()
+
+    assess_main(["list-references", "--json"])
+    rows = json.loads(capsys.readouterr().out)
+
+    # 1. Skills that have at least one reference paired to them.
+    paired_skill_names = {
+        name
+        for row in rows
+        for name in (s.strip().lower() for s in row["skill"].split(",") if s.strip())
+    }
+
+    # 2. Skills cited via `--skills` in operator docs and dispatch invocations.
+    agent_dir = repo_root / "agent"
+    doc_files: list[Path] = []
+    doc_files.extend(sorted(agent_dir.glob("operator-core*.md")))
+    doc_files.append(agent_dir / "AGENTS.md")
+    doc_files.extend(sorted(agent_dir.glob("shared-constraints*.md")))
+    doc_files.extend(sorted(agent_dir.glob("skills/*/SKILL.md")))
+
+    skills_pattern = re.compile(r"--skills\s+[\"']?([a-z0-9,\- ]+)")
+    cited: set[str] = set()
+    for path in doc_files:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in skills_pattern.finditer(text):
+            for token in match.group(1).split(","):
+                name = token.strip().lower()
+                if not name:
+                    continue
+                # Drop doc placeholders like <name>, $VAR, *.
+                if any(ch in name for ch in "<>$*"):
+                    continue
+                cited.add(name)
+
+    # 3. Only flag skills whose SKILL.md actually promises reference pairings.
+    #    A skill "promises" a `--skill`-discoverable pairing only if it cites a
+    #    references path other than `agent/references/tenants/`: the tenants files
+    #    are per-tenant IR context injected by the operator from scope.json, not
+    #    discovered via `list-references --skill`, so they legitimately carry no
+    #    `skill:` frontmatter. This is the "skills that legitimately have no
+    #    reference pairings" carve-out — without it, every tenant-aware blue skill
+    #    would be a false positive.
+    skills_dir = agent_dir / "skills"
+    refs_cite = re.compile(r"agent/references/(?!tenants/)")
+    cited_promising: set[str] = set()
+    for name in cited:
+        skill_md = skills_dir / name / "SKILL.md"
+        if not skill_md.exists():
+            # Inverse/validation covers non-existent skill names elsewhere.
+            continue
+        if refs_cite.search(skill_md.read_text(encoding="utf-8")):
+            cited_promising.add(name)
+
+    # 4. Any cited, reference-promising skill with no paired reference is a gap.
+    gaps = sorted(cited_promising - paired_skill_names)
+    assert not gaps, (
+        "These skills are cited in operator docs with --skills and their SKILL.md "
+        "references agent/references/, but no reference file carries "
+        "`skill: <name>` in its frontmatter — `vigil assess list-references "
+        "--skill <name>` would return []. Add the skill: pairing to the "
+        "relevant reference files:\n  " + "\n  ".join(gaps)
+    )
+
+
 def test_references_index_md_is_retired() -> None:
     """The legacy references/INDEX.md is replaced by `vigil assess list-references`.
     Guard against it being reintroduced and against operator prompts pointing back at it."""
