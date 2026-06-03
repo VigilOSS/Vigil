@@ -8,6 +8,66 @@
 
 ---
 
+## Why This Keeps Happening — Root-Cause Taxonomy
+
+IDOR is not one bug; it is a family with distinct mechanical causes. Naming the cause makes the
+miss obvious and the fix complete. The reasons IDOR ships:
+
+1. **Authentication ≠ authorization.** The user is logged in (auth gate passed), so the handler
+   assumes they may touch the object. Logged-in says *who*, never *what they own*.
+2. **UI route checked, API/export/webhook path not.** The HTML controller scopes the query, but
+   the JSON API, CSV export, webhook callback, or background job re-implements the lookup unscoped.
+3. **Parent checked, child fetched by raw PK.** `require_member(workspace_id)` guards the route,
+   then the service does `Issue.find(issue_id)` with no `workspace_id` constraint — the leaf is
+   reachable across the parent boundary.
+4. **Trusting client-supplied identity.** Tenant/owner/user ID read from `req.body`, a header, a
+   query param, or an editable JWT claim instead of the server-side session.
+5. **Security by obscurity via UUIDs.** "It's a random ID, no one can guess it," so the developer
+   drops the ownership check entirely. The ID still leaks (logs, referrers, shared links, enumerable
+   neighbors).
+6. **Deny-list field binding.** `$guarded = []`, `[Bind(Exclude=...)]`, `read_only_fields` —
+   blocklists fail *open* the moment a new sensitive column is added to the model.
+7. **Horizontal vs vertical authz split across layers.** Horizontal (own-vs-other-user) enforced in
+   one layer, vertical (user-vs-admin) in another; one layer forgets its half.
+8. **Middleware ordering / framework lifecycle.** The object is resolved (route-model binding,
+   query) *before* the authz filter runs — leaking a 404-vs-403 existence oracle, or skipping authz
+   if the developer forgot to attach it.
+9. **Default-allow framework behavior.** Auto-exported repositories, RLS-disabled tables,
+   `fields = '__all__'` — the framework's default is *expose*, and silence means exposed.
+10. **Copy-paste of an unscoped query.** The single most common mechanical cause: one safe scoped
+    query gets copied into a new handler and the `.filter(user=...)` clause is dropped.
+11. **Object-level pass, property-level fail (BOPLA).** The right object is loaded and ownership
+    verified, but the response over-exposes properties or the update over-writes properties the
+    caller shouldn't control.
+
+> **Standing CVE-citation caveat.** Product-named CVE roundups are frequently mis-attributed —
+> always read the NVD description and state the precise CWE + the *missing check*, never trust the
+> roundup headline. (Real proof: CVE-2024-13585 and CVE-2024-13155 are Stored XSS mislabeled as
+> IDOR in roundups; CVE-2026-1389 "Document Embedder" is a plain WordPress-plugin IDOR, not an
+> AI/RAG bug despite the name.) Do **not** hard-code unassigned CVE numbers — when a public writeup
+> has no CVE yet (e.g. the PraisonAI workspace IDOR), cite the *pattern*, not a fabricated number.
+
+> **CWE map.** CWE-639 = canonical IDOR (authz bypass through a user-controlled key);
+> CWE-566 = SQL-PK variant (child of 639); CWE-862 = missing authz (no check at all);
+> CWE-863 = incorrect authz (a check exists but validates the wrong thing); CWE-284 = the pillar;
+> CWE-602 = client-side enforcement of server-side security.
+
+> **File the finding in the right class — BOLA vs BOPLA vs BFLA.**
+> - **BOLA** (OWASP **API1**, CWE-639) = *wrong object*: caller reaches an object they don't own
+>   by supplying its key. → `agent/references/api-security/API01-broken-object-level-authz.md`
+> - **BOPLA** (OWASP **API3**, CWE-639/CWE-213) = *wrong property*: right object, but an
+>   over-exposed read field or an over-writable mass-assignment field.
+>   → `agent/references/api-security/API03-broken-property-authz.md`
+> - **BFLA** (OWASP **API5**, CWE-862/CWE-863) = *wrong function*: caller invokes an
+>   admin/privileged operation they shouldn't.
+>   → `agent/references/api-security/API05-broken-function-authz.md`
+>
+> See also `agent/skills/idor-testing/SKILL.md`,
+> `agent/references/access-control/idor-modern-architectures.md`, and
+> `agent/references/access-control/idor-identifier-prediction.md`.
+
+---
+
 ## Baseline Patterns (Single-Function / Single-Scope)
 
 Toolchain-catchable patterns. Record as findings if encountered during orientation —
@@ -23,6 +83,14 @@ Invest primary analysis time in the LLM-advantage patterns below.
 ---
 
 ## What You're Hunting (LLM-Advantage Patterns)
+
+> **Why SAST misses IDOR.** IDOR is *semantic*, not *structural*. SAST finds tainted-data-into-sink
+> — but `Order.find(id)` has no tainted flow: it is a syntactically valid query, and the bug is the
+> *absence* of a check, not the presence of a bad one. To catch it a tool must understand the domain
+> model (that `order.user_id == current_user.id` is a mandatory invariant) and authorization is
+> frequently *distributed* across middleware, service layers, hooks, and other files — so the safety
+> of any one query can't be decided locally. That is precisely the gap whole-codebase LLM reasoning
+> closes.
 
 ### 1. Missing Ownership Filter in ORM Queries (IDOR)
 
@@ -350,6 +418,125 @@ public Page<Message> getMessages(Pageable pageable) {
 }
 ```
 
+### 7. Framework Default-Behavior Traps
+
+The default *is* the vulnerability. These frameworks resolve or bind objects without an ownership
+check unless the developer opts in, so silence means exposed. Each pair: the trap, then the fix.
+
+**Laravel — route-model binding skips the policy.** `SubstituteBindings` runs *before* `Authorize`
+in the middleware stack, so the model is resolved (and a 404-vs-403 existence oracle leaks) before
+any policy runs. Forget `->can()` / `$this->authorize()` and **no** ownership check happens at all.
+
+```php
+// Vulnerable — model resolved by ID, returned unscoped
+Route::get('/orders/{order}', [OrderController::class, 'show']);
+public function show(Order $order) { return $order; }   // any user, any order
+
+// Fixed — bind the policy to the route AND assert in the action
+Route::get('/orders/{order}', [OrderController::class, 'show'])->middleware('can:view,order');
+public function show(Order $order) {
+    $this->authorize('view', $order);
+    return $order;
+}
+// OrderPolicy
+public function view(User $user, Order $order): bool { return $user->id === $order->user_id; }
+```
+
+**Laravel — mass assignment.** `$guarded = []` (or defining no `$fillable`) makes *every* column
+mass-assignable; `forceFill()` / `Model::unguard()` bypass the guards entirely.
+
+```php
+// Vulnerable — deny-list wide open; attacker sends is_admin=1
+protected $guarded = [];
+User::create($request->all());
+
+// Fixed — allow-list
+protected $fillable = ['name', 'email'];
+User::create($request->only(['name', 'email']));
+```
+
+**.NET / EF Core — `Find` / `FindAsync` resolves by PK only.** Authenticated ≠ owner.
+
+```csharp
+// Vulnerable — keyed purely on the primary key
+var order = await _db.Orders.FindAsync(id);
+return Ok(order);
+
+// Fixed — AND the owner from the session claim
+var uid = User.FindFirstValue(ClaimTypes.NameIdentifier);
+var order = await _db.Orders.FirstOrDefaultAsync(o => o.Id == id && o.UserId == uid);
+if (order == null) return NotFound();
+```
+
+**.NET — overposting / mass assignment.** `[ApiController]` + binding the EF entity directly lets
+clients set any property; `[Bind(Exclude=...)]` is a deny-list (fails open on new columns).
+
+```csharp
+// Vulnerable — binds the whole entity; client sets IsAdmin / Balance
+public async Task<IActionResult> Update(int id, Order order) { ... }
+
+// Fixed — bind a DTO with only allowed props, map onto the ownership-checked entity
+public async Task<IActionResult> Update(int id, OrderUpdateDto dto) {
+    var uid = User.FindFirstValue(ClaimTypes.NameIdentifier);
+    var order = await _db.Orders.FirstOrDefaultAsync(o => o.Id == id && o.UserId == uid);
+    if (order == null) return NotFound();
+    order.Note = dto.Note;   // only allow-listed fields
+    await _db.SaveChangesAsync();
+    return NoContent();
+}
+```
+
+**Go — no auto-scoping.** No ORM scopes by tenant/owner by default; *every* query must add the
+filter, so a copy-pasted query silently drops it.
+
+```go
+// Vulnerable — keyed on id only
+db.Where("id = ?", id).First(&order)
+
+// Fixed — add the tenant/owner predicate (reusable scope; back with Postgres RLS)
+db.Where("id = ? AND tenant_id = ?", id, tenantID).First(&order)
+// func TenantScope(ctx context.Context) func(*gorm.DB) *gorm.DB { ... }
+db.Scopes(TenantScope(ctx)).Where("id = ?", id).First(&order)
+```
+
+**Prisma / Next.js — `findUnique`.** Resolves by a unique key with *no room* for a relational
+scope (you can't AND a non-unique predicate into `findUnique`), and API routes read `id` from the
+URL, not the session.
+
+```ts
+// Vulnerable — id straight from the URL, no session scope
+const u = await db.user.findUnique({ where: { id: params.id } });
+
+// Fixed — derive identity from the session
+const u = await db.user.findUnique({
+  where: { id: session.user.id },
+  select: { id: true, email: true, name: true },
+});
+// For owner-scoped NON-unique lookups, use findFirst (findUnique can't AND a non-unique scope)
+const order = await db.order.findFirst({ where: { id, ownerId: session.user.id } });
+```
+
+**Hasura / Supabase — Row-Level Security.** Hasura row permission `filter: {}` (no row filter) or a
+missing column allow-list leaks every row. Supabase / PostgREST ship tables with **RLS disabled**,
+so the anon key reads/writes every row (CVE-2025-48757: 303 endpoints across 170 projects).
+
+```jsonc
+// Hasura — Vulnerable: no row filter
+{ "role": "user", "permission": { "filter": {}, "columns": ["*"] } }
+// Hasura — Fixed: scope rows to the session var + allow-list columns
+{ "role": "user",
+  "permission": { "filter": { "user_id": { "_eq": "X-Hasura-User-Id" } },
+                  "columns": ["id", "title", "created_at"] } }
+```
+
+```sql
+-- Supabase/Postgres — Fixed: turn RLS ON and add an owner policy
+alter table orders enable row level security;
+-- perf trap: wrap auth.uid() in a subselect so it's evaluated once, not per-row
+create policy owner_select on orders
+  for select using ((select auth.uid()) = user_id);
+```
+
 ---
 
 ## Python Specific
@@ -383,7 +570,7 @@ public Page<Message> getMessages(Pageable pageable) {
 **Spring**:
 - `JpaRepository.findAll()` without `@PostFilter` — returns all entities
 - `@JsonView` can restrict serialization, but a missing `@JsonView` annotation on a controller method returns all fields
-- Spring Data REST auto-exposes repository methods as REST endpoints — `findAll`, `findById` without auth by default
+- **Spring Data REST auto-exports any `CrudRepository`/`JpaRepository` as full unauthenticated CRUD** — declaring `interface OrderRepository extends JpaRepository<Order, Long> {}` silently publishes `GET/POST/PUT/PATCH/DELETE /orders` and `/orders/{id}` with no auth. Fixes: annotate `@RepositoryRestResource(exported = false)` on repositories that shouldn't be web-reachable; set `RepositoryDetectionStrategy.ANNOTATED` (only `@(Repository)RestResource(exported=true)` repos are exposed); and put method-level `@PreAuthorize("...")` on every exported query/mutation
 - `Specification` and `Predicate` — dynamic query building from request params can expose unintended filter paths
 
 **Jakarta EE**:
@@ -415,9 +602,133 @@ public Page<Message> getMessages(Pageable pageable) {
    Submit invalid data to every endpoint and inspect the error response. Validation errors that
    list field names and constraints are a schema enumeration vector.
 
+6. **"Is the ownership filter on the leaf, or only on the parent?"** (root-cause c)
+   For nested `/{parent}/.../{child}` routes, grep for a `findById(childId)` / `find(child_id)`
+   in the service that runs *after* a parent membership check — the child is the blind spot.
+
+7. **"Is the scope derived from the session, or from the request?"** (root-cause d)
+   Grep tenant/owner identity sourced from `req.body`, `req.query`, `req.headers`, `params`, or an
+   editable JWT claim (`jwt.tenant`, `claims.org`) vs `req.user.id` / `session.user.id` /
+   `current_user`. Client-controlled identity = trust boundary violation.
+
+8. **"Are there raw PK lookups with no relational scope?"** (root-cause j)
+   Grep `\.Find(`, `\.FindAsync(`, `findUnique\(`, `findById\(`, `\.find\(params\[:id\]\)`,
+   `get_object_or_404\([A-Za-z]+, *pk=` — each is an IDOR candidate unless an owner/tenant
+   predicate is present.
+
+9. **"Does route-model binding or auto-CRUD bypass the policy?"** (root-cause h, i)
+   Grep `Route::.*\{[a-z]+\}` not followed by `->can:` / `authorize`; grep
+   `extends CrudRepository|JpaRepository` without `@PreAuthorize` or `exported=false`.
+
+10. **"Allow-list or deny-list binding?"** (root-cause f)
+    Grep `$guarded`, `fields = '__all__'`, whole-`req.body` passed to update, `[Bind(` with
+    `Exclude`, `BeanUtils.copyProperties`. Deny-lists fail open on the next added column.
+
+11. **"Is RLS enabled on every exposed table?"** (root-cause i)
+    Grep migrations for `create table` not followed by `enable row level security`; grep Hasura
+    permissions for `filter: {}`. RLS-off-by-default is an at-scale IDOR.
+
+12. **"Full-object or cherry-picked serialization?"** (BOPLA)
+    Grep `return $model`, `res.json(doc)` with no `.select`, `Ok(entity)` returning the EF entity,
+    Prisma queries missing a `select:`. Over-returning is property-level exposure.
+
+13. **"Do GET and its mutation share the same scope?"**
+    Confirm `PUT`/`DELETE`/GraphQL-mutation handlers *re-apply* ownership — not just the read.
+    Fixing only the read controller is the classic incomplete remediation.
+
+14. **"Does the error path fail closed?"** (ASVS V4.1.5)
+    On authz failure / lookup miss the handler must deny — not fall through to a default-allow
+    branch or return the object anyway.
+
+15. **"Are admin/privileged functions inline in normal controllers?"** (BFLA)
+    Grep for inline `if (user.isAdmin)` / `if current_user.admin?` scattered in feature
+    controllers vs a single consistent policy. Inline privilege checks get forgotten on new routes.
+
+16. **"Is the same object reachable via a second route?"** (root-cause b)
+    Grep for the object's repo call in export/report/webhook/batch handlers that reuse a *raw*
+    repository call the main controller scoped. The side-channel forgets the check.
+
+17. **"Can a bulk/`findAll` filter be widened by the caller?"** (root-cause k / BOPLA-read)
+    Grep `filterset_fields = '__all__'`, dynamic `Specification`/`where` built from request params,
+    `?filter=` passthroughs — a user-controllable filter that can be broadened leaks neighbor rows.
+
 ---
 
 ## Real CVE Examples
+
+> Organized by **root-cause pattern** (the numbered taxonomy above), so each CVE doubles as a
+> worked example of one cause. Per the standing caveat, every entry is the NVD-accurate CWE + the
+> precise missing check, not the roundup headline.
+
+### Pattern: missing-ownership-filter / wrong-key (CWE-639, BOLA)
+
+### CVE-2024-7041 (open-webui ≤ 0.3.8 — CWE-639) — every mutating handler must re-derive ownership
+The `PUT /api/v1/memories/{id}/update` endpoint trusts the path-supplied memory ID and performs no
+ownership check, so any authenticated user can edit another user's stored "memory" records. The
+read was scoped but the mutation handler keyed solely on the path ID — root-cause pattern (a):
+authenticated ≠ owner. Lesson: every *mutating* handler must re-derive ownership server-side, never
+infer it from the fact the caller is logged in. (Also note the AI-product angle: LLM "memory"
+stores are user-scoped data like any other table.)
+
+### CVE-2024-48899 (Moodle — CWE-639) — list/collection endpoints are the blind spot
+The badge *list* endpoint failed to enforce the course-access check that the badge *detail* view
+correctly applied, exposing badges from courses the user couldn't access. Root-cause pattern (b):
+two routes onto the same data, only one scoped. Lesson: list/collection endpoints are the blind
+spot — confirm the index action re-applies the same filter as the show action (Detection Q13/Q16).
+
+### CVE-2023-3219 (EventON WordPress plugin — CWE-639, unauthenticated) — export side-channels forget the check
+The `eventon_ics_download` AJAX action accepts an arbitrary `event_id` and returns the event ICS —
+including unpublished drafts — with no authorization, unauthenticated. The main calendar view
+filtered to published events; the download side-channel did not. Root-cause pattern (b): the
+export/download path re-implements the lookup unscoped. Lesson: ICS/CSV/PDF export endpoints
+forget the check the primary view has.
+
+### Pattern: parent checked, child fetched by raw PK (CWE-639, root-cause c)
+
+### "Parent path checked, child PK unconstrained" — PraisonAI agent platform (2026, CVE pending)
+Routes were guarded by `require_workspace_member(workspace_id)`, but the service layer then did a
+direct primary-key lookup on `issue_id` with **no** `workspace_id` constraint — so a member of any
+workspace could read/modify/delete issues belonging to any other workspace. Worse, the actions were
+logged under the *attacker's* workspace, evading the victim's audit trail. This is the cleanest
+modern illustration of root-cause pattern (c): the parent boundary is enforced, the leaf is fetched
+raw. **Cite the pattern, not a hard CVE number** (per the standing caveat — this writeup has no
+assigned CVE).
+
+### Pattern: incorrect-authz / wrong privilege tier (CWE-863)
+
+### CVE-2025-27507 (ZITADEL — CWE-863) — checking the WRONG privilege tier is still broken authz
+The LDAP IdP endpoint enforced **org-level** permissions where **system/IAM-level** permissions were
+required, letting a lower-privileged actor redirect LDAP credentials and hijack login flows. A check
+existed — it simply validated the wrong privilege tier. Lesson: this is CWE-863 (incorrect authz),
+**not** CWE-862 (missing authz). The distinction matters when classing the finding: "there is a
+check but it asks the wrong question" is a different fix than "there is no check."
+
+### Pattern: missing authorization entirely (CWE-862, the contrast case)
+
+### CVE-2025-39362 (Mollie for WooCommerce — CWE-862) — no check at all
+The plugin was missing authorization **entirely** on an affected operation — not a check keyed on
+the wrong object, simply *no* check. Use this as the contrast for the 862-vs-639 distinction: 862 =
+"no check at all"; 639 = "a check exists but it's keyed on attacker-controlled input." Filing the
+right CWE drives the right remediation (add a gate vs. scope the existing query).
+
+### Pattern: default-allow at scale — RLS / weak admin + enumerable IDs
+
+### CVE-2025-48757 (Supabase / Lovable — RLS disabled at scale) — RLS-off-by-default is an IDOR class
+A scan found 303 endpoints across 170 projects whose tables had **Row-Level Security disabled**,
+making rows readable (and often writable) directly through the public anon key. No per-request bug —
+the *default* (RLS off) was the vulnerability, replicated across projects. Root-cause pattern (i):
+default-allow framework behavior. Lesson: RLS-off-by-default is an at-scale IDOR class; the audit
+question is "is RLS enabled on every exposed table?" (Detection Q11), not "is this one handler safe?"
+
+### McDonald's "McHire" / Paradox.ai (2025, no CVE) — enumerable IDs + missing object check + weak admin auth
+The McHire applicant chatbot admin console accepted the password `123456`, and the
+`/api/lead/cem-xhr` endpoint exposed applicant records by a sequential `lead_id`; decrementing from
+`64,185,742` walked the entire space, exposing ~64M applicant records. Three root causes stacked:
+enumerable IDs (no obscurity to lean on), a missing object-level ownership check (CWE-639), and weak
+admin authentication. Lesson: rate-limiting and audit logging are **not** authorization — the only
+fix is a server-side ownership check on every record fetch.
+
+### Pattern: layer above the query — missing auth gate / route-level access control
 
 ### CVE-2019-3396 (Atlassian Confluence — IDOR + Path Traversal in Widget Connector)
 Confluence's Widget Connector macro allowed users to embed content from URLs. The `_template`
@@ -446,3 +757,47 @@ logic — the queries were correct — but in the missing authentication gate th
 prevented unauthenticated access to the endpoints entirely. SAST checking the query layer
 would see properly parameterized, correctly scoped queries; the vulnerability was one layer
 above, in the routing and auth middleware composition.
+
+---
+
+## Remediation Patterns (with Trade-offs)
+
+No single control fixes IDOR; each has a footgun. Pick by layer and state the trade-off in the
+report.
+
+- **Server-side ownership-scoped queries / default-deny scoping (baseline).** Every fetch carries
+  the owner/tenant predicate (`.filter(user=request.user)`, `WHERE ... AND tenant_id = ?`).
+  *Trade-off:* it must be repeated at every call site, so it gets dropped on copy-paste (root-cause
+  j). Mitigate with a **reusable scope helper** (Rails `current_user.orders`, GORM
+  `Scopes(TenantScope(ctx))`, a base queryset) so the safe path is the easy path.
+- **Centralized authorization.** Rails **Pundit** / **CanCanCan**, Spring **`@PreAuthorize`** /
+  **`@PostAuthorize`**, Laravel **Policies**, **OPA/Rego**, **AWS Cedar**. *Trade-offs:*
+  `@PostAuthorize` runs *after* the query executes (the row is loaded, and a side-effecting query
+  already ran) — prefer `@PreAuthorize` / scoped queries where possible; Laravel policies only fire
+  if you attach them and respect middleware order (`SubstituteBindings` before `Authorize`);
+  OPA/Cedar still need you to **feed them the ownership data** — a policy engine with no
+  `resource.owner` input decides nothing.
+- **Row-Level Security as a DB backstop.** Postgres RLS / Hasura row permissions enforce the
+  predicate even when an app query forgets it. *Trade-offs:* it must be **explicitly enabled** per
+  table (off by default — see CVE-2025-48757), and `auth.uid()` / session-var lookups per row are a
+  perf footgun (wrap in a `(select ...)` subselect so they evaluate once).
+- **DTO / view-model boundary for BOPLA.** Read and write through an allow-listed DTO, never the
+  ORM entity, so new sensitive columns aren't auto-exposed or auto-bound. *Trade-off:* mapping
+  boilerplate; fails silently to the *old* behavior if a handler is left binding the entity.
+- **Default-deny at the function level for BFLA.** Privileged operations require an explicit grant;
+  no inline `if (isAdmin)` scattered through controllers. *Trade-off:* requires a consistent policy
+  surface, but new routes inherit deny instead of inheriting nothing.
+
+**Two caveats that override "clever" fixes:**
+
+1. **UUIDs and indirect-reference maps are defense-in-depth, never the fix** (per the OWASP IDOR
+   Cheat Sheet). Do **not** accept "we switched to UUIDs" as a remediation — the ID still leaks via
+   logs, Referer headers, shared links, and relational neighbors; the missing ownership check is
+   the bug.
+2. **Apply the fix to ALL paths.** Read controller, write controller, CSV/PDF export, webhook
+   callback, batch/cron job, GraphQL mutation — fixing only the read controller is the most common
+   *incomplete* remediation. Re-grep every route that touches the object (Detection Q13/Q16).
+
+**Reporting.** Map every finding to ASVS **V4.2.1** (operation-level authz on the data the user is
+authorized for) and the matching API category: **API1/BOLA** (wrong object), **API3/BOPLA** (wrong
+property), or **API5/BFLA** (wrong function).

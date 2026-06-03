@@ -523,6 +523,21 @@ def create_finding(
                 metadata=transition_metadata,
             )
     if evidence_ref:
+        # NOTE (atomicity): this runs in a separate transaction from the finding
+        # INSERT/UPDATE above, and intentionally so. ``_register_artifact_reference``
+        # opens its OWN ``get_connection()`` to write the artifact-index row, and
+        # the database is WAL (single writer) with no busy_timeout — calling it
+        # inside the still-open ``BEGIN IMMEDIATE`` finding transaction would hit
+        # "database is locked". So the index write cannot be folded into the
+        # finding transaction. The ``evidence_artifact_id`` back-fill below could in
+        # principle ride the finding transaction, but only by registering the
+        # artifact first; the registration is the uncloseable separate writer, and
+        # the report-readiness ``finding_evidence_unindexed`` gate keys on the
+        # presence of that index row (controlled by the registration), not on
+        # ``evidence_artifact_id``. A crash after registration but before this
+        # back-fill leaves ``evidence_artifact_id`` NULL but the artifact indexed,
+        # which does NOT raise a false ``finding_evidence_unindexed`` and self-heals
+        # on the next record/verify write. Keeping the back-fill separate here.
         artifact_id = _common._register_artifact_reference(
             engagement.id,
             evidence_ref,
@@ -559,10 +574,10 @@ def update_finding(
     *,
     slug: str,
     title: str,
-    severity: str,
-    workflow_status: str,
-    verification_state: str,
-    verification_disposition: str,
+    severity: str | None = None,
+    workflow_status: str | None = None,
+    verification_state: str | None = None,
+    verification_disposition: str | None = None,
     defect_family: str,
     root_cause_key: str,
     auth_context: str,
@@ -575,14 +590,25 @@ def update_finding(
     provenance: dict[str, Any] | None,
     evidence_type: str | None = None,
 ) -> dict[str, Any]:
+    # severity / workflow_status / verification_state / verification_disposition
+    # are partial-update fields: ``None`` means "preserve the existing value".
+    # Passing a value sets the matching ``explicit_*_override`` flag so the caller
+    # can deliberately overwrite; ``None`` leaves the override False, and
+    # ``create_finding`` then coalesces the (default) incoming value against the
+    # semantically-matched existing row via ``_coalesce_*`` / ``_stronger_severity``
+    # — i.e. the existing stronger/sticky value is preserved. The defaults below
+    # therefore only take effect when there is NO existing finding to match (a true
+    # create). Previously these were required ``str`` with no default, so the
+    # ``is not None`` guards were always True and every call hard-overwrote the
+    # lifecycle columns — silently downgrading confirmed/reported findings.
     result = create_finding(
         engagement_id,
         slug=slug,
         title=title,
-        severity=severity,
-        workflow_status=workflow_status,
-        verification_state=verification_state,
-        verification_disposition=verification_disposition,
+        severity=severity if severity is not None else "info",
+        workflow_status=workflow_status if workflow_status is not None else "draft",
+        verification_state=verification_state if verification_state is not None else "unreviewed",
+        verification_disposition=verification_disposition if verification_disposition is not None else "none",
         defect_family=defect_family,
         root_cause_key=root_cause_key,
         auth_context=auth_context,

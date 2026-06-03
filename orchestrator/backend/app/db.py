@@ -61,6 +61,8 @@ def _append_notes(existing: str, incoming: str) -> str:
         return existing
     if not existing:
         return incoming
+    if incoming in existing.splitlines():
+        return existing
     return existing + "\n" + incoming
 
 
@@ -77,6 +79,11 @@ def _merge_coverage_status(statuses: list[str]) -> str:
 
 
 def _refresh_service_coverage_status(connection: sqlite3.Connection, engagement_id: int, service_id: int) -> None:
+    # Sibling of state_manager.coverage._refresh_service_coverage_status. They are
+    # NOT merged on purpose: importing that one here would create a cycle
+    # (db -> coverage -> events -> db), and this migration/dedupe-time copy must
+    # tolerate arbitrary legacy status strings (raw .lower()) rather than validate
+    # against the CoverageStatus enum (which raises). Keep the bucketing logic in sync.
     rows = connection.execute(
         "SELECT status FROM assessment_coverage_items WHERE engagement_id = ? AND service_id = ?",
         (engagement_id, service_id),
@@ -2879,7 +2886,7 @@ def update_engagement_status(engagement_id: int, status: str) -> Engagement:
         )
         row = connection.execute(
             """
-            SELECT id, key, target, status, engagement_root, created_at, updated_at
+            SELECT id, key, target, status, engagement_root, engagement_type, created_at, updated_at
             FROM engagements
             WHERE id = ?
             """,

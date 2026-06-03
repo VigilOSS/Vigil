@@ -27,6 +27,15 @@ API-specific testing checklists. Used by: vulnerability-analyst, exploit-develop
 | `api-security/API09-improper-inventory.md` | Undocumented endpoints, deprecated versions |
 | `api-security/API10-unsafe-consumption.md` | SSRF via third-party integrations |
 
+## access-control/ — IDOR/BOLA Deep-Dives
+
+In-depth IDOR/BOLA references beyond the OWASP API1 checklist. Used by: vulnerability-analyst, exploit-developer, operator.
+
+| File | Focus |
+|------|-------|
+| `access-control/idor-modern-architectures.md` | Architecture-specific IDOR/BOLA tactics (GraphQL Relay-GID/batch, JWT claim-trust, signed/presigned refs, cloud datastores, AI/LLM apps, realtime/WS, microservice mesh, cache deception) |
+| `access-control/idor-identifier-prediction.md` | Object-identifier prediction (ObjectId/UUIDv1-v7/ULID/Snowflake/KSUID/NanoID/Stripe) and ID-harvesting techniques |
+
 ## offensive-tactics/ — Red Team TTPs (from ired.team)
 
 Attack techniques organized by kill chain phase. Used by: operator, exploit-developer, vulnerability-analyst.

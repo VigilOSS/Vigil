@@ -27,9 +27,8 @@ from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessError, AssessmentClient, default_runtime_container
 from assess.lib.config import load_config
+from assess.lib.kali_runtime_exec import _cat_container_pid_file, _container_pid_file
 
-
-_DEFAULT_CONTAINER_NAME = default_runtime_container()
 _DEFAULT_MAX_AGE_SECONDS = 3600
 
 # Statuses that are still in-flight (worth probing for liveness). Anything else
@@ -69,13 +68,16 @@ def register(subparsers) -> None:
             f"candidates. Default: {_DEFAULT_MAX_AGE_SECONDS} (1 hour)."
         ),
     )
+    # Resolve at parse time (not bound to a frozen module constant) so
+    # VIGIL_RUNTIME_CONTAINER is read when the parser is built.
+    default_container = default_runtime_container()
     p.add_argument(
         "--container-name",
         dest="container_name",
-        default=_DEFAULT_CONTAINER_NAME,
+        default=default_container,
         help=(
             f"Docker container to probe for liveness via `docker exec ... kill -0` "
-            f"(default: {_DEFAULT_CONTAINER_NAME})."
+            f"(default: {default_container})."
         ),
     )
     p.add_argument(
@@ -158,36 +160,15 @@ def _resolve_run_uuid(row: dict) -> str | None:
     return _run_uuid_from_stdout_path(row.get("stdout_path"))
 
 
-def _container_pid_file(run_uuid: str) -> str:
-    """Mirror of ``kali.py:_container_pid_file`` — the wrapper writes the
-    in-container PID here."""
-    return f"/tmp/vigil-pid-{run_uuid}.pid"
-
-
 def _read_container_pid_result(container_name: str, run_uuid: str) -> _PidReadResult:
-    pid_file = _container_pid_file(run_uuid)
-    try:
-        result = subprocess.run(
-            ["docker", "exec", container_name, "cat", pid_file],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return _PidReadResult(None, f"pid-probe-failed:{exc.__class__.__name__}")
-    if result.returncode != 0:
-        stderr = (result.stderr or "").lower()
-        if "no such file" in stderr or "cannot open" in stderr:
-            return _PidReadResult(None, "pid-file-missing")
-        return _PidReadResult(None, "pid-probe-failed")
-    raw = (result.stdout or "").strip().splitlines()
-    if not raw:
-        return _PidReadResult(None, "pid-file-empty")
-    try:
-        return _PidReadResult(int(raw[0]), "pid-read")
-    except ValueError:
-        return _PidReadResult(None, "pid-file-invalid")
+    """Read the wrapper-recorded PID, preserving the rich diagnostic ``reason``
+    the dry-run output keys on. Delegates to the shared
+    ``kali_runtime_exec._cat_container_pid_file`` core (which emits the same
+    reason tags) and re-wraps its ``(pid, reason)`` tuple into the local
+    ``_PidReadResult`` — no behavioural change, just no duplicated
+    cat/parse/path logic."""
+    pid, reason = _cat_container_pid_file(container_name, _container_pid_file(run_uuid))
+    return _PidReadResult(pid, reason)
 
 
 def _read_container_pid(container_name: str, run_uuid: str) -> int | None:

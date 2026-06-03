@@ -1835,30 +1835,43 @@ def coverage_rollup(engagement_id: int) -> dict[str, Any]:
     reachable hosts. Reports STORED verdicts (no freshness overlay) since it is
     a coarse rollup, not a per-host dispatch decision. Observability only — no gate.
     """
+    # Local import: coverage is imported before command_runs in this package's
+    # __init__, so import the canonical host normalizer lazily to avoid any
+    # init-order coupling (command_runs does not import coverage, so no cycle).
+    from .command_runs import _normalize_liveness_host
+
     _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
-        rows = connection.execute(
+        # Project each coverage item's host (rv.host preferred, else the service
+        # endpoint) and the liveness verdict map in Python, then bucket. The host
+        # key is derived with ``_normalize_liveness_host`` — the same canonical,
+        # IPv6-aware port-strip used when liveness rows are written — so the join
+        # matches stored rows. (The old SQL stripped at the FIRST ':' via instr(),
+        # which turned IPv6 endpoints like ``::1:8080`` into an empty host and
+        # misreported them as 'unprobed'.)
+        item_rows = connection.execute(
             """
-            SELECT COALESCE(hl.reachability_class, 'unprobed') AS klass, COUNT(*) AS count
+            SELECT rv.host AS rv_host, s.endpoint AS endpoint
             FROM assessment_coverage_items ci
             LEFT JOIN assessment_services s ON s.id = ci.service_id
             LEFT JOIN assessment_request_variants rv ON rv.id = ci.request_variant_id
-            LEFT JOIN assessment_host_liveness hl
-                ON hl.engagement_id = ci.engagement_id
-               AND hl.host = LOWER(
-                     COALESCE(
-                       rv.host,
-                       CASE WHEN instr(s.endpoint, ':') > 0
-                            THEN substr(s.endpoint, 1, instr(s.endpoint, ':') - 1)
-                            ELSE s.endpoint END
-                     )
-                   )
             WHERE ci.engagement_id = ?
-            GROUP BY klass
             """,
             (engagement_id,),
         ).fetchall()
-    counts = {row["klass"]: int(row["count"]) for row in rows}
+        liveness_rows = connection.execute(
+            "SELECT host, reachability_class FROM assessment_host_liveness WHERE engagement_id = ?",
+            (engagement_id,),
+        ).fetchall()
+    liveness = {
+        str(r["host"]): str(r["reachability_class"] or "unprobed")
+        for r in liveness_rows
+    }
+    counts: dict[str, int] = {}
+    for item in item_rows:
+        host = _normalize_liveness_host(str(item["rv_host"] or item["endpoint"] or ""))
+        klass = liveness.get(host, "unprobed") if host else "unprobed"
+        counts[klass] = counts.get(klass, 0) + 1
     return {
         "total": sum(counts.values()),
         "reachable": counts.get("live", 0),

@@ -97,7 +97,12 @@ def run(args) -> None:
     ]
 
     body_blocks = [_render_finding(f) for f in findings]
-    content = "\n".join(header_lines) + "\n".join(body_blocks) + "\n"
+    # Separate sections with a blank line so consecutive ``##`` headings are not
+    # glued onto the previous section's last line (which collapses two findings
+    # into one in most Markdown renderers). The leading "\n" guarantees a blank
+    # line between the header block and the first finding too.
+    body = "\n\n".join(body_blocks)
+    content = "\n".join(header_lines) + ("\n" + body + "\n" if body else "")
 
     out_path = Path(cfg.engagement_dir) / "findings.md"
     out_path.write_text(content, encoding="utf-8")

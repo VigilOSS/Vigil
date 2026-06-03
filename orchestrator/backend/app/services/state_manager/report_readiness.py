@@ -111,7 +111,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             if not isinstance(mitre, list) or not mitre:
                 missing_fields.append("mitre_techniques")
         else:
-            if not details.get("cvss_score") and details.get("cvss_score") != 0:
+            if details.get("cvss_score") is None:
                 missing_fields.append("cvss_score")
             if not details.get("cvss_vector"):
                 missing_fields.append("cvss_vector")
@@ -462,12 +462,16 @@ def _report_finding_records(engagement_id: int, *, mode: str = "draft") -> list[
         # ``verification_state == "verified"`` so the disputed filter alone would
         # leak it into draft reports; mirror how ``final`` mode keeps only
         # {confirmed, downgraded} dispositions. There is no chain_required bypass
-        # in ``final`` — a held finding is never report-durable.
+        # in ``final`` — a held finding is never report-durable. Also drop
+        # ``workflow_status == "draft"`` findings: ``report_readiness()`` never
+        # gates them (draft is not a reportable status) and ``final`` mode already
+        # excludes them, so they must not leak into the draft projection either.
         rows = [
             row
             for row in rows
             if row.get("verification_state") != "disputed"
             and row.get("verification_disposition") != "pending_runtime_proof"
+            and row.get("workflow_status") != "draft"
         ]
     elif mode == "final":
         rows = [

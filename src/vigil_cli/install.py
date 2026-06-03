@@ -86,6 +86,7 @@ def _has_preserved_descendant(child_name: str, preserve_rel_paths: set[Path]) ->
 def _sync_dir(src: Path, dest: Path, *, preserve_rel_paths: set[Path]) -> None:
     dest.mkdir(parents=True, exist_ok=True)
 
+    src_names = {item.name for item in src.iterdir()}
     for child in list(dest.iterdir()):
         if _has_preserved_descendant(child.name, preserve_rel_paths):
             remaining = {
@@ -96,7 +97,7 @@ def _sync_dir(src: Path, dest: Path, *, preserve_rel_paths: set[Path]) -> None:
             if remaining and child.is_dir() and (src / child.name).is_dir():
                 _sync_dir(src / child.name, child, preserve_rel_paths=remaining)
             continue
-        if child.name not in {item.name for item in src.iterdir()} and not _is_excluded(child):
+        if child.name not in src_names and not _is_excluded(child):
             if child.is_dir():
                 _rmtree(child)
             else:
