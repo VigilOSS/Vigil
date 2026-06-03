@@ -135,6 +135,19 @@ Cross-ref: `agent/skills/jwt-testing/SKILL.md`, `agent/references/payloads/jwt-p
     -d '{"bucketName":"","objectKey":""}'
   vigil assess kali exec --technique IDOR -- curl -s 'https://target/download?filePath=/'
   ```
+- [ ] **Upload→blob-id→download-route pivot** (Confidence: High) — **a write that returns a blob id
+  is half a read.** When an upload/create response hands back a `ContentVersion` / `068...` id, an
+  S3 key, or a document id, test the *download* route for that id — ownership is frequently unchecked
+  on the download even when the primary API exposes no read. A blob-download IDOR reads other users'
+  uploaded documents = real PII even when the primary/JSON API exposes none. Routes to enumerate:
+  Salesforce `/sfc/servlet.shepherd/version/download/<id>`, `/servlet/servlet.FileDownload?file=<id>`,
+  `/sfsites/c/...`; generic `/download/<id>`, `/files/<id>`, `/document/download/<id>`, presigned `?key=`.
+  ```bash
+  # Upload returned a 068... ContentVersion id; try the download route ownership skips:
+  vigil assess kali exec --technique IDOR -- \
+    curl -s 'https://target/sfc/servlet.shepherd/version/download/068XXXXXXXXXXXXXXX'
+  ```
+  Cross-ref `agent/references/payloads/salesforce-aura-payloads.md` for the Salesforce-specific paths.
 - [ ] **JWE / encrypted-ID malleability** (Confidence: Low — label clearly) — Homegrown "encrypt the
   ID" schemes (ECB, or CBC with no MAC) are malleable. Collect many encrypted IDs and look for
   repeated ECB blocks or reused GCM IVs that betray structure; proper JOSE AEAD resists naive
