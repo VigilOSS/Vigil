@@ -40,6 +40,21 @@
       "maxLength": 128,
       "default": ""
     },
+    "lead_status": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "open",
+        "in_progress",
+        "resolved",
+        "ruled_out",
+        null
+      ],
+      "default": null,
+      "description": "Set to make this note a tracked *lead* (an actionable hypothesis/thread): open|in_progress are the worklist; resolved|ruled_out are closed. Omit/null for a plain reference note. Lead titles must be unique per engagement (title is the natural key) or a re-record overwrites the prior disposition."
+    },
     "provenance": {
       "type": "object",
       "additionalProperties": false,

@@ -164,6 +164,23 @@ JOB_STATUSES = frozenset(JobStatus)
 JOB_PRE_TERMINAL_STATUSES = frozenset({JobStatus.QUEUED, JobStatus.RUNNING})
 JOB_TERMINAL_STATUSES = JOB_STATUSES - JOB_PRE_TERMINAL_STATUSES
 
+class LeadStatus(enum.StrEnum):
+    """Disposition lifecycle for an intel note that is a tracked *lead* (an
+    actionable hypothesis/thread). A note with no ``lead_status`` (NULL) is a
+    plain reference note, not a lead. ``StrEnum`` so members serialize as their
+    bare value."""
+
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    RULED_OUT = "ruled_out"
+
+
+LEAD_STATUSES = frozenset(LeadStatus)
+# Terminal/closed = a lead that no longer needs work. Worklist = the rest.
+LEAD_TERMINAL_STATUSES = frozenset({LeadStatus.RESOLVED, LeadStatus.RULED_OUT})
+LEAD_OPEN_STATUSES = LEAD_STATUSES - LEAD_TERMINAL_STATUSES
+
 ROOT_CAUSE_LINK_KIND = "root_cause"
 
 ROOT_CAUSE_EFFECTS = {"eliminates_finding", "eliminates_attack_path"}

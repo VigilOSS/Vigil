@@ -1,6 +1,6 @@
 ---
 description: State machine bugs, async refactoring artifacts, signal handler races
-skill: code-vulnerability-analysis
+skill: code-vulnerability-analysis, code-variant-analysis
 languages: C/C++, Python, JS
 ---
 
