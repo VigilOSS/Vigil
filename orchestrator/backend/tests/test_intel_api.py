@@ -598,6 +598,74 @@ def test_note_post_get_upsert_and_extra_forbid(client, isolate_settings):
     assert _assert_present_in_search(client, "Recon")
 
 
+def test_note_lead_status_lifecycle(client, isolate_settings):
+    """A note with lead_status is a tracked lead; list_leads(open_only) is the
+    worklist; PATCH to a terminal status drops it; bad status is 422; the migration
+    is idempotent."""
+    import sqlite3
+
+    from app import db as db_module
+    from app.services import intel as intel_service
+
+    _seed_engagement(client, isolate_settings)
+
+    # Plain reference note — not a lead.
+    ref = client.post(f"{INTEL_BASE}/notes", json={"title": "Reference: tech stack"})
+    assert ref.status_code == 201, ref.text
+    assert ref.json().get("lead_status") in (None, "")
+
+    # A tracked lead.
+    lead = client.post(
+        f"{INTEL_BASE}/notes",
+        json={
+            "title": "Lead: Axis SSRF untested",
+            "body_markdown": "Axis 1.x AdminService reachable; SSRF not yet attempted.",
+            "lead_status": "open",
+        },
+    )
+    assert lead.status_code == 201, lead.text
+    assert lead.json()["lead_status"] == "open"
+    lead_id = lead.json()["id"]
+
+    # Invalid status rejected on POST (Pydantic Literal) and on PATCH/supersede
+    # (service-level _validate_lead_status, since those bypass the Literal).
+    bad = client.post(f"{INTEL_BASE}/notes", json={"title": "x", "lead_status": "bogus"})
+    assert bad.status_code == 422, bad.text
+    bad_patch = client.patch(
+        f"{INTEL_BASE}/notes/{lead_id}", json={"payload": {"lead_status": "bogus"}}
+    )
+    assert bad_patch.status_code == 400, bad_patch.text
+
+    # FTS round-trip (lead body indexed).
+    assert _assert_present_in_search(client, "Axis")
+
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        engagement_id = connection.execute(
+            "SELECT id FROM engagements WHERE key = ?", (ENGAGEMENT_KEY,)
+        ).fetchone()[0]
+
+    # Worklist = the open lead only (reference note excluded).
+    open_titles = [r["title"] for r in intel_service.list_leads(engagement_id, open_only=True)]
+    assert open_titles == ["Lead: Axis SSRF untested"], open_titles
+
+    # Disposition it -> drops from the worklist but remains queryable.
+    patched = client.patch(
+        f"{INTEL_BASE}/notes/{lead_id}",
+        json={"payload": {"lead_status": "resolved"}},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["lead_status"] == "resolved"
+    assert intel_service.list_leads(engagement_id, open_only=True) == []
+    all_titles = [r["title"] for r in intel_service.list_leads(engagement_id, open_only=False)]
+    assert all_titles == ["Lead: Axis SSRF untested"], all_titles
+
+    # Migration is idempotent — re-running init_db() does not error or duplicate.
+    db_module.init_db()
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        cols = {row[1] for row in connection.execute("PRAGMA table_info(intel_notes)").fetchall()}
+    assert "lead_status" in cols
+
+
 # ──────────────────────────────────────────────────────────────
 # /intel/credentials alias
 # ──────────────────────────────────────────────────────────────

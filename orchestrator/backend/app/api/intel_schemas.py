@@ -168,6 +168,10 @@ class NoteRecordRequest(_IntelRequestBase):
     tags: list[str] = Field(default_factory=list)
     source_name: str = Field(default="", max_length=128)
     provenance: dict[str, Any] = Field(default_factory=dict)
+    # A note with lead_status set is a tracked *lead* (actionable hypothesis);
+    # None = a plain reference note. Titles are UNIQUE per engagement, so lead
+    # titles must be unique or a re-record overwrites the prior disposition.
+    lead_status: Literal["open", "in_progress", "resolved", "ruled_out"] | None = None
 
 
 class ActivityEntryRecordRequest(_IntelRequestBase):

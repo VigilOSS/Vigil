@@ -1,6 +1,6 @@
 ---
 description: Cross-function size propagation, incomplete bounds checks, realloc chains
-skill: code-vulnerability-analysis
+skill: code-vulnerability-analysis, code-variant-analysis
 languages: C/C++, Python, JS
 ---
 
