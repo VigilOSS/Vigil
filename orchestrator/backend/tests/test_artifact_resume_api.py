@@ -232,6 +232,59 @@ def test_artifact_register_preserves_existing_legacy_finding_slug(client, isolat
     )
 
 
+def test_artifact_register_preserves_explicit_kind_on_bare_reregister(client, isolate_settings) -> None:
+    """A bare re-register (no kind/media_type) must not clobber explicit ones.
+
+    Regression: the ON CONFLICT upsert guarded kind with
+    ``COALESCE(NULLIF(excluded.kind, ''), ...)``, but ``excluded.kind`` carried
+    the ``_guess_kind()`` result, which is never empty (it falls back to a
+    path-inferred kind or ``artifact``). So the guard never fired and a bare
+    ``artifact register <path>`` silently rewrote an explicit kind such as
+    ``verification-narrative`` to the path-inferred default (``note``), making
+    kind-filtered search and report/export paths miss the artifact.
+    """
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    (eng / "notes").mkdir(parents=True, exist_ok=True)
+    (eng / "notes" / "va-047-proof.md").write_text("baseline vs payload proof", encoding="utf-8")
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+    # First registration carries an explicit kind that differs from what
+    # _guess_kind() infers for a notes/ path ("note"), plus an explicit
+    # media_type that differs from the mimetypes guess for .md.
+    first = client.post(
+        f"{BASE}/artifacts",
+        json={
+            "path": "notes/va-047-proof.md",
+            "kind": "verification-narrative",
+            "media_type": "application/x-vigil-proof",
+        },
+    )
+    assert first.status_code == 201, first.text
+    assert first.json()["kind"] == "verification-narrative"
+    assert first.json()["media_type"] == "application/x-vigil-proof"
+
+    # Bare re-register: no kind / no media_type (CLI --kind defaults to "").
+    bare = client.post(f"{BASE}/artifacts", json={"path": "notes/va-047-proof.md"})
+    assert bare.status_code == 201, bare.text
+    assert bare.json()["kind"] == "verification-narrative", "bare re-register clobbered explicit kind"
+    assert bare.json()["media_type"] == "application/x-vigil-proof", "bare re-register clobbered explicit media_type"
+
+    # Search filtered by the original kind must still find it.
+    by_kind = client.get(f"{BASE}/artifacts/search", params={"kind": "verification-narrative"})
+    assert by_kind.status_code == 200, by_kind.text
+    assert any(
+        row["relative_path"] == "notes/va-047-proof.md" for row in by_kind.json()
+    ), "kind-filtered search missed the artifact after bare re-register"
+
+    # An explicit new kind on re-register still overrides (last-writer-wins).
+    relabel = client.post(
+        f"{BASE}/artifacts",
+        json={"path": "notes/va-047-proof.md", "kind": "scan-report"},
+    )
+    assert relabel.status_code == 201, relabel.text
+    assert relabel.json()["kind"] == "scan-report"
+
+
 def test_resume_brief_returns_bounded_operating_picture(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
