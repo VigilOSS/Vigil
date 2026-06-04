@@ -20,7 +20,15 @@ from ..search import (
 )
 
 from . import _common
-from ._common import _remove_written_command_run_artifacts
+from ._common import (
+    _remove_written_command_run_artifacts,
+    COMMAND_RUN_TERMINAL_STATUSES as _FINALIZE_TERMINAL_STATUSES,
+    COMMAND_RUN_FINALIZE_ALLOWED_STATUSES as _FINALIZE_ALLOWED_STATUSES,
+    COMMAND_RUN_MUTABLE_STATUSES as _FINALIZE_MUTABLE_STATUSES,
+    JOB_STATUSES as _JOB_VALID_STATUSES,
+    JOB_TERMINAL_STATUSES as _JOB_TERMINAL_STATUSES,
+    JOB_PRE_TERMINAL_STATUSES as _JOB_PRE_TERMINAL_STATUSES,
+)
 
 
 
@@ -692,11 +700,8 @@ def _infer_command_run_status(
         return "failed"
     return "running"
 
-_FINALIZE_TERMINAL_STATUSES = {"completed", "failed", "timed_out", "killed", "lost"}
-
-_FINALIZE_ALLOWED_STATUSES = _FINALIZE_TERMINAL_STATUSES | {"running"}
-
-_FINALIZE_MUTABLE_STATUSES = {"queued", "running"}
+# Status membership sets are now sourced from the CommandRunStatus enum in
+# _common (imported above under their original private names).
 
 def finalize_command_run(
     engagement_id: int,
@@ -725,7 +730,7 @@ def finalize_command_run(
     if status_value not in _FINALIZE_ALLOWED_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"finalize status must be one of {sorted(_FINALIZE_ALLOWED_STATUSES)}",
+            detail=f"finalize status must be one of {sorted(str(s) for s in _FINALIZE_ALLOWED_STATUSES)}",
         )
     with _common.get_connection() as connection:
         existing_row = connection.execute(
@@ -806,7 +811,7 @@ def finalize_command_run(
             values.append(float(cpu_system_seconds))
         sets.append("partial_results = ?")
         values.append(1 if partial_results else 0)
-        mutable_statuses = tuple(sorted(_FINALIZE_MUTABLE_STATUSES))
+        mutable_statuses = tuple(sorted(str(s) for s in _FINALIZE_MUTABLE_STATUSES))
         values.append(command_run_id)
         values.extend(mutable_statuses)
         # Guard against the read→update race when two finalize PATCHes arrive
@@ -851,11 +856,8 @@ def finalize_command_run(
 # ── Assessment job lifecycle ────────────────────────────────────────
 
 
-_JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
-
-_JOB_VALID_STATUSES = {"queued", "running", *_JOB_TERMINAL_STATUSES}
-
-_JOB_PRE_TERMINAL_STATUSES = _JOB_VALID_STATUSES - _JOB_TERMINAL_STATUSES
+# Job status membership sets are sourced from the JobStatus enum in _common
+# (imported above under their original private names).
 
 def _serialize_job(row) -> dict[str, Any]:
     data = dict(row)
@@ -886,7 +888,7 @@ def record_job(
     if status_value not in _JOB_VALID_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"job status must be one of {sorted(_JOB_VALID_STATUSES)}",
+            detail=f"job status must be one of {sorted(str(s) for s in _JOB_VALID_STATUSES)}",
         )
     metadata_json = json.dumps(audit_metadata, ensure_ascii=False) if audit_metadata is not None else None
     with _common.get_connection() as connection:
@@ -949,7 +951,7 @@ def update_job(
         if status_value not in _JOB_VALID_STATUSES:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"job status must be one of {sorted(_JOB_VALID_STATUSES)}",
+                detail=f"job status must be one of {sorted(str(s) for s in _JOB_VALID_STATUSES)}",
             )
         sets.append("status = ?")
         values.append(status_value)
@@ -1007,7 +1009,7 @@ def update_job(
             and existing_status in _JOB_PRE_TERMINAL_STATUSES
         )
         if guard_terminal_update:
-            pre_terminal_statuses = tuple(sorted(_JOB_PRE_TERMINAL_STATUSES))
+            pre_terminal_statuses = tuple(sorted(str(s) for s in _JOB_PRE_TERMINAL_STATUSES))
             placeholders = ", ".join("?" for _ in pre_terminal_statuses)
             where += f" AND status IN ({placeholders})"
             where_values.extend(pre_terminal_statuses)

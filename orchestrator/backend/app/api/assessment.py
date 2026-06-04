@@ -151,7 +151,7 @@ class CommandRunRecordRequest(BaseModel):
         """Empty completed_at is only valid for in-flight rows (status="running"
         or "queued"). Any terminal status must supply a real timestamp so the
         audit row reflects when the command actually finished."""
-        terminal = {"completed", "failed", "timed_out", "killed", "lost"}
+        terminal = state_manager.COMMAND_RUN_TERMINAL_STATUSES
         if (self.status or "completed") in terminal and not (self.completed_at or "").strip():
             raise ValueError(
                 f"completed_at is required when status='{self.status}'; "

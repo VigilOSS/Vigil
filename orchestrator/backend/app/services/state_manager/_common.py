@@ -106,6 +106,64 @@ VERIFICATION_DISPOSITION_RANK = {
     VerificationDisposition.FALSE_POSITIVE: -1,
 }
 
+class DispatchStatus(enum.StrEnum):
+    """Specialist-dispatch lifecycle status (``assessment_dispatches.status``).
+
+    ``in-progress`` is the single non-terminal state; the rest are terminal.
+    ``StrEnum`` so members compare/serialize as their bare value."""
+
+    IN_PROGRESS = "in-progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    ABORTED = "aborted"
+    BLOCKED = "blocked"
+
+
+class CommandRunStatus(enum.StrEnum):
+    """``assessment_command_runs.status`` lifecycle.
+
+    ``queued``/``running`` are mutable pre-terminal states; a finalize PATCH may
+    only land ``running`` or a terminal state (never back to ``queued``)."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    KILLED = "killed"
+    LOST = "lost"
+
+
+class JobStatus(enum.StrEnum):
+    """``assessment_jobs.status`` lifecycle. Mirrors CommandRunStatus except jobs
+    carry ``stop_failed`` (kill attempt failed) and never ``timed_out``."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    KILLED = "killed"
+    LOST = "lost"
+    STOP_FAILED = "stop_failed"
+
+
+# Derived membership sets (frozenset of enum members). Members compare/hash equal
+# to their str value, so ``"completed" in TERMINAL_DISPATCH_STATUSES`` stays True
+# and these remain the single source of truth for the consuming modules.
+DISPATCH_STATUSES = frozenset(DispatchStatus)
+TERMINAL_DISPATCH_STATUSES = DISPATCH_STATUSES - {DispatchStatus.IN_PROGRESS}
+
+COMMAND_RUN_STATUSES = frozenset(CommandRunStatus)
+COMMAND_RUN_MUTABLE_STATUSES = frozenset({CommandRunStatus.QUEUED, CommandRunStatus.RUNNING})
+COMMAND_RUN_TERMINAL_STATUSES = COMMAND_RUN_STATUSES - COMMAND_RUN_MUTABLE_STATUSES
+# A finalize PATCH accepts the terminal states plus a ``running`` refresh, but not
+# ``queued`` (a row cannot be finalized back to queued).
+COMMAND_RUN_FINALIZE_ALLOWED_STATUSES = COMMAND_RUN_TERMINAL_STATUSES | {CommandRunStatus.RUNNING}
+
+JOB_STATUSES = frozenset(JobStatus)
+JOB_PRE_TERMINAL_STATUSES = frozenset({JobStatus.QUEUED, JobStatus.RUNNING})
+JOB_TERMINAL_STATUSES = JOB_STATUSES - JOB_PRE_TERMINAL_STATUSES
+
 ROOT_CAUSE_LINK_KIND = "root_cause"
 
 ROOT_CAUSE_EFFECTS = {"eliminates_finding", "eliminates_attack_path"}
