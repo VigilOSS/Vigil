@@ -352,6 +352,226 @@ def test_resume_brief_returns_bounded_operating_picture(client, isolate_settings
     )
 
 
+def test_resume_brief_surfaces_open_high_cves(client, isolate_settings) -> None:
+    """build_resume_brief.intel.open_high_cves surfaces cvss>=7 non-terminal CVEs
+    only, sorted by score, with the linkage/component projection — and respects
+    `since`. summary counts are an absolute snapshot (not since-filtered)."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    intel_base = f"/engagements/{ENGAGEMENT_KEY}/intel"
+
+    # Open high CVE with a public PoC — must surface.
+    assert client.post(
+        f"{intel_base}/cves",
+        json={
+            "cve_id": "CVE-2019-0227",
+            "affected_component": "Apache Axis 1.x",
+            "cvss_score": 7.5,
+            "poc_available": True,
+            "validation_status": "poc_available_unverified",
+            "source_name": "osint-analyst",
+        },
+    ).status_code == 201
+    # Another open high CVE (higher score) — must sort first.
+    assert client.post(
+        f"{intel_base}/cves",
+        json={
+            "cve_id": "CVE-2022-23855",
+            "affected_component": "Eurekify",
+            "cvss_score": 9.8,
+            "validation_status": "unverified",
+            "source_name": "osint-analyst",
+        },
+    ).status_code == 201
+    # High CVE already dispositioned (ruled_out) — must NOT surface.
+    assert client.post(
+        f"{intel_base}/cves",
+        json={
+            "cve_id": "CVE-2024-36522",
+            "affected_component": "Apache Wicket",
+            "cvss_score": 9.8,
+            "validation_status": "ruled_out",
+            "source_name": "osint-analyst",
+        },
+    ).status_code == 201
+    # Low-severity CVE (below cvss 7) — must NOT surface.
+    assert client.post(
+        f"{intel_base}/cves",
+        json={
+            "cve_id": "CVE-2017-9394",
+            "affected_component": "CA Identity Governance",
+            "cvss_score": 5.4,
+            "validation_status": "unverified",
+            "source_name": "osint-analyst",
+        },
+    ).status_code == 201
+
+    body = client.get(f"{BASE}/resume-brief").json()
+    intel = body["intel"]
+    assert intel["summary"]["cves"] == 4  # snapshot count, all rows
+    open_ids = [r["cve_id"] for r in intel["open_high_cves"]]
+    assert open_ids == ["CVE-2022-23855", "CVE-2019-0227"], open_ids  # sorted desc, open+high only
+    axis = intel["open_high_cves"][1]
+    assert axis["linked_finding_slug"] == ""
+    assert axis["affected_component"] == "Apache Axis 1.x"
+    assert intel["open_leads"] == []  # stubbed until lead lifecycle lands
+
+    # `since` with a Z (offset-aware, the documented format) must NOT crash
+    # against naive intel CURRENT_TIMESTAMP rows, and must filter correctly.
+    future = client.get(f"{BASE}/resume-brief", params={"since": "2099-01-01T00:00:00Z"})
+    assert future.status_code == 200, future.text
+    assert future.json()["intel"]["open_high_cves"] == []
+    assert future.json()["intel"]["summary"]["cves"] == 4  # summary stays absolute
+    past = client.get(f"{BASE}/resume-brief", params={"since": "2000-01-01T00:00:00Z"})
+    assert past.status_code == 200, past.text
+    assert [c["cve_id"] for c in past.json()["intel"]["open_high_cves"]] == [
+        "CVE-2022-23855",
+        "CVE-2019-0227",
+    ]
+
+
+def test_resume_brief_surfaces_open_leads(client, isolate_settings) -> None:
+    """build_resume_brief.intel.open_leads surfaces only open/in_progress leads
+    (not terminal ones, not plain reference notes), projected to title+status."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    intel_base = f"/engagements/{ENGAGEMENT_KEY}/intel"
+
+    assert client.post(
+        f"{intel_base}/notes",
+        json={"title": "Lead: Axis SSRF untested", "lead_status": "open"},
+    ).status_code == 201
+    assert client.post(
+        f"{intel_base}/notes",
+        json={"title": "Lead: host-header SSRF hypothesis", "lead_status": "in_progress"},
+    ).status_code == 201
+    # Terminal lead — must NOT surface.
+    assert client.post(
+        f"{intel_base}/notes",
+        json={"title": "Lead: jQuery XSS", "lead_status": "ruled_out"},
+    ).status_code == 201
+    # Plain reference note — must NOT surface.
+    assert client.post(
+        f"{intel_base}/notes", json={"title": "Reference: tech stack"}
+    ).status_code == 201
+
+    intel = client.get(f"{BASE}/resume-brief").json()["intel"]
+    titles = sorted(row["title"] for row in intel["open_leads"])
+    assert titles == ["Lead: Axis SSRF untested", "Lead: host-header SSRF hypothesis"], titles
+    # id is included so the operator can disposition the exact row via update-intel.
+    assert all(set(row) == {"id", "title", "lead_status"} for row in intel["open_leads"])
+    assert all(isinstance(row["id"], int) for row in intel["open_leads"])
+    assert intel["summary"]["notes"] == 4  # snapshot count includes all notes
+
+    # Z-suffixed (offset-aware) cutoff must not crash against naive timestamps.
+    future = client.get(f"{BASE}/resume-brief", params={"since": "2099-01-01T00:00:00Z"})
+    assert future.status_code == 200, future.text
+    assert future.json()["intel"]["open_leads"] == []
+
+
+def test_intel_readiness_red_engagement(client, isolate_settings) -> None:
+    """GET /intel/readiness buckets open PoC-backed high CVEs, exploited-but-
+    unlinked CVEs, dangling linked_finding_slug refs, and open leads. Advisory."""
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng, slug="VA-047")  # a real active finding to link to
+    intel_base = f"/engagements/{ENGAGEMENT_KEY}/intel"
+
+    def cve(**kw):
+        assert client.post(f"{intel_base}/cves", json=kw).status_code == 201, kw
+
+    # open PoC-backed high CVE -> open_high_cves
+    cve(cve_id="CVE-2019-0227", affected_component="Apache Axis 1.x", cvss_score=7.5,
+        poc_available=True, validation_status="poc_available_unverified")
+    # high but NO poc -> excluded from the (stricter) advisory
+    cve(cve_id="CVE-2022-23855", affected_component="Eurekify", cvss_score=9.8,
+        poc_available=False, validation_status="unverified")
+    # exploited with no linked finding -> exploited_unlinked_cves
+    cve(cve_id="CVE-2020-0001", affected_component="X", cvss_score=8.0, validation_status="exploited")
+    # exploited linked to a REAL finding -> neither unlinked nor dangling
+    cve(cve_id="CVE-2020-0002", affected_component="Y", cvss_score=8.0,
+        validation_status="exploited", linked_finding_slug="VA-047")
+    # exploited linked to a MISSING finding -> dangling (missing)
+    cve(cve_id="CVE-2020-0003", affected_component="Z", cvss_score=8.0,
+        validation_status="exploited", linked_finding_slug="VA-999")
+    assert client.post(f"{intel_base}/notes", json={"title": "Lead: hosthdr SSRF", "lead_status": "open"}).status_code == 201
+
+    data = client.get(f"{intel_base}/readiness").json()
+    assert data["applicable"] is True
+    assert [c["cve_id"] for c in data["open_high_cves"]] == ["CVE-2019-0227"]
+    assert [c["cve_id"] for c in data["exploited_unlinked_cves"]] == ["CVE-2020-0001"]
+    assert [d["cve_id"] for d in data["dangling_links"]] == ["CVE-2020-0003"]
+    assert data["dangling_links"][0]["reason"] == "missing"
+    assert [lead["title"] for lead in data["open_leads"]] == ["Lead: hosthdr SSRF"]
+    # Every readiness row carries the backend id so update-intel <id> is directly runnable.
+    for bucket in ("open_high_cves", "exploited_unlinked_cves", "dangling_links", "open_leads"):
+        assert all(isinstance(row.get("id"), int) for row in data[bucket]), bucket
+
+
+def test_intel_readiness_blue_engagement_not_applicable(client, isolate_settings) -> None:
+    """Blue/IR engagements don't pursue CVE exploitation -> applicable=False,
+    empty buckets, even with a high PoC CVE recorded."""
+    key = "2026-05-19-130000-blue"
+    eng = isolate_settings["engagements_dir"] / key
+    (eng / "sessions").mkdir(parents=True, exist_ok=True)
+    (eng / "engagement.json").write_text(
+        json.dumps({
+            "key": key, "target": "https://example.com", "hostname": "example.com",
+            "created_at": "2026-05-19T13:00:00Z", "engagement_type": "blue",
+        }),
+        encoding="utf-8",
+    )
+    (eng / "scope.json").write_text(
+        json.dumps({
+            "hostname": "example.com", "hosts": ["example.com"], "status": "in_progress",
+            "current_phase": "triage", "engagement_type": "blue",
+        }),
+        encoding="utf-8",
+    )
+    assert client.get(f"/engagements/{key}").status_code == 200
+    intel_base = f"/engagements/{key}/intel"
+    assert client.post(
+        f"{intel_base}/cves",
+        json={"cve_id": "CVE-2019-0227", "affected_component": "X", "cvss_score": 9.8,
+              "poc_available": True, "validation_status": "unverified"},
+    ).status_code == 201
+
+    data = client.get(f"{intel_base}/readiness").json()
+    assert data["applicable"] is False
+    assert data["engagement_type"] == "blue"
+    assert data["open_high_cves"] == []
+    assert data["exploited_unlinked_cves"] == []
+    assert data["open_leads"] == []
+
+
+def test_resolve_linked_finding_join(client, isolate_settings) -> None:
+    """intel.resolve_linked_finding reads linked_finding_slug back against
+    assessment_findings — the read path for an otherwise write-only field."""
+    from app.services import intel as intel_service
+
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng, slug="VA-047")  # workflow_status=active
+
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        engagement_id = connection.execute(
+            "SELECT id FROM engagements WHERE key = ?", (ENGAGEMENT_KEY,)
+        ).fetchone()[0]
+
+    assert intel_service.resolve_linked_finding(engagement_id, "VA-047") == {
+        "exists": True,
+        "workflow_status": "active",
+    }
+    assert intel_service.resolve_linked_finding(engagement_id, "VA-999") == {
+        "exists": False,
+        "workflow_status": None,
+    }
+    assert intel_service.resolve_linked_finding(engagement_id, "") == {
+        "exists": False,
+        "workflow_status": None,
+    }
+
+
 def test_report_readiness_blocks_unlinked_markdown_notes(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
