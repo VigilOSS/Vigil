@@ -212,8 +212,23 @@ Structured document covering:
 - What the software does (one paragraph)
 - External entry points (network, CLI, files, environment, APIs)
 - Trust boundaries (where untrusted data crosses into trusted processing)
+- **Trusted inputs** — sources the system is *designed* to trust and that a hunter should NOT
+  treat as attacker-controlled: operator-owned config files, deployment-env secrets, internal
+  service calls behind mTLS/IAM, already-authenticated/-authorized callers. Name each source and
+  its trust assumption, including any precondition ("JWT claims — trusted only after signature
+  verification"). Mislabeling a trusted input as untrusted is the most common false-positive
+  cause, so make the trusted set explicit, not implied.
 - High-value targets (what an attacker would want: RCE, data exfiltration, auth bypass, DoS)
-- Historical vulnerability patterns (from git history and known CVEs)
+- Historical vulnerability patterns → **CVE bug-shapes**. For each past CVE (CVE-fixing commits in
+  git history, or an OSV/NVD lookup on the project + top dependencies), distill the abstract bug
+  shape: the vulnerable pattern, the CWE, the fixed function, and two seed questions for Phase 2 —
+  (1) is the fix actually present and complete in this revision? (2) does the same pattern exist in
+  sibling paths the patch never touched? Record each as an intel note so the hunter and
+  variant-hunter inherit them as guidance hypotheses, and write a flat
+  `tools/analysis-state/cve-bug-shapes.txt` index (one shape id per line, with per-shape detail in
+  `tools/analysis-state/cve-bug-shapes/<id>.json`) so the operator can fan a variant-hunter swarm
+  across them when there are many. ("What was exploited before" is a higher-yield seed than "find
+  me a bug.")
 
 ### `#### File Classifications`
 Use `vigil assess contract code-classify` as the classification shape source. Every classification
@@ -342,8 +357,9 @@ downstream agents cannot recover from. Declare gaps explicitly.
 ### Threat Model
 - [ ] "What the software does" section is concrete (names protocols, data formats, trust relationships)
 - [ ] External entry points section covers ALL categories (network, CLI, file, env, API, IPC)
+- [ ] Trusted inputs section explicitly names sources to treat as trusted (config, env secrets, internal mTLS callers, authenticated principals) — not only the untrusted ones
 - [ ] High-value targets section names specific attacker goals (not generic "code execution")
-- [ ] Historical patterns section references git history or known CVEs (or states none found)
+- [ ] Historical patterns section distills past CVEs into reusable bug-shapes (or states none found), not just a reference to git history
 
 ### Coverage Gap Declaration Rule
 For any item you could NOT complete, declare it in `#### Coverage Gaps` with:

@@ -53,7 +53,7 @@ Before producing any output, confirm:
       `queue_item_id` as the file identity source
 - [ ] **Structural index loaded (if available at `tools/analysis-state/structural-index/`)** -- provides
       function map as completeness anchor, plus entry points, sinks, exports, and import targets as advisory navigation metadata
-- [ ] **Threat model summary available** -- trust boundaries, entry points, high-value targets
+- [ ] **Threat model summary available** -- trust boundaries, entry points, high-value targets, and trusted inputs (sources NOT to treat as attacker-controlled)
 - [ ] **Call graph excerpt available** -- shows how functions connect to entry points and other modules
 - [ ] **Guidance hypotheses available** (optional -- test AFTER broad analysis, see Phase E.5)
 - [ ] **Applicable vulnerability classes listed** -- all classes requiring effort scores (from
@@ -647,9 +647,11 @@ Before returning results, verify:
   first. Most cross-module questions can be answered with a 30-second file read.
 - **These bugs survived SAST** -- if grep would find it, it's already fixed. Think deeper.
   Multi-function chains, error path interactions, integer compositions, protocol semantics.
-- **Concrete exploits, not speculation** -- "could potentially", "may allow", "might be
-  possible" are banned. Either demonstrate the exploit path or disposition as suspicious
-  with a specific hypothesis.
+- **Concrete exploits, not speculation** -- for every candidate produce one of two things: a
+  complete taint-to-sink chain with attacker-controlled input (record as `finding`), or a
+  specific documented hypothesis naming the exact missing context (record as `suspicious`).
+  Vague language ("could potentially", "may allow") is a signal the analysis is unfinished --
+  finish the chain or file it `suspicious`; it is never a reason to drop the candidate.
 - **Adversarial escalation is not optional** -- Phase E must run after Phases A-D. The
   first pass finds the obvious issues. The escalation pass finds the CVEs.
 - **Broad analysis before hypotheses** -- Phases A-E run unconstrained against all applicable
