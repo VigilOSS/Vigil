@@ -7,12 +7,14 @@ from fastapi import HTTPException, status
 from ..events import _engagement_or_404
 
 from . import _common
-from ._common import _require_canonical_finding_slugs
+from ._common import (
+    DispatchStatus,
+    TERMINAL_DISPATCH_STATUSES as _TERMINAL_DISPATCH_STATUSES,
+    _require_canonical_finding_slugs,
+)
 from .findings import _ensure_finding_slugs_exist
 
 
-
-_TERMINAL_DISPATCH_STATUSES = {"completed", "failed", "aborted", "blocked"}
 
 def _require_terminal_dispatch_status(value: str | None) -> str | None:
     if value is None:
@@ -48,7 +50,7 @@ def record_dispatch(
     task: str | None = None,
     scope_host: str | None = None,
     dispatched_at: str | None = None,
-    status_value: str = "in-progress",
+    status_value: str = DispatchStatus.IN_PROGRESS,
     model: str | None = None,
     reasoning: str | None = None,
     requested_model: str | None = None,
