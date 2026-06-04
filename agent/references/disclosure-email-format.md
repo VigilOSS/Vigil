@@ -1,3 +1,9 @@
+---
+description: "Email disclosure format for vendor security teams: structure, rules, anti-patterns"
+skill: report-generation
+category: Disclosure & Reporting Formats
+---
+
 # Security Disclosure Email Format
 
 Reference format for email-based vulnerability disclosures to security teams

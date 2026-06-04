@@ -1,3 +1,8 @@
+---
+description: Scaffold tenant reference for Google Workspace alert investigations (GAM/gcloud IR context)
+skill: google-workspaces
+---
+
 # <CUSTOMER> — Google Workspace Tenant Reference
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**

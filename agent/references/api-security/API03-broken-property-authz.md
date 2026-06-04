@@ -1,3 +1,8 @@
+---
+description: Excessive data exposure, mass assignment
+skill: parameter-fuzzing
+---
+
 # API3:2023 — Broken Object Property Level Authorization
 
 > Skill: `parameter-fuzzing`

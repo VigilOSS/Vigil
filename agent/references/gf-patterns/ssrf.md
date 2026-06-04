@@ -2,6 +2,8 @@
 name: gf-patterns:ssrf
 description: URL-fetch parameter patterns that signal server-side request forgery surfaces
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+bucket: ssrf
+weight: 40
 ---
 
 # gf: ssrf

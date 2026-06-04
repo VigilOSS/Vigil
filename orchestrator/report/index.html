@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Vigil Report</title>
+    <!--
+      Data injection node. The backend export endpoint replaces the sentinel
+      string "__VIGIL_REPORT_DATA__" (including its surrounding quotes) with the
+      real JSON payload. The sentinel-with-quotes is itself valid JSON (a string),
+      so when no injection has happened (dev / un-injected template) App.tsx can
+      JSON.parse this node, observe it equals the sentinel string, and fall back
+      to the committed dev fixture.
+    -->
+    <script id="vigil-report-data" type="application/json">"__VIGIL_REPORT_DATA__"</script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

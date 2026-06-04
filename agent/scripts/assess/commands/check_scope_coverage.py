@@ -169,7 +169,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "C40 — emit per-host outcome status (WAF tier, service inventory, "
-            "directory-fuzz coverage, nikto trigger, OSINT) for every host the "
+            "directory-fuzz coverage, tech fingerprint, OSINT) for every host the "
             "engagement has signal for. Outcomes are read from intel / surface / "
             "service / decision tables; this gate NEVER queries assessment_command_runs. "
             "Unmet objectives WARN but do not block (use --force on transition-phase "
@@ -240,7 +240,7 @@ _PER_HOST_OBJECTIVES: tuple[str, ...] = (
     "waf_tier",
     "service_inventory",
     "directory_fuzz",
-    "nikto_trigger",
+    "tech_fingerprint",
     "osint",
 )
 
@@ -277,7 +277,7 @@ _OBJECTIVE_DISPATCH_HINTS: dict[str, str] = {
         "coverage_deferral with reason='brute-force forbidden by scope brief' "
         "if the program disallows directory brute-force"
     ),
-    "nikto_trigger": (
+    "tech_fingerprint": (
         f"dispatch {_HINT_RECON_SPECIALIST} with web-recon (any of whatweb / "
         "httpx -tech-detect / nuclei tech templates / nikto recording a "
         "tech-component intel row satisfies this), OR record a coverage_deferral"

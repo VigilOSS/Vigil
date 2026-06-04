@@ -1,3 +1,9 @@
+---
+description: CL.TE, TE.CL, TE.TE obfuscation, HTTP/2 downgrade
+skill: request-smuggling
+source: PayloadsAllTheThings — Request Smuggling
+---
+
 # HTTP Request Smuggling Payloads
 
 > Source: PayloadsAllTheThings — Request Smuggling

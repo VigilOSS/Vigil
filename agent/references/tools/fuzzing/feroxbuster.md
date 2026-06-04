@@ -1,3 +1,8 @@
+---
+description: Recursive content discovery (primary for directory scanning)
+skill: directory-fuzzing
+---
+
 # feroxbuster
 
 **Purpose:** Fast, recursive content discovery (Rust-based replacement for gobuster/dirb)

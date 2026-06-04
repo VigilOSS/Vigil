@@ -1,3 +1,8 @@
+---
+description: Standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata)
+source: Custom — compiled from security research and common patterns
+---
+
 # Information Disclosure Probes — Checklist
 
 > Source: Custom — compiled from security research and common patterns

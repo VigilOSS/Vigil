@@ -1,3 +1,9 @@
+---
+description: Extension bypass, Content-Type bypass, magic bytes, SVG XSS, zip slip
+skill: file-upload-testing
+source: PayloadsAllTheThings — Upload Insecure Files
+---
+
 # File Upload Bypass Payloads
 
 > Source: PayloadsAllTheThings — Upload Insecure Files

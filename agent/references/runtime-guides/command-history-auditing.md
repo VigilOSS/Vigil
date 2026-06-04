@@ -1,3 +1,7 @@
+---
+description: How to read vigil assess list-command-runs as a coverage map — use it to pick variants that haven't been probed, not to gate-keep reruns; includes field-interpretation guide for retention/suppression
+---
+
 # Command History — Coverage Check Before Probing
 
 Every `vigil assess kali` call made during an engagement lands in the orchestrator

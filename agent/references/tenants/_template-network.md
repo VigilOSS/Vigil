@@ -1,3 +1,7 @@
+---
+description: Scaffold tenant reference for network-plane alert investigations (firewall, proxy, SIEM, DNS, beacon hunting)
+---
+
 # <CUSTOMER> — Network / Perimeter Tenant Reference
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**

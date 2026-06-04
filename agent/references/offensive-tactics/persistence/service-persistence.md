@@ -1,3 +1,7 @@
+---
+description: Service DLL, schtasks, BITS jobs
+---
+
 # Service-Based Persistence
 
 ## Service DLL in svchost.exe

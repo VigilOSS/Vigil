@@ -1,3 +1,7 @@
+---
+description: Vendor exact-version triangulation — npm/pypi/maven publish-date probes, Sentry release-tag → git-SHA recipes, per-vendor mapping examples
+---
+
 # Vendor Exact-version Fingerprint Probes
 
 When osint-analyst needs an exact patch level for CVE matching, version-only

@@ -1,3 +1,7 @@
+---
+description: Engagement style, PEAK/Pyramid/MITRE mindset, escalation expectations, and optional Athena final phase
+---
+
 # Engagement Methodology
 
 Primary engagement style and investigation mindset for `vigil`.

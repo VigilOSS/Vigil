@@ -1,3 +1,7 @@
+---
+description: Terraform, GoPhish, Modlishka reverse proxy, SMTP
+---
+
 # Red Team Infrastructure Setup
 
 ## Terraform Automation

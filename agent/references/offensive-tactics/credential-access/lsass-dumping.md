@@ -1,3 +1,7 @@
+---
+description: mimikatz, procdump, comsvcs.dll, MiniDumpWriteDump
+---
+
 # LSASS Credential Dumping
 
 ## Mimikatz (In-Memory)

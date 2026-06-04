@@ -1,3 +1,8 @@
+---
+description: APK/AAB assessment, MASVS mapping, Android storage/crypto/network/IPC/WebView/native testing, API-level notes
+skill: android-app-security
+---
+
 # Android App Security Reference
 
 ## Assessment Spine

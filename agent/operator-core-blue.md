@@ -37,7 +37,7 @@ per-action operator approval through the proposal pipeline below.
 - **Always-active rules** (loaded by every blue role): `agent/rules/resume.md`, `agent/rules/triage.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`, `agent/rules/ir-evidence.md`.
 - **Skill discovery** — `vigil assess list-skills` returns the compact skill index (`name` + one-liner). The operator does not read full skill files; specialists do.
 - **Detailed skill bodies** — `agent/skills/<name>/SKILL.md`.
-- **References / payload libraries / tenant context** — `agent/references/INDEX.md`; tenant refs at `agent/references/tenants/<customer>-<platform>.md`.
+- **References / payload libraries / tenant context** — `vigil assess list-references` (`--skill <name>` for a skill's paired refs); tenant refs at `agent/references/tenants/<customer>-<platform>.md`.
 
 Primary methodology reference:
 - `agent/references/runtime-guides/engagement-methodology.md`

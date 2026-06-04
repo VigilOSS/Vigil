@@ -1,3 +1,8 @@
+---
+description: iOS secure boot, SEP, Data Protection, sandboxing, XPC/Mach, dyld/XNU, observability, jailbreak, SRD boundaries
+skill: mobile-lab-setup
+---
+
 # iOS Platform And Device Lab Reference
 
 ## Authorization Gate

@@ -1,3 +1,8 @@
+---
+description: Bulk DNS resolution and record enumeration — NXDOMAIN/CPU spike pattern, two-step lean-then-enrich, `GOMAXPROCS=1 nice -n 10` profile
+skill: subdomain-enumeration
+---
+
 # dnsx
 
 **Purpose:** Fast multi-purpose DNS toolkit for bulk resolution and record enumeration

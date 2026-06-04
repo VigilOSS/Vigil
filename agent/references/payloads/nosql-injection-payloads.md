@@ -1,3 +1,9 @@
+---
+description: MongoDB operators ($gt, $ne, $regex, $where), auth bypass, blind extraction
+skill: nosql-injection
+source: PayloadsAllTheThings — NoSQL Injection
+---
+
 # NoSQL Injection Payloads
 
 > Source: PayloadsAllTheThings — NoSQL Injection

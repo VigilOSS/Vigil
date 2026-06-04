@@ -1,3 +1,8 @@
+---
+description: ASN → CIDR mapping; feeds cero for TLS SAN sweeps
+skill: subdomain-enumeration
+---
+
 # asnmap
 
 **Purpose:** ASN → CIDR mapper. Takes a domain or org name, looks up the owning ASN(s), and emits the IP ranges those ASNs announce. The cero feed for the Phase 3 TLS SAN sweep.

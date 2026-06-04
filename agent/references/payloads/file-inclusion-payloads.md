@@ -1,3 +1,9 @@
+---
+description: Path traversal, PHP wrappers, null byte, log poisoning, interesting files
+skill: file-inclusion
+source: PayloadsAllTheThings — File Inclusion
+---
+
 # File Inclusion (LFI/RFI) Payloads
 
 > Source: PayloadsAllTheThings — File Inclusion

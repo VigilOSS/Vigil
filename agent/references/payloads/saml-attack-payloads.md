@@ -1,3 +1,8 @@
+---
+description: Unsigned assertion templates, XSW signature wrapping variants (1-8), NameID comment/encoding injection, attribute escalation, RelayState redirect, XXE via SAML
+skill: saml-sso-testing
+---
+
 # SAML Attack Payloads
 
 Templates and payloads for SAML SSO security testing. Organized by attack class:
