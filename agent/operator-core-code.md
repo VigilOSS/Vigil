@@ -231,6 +231,20 @@ Adaptive batching is part of the method, not a convenience:
 
 #### Phase 2A -- Broad Hunt
 
+**CVE bug-shape seeding (when the architect produced `tools/analysis-state/cve-bug-shapes.txt`).**
+Before the broad-hunt loop, hunt the historical bug-shapes — "is this old bug's fix complete and
+applied everywhere?" is a faster path to a finding than rediscovering the class. Scale the dispatch
+to the number of shapes:
+- **Few shapes:** dispatch one `code-variant-hunter` over the bug-shape intel notes.
+- **Many shapes (Git/libcurl carry dozens of historical CVEs):** cluster related shapes (e.g. all
+  size-arithmetic integer overflows into one cluster) and fan out with
+  `vigil assess agent start-swarm --role code-variant-hunter --items-file
+  tools/analysis-state/cve-bug-shapes.txt --batch-size 1-2 --skills code-variant-analysis ...`,
+  firing one specialist per worker row.
+Each agent, for its shape(s): verify the fix is complete in this revision, then hunt sibling code
+paths for the same pattern the patch never touched. Dedup results against the main hunt before
+Phase 3. This pass is additive to the file-analysis queue, not a replacement for it.
+
 **Queue setup:**
 ```bash
 # Load file analysis queue into the dispatch engine
@@ -314,9 +328,12 @@ using the available subagent budget.
 - **Call graph excerpt** -- give a short summary of the relevant entry chain plus the artifact path
   to `tools/analysis-state/call-graph.json`. Inline only the edges that materially change the
   hunter's reasoning for this dispatch.
-- **Threat model summary** -- trust boundaries, entry points, and high-value targets relevant
-  to this batch from the Phase 1 threat model. Keep this short and file-local; do not dump the
-  full Phase 1 artifact when a 3-8 bullet summary will do.
+- **Threat model summary** -- trust boundaries, entry points, high-value targets, and **trusted
+  inputs** (sources the hunter should NOT treat as attacker-controlled: operator-owned config,
+  env secrets, internal mTLS/IAM callers, authenticated principals) relevant to this batch from
+  the Phase 1 threat model. Passing the trusted set is what suppresses the most common false
+  positive -- a guard flagged "missing" on input that was never attacker-controlled. Keep this
+  short and file-local; do not dump the full Phase 1 artifact when a 3-8 bullet summary will do.
 - **Root-cause candidate capture** -- ask the hunter to put shared utility functions, shared
   guards, or common missing-control candidates in handoff `extras.root_cause_candidates` when
   several concrete findings appear to depend on the same cause. This stays schema-valid and gives
@@ -547,7 +564,7 @@ must reach `confirmed` (promoted to finding) or `clean` (hypothesis disproven). 
 unresolved suspicious findings to the verifier — the verifier's job is FP elimination on
 confirmed findings, not investigation of incomplete ones.
 
-**Phase 2 exit:** 2A, 2B, and 2C gates pass, AND no unresolved suspicious findings remain.
+**Phase 2 exit:** 2A, 2B, 2C, and 2D gates pass, AND no unresolved suspicious findings remain.
 
 ```bash
 vigil assess transition-phase verify-variant
@@ -555,7 +572,8 @@ vigil assess transition-phase verify-variant
 
 Exit: All critical/high files analyzed with effort thresholds met. CWE coverage gaps closed
 or documented. No unresolved needs-context. No pending triggers. No unresolved suspicious
-findings. Adversarial depth pass complete. Transition to Phase 3.
+findings. Adversarial depth pass (2C) and system-level synthesis pass (2D) complete. Transition
+to Phase 3.
 
 #### Phase 2C -- Adversarial Depth Pass
 
@@ -586,6 +604,60 @@ what an adversary would target given this project's architecture and threat mode
 satisfy CWE coverage thresholds — it produces findings, not coverage closure.
 
 **Phase 2C exit:** All dispatched files reviewed. Findings recorded.
+
+#### Phase 2D -- System-Level Synthesis Pass
+
+Phases 2A-2C are file-local: each hunter sees one module. Some vulnerabilities exist only *between*
+partitions — an auth check in module A that module B's entry path bypasses, a privilege escalation
+formed by combining two individually-low findings, a trust boundary no single file owns. These are
+invisible to any file-batch dispatch by construction, so they get a dedicated pass.
+
+**The unit of synthesis is a seam, not "the whole codebase."** On a large repo (Git, libcurl, a
+kernel) the full call graph + finding set never fits one context, and a single synthesis agent would
+skim and miss exactly the cross-module bugs this pass exists to find. Enumerate bounded seams and
+fan out one focused agent per seam. Tokens and wall-clock are not the constraint here — coverage is
+(`agent/rules/hunting.md §16`); scale the agent count to the seam count.
+
+**Step 1 — Build the seam manifest (operator-mechanical, from artifacts already on disk).** Derive
+two seam classes and write each to `tools/analysis-state/seams/<seam_id>.json` plus a flat
+`tools/analysis-state/seams.txt` index:
+- **Structural seams** — group `call-graph.json` edges with `crosses_trust_boundary: true` by
+  `(caller_module, callee_module)`. Each group is one seam carrying: the edge subgraph, the
+  entry-point chains that traverse it, the trust boundary + trusted-inputs note for that crossing,
+  and every finding whose location falls in either module.
+- **Capability seams** — bucket findings by primitive (read / write / SSRF / redirect /
+  auth-state-change / info-leak / injection-sink) and form the composable pairs from the
+  `agent/agents/exploit-developer.md` A→B chain table (info-leak + redirect, SSRF + metadata, IDOR +
+  impersonation, ...). Each promising pair-bucket is one seam. Bucket by capability so this stays
+  O(capabilities²), never O(findings²).
+
+**Step 2 — Scale the dispatch to the seam count.**
+- **Few seams (the manifest fits one focused context):** dispatch ONE `code-vuln-hunter` in
+  `deep-manual` mode with the whole seam manifest, the cross-module call graph, the threat model
+  (trust boundaries + trusted inputs), and the module map.
+- **Many seams (Git/libcurl scale):** fan out with
+  `vigil assess agent start-swarm --role code-vuln-hunter --items-file
+  tools/analysis-state/seams.txt --batch-size 1-3 --skills code-vulnerability-analysis --task
+  "system-level synthesis: <objective>"`, then fire one specialist per worker row. Keep batch-size
+  small (1-3 seams) so each agent reasons deeply about coherent crossings instead of skimming dozens;
+  each worker reads its seam slice from `seams/<id>.json`.
+
+Synthesis objective (per agent): "These seams join modules with different trust assumptions. For
+each: does one side's guarantee fail to hold as the other side's assumption? Can a finding/primitive
+on one side combine with the other to escalate? Does either entry path bypass the other's guard?
+Reason across the seam; do not re-audit individual files."
+
+**Step 3 — Reduce (transitive / multi-hop chains).** Seam agents find 2-module chains; 3+-module
+chains (A→B→C) form by joining seam outputs that share a module. Collect all candidate chains and
+dispatch a consolidation pass (`code-vuln-hunter` or `exploit-developer`) to hunt the joins. If the
+candidate set is large, partition the reduce by subsystem — one reduce agent per subsystem touching
+many seams — a tree, not a single reduce.
+
+Record findings normally. This pass does not need to satisfy CWE coverage thresholds; it produces
+findings, not coverage closure.
+
+**Phase 2D exit:** Seam manifest built. One synthesis agent per seam (or a single dispatch when the
+manifest fits one context). Reduce pass run for multi-hop chains. Findings recorded.
 
 ### Phase 3: VERIFY + VARIANT
 
@@ -701,8 +773,12 @@ vigil assess record-finding code-variant-hunter <variant-finding-json>
 ```
 
 **Pre-report deduplication:**
-Before dispatching report-writer, check for duplicate findings (same `canonical_location` and
-similar `defect_family` across hunter and variant-hunter prefixes):
+Before dispatching report-writer, check for duplicates across hunter and variant-hunter prefixes.
+Two findings are duplicates when they share a `defect_family` AND either: (a) the same
+`canonical_location`, or (b) locations in the **same file within ~10 lines** — one root cause
+reported at different points on a single taint path. Keep them distinct when they are different
+vulnerability classes, involve different variables, or are independent bugs that merely sit near
+each other. Merge the weaker into the stronger:
 ```bash
 vigil assess merge-finding <source-slug> <target-slug> "<reason>"
 ```

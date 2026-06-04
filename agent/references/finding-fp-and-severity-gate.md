@@ -83,6 +83,11 @@ List** + **Fast Kill Signals** in `agent/agents/vulnerability-analyst.md` and `h
 (self-XSS, open-redirect alone, CORS-without-exfil, missing-headers alone, theoretical/no-PoC,
 not-reproducible, stacked preconditions, third-party/out-of-scope, 200-but-rejected/soft-fail).
 
+> **No-PoC guard:** "theoretical/no-PoC" means kill when the primitive is *disproven*, not when a
+> runtime PoC merely wasn't built. A structurally sound finding that only lacks runtime
+> demonstration is parked at `evidence_type=theoretical` + `chain_required=true` (`hunting.md §2`),
+> not killed.
+
 ## Disposition & severity ladder
 
 - Any **KILL** → don't record (or record as intel/null with the counter-evidence).
@@ -94,6 +99,16 @@ Severity ladder (real-world outcome): proven cross-user **read of real sensitive
 cross-user **write/corruption of a meaningful record** > **append to a non-critical field /
 existence-status oracle** > **orphan write / storage pollution** > self-only / public-data. Reads do
 not auto-cap severity, but **unproven** real-object impact is never `I:H`/`C:H`.
+
+**Precondition anchor (sanity-check the band before trusting the CVSS number):**
+- 0 preconditions + unauthenticated + network-reachable → Critical / High
+- 1–2 preconditions, or requires an authenticated session → Medium
+- 3+ stacked preconditions, or local-only access → Low
+
+Count "anonymous network access" as zero preconditions. Use this to catch a vector that computes to
+the wrong band — CVSS confirms the score, it does not derive it. (Aligns with `hunting.md §3`
+precondition-equivalence: when incremental impact would still reach Medium/High, the precondition
+count is a ceiling.)
 
 ## Author the result into the finding
 
