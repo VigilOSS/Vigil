@@ -60,9 +60,9 @@ Push-harder signals include:
 - A sibling route, method, or content-type behaves differently than the one you just tested — siblings are the fastest way to confirm or widen the finding
 - The response silently accepts an input shape the application shouldn't (alternate protocol, unexpected encoding, out-of-range value) without erroring — silent acceptance is almost never benign
 
-## 5. Five-minute rule for dead surface
+## 5. Exhaust the surface — rotate only when genuinely dry
 
-If a surface yields no meaningful routes, no privileged features, no object references, and no useful source intelligence after a short focused pass, rotate instead of grinding.
+Leave a surface only when it is genuinely dry: no meaningful routes, no privileged features, no object references, and no useful source intelligence after a *thorough* pass. "Slow" is not "dry" — do not rotate on a timer; rotate when you have actually exhausted the surface.
 
 ## 6. Evidence beats volume
 
@@ -82,7 +82,7 @@ When one route, method, or controller path is vulnerable, inspect its siblings b
 
 ## 10. Think in chains
 
-Use bug A as a signal for B and C nearby, but time-box chain exploration and stop when the cluster is dry.
+Use bug A as a signal for B and C nearby; follow the cluster until it is genuinely dry.
 
 ## 11. Impact first
 
@@ -100,17 +100,13 @@ Validate leads to reproducible, evidence-backed state before report drafting —
 
 Leaked tokens, keys, or config only matter when you show what they actually grant.
 
-## 15. Rotate when progress stalls
+## 15. Rotate only when genuinely dry, not when slow
 
-If repeated attempts produce no new information, switch endpoint, method, surface, or hypothesis instead of grinding.
+Switch endpoint, method, surface, or hypothesis when a lead is genuinely exhausted — when repeated *varied* attempts (not repeats of the same probe) produce no new information. Slow or difficult is not the same as dry: push through ambiguous responses on a live lead before rotating.
 
-## 16. Time-box caps
+## 16. Time is not the constraint — confidence is
 
-Three tiers prevent rabbit-holing:
-
-- **5 minutes** — dead surface with no routes, no features, no object references (rule 5)
-- **20 minutes** — a single endpoint producing no new signals. Rotate to a different endpoint, vuln class, or subdomain.
-- **45 minutes** — absolute cap on a single parameter or feature before forced rotation. If 45 minutes of focused testing yields nothing, the lead is dry.
+Being thorough and refusing to rush is what earns high confidence that no vulnerability was left undiscovered; a pass that finishes fast but shallow has not done the job. Do not trade coverage or validation depth for speed, and do not abandon a live lead because it is taking time. This is not license to grind genuinely dead surface — rules 5 and 15 govern that: rotate only when a surface is truly exhausted, then spend the reclaimed time going deep on live surface.
 
 ## 17. Stuck-state recovery
 

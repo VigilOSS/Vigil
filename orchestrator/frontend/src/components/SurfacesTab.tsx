@@ -1,36 +1,66 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AssessmentFindingLink, AssessmentSurface, SurfacePatchPayload } from "../lib/api";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  AssessmentFinding,
+  AssessmentFindingDetail,
+  AssessmentFindingLink,
+  AssessmentSurface,
+  SurfacePatchPayload,
+} from "../lib/api";
 import {
   listAssessmentFindingLinks,
   listAssessmentSurfaces,
   patchAssessmentSurface,
 } from "../lib/api";
+import { Copy } from "lucide-react";
+import { useBodyScrollLock } from "../lib/modalScrollLock";
+import { useToast } from "../contexts/ToastContext";
+import { RelTime } from "./formatting";
+import { KV, ProseSection, SectionHead } from "./drawer/DrawerKit";
+import { TableSkeleton } from "./Skeletons";
+
+// Severity palette + dot color, mirrored from FindingsTab so the linked-
+// findings list reads consistently with the Findings drawer's severity dots.
+const SEV_COLORS: Record<string, string> = {
+  critical: "var(--sev-critical)",
+  high: "var(--sev-high)",
+  medium: "var(--sev-medium)",
+  low: "var(--sev-low)",
+  info: "var(--sev-info)",
+};
+function sevDotColor(sev: string): string {
+  return SEV_COLORS[sev] || "var(--sev-info)";
+}
+
+type FindingLike = AssessmentFinding | AssessmentFindingDetail;
+
+// Heuristic: does a rationale string read like prose worth rendering as
+// markdown (sentences / markdown markers), vs. a short flat label? Long or
+// multi-sentence rationales render through MarkdownBlock; terse ones stay
+// plain. Errs toward markdown for anything substantive.
+function looksLikeProse(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/[*_`#>\[\]]|\n/.test(t)) return true; // markdown markers / multi-line
+  if (t.length > 120) return true; // long enough to be a paragraph
+  return /[.!?]\s/.test(t); // multiple sentences
+}
+
+// ag-grid is heavy (~470 kB) — lazy-load the grid into a code-split chunk
+// so the main entry bundle stays lean. Shares the chunk with the other
+// grids via the common ../lib/agGrid import.
+const SurfacesGrid = lazy(() => import("./SurfacesGrid"));
 
 type SurfacesTabProps = {
   engagementKey: string;
   surfaces: AssessmentSurface[];
+  // Findings list (already loaded by the parent) used to resolve a linked
+  // finding's severity + title for the drawer's "Linked findings" section.
+  // Optional so the tab still renders standalone (count-only, no severity).
+  findings?: FindingLike[];
   // Optional: parent refresh hook so a successful PATCH triggers a fresh
   // list fetch instead of waiting for the next polling tick.
   onSurfaceUpdated?: (surface: AssessmentSurface) => void;
 };
-
-type GroupedSurfaces = {
-  type: string;
-  items: AssessmentSurface[];
-};
-
-function groupSurfaces(surfaces: AssessmentSurface[]): GroupedSurfaces[] {
-  const buckets = new Map<string, AssessmentSurface[]>();
-  for (const surface of surfaces) {
-    const key = surface.surface_type || "unknown";
-    const list = buckets.get(key) ?? [];
-    list.push(surface);
-    buckets.set(key, list);
-  }
-  return Array.from(buckets.entries())
-    .map(([type, items]) => ({ type, items }))
-    .sort((a, b) => b.items.length - a.items.length || a.type.localeCompare(b.type));
-}
 
 // ── Search tokenizer ──────────────────────────────────────────────────
 
@@ -116,8 +146,13 @@ const IconClose = () => (
 
 // ── Component ─────────────────────────────────────────────────────────
 
-export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: SurfacesTabProps) {
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+export function SurfacesTab({
+  engagementKey,
+  surfaces,
+  findings = [],
+  onSurfaceUpdated,
+}: SurfacesTabProps) {
+  const { toast } = useToast();
   const [findingLinks, setFindingLinks] = useState<AssessmentFindingLink[]>([]);
   const [linksError, setLinksError] = useState<string | null>(null);
   const [selected, setSelected] = useState<AssessmentSurface | null>(null);
@@ -251,6 +286,14 @@ export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: Surfa
     return map;
   }, [findingLinks]);
 
+  // slug -> finding, so the drawer's Linked-findings list can resolve a
+  // link's severity + title for its badge + deep link.
+  const findingBySlug = useMemo(() => {
+    const m = new Map<string, FindingLike>();
+    for (const f of findings) m.set(f.slug, f);
+    return m;
+  }, [findings]);
+
   // Pre-compute searchable corpus per surface
   const corpusBySurfaceId = useMemo(() => {
     const m = new Map<number, string>();
@@ -300,7 +343,12 @@ export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: Surfa
     });
   }, [localSurfaces, typeFilters, statusFilters, sourceFilters, parsedQuery, matchesQuery]);
 
-  const groups = useMemo(() => groupSurfaces(filteredSurfaces), [filteredSurfaces]);
+  // surface id → linked-findings count, for the grid's Findings column.
+  const linkCounts = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const [id, list] of linksBySurfaceId) m.set(id, list.length);
+    return m;
+  }, [linksBySurfaceId]);
 
   // Counts computed over unfiltered list so chips remain meaningful
   const typeCounts = useMemo(() => {
@@ -329,10 +377,6 @@ export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: Surfa
     }
     return c;
   }, [localSurfaces]);
-
-  function toggle(type: string) {
-    setExpanded((current) => ({ ...current, [type]: !current[type] }));
-  }
 
   function toggleChip(set: Set<string>, setter: (s: Set<string>) => void, val: string) {
     const next = new Set(set);
@@ -474,7 +518,7 @@ export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: Surfa
         </div>
       </div>
 
-      {/* Surfaces table, grouped by type */}
+      {/* Surfaces table */}
       <section className="panel">
         <div className="panel-header">
           <h2>Attack surfaces</h2>
@@ -484,229 +528,248 @@ export function SurfacesTab({ engagementKey, surfaces, onSurfaceUpdated }: Surfa
           </p>
         </div>
 
-        {groups.length === 0 ? (
+        {localSurfaces.length === 0 ? (
           <p className="empty-state" style={{ padding: "20px" }}>
-            {localSurfaces.length === 0
-              ? "No surfaces discovered yet."
-              : "No surfaces match the current filters."}
+            No surfaces discovered yet.
           </p>
         ) : (
-          <div className="coverage-tree" style={{ marginTop: "14px" }}>
-            {groups.map(({ type, items }) => {
-              const isOpen = expanded[type] ?? true;
-              return (
-                <div key={type} className="coverage-tree-node">
-                  <button
-                    type="button"
-                    className="coverage-tree-header"
-                    onClick={() => toggle(type)}
-                  >
-                    <span>{isOpen ? "▾" : "▸"}</span>
-                    <strong>{type}</strong>
-                    <span className="meta-text">
-                      {items.length} surface{items.length === 1 ? "" : "s"}
-                    </span>
-                  </button>
-                  {isOpen && (
-                    <div style={{ padding: "0 14px 14px" }}>
-                      <div className="coverage-items-grid">
-                        <div
-                          className="coverage-items-header"
-                          style={{ gridTemplateColumns: "1fr 120px 140px 2fr 80px" }}
-                        >
-                          <span>Target</span>
-                          <span>Status</span>
-                          <span>Source</span>
-                          <span>Rationale</span>
-                          <span>Findings</span>
-                        </div>
-                        {items.map((surface) => {
-                          const links = linksBySurfaceId.get(surface.id) ?? [];
-                          return (
-                            <button
-                              key={surface.id}
-                              type="button"
-                              className="finding-row"
-                              onClick={() => setSelected(surface)}
-                              style={{
-                                display: "grid",
-                                gridTemplateColumns: "1fr 120px 140px 2fr 80px",
-                                gap: "8px",
-                                textAlign: "left",
-                              }}
-                            >
-                              <span className="mono-text" title={surface.target_descriptor}>
-                                {surface.target_descriptor}
-                              </span>
-                              <span>
-                                <span className={`badge status-${surface.status}`}>
-                                  {surface.status}
-                                </span>
-                              </span>
-                              <span className="meta-text">{surface.source_name || "—"}</span>
-                              <span className="meta-text">{surface.rationale || "—"}</span>
-                              <span>
-                                {links.length > 0 ? (
-                                  <span className="badge">{links.length}</span>
-                                ) : (
-                                  <span className="meta-text">—</span>
-                                )}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+          <Suspense fallback={<TableSkeleton rows={8} showHeader={false} />}>
+            <SurfacesGrid
+              rows={filteredSurfaces}
+              linkCounts={linkCounts}
+              selectedId={selected?.id ?? null}
+              onRowOpen={(surface) => setSelected(surface)}
+            />
+          </Suspense>
         )}
       </section>
 
-      {/* Detail modal — styled to match Findings drawer */}
+      {/* Detail modal — styled to match the Findings drawer */}
       {selected && (
-        <div
-          className="finding-overlay"
-          role="presentation"
-          onClick={() => setSelected(null)}
-        >
-          <article
-            className="drawer-panel panel"
-            role="dialog"
-            aria-modal="true"
-            onClick={(event) => event.stopPropagation()}
-            style={{ maxWidth: "720px", width: "min(92vw, 720px)", maxHeight: "90vh", overflow: "auto" }}
-          >
-            <div className="drawer-hero">
-              <div className="drawer-top">
-                <div className="drawer-slug">
-                  <span>{selected.surface_type}</span>
-                </div>
-                <div className="drawer-nav">
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    onClick={() => setSelected(null)}
-                    title="Close (Esc)"
-                  >
-                    <IconClose />
-                  </button>
-                </div>
-              </div>
-              <h2 className="drawer-title">{selected.target_descriptor}</h2>
-              <div className="hero-meta">
-                <span className={`pill pill-${selected.status}`}>{selected.status}</span>
-                {selected.source_name && (
-                  <span className="pill pill-unreviewed">{selected.source_name}</span>
-                )}
-              </div>
-            </div>
-            <div className="drawer-body">
-              <div className="section">
-                <p className="section-title">Metadata</p>
-                <div className="kv-grid">
-                  <div className="kv">
-                    <p className="k">Surface type</p>
-                    <p className="v">{selected.surface_type || "—"}</p>
-                  </div>
-                  <div className="kv">
-                    <p className="k">Status</p>
-                    <p className="v">{selected.status || "—"}</p>
-                  </div>
-                  <div className="kv">
-                    <p className="k">Source</p>
-                    <p className="v">{selected.source_name || "—"}</p>
-                  </div>
-                  <div className="kv">
-                    <p className="k">Updated</p>
-                    <p className="v">{selected.updated_at || "—"}</p>
-                  </div>
-                  {selected.evidence_ref && (
-                    <div className="kv">
-                      <p className="k">Evidence ref</p>
-                      <p className="v mono">{selected.evidence_ref}</p>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="section">
-                <p className="section-title">Resolve status</p>
-                <p className="meta-text" style={{ margin: "0 0 8px" }}>
-                  Resolve a discovered surface to covered, not_applicable, or deferred.
-                  A non-empty rationale is required and appended to the existing audit trail.
-                </p>
-                <textarea
-                  rows={2}
-                  placeholder="Required rationale appended to the audit trail"
-                  value={resolutionRationale}
-                  onChange={(e) => setResolutionRationale(e.target.value)}
-                  style={{
-                    width: "100%",
-                    boxSizing: "border-box",
-                    fontSize: "0.85rem",
-                    padding: "6px 8px",
-                    marginBottom: "8px",
-                  }}
-                />
-                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                  {(["covered", "not_applicable", "deferred"] as const).map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      className={`filter-chip ${pendingResolution === s ? "is-active" : ""}`}
-                      disabled={pendingResolution != null || !canSubmitResolution}
-                      title={!canSubmitResolution ? "Enter rationale to change status" : undefined}
-                      onClick={() => void resolveSurfaceStatus(s)}
-                    >
-                      {pendingResolution === s ? "Saving…" : `Mark ${s}`}
-                    </button>
-                  ))}
-                </div>
-                {resolutionError && (
-                  <p className="meta-text" style={{ color: "var(--c-error, #c33)", margin: "8px 0 0" }}>
-                    {resolutionError}
-                  </p>
-                )}
-              </div>
-
-              {selected.rationale && (
-                <div className="callout">
-                  <p className="section-title">Rationale</p>
-                  <p>{selected.rationale}</p>
-                </div>
-              )}
-
-              <div className="section">
-                <p className="section-title">
-                  Linked findings <span className="count">{selectedLinks.length}</span>
-                </p>
-                {selectedLinks.length === 0 ? (
-                  <p className="empty" style={{ padding: "12px 0" }}>
-                    No findings linked to this surface yet.
-                  </p>
-                ) : (
-                  <div style={{ display: "grid", gap: "6px" }}>
-                    {selectedLinks.map((link) => (
-                      <div key={link.id} className="callout" style={{ padding: "10px 12px" }}>
-                        <p className="mono" style={{ margin: 0, fontWeight: 600 }}>
-                          {link.finding_slug}
-                        </p>
-                        <p className="meta-text" style={{ margin: "4px 0 0" }}>
-                          {link.link_kind}
-                          {link.notes ? ` · ${link.notes}` : ""}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </article>
-        </div>
+        <SurfaceDrawer
+          engagementKey={engagementKey}
+          surface={selected}
+          links={selectedLinks}
+          findingBySlug={findingBySlug}
+          toast={toast}
+          onClose={() => setSelected(null)}
+          resolutionRationale={resolutionRationale}
+          setResolutionRationale={setResolutionRationale}
+          pendingResolution={pendingResolution}
+          canSubmitResolution={canSubmitResolution}
+          resolutionError={resolutionError}
+          resolveSurfaceStatus={resolveSurfaceStatus}
+        />
       )}
+    </div>
+  );
+}
+
+// ── Surface detail drawer ─────────────────────────────────────────────
+// Centred modal styled to match the Findings drawer (reuses .finding-overlay
+// + .drawer-panel CSS). Calls useBodyScrollLock so background scroll is
+// frozen while open, matching the Findings/Intel DetailModal behavior. The
+// existing resolve-status PATCH flow is preserved verbatim (read-only product
+// elsewhere; this control already existed — no NEW mutation controls added).
+function SurfaceDrawer({
+  engagementKey,
+  surface,
+  links,
+  findingBySlug,
+  toast,
+  onClose,
+  resolutionRationale,
+  setResolutionRationale,
+  pendingResolution,
+  canSubmitResolution,
+  resolutionError,
+  resolveSurfaceStatus,
+}: {
+  engagementKey: string;
+  surface: AssessmentSurface;
+  links: AssessmentFindingLink[];
+  findingBySlug: Map<string, FindingLike>;
+  toast: (message: string, type?: "success" | "error" | "info") => void;
+  onClose: () => void;
+  resolutionRationale: string;
+  setResolutionRationale: (v: string) => void;
+  pendingResolution: string | null;
+  canSubmitResolution: boolean;
+  resolutionError: string | null;
+  resolveSurfaceStatus: (status: SurfacePatchPayload["status"]) => void | Promise<void>;
+}) {
+  useBodyScrollLock();
+  const rationale = surface.rationale || "";
+  const findingHref = (slug: string) =>
+    `#/engagements/${encodeURIComponent(engagementKey)}?tab=findings&finding=${encodeURIComponent(slug)}`;
+
+  return (
+    <div className="finding-overlay" role="presentation" onClick={onClose}>
+      <article
+        className="drawer-panel panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="surface-detail-modal-title"
+        onClick={(event) => event.stopPropagation()}
+        style={{ maxWidth: "720px", width: "min(92vw, 720px)", maxHeight: "90vh", overflow: "auto" }}
+      >
+        <div className="drawer-hero">
+          <div className="drawer-top">
+            <div className="drawer-slug">
+              <span>{surface.surface_type || "surface"}</span>
+              <button
+                type="button"
+                className="copy-btn"
+                onClick={() => {
+                  try {
+                    void navigator.clipboard?.writeText(surface.target_descriptor);
+                    toast("Copied", "success");
+                  } catch {
+                    /* best-effort */
+                  }
+                }}
+                title="Copy target"
+                aria-label="Copy target descriptor"
+              >
+                <Copy size={12} />
+              </button>
+            </div>
+            <div className="drawer-nav">
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={onClose}
+                title="Close (Esc)"
+              >
+                <IconClose />
+              </button>
+            </div>
+          </div>
+          <h2 id="surface-detail-modal-title" className="drawer-title">
+            {surface.target_descriptor}
+          </h2>
+          <div className="hero-meta">
+            {surface.surface_type && (
+              <span className="hero-sev info">{surface.surface_type}</span>
+            )}
+            <span className={`pill pill-${surface.status}`}>{surface.status}</span>
+            {surface.vendor_saas && <span className="tag">vendor SaaS</span>}
+            {surface.source_name && <span className="tag">{surface.source_name}</span>}
+          </div>
+        </div>
+        <div className="drawer-body">
+          <div className="section">
+            <p className="section-title">Metadata</p>
+            <div className="kv-grid">
+              <KV k="Surface type" v={surface.surface_type} />
+              <KV k="Status" v={surface.status} />
+              <KV k="Source" v={surface.source_name} toast={surface.source_name ? toast : undefined} />
+              <div className="kv">
+                <p className="k">Updated</p>
+                <p className="v">{surface.updated_at ? <RelTime iso={surface.updated_at} /> : "—"}</p>
+              </div>
+              <KV k="Vendor SaaS" v={surface.vendor_saas == null ? "" : surface.vendor_saas ? "yes" : "no"} />
+              <KV
+                k="Evidence ref"
+                v={surface.evidence_ref}
+                mono
+                toast={surface.evidence_ref ? toast : undefined}
+              />
+            </div>
+          </div>
+
+          {/* Rationale: markdown when it reads like prose, plain otherwise. */}
+          {rationale && looksLikeProse(rationale) ? (
+            <ProseSection title="Rationale" text={rationale} mode="rendered" toast={toast} kind="callout" />
+          ) : rationale ? (
+            <div className="callout">
+              <SectionHead title="Rationale" copyText={rationale} toast={toast} />
+              <p>{rationale}</p>
+            </div>
+          ) : null}
+
+          <div className="section">
+            <p className="section-title">Resolve status</p>
+            <p className="meta-text" style={{ margin: "0 0 8px" }}>
+              Resolve a discovered surface to covered, not_applicable, or deferred.
+              A non-empty rationale is required and appended to the existing audit trail.
+            </p>
+            <textarea
+              rows={2}
+              placeholder="Required rationale appended to the audit trail"
+              value={resolutionRationale}
+              onChange={(e) => setResolutionRationale(e.target.value)}
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                fontSize: "0.85rem",
+                padding: "6px 8px",
+                marginBottom: "8px",
+              }}
+            />
+            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+              {(["covered", "not_applicable", "deferred"] as const).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  className={`filter-chip ${pendingResolution === s ? "is-active" : ""}`}
+                  disabled={pendingResolution != null || !canSubmitResolution}
+                  title={!canSubmitResolution ? "Enter rationale to change status" : undefined}
+                  onClick={() => void resolveSurfaceStatus(s)}
+                >
+                  {pendingResolution === s ? "Saving…" : `Mark ${s}`}
+                </button>
+              ))}
+            </div>
+            {resolutionError && (
+              <p className="meta-text" style={{ color: "var(--c-error, #c33)", margin: "8px 0 0" }}>
+                {resolutionError}
+              </p>
+            )}
+          </div>
+
+          <div className="section">
+            <p className="section-title">
+              Linked findings <span className="count">{links.length}</span>
+            </p>
+            {links.length === 0 ? (
+              <p className="empty" style={{ padding: "12px 0" }}>
+                No findings linked to this surface yet.
+              </p>
+            ) : (
+              <div className="link-grid">
+                {links.map((link) => {
+                  const finding = findingBySlug.get(link.finding_slug);
+                  const severity = finding?.severity;
+                  return (
+                    <a
+                      key={link.id}
+                      className="link-card"
+                      href={findingHref(link.finding_slug)}
+                      title="Open this finding"
+                    >
+                      <span className="link-kind">{(link.link_kind || "").replace(/_/g, " ")}</span>
+                      <span>
+                        <span className="link-title">{finding?.title || link.finding_slug}</span>
+                        <br />
+                        <span className="link-sub">
+                          {link.finding_slug}
+                          {severity ? ` · ${severity}` : ""}
+                          {link.notes ? ` · ${link.notes}` : ""}
+                        </span>
+                      </span>
+                      {severity && (
+                        <span className="sev-dot" style={{ background: sevDotColor(severity) }} />
+                      )}
+                      <span className="link-go">›</span>
+                    </a>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </article>
     </div>
   );
 }

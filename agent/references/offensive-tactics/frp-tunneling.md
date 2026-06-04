@@ -1,3 +1,8 @@
+---
+description: "`vigil oob` frp/interactsh setup, per-agent OOB clients, tunnel logging, reverse shell and OOB DNS/HTTP callback conventions — paired with `agent/skills/exploit-playbook-authoring/SKILL.md` for playbook authoring conventions"
+skill: exploit-playbook-authoring
+---
+
 # FRP Tunneling & OOB Callbacks
 
 ## Overview

@@ -1,3 +1,9 @@
+---
+description: Java (ysoserial), PHP, Python (pickle), Node.js, .NET
+skill: deserialization-testing
+source: PayloadsAllTheThings — Insecure Deserialization
+---
+
 # Insecure Deserialization Payloads
 
 > Source: PayloadsAllTheThings — Insecure Deserialization

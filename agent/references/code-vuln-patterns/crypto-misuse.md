@@ -1,3 +1,9 @@
+---
+description: Subtle mode/parameter misuse, timing leaks, non-obvious randomness issues
+skill: code-vulnerability-analysis
+languages: C/C++, Python, JS
+---
+
 # Cryptographic Misuse — Subtle Implementation Patterns
 
 > Target: Crypto bugs that survive SAST because the algorithm choice is correct — the misuse

@@ -1,3 +1,9 @@
+---
+description: Per-engine detection and RCE (Jinja2, Twig, Pug, Freemarker, ERB, etc.)
+skill: ssti-testing
+source: PayloadsAllTheThings — Server Side Template Injection
+---
+
 # Server-Side Template Injection (SSTI) Payloads
 
 > Source: PayloadsAllTheThings — Server Side Template Injection

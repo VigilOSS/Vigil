@@ -17,7 +17,16 @@ import { useResizableColumns } from "../lib/useResizableColumns";
 import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
 import { useBodyScrollLock } from "../lib/modalScrollLock";
-import { NotesBody, ProvenanceBlock } from "./formatting";
+import { ProvenanceBlock } from "./formatting";
+import {
+  KV,
+  ProseModeToggle,
+  ProseSection,
+  SectionHead,
+} from "./drawer/DrawerKit";
+import type { ProseMode, ToastFn } from "./drawer/DrawerKit";
+import { useToast } from "../contexts/ToastContext";
+import { TableSkeleton } from "./Skeletons";
 
 // ── Props ────────────────────────────────────────────────────────────
 type IntelTabProps = {
@@ -75,42 +84,42 @@ function cvssBucket(score: number | null | undefined): string | null {
 }
 
 const SEV_COLORS: Record<string, string> = {
-  critical: "#991b1b",
-  high: "#c64d15",
-  medium: "#a16207",
-  low: "#17354c",
-  info: "#9a988d",
+  critical: "var(--sev-critical)",
+  high: "var(--sev-high)",
+  medium: "var(--sev-medium)",
+  low: "var(--sev-low)",
+  info: "var(--sev-info)",
 };
 function sevDotColor(sev: string): string {
-  return SEV_COLORS[sev] || "#9a988d";
+  return SEV_COLORS[sev] || "var(--sev-info)";
 }
 
 // Per-entity accent colors used when a row has no CVSS-derived severity
 // (i.e. everything except CVE). Keeps the Intel list visually distinguishable
 // by category instead of painting every row the default gray.
 const ITYPE_COLORS: Record<string, string> = {
-  tech_component: "#17354c",
-  person: "#7c3aed",
-  email: "#2f7f52",
-  domain: "#0d6b6b",
-  credentials: "#c64d15",
-  cve: "#991b1b",
-  dns_record: "#4b5563",
-  social_profile: "#be185d",
-  breach_record: "#6b0d0d",
-  org_fact: "#a16207",
-  note: "#8c7b62",
+  tech_component: "var(--chip-navy)",
+  person: "var(--chip-purple)",
+  email: "var(--chip-green)",
+  domain: "var(--chip-teal)",
+  credentials: "var(--chip-orange)",
+  cve: "var(--chip-red)",
+  dns_record: "var(--chip-slate)",
+  social_profile: "var(--chip-pink)",
+  breach_record: "var(--chip-maroon)",
+  org_fact: "var(--chip-ochre)",
+  note: "var(--chip-muted)",
 };
 
 // Status color buckets. Arbitrary status strings from different intel types
 // (domain live_status, credential state, CVE validation_status, etc.) collapse
 // into a small semantic palette so the Status filter chips read consistently.
 const STATUS_COLORS: Record<string, string> = {
-  active: "#2f7f52",
-  blocked: "#991b1b",
-  exploited: "#6b0d0d",
-  false_positive: "#8c7b62",
-  unreviewed: "#9a988d",
+  active: "var(--ok)",
+  blocked: "var(--danger)",
+  exploited: "var(--chip-maroon)",
+  false_positive: "var(--chip-muted)",
+  unreviewed: "var(--chip-unreviewed)",
 };
 function statusColorKey(s: string): string {
   const v = s.toLowerCase();
@@ -1110,7 +1119,7 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
                     className={`filter-chip isource ${sourceFilters.has(s) ? "is-active" : ""}`}
                     onClick={() => toggle(sourceFilters, setSourceFilters, s)}
                   >
-                    <span className="sev-dot" style={{ background: "#0d6b6b" }} />
+                    <span className="sev-dot" style={{ background: "var(--chip-teal)" }} />
                     {s}
                     <span className="filter-count">{n}</span>
                   </button>
@@ -1283,9 +1292,15 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
               <span style={{ textAlign: "right" }}>Status</span>
             </div>
             <div className="list-scroll">
-              {pageRows.length === 0 ? (
+              {pageRows.length === 0 && loadingAny ? (
+                <TableSkeleton
+                  rows={8}
+                  showHeader={false}
+                  columns={["12%", "18%", "34%", "20%", "16%"]}
+                />
+              ) : pageRows.length === 0 ? (
                 <div className="empty">
-                  {loadingAny ? "Loading intel…" : "No intel records match."}
+                  No intel records match.
                   <div style={{ marginTop: 10 }}>
                     <button type="button" className="qa-btn" onClick={clearAll}>
                       Clear filters
@@ -1511,25 +1526,43 @@ type DrawerProps = {
 type TabId = "overview" | "references" | "provenance" | "raw";
 
 function Drawer({ d, titleId }: DrawerProps) {
+  const { toast } = useToast();
   const [tab, setTab] = useState<TabId>("overview");
+  // Drawer-wide prose view mode (rendered markdown ↔ raw text), mirroring the
+  // Findings drawer. Reset per record so a raw toggle doesn't leak across rows.
+  const [proseMode, setProseMode] = useState<ProseMode>("rendered");
   useEffect(() => {
     setTab("overview");
+    setProseMode("rendered");
   }, [d?.id]);
 
   const provenance = (d.raw.provenance as Record<string, unknown>) || {};
-  const hasProvenance = Object.keys(provenance).length > 0;
-  const notes = (d.raw.notes as string) || "";
+  // The canonical provenance block (agent/captured/artifact/evidence) now
+  // renders inline on Overview. The dedicated Provenance tab only appears when
+  // there are EXTRA provenance fields beyond those four, so nothing is dropped
+  // but the common case isn't shown twice.
+  const PROVENANCE_CANONICAL = ["agent_name", "captured_at", "artifact_ref", "evidence_quote"];
+  const provExtraCount = Object.keys(provenance).filter(
+    (k) => !PROVENANCE_CANONICAL.includes(k),
+  ).length;
 
-  // Count fields (rough heuristic for tab badge).
+  // Links & tags tab count: tags + a record URL + a linked-finding deep link
+  // (CVE). Notes + the note body now live on Overview (rendered markdown), so
+  // they no longer count here.
   const refCount =
     (Array.isArray((d.raw as Record<string, unknown>).tags) ? (d.raw.tags as unknown[]).length : 0) +
     (d.raw.url ? 1 : 0) +
-    (notes ? 1 : 0);
+    (d.raw.linked_finding_slug ? 1 : 0);
 
   const tabs: { id: TabId; label: string; count?: number; hidden?: boolean }[] = [
     { id: "overview", label: "Overview" },
-    { id: "references", label: "Notes & tags", count: refCount, hidden: refCount === 0 },
-    { id: "provenance", label: "Provenance", count: hasProvenance ? 1 : 0, hidden: !hasProvenance },
+    { id: "references", label: "Links & tags", count: refCount, hidden: refCount === 0 },
+    {
+      id: "provenance",
+      label: "Provenance",
+      count: provExtraCount,
+      hidden: provExtraCount === 0,
+    },
     { id: "raw", label: "Raw" },
   ];
   const visibleTabs = tabs.filter((t) => !t.hidden);
@@ -1542,10 +1575,15 @@ function Drawer({ d, titleId }: DrawerProps) {
   const copyId = () => {
     try {
       void navigator.clipboard?.writeText(d.id);
+      toast("Copied", "success");
     } catch {
       // ignore
     }
   };
+
+  // Prose toggle is only meaningful on Overview (notes / note body render as
+  // markdown there); other tabs don't surface prose.
+  const showProseToggle = tab === "overview";
 
   return (
     <aside className="drawer-panel panel">
@@ -1585,10 +1623,11 @@ function Drawer({ d, titleId }: DrawerProps) {
             {t.count != null && t.count > 0 && <span className="count">{t.count}</span>}
           </button>
         ))}
+        {showProseToggle && <ProseModeToggle mode={proseMode} onChange={setProseMode} />}
       </div>
       <div className="drawer-body">
-        {tab === "overview" && <OverviewPane d={d} />}
-        {tab === "references" && <ReferencesPane d={d} />}
+        {tab === "overview" && <OverviewPane d={d} proseMode={proseMode} toast={toast} />}
+        {tab === "references" && <ReferencesPane d={d} toast={toast} />}
         {tab === "provenance" && <ProvenancePane d={d} />}
         {tab === "raw" && <RawPane d={d} />}
       </div>
@@ -1597,15 +1636,15 @@ function Drawer({ d, titleId }: DrawerProps) {
 }
 
 // ── Panes ────────────────────────────────────────────────────────────
-function KV({ k, v, mono }: { k: string; v: unknown; mono?: boolean }) {
-  if (v === undefined || v === null || v === "") return null;
-  const str = typeof v === "string" ? v : fmtCell(v);
-  if (!str) return null;
-  return (
-    <div className="kv">
-      <p className="k">{k}</p>
-      <p className={`v ${mono ? "mono" : ""}`}>{str}</p>
-    </div>
+// KV is imported from ./drawer/DrawerKit (shared with Findings + Surface).
+// It accepts an optional `toast` (renders a copy chip next to the label) and
+// an optional `href` (renders the value as an external link).
+
+// Detect whether a value reads as an identifier/hash/URL worth making
+// monospace + copyable in the Overview KV grid.
+function isCopyableRef(key: string): boolean {
+  return /id|key|hash|url|endpoint|token|ref|cve|cvss|vector|address|identity|handle|value|component|version/i.test(
+    key,
   );
 }
 
@@ -1623,10 +1662,22 @@ const BASE_KEYS_HANDLED = new Set<string>([
   "updated_at",
 ]);
 
-function OverviewPane({ d }: { d: Derived }) {
+function OverviewPane({
+  d,
+  proseMode,
+  toast,
+}: {
+  d: Derived;
+  proseMode: ProseMode;
+  toast: ToastFn;
+}) {
   const raw = d.raw;
   const known = new Set<string>(BASE_KEYS_HANDLED);
   const add = (k: string) => known.add(k);
+
+  // URL of the record (social profile, etc.) — rendered as an external link
+  // in the KV grid when present.
+  const recordUrl = typeof raw.url === "string" && /^https?:\/\//i.test(raw.url) ? raw.url : undefined;
 
   let specific: React.ReactNode = null;
   switch (d.entity) {
@@ -1634,10 +1685,10 @@ function OverviewPane({ d }: { d: Derived }) {
       ["component", "version", "confidence", "evidence_ref", "first_seen_at", "last_seen_at"].forEach(add);
       specific = (
         <div className="kv-grid">
-          <KV k="Component" v={raw.component} mono />
-          <KV k="Version" v={raw.version} mono />
+          <KV k="Component" v={raw.component} mono toast={toast} />
+          <KV k="Version" v={raw.version} mono toast={toast} />
           <KV k="Confidence" v={raw.confidence} />
-          <KV k="Evidence ref" v={raw.evidence_ref} mono />
+          <KV k="Evidence ref" v={raw.evidence_ref} mono toast={toast} />
           <KV k="First seen" v={raw.first_seen_at} />
           <KV k="Last seen" v={raw.last_seen_at} />
         </div>
@@ -1650,7 +1701,7 @@ function OverviewPane({ d }: { d: Derived }) {
           <KV k="Name" v={raw.name} />
           <KV k="Role" v={raw.role} />
           <KV k="Organization" v={raw.organization} />
-          <KV k="Email" v={raw.email} mono />
+          <KV k="Email" v={raw.email} mono toast={toast} />
         </div>
       );
       break;
@@ -1658,7 +1709,7 @@ function OverviewPane({ d }: { d: Derived }) {
       ["address", "role_hint", "linked_person_id"].forEach(add);
       specific = (
         <div className="kv-grid">
-          <KV k="Address" v={raw.address} mono />
+          <KV k="Address" v={raw.address} mono toast={toast} />
           <KV k="Role hint" v={raw.role_hint} />
           <KV k="Linked person" v={raw.linked_person_id} mono />
         </div>
@@ -1668,9 +1719,9 @@ function OverviewPane({ d }: { d: Derived }) {
       ["identity", "kind", "value", "live_status"].forEach(add);
       specific = (
         <div className="kv-grid">
-          <KV k="Identity" v={raw.identity} mono />
+          <KV k="Identity" v={raw.identity} mono toast={toast} />
           <KV k="Kind" v={raw.kind} />
-          <KV k="Value" v={raw.value} mono />
+          <KV k="Value" v={raw.value} mono toast={toast} />
           <KV k="Live status" v={raw.live_status} />
         </div>
       );
@@ -1682,9 +1733,18 @@ function OverviewPane({ d }: { d: Derived }) {
         <div className="kv-grid">
           {Object.entries(raw)
             .filter(([k]) => !BASE_KEYS_HANDLED.has(k) && typeof raw[k] !== "object")
-            .map(([k, v]) => (
-              <KV key={k} k={k.replace(/_/g, " ")} v={v} mono={/id|key|host|url|endpoint|token|hash/i.test(k)} />
-            ))}
+            .map(([k, v]) => {
+              const mono = isCopyableRef(k);
+              return (
+                <KV
+                  key={k}
+                  k={k.replace(/_/g, " ")}
+                  v={v}
+                  mono={mono}
+                  toast={mono ? toast : undefined}
+                />
+              );
+            })}
         </div>
       );
       break;
@@ -1702,15 +1762,15 @@ function OverviewPane({ d }: { d: Derived }) {
       ].forEach(add);
       specific = (
         <div className="kv-grid">
-          <KV k="CVE" v={raw.cve_id} mono />
-          <KV k="Affected component" v={raw.affected_component} mono />
-          <KV k="Affected versions" v={raw.affected_version_range} mono />
+          <KV k="CVE" v={raw.cve_id} mono toast={toast} />
+          <KV k="Affected component" v={raw.affected_component} mono toast={toast} />
+          <KV k="Affected versions" v={raw.affected_version_range} mono toast={toast} />
           <KV k="CVSS score" v={raw.cvss_score} />
-          <KV k="CVSS vector" v={raw.cvss_vector} mono />
-          <KV k="CWE" v={raw.cwe_id} mono />
+          <KV k="CVSS vector" v={raw.cvss_vector} mono toast={toast} />
+          <KV k="CWE" v={raw.cwe_id} mono toast={toast} />
           <KV k="PoC available" v={raw.poc_available} />
           <KV k="Validation" v={raw.validation_status} />
-          <KV k="Linked finding" v={raw.linked_finding_slug} mono />
+          <KV k="Linked finding" v={raw.linked_finding_slug} mono toast={toast} />
         </div>
       );
       break;
@@ -1719,8 +1779,8 @@ function OverviewPane({ d }: { d: Derived }) {
       specific = (
         <div className="kv-grid">
           <KV k="Type" v={raw.record_type} mono />
-          <KV k="Name" v={raw.name} mono />
-          <KV k="Value" v={raw.value} mono />
+          <KV k="Name" v={raw.name} mono toast={toast} />
+          <KV k="Value" v={raw.value} mono toast={toast} />
           <KV k="First seen" v={raw.first_seen} />
           <KV k="Last seen" v={raw.last_seen} />
         </div>
@@ -1731,10 +1791,10 @@ function OverviewPane({ d }: { d: Derived }) {
       specific = (
         <div className="kv-grid">
           <KV k="Platform" v={raw.platform} />
-          <KV k="Handle" v={raw.handle} mono />
-          <KV k="Subject" v={raw.subject_ref} mono />
+          <KV k="Handle" v={raw.handle} mono toast={toast} />
+          <KV k="Subject" v={raw.subject_ref} mono toast={toast} />
           <KV k="Subject kind" v={raw.subject_kind} />
-          <KV k="URL" v={raw.url} mono />
+          <KV k="URL" v={raw.url} mono toast={toast} href={recordUrl} />
         </div>
       );
       break;
@@ -1743,7 +1803,7 @@ function OverviewPane({ d }: { d: Derived }) {
       specific = (
         <div className="kv-grid">
           <KV k="Breach" v={raw.breach_name} />
-          <KV k="Subject" v={raw.subject} mono />
+          <KV k="Subject" v={raw.subject} mono toast={toast} />
           <KV k="Date" v={raw.breach_date} />
           <KV k="Data types" v={raw.data_types} />
         </div>
@@ -1753,7 +1813,7 @@ function OverviewPane({ d }: { d: Derived }) {
       ["fact_key", "fact_value"].forEach(add);
       specific = (
         <div className="kv-grid">
-          <KV k="Key" v={raw.fact_key} mono />
+          <KV k="Key" v={raw.fact_key} mono toast={toast} />
           <KV k="Value" v={raw.fact_value} />
         </div>
       );
@@ -1763,7 +1823,7 @@ function OverviewPane({ d }: { d: Derived }) {
       specific = (
         <div className="kv-grid">
           <KV k="Title" v={raw.title} />
-          <KV k="Source agent" v={raw.source_agent} mono />
+          <KV k="Source agent" v={raw.source_agent} mono toast={toast} />
           <KV k="Tags" v={Array.isArray(raw.tags) ? (raw.tags as string[]).join(", ") : ""} />
         </div>
       );
@@ -1771,6 +1831,14 @@ function OverviewPane({ d }: { d: Derived }) {
   }
 
   const bodyMarkdown = (raw.body_markdown as string | undefined) || "";
+  const notes = (raw.notes as string | undefined) || "";
+  const prov = (raw.provenance as Record<string, unknown>) || {};
+  const hasProvenance = !!(
+    prov.agent_name ||
+    prov.captured_at ||
+    prov.artifact_ref ||
+    prov.evidence_quote
+  );
   const additional = Object.keys(raw).filter((k) => !known.has(k));
 
   return (
@@ -1782,16 +1850,26 @@ function OverviewPane({ d }: { d: Derived }) {
       <div className="section">
         <p className="section-title">Metadata</p>
         <div className="kv-grid">
-          <KV k="Source" v={d.source} />
-          <KV k="Record ID" v={raw.id} mono />
+          <KV k="Source" v={d.source} toast={d.source ? toast : undefined} />
+          <KV k="Record ID" v={raw.id} mono toast={raw.id != null ? toast : undefined} />
           <KV k="Created" v={d.created_at || raw.created_at} />
           <KV k="Updated" v={d.updated_at || raw.updated_at} />
         </div>
       </div>
-      {bodyMarkdown && (
+      {/* Note body + free-form notes now render through the shared prose
+          renderer (rendered markdown by default, raw text when toggled) with
+          a copy chip, matching the Findings drawer. */}
+      <ProseSection title="Body" text={bodyMarkdown} mode={proseMode} toast={toast} />
+      <ProseSection title="Notes" text={notes} mode={proseMode} toast={toast} />
+      {hasProvenance && (
         <div className="section">
-          <p className="section-title">Body</p>
-          <NotesBody text={bodyMarkdown} />
+          <SectionHead title="Provenance" />
+          <ProvenanceBlock
+            agent={prov.agent_name as string | undefined}
+            captured={prov.captured_at as string | undefined}
+            artifactRef={prov.artifact_ref as string | undefined}
+            evidenceQuote={prov.evidence_quote as string | undefined}
+          />
         </div>
       )}
       {additional.length > 0 && (
@@ -1808,14 +1886,20 @@ function OverviewPane({ d }: { d: Derived }) {
   );
 }
 
-function ReferencesPane({ d }: { d: Derived }) {
+function ReferencesPane({
+  d,
+  toast,
+}: {
+  d: Derived;
+  toast: ToastFn;
+}) {
   const raw = d.raw;
-  const notes = (raw.notes as string) || "";
   const url = (raw.url as string) || "";
   const tags = Array.isArray(raw.tags) ? (raw.tags as string[]) : [];
+  const linkedFindingSlug = (raw.linked_finding_slug as string) || "";
 
-  if (!notes && !url && tags.length === 0) {
-    return <p className="empty">No notes or tags recorded.</p>;
+  if (!url && tags.length === 0 && !linkedFindingSlug) {
+    return <p className="empty">No links or tags recorded.</p>;
   }
   return (
     <>
@@ -1829,15 +1913,19 @@ function ReferencesPane({ d }: { d: Derived }) {
           </div>
         </div>
       )}
-      {notes && (
+      {linkedFindingSlug && (
         <div className="section">
-          <p className="section-title">Notes</p>
-          <NotesBody text={notes} />
+          <SectionHead title="Linked finding" copyText={linkedFindingSlug} toast={toast} />
+          <ul className="ref-list">
+            <li>
+              <span className="mono">{linkedFindingSlug}</span>
+            </li>
+          </ul>
         </div>
       )}
       {url && (
         <div className="section">
-          <p className="section-title">URL</p>
+          <SectionHead title="URL" copyText={url} toast={toast} />
           <ul className="ref-list">
             <li>
               <a href={url} target="_blank" rel="noopener noreferrer">

@@ -1,3 +1,8 @@
+---
+description: Admin endpoint access with user tokens
+skill: auth-bypass
+---
+
 # API5:2023 — Broken Function Level Authorization
 
 > Skill: `auth-bypass`

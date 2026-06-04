@@ -1,3 +1,8 @@
+---
+description: "On-device AI/ML: Core ML/TFLite/ONNX model extraction, inference data leakage, content filter bypass, prompt injection in mobile LLMs, federated learning"
+skill: ai-ml-on-device-security
+---
+
 # AI/ML On-Device Security Testing Reference
 
 Mobile apps increasingly embed on-device AI/ML models for inference, summarization, image processing, and chat features. This reference provides concrete test procedures for model extraction, data leakage, feature manipulation, prompt injection, and federated learning assessment.

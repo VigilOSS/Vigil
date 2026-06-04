@@ -1,3 +1,7 @@
+---
+description: CDN/edge IP-reputation block detection signals (403 + reference codes, TCP reset, 000-status), the egress reputation curl script, four mitigation options (program allowlist / residential proxy / browser-based tool / accept-gap), give-up-vs-escalate rule, and the vigil assess ingest-endpoints --egress-blocked-hosts cross-reference
+---
+
 # CDN / Edge IP-Reputation Blocking — Detection and Mitigation
 
 > **Automated version:** `vigil assess egress-check --hosts <hosts> --control example.com --emit-blocked-hosts <file>`

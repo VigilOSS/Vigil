@@ -1,3 +1,7 @@
+---
+description: PsExec, WMI, WinRM, DCOM, SMB relay
+---
+
 # SMB/WMI/WinRM/DCOM Lateral Movement
 
 ## PsExec (Sysinternals)

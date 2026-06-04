@@ -190,7 +190,8 @@ render_prompt_locality() {
 - Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 - Skill discovery: `vigil assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
-- References: `agent/references/INDEX.md`
+- Reference discovery: `vigil assess list-references` (compact name + one-line description + paired skill; `--skill <name>` for a skill's paired refs).
+- Detailed references: `agent/references/**/*.md`
 
 EOF
 }
@@ -260,7 +261,7 @@ EOF
 
 After an engagement, review generated tools in `agent/engagements/<...>/tools/`:
 1. Identify reusable tools -> create a skill in `agent/skills/<name>/SKILL.md`
-2. Add the new skill to `agent/references/INDEX.md` and note it in the relevant Claude/Codex instructions
+2. Skills and references self-register — `vigil assess list-skills` / `list-references` discover new files from their frontmatter, so there is no index to update; just note the new skill in the relevant Claude/Codex instructions if it needs workflow wiring
 EOF
   } > "$out"
   perl -0pi -e 's/\n+\z/\n/' "$out"

@@ -1,3 +1,8 @@
+---
+description: Missing auth, token validation flaws
+skill: auth-bypass
+---
+
 # API2:2023 — Broken Authentication
 
 > Skill: `auth-bypass`

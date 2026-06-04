@@ -1,3 +1,7 @@
+---
+description: PPID spoofing, timestomping, ADS, Sysmon unloading, PS obfuscation
+---
+
 # Defense Evasion Techniques
 
 ## PPID Spoofing

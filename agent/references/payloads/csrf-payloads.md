@@ -1,3 +1,9 @@
+---
+description: Auto-submit forms, JSON CSRF, token bypass techniques
+skill: csrf-testing
+source: PayloadsAllTheThings — Cross-Site Request Forgery
+---
+
 # CSRF (Cross-Site Request Forgery) Payloads
 
 > Source: PayloadsAllTheThings — Cross-Site Request Forgery

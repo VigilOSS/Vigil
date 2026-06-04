@@ -1,3 +1,9 @@
+---
+description: Cross-function size propagation, incomplete bounds checks, realloc chains
+skill: code-vulnerability-analysis
+languages: C/C++, Python, JS
+---
+
 # Buffer Overflow — Cross-Function Size Propagation
 
 > Target: Bugs that survive CodeQL, Semgrep, and OSS-Fuzz in heavily-audited C projects (cURL, git, wget).

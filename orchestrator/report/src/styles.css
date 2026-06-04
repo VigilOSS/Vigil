@@ -1,0 +1,1008 @@
+/* Vigil single-file report — self-contained stylesheet.
+ *
+ * Mirrors the operator console's CSS-var approach (data-theme="light"|"dark")
+ * and reuses the same --sev-* / --ink / --panel / --accent values from
+ * orchestrator/frontend/src/app.css so severity colours read identically. No
+ * webfonts are fetched — IBM Plex falls back to system-ui so the file is fully
+ * offline. The @media print block at the bottom hides nav/buttons for a clean
+ * printed document. */
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --page-bg: #f6f2e8;
+  --page-bg-gradient-1: rgba(255, 197, 90, 0.22);
+  --page-bg-gradient-2: rgba(32, 88, 255, 0.14);
+  --ink: #1a1a16;
+  --ink-2: #4b4a42;
+  --muted: #6b685d;
+
+  --panel: #ffffff;
+  --panel-soft: rgba(255, 255, 255, 0.7);
+  --elevated: #ffffff;
+  --border: rgba(18, 18, 18, 0.12);
+  --border-strong: rgba(18, 18, 18, 0.2);
+  --divider: rgba(18, 18, 18, 0.08);
+  --row-hover: rgba(18, 18, 18, 0.035);
+
+  --accent: #17354c;
+  --accent-soft: #f4a259;
+  --on-accent: #ffffff;
+  --ok: #2f7f52;
+  --warn: #c64d15;
+  --danger: #991b1b;
+
+  --sev-critical: #991b1b;
+  --sev-high: #c64d15;
+  --sev-medium: #a16207;
+  --sev-low: #17354c;
+  --sev-info: #5a584f;
+
+  --code-bg: rgba(16, 18, 26, 0.05);
+  --code-border: rgba(16, 18, 26, 0.1);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --page-bg: #0f1117;
+  --page-bg-gradient-1: rgba(90, 60, 200, 0.18);
+  --page-bg-gradient-2: rgba(32, 88, 255, 0.14);
+  --ink: #e6e8ee;
+  --ink-2: #c4c8d4;
+  --muted: #a0a6b5;
+
+  --panel: #161920;
+  --panel-soft: rgba(28, 32, 42, 0.5);
+  --elevated: #1c202a;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.2);
+  --divider: rgba(255, 255, 255, 0.07);
+  --row-hover: rgba(255, 255, 255, 0.04);
+
+  --accent: #79a9d4;
+  --accent-soft: #f7bb7b;
+  --on-accent: #0f1117;
+  --ok: #5fc08a;
+  --warn: #f08a52;
+  --danger: #e56c6c;
+
+  --sev-critical: #e56c6c;
+  --sev-high: #f08a52;
+  --sev-medium: #e0b04a;
+  --sev-low: #79a9d4;
+  --sev-info: #9aa0ae;
+
+  --code-bg: rgba(255, 255, 255, 0.05);
+  --code-border: rgba(255, 255, 255, 0.1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, var(--page-bg-gradient-1), transparent 34%),
+    radial-gradient(circle at top right, var(--page-bg-gradient-2), transparent 30%),
+    var(--page-bg);
+  background-attachment: fixed;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.rpt-mono,
+.rpt-code,
+code,
+pre {
+  font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* ── Top bar / nav ─────────────────────────────────────────── */
+
+.rpt-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(6px);
+}
+
+.rpt-topbar-in {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 10px 20px;
+}
+
+.rpt-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.rpt-brand-name {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.rpt-brand-sep {
+  color: var(--muted);
+}
+
+.rpt-brand-target {
+  color: var(--ink-2);
+  font-weight: 500;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rpt-nav {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+}
+
+.rpt-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.rpt-nav-btn:hover {
+  background: var(--row-hover);
+}
+
+.rpt-nav-btn.is-active {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.rpt-pill {
+  background: var(--border-strong);
+  color: var(--ink);
+  border-radius: 999px;
+  font-size: 11px;
+  padding: 0 7px;
+  line-height: 16px;
+}
+
+.rpt-nav-btn.is-active .rpt-pill {
+  background: rgba(255, 255, 255, 0.25);
+  color: var(--on-accent);
+}
+
+.rpt-topbar-right {
+  display: flex;
+  gap: 6px;
+}
+
+.rpt-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.rpt-icon-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--ink);
+}
+
+/* ── Layout ───────────────────────────────────────────────── */
+
+.rpt-main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+}
+
+.rpt-section {
+  display: grid;
+  gap: 24px;
+}
+
+/* ── Hero ─────────────────────────────────────────────────── */
+
+.rpt-hero {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  justify-content: space-between;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px;
+}
+
+.rpt-hero-main {
+  flex: 1 1 360px;
+  min-width: 0;
+}
+
+.rpt-eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  color: var(--muted);
+  margin: 0 0 8px;
+}
+
+.rpt-hero-title {
+  font-size: 28px;
+  line-height: 1.2;
+  margin: 0 0 14px;
+  word-break: break-word;
+}
+
+.rpt-hero-badges {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rpt-hero-meta {
+  margin: 0;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 220px;
+}
+
+.rpt-hero-meta div {
+  display: grid;
+  gap: 2px;
+}
+
+.rpt-hero-meta dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.rpt-hero-meta dd {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+/* ── Chips / badges ───────────────────────────────────────── */
+
+.rpt-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  color: var(--ink-2);
+}
+
+.rpt-chip-mono {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.rpt-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
+.rpt-mode-draft {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+}
+
+.rpt-mode-final {
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+  color: var(--ok);
+  border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent);
+}
+
+.rpt-sev-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: capitalize;
+  padding: 2px 9px;
+  border-radius: 999px;
+  color: #fff;
+}
+
+.rpt-sev-critical { background: var(--sev-critical); }
+.rpt-sev-high { background: var(--sev-high); }
+.rpt-sev-medium { background: var(--sev-medium); }
+.rpt-sev-low { background: var(--sev-low); }
+.rpt-sev-info { background: var(--sev-info); }
+
+.rpt-sev-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 8px;
+}
+.rpt-sev-dot.rpt-sev-critical { background: var(--sev-critical); }
+.rpt-sev-dot.rpt-sev-high { background: var(--sev-high); }
+.rpt-sev-dot.rpt-sev-medium { background: var(--sev-medium); }
+.rpt-sev-dot.rpt-sev-low { background: var(--sev-low); }
+.rpt-sev-dot.rpt-sev-info { background: var(--sev-info); }
+
+/* Dark-mode contrast: the dark severity palette is intentionally bright/high
+ * value (e.g. low #79a9d4, info #9aa0ae, medium #e0b04a, high #f08a52) so the
+ * fills read on the dark page. White badge text then fails WCAG even at the
+ * 3:1 badge bar (low/info/medium/high all land ~2.0–2.6:1). Flip the badge ink
+ * to --on-accent (#0f1117, the dark-ink-on-light-fill token) which clears 6:1+
+ * on every severity. NOTE: --ink is near-white in dark mode, so it must NOT be
+ * used here (that was the old, broken value). */
+:root[data-theme="dark"] .rpt-sev-badge {
+  color: var(--on-accent);
+}
+
+/* ── Stat cards ───────────────────────────────────────────── */
+
+.rpt-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px;
+}
+
+.rpt-stat-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  display: grid;
+  gap: 4px;
+}
+
+.rpt-stat-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.rpt-stat-label {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ── Panels ───────────────────────────────────────────────── */
+
+.rpt-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.rpt-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+}
+
+.rpt-panel-title {
+  font-size: 15px;
+  margin: 0 0 16px;
+}
+
+.rpt-scope-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ── Donut ────────────────────────────────────────────────── */
+
+.v-donut {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.v-donut-total {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.v-donut-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.v-donut-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.v-donut-swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+}
+
+.v-donut-legend-label {
+  text-transform: capitalize;
+  min-width: 64px;
+}
+
+.v-donut-legend-count {
+  font-weight: 600;
+}
+
+.v-donut-legend-pct {
+  color: var(--muted);
+}
+
+/* ── Breakdown bars ───────────────────────────────────────── */
+
+.rpt-breakdown + .rpt-breakdown {
+  margin-top: 18px;
+}
+
+.rpt-breakdown-title {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+.rpt-breakdown-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.rpt-breakdown-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 32px;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.rpt-breakdown-label {
+  text-transform: capitalize;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rpt-breakdown-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--divider);
+  overflow: hidden;
+}
+
+.rpt-breakdown-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.rpt-breakdown-count {
+  text-align: right;
+  font-weight: 600;
+}
+
+/* ── Findings table ───────────────────────────────────────── */
+
+.rpt-table-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.rpt-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 6px 10px;
+  color: var(--muted);
+  flex: 1 1 220px;
+  max-width: 360px;
+}
+
+.rpt-search input {
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  outline: none;
+  width: 100%;
+}
+
+.rpt-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.rpt-select select {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+
+.rpt-result-count {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: auto;
+}
+
+.rpt-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  font-size: 14px;
+}
+
+.rpt-table thead th {
+  text-align: left;
+  padding: 10px 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-soft);
+}
+
+.rpt-th-btn {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+.rpt-col-toggle {
+  width: 28px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.rpt-row {
+  cursor: pointer;
+  border-bottom: 1px solid var(--divider);
+}
+
+.rpt-row:hover {
+  background: var(--row-hover);
+}
+
+.rpt-table td {
+  padding: 10px 12px;
+  vertical-align: middle;
+}
+
+.rpt-detail-row td {
+  background: var(--panel-soft);
+  border-bottom: 1px solid var(--border);
+  padding: 0;
+}
+
+.rpt-empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 28px 12px;
+}
+
+.rpt-finding-detail {
+  display: grid;
+  gap: 16px;
+  padding: 18px 20px;
+}
+
+.rpt-finding-detail h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.rpt-finding-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.rpt-finding-meta dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.rpt-finding-meta dd {
+  margin: 2px 0 0;
+  word-break: break-word;
+}
+
+.rpt-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 4px;
+}
+
+.rpt-code {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+/* ── Full report (print document) ─────────────────────────── */
+
+.rpt-doc {
+  max-width: 880px;
+  margin: 0 auto;
+  display: grid;
+  gap: 28px;
+}
+
+.rpt-doc-titlepage {
+  border-bottom: 2px solid var(--border-strong);
+  padding-bottom: 20px;
+}
+
+.rpt-doc-titlepage h1 {
+  margin: 4px 0 10px;
+  font-size: 30px;
+}
+
+.rpt-doc-subtitle {
+  margin: 2px 0;
+  color: var(--ink-2);
+}
+
+.rpt-toc {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 24px;
+}
+
+.rpt-toc h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.rpt-toc ol {
+  margin: 0;
+  padding-left: 22px;
+  display: grid;
+  gap: 6px;
+}
+
+.rpt-toc a {
+  text-decoration: none;
+}
+
+.rpt-toc a:hover {
+  text-decoration: underline;
+}
+
+.rpt-doc-section {
+  border-top: 1px solid var(--divider);
+  padding-top: 22px;
+}
+
+.rpt-doc-finding {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.rpt-doc-finding-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rpt-doc-finding-head h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.rpt-doc-finding-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rpt-sibling-tag {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--warn);
+  margin-left: 8px;
+}
+
+.rpt-doc-location {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+  word-break: break-all;
+}
+
+.rpt-doc-block h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.rpt-appendix-title {
+  font-size: 20px;
+  margin: 0 0 16px;
+}
+
+.rpt-doc-chain {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.rpt-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.rpt-copy-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--ink);
+}
+
+/* ── Markdown body ────────────────────────────────────────── */
+
+.md-body {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.md-body > :first-child {
+  margin-top: 0;
+}
+
+.md-body > :last-child {
+  margin-bottom: 0;
+}
+
+.md-body p {
+  margin: 0 0 8px;
+}
+
+.md-body code {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.92em;
+}
+
+.md-body pre {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+}
+
+.md-body pre code {
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.md-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+}
+
+.md-body th,
+.md-body td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.md-body ul,
+.md-body ol {
+  padding-left: 22px;
+  margin: 0 0 8px;
+}
+
+.md-body a {
+  word-break: break-word;
+}
+
+/* ── Back to top ──────────────────────────────────────────── */
+
+.rpt-backtop {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+}
+
+/* ── Footer ───────────────────────────────────────────────── */
+
+.rpt-footer {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.rpt-footer-disclaimer {
+  font-style: italic;
+  margin: 0 0 12px;
+  text-align: center;
+}
+
+.rpt-footer-meta {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+}
+
+/* ── Print ────────────────────────────────────────────────── */
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: light;
+  }
+
+  .rpt-main {
+    max-width: none;
+    padding: 0;
+  }
+
+  .rpt-panel,
+  .rpt-stat-card,
+  .rpt-toc,
+  .rpt-table {
+    box-shadow: none;
+    break-inside: avoid;
+  }
+
+  .rpt-doc-finding,
+  .rpt-doc-chain {
+    break-inside: avoid;
+  }
+
+  .rpt-doc-section {
+    break-before: auto;
+  }
+
+  a {
+    color: #000;
+    text-decoration: underline;
+  }
+}

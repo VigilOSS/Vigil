@@ -1,3 +1,9 @@
+---
+description: DOM XSS, reflected, stored, filter bypass, CSP bypass, polyglots
+skill: xss-testing
+source: PayloadsAllTheThings — XSS Injection
+---
+
 # XSS Payloads
 
 > Source: PayloadsAllTheThings — XSS Injection

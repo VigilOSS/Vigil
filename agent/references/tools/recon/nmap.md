@@ -1,3 +1,8 @@
+---
+description: Port/service discovery and enumeration
+skill: port-scanning
+---
+
 # nmap
 
 **Purpose:** Port/service discovery and enumeration

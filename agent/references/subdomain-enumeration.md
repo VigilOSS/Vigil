@@ -1,3 +1,9 @@
+---
+description: "Subdomain enumeration (when *.domain in hosts), prioritization, and sliding-window execution rules"
+skill: subdomain-enumeration
+category: Shared Runtime References
+---
+
 # Subdomain Enumeration
 
 Activate when scope.json `hosts` contains `*.domain` entries (e.g., `*.example.com`).

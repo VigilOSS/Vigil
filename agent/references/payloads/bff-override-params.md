@@ -1,3 +1,8 @@
+---
+description: Framework-specific BFF/middleware internal parameter wordlists (Express, Next.js, Django, Rails, Spring, Kong) for identity/tenant/role override testing
+skill: bff-parameter-override
+---
+
 # BFF / Middleware Parameter Override Payloads
 
 Framework-specific internal parameters that middleware layers set before forwarding to backend

@@ -1,3 +1,8 @@
+---
+description: URL brute-forcing with wordlists
+skill: directory-fuzzing
+---
+
 # dirb
 
 **Purpose:** Web directory brute-forcing with built-in wordlists

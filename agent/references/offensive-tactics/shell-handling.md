@@ -1,3 +1,8 @@
+---
+description: pwncat-vl listeners, tmux session management, reverse shell payloads, log tailing for LLM visibility — paired with `agent/skills/exploit-playbook-authoring/SKILL.md` for playbook bash structure and `# MANUAL:` annotation conventions
+skill: exploit-playbook-authoring
+---
+
 # Shell Handling & Post-Exploitation Listeners
 
 ## Architecture

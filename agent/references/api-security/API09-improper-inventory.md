@@ -1,3 +1,8 @@
+---
+description: Undocumented endpoints, deprecated versions
+skill: source-analysis
+---
+
 # API9:2023 — Improper Inventory Management
 
 > Skill: `source-analysis`

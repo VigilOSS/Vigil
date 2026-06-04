@@ -726,6 +726,10 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
     assert summary.status_code == 200
     assert summary.json()["finding_count"] == 1
+    # finding_severities mirrors finding_count's WHERE clause, so the single
+    # live high finding is the entire rollup and it sums to finding_count.
+    assert summary.json()["finding_severities"] == {"high": 1}
+    assert sum(summary.json()["finding_severities"].values()) == summary.json()["finding_count"]
     assert summary.json()["exploit_candidate_count"] == 1
     assert summary.json()["coverage_blocker_count"] == 0
     assert summary.json()["report_blocker_count"] == 0
@@ -1829,6 +1833,11 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
     assert summary.json()["finding_count"] == 0
     assert summary.json()["finding_workflow_statuses"]["false_positive"] == 1
     assert summary.json()["finding_verification_dispositions"]["false_positive"] == 1
+    # The false_positive CH-001 (high) is excluded from the severity rollup
+    # exactly like finding_count, so the donut total stays at 0 (empty rollup)
+    # rather than counting the suppressed high finding.
+    assert summary.json()["finding_severities"] == {}
+    assert sum(summary.json()["finding_severities"].values()) == summary.json()["finding_count"]
     assert summary.json()["top_findings"] == []
 
     report_findings = client.get("/engagements/2026-03-30-120000-example/assessment/report-findings")

@@ -1,3 +1,9 @@
+---
+description: Negative quantity, coupon abuse, payment bypass, mass assignment
+skill: business-logic-testing
+source: Custom — security research and common vulnerability patterns
+---
+
 # Business Logic Attack Payloads
 
 > Source: Custom — security research and common vulnerability patterns

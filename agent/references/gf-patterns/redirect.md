@@ -2,6 +2,8 @@
 name: gf-patterns:redirect
 description: Return-URL parameter patterns that signal open-redirect and OAuth redirect surfaces
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+bucket: redirect
+weight: 25
 ---
 
 # gf: redirect

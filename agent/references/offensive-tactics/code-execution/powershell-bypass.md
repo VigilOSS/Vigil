@@ -1,3 +1,7 @@
+---
+description: CLM bypass, PowerShdll, AMSI bypass, download cradles
+---
+
 # PowerShell Execution Bypass
 
 ## PowerShell Without powershell.exe

@@ -1,3 +1,7 @@
+---
+description: Offline password hash cracking (CPU)
+---
+
 # john (John the Ripper)
 
 **Purpose:** Offline password hash cracking with format auto-detection and conversion utilities
