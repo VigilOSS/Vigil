@@ -2504,6 +2504,10 @@ input {
   padding: 18px 20px 24px;
   display: grid;
   gap: 18px;
+  /* Pack panes to the top at content height — without this the grid's auto
+   * rows stretch to fill a tall drawer, leaving short panes (Links, Intel,
+   * History) with large gaps and over-tall cards. */
+  align-content: start;
   min-height: 0;
   /* min-width: 0 on the grid container + overflow-wrap on prose
    * children prevents long unbreakable strings (pasted URLs, JWTs,
@@ -2741,14 +2745,14 @@ input {
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--panel-soft);
   cursor: pointer;
   text-align: left;
   font: inherit;
   color: inherit;
   transition: background 0.12s, border-color 0.12s;
 }
-.findings-redesign .link-card:hover:not(:disabled) { background: white; border-color: var(--accent); }
+.findings-redesign .link-card:hover:not(:disabled) { background: var(--panel-hover); border-color: var(--accent); }
 .findings-redesign .link-card:disabled { cursor: default; opacity: 0.8; }
 .findings-redesign .link-card .sev-dot { width: 8px; height: 8px; border-radius: 50%; }
 .findings-redesign .link-card .link-kind {
@@ -2785,8 +2789,9 @@ input {
   border: 1px solid var(--border);
   border-left: 3px solid var(--warn);
   border-radius: 12px;
-  background: rgba(255, 248, 237, 0.6);
+  background: var(--panel-soft);
   display: grid;
+  align-content: start;
   gap: 6px;
 }
 .findings-redesign .chain-flow {
@@ -2919,6 +2924,48 @@ input {
 }
 
 /* Refs */
+/* References render as a grid of bordered cards (matching the linked-findings
+ * and metadata cards) so the Intel tab reads as a sharp, consistent set of
+ * surfaces that grows cleanly — not a scattered list of loose links. */
+.findings-redesign .ref-grid { display: grid; gap: 8px; }
+.findings-redesign .ref-card {
+  display: grid;
+  gap: 3px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  text-decoration: none;
+  min-width: 0;
+  transition: border-color 0.12s, background 0.12s;
+}
+.findings-redesign a.ref-card:hover { border-color: var(--accent); background: var(--panel-hover); }
+.findings-redesign .ref-card-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--ink);
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.findings-redesign .ref-card-url {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+/* Provenance evidence quote, beneath the KV grid that mirrors the Metadata box. */
+.findings-redesign .prov-quote {
+  margin: 8px 0 0;
+  padding: 4px 0 4px 12px;
+  border-left: 3px solid var(--border);
+  font-style: italic;
+  color: var(--ink-2);
+  font-size: 0.86rem;
+}
 .findings-redesign .ref-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
 /* Lead with the human label/host (normal-ink, clickable); demote the full
  * URL to a muted, truncated second line. */
@@ -3968,12 +4015,6 @@ body.detail-modal-open {
   /* Same fix as .taint-line: the chip's hardcoded near-white background was a
    * glaring light island in dark mode (and now the SOLE place CVSS appears,
    * since it was dropped from the Metadata grid). Subtle tint instead. */
-  background: rgba(255, 255, 255, 0.07);
-}
-:root[data-theme="dark"] .findings-redesign .link-card {
-  background: rgba(255, 255, 255, 0.03);
-}
-:root[data-theme="dark"] .findings-redesign .link-card:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.07);
 }
 :root[data-theme="dark"] .findings-redesign .icon-btn:hover {

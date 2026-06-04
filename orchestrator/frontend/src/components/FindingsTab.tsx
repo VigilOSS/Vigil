@@ -18,7 +18,7 @@ import { listAssessmentFindingGroups, listAssessmentFindingLinks, listAssessment
 import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
 import { useBodyScrollLock } from "../lib/modalScrollLock";
-import { CodeBlock, NotesBody, ProvenanceBlock, isCurlLike } from "./formatting";
+import { CodeBlock, NotesBody, isCurlLike } from "./formatting";
 import { KV, Prose, ProseModeToggle, SectionHead } from "./drawer/DrawerKit";
 import type { ProseMode, ToastFn } from "./drawer/DrawerKit";
 import { Skeleton, TableSkeleton } from "./Skeletons";
@@ -2072,7 +2072,7 @@ function Drawer({
             error={transitionsError}
           />
         )}
-        {tab === "intel" && <IntelPane d={d} />}
+        {tab === "intel" && <IntelPane d={d} toast={toast} />}
       </div>
     </aside>
   );
@@ -2712,7 +2712,7 @@ function HistoryPane({
   );
 }
 
-function IntelPane({ d }: { d: Derived }) {
+function IntelPane({ d, toast }: { d: Derived; toast: ToastFn }) {
   const refs = d.references;
   // Match the Drawer's tab-count logic exactly: a provenance object
   // only counts when at least one of the surfaced fields is present.
@@ -2731,43 +2731,45 @@ function IntelPane({ d }: { d: Derived }) {
           <p className="section-title">
             References <span className="count">{refs.length}</span>
           </p>
-          <ul className="ref-list">
+          <div className="ref-grid">
             {refs.map((r, i) => {
               const { label, href } = normalizeReference(r);
               const host = href ? extractHost(href) : "";
               // Lead with a human label (title, else hostname) in normal ink;
               // demote the full URL to muted, truncated secondary text.
-              const primary = href ? label && label !== href ? label : host || href : label;
-              return (
-                <li key={i}>
-                  {href ? (
-                    <a href={href} target="_blank" rel="noopener noreferrer">
-                      <span className="ref-primary">
-                        {primary}
-                        <IconExternal />
-                      </span>
-                      <span className="ref-url" title={href}>
-                        {href}
-                      </span>
-                    </a>
-                  ) : (
-                    <span className="ref-primary">{label}</span>
-                  )}
-                </li>
+              const primary = href ? (label && label !== href ? label : host || href) : label;
+              return href ? (
+                <a key={i} className="ref-card" href={href} target="_blank" rel="noopener noreferrer">
+                  <span className="ref-card-title">
+                    {primary}
+                    <IconExternal />
+                  </span>
+                  <span className="ref-card-url" title={href}>
+                    {href}
+                  </span>
+                </a>
+              ) : (
+                <div key={i} className="ref-card">
+                  <span className="ref-card-title">{label}</span>
+                </div>
               );
             })}
-          </ul>
+          </div>
         </div>
       )}
       {hasProvenance && prov && provFieldCount > 1 && (
         <div className="section">
           <p className="section-title">Provenance</p>
-          <ProvenanceBlock
-            agent={prov.agent_name}
-            captured={prov.captured_at}
-            artifactRef={prov.artifact_ref}
-            evidenceQuote={prov.evidence_quote}
-          />
+          {/* Mirror the Overview Metadata box exactly (kv-grid card) so the
+              tabs share one visual rhythm; the evidence quote sits beneath. */}
+          <div className="kv-grid">
+            <KV k="Agent" v={prov.agent_name} mono />
+            <KV k="Captured" v={prov.captured_at ? relTime(prov.captured_at) : undefined} />
+            <KV k="Artifact" v={prov.artifact_ref} mono toast={toast} />
+          </div>
+          {prov.evidence_quote && (
+            <blockquote className="prov-quote">{prov.evidence_quote}</blockquote>
+          )}
         </div>
       )}
       {/* Single-field provenance (only agent_name) reads as a heavy,
