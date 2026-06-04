@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from ..db import get_connection
-from . import artifact_index, state_manager
+from . import artifact_index, intel, state_manager
 from .events import _engagement_or_404
 from .search import canonical_finding_alias
 
@@ -85,6 +85,21 @@ def _recent_decisions(engagement_id: int, *, since: str = "") -> list[dict[str, 
     return _since_filter(rows, since=since, field="created_at")[:10]
 
 
+def _to_naive_utc(value: dt.datetime | None) -> dt.datetime | None:
+    """Collapse an aware datetime to offset-naive UTC; pass naive through.
+
+    Row timestamps are a mix: SQLite ``CURRENT_TIMESTAMP`` is offset-naive UTC
+    (intel_* tables), while app-written columns are ISO-8601 with a ``Z``
+    (offset-aware). A caller-supplied ``--since`` cutoff is likewise often
+    ``...Z`` (the documented format). Comparing a naive row to an aware cutoff
+    raises ``TypeError``, so normalize both to naive-UTC before comparing —
+    correct because the naive DB timestamps are already UTC.
+    """
+    if value is not None and value.tzinfo is not None:
+        return value.astimezone(dt.timezone.utc).replace(tzinfo=None)
+    return value
+
+
 def _since_filter(
     rows: list[dict[str, Any]],
     *,
@@ -99,7 +114,7 @@ def _since_filter(
     """
     if not since:
         return rows
-    cutoff = _parse_iso(since)
+    cutoff = _to_naive_utc(_parse_iso(since))
     if cutoff is None:
         return rows
     kept: list[dict[str, Any]] = []
@@ -108,7 +123,7 @@ def _since_filter(
         if not ts_raw:
             kept.append(row)
             continue
-        parsed = _parse_iso(ts_raw)
+        parsed = _to_naive_utc(_parse_iso(ts_raw))
         if parsed is None or parsed >= cutoff:
             kept.append(row)
     return kept
@@ -296,6 +311,24 @@ def build_resume_brief(
         limit=10 if not since else 30,
     )
     artifacts = _since_filter(artifacts_all, since=since, field="updated_at")[:10]
+    open_high_cves = _since_filter(
+        intel.list_open_high_cves(engagement_id), since=since, field="updated_at"
+    )[:10]
+    open_leads = _since_filter(
+        intel.list_leads(engagement_id, open_only=True), since=since, field="updated_at"
+    )[:10]
+    intel_section = {
+        # Aggregate counts are an absolute snapshot (like finding_counts), so
+        # they are NOT since-filtered; the bounded lists below are.
+        "summary": intel.intel_summary(engagement_id),
+        "open_high_cves": open_high_cves,
+        # Project a pointer (title + status), not the note body — keep the brief
+        # compact; the operator opens the lead via list-intel/search.
+        "open_leads": [
+            {"id": row.get("id"), "title": row.get("title"), "lead_status": row.get("lead_status")}
+            for row in open_leads
+        ],
+    }
     dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours)
     if agent_id:
         dispatch_picture["selected_dispatch"] = state_manager.get_dispatch(engagement_id, agent_id)
@@ -321,6 +354,7 @@ def build_resume_brief(
         "dispatches": dispatch_picture,
         "command_runs": command_matches,
         "artifacts": artifacts,
+        "intel": intel_section,
         "recommended_next_actions": _recommended_actions(
             finding=canonical_finding or finding,
             agent_id=agent_id,

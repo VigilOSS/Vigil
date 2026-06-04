@@ -1,6 +1,6 @@
 ---
 description: Conditional initialization, cross-function partial init, stack/heap info leaks
-skill: code-vulnerability-analysis
+skill: code-vulnerability-analysis, code-variant-analysis
 languages: C/C++, Python, JS
 ---
 

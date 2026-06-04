@@ -2149,6 +2149,14 @@ def _create_intel_tables(connection: sqlite3.Connection) -> None:
             """
     )
 
+    # Additive migration: lead lifecycle. A note with a non-NULL lead_status is
+    # a tracked *lead* (an actionable hypothesis/thread); NULL means a plain
+    # reference note. Existing rows stay NULL — correct, so no pre-existing note
+    # becomes a phantom lead.
+    note_columns = _table_columns(connection, "intel_notes")
+    if note_columns and "lead_status" not in note_columns:
+        connection.execute("ALTER TABLE intel_notes ADD COLUMN lead_status TEXT")
+
     # Shadow table for unified FTS across every intel_* source table.
     # Service helpers (to be built in Phase B1) write one row here per
     # intel_* insert/update/delete, keyed by (entity_type, source_id),

@@ -1,6 +1,6 @@
 ---
 description: Indirect format control, multi-source format construction, callback chains
-skill: code-vulnerability-analysis
+skill: code-vulnerability-analysis, code-variant-analysis
 languages: C/C++, Python, JS
 ---
 

@@ -1,6 +1,6 @@
 ---
 description: Generic/C auth gaps, fallback bypasses, token validation gaps. Framework-specific → see `web-app-auth.md`
-skill: code-vulnerability-analysis
+skill: code-vulnerability-analysis, code-variant-analysis
 languages: C/C++ (frameworks → web-app-auth)
 ---
 

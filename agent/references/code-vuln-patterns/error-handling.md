@@ -1,6 +1,6 @@
 ---
 description: Fail-open, unchecked returns, cleanup double-free, exception swallowing, resource leaks
-skill: code-vulnerability-analysis
+skill: code-vulnerability-analysis, code-variant-analysis
 languages: C/C++, Python, JS
 ---
 

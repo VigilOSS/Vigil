@@ -1,6 +1,6 @@
 ---
 description: IDOR in ORM queries, mass assignment, serializer over-exposure, GraphQL field auth, bulk endpoints
-skill: code-vulnerability-analysis
+skill: code-vulnerability-analysis, code-variant-analysis
 languages: Python, JS, Java, Ruby, Go
 ---
 
