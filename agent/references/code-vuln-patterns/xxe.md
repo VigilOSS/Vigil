@@ -1,6 +1,6 @@
 ---
 description: External entity fetches, SSRF/file-read pivots, parser configuration regressions
-skill: code-vulnerability-analysis
+skill: code-vulnerability-analysis, code-variant-analysis
 languages: Python, JS, Java, Go
 ---
 

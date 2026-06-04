@@ -1,6 +1,6 @@
 ---
 description: Validation/storage drift, archive smuggling, upload-to-parser and upload-to-execution chains
-skill: code-vulnerability-analysis
+skill: code-vulnerability-analysis, code-variant-analysis
 languages: Python, JS, Java, Go
 ---
 

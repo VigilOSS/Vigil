@@ -157,6 +157,29 @@ def _render_markdown(brief: dict) -> str:
         lines.append(f"- #{row.get('id')} {row.get('kind')} present={row.get('present')} {row.get('relative_path')}")
     if not brief.get("artifacts"):
         lines.append("- none")
+    intel = brief.get("intel") or {}
+    if intel:
+        lines.extend(["", "## Intel"])
+        summary = intel.get("summary") or {}
+        compact = ", ".join(f"{name}={count}" for name, count in sorted(summary.items()) if count) or "-"
+        lines.append(f"- counts: {compact}")
+        open_cves = intel.get("open_high_cves") or []
+        lines.append(f"- open high CVEs ({len(open_cves)}):")
+        if not open_cves:
+            lines.append("  - none")
+        for row in open_cves:
+            link = row.get("linked_finding_slug") or "UNLINKED"
+            lines.append(
+                f"  - id={row.get('id')} {row.get('cve_id')} cvss {row.get('cvss_score')} "
+                f"[{row.get('validation_status')}] → {link}"
+                + (f" ({_trim(row.get('affected_component') or '', 60)})" if row.get("affected_component") else "")
+            )
+        open_leads = intel.get("open_leads") or []
+        lines.append(f"- open leads ({len(open_leads)}):")
+        if not open_leads:
+            lines.append("  - none")
+        for row in open_leads:
+            lines.append(f"  - id={row.get('id')} [{row.get('lead_status')}] {_trim(row.get('title') or '', 100)}")
     lines.extend(["", "## Next Actions"])
     for row in brief.get("recommended_next_actions") or []:
         entity = ""
