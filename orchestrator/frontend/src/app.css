@@ -2147,6 +2147,9 @@ input {
   padding: 2px 8px;
   border-radius: 999px;
   font-weight: 500;
+  /* A border in the pill's own hue gives each status chip a clear, legible
+   * edge in both themes (the bg tints are faint on their own). */
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
 }
 .findings-redesign .pill-active     { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
 .findings-redesign .pill-reported   { background: rgba(47, 127, 82, 0.16); color: var(--ok); }
@@ -2813,6 +2816,9 @@ input {
 /* Timeline (scoped) */
 .findings-redesign .timeline {
   display: grid;
+  /* Pack entries to content height at the top — otherwise the auto rows stretch
+   * to fill a tall drawer, leaving large empty space inside each entry card. */
+  align-content: start;
   gap: 0;
   position: relative;
   padding-left: 18px;
@@ -2822,21 +2828,29 @@ input {
   position: absolute;
   left: 4px; top: 4px; bottom: 4px;
   width: 2px;
-  background: rgba(23, 53, 76, 0.14);
+  background: var(--border);
 }
+/* Each history entry is a bordered card so the changes are clearly delineated
+ * rather than floating in whitespace. The bullet sits on the rail in the 18px
+ * gutter to the left of the card. */
 .findings-redesign .tl-row {
   position: relative;
-  padding: 8px 0 14px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-soft);
 }
 .findings-redesign .tl-row::before {
   content: "";
   position: absolute;
   left: -18px;
-  top: 12px;
+  top: 16px;
   width: 10px; height: 10px;
   border-radius: 50%;
   background: var(--elevated);
   border: 2px solid var(--accent);
+  box-shadow: 0 0 0 3px var(--panel);
 }
 .findings-redesign .tl-row.action-created::before { border-color: var(--pending); }
 .findings-redesign .tl-row.action-verified::before,
