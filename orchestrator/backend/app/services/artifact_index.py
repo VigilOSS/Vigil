@@ -240,8 +240,13 @@ def register_artifact(
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(engagement_id, relative_path) DO UPDATE SET
-                kind = COALESCE(NULLIF(excluded.kind, ''), assessment_artifacts.kind),
-                media_type = COALESCE(NULLIF(excluded.media_type, ''), assessment_artifacts.media_type),
+                -- Bind the RAW caller-supplied kind/media_type here, not
+                -- excluded.* — excluded.kind carries the _guess_kind() result,
+                -- which is never empty, so NULLIF(excluded.kind, '') would
+                -- never preserve the stored kind and a bare re-register would
+                -- clobber an explicit kind (e.g. verification-narrative).
+                kind = COALESCE(NULLIF(?, ''), assessment_artifacts.kind),
+                media_type = COALESCE(NULLIF(?, ''), assessment_artifacts.media_type),
                 size_bytes = excluded.size_bytes,
                 sha256 = excluded.sha256,
                 preview_text = excluded.preview_text,
@@ -279,6 +284,9 @@ def register_artifact(
                 now,
                 now,
                 now,
+                # DO UPDATE placeholders (raw explicit kind/media_type, stripped).
+                kind.strip(),
+                media_type.strip(),
             ),
         )
         row = connection.execute(
