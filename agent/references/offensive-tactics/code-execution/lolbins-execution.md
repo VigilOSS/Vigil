@@ -1,3 +1,7 @@
+---
+description: MSBuild, regsvr32, mshta, cmstp, installutil, forfiles
+---
+
 # LOLBins Code Execution
 
 ## MSBuild (T1127.001)

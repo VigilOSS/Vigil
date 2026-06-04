@@ -1,3 +1,8 @@
+---
+description: Scaffold tenant reference for Microsoft 365 / Entra ID alert investigations (Graph, Exchange Online, Defender IR context)
+skill: m365-signin-investigation
+---
+
 # <CUSTOMER> — Microsoft 365 / Entra ID Tenant Reference
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**

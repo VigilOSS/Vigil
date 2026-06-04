@@ -192,6 +192,9 @@ Cross-ref `agent/references/api-security/API01-broken-object-level-authz.md`.
       wildcard segment `/workspaces/*/users`
 - [ ] **Content-Type swap:** json ↔ form-encoded ↔ xml (different binders, different authz)
 - [ ] **Version-prefix swap:** `/v1/` vs `/v2/` (older/newer route may lack the check)
+- [ ] **Serializer / format twins:** the same object via an uncovered route — append `?_format=json` /
+      `.json` / other format suffixes (and alternate API versions), which often hit a different
+      (unauthorized) serializer/controller path than the protected route
 - [ ] **Case + trailing-slash:** `/API/Users/123`, `/api/users/123/`
 
 ```bash

@@ -1,3 +1,9 @@
+---
+description: "Drupal JSON:API deep-enum: entity-type / bundle list, sparse-fieldset abuse, `filter[]` query DSL, `?include` chain-walk, IDOR boundedness test"
+skill: vendor-platform-enum
+source: Custom — compiled from the Drupal JSON:API module documentation and entity-access research.
+---
+
 # Drupal JSON:API — Deep-Enum Payloads
 
 > Source: Custom — compiled from the Drupal JSON:API module documentation and entity-access research.

@@ -1,3 +1,8 @@
+---
+description: "vigil assess kali troubleshooting: discovery failures, dispatch-time guardrails (no broad pkill, per-agent binary copy, docker-exec parallelism cap), common errors (audit POST 422 phase required, dedup window, dtach missing), and the canonical smoke test"
+skill: kali-exec
+---
+
 # Kali CLI Troubleshooting
 
 Use when `vigil assess kali --help` errors, a verb fails unexpectedly, or an audit POST returns an unexpected status.

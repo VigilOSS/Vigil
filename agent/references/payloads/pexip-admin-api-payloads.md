@@ -1,3 +1,9 @@
+---
+description: "Pexip Infinity admin-API deep-enum: namespace probe list, anonymous-vs-default-admin-vs-credentialed reachability triad, configuration-leak chain seeds"
+skill: vendor-platform-enum
+source: Custom — compiled from the Pexip Infinity admin-API documentation and management-plane research.
+---
+
 # Pexip Infinity Admin API — Deep-Enum Payloads
 
 > Source: Custom — compiled from the Pexip Infinity admin-API documentation and management-plane research.

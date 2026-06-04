@@ -1,3 +1,8 @@
+---
+description: Lighter alternative to puredns; we generally prefer puredns for better wildcard handling
+skill: subdomain-enumeration
+---
+
 # shuffledns
 
 **Purpose:** Lighter alternative to puredns for active DNS brute-force. Wraps massdns directly with a simpler resolver-pool/wildcard-filter pipeline. Useful as a fallback when puredns errors at startup, or for very small wordlists where puredns's wildcard-batch pre-pass is overkill.

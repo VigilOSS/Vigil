@@ -1,3 +1,9 @@
+---
+description: Null origin, subdomain wildcard, pre-flight bypass
+skill: cors-testing
+source: PayloadsAllTheThings — CORS Misconfiguration
+---
+
 # CORS Misconfiguration Payloads
 
 > Source: PayloadsAllTheThings — CORS Misconfiguration

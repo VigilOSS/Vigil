@@ -1,3 +1,7 @@
+---
+description: RDP hijacking (tscon), SharpRDP headless
+---
+
 # RDP Lateral Movement
 
 ## RDP Hijacking with tscon (T1021.001)

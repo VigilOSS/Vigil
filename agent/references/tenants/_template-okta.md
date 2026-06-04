@@ -1,3 +1,8 @@
+---
+description: Scaffold tenant reference for Okta org alert investigations (Okta API token scopes and admin role context)
+skill: okta-investigation
+---
+
 # <CUSTOMER> — Okta Tenant Reference
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**

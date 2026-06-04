@@ -1,3 +1,7 @@
+---
+description: Offline password hash cracking (GPU)
+---
+
 # hashcat
 
 **Purpose:** GPU-accelerated password hash cracking

@@ -1,3 +1,7 @@
+---
+description: NetNTLMv2 stealing, OWA spraying, forced auth (.SCF/.URL)
+---
+
 # Credential Harvesting & Forced Authentication
 
 ## NetNTLMv2 Stealing via Outlook

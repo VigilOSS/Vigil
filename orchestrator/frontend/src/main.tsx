@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import './app.css';
+import { ToastProvider, ToastViewport } from './contexts/ToastContext';
 import { applyTheme, detectInitialTheme } from './lib/theme';
 
 // Apply the theme before the first render so the page paints in the right
@@ -11,6 +12,9 @@ applyTheme(detectInitialTheme());
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <ToastProvider>
+      <App />
+      <ToastViewport />
+    </ToastProvider>
   </React.StrictMode>,
 );

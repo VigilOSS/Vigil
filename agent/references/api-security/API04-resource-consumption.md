@@ -1,3 +1,8 @@
+---
+description: Rate limiting, oversized payloads
+skill: business-logic-testing
+---
+
 # API4:2023 — Unrestricted Resource Consumption
 
 > Skill: `business-logic-testing`

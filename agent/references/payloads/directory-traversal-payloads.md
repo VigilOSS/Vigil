@@ -1,3 +1,8 @@
+---
+description: Encoding variants, null byte, double URL encoding, OS-specific paths
+source: PayloadsAllTheThings — Directory Traversal
+---
+
 # Directory / Path Traversal Payloads
 
 > Source: PayloadsAllTheThings — Directory Traversal

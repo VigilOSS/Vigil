@@ -1,3 +1,7 @@
+---
+description: Per-target rate calibration table (Cloud-fronted / Origin / WAF-protected / High-friction / Vendor SaaS) plus the runtime-tier × DNS-profile matrix and the concurrent-nmap-procs cap. Recon-class roles load on first use; extracted from shared-constraints.md §14 to keep the every-specialist load lighter
+---
+
 # Per-Target Rate Calibration Table
 
 Operators set per-target rate calibration before dispatch; recon-class specialists

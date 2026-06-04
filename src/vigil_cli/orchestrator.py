@@ -34,6 +34,12 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
     else:
         print("frontend\tcurrent")
 
+    if _report_build_needed(install_root, force=options.build):
+        print("report\tbuilding")
+        _build_report(install_root)
+    else:
+        print("report\tcurrent")
+
     if _pid_running(pid_file):
         pid = pid_file.read_text(encoding="utf-8").strip()
         if options.allow_existing:
@@ -171,14 +177,65 @@ def build_frontend(install_root: Path, *, force: bool = False) -> None:
     Builds the install-side `orchestrator/frontend/dist/` even when the
     backend was already started without it. Use this when a direct
     `uv run uvicorn ...` launch bypassed `start_orchestrator`'s implicit
-    build step and `/` returns 503 with `frontend build not found`.
+    build step and `/` returns 503 with `frontend build not found`. Also
+    builds the single-file report template alongside it so
+    `report-export` has a template to inject into.
     """
     install_root = install_root.expanduser().resolve()
     if not _frontend_build_needed(install_root, force=force):
         print(f"frontend already built: {install_root / 'orchestrator' / 'frontend' / 'dist' / 'index.html'}")
-        return
-    _build_frontend(install_root)
-    print(f"frontend built: {install_root / 'orchestrator' / 'frontend' / 'dist'}")
+    else:
+        _build_frontend(install_root)
+        print(f"frontend built: {install_root / 'orchestrator' / 'frontend' / 'dist'}")
+
+    report_template = install_root / "orchestrator" / "report" / "dist" / "template.html"
+    if not _report_build_needed(install_root, force=force):
+        print(f"report already built: {report_template}")
+    else:
+        _build_report(install_root)
+        print(f"report built: {report_template}")
+
+
+def _build_report(install_root: Path) -> None:
+    report_dir = install_root / "orchestrator" / "report"
+    subprocess.run(["npm", "ci"], cwd=report_dir, check=True)
+    subprocess.run(["npm", "run", "build"], cwd=report_dir, check=True)
+
+
+def _report_build_needed(install_root: Path, *, force: bool = False) -> bool:
+    if force:
+        return True
+    report_dir = install_root / "orchestrator" / "report"
+    # The package directory may not exist on an install that predates the
+    # report template — treat that as "nothing to build" rather than failing
+    # the orchestrator launch.
+    if not report_dir.is_dir():
+        return False
+    report_dist = report_dir / "dist" / "template.html"
+    if not report_dist.exists():
+        return True
+    latest_input = _latest_report_input_mtime(report_dir)
+    return latest_input is not None and latest_input > report_dist.stat().st_mtime
+
+
+def _latest_report_input_mtime(report_dir: Path) -> float | None:
+    candidates = [
+        report_dir / "package.json",
+        report_dir / "package-lock.json",
+        report_dir / "index.html",
+        report_dir / "vite.config.ts",
+        report_dir / "tsconfig.json",
+    ]
+    latest: float | None = None
+    for path in candidates:
+        if path.is_file():
+            latest = max(latest or 0, path.stat().st_mtime)
+    src_dir = report_dir / "src"
+    if src_dir.is_dir():
+        for path in src_dir.rglob("*"):
+            if path.is_file():
+                latest = max(latest or 0, path.stat().st_mtime)
+    return latest
 
 
 def _frontend_build_needed(install_root: Path, *, force: bool = False) -> bool:

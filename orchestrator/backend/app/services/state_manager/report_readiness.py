@@ -431,6 +431,22 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         "coverage": coverage,
     }
 
+def _as_string_list(value: Any) -> list[str]:
+    """Coerce a details field that *should* be a string list into one.
+
+    Agents occasionally record ``steps_to_reproduce`` as a single string (a
+    numbered multi-step block) instead of a list. Downstream report renderers
+    iterate it with ``.forEach`` / ``.join``; a raw string would crash them, so
+    normalize here: a list keeps its (stringified, non-empty) items, a non-empty
+    string becomes a one-element list (content preserved), anything else is ``[]``.
+    """
+    if isinstance(value, list):
+        return [str(v) for v in value if v not in (None, "")]
+    if isinstance(value, str) and value.strip():
+        return [value]
+    return []
+
+
 def _report_record(record: dict[str, Any], report_id: str) -> dict[str, Any]:
     item = dict(record)
     details = _json_object(item.get("details_json", "{}"))
@@ -438,7 +454,7 @@ def _report_record(record: dict[str, Any], report_id: str) -> dict[str, Any]:
     item["cvss_vector"] = details.get("cvss_vector", "")
     item["cvss_score"] = details.get("cvss_score")
     item["remediation"] = details.get("remediation", "")
-    item["steps_to_reproduce"] = details.get("steps_to_reproduce", [])
+    item["steps_to_reproduce"] = _as_string_list(details.get("steps_to_reproduce"))
     item["cwe_id"] = details.get("cwe_id", "")
     item["owasp_category"] = details.get("owasp_category", "")
     item["impact"] = details.get("impact", item.get("summary", ""))

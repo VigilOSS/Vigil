@@ -107,7 +107,7 @@ def test_per_host_coverage_returns_objectives_and_empty_hosts(client, isolate_se
         "waf_tier",
         "service_inventory",
         "directory_fuzz",
-        "nikto_trigger",
+        "tech_fingerprint",
         "osint",
     ]
     assert body["hosts"] == []
@@ -171,7 +171,7 @@ def test_per_host_coverage_deferral_marks_objective_deferred(client, isolate_set
         kind="coverage_deferral",
         payload={
             "host": "api.target.example",
-            "deferred_objectives": ["directory_fuzz", "nikto_trigger"],
+            "deferred_objectives": ["directory_fuzz", "tech_fingerprint"],
             "reason": "Scope brief forbids brute-force",
             "approved_by": "operator",
         },
@@ -181,10 +181,10 @@ def test_per_host_coverage_deferral_marks_objective_deferred(client, isolate_set
     rows = {row["host"]: row for row in body["hosts"]}
     row = rows["api.target.example"]
     assert row["outcomes"]["directory_fuzz"]["deferred"] is True
-    assert row["outcomes"]["nikto_trigger"]["deferred"] is True
+    assert row["outcomes"]["tech_fingerprint"]["deferred"] is True
     assert "directory_fuzz" not in row["unmet_objectives"]
-    assert "nikto_trigger" not in row["unmet_objectives"]
-    assert sorted(row["deferred_objectives"]) == ["directory_fuzz", "nikto_trigger"]
+    assert "tech_fingerprint" not in row["unmet_objectives"]
+    assert sorted(row["deferred_objectives"]) == ["directory_fuzz", "tech_fingerprint"]
     # Deferral row carried for audit visibility.
     assert any(d["kind"] == "coverage_deferral" for d in row["deferrals"])
 
@@ -208,7 +208,7 @@ def test_per_host_coverage_deferral_normalizes_url_shaped_target(client, isolate
         kind="coverage_deferral",
         payload={
             "hosts": ["api.target.example:8443"],
-            "deferred_objectives": ["nikto_trigger"],
+            "deferred_objectives": ["tech_fingerprint"],
             "reason": "TLS-only endpoint",
             "approved_by": "operator",
         },
@@ -218,9 +218,9 @@ def test_per_host_coverage_deferral_normalizes_url_shaped_target(client, isolate
     rows = {row["host"]: row for row in body["hosts"]}
     row = rows["api.target.example"]
     assert row["outcomes"]["directory_fuzz"]["deferred"] is True
-    assert row["outcomes"]["nikto_trigger"]["deferred"] is True
+    assert row["outcomes"]["tech_fingerprint"]["deferred"] is True
     assert "directory_fuzz" not in row["unmet_objectives"]
-    assert "nikto_trigger" not in row["unmet_objectives"]
+    assert "tech_fingerprint" not in row["unmet_objectives"]
 
 
 def test_per_host_coverage_deferral_lookup_not_capped_at_500(client, isolate_settings):
@@ -267,7 +267,7 @@ def test_per_host_coverage_deferral_lookup_not_capped_at_500(client, isolate_set
         kind="coverage_deferral",
         payload={
             "host": "h0000.target.example",
-            "deferred_objectives": ["nikto_trigger"],
+            "deferred_objectives": ["tech_fingerprint"],
             "reason": "second deferral for h0000",
             "approved_by": "operator",
         },
@@ -487,7 +487,7 @@ def test_coverage_deferral_validator_accepts_hosts_list_alias(client, isolate_se
         kind="coverage_deferral",
         payload={
             "hosts": ["api.target.example", "edge.target.example"],
-            "deferred_objectives": ["nikto_trigger"],
+            "deferred_objectives": ["tech_fingerprint"],
             "reason": "Vendor confirms WAF tier out-of-band",
         },
     )
@@ -571,10 +571,10 @@ def test_per_host_coverage_engagement_wide_deferral_satisfies_every_host(client,
 def test_coverage_deferral_engagement_wide_rejects_per_host_objectives(client, isolate_settings):
     """engagement_wide=true is restricted to objectives that legitimately apply
     program-wide (osint, waf_tier, directory_fuzz). Per-host signals like
-    service_inventory and nikto_trigger require an explicit host / hosts[] list
+    service_inventory and tech_fingerprint require an explicit host / hosts[] list
     so the audit row carries the per-host rationale."""
     _seed(client, isolate_settings)
-    for forbidden in ("service_inventory", "nikto_trigger"):
+    for forbidden in ("service_inventory", "tech_fingerprint"):
         response = _post_decision_raw(
             client,
             kind="coverage_deferral",

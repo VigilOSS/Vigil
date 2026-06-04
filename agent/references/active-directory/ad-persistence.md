@@ -1,3 +1,7 @@
+---
+description: DCSync, DCShadow, AdminSDHolder, shadow credentials, trust abuse, DCSync detection via replication GUIDs
+---
+
 # Active Directory Persistence
 
 ## DCSync

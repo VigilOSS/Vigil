@@ -1,3 +1,8 @@
+---
+description: SSRF via URL parameters, webhooks
+skill: ssrf-testing
+---
+
 # API7:2023 — Server Side Request Forgery
 
 > Skill: `ssrf-testing`

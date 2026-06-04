@@ -1,3 +1,11 @@
+---
+name: gf-patterns:upload_fields
+description: File-upload parameters (`file`, `filename`, `attachment`, `avatar`)
+origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+bucket: upload_fields
+weight: 30
+---
+
 # GF Bucket: upload_fields
 
 ## Purpose

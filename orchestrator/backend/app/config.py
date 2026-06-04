@@ -19,6 +19,7 @@ class Settings:
     data_dir: Path = Path(os.environ.get("VIGIL_DATA_DIR", os.environ.get("REDTEAM_ORCHESTRATOR_DATA_DIR", str(BACKEND_ROOT / "data"))))
     install_dir: Path = Path(os.environ.get("VIGIL_INSTALL_DIR", str(REPO_ROOT)))
     frontend_dist_dir: Path = REPO_ROOT / "orchestrator" / "frontend" / "dist"
+    report_template_path: Path = REPO_ROOT / "orchestrator" / "report" / "dist" / "template.html"
     agent_source_dir: Path = REPO_ROOT / "agent"
     orchestrator_public_url: str = os.environ.get("VIGIL_PUBLIC_URL", os.environ.get("ORCHESTRATOR_PUBLIC_URL", "http://127.0.0.1:18000"))
     auto_refresh_seconds: int = int(os.environ.get("VIGIL_DISCOVERY_REFRESH_SECONDS", "5"))

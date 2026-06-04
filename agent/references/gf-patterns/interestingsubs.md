@@ -2,6 +2,7 @@
 name: gf-patterns:interestingsubs
 description: Subdomain naming conventions that signal non-production and internal-bleed surface
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+bucket: conceptual
 ---
 
 # gf: interestingsubs

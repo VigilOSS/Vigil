@@ -23,6 +23,8 @@ import json
 import sys
 from pathlib import Path
 
+from assess.lib import frontmatter
+
 
 # Skills directory is resolved relative to this file's location:
 # agent/scripts/assess/commands/list_skills.py -> agent/skills/
@@ -86,7 +88,7 @@ def run(args: argparse.Namespace) -> None:
 def _collect_skills(skills_dir: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
-        meta = _parse_skill(skill_md)
+        meta = frontmatter.parse(skill_md)
         rows.append(
             {
                 "name": skill_md.parent.name,
@@ -95,52 +97,3 @@ def _collect_skills(skills_dir: Path) -> list[dict[str, str]]:
             }
         )
     return rows
-
-
-def _parse_skill(path: Path) -> dict[str, str]:
-    """Parse YAML frontmatter for `name` / `description`.
-
-    We do not pull in PyYAML to keep this command zero-dep — the frontmatter
-    we own is simple `key: value` lines (no nested structures, no multi-line
-    values), so a hand-rolled parser is sufficient and faster than importing
-    YAML.
-    """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-
-    meta: dict[str, str] = {}
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        # No frontmatter — fall back to the first H1 heading as the description.
-        meta["description"] = _first_heading(lines)
-        return meta
-
-    for raw in lines[1:]:
-        line = raw.rstrip()
-        if line.strip() == "---":
-            break
-        if ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        key = key.strip().lower()
-        value = value.strip()
-        # Strip matching surrounding quotes if present.
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
-        if key in {"name", "description"}:
-            meta[key] = value
-
-    if "description" not in meta:
-        meta["description"] = _first_heading(lines)
-
-    return meta
-
-
-def _first_heading(lines: list[str]) -> str:
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("# "):
-            return stripped[2:].strip()
-    return ""

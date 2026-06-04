@@ -1,3 +1,7 @@
+---
+description: Sticky keys, IFEO, WMI subscriptions, PS profile, Office templates
+---
+
 # Other Persistence Techniques
 
 ## Sticky Keys Backdoor (T1546.008)

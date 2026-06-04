@@ -1,3 +1,7 @@
+---
+description: URL parameter-pattern classifier (xss, ssrf, redirect, idor, sqli, lfi, debug); the patterns are now compiled into `assess.lib.classify_buckets` and applied inline at ingest — this reference documents the bucket source-of-truth
+---
+
 # gf (grep-friendly)
 
 **Purpose:** Classify URLs by vulnerability-parameter patterns using pre-baked JSON pattern

@@ -1,3 +1,7 @@
+---
+description: Scaffold tenant reference for EDR fleet alert investigations (MDE, CrowdStrike Falcon, SentinelOne)
+---
+
 # <CUSTOMER> — EDR Tenant Reference
 
 > **USE THIS AS A SCAFFOLD — DO NOT DISPATCH AGAINST IT AS-IS.**

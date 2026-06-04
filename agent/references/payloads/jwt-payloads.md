@@ -1,3 +1,9 @@
+---
+description: alg:none, key confusion (RS256→HS256), JWK/kid injection, weak secret brute-force
+skill: jwt-testing
+source: PayloadsAllTheThings — JSON Web Token
+---
+
 # JWT Attack Payloads
 
 > Source: PayloadsAllTheThings — JSON Web Token

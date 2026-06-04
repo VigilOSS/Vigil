@@ -1,3 +1,7 @@
+---
+description: Certificate template abuse (ESC1), PetitPotam + NTLM relay, Certify/Certipy
+---
+
 # AD Certificate Services (ADCS) Attacks
 
 ## ESC1: Misconfigured Certificate Template

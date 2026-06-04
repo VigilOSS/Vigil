@@ -1,3 +1,8 @@
+---
+description: "Jira REST API v3: authentication, issue CRUD, ADF formatting for security findings"
+skill: report-generation
+---
+
 # Jira API (v3)
 
 **Purpose:** Create, update, and query security findings in Jira via the REST API v3
