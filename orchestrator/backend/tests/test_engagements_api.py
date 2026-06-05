@@ -755,6 +755,72 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     assert [row["slug"] for row in final_report.json()["standalone"]] == ["VA-001"]
 
 
+def test_findings_endpoint_filters_and_paginates_server_side(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    payloads = [
+        {
+            "slug": "VA-101",
+            "title": "OIDC static state replay",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "canonical_location": "https://example.com/login",
+            "summary": "OIDC state can be replayed",
+            "source_name": "vulnerability-analyst",
+        },
+        {
+            "slug": "VA-102",
+            "title": "Low severity cookie issue",
+            "severity": "low",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "canonical_location": "https://example.com/cookie",
+            "summary": "Cookie issue",
+            "source_name": "recon-specialist",
+        },
+        {
+            "slug": "VA-103",
+            "title": "Another active OIDC issue",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "canonical_location": "https://example.com/callback",
+            "summary": "OIDC callback issue",
+            "source_name": "vulnerability-analyst",
+        },
+    ]
+    for payload in payloads:
+        response = client.post(
+            "/engagements/2026-03-30-120000-example/assessment/findings",
+            json=payload,
+        )
+        assert response.status_code == 201, response.text
+
+    filtered = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        params={
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "source_name": "vulnerability-analyst",
+            "search": "OIDC",
+            "limit": 1,
+            "offset": 1,
+        },
+    )
+    assert filtered.status_code == 200, filtered.text
+    rows = filtered.json()
+    assert len(rows) == 1
+    assert rows[0]["slug"] in {"VA-101", "VA-103"}
+    assert rows[0]["severity"] == "high"
+    assert rows[0]["workflow_status"] == "active"
+    assert rows[0]["verification_state"] == "verified"
+
+
 def test_finding_create_rejects_malformed_slug_and_lookup_accepts_alias(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 

@@ -1,6 +1,6 @@
 ---
 description: URL parser confusion, DNS rebinding, internal metadata reachability, cross-protocol fetches
-skill: code-vulnerability-analysis
+skill: code-vulnerability-analysis, code-variant-analysis
 languages: C/C++, Python, JS
 ---
 

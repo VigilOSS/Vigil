@@ -13,6 +13,7 @@ def register(subparsers) -> None:
         help="Fetch a single `vigil assess kali` command-run record by id, including previews and artifact refs",
     )
     p.add_argument("command_run_id", type=int, help="numeric id from list-command-runs")
+    p.add_argument("--json", dest="as_json", action="store_true", help="No-op: get-command-run always emits JSON.")
     p.set_defaults(func=run)
 
 

@@ -1,6 +1,6 @@
 ---
 description: Cross-module lifetime reasoning, refcount errors, async cleanup races
-skill: code-vulnerability-analysis
+skill: code-vulnerability-analysis, code-variant-analysis
 languages: C/C++, Python, JS
 ---
 

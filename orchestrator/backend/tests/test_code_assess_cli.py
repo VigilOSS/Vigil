@@ -1935,7 +1935,7 @@ def test_list_findings_filters_by_status_and_severity(monkeypatch, capsys):
             self.engagement_key = engagement_key
 
         def get(self, endpoint: str):
-            assert endpoint == "findings"
+            assert endpoint == "findings?severity=high&workflow_status=active&limit=100&offset=0"
             return [
                 {
                     "slug": "ACTIVE-001",
@@ -1981,6 +1981,10 @@ def test_list_findings_filters_by_status_and_severity(monkeypatch, capsys):
             source_name=None,
             slug=None,
             search=None,
+            holding=False,
+            limit=100,
+            offset=0,
+            all=False,
             json=False,
         )
     )

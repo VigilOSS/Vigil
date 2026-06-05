@@ -77,6 +77,20 @@ def _hoist_root_flags(argv: list[str]) -> list[str]:
     return hoisted + rest
 
 
+def _root_command_index(argv: list[str]) -> int | None:
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token in _ROOT_FLAGS_WITH_VALUE:
+            i += 2
+            continue
+        if any(token.startswith(prefix) for prefix in _ROOT_FLAG_PREFIXES):
+            i += 1
+            continue
+        return i
+    return None
+
+
 def main(argv: list[str] | None = None) -> None:
     from assess.lib.client import AssessError
 
@@ -114,6 +128,7 @@ def main(argv: list[str] | None = None) -> None:
         auth_status,
         check_coverage,
         check_exploit_gate,
+        check_intel_readiness,
         check_report_readiness,
         check_scope_coverage,
         classify_payload,
@@ -252,6 +267,7 @@ def main(argv: list[str] | None = None) -> None:
         check_coverage,
         check_scope_coverage,
         check_report_readiness,
+        check_intel_readiness,
         review_exploits,
         scaffold_probe,
         check_exploit_gate,
@@ -319,6 +335,12 @@ def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
     argv = _hoist_root_flags(list(argv))
+    command_index = _root_command_index(argv)
+    if command_index is not None and command_index < len(argv):
+        if argv[command_index] == "agent":
+            agent.maybe_print_action_help(argv[command_index + 1 :])
+        elif argv[command_index] == "work-buffer":
+            work_buffer.maybe_print_action_help(argv[command_index + 1 :])
     args = parser.parse_args(argv)
     if not args.command:
         parser.print_help()

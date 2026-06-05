@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import shutil
 import sqlite3
@@ -375,6 +376,538 @@ def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkey
     assert not list(default_data.glob("orchestrator.sqlite3.bak.*"))
     with sqlite3.connect(custom_snapshots[0]) as connection:
         assert connection.execute("SELECT value FROM marker").fetchone() == ("custom",)
+
+
+class _TTYStdin:
+    """Stdin stand-in whose isatty() is True, for wizard-path tests."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def _created_path_from_stdout(out: str) -> Path:
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == 1, f"stdout must carry exactly the engagement path, got: {out!r}"
+    return Path(lines[0].strip())
+
+
+def test_engagement_create_cli_merges_host_flags_and_hosts_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    hosts_file = tmp_path / "hosts.txt"
+    hosts_file.write_text(
+        "# extra scope\nc.example.com\n\na.example.com\n",
+        encoding="utf-8",
+    )
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "https://app.example.com",
+            "--hosts",
+            "a.example.com",
+            "--host",
+            "b.example.com",
+            "--hosts-file",
+            str(hosts_file),
+            "--no-prompt",
+        ]
+    )
+
+    created_path = _created_path_from_stdout(capsys.readouterr().out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    # csv first, then --host entries, then file lines; duplicates collapse.
+    assert scope["hosts"] == ["a.example.com", "b.example.com", "c.example.com"]
+
+
+def test_engagement_create_cli_missing_hosts_file_fails_with_clear_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    with pytest.raises(SystemExit, match="hosts-file"):
+        main_module.main(
+            [
+                "--root",
+                str(install_root),
+                "engagement",
+                "create",
+                "https://app.example.com",
+                "--hosts-file",
+                str(tmp_path / "missing.txt"),
+                "--no-prompt",
+            ]
+        )
+    assert not list((install_root / "agent" / "engagements").iterdir())
+
+
+def test_engagement_create_cli_echoes_inferred_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "https://app.example.com",
+            "--no-prompt",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    created_path = _created_path_from_stdout(captured.out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["engagement_type"] == "web"
+    assert "inferred type: web" in captured.err
+    assert "--type" in captured.err
+
+
+def test_engagement_create_cli_ambiguous_type_requires_explicit_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    with pytest.raises(SystemExit, match="--type"):
+        main_module.main(
+            [
+                "--root",
+                str(install_root),
+                "engagement",
+                "create",
+                "my-project",
+                "--no-prompt",
+            ]
+        )
+    assert not list((install_root / "agent" / "engagements").iterdir())
+
+
+def test_engagement_create_cli_repo_flag_infers_code_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "my-project",
+            "--repo",
+            str(tmp_path / "repo"),
+            "--no-prompt",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    created_path = _created_path_from_stdout(captured.out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["engagement_type"] == "code"
+    assert scope["name"] == "my-project"
+    assert "inferred type: code" in captured.err
+
+
+def test_engagement_create_cli_repo_plus_web_target_infers_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "https://app.example.com",
+            "--repo",
+            str(tmp_path / "repo"),
+            "--name",
+            "my-project",
+            "--no-prompt",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    created_path = _created_path_from_stdout(captured.out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["engagement_type"] == "both"
+    assert scope["hosts"] == ["app.example.com"]
+    assert [repo["path"] for repo in scope["repos"]] == [str(tmp_path / "repo")]
+    assert "inferred type: both" in captured.err
+
+
+def test_engagement_create_wizard_prompts_on_stderr_keep_stdout_path_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
+    answers = iter(["app.example.com", "y"])
+    monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
+
+    main_module.main(["--root", str(install_root), "engagement", "create", "--type", "web"])
+
+    captured = capsys.readouterr()
+    created_path = _created_path_from_stdout(captured.out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["engagement_type"] == "web"
+    assert scope["hosts"] == ["app.example.com"]
+    assert "Target URL or host" in captured.err
+    assert "Create engagement?" in captured.err
+
+
+def test_engagement_create_bare_invocation_runs_full_wizard_with_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
+    # type choice (1 = web), target, confirmation.
+    answers = iter(["1", "app.example.com", "y"])
+    monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
+
+    main_module.main(["--root", str(install_root), "engagement", "create"])
+
+    captured = capsys.readouterr()
+    created_path = _created_path_from_stdout(captured.out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["engagement_type"] == "web"
+    assert scope["hosts"] == ["app.example.com"]
+    assert "Engagement type" in captured.err
+    assert "Create engagement?" in captured.err
+
+
+def test_engagement_create_wizard_confirmation_decline_aborts_without_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
+    answers = iter(["app.example.com", "n"])
+    monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
+
+    with pytest.raises(SystemExit):
+        main_module.main(["--root", str(install_root), "engagement", "create", "--type", "web"])
+    assert not list((install_root / "agent" / "engagements").iterdir())
+
+
+def test_engagement_create_wizard_reprompts_on_empty_required_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
+    answers = iter(["", "app.example.com", "y"])
+    monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
+
+    main_module.main(["--root", str(install_root), "engagement", "create", "--type", "web"])
+
+    created_path = _created_path_from_stdout(capsys.readouterr().out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["hosts"] == ["app.example.com"]
+
+
+def test_engagement_create_interactive_with_complete_flags_skips_wizard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("wizard must not engage when flags are complete")),
+    )
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "--type",
+            "web",
+            "https://app.example.com",
+            "--hosts",
+            "app.example.com",
+        ]
+    )
+
+    created_path = _created_path_from_stdout(capsys.readouterr().out)
+    assert (created_path / "scope.json").is_file()
+
+
+def test_engagement_create_cli_json_output_replaces_bare_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "https://app.example.com",
+            "--no-prompt",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["engagement_type"] == "web"
+    assert payload["scope"]["hosts"] == ["app.example.com"]
+    created_path = Path(payload["path"])
+    assert created_path.name == payload["key"]
+    assert (created_path / "scope.json").is_file()
+
+
+def test_engagement_create_interactive_dry_run_skips_creation_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
+    # Only the target answer: a "Create engagement?" confirmation would
+    # exhaust the iterator and fail the test — dry-run must not ask it.
+    answers = iter(["app.example.com"])
+    monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
+
+    main_module.main(["--root", str(install_root), "engagement", "create", "--type", "web", "--dry-run"])
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "dry-run" in captured.err
+    assert "Create engagement?" not in captured.err
+    assert not list((install_root / "agent" / "engagements").iterdir())
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission checks are bypassed when running as root")
+def test_engagement_create_cli_unreadable_hosts_file_fails_with_clear_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    hosts_file = tmp_path / "hosts.txt"
+    hosts_file.write_text("a.example.com\n", encoding="utf-8")
+    hosts_file.chmod(0o000)
+
+    try:
+        with pytest.raises(SystemExit, match="hosts-file"):
+            main_module.main(
+                [
+                    "--root",
+                    str(install_root),
+                    "engagement",
+                    "create",
+                    "https://app.example.com",
+                    "--hosts-file",
+                    str(hosts_file),
+                    "--no-prompt",
+                ]
+            )
+    finally:
+        hosts_file.chmod(0o644)
+    assert not list((install_root / "agent" / "engagements").iterdir())
+
+
+def test_engagement_create_cli_dry_run_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    data_dir = install_root / "orchestrator" / "backend" / "data"
+    _write_marker_database(data_dir / "orchestrator.sqlite3", "untouched")
+    monkeypatch.delenv("VIGIL_DATA_DIR", raising=False)
+    monkeypatch.delenv("REDTEAM_ORCHESTRATOR_DATA_DIR", raising=False)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "https://app.example.com",
+            "--no-prompt",
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["dry_run"] is True
+    assert payload["engagement_type"] == "web"
+    assert payload["scope"]["hosts"] == ["app.example.com"]
+    assert not list((install_root / "agent" / "engagements").iterdir())
+    assert not list(data_dir.glob("orchestrator.sqlite3.bak.*"))
+
+
+def test_engagement_create_cli_dry_run_text_keeps_stdout_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "https://app.example.com",
+            "--no-prompt",
+            "--dry-run",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "dry-run" in captured.err
+    assert "web" in captured.err
+    assert not list((install_root / "agent" / "engagements").iterdir())
+
+
+def test_engagement_create_dry_run_still_validates_required_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    with pytest.raises(SystemExit, match="require"):
+        main_module.main(
+            [
+                "--root",
+                str(install_root),
+                "engagement",
+                "create",
+                "--type",
+                "web",
+                "--no-prompt",
+                "--dry-run",
+            ]
+        )
+
+
+def test_engagement_create_help_documents_examples_and_blue_pointer(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(["engagement", "create", "--help"])
+    assert excinfo.value.code == 0
+
+    help_text = capsys.readouterr().out
+    assert "Examples" in help_text
+    assert "vigil blue engage" in help_text
+
+
+def test_prompt_choice_reprompts_on_invalid_then_accepts(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli.main import _prompt_choice
+
+    answers = iter(["9", "code"])
+    monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
+
+    assert _prompt_choice("Engagement type", "web", ["web", "code", "both", "android"]) == "code"
+    assert "Invalid" in capsys.readouterr().err
+
+
+def test_plan_engagement_scope_matches_created_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.engagements import CreateEngagementOptions, create_engagement, plan_engagement
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    options = CreateEngagementOptions(
+        install_root=install_root,
+        engagement_type="web",
+        target="https://app.example.com",
+        hosts=["app.example.com", "admin.example.com"],
+    )
+
+    plan = plan_engagement(options)
+    created = create_engagement(options)
+
+    scope_on_disk = json.loads((created.path / "scope.json").read_text(encoding="utf-8"))
+    assert plan.scope == scope_on_disk
+    assert plan.engagement_type == "web"
+    assert plan.label
 
 
 def test_resolve_runtime_data_dir_honours_runtime_then_legacy_then_default(

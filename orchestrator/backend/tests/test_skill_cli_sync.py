@@ -424,7 +424,6 @@ _KNOWN_UNDOCUMENTED_ASSESS = {
     "launch-session",             # session bootstrap called by the orchestrator
     "record-proposal",            # exploit-proposal plumbing
     "supersede-intel",            # intel-lifecycle knob (named in prose, never invoked)
-    "update-intel",               # intel-lifecycle knob
     "validate-dispatch-contract",  # dispatch contract self-check
 }
 _KNOWN_UNDOCUMENTED_OOB = {

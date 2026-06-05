@@ -600,10 +600,12 @@ def record_note(
     tags: list[str] | None = None,
     source_name: str = "",
     provenance: dict[str, Any] | None = None,
+    lead_status: str | None = None,
     _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    values = {
+    _validate_lead_status(lead_status)
+    values: dict[str, Any] = {
         "title": title,
         "body_markdown": body_markdown,
         "source_agent": source_agent,
@@ -611,6 +613,11 @@ def record_note(
         "source_name": source_name,
         "provenance_json": _json_text(provenance),
     }
+    # Only write lead_status when supplied, so a bare re-record of the same
+    # note (UNIQUE on title) preserves an existing disposition instead of
+    # clobbering it back to NULL.
+    if lead_status is not None:
+        values["lead_status"] = lead_status
     with _use_connection(_conn) as connection:
         row = _generic_upsert(
             connection,
@@ -625,7 +632,7 @@ def record_note(
             entity_type="note",
             source_id=int(row["id"]),
             key=title,
-            body=_compose_body(title, body_markdown, source_agent, *(tags or [])),
+            body=_compose_body(title, body_markdown, source_agent, lead_status, *(tags or [])),
             source_name=source_name,
         )
     return _row_to_dict(row)
@@ -756,7 +763,7 @@ _INTEL_UPDATABLE_FIELDS: dict[str, set[str]] = {
     },
     "note": {
         "title", "body_markdown", "source_agent", "tags", "source_name",
-        "provenance",
+        "provenance", "lead_status",
     },
 }
 
@@ -891,6 +898,7 @@ def _intel_search_body(
             row.get("title"),
             row.get("body_markdown"),
             row.get("source_agent"),
+            row.get("lead_status"),
             *(tags if isinstance(tags, list) else []),
         )
     return "", ""
@@ -920,6 +928,9 @@ def _coerce_update_values(
             column_values["tags_json"] = _json_list_text(value)
         elif column == "poc_available":
             column_values["poc_available"] = 1 if value else 0
+        elif column == "lead_status":
+            _validate_lead_status(value)
+            column_values[column] = value
         else:
             column_values[column] = value
     return column_values
@@ -1326,6 +1337,163 @@ def list_cves(
     return rows
 
 
+# Terminal CVE dispositions: an open CVE is one whose validation_status is NOT
+# one of these. Mirrors the {exploited, ruled_out} closed set used by the
+# readiness advisory.
+CVE_TERMINAL_STATUSES = frozenset({"exploited", "ruled_out"})
+
+
+def list_open_high_cves(engagement_id: int) -> list[dict[str, Any]]:
+    """Canonical (non-superseded) CVEs with cvss_score >= 7 and no terminal
+    disposition, sorted by cvss_score descending, projected for the resume brief.
+
+    NOTE: this predicate is intentionally LOOSER than ``intel_readiness``'s
+    high-CVE check — it omits the ``poc_available`` requirement. The resume
+    brief is for situational awareness ("which high CVEs still need a
+    disposition"); the readiness advisory gates on the actionable PoC-backed
+    subset. Do not unify the two predicates.
+    """
+    open_high: list[dict[str, Any]] = []
+    for row in list_cves(engagement_id, include_superseded=False):
+        score = row.get("cvss_score")
+        if not isinstance(score, (int, float)) or score < 7.0:
+            continue
+        if str(row.get("validation_status") or "") in CVE_TERMINAL_STATUSES:
+            continue
+        open_high.append(
+            {
+                # Backend id so the operator can act on the exact row
+                # (`vigil assess update-intel cve <id>` takes the numeric id).
+                "id": row.get("id"),
+                "cve_id": row.get("cve_id"),
+                "cvss_score": score,
+                "validation_status": row.get("validation_status"),
+                "linked_finding_slug": row.get("linked_finding_slug") or "",
+                "affected_component": row.get("affected_component") or "",
+                "updated_at": row.get("updated_at"),
+            }
+        )
+    open_high.sort(key=lambda r: r.get("cvss_score") or 0.0, reverse=True)
+    return open_high
+
+
+def resolve_linked_finding(engagement_id: int, slug: str) -> dict[str, Any]:
+    """Resolve a CVE's ``linked_finding_slug`` against ``assessment_findings``.
+
+    Returns ``{"exists": bool, "workflow_status": str | None}``. The findings
+    DB column is ``status`` (serialised as ``workflow_status`` elsewhere). An
+    empty slug returns ``exists=False``. This is the read path for the
+    otherwise write-only ``linked_finding_slug`` field; reused by the readiness
+    advisory to flag dangling links.
+    """
+    value = (slug or "").strip()
+    if not value:
+        return {"exists": False, "workflow_status": None}
+    engagement = _engagement_or_404(engagement_id)
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT status FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, value),
+        ).fetchone()
+    if row is None:
+        return {"exists": False, "workflow_status": None}
+    return {"exists": True, "workflow_status": str(row[0] or "")}
+
+
+def intel_readiness(engagement_id: int) -> dict[str, Any]:
+    """Advisory (NON-gating) intel-closure view for RED engagements.
+
+    Returns four buckets — open PoC-backed high CVEs, open leads, exploited
+    CVEs with no linked finding, and dangling ``linked_finding_slug``
+    references — plus an ``applicable`` flag. Blue/IR engagements do not pursue
+    CVE exploitation, so they are not applicable and return empty buckets. This
+    never blocks anything (report_readiness is untouched); it only surfaces
+    what still needs a disposition.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    engagement_type = str(getattr(engagement, "engagement_type", "") or "red")
+    if engagement_type.lower() == "blue":
+        return {
+            "applicable": False,
+            "engagement_type": engagement_type,
+            "open_high_cves": [],
+            "open_leads": [],
+            "exploited_unlinked_cves": [],
+            "dangling_links": [],
+        }
+
+    open_high_cves: list[dict[str, Any]] = []
+    exploited_unlinked_cves: list[dict[str, Any]] = []
+    dangling_links: list[dict[str, Any]] = []
+    for row in list_cves(engagement_id, include_superseded=False):
+        status_value = str(row.get("validation_status") or "")
+        score = row.get("cvss_score")
+        slug = str(row.get("linked_finding_slug") or "")
+        cve_id = row.get("cve_id")
+        # Actionable subset: high + PoC-backed + not yet dispositioned. This is
+        # STRICTER than the resume-brief surfacing (list_open_high_cves), which
+        # omits the poc_available requirement — awareness vs. the actionable
+        # advisory. Keep the two predicates distinct on purpose.
+        if (
+            isinstance(score, (int, float))
+            and score >= 7.0
+            and row.get("poc_available")
+            and status_value not in CVE_TERMINAL_STATUSES
+        ):
+            open_high_cves.append(
+                {
+                    "id": row.get("id"),
+                    "cve_id": cve_id,
+                    "cvss_score": score,
+                    "validation_status": status_value,
+                    "affected_component": row.get("affected_component") or "",
+                }
+            )
+        if status_value == "exploited" and not slug:
+            exploited_unlinked_cves.append(
+                {
+                    "id": row.get("id"),
+                    "cve_id": cve_id,
+                    "cvss_score": score,
+                    "affected_component": row.get("affected_component") or "",
+                }
+            )
+        if slug:
+            resolved = resolve_linked_finding(engagement_id, slug)
+            reason = None
+            if not resolved["exists"]:
+                reason = "missing"
+            elif resolved["workflow_status"] == "false_positive":
+                reason = "stale"
+            elif resolved["workflow_status"] == "merged":
+                reason = "merged"
+            if reason is not None:
+                dangling_links.append(
+                    {
+                        "id": row.get("id"),
+                        "cve_id": cve_id,
+                        "linked_finding_slug": slug,
+                        "reason": reason,
+                        "workflow_status": resolved["workflow_status"],
+                    }
+                )
+
+    # id included so the operator can disposition the exact lead row
+    # (`vigil assess update-intel note <id>`).
+    open_leads = [
+        {"id": row.get("id"), "title": row.get("title"), "lead_status": row.get("lead_status")}
+        for row in list_leads(engagement_id, open_only=True)
+    ]
+    return {
+        "applicable": True,
+        "engagement_type": engagement_type,
+        "open_high_cves": open_high_cves,
+        "open_leads": open_leads,
+        "exploited_unlinked_cves": exploited_unlinked_cves,
+        "dangling_links": dangling_links,
+    }
+
+
 def list_dns_records(
     engagement_id: int, *, include_superseded: bool = True
 ) -> list[dict[str, Any]]:
@@ -1362,6 +1530,44 @@ def list_notes(
     engagement_id: int, *, include_superseded: bool = True
 ) -> list[dict[str, Any]]:
     return _list_rows(engagement_id, "intel_notes", include_superseded=include_superseded)
+
+
+# Lead worklist. Kept separate from list_notes (whose contract feeds
+# intel_summary and the frontend) so the open-lead query lives in one place for
+# resume-brief and the readiness advisory.
+LEAD_OPEN_STATUSES = frozenset({"open", "in_progress"})
+# All valid lead_status values (mirrors LeadStatus in state_manager/_common.py;
+# duplicated locally to avoid an import dependency on the state_manager package).
+LEAD_STATUS_VALUES = frozenset({"open", "in_progress", "resolved", "ruled_out"})
+
+
+def _validate_lead_status(value: Any) -> None:
+    """Reject an invalid lead_status on every write path. The POST path already
+    validates via the Pydantic Literal, but PATCH (_coerce_update_values) and
+    supersede (record_note) bypass it — an unguarded typo would silently drop a
+    lead from the open-lead worklist."""
+    if value is not None and value not in LEAD_STATUS_VALUES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid lead_status: {value!r} (expected one of {sorted(LEAD_STATUS_VALUES)} or null)",
+        )
+
+
+def list_leads(
+    engagement_id: int, *, open_only: bool = True
+) -> list[dict[str, Any]]:
+    """Canonical (non-superseded) notes that are tracked leads (``lead_status``
+    is set). With ``open_only`` (default) only non-terminal leads are returned —
+    the worklist. Already ordered ``updated_at DESC`` by ``_list_rows``."""
+    leads: list[dict[str, Any]] = []
+    for row in list_notes(engagement_id, include_superseded=False):
+        status_value = str(row.get("lead_status") or "")
+        if not status_value:
+            continue
+        if open_only and status_value not in LEAD_OPEN_STATUSES:
+            continue
+        leads.append(row)
+    return leads
 
 
 # ── Aggregate / search ─────────────────────────────────────

@@ -73,6 +73,14 @@ def get_intel_summary(engagement_key: str) -> IntelSummaryResponse:
     return IntelSummaryResponse(counts=counts)
 
 
+@router.get("/readiness")
+def get_intel_readiness(engagement_key: str) -> dict[str, Any]:
+    """Advisory (non-gating) intel-closure view — open CVEs/leads + dangling
+    finding links. Red engagements only; blue returns applicable=False."""
+    engagement = get_engagement_or_404(engagement_key)
+    return intel_service.intel_readiness(engagement.id)
+
+
 @router.get("/search")
 def search_intel(
     engagement_key: str,
@@ -388,6 +396,7 @@ async def create_note(engagement_key: str, request: NoteRecordRequest) -> dict[s
         tags=request.tags,
         source_name=request.source_name,
         provenance=request.provenance,
+        lead_status=request.lead_status,
     )
     await _broadcast(engagement.key, "note", record)
     return record

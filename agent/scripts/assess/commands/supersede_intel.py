@@ -66,6 +66,7 @@ _INTEL_UPDATABLE_FIELDS: dict[str, set[str]] = {
     },
     "note": {
         "title", "body_markdown", "source_agent", "tags", "source_name", "provenance",
+        "lead_status",
     },
 }
 
