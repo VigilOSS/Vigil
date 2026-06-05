@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
@@ -18,7 +19,8 @@ def register(subparsers) -> None:
             "  vigil assess list-findings --severity high --status active\n"
             "  vigil assess list-findings --root-cause auth-bypass-root\n"
             "  vigil assess list-findings --verification-disposition false_positive --json\n"
-            "  vigil assess list-findings --search parser --source-name vulnerability-analyst"
+            "  vigil assess list-findings --search parser --source-name vulnerability-analyst\n"
+            "  vigil assess list-findings --all --json  # explicit unbounded fetch"
         ),
     )
     p.add_argument("--severity")
@@ -38,6 +40,9 @@ def register(subparsers) -> None:
             "pending_runtime_proof (strong-but-unproven, awaiting runtime proof)."
         ),
     )
+    p.add_argument("--limit", type=int, default=100, help="Maximum rows to fetch from the backend (default: 100)")
+    p.add_argument("--offset", type=int, default=0, help="Backend result offset for pagination")
+    p.add_argument("--all", action="store_true", help="Fetch all matching findings instead of applying the default limit")
     p.add_argument("--json", action="store_true", help="Print filtered findings as JSON instead of a table")
     p.set_defaults(func=run)
 
@@ -64,7 +69,28 @@ def run(args) -> None:
                 item["root_cause_role"] = "sibling"
                 findings.append(item)
         else:
-            findings = client.get("findings")
+            params: list[tuple[str, str]] = []
+            for attr, key in (
+                ("severity", "severity"),
+                ("workflow_status", "workflow_status"),
+                ("verification_state", "verification_state"),
+                ("verification_disposition", "verification_disposition"),
+                ("source_name", "source_name"),
+                ("slug", "slug"),
+                ("search", "search"),
+            ):
+                value = getattr(args, attr, None)
+                if value:
+                    params.append((key, str(value)))
+            if getattr(args, "holding", False):
+                params.append(("holding", "true"))
+            if not getattr(args, "all", False):
+                params.append(("limit", str(int(getattr(args, "limit", 100)))))
+                params.append(("offset", str(int(getattr(args, "offset", 0)))))
+            endpoint = "findings"
+            if params:
+                endpoint += "?" + urlencode(params, quote_via=quote)
+            findings = client.get(endpoint)
 
     if not isinstance(findings, list):
         print(json.dumps(findings, indent=2, ensure_ascii=False))
@@ -103,6 +129,11 @@ def run(args) -> None:
             if str(item.get("evidence_type", "")).lower() == "theoretical"
             or str(item.get("verification_disposition", "")).lower() == "pending_runtime_proof"
         ]
+    if not getattr(args, "all", False):
+        limit = int(getattr(args, "limit", 100))
+        if len(filtered) > limit:
+            offset = int(getattr(args, "offset", 0))
+            filtered = filtered[offset : offset + limit]
 
     if args.json:
         print(json.dumps(filtered, indent=2, ensure_ascii=False))

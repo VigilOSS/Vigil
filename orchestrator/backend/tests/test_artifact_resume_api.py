@@ -106,6 +106,7 @@ def test_artifact_register_search_and_get(client, isolate_settings) -> None:
     assert search.status_code == 200, search.text
     rows = search.json()
     assert any(row["relative_path"] == "notes/VA-047-note.md" for row in rows)
+    assert all("indexed_text" not in row for row in rows)
 
     artifact_id = next(row["id"] for row in rows if row["relative_path"] == "notes/VA-047-note.md")
     detail = client.get(f"{BASE}/artifacts/{artifact_id}")
@@ -124,6 +125,18 @@ def test_artifact_register_search_and_get(client, isolate_settings) -> None:
     # The explicitly finding-linked artifact must rank ahead of the incidental
     # name-only match.
     assert by_finding.json()[0]["relative_path"] == "notes/VA-047-note.md"
+
+
+def test_resume_brief_artifacts_omit_indexed_text(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+
+    brief = client.get(f"{BASE}/resume-brief", params={"q": "OIDC"})
+    assert brief.status_code == 200, brief.text
+    artifacts = brief.json()["artifacts"]
+    assert artifacts
+    assert all("indexed_text" not in row for row in artifacts)
 
 
 def test_artifact_register_supports_blue_ir_artifact_roots(client, isolate_settings) -> None:

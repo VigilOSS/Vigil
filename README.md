@@ -50,6 +50,7 @@ Vigil's docs are spread across operator prompts, a code map, and a deep referenc
 | Document | What it covers |
 |----------|----------------|
 | [`agent/AGENTS.md`](agent/AGENTS.md) | The operator prompt — the workflow every engagement runs. |
+| [`docs/engagement-prompt-playbook.md`](docs/engagement-prompt-playbook.md) | Operator steering playbook — the human-side prompts for pushing an engagement when the model goes shallow, overclaims severity, or forgets the core loop. |
 | [`AGENTS.md`](AGENTS.md) | Maintainer/contributor workflow: clone-to-first-dispatch walkthrough and recipes for adding a skill, an `vigil assess` verb, an oracle, or an eval case. |
 | [`CODE-MAP.md`](CODE-MAP.md) | Map of the codebase — where each subsystem lives. |
 | [`agent/references/`](agent/references/) | Reference library (payloads, tactics, recon, tenants, tools) — discover with `vigil assess list-references` (self-registering; `--skill <name>` filters to a skill's paired refs). |
@@ -147,7 +148,11 @@ vigil engagement create https://target.example --hosts target.example
 
 In non-interactive runs the safe default is the parsed target hostname as the sole `hosts` entry. The default exploit policy is `pause` (human approval required before any exploit work); change it later via the orchestrator UI or by editing the engagement's `scope.json`. Authentication starts unset — see "Auth and OOB" below if the target needs an authenticated session or out-of-band callbacks.
 
-`vigil engagement create` finishes by printing the engagement directory path on stdout and a short status footer on stderr: the current state of mitmproxy and OOB plus the exact start command. There is no need to `cd` into the directory by hand.
+When `--type` is omitted it is inferred from the inputs (URL/host → `web`, `--repo` → `code`, both kinds of evidence → `both`, APK or `--package-name` → `android`) and the inferred type is echoed on stderr so it can be overridden. Ambiguous inputs (a bare name with no corroborating flag) prompt on a terminal and fail fast with `--no-prompt` instead of silently defaulting. On a terminal, missing required fields are asked for interactively, ending with a summary and a confirmation; pass `--no-prompt` for strictly non-interactive behavior.
+
+Scope hosts can be supplied as `--hosts a,b` (comma-separated), repeated `--host` flags, a `--hosts-file` (one host per line, `#` comments allowed), or any mix — entries merge in order and deduplicate. `--dry-run` validates the inputs and shows exactly what would be created without writing anything, and `--json` replaces the bare-path stdout line with a JSON object (`key`, `path`, `engagement_type`, `scope`).
+
+`vigil engagement create` finishes by printing the engagement directory path on stdout and a short status footer on stderr: the current state of mitmproxy and OOB plus the exact start command. There is no need to `cd` into the directory by hand. All interactive prompts also write to stderr, so `eng=$(vigil engagement create ...)` works even when the wizard engages.
 
 ### Auth and OOB (optional, before starting)
 
