@@ -53,6 +53,32 @@ class CreatedEngagement:
 
 
 @dataclass(frozen=True, slots=True)
+class EngagementPlan:
+    """Pure, side-effect-free derivation of everything `create_engagement`
+    would write for a given set of options.
+
+    `plan_engagement` performs all option validation and scope/manifest
+    construction without touching the filesystem, database, or network, so
+    `vigil engagement create --dry-run` can show exactly what would be created
+    and fail on exactly the inputs the real create would reject. The manifest
+    carries an empty `key` placeholder — the final key depends on the
+    collision-suffixed directory name chosen at materialization time.
+    """
+
+    engagement_type: str
+    label: str
+    scope: dict[str, object]
+    manifest: dict[str, object]
+    subdirs: tuple[str, ...]
+    report_name: str | None
+    report_target: str
+    repos: tuple[dict[str, str], ...]
+    date_label: str
+    time_label: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class EngagementRow:
     key: str
     path: Path
@@ -88,12 +114,13 @@ def repo_name(raw: str) -> str:
     return name.removesuffix(".git") or "repo"
 
 
-def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
-    install_root = options.install_root.expanduser().resolve()
-    agent_root = install_root / "agent"
-    root = engagements_root(install_root)
-    root.mkdir(parents=True, exist_ok=True)
+def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = None) -> EngagementPlan:
+    """Validate options and derive the scope/manifest/report inputs.
 
+    Pure with respect to the environment: no directories are created, no
+    database snapshot is taken, and the orchestrator is not contacted. Raises
+    SystemExit on the same invalid inputs `create_engagement` rejects.
+    """
     if options.engagement_type not in ENGAGEMENT_TYPES:
         raise SystemExit("--type must be one of: web, code, both, android, blue")
     if options.dynamic_mode not in ANDROID_DYNAMIC_MODES:
@@ -104,9 +131,8 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         if not options.platforms:
             raise SystemExit("blue engagements require at least one --platform")
 
-    _snapshot_orchestrator_database(install_root)
-
-    now = datetime.now(timezone.utc)
+    if now is None:
+        now = datetime.now(timezone.utc)
     date_label = now.strftime("%Y-%m-%d")
     time_label = now.strftime("%H%M%S")
     created_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -144,19 +170,14 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         label = slug(f"{options.customer}-{first_platform}")
     else:
         label = slug(name or "engagement")
-    eng_dir = root / f"{date_label}-{time_label}-{label}"
-    counter = 2
-    while eng_dir.exists():
-        eng_dir = root / f"{date_label}-{time_label}-{label}-{counter}"
-        counter += 1
-    eng_dir.mkdir(parents=True)
-    key = eng_dir.name
 
     subdirs = ["tools", "downloads", "scans", "pids", "sessions"]
     if options.engagement_type in {"code", "both", "android"}:
         subdirs.append("source")
-    for subdir in subdirs:
-        (eng_dir / subdir).mkdir()
+
+    # The final key is the collision-suffixed directory name, chosen when the
+    # plan is materialized; the manifest carries a placeholder until then.
+    key = ""
 
     repos = [{"path": raw, "name": repo_name(raw)} for raw in options.repos]
     scope: dict[str, object]
@@ -273,15 +294,64 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
             "created_at": created_at,
         }
 
-    _write_json(eng_dir / "scope.json", scope)
-    _write_json(eng_dir / "engagement.json", manifest)
     report_name = name
     report_target = target_normalized
     if options.engagement_type == "blue":
         report_name = str(manifest.get("customer") or options.customer or "")
         report_target = str(manifest.get("target") or "")
-    _write_report(eng_dir, options.engagement_type, name=report_name, target=report_target, repos=repos, date_label=date_label)
-    _write_auth_scaffold(eng_dir, "none", created_at)
+
+    return EngagementPlan(
+        engagement_type=options.engagement_type,
+        label=label,
+        scope=scope,
+        manifest=manifest,
+        subdirs=tuple(subdirs),
+        report_name=report_name,
+        report_target=report_target,
+        repos=tuple(repos),
+        date_label=date_label,
+        time_label=time_label,
+        created_at=created_at,
+    )
+
+
+def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
+    install_root = options.install_root.expanduser().resolve()
+    agent_root = install_root / "agent"
+    # Validate and derive everything before taking any side effect: an invalid
+    # option set must not leave behind a DB snapshot or a half-made directory.
+    plan = plan_engagement(options)
+
+    root = engagements_root(install_root)
+    root.mkdir(parents=True, exist_ok=True)
+    _snapshot_orchestrator_database(install_root)
+
+    eng_dir = root / f"{plan.date_label}-{plan.time_label}-{plan.label}"
+    counter = 2
+    while eng_dir.exists():
+        eng_dir = root / f"{plan.date_label}-{plan.time_label}-{plan.label}-{counter}"
+        counter += 1
+    eng_dir.mkdir(parents=True)
+    key = eng_dir.name
+
+    for subdir in plan.subdirs:
+        (eng_dir / subdir).mkdir()
+
+    scope = dict(plan.scope)
+    manifest = dict(plan.manifest)
+    manifest["key"] = key
+
+    _write_json(eng_dir / "scope.json", scope)
+    _write_json(eng_dir / "engagement.json", manifest)
+    _write_report(
+        eng_dir,
+        options.engagement_type,
+        name=plan.report_name,
+        target=plan.report_target,
+        repos=list(plan.repos),
+        date_label=plan.date_label,
+    )
+    _write_auth_scaffold(eng_dir, "none", plan.created_at)
     _write_json(eng_dir / "sessions" / "index.json", [])
     # Dispatch tracking + handoff content live in the orchestrator backend
     # (assessment_dispatches / assessment_dispatch_handoffs /

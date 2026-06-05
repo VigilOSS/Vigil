@@ -57,6 +57,138 @@ def test_assess_cli_imports_agent_work_buffer_without_legacy_dispatch_module() -
     assert "dispatch" not in imported
 
 
+def test_agent_action_help_is_action_specific(capsys) -> None:
+    """`vigil assess agent list --help` should show list usage, not only umbrella help."""
+    root = str(_scripts_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import assess.cli as cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["agent", "list", "--limit", "5", "--help"])
+
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "Usage: vigil assess agent list" in captured.out
+    assert "--filter-role" in captured.out
+    assert "start-swarm" not in captured.out
+
+
+def test_get_command_run_accepts_json_flag(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_get_command_run_module",
+        "agent/scripts/assess/commands/get_command_run.py",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    captured_endpoints: list[str] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            captured_endpoints.append(endpoint)
+            return {"id": 123, "stdout_preview": "ok"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    module.register(sub)
+    args = parser.parse_args(["get-command-run", "123", "--json"])
+    args.engagement_dir = tmp_path
+    args.func(args)
+
+    assert captured_endpoints == ["command-runs/123"]
+    assert json.loads(capsys.readouterr().out) == {"id": 123, "stdout_preview": "ok"}
+
+
+def test_list_findings_pushes_filters_and_limit_to_backend(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_list_findings_module",
+        "agent/scripts/assess/commands/list_findings.py",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    captured: list[str] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            captured.append(endpoint)
+            return [
+                {
+                    "slug": "VA-123",
+                    "severity": "high",
+                    "workflow_status": "active",
+                    "verification_state": "verified",
+                    "verification_disposition": "confirmed",
+                    "source_name": "vulnerability-analyst",
+                    "canonical_location": "https://example.test/oidc",
+                    "summary": "OIDC state result",
+                    "title": "Filtered result",
+                }
+            ]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(
+        SimpleNamespace(
+            engagement_dir=tmp_path,
+            severity="high",
+            workflow_status="active",
+            verification_state="verified",
+            verification_disposition="confirmed",
+            source_name="vulnerability-analyst",
+            slug="",
+            root_cause_slug="",
+            search="OIDC state",
+            holding=False,
+            limit=25,
+            offset=50,
+            all=False,
+            json=False,
+        )
+    )
+
+    assert captured == [
+        "findings?severity=high&workflow_status=active&verification_state=verified&"
+        "verification_disposition=confirmed&source_name=vulnerability-analyst&search=OIDC%20state&"
+        "limit=25&offset=50"
+    ]
+    assert "VA-123 | high | active | verified/confirmed" in capsys.readouterr().out
+
+
 def test_kali_runtime_dockerfiles_package_audit_enum_module() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     required_copy = "COPY agent/scripts/assess/lib/audit_enums.py /opt/mcp-tools/audit_enums.py"
@@ -2440,6 +2572,59 @@ def _run_resume_brief(monkeypatch, tmp_path, body, *, as_json):
             as_json=as_json,
         )
     )
+
+
+def test_list_report_findings_409_is_concise(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_list_report_findings_module",
+        "agent/scripts/assess/commands/list_report_findings.py",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    detail = {
+        "detail": {
+            "ready": False,
+            "blocker_count": 2,
+            "blockers": [
+                {"kind": "coverage", "detail": "Coverage blockers remain", "blocker_count": 7},
+                {"kind": "finding_verification_state", "slug": "VA-001", "detail": "unreviewed"},
+            ],
+        }
+    }
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            raise module.AssessError(f"HTTP 409:\n{json.dumps(detail)}")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(SimpleNamespace(engagement_dir=tmp_path, mode="final", json=False))
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Final report blockers remain" in captured.err
+    assert "coverage: Coverage blockers remain" in captured.err
+    assert "VA-001: unreviewed" in captured.err
+    assert len(captured.err) < 1000
 
 
 @pytest.mark.parametrize("body", ["", "<!doctype html><html>SPA</html>"])
