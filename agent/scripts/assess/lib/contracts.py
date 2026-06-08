@@ -510,6 +510,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Use this helper in prompts and report workflows instead of raw `vigil assess fetch report-findings?...` calls. The helper makes grouped root-cause output the contract and keeps query-string details out of operator instructions.",
+            "`--mode final` enforces report-readiness and exits non-zero while blockers remain. Use `--mode draft` to inspect the grouped projection before final readiness passes.",
             "`--json` is the report-writer/LLM ingestion form. The default text form is for quick human inspection before dispatch.",
         ),
     ),
@@ -1644,6 +1645,7 @@ def _work_buffer_contract() -> CommandContract:
         schema_name="local cases.db work_items schema",
         preferred_invocations=(
             "vigil assess work-buffer <cases.db> stats --by status|source|cluster|host",
+            "vigil assess work-buffer <cases.db> peek <type> [limit]",
             "vigil assess work-buffer <cases.db> fetch <type> <limit> <agent-name>",
             "vigil assess work-buffer <cases.db> fetch-by-priority <limit> auto",
             "vigil assess work-buffer <cases.db> done <id1,id2,...>",

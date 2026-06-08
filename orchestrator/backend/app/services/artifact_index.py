@@ -138,10 +138,12 @@ def _file_payload(root: Path, relative_path: str, media_type: str) -> dict[str, 
     }
 
 
-def _serialize_artifact(row) -> dict[str, Any]:
+def _serialize_artifact(row, *, compact: bool = False) -> dict[str, Any]:
     data = dict(row)
     for key in ("sensitive", "present", "scratch"):
         data[key] = bool(data.get(key))
+    if compact:
+        data.pop("indexed_text", None)
     return data
 
 
@@ -435,7 +437,7 @@ def search_artifacts(
     )
     with get_connection() as connection:
         rows = connection.execute(sql, tuple(select_params + params)).fetchall()
-    return [_serialize_artifact(row) for row in rows]
+    return [_serialize_artifact(row, compact=True) for row in rows]
 
 
 def get_artifact(engagement_id: int, artifact_id: int) -> dict[str, Any]:
