@@ -1000,9 +1000,33 @@ def get_oob_probe(engagement_key: str, nonce: str) -> dict[str, Any]:
 
 
 @router.get("/findings")
-def get_findings(engagement_key: str) -> list[dict[str, Any]]:
+def get_findings(
+    engagement_key: str,
+    severity: str | None = None,
+    workflow_status: str | None = None,
+    verification_state: str | None = None,
+    verification_disposition: str | None = None,
+    source_name: str | None = None,
+    slug: str | None = None,
+    search: str | None = None,
+    holding: bool = False,
+    limit: int | None = Query(default=None, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_findings(engagement.id)
+    return state_manager.list_findings(
+        engagement.id,
+        severity=severity,
+        workflow_status=workflow_status,
+        verification_state=verification_state,
+        verification_disposition=verification_disposition,
+        source_name=source_name,
+        slug=slug,
+        search=search,
+        holding=holding,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/findings/{finding_slug}")
