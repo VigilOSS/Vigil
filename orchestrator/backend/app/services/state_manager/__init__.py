@@ -56,6 +56,9 @@ from .dispatches import (
 )
 from .coverage import (
     COVERAGE_STATUSES,
+    PROBE_RESULT_STATUSES,
+    PROBE_RESULT_STATUSES_COVERING,
+    PROBE_RESULT_STATUS_DEFAULT,
     record_target,
     list_targets,
     record_service,
@@ -78,6 +81,20 @@ from .coverage import (
     vendor_saas_hosts_pending_decision,
     egress_block_status,
     coverage_rollup,
+)
+from .app_units import (
+    score_application_units,
+    list_application_units,
+    set_app_unit_override,
+)
+from .depth_ledger import (
+    depth_ledger,
+    terminal_depth_block,
+)
+from .phase_readiness import (
+    phase_readiness,
+    PHASES as PHASE_READINESS_PHASES,
+    PHASE_REQUIRE_STAGE,
 )
 from .report_readiness import (
     report_readiness,
@@ -177,6 +194,9 @@ __all__ = [
     "list_decisions",
     "update_decision",
     "COVERAGE_STATUSES",
+    "PROBE_RESULT_STATUSES",
+    "PROBE_RESULT_STATUSES_COVERING",
+    "PROBE_RESULT_STATUS_DEFAULT",
     "record_target",
     "list_targets",
     "record_service",
@@ -199,6 +219,14 @@ __all__ = [
     "vendor_saas_hosts_pending_decision",
     "egress_block_status",
     "coverage_rollup",
+    "score_application_units",
+    "list_application_units",
+    "set_app_unit_override",
+    "depth_ledger",
+    "terminal_depth_block",
+    "phase_readiness",
+    "PHASE_READINESS_PHASES",
+    "PHASE_REQUIRE_STAGE",
     "report_readiness",
     "list_report_findings",
     "list_report_finding_groups",

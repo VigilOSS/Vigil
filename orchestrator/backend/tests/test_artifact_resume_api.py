@@ -585,7 +585,7 @@ def test_resolve_linked_finding_join(client, isolate_settings) -> None:
     }
 
 
-def test_report_readiness_blocks_unlinked_markdown_notes(client, isolate_settings) -> None:
+def test_report_readiness_unlinked_markdown_notes_are_advisory(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _seed_finding(client, eng)
@@ -594,11 +594,17 @@ def test_report_readiness_blocks_unlinked_markdown_notes(client, isolate_setting
 
     readiness = client.get(f"{BASE}/report-readiness")
     assert readiness.status_code == 200, readiness.text
-    blockers = readiness.json()["blockers"]
-    assert any(
-        blocker["kind"] == "unlinked_markdown_note" and blocker["path"] == "notes/scratch.md"
-        for blocker in blockers
+    body = readiness.json()
+    assert not any(
+        blocker["kind"] == "unlinked_markdown_note"
+        for blocker in body["blockers"]
+    ), body
+    advisory = next(
+        a for a in body["advisories"]
+        if a["kind"] == "unlinked_markdown_note" and a["path"] == "notes/scratch.md"
     )
+    assert "mark-scratch" in advisory["detail"]
+    assert body["ready"] is True, body
 
 
 def test_report_readiness_normalizes_absolute_evidence_ref(client, isolate_settings) -> None:
@@ -669,7 +675,7 @@ def test_report_readiness_validates_evidence_ref_when_artifact_id_is_present(cli
     assert "vigil assess update-finding VA-047 --evidence-ref notes/replacement-evidence.md" in mismatch["detail"]
 
 
-def test_mark_scratch_clears_unlinked_markdown_blocker(client, isolate_settings) -> None:
+def test_mark_scratch_clears_unlinked_markdown_advisory(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _seed_finding(client, eng)
@@ -677,15 +683,17 @@ def test_mark_scratch_clears_unlinked_markdown_blocker(client, isolate_settings)
     _register_note(client, "notes/scratch.md")
 
     readiness_before = client.get(f"{BASE}/report-readiness")
-    blockers_before = readiness_before.json()["blockers"]
-    note_blocker = next(
-        b for b in blockers_before
-        if b["kind"] == "unlinked_markdown_note" and b["path"] == "notes/scratch.md"
+    before = readiness_before.json()
+    assert not any(
+        b["kind"] == "unlinked_markdown_note" for b in before["blockers"]
+    ), before
+    note_advisory = next(
+        a for a in before["advisories"]
+        if a["kind"] == "unlinked_markdown_note" and a["path"] == "notes/scratch.md"
     )
-    # Blocker message must name the operator escape commands so a human or
     # LLM can fix without searching docs.
-    assert "artifact register" in note_blocker["detail"]
-    assert "mark-scratch" in note_blocker["detail"]
+    assert "artifact register" in note_advisory["detail"]
+    assert "mark-scratch" in note_advisory["detail"]
 
     flagged = client.post(
         f"{BASE}/artifacts/scratch-by-path",
@@ -696,10 +704,9 @@ def test_mark_scratch_clears_unlinked_markdown_blocker(client, isolate_settings)
 
     readiness_after = client.get(f"{BASE}/report-readiness")
     assert readiness_after.status_code == 200, readiness_after.text
-    blockers_after = readiness_after.json()["blockers"]
     assert not any(
-        b["kind"] == "unlinked_markdown_note" and b["path"] == "notes/scratch.md"
-        for b in blockers_after
+        a["kind"] == "unlinked_markdown_note" and a["path"] == "notes/scratch.md"
+        for a in readiness_after.json()["advisories"]
     )
 
 
@@ -723,10 +730,14 @@ def test_mark_scratch_under_prefix_clears_many_blockers(client, isolate_settings
     assert set(body["updated"]) == {"notes/scratch/a.md", "notes/scratch/b.md", "notes/scratch/c.md"}
 
     readiness = client.get(f"{BASE}/report-readiness")
-    blockers = readiness.json()["blockers"]
+    body = readiness.json()
     assert not any(
         b["kind"] == "unlinked_markdown_note" and b["path"].startswith("notes/scratch/")
-        for b in blockers
+        for b in body["blockers"]
+    )
+    assert not any(
+        a["kind"] == "unlinked_markdown_note" and a["path"].startswith("notes/scratch/")
+        for a in body["advisories"]
     )
 
 

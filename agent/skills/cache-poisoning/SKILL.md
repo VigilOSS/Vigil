@@ -2,6 +2,7 @@
 name: cache-poisoning
 description: Detect and exploit web cache poisoning and cache deception vulnerabilities
 origin: Vigil
+vuln_class: cache-poisoning
 ---
 
 # Cache Poisoning Testing

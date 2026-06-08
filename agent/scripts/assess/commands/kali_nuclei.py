@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -19,77 +21,76 @@ from assess.lib.kali import (
 )
 
 
-_NUCLEI_LOCK_BASENAME = ".nuclei.lock"
+_NUCLEI_LOCK_TIMEOUT_S = 1800.0
+
+
+def _lock_holder_is_stale(fd: int) -> bool:
+    """True when the PID recorded in the lockfile is no longer alive.
+
+    Stale lockfiles (the holder crashed) must be reclaimable so a dead run
+    can't wedge the output path forever. A PID owned by another user is treated
+    as ALIVE (we can't safely force-release it). No recorded PID means the
+    holder crashed before writing one — stale.
+    """
+    os.lseek(fd, 0, os.SEEK_SET)
+    prior_pid_raw = os.read(fd, 64).decode("ascii", errors="ignore").strip()
+    if not prior_pid_raw:
+        return True
+    try:
+        prior_pid = int(prior_pid_raw)
+    except ValueError:
+        return True
+    try:
+        os.kill(prior_pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        return True
+    return False
 
 
 @contextmanager
-def _nuclei_engagement_lock(engagement_dir: Path):
-    """C32: per-engagement file lock so two concurrent ``vigil assess kali nuclei``
-    invocations cannot corrupt each other's output. The lockfile records the
-    PID of the holding process. If a stale lockfile exists for a PID that is
-    no longer alive (crashed run), force-release and acquire.
+def _nuclei_output_lock(lock_path: Path, *, timeout_s: float = _NUCLEI_LOCK_TIMEOUT_S):
+    """Serialize only the nuclei runs that share the SAME ``-o`` output file.
 
-    Raises AssessError on contention with a clear message naming the holding
-    PID and the lockfile path so the operator can debug quickly.
+    L3-1: a per-*engagement* exclusive lock hard-failed every concurrent
+    ``vigil assess kali nuclei`` after the first, killing the 4-6-agent swarm.
+    But two nuclei runs corrupt each other ONLY when they append to the same
+    jsonl artifact — so the lock is keyed on the OUTPUT PATH. Runs with distinct
+    ``-o`` files (or none) take different locks and run fully in parallel.
+
+    When two runs genuinely target the same file, the contender BLOCKS (up to
+    ``timeout_s``, polling) until the holder finishes and then runs — instead of
+    hard-failing the dispatch. A stale lockfile (holder PID dead) is reclaimed
+    immediately. Only a genuinely hung holder past the timeout raises.
     """
-    scans_dir = engagement_dir / "scans"
-    scans_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = scans_dir / _NUCLEI_LOCK_BASENAME
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    deadline = time.monotonic() + timeout_s
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            # Read prior PID, check liveness, force-release if stale.
-            os.lseek(fd, 0, os.SEEK_SET)
-            prior_pid_raw = os.read(fd, 64).decode("ascii", errors="ignore").strip()
-            prior_pid = None
+        while True:
             try:
-                prior_pid = int(prior_pid_raw) if prior_pid_raw else None
-            except ValueError:
-                prior_pid = None
-            stale = False
-            if prior_pid is not None:
-                try:
-                    os.kill(prior_pid, 0)
-                except (ProcessLookupError, PermissionError):
-                    # PermissionError means the PID exists but is owned by
-                    # another user — treat as alive (cannot safely force-release).
-                    if isinstance(sys.exc_info()[1], ProcessLookupError):
-                        stale = True
-                except OSError:
-                    stale = True
-            else:
-                # No recorded PID — the previous holder crashed before writing
-                # its PID. Treat as stale and force-release.
-                stale = True
-            if stale:
-                # Force-acquire: re-flock LOCK_EX | LOCK_NB after the prior
-                # owner released by dying. If the re-flock itself races
-                # (another writer is mid-acquire — lock taken but PID not yet
-                # written), convert BlockingIOError into the same actionable
-                # AssessError as a normal contention so operators see a clean
-                # message instead of an internal traceback.
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError as exc:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if _lock_holder_is_stale(fd):
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        pass
+                if time.monotonic() >= deadline:
                     os.close(fd)
                     raise AssessError(
-                        f"nuclei lock contention on retry "
-                        f"(lockfile: {lock_path}). Another process is "
-                        "mid-acquire (lock taken but PID not yet recorded). "
-                        "Wait a moment and re-run, or remove the lockfile "
-                        "manually if no nuclei process is actually running."
-                    ) from exc
-            else:
-                os.close(fd)
-                raise AssessError(
-                    f"nuclei lock already held by PID {prior_pid or '<unknown>'} "
-                    f"(lockfile: {lock_path}). Concurrent nuclei runs in the same "
-                    "engagement can corrupt each other's jsonl output. Wait for the "
-                    "prior run to finish, or if it has crashed remove the lockfile "
-                    "manually."
-                )
+                        f"nuclei output lock on {lock_path} still held after "
+                        f"{int(timeout_s)}s — a concurrent run targeting the same "
+                        "-o file has not finished. Use a distinct -o path per run "
+                        "so sweeps run in parallel, or remove the lockfile if no "
+                        "nuclei process is actually running."
+                    )
+                time.sleep(0.5)
         # Record this process's PID so a future contender can detect staleness.
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
@@ -104,6 +105,25 @@ def _nuclei_engagement_lock(engagement_dir: Path):
             os.close(fd)
         except OSError:
             pass
+
+
+def _nuclei_lock_path_for(output_arg: str, engagement_dir: Path | None) -> Path | None:
+    """Return the lockfile path that guards ``output_arg``, or None for no lock.
+
+    No ``-o`` output → None (the wrapper's stdout capture is per-run-uuid, so
+    nothing is shared and nothing needs a lock). Otherwise the lock is a sidecar
+    next to the resolved host output path, so distinct outputs never contend.
+    """
+    if engagement_dir is None:
+        return None
+    output_arg = (output_arg or "").strip()
+    if not output_arg:
+        return None
+    host_out = _resolve_output_host_path(output_arg, engagement_dir)
+    if host_out is not None:
+        return host_out.parent / f".{host_out.name}.lock"
+    digest = hashlib.sha1(output_arg.encode("utf-8")).hexdigest()[:16]
+    return engagement_dir / "scans" / f".nuclei-{digest}.lock"
 
 
 def _resolve_output_host_path(output_arg: str, engagement_dir: Path | None) -> Path | None:
@@ -233,19 +253,15 @@ def run(args) -> None:
         cmd.extend(["-o", args.output])
     extend_cmd_with_extra_args(cmd, args)
 
-    # C32: lock + zero-byte post-check. Lock is per-engagement so concurrent
-    # invocations cannot corrupt each other's jsonl artifacts. Test contexts
-    # that do not provide an engagement directory (argv-shape tests) skip the
-    # lock — the only operational guarantee it provides is concurrency
-    # safety, which is moot when no real exec happens.
     engagement_dir: Path | None = None
     try:
         cfg = load_config(getattr(args, "engagement_dir", None))
         engagement_dir = Path(cfg.engagement_dir)
     except SystemExit:
         engagement_dir = None
-    if engagement_dir is not None:
-        with _nuclei_engagement_lock(engagement_dir):
+    lock_path = _nuclei_lock_path_for(getattr(args, "output", ""), engagement_dir)
+    if lock_path is not None:
+        with _nuclei_output_lock(lock_path):
             result = kali_exec(cmd, tool_name="nuclei", **kali_args_to_kwargs(args))
     else:
         result = kali_exec(cmd, tool_name="nuclei", **kali_args_to_kwargs(args))

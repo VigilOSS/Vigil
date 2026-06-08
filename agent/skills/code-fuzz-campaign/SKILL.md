@@ -2,6 +2,7 @@
 name: code-fuzz-campaign
 description: AI-driven fuzz campaign orchestration — target selection, harness construction, sanitizer compilation, and crash triage for memory-safety vulnerabilities in C/C++ codebases
 origin: Vigil
+vuln_class: buffer-overflow, integer-overflow, format-string, null-dereference, use-after-free, uninitialized-memory, type-confusion, algorithmic-dos
 ---
 
 # Code Fuzz Campaign

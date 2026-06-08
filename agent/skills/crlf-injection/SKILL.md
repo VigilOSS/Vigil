@@ -2,6 +2,7 @@
 name: crlf-injection
 description: Detect and exploit CRLF injection for HTTP response splitting, header injection, and log forging
 origin: Vigil
+vuln_class: crlf
 ---
 
 # CRLF Injection Testing

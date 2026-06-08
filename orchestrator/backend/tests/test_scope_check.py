@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 def _run_scope_check(command: str, engagement_dir: Path) -> subprocess.CompletedProcess[str]:
     repo_root = Path(__file__).resolve().parents[3]
@@ -119,6 +121,52 @@ def test_scope_check_blocks_destructive_disk_operation(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "disk operation" in result.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git clean -fdx",
+        "git clean -fxd",
+        "git clean -dfx",
+        "git clean -dxf",
+        "git clean -xfd",
+        "git clean -xdf",
+        "git clean -fd",
+        "git clean -df",
+        "git clean -f -d",
+        "git clean -d -f",
+        "git clean --force -d",
+        "git clean -d --force",
+        "cd /repo && git clean -xfd",
+    ],
+)
+def test_scope_check_blocks_forced_recursive_git_clean(tmp_path: Path, command: str) -> None:
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    result = _run_scope_check(command, engagement_dir)
+    assert result.returncode == 2, f"{command!r} should be blocked"
+    assert "git clean" in result.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git clean -n",
+        "git clean -fdxn",
+        "git clean -f -d --dry-run",
+        "git clean -i",
+        "git clean -f",
+        "git clean -f -e keep.txt",
+        "git status",
+        "git checkout -- .",
+    ],
+)
+def test_scope_check_allows_non_recursive_or_dryrun_git_clean(tmp_path: Path, command: str) -> None:
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    result = _run_scope_check(command, engagement_dir)
+    assert result.returncode == 0, f"{command!r} should be allowed"
 
 
 # ---------------------------------------------------------------------------

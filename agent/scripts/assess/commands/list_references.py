@@ -20,8 +20,9 @@ Frontmatter fields the command surfaces:
   description  (required; falls back to the first H1 heading)
   skill        (optional; one name or a comma-list — the paired skill[s])
   category     (optional; overrides the directory-derived category)
-  source / languages / bucket / weight / origin  (optional; type-specific,
-               echoed in --json)
+  source / languages / bucket / vuln_class / weight / origin  (optional;
+               type-specific, echoed in --json — `bucket` is the gf-bucket
+               name, `vuln_class` the canonical taxonomy term)
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ from assess.lib import frontmatter
 _REFS_DIR = Path(__file__).resolve().parents[3] / "references"
 
 # Type-specific frontmatter keys echoed into the JSON output (when present).
-_EXTRA_KEYS = ("source", "languages", "bucket", "weight", "origin")
+_EXTRA_KEYS = ("source", "languages", "bucket", "vuln_class", "weight", "origin")
 
 # First path segment under references/ -> human category label.
 _DIR_CATEGORY: dict[str, str] = {

@@ -35,9 +35,21 @@ if printf '%s\n' "$COMMAND" | grep -Eq '(^|[[:space:];|&(])(sudo[[:space:]]+)?(c
   exit 2
 fi
 
-if printf '%s\n' "$COMMAND" | grep -Eq '(^|[[:space:];|&(])git[[:space:]]+clean[[:space:]][^;&|]*-[^;&|[:space:]]*f[^;&|[:space:]]*d[^;&|[:space:]]*x|(^|[[:space:];|&(])git[[:space:]]+clean[[:space:]][^;&|]*-[^;&|[:space:]]*d[^;&|[:space:]]*f[^;&|[:space:]]*x'; then
-  echo "BLOCKED: Destructive git clean detected. Use an explicit path list or ask the user." >&2
-  exit 2
+# Destructive `git clean`: a forced recursive clean (-f together with -d) deletes
+# untracked DIRECTORIES — including the operator's un-committed engagement notes.
+# Match on flag PRESENCE within the git-clean segment, order-independent and
+# whether combined (-fdx/-dfx/-xfd/...) or separate (-f -d), instead of a fixed
+# -fdx/-dfx spelling that missed 4 of the 6 orderings (L7-1). A dry-run (-n) or
+# interactive (-i) clean deletes nothing, so it is exempt.
+CLEAN_SEG=$(printf '%s\n' "$COMMAND" | grep -Eo '(^|[[:space:];|&(])git[[:space:]]+clean[^;&|]*' | head -1)
+if [ -n "$CLEAN_SEG" ]; then
+  if ! printf '%s' "$CLEAN_SEG" | grep -Eq '([[:space:]]-[[:alpha:]]*[ni]|[[:space:]]--dry-run|[[:space:]]--interactive)'; then
+    if printf '%s' "$CLEAN_SEG" | grep -Eq '([[:space:]]--force|[[:space:]]-[[:alpha:]]*f)' \
+       && printf '%s' "$CLEAN_SEG" | grep -Eq '[[:space:]]-[[:alpha:]]*d'; then
+      echo "BLOCKED: Destructive git clean (-f with -d) detected. Use an explicit path list or ask the user." >&2
+      exit 2
+    fi
+  fi
 fi
 
 exit 0

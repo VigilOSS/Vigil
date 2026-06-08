@@ -2,6 +2,7 @@
 name: request-smuggling
 description: HTTP request smuggling via CL.TE/TE.CL desync and cache poisoning
 origin: Vigil
+vuln_class: request-smuggling
 ---
 
 # HTTP Request Smuggling Testing

@@ -145,7 +145,7 @@ Output: backend intel-table updates via `record-intel` (technology, CVE, breach,
 
 ### REPORT-WRITER ← backend API (self-service)
 
-For final reports, run `vigil assess check-report-readiness` first. Report-writer queries the backend
+For final reports, run `vigil assess check-phase-readiness --phase report` first. Report-writer queries the backend
 directly via `vigil assess list-report-findings --mode final --json` for final output or
 `vigil assess list-report-findings --mode draft --json` for interim output, plus `attack-chains`,
 `surfaces`, and `summary`. The operator does not pre-assemble findings context.

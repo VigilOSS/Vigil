@@ -22,7 +22,12 @@ _GRAPHQL_CT = re.compile(r"^application/graphql$", re.IGNORECASE)
 _WS_SCHEME = re.compile(r"^wss?://", re.IGNORECASE)
 _WS_PATH = re.compile(r"/ws(/|$)|^/socket\.io(/|$)", re.IGNORECASE)
 _API_SPEC_PATH = re.compile(
-    r"^/(api-docs|openapi(\.json)?|swagger(\.json|-ui(\.html)?)?|v[0-9]+/api-docs)(/|$)",
+    r"(^|/)("
+    r"api-docs"
+    r"|openapi(\.json|\.yaml|\.yml)?"
+    r"|swagger(\.json|\.yaml|\.yml|-ui(\.html)?)?"
+    r"|v[0-9]+/api-docs"
+    r")(/|$)",
     re.IGNORECASE,
 )
 _API_PATH = re.compile(r"^/(api|rest)(/|$)|/v[0-9]+(/|$)", re.IGNORECASE)

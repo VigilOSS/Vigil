@@ -35,6 +35,7 @@ def add_required_kali_flags(parser) -> None:
         required=True,
         help=(
             "Vulnerability-class technique tag (e.g. RECON, SSRF, SQLI). "
+            "Case- and separator-insensitive (ssrf / open_redirect resolve). "
             f"Allowed: {', '.join(TECHNIQUE_ENUM) if TECHNIQUE_ENUM else 'see audit_enums.py'}"
         ),
     )
@@ -47,16 +48,18 @@ def add_required_kali_flags(parser) -> None:
         "--probe-kind",
         required=True,
         dest="probe_kind",
+        type=str.lower,
         choices=list(PROBE_KIND_ENUM) if PROBE_KIND_ENUM else None,
-        help="fingerprint | baseline | payload | exploit | replay | cleanup",
+        help="fingerprint | baseline | payload | exploit | replay | cleanup (case-insensitive)",
     )
     parser.add_argument(
         "--phase",
         required=True,
+        type=str.lower,
         choices=list(ALLOWED_PHASES),
         help=(
             "Phase the dispatching agent was authorized for. No env-var "
-            "fallback — pass explicitly."
+            "fallback — pass explicitly. Case-insensitive."
         ),
     )
     parser.add_argument(
@@ -86,6 +89,18 @@ def add_required_kali_flags(parser) -> None:
         help=(
             "Dispatching agent name. Defaults to $AGENT_NAME / $VIGIL_AGENT_NAME / "
             "'operator'; specialists should pass this explicitly if wrapper env is missing."
+        ),
+    )
+    parser.add_argument(
+        "--identity",
+        dest="identity",
+        default=None,
+        help=(
+            "Named identity from auth.json to run AND stamp as (e.g. user_a, "
+            "user_b, admin). Selects that identity's auth material and records "
+            "it as the probe's auth_context so cross-identity access-control "
+            "(IDOR/BOLA/BFLA) depth is measurable. Omit for the active identity "
+            "/ legacy single-identity behavior."
         ),
     )
     # default_runtime_container() is called at parse time (not bound to a
@@ -170,6 +185,7 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "agent_name": getattr(args, "kali_agent_name", None),
         "force": bool(getattr(args, "force", False)),
         "container_name": getattr(args, "container_name", None),
+        "identity": getattr(args, "identity", None),
     }
     if explicit_dir:
         kwargs["engagement_dir"] = Path(explicit_dir).expanduser().resolve()

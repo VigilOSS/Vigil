@@ -78,10 +78,33 @@ class ProbeRunRecordRequest(BaseModel):
     payload_value: str = Field(default="", max_length=16384)
     tool_name: str = Field(min_length=1, max_length=128)
     agent_name: str = Field(default="", max_length=128)
-    result_status: str = Field(default="tested", min_length=1, max_length=64)
+    result_status: Literal[
+        "tested", "signal", "attempted", "blocked", "error", "no-signal"
+    ] = "tested"
     observed_http_status: int | None = None
     signal_type: str = Field(default="", max_length=128)
     evidence_ref: str = Field(default="", max_length=1024)
+    notes: str = Field(default="", max_length=4096)
+    target_host: str = Field(default="", max_length=256)
+    target_path: str = Field(default="", max_length=2048)
+    target_port: int | None = None
+
+
+class CoverageItemRecordRequest(BaseModel):
+    """Create/upsert a class-typed coverage item (Wave 5 / 2b).
+
+    Wires the previously-dead ``record_coverage_item``. The gf-bucket bridge
+    (``ingest_endpoints``) POSTs one of these per matched gf bucket with the
+    canonical ``attack_family`` so the depth ledger sees a class-typed coverage
+    obligation per endpoint, not just the generic baseline.
+    """
+
+    request_variant_id: int | None = None
+    service_id: int | None = None
+    auth_context: str = Field(default="anonymous", min_length=1, max_length=128)
+    input_slot: str = Field(default="endpoint", min_length=1, max_length=64)
+    attack_family: str = Field(min_length=1, max_length=64)
+    status_value: str = Field(default="pending", min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)
 
 
@@ -268,6 +291,8 @@ class SurfaceRecordRequest(BaseModel):
         "object_reference",
         "privileged_write",
         "workflow_token",
+        "misconfiguration",
+        "informational",
     ]
     target_descriptor: str = Field(min_length=1, max_length=1024)
     source_name: str = Field(default="", max_length=128)
@@ -365,6 +390,7 @@ class CredentialRecordRequest(BaseModel):
     status: str = Field(default="discovered", min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)
     provenance: dict[str, Any] = Field(default_factory=dict)
+    identity: str = Field(default="", max_length=128)
 
 
 class CredentialTestRecordRequest(BaseModel):
@@ -393,6 +419,18 @@ class AccessRecordRequest(BaseModel):
 class CoverageItemUpdateRequest(BaseModel):
     status: str = Field(min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)
+
+    @model_validator(mode="after")
+    def _require_rationale_for_resolved(self) -> "CoverageItemUpdateRequest":
+        resolved_positive = {"covered", "not_applicable", "done", "n/a", "not-applicable"}
+        if (self.status or "").strip().lower() in resolved_positive and not (
+            self.notes and self.notes.strip()
+        ):
+            raise ValueError(
+                "a non-empty rationale (notes) is required to mark a coverage "
+                "item 'covered' or 'not_applicable'"
+            )
+        return self
 
 
 class BlockedTechniqueRecordRequest(BaseModel):
@@ -604,8 +642,8 @@ def get_per_host_coverage(engagement_key: str) -> dict[str, Any]:
     Surfaces the WAF / service-inventory / directory-fuzz / nikto-trigger /
     OSINT outcome status for every host the engagement has signal for, plus
     active ``coverage_deferral`` decision rows. The CLI consumes this via
-    ``vigil assess check-scope-coverage --by-host``; the frontend Readiness
-    panel (C58) renders the same shape.
+    ``vigil assess check-phase-readiness --phase recon|collect|consume --by-host``;
+    the frontend Readiness panel (C58) renders the same shape.
 
     P1#3: also embeds ``scope_hosts`` (the raw scope.json hosts list) so
     the frontend can partition rows into scope literals vs wildcard
@@ -639,6 +677,27 @@ def get_report_readiness(engagement_key: str) -> dict[str, Any]:
             "scope_hosts": [],
         }
     return readiness
+
+
+@router.get("/phase-readiness")
+def get_phase_readiness(engagement_key: str, phase: str) -> dict[str, Any]:
+    """Wave 6d — consolidated phase-keyed readiness (depth-gate §6).
+
+    The backend half of ``vigil assess check-phase-readiness --phase <phase>``.
+    ASSEMBLES the per-phase result by CALLING the existing, unchanged gates
+    (``coverage_readiness`` / ``per_host_coverage`` / ``report_readiness`` /
+    ``depth_ledger`` / intel ``intel_readiness``) — those function names and the
+    routes that serve them are stable; this is purely an additive front door.
+
+    Read-only and ADVISORY: it never mutates state and never refuses a
+    transition (the terminal depth block lives on the ``transition-phase``
+    report/complete precondition). An unknown ``phase`` is a 422.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    try:
+        return state_manager.phase_readiness(engagement.id, phase)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/targets")
@@ -1148,6 +1207,14 @@ async def create_probe_run(engagement_key: str, request: ProbeRunRecordRequest) 
     return record
 
 
+@router.post("/coverage-items", status_code=status.HTTP_201_CREATED)
+async def create_coverage_item(engagement_key: str, request: CoverageItemRecordRequest) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.record_coverage_item(engagement.id, **request.model_dump())
+    await _broadcast(engagement.key, "coverage_item", record)
+    return record
+
+
 @router.post("/command-runs", status_code=status.HTTP_201_CREATED)
 async def create_command_run(
     engagement_key: str,
@@ -1384,6 +1451,87 @@ async def update_surface_endpoint(
         followup_condition=request.followup_condition,
     )
     await _broadcast(engagement.key, "surface", record)
+    return record
+
+
+class AppUnitOverrideRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    override: Literal["mark-deep", "clear-deep"] | None = None
+    reason: str | None = Field(default=None, max_length=2048)
+
+
+@router.get("/application-units")
+def get_application_units(engagement_key: str) -> list[dict[str, Any]]:
+    """List scored app units (depth-gate §5.2). Read-only; advisory."""
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_application_units(engagement.id)
+
+
+@router.get("/application-units/depth-ledger")
+def get_depth_ledger(engagement_key: str) -> dict[str, Any]:
+    """Read-only, ADVISORY depth ledger (depth-gate §5.3, Wave 6c).
+
+    Per ``deep_required`` app unit: Expected vuln classes (each gated by an
+    executable §5.3 predicate), Covered, missing block/warn classes, active
+    depth deferrals, the structured dedicated-dispatch verdict, a per-unit
+    ``depth_satisfied`` verdict, and an EV rank. EV-ranked, highest first.
+
+    Mid-engagement this is ADVISORY ONLY — it never blocks a transition and the
+    endpoint never returns non-2xx for missing depth (the terminal block is a
+    later wave). WEB-ONLY: code/blue engagements get a skipped result.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.depth_ledger(engagement.id)
+
+
+@router.get("/application-units/terminal-block")
+def get_terminal_depth_block(engagement_key: str) -> dict[str, Any]:
+    """The ONE hard block (Wave 7, S17 resolution; master plan §1A).
+
+    Read-only. Returns the units that BLOCK the terminal ``report``/``complete``
+    edge on the WEB track: the union of high-confidence ``deep_required`` units
+    AND units carrying a decisive risk surface, intersected with
+    unsatisfied + undeferred + UNTOUCHED. Under-observed / touched-but-unfinished
+    units are LISTED in ``warned_under_observed`` (never block). ``deferral_count``
+    makes the recorded-deferral rate visible.
+
+    The endpoint itself NEVER returns non-2xx for missing depth — it is the
+    ``transition-phase`` report/complete precondition that turns a non-empty
+    ``blocking`` list into the hard transition block. WEB-ONLY: code/blue get
+    ``skipped=True`` with empty ``blocking`` (reuses the ledger's web-only skip).
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.terminal_depth_block(engagement.id)
+
+
+@router.post("/application-units/score")
+async def score_application_units_endpoint(engagement_key: str) -> dict[str, Any]:
+    """Run prefix discovery + the depth scorer (idempotent). WEB-ONLY guard
+    inside the scorer makes this a no-op for code/blue engagements."""
+    engagement = get_engagement_or_404(engagement_key)
+    result = state_manager.score_application_units(engagement.id)
+    return result
+
+
+@router.patch("/application-units/{unit_id}")
+async def update_application_unit_override(
+    engagement_key: str,
+    unit_id: int,
+    request: AppUnitOverrideRequest,
+) -> dict[str, Any]:
+    """Set/clear the manual mark-deep/clear-deep override on an app unit.
+
+    Driven by ``vigil assess app-unit mark-deep|clear-deep``. The override is
+    durable and always wins over the scorer (depth-gate §5.2).
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    try:
+        record = state_manager.set_app_unit_override(
+            engagement.id, unit_id, override=request.override, reason=request.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     return record
 
 
@@ -1637,6 +1785,7 @@ async def create_credential(engagement_key: str, request: CredentialRecordReques
         status_value=request.status,
         notes=request.notes,
         provenance=request.provenance,
+        identity=request.identity,
     )
     await _broadcast(engagement.key, "credential", record)
     return record
@@ -1716,13 +1865,13 @@ async def create_blocked_technique(engagement_key: str, request: BlockedTechniqu
 
 _DISPATCH_STATUS = Literal["in-progress", "completed", "failed", "aborted", "blocked"]
 _DISPATCH_TERMINAL_STATUS = Literal["completed", "failed", "aborted", "blocked"]
-_DISPATCH_MODE = Literal[
+_KNOWN_DISPATCH_MODES: tuple[str, ...] = (
     "hypothesis-driven",
     "item-iterating",
     "deep-manual",
     "variant-rotation",
     "swarm",
-]
+)
 _REASONING = Literal["low", "medium", "high", "xhigh", "max"]
 _CONFIDENCE = Literal["low", "medium", "high"]
 _HANDOFF_STATUS = Literal["checkpointed", "ready", "blocked", "superseded"]
@@ -1752,10 +1901,21 @@ class DispatchCreate(BaseModel):
     actual_model: str | None = Field(default=None, max_length=128)
     requested_reasoning: _REASONING | None = None
     actual_reasoning: _REASONING | None = None
-    dispatch_mode: _DISPATCH_MODE | None = None
+    dispatch_mode: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Dispatch execution mode (free text). Advisory known modes: "
+            + ", ".join(_KNOWN_DISPATCH_MODES)
+        ),
+    )
     finding_slugs: list[str] | None = None
     skills: str | None = Field(default=None, max_length=4096)
     tier: Literal["L1", "L2", "L3", "L4"] | None = None
+    scope_path_prefix: str | None = Field(default=None, max_length=512)
+    vuln_classes: str | None = Field(default=None, max_length=2048)
+    identity: str | None = Field(default=None, max_length=128)
+    allow_no_skills: bool = False
 
     @model_validator(mode="after")
     def _enforce_skills_for_specialists(self) -> "DispatchCreate":
@@ -1764,16 +1924,23 @@ class DispatchCreate(BaseModel):
         The dispatch row is the audit surface for "what context did this
         specialist actually carry"; without a skill list it loses the
         provenance report-writer relies on. Operators are exempt because
-        they coordinate phases rather than executing a single skill.
+        they coordinate phases rather than executing a single skill. L2-2 /
+        L3-6: `allow_no_skills=true` provides an explicit escape for ad-hoc
+        roles so the recording path is not hard-blocked on a self-attested
+        signal — per the harness-not-gate doctrine, prefer a loud WARN +
+        proceed over a 422.
         """
         role = (self.agent_role or "").strip()
         if role.lower() in _DISPATCH_ROLES_WITHOUT_SKILLS:
+            return self
+        if self.allow_no_skills:
             return self
         skills = (self.skills or "").strip()
         if not skills:
             raise ValueError(
                 f"skills is required for role '{role}'; "
-                "list at least one skill name from `vigil assess list-skills`"
+                "list at least one skill name from `vigil assess list-skills` "
+                "(or set allow_no_skills=true for an ad-hoc role)"
             )
         return self
 
@@ -1954,6 +2121,60 @@ class ContainmentProposalPayload(BaseModel):
     finding_slug: str | None = Field(default=None)
 
 
+class DepthDeferralPayload(BaseModel):
+    """Strict shape for ``kind='depth_deferral'`` decision rows (depth-gate §5.3).
+
+    Mirrors ``CoverageDeferralPayload``: the depth ledger consults active
+    ``depth_deferral`` rows to decide whether an Expected vuln-class for an app
+    unit has been EXPLICITLY skipped-with-reason. A malformed payload would
+    silently fail to match (the class stays unmet), so the shape is validated at
+    POST time. The deferral is bounded + visible: a recorded, surfaced decision,
+    never a silent skip.
+
+    Scope: either a specific ``(host, path_prefix)`` app boundary, OR
+    ``engagement_wide=true`` (a program-wide carve-out for the listed classes).
+    Each entry of ``vuln_classes`` is a canonical class token (from
+    ``vuln_taxonomy``); the ledger resolves it to its family.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    vuln_classes: list[str] = Field(
+        min_length=1,
+        description="One or more canonical vuln classes the operator is "
+                    "explicitly skipping for the app unit.",
+    )
+    reason: str = Field(
+        min_length=1,
+        description="Why the depth deferral was approved. Read by the ledger + audit views.",
+    )
+    host: str | None = Field(default=None, min_length=1)
+    path_prefix: str | None = Field(default=None, min_length=1)
+    engagement_wide: bool | None = Field(default=None)
+    approved_by: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _require_host_or_engagement_wide(self) -> "DepthDeferralPayload":
+        has_host = bool(self.host)
+        if not has_host and not self.engagement_wide:
+            raise ValueError(
+                "depth_deferral payload requires a `host` (with optional "
+                "`path_prefix`) or `engagement_wide=true`"
+            )
+        if has_host and self.engagement_wide:
+            raise ValueError(
+                "depth_deferral payload cannot mix `host` with "
+                "`engagement_wide=true`; pick one or the other"
+            )
+        for cls in self.vuln_classes:
+            if not isinstance(cls, str) or not cls.strip():
+                raise ValueError(
+                    "depth_deferral payload `vuln_classes` entries must be "
+                    "non-empty strings"
+                )
+        return self
+
+
 class DecisionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1976,6 +2197,16 @@ class DecisionCreate(BaseModel):
     def _validate_known_kind_payload(self) -> "DecisionCreate":
         if self.kind == "coverage_deferral":
             CoverageDeferralPayload.model_validate(self.payload)
+        elif self.kind == "depth_deferral":
+            try:
+                DepthDeferralPayload.model_validate(self.payload)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"depth_deferral payload invalid: {exc}",
+                ) from exc
         elif self.kind == "containment_proposal":
             try:
                 ContainmentProposalPayload.model_validate(self.payload)
@@ -2019,6 +2250,9 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
         finding_slugs=request.finding_slugs,
         skills=request.skills,
         tier=request.tier,
+        scope_path_prefix=request.scope_path_prefix,
+        vuln_classes=request.vuln_classes,
+        identity=request.identity,
     )
     _audit_assessment_mutation(
         engagement.id,

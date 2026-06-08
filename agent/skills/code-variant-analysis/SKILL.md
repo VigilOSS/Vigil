@@ -2,6 +2,7 @@
 name: code-variant-analysis
 description: Systematic scanning for variant instances of confirmed bug patterns across the codebase
 origin: Vigil
+vuln_class: injection, web-app-injection, web-app-auth, web-app-data-exposure, deserialization, crypto-misuse, error-handling, algorithmic-dos, buffer-overflow, integer-overflow, format-string, null-dereference, use-after-free, uninitialized-memory, type-confusion
 ---
 
 # Code Variant Analysis

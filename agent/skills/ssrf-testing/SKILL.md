@@ -2,6 +2,7 @@
 name: ssrf-testing
 description: Detect and exploit server-side request forgery — blind confirmation, filter bypass decision trees, cloud metadata reality, post-SSRF exploitation of internal services
 origin: Vigil
+vuln_class: ssrf
 ---
 
 # SSRF Testing

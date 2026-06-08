@@ -36,17 +36,26 @@ import time
 import uuid
 from pathlib import Path
 
+from . import vuln_taxonomy
 from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
+from .identity import identity_names, resolve_identity
 
 # Re-exports — keep this block ordered by source module so the public surface
 # is grep-friendly. Tests patch a number of these via the legacy
 # ``kali.<name>`` attribute path; the orchestrator below also calls them via
 # bare name lookup, which resolves to these globals (so patches take effect).
-from .audit_enums import PROBE_KIND_ENUM, TECHNIQUE_ENUM
+from .audit_enums import (
+    PROBE_KIND_ENUM,
+    TECHNIQUE_ENUM,
+    normalize_probe_kind,
+    normalize_technique,
+)
 from .kali_audit import (
     ALLOWED_PHASES,
     _INTENT_MAX_LEN,
+    _extract_target_anchor,
+    _extract_target_host,
     _patch_finalize,
     _post_pre_exec_row,
     _resolve_agent_name,
@@ -64,6 +73,7 @@ from .kali_cli import (
 from .kali_output import (
     KaliResult,
     _auth_context,
+    _engagement_type,
     _peak_rss_kilobytes_to_bytes,
     _read_proc_peak_rss,
     _read_safely,
@@ -96,6 +106,135 @@ from .kali_tool_naming import (
 _KALI_NOOP_ENV = "VIGIL_KALI_NOOP"
 
 
+_PROBE_EMITTING_KINDS = frozenset({"payload", "exploit", "baseline", "replay"})
+
+_NON_WEB_ENGAGEMENT_TYPES = frozenset({"code", "blue"})
+
+
+def _emit_probe_run(
+    client: AssessmentClient,
+    *,
+    engagement_type: str,
+    technique: str,
+    probe_kind: str,
+    auth_context: str,
+    tool_name: str,
+    agent_name: str,
+    return_code: int | None,
+    timed_out: bool,
+    cmd: list[str],
+    evidence_ref: str,
+) -> None:
+    """Best-effort auto-emit one probe_run from a finished kali run (Wave 5 / 2a).
+
+    This is the linchpin that makes depth observable: every typed kali call
+    already carries a vuln-class ``--technique`` and a ``--probe-kind``, so a
+    completed real-attack probe honestly records "this vuln class was tested
+    against this host" WITHOUT any new specialist behavior.
+
+    Emission rules (each derived from durable run state, never a blind default):
+      * WEB-ONLY GUARD: skip unless engagement_type ∈ {web, both} — no
+        cross-track bleed onto code/blue (R-H2 doctrine).
+      * Only for a REAL test (probe_kind ∈ payload/exploit/baseline/replay);
+        fingerprint/cleanup never emit.
+      * attack_family = TECHNIQUE_TO_CLASS[technique]; if None (operational
+        technique like RECON/FUZZ/HEALTH) there is no vuln class to attribute,
+        so SKIP — never invent a class.
+      * result_status: timed_out OR return_code not in (0, None) → "error"
+        (which is NOT in PROBE_RESULT_STATUSES_COVERING, so a failed probe never
+        counts as covered, S4); otherwise "tested". Operational/fingerprint
+        probes are already excluded, so a completed real-attack probe = the
+        class was honestly tested.
+
+    BEST-EFFORT: any failure warns to stderr and returns; it must NEVER block or
+    fail the tool run, and must not raise.
+    """
+    try:
+        if str(engagement_type or "").lower() in _NON_WEB_ENGAGEMENT_TYPES:
+            return
+        if probe_kind not in _PROBE_EMITTING_KINDS:
+            return
+        attack_family = vuln_taxonomy.TECHNIQUE_TO_CLASS.get(technique)
+        if attack_family is None:
+            return
+        if timed_out or (return_code not in (0, None)):
+            result_status = "error"
+        else:
+            result_status = "tested"
+        target_host, target_path, target_port = _extract_target_anchor(tool_name, cmd)
+        if not target_host:
+            target_host = _extract_target_host(tool_name, cmd)
+        payload = {
+            "target_host": target_host,
+            "target_path": target_path,
+            "target_port": target_port,
+            "auth_context": auth_context,
+            "input_slot": "unknown",
+            "attack_family": attack_family,
+            "payload_family": "",
+            "payload_value": "",
+            "tool_name": tool_name,
+            "agent_name": agent_name,
+            "result_status": result_status,
+            "observed_http_status": None,
+            "evidence_ref": evidence_ref,
+        }
+        client.post("probe-runs", payload)
+    except Exception as exc:  # noqa: BLE001 — best-effort, must never break a run
+        print(
+            f"warning: probe-run auto-emit failed: {exc}; depth harness skipped this run.",
+            file=sys.stderr,
+        )
+
+
+_IDENTITY_INJECTABLE_TOOLS = frozenset({"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"})
+
+
+def _identity_header_pairs(material: dict) -> list[tuple[str, str]]:
+    """Flatten an identity's auth material into ``(header, value)`` pairs.
+
+    Supports a ``headers`` map, a ``cookies`` map (joined into one ``Cookie``
+    header), and an optional bearer ``token``. Order is deterministic.
+    """
+    pairs: list[tuple[str, str]] = []
+    headers = material.get("headers")
+    if isinstance(headers, dict):
+        for key, value in headers.items():
+            if str(key).strip():
+                pairs.append((str(key), str(value)))
+    cookies = material.get("cookies")
+    if isinstance(cookies, dict) and cookies:
+        cookie = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        pairs.append(("Cookie", cookie))
+    token = material.get("token") or material.get("bearer")
+    if token and not any(name.lower() == "authorization" for name, _ in pairs):
+        pairs.append(("Authorization", f"Bearer {token}"))
+    return pairs
+
+
+def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> bool:
+    """Inject a named identity's auth headers/cookies into an HTTP command argv so
+    the request actually runs AS that identity.
+
+    Returns True when the credentials were applied (the caller may then relabel
+    auth_context to the identity); False when there is nothing to apply or the
+    tool can't take injected headers. A False return MUST prevent relabeling, so
+    a run that did not actually carry the identity's credentials is never counted
+    as a distinct identity by the depth ledger's cross-identity rule.
+    """
+    if not isinstance(material, dict):
+        return False
+    pairs = _identity_header_pairs(material)
+    if not pairs:
+        return False
+    exe = os.path.basename(str(cmd[0])).lower() if cmd else ""
+    if exe not in _IDENTITY_INJECTABLE_TOOLS:
+        return False
+    for name, value in pairs:
+        cmd.extend(["-H", f"{name}: {value}"])
+    return True
+
+
 def kali_exec(
     cmd: list[str],
     *,
@@ -112,6 +251,7 @@ def kali_exec(
     container_name: str | None = None,
     config: Config | None = None,
     tool_name: str | None = None,
+    identity: str | None = None,
 ) -> KaliResult:
     """Run `cmd` inside the runtime container with full audit recording.
 
@@ -131,6 +271,10 @@ def kali_exec(
     eng_dir = _resolve_engagement_dir(engagement_dir, cfg)
     eng_key = engagement_key or eng_dir.name or cfg.engagement_key
     resolved_agent = _resolve_agent_name(agent_name)
+    technique = normalize_technique(technique)
+    probe_kind = normalize_probe_kind(probe_kind)
+    if phase:
+        phase = phase.strip().lower()
     _validate_inputs(
         technique=technique,
         intent=intent,
@@ -150,6 +294,17 @@ def kali_exec(
     started_monotonic = time.monotonic()
     scope_version = _scope_version(eng_dir)
     auth_context = _auth_context(eng_dir)
+    _identity_name: str | None = None
+    _identity_material: dict = {}
+    if identity is not None:
+        _identity_name, _identity_material = resolve_identity(eng_dir, identity)
+        if not _identity_material:
+            print(
+                f"warning: --identity '{identity}' not found in auth.json "
+                f"(known: {', '.join(identity_names(eng_dir)) or 'none'}); "
+                "no auth material to apply.",
+                file=sys.stderr,
+            )
 
     if os.environ.get(_KALI_NOOP_ENV):
         # Test-only short-circuit. Returns a synthetic result so argparse
@@ -171,6 +326,18 @@ def kali_exec(
     _check_container_running(container_name)
 
     derived_tool_name = tool_name or _derive_tool_name(cmd)
+    if identity is not None:
+        if _apply_identity_material(cmd, derived_tool_name, _identity_material):
+            auth_context = _identity_name or auth_context
+        else:
+            print(
+                f"warning: --identity '{identity}': auth material was NOT applied "
+                f"(tool '{derived_tool_name}' takes no injectable -H header, or no "
+                "material). Leaving auth_context derived so this run is NOT counted "
+                "as a cross-identity probe — inject the identity's auth into the "
+                "command manually if this tool needs it.",
+                file=sys.stderr,
+            )
     container_working_dir = f"/engagements/{eng_key}"
     docker_argv = _build_docker_exec(
         cmd,
@@ -386,13 +553,31 @@ def kali_exec(
                     cpu_user_seconds=cpu_user_seconds,
                     cpu_system_seconds=cpu_system_seconds,
                 )
+                finalize_ok = True
             except AssessError as exc:
                 # 409 races are now handled inside _patch_finalize; reaching
                 # this branch means a real failure (network, 4xx other than
                 # 409, 5xx exhaustion) and the row may genuinely need sweep.
+                finalize_ok = False
                 print(
                     f"warning: finalize PATCH failed: {exc}; row stays running and may need orphan sweep.",
                     file=sys.stderr,
+                )
+
+            if finalize_ok:
+                evidence_ref = f"{container_working_dir}/scans/kali/{run_uuid}.out"
+                _emit_probe_run(
+                    client,
+                    engagement_type=_engagement_type(eng_dir),
+                    technique=technique,
+                    probe_kind=probe_kind,
+                    auth_context=auth_context,
+                    tool_name=derived_tool_name,
+                    agent_name=resolved_agent,
+                    return_code=return_code,
+                    timed_out=timed_out,
+                    cmd=cmd,
+                    evidence_ref=evidence_ref,
                 )
 
         return KaliResult(
@@ -423,6 +608,7 @@ __all__ = [
     # Audit + validation (from kali_audit)
     "ALLOWED_PHASES",
     "_INTENT_MAX_LEN",
+    "_extract_target_host",
     "_post_pre_exec_row",
     "_patch_finalize",
     "_resolve_agent_name",
@@ -438,6 +624,7 @@ __all__ = [
     # Output + RSS (from kali_output)
     "KaliResult",
     "_auth_context",
+    "_engagement_type",
     "_peak_rss_kilobytes_to_bytes",
     "_read_proc_peak_rss",
     "_read_safely",
@@ -463,6 +650,7 @@ __all__ = [
     "default_runtime_container",
     "PROBE_KIND_ENUM",
     "TECHNIQUE_ENUM",
+    "_emit_probe_run",
     # Public surface
     "kali_exec",
 ]

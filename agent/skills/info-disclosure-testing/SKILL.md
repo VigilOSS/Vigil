@@ -2,6 +2,7 @@
 name: info-disclosure-testing
 description: Information disclosure detection — error messages, files, headers, debug endpoints
 origin: Vigil
+vuln_class: info-disclosure, debug-exposure
 ---
 
 # Information Disclosure Testing

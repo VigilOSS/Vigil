@@ -148,11 +148,12 @@ _FINDING_DETAIL_PROPERTIES = {
     },
     "cvss_vector": {
         "type": "string",
+        "minLength": 1,
         "description": "CVSS 3.1 vector string (for example, CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N)",
     },
     "cvss_score": {
         "type": "number",
-        "minimum": 0,
+        "exclusiveMinimum": 0,
         "maximum": 10,
         "description": "Numeric CVSS 3.1 base score",
     },
@@ -362,10 +363,6 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "required": [
                             "evidence",
                             "impact",
-                            "remediation",
-                            "steps_to_reproduce",
-                            "cvss_vector",
-                            "cvss_score",
                         ],
                         "properties": _FINDING_DETAIL_PROPERTIES,
                     },

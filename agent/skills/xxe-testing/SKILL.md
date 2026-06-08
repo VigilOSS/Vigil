@@ -2,6 +2,7 @@
 name: xxe-testing
 description: XML external entity injection for file read, SSRF, and DoS
 origin: Vigil
+vuln_class: xxe
 ---
 
 # XXE Testing (XML External Entity Injection)

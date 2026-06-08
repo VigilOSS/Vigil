@@ -5,6 +5,30 @@ prompts, deterministic assessment verbs, orchestrator services, and the `vigil` 
 Entries are grouped by date and summarize shipped work at a high level; the code at the
 cited paths and the [TODOv2.md](TODOv2.md) backlog remain the detailed record.
 
+## 2026-06-09
+
+### Command consolidation — one phase-aware readiness command (Wave 6d)
+
+Five standalone readiness commands were folded into a single phase-aware command and
+deleted (no aliases): **`vigil assess check-phase-readiness --phase <recon|collect|consume|verify|exploit|report>`**
+replaces `check-coverage`, `check-scope-coverage`, `check-report-readiness`,
+`check-exploit-gate`, and `check-intel-readiness`. Per-phase composition: `recon`=enum
+evidence + intel advisory; `collect`=collection evidence; `consume`=consumption evidence +
+surface-coverage gate + the EV-ranked depth ledger + intel advisory; `verify`=depth carry-over;
+`exploit`=the exploit projection (`{exploit_policy, approved_targets}`, with the same
+`full_send` / slug-list / `*` text tokens specialists key off); `report`=report-readiness
+blockers + intel advisory. Flags: `--depth`/`--by-app-unit`, `--by-host`, `--auto-redispatch`,
+`--strict` (CI exit-1 on any open advisory item — preserves the old intel `--strict`),
+`--strict-deep` (gate on app-unit detection, default OFF), `--include-intel`, `--json`.
+
+Behind the new front door, the existing gates are UNCHANGED: a new
+`state_manager.phase_readiness` module + `GET …/assessment/phase-readiness?phase=…` endpoint
+CALL the stable `coverage_readiness` / `report_readiness` / `per_host_coverage` / `depth_ledger`
+functions (and the `/coverage-readiness`, `/coverage-readiness/by-host`, `/report-readiness`
+routes), which the phase-transition gate, report export, and frontend still bind to. The
+deleted commands' reusable logic moved into `agent/scripts/assess/lib/coverage_checks.py`.
+The terminal report/complete hard block is independent of `--strict`/`--strict-deep`.
+
 ## 2026-06-01
 
 A consolidation-and-hardening pass: the deterministic oracle verbs are now wired into the
