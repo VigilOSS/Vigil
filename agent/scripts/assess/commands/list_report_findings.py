@@ -106,7 +106,7 @@ def _print_readiness_conflict(exc: AssessError) -> None:
     if len(blockers) > 10:
         print(f"  - ... and {len(blockers) - 10} more", file=sys.stderr)
     print(
-        "Run `vigil assess check-report-readiness` for full blockers, or "
+        "Run `vigil assess check-phase-readiness --phase report` for full blockers, or "
         "`vigil assess list-report-findings --mode draft` to inspect grouped output before final readiness passes.",
         file=sys.stderr,
     )

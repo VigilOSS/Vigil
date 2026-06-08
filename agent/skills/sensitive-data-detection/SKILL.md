@@ -2,6 +2,7 @@
 name: sensitive-data-detection
 description: Detect PII, credentials, and corporate sensitive data in API responses, source code, files, headers, and database extracts
 origin: Vigil
+vuln_class: secrets-exposure, source-disclosure
 ---
 
 # Sensitive Data Detection

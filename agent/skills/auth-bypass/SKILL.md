@@ -2,6 +2,7 @@
 name: auth-bypass
 description: Test for authentication and authorization flaws including credential attacks, session issues, and access control bypasses
 origin: Vigil
+vuln_class: auth-bypass, session, bfla
 ---
 
 # Authentication & Authorization Bypass

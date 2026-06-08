@@ -94,8 +94,39 @@ def register(subparsers) -> None:
         choices=("L1", "L2", "L3", "L4"),
         help="(start) Blue specialist tier label recorded on the dispatch row.",
     )
+    p.add_argument(
+        "--scope-path-prefix",
+        dest="scope_path_prefix",
+        default=None,
+        help="(start) App-unit path-prefix this dispatch covers (pairs with --scope-host).",
+    )
+    p.add_argument(
+        "--vuln-classes",
+        dest="vuln_classes",
+        default=None,
+        help="(start) Comma-list of canonical vuln classes this dispatch covers "
+             "(see `vigil assess list-skills --json` / vuln-taxonomy.md).",
+    )
+    p.add_argument(
+        "--identity",
+        dest="dispatch_identity",
+        default=None,
+        help="(start) Named identity this dispatch ran as (e.g. user_a / admin).",
+    )
     p.add_argument("--from-json", dest="from_json", default=None)
     p.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true")
+    p.add_argument(
+        "--allow-no-skills",
+        dest="allow_no_skills",
+        action="store_true",
+        help="(start) Allow a specialist dispatch with no --skills; emits a WARN instead of erroring.",
+    )
+    p.add_argument(
+        "--check-overlap",
+        dest="check_overlap",
+        action="store_true",
+        help="(start) Run the advisory overlap check (limit=1000 list query) against in-progress dispatches.",
+    )
     p.add_argument("--status", dest="dispatch_status", default=None, choices=("in-progress", "completed", "failed", "aborted", "blocked"))
     p.add_argument("--completed-at", dest="completed_at", default=None)
     p.add_argument("--finding-slugs", dest="finding_slugs", default=None)
@@ -454,7 +485,7 @@ def _start(args) -> None:
     payload = dispatch._build_register_payload(args)  # noqa: SLF001
     client, cfg = dispatch._client_for(args)  # noqa: SLF001
     try:
-        if not getattr(args, "allow_duplicate", False):
+        if getattr(args, "check_overlap", False) and not getattr(args, "allow_duplicate", False):
             dispatch._warn_on_overlapping_dispatch(client, payload)  # noqa: SLF001
         row = client.record_dispatch(payload)
     finally:

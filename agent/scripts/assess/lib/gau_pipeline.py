@@ -5,7 +5,7 @@ all need the same five primitives:
 
 1. Resolve the engagement directory and `cases.db` from the engagement
    context, with `--db` and `--engagement-dir` overrides. Existing wrappers
-   like `transition_phase.py` and `check_scope_coverage.py` already use this
+   like `transition_phase.py` and `lib/coverage_checks.py` already use this
    pattern; collecting it here keeps the new commands consistent.
 2. Resolve the canonical gau output path
    (`scans/gau-pipeline/<target_slug>/<cache_key_slug>/<basename>.txt`)

@@ -2144,12 +2144,12 @@ def test_launch_session_rejects_existing_session_without_truncating_proposals(mo
     assert proposals_file.read_text(encoding="utf-8") == '{"type":"finding_record"}\n'
 
 
-def test_check_report_readiness_surfaces_backend_blockers(monkeypatch, tmp_path: Path, capsys) -> None:
+def _run_phase_report(monkeypatch, tmp_path: Path, payload: dict):
+    """Drive ``check-phase-readiness --phase report`` against a report payload."""
     module = _load_script_module(
-        "test_check_report_readiness_module",
-        "agent/scripts/assess/commands/check_report_readiness.py",
+        "test_check_phase_readiness_report_module",
+        "agent/scripts/assess/commands/check_phase_readiness.py",
     )
-
     monkeypatch.setattr(
         module,
         "load_config",
@@ -2166,17 +2166,20 @@ def test_check_report_readiness_surfaces_backend_blockers(monkeypatch, tmp_path:
             self.engagement_key = engagement_key
 
         def get(self, endpoint: str):
-            assert endpoint == "report-readiness"
-            return {
-                "ready": False,
-                "blockers": [
-                    {
-                        "kind": "verification",
-                        "slug": "VA-001",
-                        "detail": "Finding remains unreviewed.",
-                    }
-                ],
-            }
+            if endpoint.startswith("phase-readiness"):
+                return {
+                    "phase": "report",
+                    "report_readiness": payload,
+                    "intel": {"applicable": False, "engagement_type": "red",
+                              "open_high_cves": [], "open_leads": [],
+                              "exploited_unlinked_cves": [], "dangling_links": []},
+                }
+            raise AssertionError(f"unexpected endpoint {endpoint}")
+
+        def get_engagement(self, endpoint: str, query: str = ""):
+            return {"applicable": False, "engagement_type": "red",
+                    "open_high_cves": [], "open_leads": [],
+                    "exploited_unlinked_cves": [], "dangling_links": []}
 
         def close(self) -> None:
             return None
@@ -2188,13 +2191,97 @@ def test_check_report_readiness_surfaces_backend_blockers(monkeypatch, tmp_path:
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
+    args = SimpleNamespace(
+        engagement_dir=str(tmp_path), phase="report", as_json=False, verbose=False,
+        strict_vendor_saas=False, by_host=False, include_discovered=False,
+        auto_redispatch=False, max_recommendations=10, depth=False,
+        by_app_unit=False, include_intel=False, strict=False, strict_deep=False,
+    )
+    return module, args
+
+
+def test_check_report_readiness_surfaces_backend_blockers(monkeypatch, tmp_path: Path, capsys) -> None:
+    module, args = _run_phase_report(
+        monkeypatch,
+        tmp_path,
+        {
+            "ready": False,
+            "blockers": [
+                {
+                    "kind": "verification",
+                    "slug": "VA-001",
+                    "detail": "Finding remains unreviewed.",
+                }
+            ],
+        },
+    )
+
     with pytest.raises(SystemExit) as excinfo:
-        module.run(SimpleNamespace(engagement_dir=tmp_path))
+        module.run(args)
 
     assert excinfo.value.code == 1
-    err = capsys.readouterr().err
-    assert "Final report blockers remain:" in err
-    assert "verification | VA-001: Finding remains unreviewed." in err
+    out = capsys.readouterr().out
+    assert "Final report blockers remain:" in out
+    assert "verification | VA-001: Finding remains unreviewed." in out
+
+
+def test_check_report_readiness_prints_advisories_without_failing(monkeypatch, tmp_path: Path, capsys) -> None:
+    module, args = _run_phase_report(
+        monkeypatch,
+        tmp_path,
+        {
+            "ready": True,
+            "blockers": [],
+            "advisories": [
+                {
+                    "kind": "draft_finding_needs_disposition",
+                    "slug": "VA-009",
+                    "detail": "finding VA-009 is parked in workflow_status='draft'",
+                },
+                {
+                    "kind": "unlinked_markdown_note",
+                    "path": "notes/loose.md",
+                    "detail": "markdown note 'notes/loose.md' is indexed but not linked",
+                },
+            ],
+        },
+    )
+
+    module.run(args)
+    captured = capsys.readouterr()
+    assert "report readiness: ok" in captured.out
+    assert "Advisories (not blocking" in captured.out
+    assert "draft_finding_needs_disposition | VA-009:" in captured.out
+    assert "unlinked_markdown_note:" in captured.out
+
+
+def test_check_report_readiness_prints_advisories_alongside_blockers(monkeypatch, tmp_path: Path, capsys) -> None:
+    module, args = _run_phase_report(
+        monkeypatch,
+        tmp_path,
+        {
+            "ready": False,
+            "blockers": [
+                {"kind": "finding_verification_state", "slug": "VA-001", "detail": "unreviewed"},
+            ],
+            "advisories": [
+                {
+                    "kind": "stale_dispatch_ready_handoff",
+                    "agent_id": "HF-009",
+                    "detail": "stale ready handoff; bulk-close with reconcile-stale",
+                },
+            ],
+        },
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(args)
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "Final report blockers remain:" in out
+    assert "finding_verification_state | VA-001: unreviewed" in out
+    assert "Advisories (not blocking" in out
+    assert "stale_dispatch_ready_handoff: stale ready handoff" in out
 
 
 # ---------------------------------------------------------------------------
@@ -2702,8 +2789,6 @@ def test_anchor_engagement_relative_uses_engagement_dir(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# record-finding evidence_ref validation (catches the ~24 report-readiness
-# evidence blockers at record time instead of at the very end). §2.6.
 # ---------------------------------------------------------------------------
 
 def _load_record_finding_module():
@@ -2719,69 +2804,107 @@ def test_evidence_ref_accepts_existing_file(tmp_path):
     (tmp_path / "scans" / "proof.txt").write_text("evidence", encoding="utf-8")
     # Relative to engagement dir, and the container-path form, both resolve.
     for ref in ("scans/proof.txt", "/engagements/eng/scans/proof.txt"):
-        mod._validate_evidence_ref(
+        mod._normalize_evidence_ref(
             {"evidence_ref": ref}, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False
         )  # no SystemExit
 
 
-def test_evidence_ref_rejects_url(tmp_path, capsys):
+def test_evidence_ref_url_is_rerouted_not_rejected(tmp_path, capsys):
     mod = _load_record_finding_module()
-    with pytest.raises(SystemExit):
-        mod._validate_evidence_ref(
-            {"evidence_ref": "https://target.example/proof"},
-            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
-        )
-    assert "not a registered artifact path" in capsys.readouterr().err
+    payload = {"evidence_ref": "https://target.example/proof", "details": {}}
+    mod._normalize_evidence_ref(  # no SystemExit
+        payload, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+    )
+    assert payload["details"]["references"] == ["https://target.example/proof"]
+    assert payload["evidence_ref"] == ""
+    assert "rerouted into details.references" in capsys.readouterr().err
 
 
-def test_evidence_ref_rejects_prose(tmp_path, capsys):
+def test_evidence_ref_url_rerouted_even_when_details_missing(tmp_path):
     mod = _load_record_finding_module()
-    with pytest.raises(SystemExit):
-        mod._validate_evidence_ref(
-            {"evidence_ref": "kali run_id 13992 listMethods proved this"},
-            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
-        )
+    payload = {"evidence_ref": "http://t.example/x"}
+    mod._normalize_evidence_ref(
+        payload, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=True,
+    )
+    assert payload["details"]["references"] == ["http://t.example/x"]
+    assert payload["evidence_ref"] == ""
+
+
+def test_evidence_ref_prose_warns_not_rejects(tmp_path, capsys):
+    mod = _load_record_finding_module()
+    mod._normalize_evidence_ref(
+        {"evidence_ref": "kali run_id 13992 listMethods proved this"},
+        eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+    )
     assert "prose" in capsys.readouterr().err
 
 
-def test_evidence_ref_rejects_missing_path(tmp_path, capsys):
+def test_evidence_ref_missing_path_warns_not_rejects(tmp_path, capsys):
     mod = _load_record_finding_module()
-    with pytest.raises(SystemExit):
-        mod._validate_evidence_ref(
-            {"evidence_ref": "scans/does-not-exist.txt"},
-            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
-        )
+    mod._normalize_evidence_ref(
+        {"evidence_ref": "scans/does-not-exist.txt"},
+        eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+    )
     assert "no file exists" in capsys.readouterr().err
 
 
 def test_evidence_ref_empty_warns_not_rejects(tmp_path, capsys):
     mod = _load_record_finding_module()
-    mod._validate_evidence_ref(
+    mod._normalize_evidence_ref(
         {"evidence_ref": ""}, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False
-    )  # no SystemExit
+    )
     assert "no evidence_ref set" in capsys.readouterr().err
 
 
-def test_evidence_ref_allow_unindexed_bypasses(tmp_path):
+def test_evidence_ref_allow_unindexed_silences_warning(tmp_path, capsys):
     mod = _load_record_finding_module()
-    mod._validate_evidence_ref(
+    mod._normalize_evidence_ref(
         {"evidence_ref": "just prose here"},
         eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=True,
-    )  # no SystemExit even though it is prose
+    )
+    assert capsys.readouterr().err == ""
 
 
-def test_evidence_ref_rejects_prose_containing_scheme(tmp_path):
+def test_evidence_ref_prose_containing_scheme_is_not_a_url(tmp_path, capsys):
     mod = _load_record_finding_module()
-    with pytest.raises(SystemExit):
-        mod._validate_evidence_ref(
-            {"evidence_ref": "attacker forces http:// downgrade then steals cookie"},
-            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
-        )
-    with pytest.raises(SystemExit):
-        mod._validate_evidence_ref(
-            {"evidence_ref": "https://target.example/proof?id=1"},
-            eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
-        )
+    payload = {"evidence_ref": "attacker forces http:// downgrade then steals cookie", "details": {}}
+    mod._normalize_evidence_ref(
+        payload, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
+    )
+    assert payload["evidence_ref"] == "attacker forces http:// downgrade then steals cookie"
+    assert "references" not in payload["details"]
+    assert "warning" in capsys.readouterr().err
+
+
+def test_record_time_schema_allows_finding_without_report_time_fields():
+    mod = _load_record_finding_module()
+    payload = mod._normalize_payload(
+        {
+            "title": "Suspected IDOR on /api/orders/{id}",
+            "severity": "medium",
+            "details": {
+                "evidence": "Sequential order IDs returned other tenants' rows in a manual probe",
+                "impact": "Cross-tenant data exposure",
+            },
+        },
+        agent_name="vulnerability-analyst",
+        candidate_slug="f-0001",
+    )
+    errors = mod.collect_validation_errors(payload, mod._FINDING_SCHEMA)
+    assert errors == [], errors
+
+
+def test_record_time_schema_still_requires_evidence_and_impact():
+    mod = _load_record_finding_module()
+    payload = mod._normalize_payload(
+        {"title": "Bare finding", "severity": "low", "details": {}},
+        agent_name="va",
+        candidate_slug="f-0002",
+    )
+    errors = mod.collect_validation_errors(payload, mod._FINDING_SCHEMA)
+    joined = " ".join(errors)
+    assert errors, "expected record-time floor (evidence + impact) to still be enforced"
+    assert "evidence" in joined and "impact" in joined, joined
 
 
 def test_update_finding_notes_replace_without_notes_errors():
@@ -2789,3 +2912,183 @@ def test_update_finding_notes_replace_without_notes_errors():
     mod = _load_script_module("update_finding_guard", "agent/scripts/assess/commands/update_finding.py")
     with pytest.raises(SystemExit):
         mod.run(SimpleNamespace(notes_replace=True, notes=None, inline_payload=None, payload=None))
+
+
+
+
+def _run_ingest_spec(monkeypatch, tmp_path: Path, spec: dict, scope: dict):
+    """Drive ingest-spec.run against an in-process FakeClient, returning the
+    list of posted observation payloads and the ingested work_items rows."""
+    module = _load_script_module(
+        "test_ingest_spec_module",
+        "agent/scripts/assess/commands/ingest_spec.py",
+    )
+    db_module = _load_script_module(
+        "test_ingest_spec_db_module",
+        "agent/scripts/assess/lib/db.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
+    db_path = engagement_dir / "cases.db"
+    db_path.touch()
+    db_module.db_init(str(db_path))
+
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir=None: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    monkeypatch.setattr(module, "auth_active_context", lambda _eng_dir: "anonymous")
+
+    posts: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def post(self, endpoint, payload):
+            posts.append(payload)
+            return {"request_variant": {"id": 200 + len(posts)}}
+
+        def close(self) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            spec_file=str(spec_path),
+            engagement_dir=str(engagement_dir),
+        )
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            "SELECT url, method, query_params, body_params, path_params, cookie_params "
+            "FROM work_items ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return posts, rows
+
+
+def test_s10_relative_servers_spec_still_ingests_paths(monkeypatch, tmp_path, capsys):
+    """S10: an OpenAPI spec whose only `servers` url is RELATIVE (`/api`) used to
+    hit the absolute-URL check and sys.exit(1), ingesting ZERO paths. It must now
+    resolve against the engagement target host and ingest its paths."""
+    spec = {
+        "openapi": "3.0.0",
+        "servers": [{"url": "/api"}],
+        "paths": {
+            "/users": {"get": {"responses": {"200": {}}}},
+            "/login": {"post": {"responses": {"200": {}}}},
+        },
+    }
+    scope = {"hosts": ["app.example.com"]}
+    posts, rows = _run_ingest_spec(monkeypatch, tmp_path, spec, scope)
+
+    assert len(rows) == 2
+    urls = sorted(r[0] for r in rows)
+    assert urls == [
+        "https://app.example.com/api/login",
+        "https://app.example.com/api/users",
+    ]
+    err = capsys.readouterr().err
+    assert "relative servers url" in err
+
+
+def test_s10_relative_servers_no_scope_host_skips_loudly(monkeypatch, tmp_path, capsys):
+    """S10: with no resolvable host, a relative-base spec CANNOT form
+    absolute URLs (the backend requires them). Instead of silently POSTing
+    relative URLs that the backend rejects one-by-one (zero coverage + a false
+    'it ran' signal), ingest-spec warns ONCE with the root cause and ingests
+    nothing — never a hard-exit, never a silent partial."""
+    spec = {
+        "openapi": "3.0.0",
+        "servers": [{"url": "/api"}],
+        "paths": {"/ping": {"get": {"responses": {"200": {}}}}},
+    }
+    scope = {"hosts": ["10.0.0.0/24"]}
+    posts, rows = _run_ingest_spec(monkeypatch, tmp_path, spec, scope)
+    assert rows == []
+    err = capsys.readouterr().err
+    assert "ABSOLUTE request URLs" in err
+    assert "Add a host to" in err
+
+
+def test_s11_spec_parses_refs_composed_form_and_pathlevel_params(monkeypatch, tmp_path):
+    """S11: path-level params, $ref params, multipart/form bodies, array and
+    composed (allOf) schemas must all surface in the ingested param inventory."""
+    spec = {
+        "openapi": "3.0.0",
+        "servers": [{"url": "https://api.example.com"}],
+        "components": {
+            "parameters": {
+                "ApiKey": {"name": "api_key", "in": "query", "schema": {"type": "string"}},
+            },
+            "schemas": {
+                "Base": {"type": "object", "properties": {"a": {"type": "string"}}},
+                "Child": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/Base"},
+                        {"type": "object", "properties": {"b": {"type": "string"}}},
+                    ]
+                },
+            },
+        },
+        "paths": {
+            "/items/{id}": {
+                "parameters": [{"name": "id", "in": "path", "schema": {"type": "integer"}}],
+                "get": {
+                    "parameters": [{"$ref": "#/components/parameters/ApiKey"}],
+                    "responses": {"200": {}},
+                },
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "multipart/form-data": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"file": {"type": "string", "format": "binary"}},
+                                }
+                            },
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/Child"}
+                            },
+                        }
+                    },
+                    "responses": {"200": {}},
+                },
+            },
+        },
+    }
+    scope = {"hosts": ["api.example.com"]}
+    posts, rows = _run_ingest_spec(monkeypatch, tmp_path, spec, scope)
+    assert len(rows) == 2
+
+    by_method = {r[1]: r for r in rows}
+    get_query = json.loads(by_method["GET"][2])
+    get_path = json.loads(by_method["GET"][4])
+    assert "api_key" in get_query
+    assert "id" in get_path
+
+    post_body = json.loads(by_method["POST"][3])
+    post_path = json.loads(by_method["POST"][4])
+    assert {"file", "a", "b"} <= set(post_body.keys())
+    assert "id" in post_path

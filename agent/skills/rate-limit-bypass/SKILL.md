@@ -2,6 +2,7 @@
 name: rate-limit-bypass
 description: Identify rate limiting mechanisms and bypass them — CDN-specific header behavior, race condition exploitation, GraphQL batching, and practical impact calculation
 origin: Vigil
+vuln_class: rate-limit
 ---
 
 # Rate Limit Bypass
