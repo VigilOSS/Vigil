@@ -23,6 +23,7 @@ from .engagements import (
     current_engagement_path,
     export_pdf,
     list_engagements,
+    plan_engagement,
     print_shell_cd_init,
     resolve_engagement_path,
     start_engagement,
@@ -146,18 +147,89 @@ def main(argv: list[str] | None = None) -> None:
     engagement_p = sub.add_parser("engagement")
     engagement_sub = engagement_p.add_subparsers(dest="engagement_command", required=True)
     engagement_sub.add_parser("list").add_argument("--json", action="store_true")
-    create_p = engagement_sub.add_parser("create")
-    create_p.add_argument("target_or_name", nargs="?")
-    create_p.add_argument("--type", choices=["web", "code", "both", "android"], default=None)
-    create_p.add_argument("--name")
-    create_p.add_argument("--target")
-    create_p.add_argument("--hosts")
-    create_p.add_argument("--repo", action="append", default=[])
+    create_p = engagement_sub.add_parser(
+        "create",
+        help="Create a new engagement workspace",
+        description=(
+            "Create an engagement workspace under <install-root>/agent/engagements/.\n"
+            "When --type is omitted it is inferred from the inputs (URL/host → web,\n"
+            "--repo → code, both kinds of evidence → both, APK/--package-name → android)\n"
+            "and the inferred type is echoed so it can be overridden. On a terminal,\n"
+            "missing required fields are asked for interactively; pass --no-prompt to\n"
+            "fail instead of asking."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  vigil engagement create https://app.example.com --hosts app.example.com\n"
+            "  vigil engagement create --type code my-project --repo ~/src/my-project\n"
+            "  vigil engagement create https://app.example.com --repo ~/src/my-project --name my-project\n"
+            "  vigil engagement create --type android ./app.apk\n"
+            "  vigil engagement create https://app.example.com --dry-run\n"
+            "\n"
+            "Blue (defensive) engagements are created via `vigil blue engage`.\n"
+            "Exploit policy always starts as `pause` and auth always starts unset;\n"
+            "both are configured after creation (orchestrator UI / `vigil auth`)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    create_p.add_argument(
+        "target_or_name",
+        nargs="?",
+        help="Target URL/host (web), engagement name (code), or APK path/package (android)",
+    )
+    create_p.add_argument(
+        "--type",
+        choices=["web", "code", "both", "android"],
+        default=None,
+        help="Engagement type; inferred from the other inputs when omitted",
+    )
+    create_p.add_argument("--name", help="Engagement name (required for code/both)")
+    create_p.add_argument("--target", help="Primary target URL or host (web/both)")
+    create_p.add_argument("--hosts", help="Comma-separated in-scope hosts")
+    create_p.add_argument(
+        "--host",
+        action="append",
+        default=[],
+        help="In-scope host; repeatable, merged with --hosts and --hosts-file",
+    )
+    create_p.add_argument(
+        "--hosts-file",
+        help="File of in-scope hosts, one per line (blank lines and # comments ignored)",
+    )
+    create_p.add_argument(
+        "--repo",
+        action="append",
+        default=[],
+        help="Source repository path or URL (code/both); repeatable",
+    )
     create_p.add_argument("--apk", action="append", default=[], help="Android APK/AAB/XAPK artifact path")
     create_p.add_argument("--package-name", help="Android package name, for example com.example.app")
-    create_p.add_argument("--dynamic-mode", choices=["static_only", "device", "emulator"], default="static_only")
-    create_p.add_argument("--skip-permissions", action="store_true")
-    create_p.add_argument("--no-prompt", action="store_true")
+    create_p.add_argument(
+        "--dynamic-mode",
+        choices=["static_only", "device", "emulator"],
+        default="static_only",
+        help="Android dynamic-analysis mode (default: static_only)",
+    )
+    create_p.add_argument(
+        "--skip-permissions",
+        action="store_true",
+        help="Generate launchers that skip client permission prompts",
+    )
+    create_p.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="Never prompt interactively; fail when required fields are missing",
+    )
+    create_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit created-engagement metadata as JSON on stdout instead of the bare path",
+    )
+    create_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate inputs and show what would be created without writing anything",
+    )
     path_p = engagement_sub.add_parser("path")
     path_p.add_argument("key", nargs="?")
     path_p.add_argument("--select", action="store_true")
@@ -551,59 +623,7 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             for row in rows:
                 print(f"{row.key}\t{row.status}\t{row.current_phase}\t{row.target}\t{row.path}")
     elif command == "create":
-        engagement_type = args.type
-        positional = args.target_or_name
-        if engagement_type is None:
-            if not args.no_prompt and sys.stdin.isatty() and not positional and not args.hosts and not args.repo and not args.apk:
-                engagement_type = _prompt_choice("Engagement type", "web", ["web", "code", "both", "android"])
-            else:
-                engagement_type = (
-                    "android"
-                    if (args.apk or (positional and _looks_like_android_artifact(positional)))
-                    else "web" if (args.hosts or (positional and _looks_like_web_target(positional)))
-                    else "code"
-                )
-        target = args.target
-        name = args.name
-        artifacts = list(args.apk or [])
-        android_package = args.package_name
-        if positional:
-            if engagement_type == "android" and _looks_like_android_artifact(positional):
-                if positional not in artifacts:
-                    artifacts.insert(0, positional)
-                if not name:
-                    name = Path(positional).name
-            elif engagement_type == "android":
-                android_package = android_package or positional
-                if not name:
-                    name = positional
-            elif engagement_type == "code" and not name:
-                name = positional
-            elif not target:
-                target = positional
-        hosts = [item.strip() for item in (args.hosts or "").split(",") if item.strip()]
-        if not args.no_prompt and sys.stdin.isatty():
-            if engagement_type in {"web", "both"} and not target and not hosts:
-                target = input("Target URL or host: ").strip()
-            if engagement_type in {"code", "both"} and not name:
-                name = input("Engagement name: ").strip()
-            if engagement_type == "android" and not name and not args.package_name and not artifacts:
-                name = input("Engagement name: ").strip()
-        created = create_engagement(
-            CreateEngagementOptions(
-                install_root=install_root,
-                engagement_type=engagement_type,
-                target=target,
-                name=name,
-                hosts=hosts,
-                repos=args.repo,
-                artifacts=artifacts,
-                android_package=android_package,
-                dynamic_mode=args.dynamic_mode,
-                skip_permissions=args.skip_permissions,
-            )
-        )
-        print(created.path)
+        _engagement_create(args, install_root)
     elif command == "path":
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
     elif command == "cd-init":
@@ -662,6 +682,238 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
             else:
                 for entry in migrated:
                     print(f"[vigil] {prefix}: {entry['key']} code_phase -> {entry['to']}")
+
+
+def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
+    interactive = not args.no_prompt and sys.stdin.isatty()
+    positional = args.target_or_name
+    target = args.target
+    name = args.name
+    hosts = _collect_hosts(args)
+    artifacts = list(args.apk or [])
+    android_package = args.package_name
+
+    asked = False
+    engagement_type = args.type
+    if engagement_type is None:
+        engagement_type = _infer_engagement_type(
+            positional,
+            target=target,
+            hosts=hosts,
+            repos=args.repo,
+            apks=args.apk,
+            package_name=android_package,
+        )
+        if engagement_type is not None:
+            print(f"[vigil] inferred type: {engagement_type} (pass --type to override)", file=sys.stderr)
+        elif interactive:
+            engagement_type = _prompt_choice("Engagement type", "web", ["web", "code", "both", "android"])
+            asked = True
+        else:
+            described = repr(positional) if positional else "the provided flags"
+            raise SystemExit(
+                f"cannot infer engagement type from {described}; pass --type web|code|both|android "
+                "(blue engagements: vigil blue engage)"
+            )
+
+    if positional:
+        if engagement_type == "android" and _looks_like_android_artifact(positional):
+            if positional not in artifacts:
+                artifacts.insert(0, positional)
+            if not name:
+                name = Path(positional).name
+        elif engagement_type == "android":
+            android_package = android_package or positional
+            if not name:
+                name = positional
+        elif engagement_type == "code" and not name:
+            name = positional
+        elif not target:
+            target = positional
+
+    if interactive:
+        if engagement_type in {"web", "both"} and not target and not hosts:
+            target = _ask_required("Target URL or host")
+            asked = True
+        if engagement_type in {"code", "both"} and not name:
+            name = _ask_required("Engagement name")
+            asked = True
+        if engagement_type == "android" and not name and not android_package and not artifacts:
+            name = _ask_required("Engagement name")
+            asked = True
+        # Dry runs skip the summary + confirmation: nothing will be created
+        # either way, and the dry-run path prints its own plan summary.
+        if asked and not args.dry_run:
+            _print_create_summary(
+                engagement_type,
+                target=target,
+                name=name,
+                hosts=hosts,
+                repos=args.repo,
+                artifacts=artifacts,
+                android_package=android_package,
+            )
+            if not _confirm("Create engagement? [Y/n]"):
+                raise SystemExit("aborted: engagement not created")
+
+    options = CreateEngagementOptions(
+        install_root=install_root,
+        engagement_type=engagement_type,
+        target=target,
+        name=name,
+        hosts=hosts,
+        repos=args.repo,
+        artifacts=artifacts,
+        android_package=android_package,
+        dynamic_mode=args.dynamic_mode,
+        skip_permissions=args.skip_permissions,
+    )
+
+    if args.dry_run:
+        # Validation and derivation only — no directory, snapshot, or
+        # backend contact. stdout stays empty in text mode so scripted
+        # `eng=$(vigil engagement create ...)` callers can never mistake a
+        # dry run for a created engagement.
+        plan = plan_engagement(options)
+        if args.json:
+            payload = {
+                "dry_run": True,
+                "engagement_type": plan.engagement_type,
+                "label": plan.label,
+                "scope": plan.scope,
+                "manifest": plan.manifest,
+            }
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print("[vigil] dry-run: no engagement created", file=sys.stderr)
+            _print_create_summary(
+                plan.engagement_type,
+                target=str(plan.manifest.get("target") or ""),
+                name=plan.report_name,
+                hosts=[str(host) for host in plan.scope.get("hosts", []) or []],
+                repos=[repo["path"] for repo in plan.repos],
+                artifacts=artifacts,
+                android_package=android_package,
+            )
+        return
+
+    created = create_engagement(options)
+    if args.json:
+        scope = json.loads((created.path / "scope.json").read_text(encoding="utf-8"))
+        payload = {
+            "key": created.key,
+            "path": str(created.path),
+            "engagement_type": str(scope.get("engagement_type") or ""),
+            "scope": scope,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(created.path)
+
+
+def _collect_hosts(args: argparse.Namespace) -> list[str]:
+    """Merge --hosts (csv), repeatable --host, and --hosts-file, deduped in order."""
+    hosts = [item.strip() for item in (args.hosts or "").split(",") if item.strip()]
+    # --host also splits on commas: before it existed, `--host a,b` reached
+    # --hosts via argparse prefix abbreviation, so keep that spelling working.
+    for entry in args.host or []:
+        hosts.extend(item.strip() for item in entry.split(",") if item.strip())
+    if args.hosts_file:
+        path = Path(args.hosts_file).expanduser()
+        if not path.is_file():
+            raise SystemExit(f"--hosts-file: file not found: {path}")
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise SystemExit(f"--hosts-file: cannot read {path}: {exc}") from exc
+        for line in content.splitlines():
+            entry = line.strip()
+            if entry and not entry.startswith("#"):
+                hosts.append(entry)
+    return list(dict.fromkeys(hosts))
+
+
+def _infer_engagement_type(
+    positional: str | None,
+    *,
+    target: str | None,
+    hosts: list[str],
+    repos: list[str],
+    apks: list[str],
+    package_name: str | None,
+) -> str | None:
+    """Infer the engagement type from corroborating evidence, or None.
+
+    Returns None when the inputs are ambiguous (e.g. a bare name with no
+    repo/host/APK evidence) — the caller then asks interactively or fails
+    with a clear message instead of silently defaulting, which used to
+    misclassify bare names as code engagements.
+    """
+    android_evidence = bool(apks) or bool(package_name) or bool(positional and _looks_like_android_artifact(positional))
+    if android_evidence:
+        return "android"
+    web_evidence = bool(target) or bool(hosts) or bool(positional and _looks_like_web_target(positional))
+    code_evidence = bool(repos)
+    if web_evidence and code_evidence:
+        return "both"
+    if web_evidence:
+        return "web"
+    if code_evidence:
+        return "code"
+    return None
+
+
+def _read_line() -> str:
+    try:
+        return input()
+    except EOFError as exc:
+        raise SystemExit("stdin closed during interactive prompt; pass the missing flags or --no-prompt") from exc
+
+
+def _ask_required(label: str, *, attempts: int = 3) -> str:
+    """Prompt on stderr for a required value, re-asking on empty input.
+
+    Prompts never touch stdout so `eng=$(vigil engagement create ...)` works
+    even when the wizard engages.
+    """
+    for _ in range(attempts):
+        print(f"{label}: ", end="", file=sys.stderr, flush=True)
+        value = _read_line().strip()
+        if value:
+            return value
+        print("A value is required.", file=sys.stderr)
+    raise SystemExit(f"{label} is required")
+
+
+def _confirm(prompt: str) -> bool:
+    print(f"{prompt} ", end="", file=sys.stderr, flush=True)
+    return _read_line().strip().lower() in {"", "y", "yes"}
+
+
+def _print_create_summary(
+    engagement_type: str,
+    *,
+    target: str | None,
+    name: str | None,
+    hosts: list[str],
+    repos: list[str],
+    artifacts: list[str],
+    android_package: str | None,
+) -> None:
+    print("[vigil] engagement summary:", file=sys.stderr)
+    print(f"[vigil]   type:      {engagement_type}", file=sys.stderr)
+    if target:
+        print(f"[vigil]   target:    {target}", file=sys.stderr)
+    if name:
+        print(f"[vigil]   name:      {name}", file=sys.stderr)
+    if hosts:
+        print(f"[vigil]   hosts:     {', '.join(hosts)}", file=sys.stderr)
+    if repos:
+        print(f"[vigil]   repos:     {', '.join(repos)}", file=sys.stderr)
+    if artifacts:
+        print(f"[vigil]   artifacts: {', '.join(artifacts)}", file=sys.stderr)
+    if android_package:
+        print(f"[vigil]   package:   {android_package}", file=sys.stderr)
 
 
 def _looks_like_web_target(value: str) -> bool:
@@ -1096,19 +1348,22 @@ def _resolve_current_or_selected_engagement(install_root: Path, *, key: str | No
     raise SystemExit("Specify an engagement key or --select, or run from inside an engagement")
 
 
-def _prompt_choice(label: str, default: str, choices: list[str]) -> str:
-    print(label, file=sys.stderr)
-    for idx, choice in enumerate(choices, start=1):
-        suffix = " [default]" if choice == default else ""
-        print(f"  {idx}. {choice}{suffix}", file=sys.stderr)
-    raw = input("> ").strip()
-    if not raw:
-        return default
-    if raw.isdigit() and 1 <= int(raw) <= len(choices):
-        return choices[int(raw) - 1]
-    if raw in choices:
-        return raw
-    raise SystemExit(f"Invalid {label.lower()}: {raw}")
+def _prompt_choice(label: str, default: str, choices: list[str], *, attempts: int = 3) -> str:
+    for _ in range(attempts):
+        print(label, file=sys.stderr)
+        for idx, choice in enumerate(choices, start=1):
+            suffix = " [default]" if choice == default else ""
+            print(f"  {idx}. {choice}{suffix}", file=sys.stderr)
+        print("> ", end="", file=sys.stderr, flush=True)
+        raw = _read_line().strip()
+        if not raw:
+            return default
+        if raw.isdigit() and 1 <= int(raw) <= len(choices):
+            return choices[int(raw) - 1]
+        if raw in choices:
+            return raw
+        print(f"Invalid {label.lower()}: {raw}", file=sys.stderr)
+    raise SystemExit(f"Invalid {label.lower()}: no valid selection after {attempts} attempts")
 
 
 if __name__ == "__main__":

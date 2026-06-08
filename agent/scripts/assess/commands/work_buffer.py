@@ -8,6 +8,56 @@ from assess.lib.classify_buckets import SKIP_REASON_TAGS
 from assess.lib.config import anchor_engagement_relative
 
 
+_ACTION_HELP: dict[str, str] = {
+    "stats": (
+        "Usage: vigil assess work-buffer <cases.db> stats [--by status|source|cluster|host|reason]\n\n"
+        "Print work-buffer counts grouped by status or another supported axis.\n"
+    ),
+    "peek": (
+        "Usage: vigil assess work-buffer <cases.db> peek <type> [limit]\n\n"
+        "Preview pending work items of the given type without claiming them.\n"
+    ),
+    "fetch": (
+        "Usage: vigil assess work-buffer <cases.db> fetch <type> <limit> <agent>\n\n"
+        "Claim pending work items of the given type for an agent.\n"
+    ),
+    "fetch-by-priority": (
+        "Usage: vigil assess work-buffer <cases.db> fetch-by-priority <limit> [auto|agent]\n\n"
+        "Claim the highest-priority pending work items across types.\n"
+    ),
+    "defer-cluster": (
+        "Usage: vigil assess work-buffer <cases.db> defer-cluster <cluster_key> --reason TEXT "
+        "[--reason-tag TAG]\n\n"
+        "Mark a whole cluster skipped/deferred with an auditable reason.\n"
+    ),
+    "defer-items": (
+        "Usage: vigil assess work-buffer <cases.db> defer-items <id> [<id> ...] --reason TEXT "
+        "[--reason-tag TAG]\n\n"
+        "Mark specific work-item ids skipped/deferred with an auditable reason.\n"
+    ),
+    "done": (
+        "Usage: vigil assess work-buffer <cases.db> done <id> [<id> ...]\n\n"
+        "Mark claimed work items done.\n"
+    ),
+    "error": (
+        "Usage: vigil assess work-buffer <cases.db> error <id> [<id> ...]\n\n"
+        "Mark claimed work items errored.\n"
+    ),
+    "reset-stale": (
+        "Usage: vigil assess work-buffer <cases.db> reset-stale <minutes>\n\n"
+        "Return stale processing rows to pending.\n"
+    ),
+}
+
+
+def maybe_print_action_help(tokens: list[str]) -> None:
+    if len(tokens) >= 3 and any(token in {"-h", "--help"} for token in tokens[2:]):
+        text = _ACTION_HELP.get(tokens[1])
+        if text:
+            print(text)
+            sys.exit(0)
+
+
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "work-buffer",

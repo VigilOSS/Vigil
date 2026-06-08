@@ -10,6 +10,46 @@ from pathlib import Path
 from assess.commands import dispatch
 
 
+_ACTION_HELP: dict[str, str] = {
+    "list": (
+        "Usage: vigil assess agent list [--filter-role <role>] [--status <status>] "
+        "[--since <iso>] [--task-q <query>] [--limit <n>]\n\n"
+        "Read backend dispatch rows newest first.\n\n"
+        "Options:\n"
+        "  --filter-role ROLE   Filter dispatches by agent role.\n"
+        "  --status STATUS      Filter by dispatch status.\n"
+        "  --since ISO          Filter to dispatches at or after an ISO datetime.\n"
+        "  --task-q QUERY       Case-insensitive task substring search.\n"
+        "  --limit N            Maximum rows to return.\n"
+    ),
+    "get": (
+        "Usage: vigil assess agent get <agent-id>\n\n"
+        "Fetch one backend dispatch row by agent_id.\n"
+    ),
+    "done": (
+        "Usage: vigil assess agent done <agent-id> [--status completed|failed|aborted|blocked] "
+        "[--finding-slugs <slug1,slug2>]\n\n"
+        "Patch a backend dispatch lifecycle row directly.\n"
+    ),
+    "reconcile-stale": (
+        "Usage: vigil assess agent reconcile-stale [--dry-run] [--max-age-hours <hours>]\n\n"
+        "Inspect or close stale in-progress dispatches with ready/blocked handoffs.\n"
+    ),
+    "render-handoff": (
+        "Usage: vigil assess agent render-handoff <agent-id> [--max-lines N] [--include-evidence]\n\n"
+        "Render the bounded handoff blob for a prior dispatch.\n"
+    ),
+}
+
+
+def maybe_print_action_help(tokens: list[str]) -> None:
+    if len(tokens) >= 2 and any(token in {"-h", "--help"} for token in tokens[1:]):
+        text = _ACTION_HELP.get(tokens[0])
+        if text:
+            print(text)
+            sys.exit(0)
+
+
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "agent",

@@ -1794,6 +1794,23 @@ def test_work_buffer_cli_wires_reason_tag_and_by_reason(tmp_path, capsys):
     assert "blackholed|1" in capsys.readouterr().out
 
 
+def test_work_buffer_action_help_is_action_specific(tmp_path, capsys):
+    root = str(_scripts_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import assess.cli as cli
+
+    db_path = _make_fresh_db(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["work-buffer", str(db_path), "peek", "url", "--help"])
+
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "Usage: vigil assess work-buffer <cases.db> peek <type> [limit]" in captured.out
+    assert "defer-cluster" not in captured.out
+
+
 def test_work_buffer_cli_defer_items_reason_tag(tmp_path):
     root = str(_scripts_root())
     if root not in sys.path:

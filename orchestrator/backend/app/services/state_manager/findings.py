@@ -1090,15 +1090,72 @@ def merge_findings(
         "link": link,
     }
 
-def list_findings(engagement_id: int) -> list[dict[str, Any]]:
+def list_findings(
+    engagement_id: int,
+    *,
+    severity: str | None = None,
+    workflow_status: str | None = None,
+    verification_state: str | None = None,
+    verification_disposition: str | None = None,
+    source_name: str | None = None,
+    slug: str | None = None,
+    search: str | None = None,
+    holding: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    where = ["findings.engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    if severity:
+        where.append("LOWER(findings.severity) = LOWER(?)")
+        params.append(severity)
+    if workflow_status:
+        where.append("LOWER(findings.status) = LOWER(?)")
+        params.append(workflow_status)
+    if verification_state:
+        where.append("LOWER(findings.verification_state) = LOWER(?)")
+        params.append(verification_state)
+    if verification_disposition:
+        where.append("LOWER(findings.verification_disposition) = LOWER(?)")
+        params.append(verification_disposition)
+    if source_name:
+        where.append("LOWER(findings.source_name) = LOWER(?)")
+        params.append(source_name)
+    if slug:
+        where.append("LOWER(findings.slug) = LOWER(?)")
+        params.append(slug)
+    if search:
+        escaped = _escape_like(search.lower())
+        needle = f"%{escaped}%"
+        where.append(
+            "("
+            "LOWER(findings.slug) LIKE ? ESCAPE '\\' OR "
+            "LOWER(findings.title) LIKE ? ESCAPE '\\' OR "
+            "LOWER(findings.summary) LIKE ? ESCAPE '\\' OR "
+            "LOWER(findings.canonical_location) LIKE ? ESCAPE '\\' OR "
+            "LOWER(findings.source_name) LIKE ? ESCAPE '\\'"
+            ")"
+        )
+        params.extend([needle, needle, needle, needle, needle])
+    if holding:
+        where.append(
+            "("
+            "LOWER(findings.evidence_type) = 'theoretical' OR "
+            "LOWER(findings.verification_disposition) = 'pending_runtime_proof'"
+            ")"
+        )
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = " LIMIT ? OFFSET ?"
+        params.extend([int(limit), int(offset)])
     with _common.get_connection() as connection:
         rows = connection.execute(
-            """
+            f"""
             SELECT findings.*, merged.slug AS merged_into_slug
             FROM assessment_findings AS findings
             LEFT JOIN assessment_findings AS merged ON merged.id = findings.merged_into_finding_id
-            WHERE findings.engagement_id = ?
+            WHERE {' AND '.join(where)}
             ORDER BY
                 CASE findings.status
                     WHEN 'exploited' THEN 0
@@ -1117,10 +1174,15 @@ def list_findings(engagement_id: int) -> list[dict[str, Any]]:
                 END,
                 findings.updated_at DESC,
                 findings.id DESC
+            {limit_sql}
             """,
-            (engagement.id,),
+            tuple(params),
         ).fetchall()
     return [_serialize_finding_record(row) for row in rows]
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
