@@ -704,6 +704,15 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
                 normalized_path TEXT NOT NULL,
                 path_template TEXT NOT NULL DEFAULT '',
                 canonical_url TEXT NOT NULL DEFAULT '',
+                -- Wave 5 / 2c scorer-fact audit (CONCLUSION — no new column):
+                -- the Wave-6 app-unit scorer's "static-asset" suppressor is
+                -- DERIVABLE from existing columns and needs NO new
+                -- raw_payload/observation fact. A variant is static-asset when
+                -- content_type_family is an asset family (image/font/style/
+                -- script/media) AND method == 'GET' AND the query/body/path
+                -- schemas are empty (no params). The scorer computes this at
+                -- score time from content_type_family + method + the *_schema_json
+                -- columns below, so we deliberately do NOT add a column here.
                 content_type_family TEXT NOT NULL DEFAULT 'unknown',
                 query_schema_json TEXT NOT NULL DEFAULT '{}',
                 body_schema_json TEXT NOT NULL DEFAULT '{}',
@@ -786,11 +795,29 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
                 probe_key TEXT NOT NULL,
                 tool_name TEXT NOT NULL,
                 agent_name TEXT NOT NULL DEFAULT '',
+                -- result_status vocabulary (Wave-2 foundation for Wave 5).
+                -- Column stays TEXT (forward-compatible: a new status can be
+                -- added to PROBE_RESULT_STATUSES without a destructive
+                -- migration). The 'tested' default is a well-formed outcome
+                -- label ONLY — it is NOT silently promoted to "covered".
+                -- Canonical vocabulary + the covering subset
+                -- (tested/signal only) live in
+                -- app.services.state_manager.coverage.PROBE_RESULT_STATUSES /
+                -- PROBE_RESULT_STATUSES_COVERING, validated on every write.
                 result_status TEXT NOT NULL DEFAULT 'tested',
                 observed_http_status INTEGER,
                 signal_type TEXT NOT NULL DEFAULT '',
                 evidence_ref TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
+                -- Target anchor (Wave 5 / S6). A raw/list-mode probe with a
+                -- null request_variant_id still carries the host it tested, so
+                -- it can be mapped to an app unit and its probe_key no longer
+                -- collides with other null-FK probes (these columns are part of
+                -- _probe_key in coverage.py). Path/port are often absent from
+                -- kali argv, so they default empty/NULL.
+                target_host TEXT NOT NULL DEFAULT '',
+                target_path TEXT NOT NULL DEFAULT '',
+                target_port INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, probe_key),
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
@@ -800,6 +827,19 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
             )
             """
     )
+    probe_columns = _table_columns(connection, "assessment_probe_runs")
+    if probe_columns and "target_host" not in probe_columns:
+        connection.execute(
+            "ALTER TABLE assessment_probe_runs ADD COLUMN target_host TEXT NOT NULL DEFAULT ''"
+        )
+    if probe_columns and "target_path" not in probe_columns:
+        connection.execute(
+            "ALTER TABLE assessment_probe_runs ADD COLUMN target_path TEXT NOT NULL DEFAULT ''"
+        )
+    if probe_columns and "target_port" not in probe_columns:
+        connection.execute(
+            "ALTER TABLE assessment_probe_runs ADD COLUMN target_port INTEGER"
+        )
     _dedupe_coverage_items(connection)
     connection.execute(
         """
@@ -814,6 +854,47 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
             )
             """
     )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS assessment_application_units (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                host TEXT NOT NULL,
+                port_class TEXT NOT NULL DEFAULT 'web',
+                path_prefix TEXT NOT NULL DEFAULT '/',
+                deep_required INTEGER NOT NULL DEFAULT 0,
+                depth_tier TEXT NOT NULL DEFAULT 'thin',
+                structure_score INTEGER NOT NULL DEFAULT 0,
+                risk_score INTEGER NOT NULL DEFAULT 0,
+                suppressor_score INTEGER NOT NULL DEFAULT 0,
+                total_score INTEGER NOT NULL DEFAULT 0,
+                confidence TEXT NOT NULL DEFAULT 'low',
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                override TEXT,
+                override_reason TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, host, port_class, path_prefix),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_application_units_host "
+        "ON assessment_application_units(engagement_id, host)"
+    )
+    coverage_columns = _table_columns(connection, "assessment_coverage_items")
+    if coverage_columns and "application_unit_id" not in coverage_columns:
+        connection.execute(
+            "ALTER TABLE assessment_coverage_items ADD COLUMN application_unit_id INTEGER "
+            "REFERENCES assessment_application_units(id) ON DELETE SET NULL"
+        )
+    probe_columns_au = _table_columns(connection, "assessment_probe_runs")
+    if probe_columns_au and "application_unit_id" not in probe_columns_au:
+        connection.execute(
+            "ALTER TABLE assessment_probe_runs ADD COLUMN application_unit_id INTEGER "
+            "REFERENCES assessment_application_units(id) ON DELETE SET NULL"
+        )
 
 
 def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
@@ -972,6 +1053,12 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 status TEXT NOT NULL DEFAULT 'discovered',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                -- Named identity this credential is replayable AS (depth-gate
+                -- Wave 4 / identity). Links a stored credential to the auth.json
+                -- identity (user_a/user_b/admin) so "which identity ran which
+                -- probe" is recordable and cross-identity access-control depth
+                -- is real. Additive + free-text; empty when no identity is set.
+                identity TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, credential_key),
@@ -979,6 +1066,11 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
             )
             """
     )
+    credential_columns = _table_columns(connection, "assessment_credentials")
+    if credential_columns and "identity" not in credential_columns:
+        connection.execute(
+            "ALTER TABLE assessment_credentials ADD COLUMN identity TEXT NOT NULL DEFAULT ''"
+        )
     connection.execute(
         """
             CREATE TABLE IF NOT EXISTS assessment_credential_tests (
@@ -2252,6 +2344,9 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
                 finding_slugs_json TEXT,
                 skills TEXT,
                 tier TEXT,
+                scope_path_prefix TEXT,
+                vuln_classes TEXT,
+                identity TEXT,
                 UNIQUE(engagement_id, agent_id)
             )
             """
@@ -2276,6 +2371,11 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
     # without a schema rebuild. Existing rows stay NULL.
     if dispatch_columns and "tier" not in dispatch_columns:
         connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN tier TEXT")
+    for _col in ("scope_path_prefix", "vuln_classes", "identity"):
+        if dispatch_columns and _col not in dispatch_columns:
+            connection.execute(
+                f"ALTER TABLE assessment_dispatches ADD COLUMN {_col} TEXT"
+            )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_at "
         "ON assessment_dispatches(engagement_id, dispatched_at DESC)"

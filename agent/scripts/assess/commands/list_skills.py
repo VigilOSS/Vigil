@@ -73,16 +73,20 @@ def run(args: argparse.Namespace) -> None:
         return
 
     name_w = max(len("SKILL"), max(len(r["name"]) for r in rows))
-    desc_w = min(80, max(len("DESCRIPTION"), max(len(r["description"]) for r in rows)))
+    desc_w = min(70, max(len("DESCRIPTION"), max(len(r["description"]) for r in rows)))
+    class_w = max(len("VULN_CLASS"), max(len(r["vuln_class"]) for r in rows))
 
-    header = f"{'SKILL':<{name_w}}  {'DESCRIPTION':<{desc_w}}  PATH"
+    header = f"{'SKILL':<{name_w}}  {'DESCRIPTION':<{desc_w}}  {'VULN_CLASS':<{class_w}}  PATH"
     print(header)
     print("-" * len(header))
     for row in rows:
         desc = row["description"]
         if len(desc) > desc_w:
             desc = desc[: desc_w - 1] + "\u2026"
-        print(f"{row['name']:<{name_w}}  {desc:<{desc_w}}  {row['path']}")
+        print(
+            f"{row['name']:<{name_w}}  {desc:<{desc_w}}  "
+            f"{row['vuln_class']:<{class_w}}  {row['path']}"
+        )
 
 
 def _collect_skills(skills_dir: Path) -> list[dict[str, str]]:
@@ -93,6 +97,7 @@ def _collect_skills(skills_dir: Path) -> list[dict[str, str]]:
             {
                 "name": skill_md.parent.name,
                 "description": meta.get("description") or "(no description)",
+                "vuln_class": meta.get("vuln_class", ""),
                 "path": str(skill_md.relative_to(skills_dir.parent.parent)),
             }
         )

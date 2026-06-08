@@ -51,6 +51,22 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "running."
         ),
     )
+    p.add_argument(
+        "--reclaim-skipped",
+        dest="reclaim_skipped",
+        action="store_true",
+        help=(
+            "Re-evaluate EVERY status='skipped' row against the CURRENT inert "
+            "policy and un-strand any whose type is no longer inert, flipping it "
+            "back to 'pending' and clearing its stale terminal_reason (L4-7). "
+            "Use after an inert-policy change (e.g. a type was removed from "
+            "classify_buckets.INERT_TYPES, like sourcemap) so previously-skipped "
+            "rows that are now testable re-enter the work queue. WARNING: this "
+            "also reverses MANUAL skips of non-inert items — it is opt-in for "
+            "exactly that reason; the default predicate never touches a skipped "
+            "row that carries a terminal_reason."
+        ),
+    )
     # Deprecated alias retained because the previous release shipped with
     # `--only-unscored` as an opt-in to the safe predicate. The safe predicate
     # is now the default, so the flag is a no-op; we accept it without error
@@ -68,6 +84,7 @@ def run(args: argparse.Namespace) -> None:
     db_path = args.db_path
     batch = max(1, int(args.batch))
     reclassify_all = bool(getattr(args, "reclassify_all", False))
+    reclaim_skipped = bool(getattr(args, "reclaim_skipped", False))
     db_init(db_path)
 
     # Default predicate is narrow: only touch rows that have not already been
@@ -87,9 +104,12 @@ def run(args: argparse.Namespace) -> None:
     base_predicate = (
         f"(status = 'pending' OR (status = 'skipped' AND type IN ({inert_placeholders})))"
     )
-    if reclassify_all:
+    if reclaim_skipped:
+        where_clause: str = "status = 'skipped'"
+        where_params: tuple = ()
+    elif reclassify_all:
         where_clause = base_predicate
-        where_params: tuple = inert_params
+        where_params = inert_params
     else:
         where_clause = (
             f"{base_predicate} "
@@ -104,6 +124,7 @@ def run(args: argparse.Namespace) -> None:
         conn.execute("PRAGMA busy_timeout=5000")
         classified = 0
         updated = 0
+        reclaimed = 0
         cluster_counts: Counter[str] = Counter()
 
         # Track an offset so we don't loop forever in the wide WHERE case
@@ -129,25 +150,48 @@ def run(args: argparse.Namespace) -> None:
                 classified += 1
                 assignment = _classify_row(row)
                 cluster_counts[assignment["cluster_key"]] += 1
-                result = conn.execute(
-                    """
-                    UPDATE work_items
-                    SET priority_score = ?,
-                        priority_reason = ?,
-                        cluster_key = ?,
-                        terminal_reason = COALESCE(?, terminal_reason),
-                        status = CASE WHEN ? IS NOT NULL THEN 'skipped' ELSE status END
-                    WHERE id = ?
-                    """,
-                    (
-                        assignment["priority_score"],
-                        assignment["priority_reason"],
-                        assignment["cluster_key"],
-                        assignment["terminal_reason"],
-                        assignment["terminal_reason"],
-                        row["id"],
-                    ),
-                )
+                if reclaim_skipped:
+                    if assignment["terminal_reason"] is None:
+                        reclaimed += 1
+                    result = conn.execute(
+                        """
+                        UPDATE work_items
+                        SET priority_score = ?,
+                            priority_reason = ?,
+                            cluster_key = ?,
+                            terminal_reason = ?,
+                            status = CASE WHEN ? IS NOT NULL THEN 'skipped' ELSE 'pending' END
+                        WHERE id = ?
+                        """,
+                        (
+                            assignment["priority_score"],
+                            assignment["priority_reason"],
+                            assignment["cluster_key"],
+                            assignment["terminal_reason"],
+                            assignment["terminal_reason"],
+                            row["id"],
+                        ),
+                    )
+                else:
+                    result = conn.execute(
+                        """
+                        UPDATE work_items
+                        SET priority_score = ?,
+                            priority_reason = ?,
+                            cluster_key = ?,
+                            terminal_reason = COALESCE(?, terminal_reason),
+                            status = CASE WHEN ? IS NOT NULL THEN 'skipped' ELSE status END
+                        WHERE id = ?
+                        """,
+                        (
+                            assignment["priority_score"],
+                            assignment["priority_reason"],
+                            assignment["cluster_key"],
+                            assignment["terminal_reason"],
+                            assignment["terminal_reason"],
+                            row["id"],
+                        ),
+                    )
                 updated += result.rowcount
             conn.commit()
 
@@ -157,6 +201,7 @@ def run(args: argparse.Namespace) -> None:
         summary = {
             "classified": classified,
             "updated": updated,
+            "reclaimed_to_pending": reclaimed,
             "by_cluster": dict(sorted(cluster_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))

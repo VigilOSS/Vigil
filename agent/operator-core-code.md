@@ -946,7 +946,7 @@ vigil assess transition-phase complete --track code
 ```
 
 **Report dispatch:**
-For a final report, run `vigil assess check-report-readiness` before dispatching
+For a final report, run `vigil assess check-phase-readiness --phase report` before dispatching
 `report-writer`. Report-writer runs `vigil assess list-report-findings --mode final --json` for final output and
 `vigil assess list-report-findings --mode draft --json` for interim output; both include code and web findings from the
 shared backend with root-cause grouping applied. Fuzz findings (CF-xxx) include crash inputs and ASAN reports as evidence.

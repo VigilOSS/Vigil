@@ -2,6 +2,7 @@
 name: cors-testing
 description: CORS misconfiguration testing for data theft and access control bypass
 origin: Vigil
+vuln_class: cors
 ---
 
 # CORS Misconfiguration Testing

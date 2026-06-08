@@ -2,6 +2,7 @@
 name: open-redirect-testing
 description: Test for unvalidated redirects — URL parameters, login flows, OAuth callbacks that redirect to attacker-controlled domains
 origin: Vigil
+vuln_class: open-redirect
 ---
 
 # Open Redirect Testing

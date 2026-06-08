@@ -224,6 +224,7 @@ def record_credential(
     status_value: str,
     notes: str,
     provenance: dict[str, Any] | None,
+    identity: str = "",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -241,6 +242,7 @@ def record_credential(
                 "status": status_value,
                 "notes": notes,
                 "provenance_json": _json_text(provenance),
+                "identity": identity or "",
             },
         )
 

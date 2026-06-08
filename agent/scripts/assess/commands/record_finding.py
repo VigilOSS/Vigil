@@ -29,10 +29,10 @@ def register(subparsers) -> None:
         "--allow-unindexed-evidence",
         dest="allow_unindexed_evidence",
         action="store_true",
-        help="Record even when evidence_ref is prose, a URL, or a non-existent path. By default "
-             "record-finding rejects evidence that won't resolve to a registered artifact, "
-             "so the gap is caught now (while you still have the evidence) instead of at "
-             "check-report-readiness. Use for theoretical/code-inferred findings with no file.",
+        help="Silence record-time warnings about an unindexed evidence_ref (prose, URL, or a "
+             "non-existent path). Recording always succeeds either way — check-phase-readiness --phase report "
+             "is the backstop for missing evidence; a URL is rerouted into details.references "
+             "regardless. Use for theoretical/code-inferred findings with no captured file yet.",
     )
     p.set_defaults(func=run)
 
@@ -85,48 +85,74 @@ def _evidence_file_exists(ref: str, eng_dir: str, engagement_key: str) -> bool:
     return any(c.is_file() for c in candidates)
 
 
-def _validate_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str, allow_unindexed: bool) -> None:
-    """Reject evidence_ref that cannot resolve to a registered artifact, at
-    record time — while the capturing agent still has the evidence in hand —
-    instead of surfacing ~24 blockers at the very end via check-report-readiness.
+def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str, allow_unindexed: bool) -> None:
+    """Normalize evidence_ref at record time WITHOUT blocking the record.
 
-    Accepts: an existing on-disk file, which the backend auto-registers.
-    Rejects: URLs, prose, or path-shaped refs with no file. Empty is a warning,
-    not an error (evidence may be attached on a later update).
+    Doctrine (master plan §0 / L4-2): recording a real finding mid-hunt must
+    always work, even before proof is a registered artifact — check-report-
+    readiness is the terminal backstop for missing evidence, not record time.
+    So this warns and, for URLs, reroutes — it never exits.
+
+    - existing on-disk file -> accepted as-is (the backend auto-registers it).
+    - URL -> rerouted into ``details.references`` and evidence_ref cleared
+      (a URL is never an auto-registerable artifact path).
+    - prose / non-existent path -> warned; the record still proceeds.
+    - empty -> warned; evidence may be attached on a later update.
+
+    ``allow_unindexed`` silences the warnings for intentionally-unindexed
+    (theoretical / code-inferred) findings; the URL reroute still happens so
+    the URL is never lost.
     """
+    ref = (payload.get("evidence_ref") or "").strip()
+
+    if ref.startswith(("http://", "https://")):
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            details = {}
+            payload["details"] = details
+        refs = details.setdefault("references", [])
+        if isinstance(refs, list) and ref not in refs:
+            refs.append(ref)
+        payload["evidence_ref"] = ""
+        if not allow_unindexed:
+            print(
+                f"record-finding: evidence_ref '{ref}' is a URL, not a registered artifact path "
+                "— rerouted into details.references and cleared evidence_ref. Attach a captured "
+                "artifact later so report-readiness can index replayable proof.",
+                file=sys.stderr,
+            )
+        return
+
     if allow_unindexed:
         return
-    ref = (payload.get("evidence_ref") or "").strip()
+
     if not ref:
         print(
-            "record-finding: warning — no evidence_ref set; check-report-readiness will flag "
+            "record-finding: warning — no evidence_ref set; check-phase-readiness --phase report will flag "
             "this finding as missing evidence. Set evidence_ref to a captured artifact path or "
             "pass --allow-unindexed-evidence to silence.",
             file=sys.stderr,
         )
         return
-    if ref.startswith(("http://", "https://")):
-        print(
-            f"record-finding: evidence_ref '{ref}' is a URL, not a registered artifact path.",
-            file=sys.stderr,
-        )
-        print("  URL evidence is not auto-registered and will block report-readiness. Fix one of:", file=sys.stderr)
-        print("    - save the evidence under the engagement directory and point evidence_ref at that file,", file=sys.stderr)
-        print("    - put the URL in details.references, or", file=sys.stderr)
-        print("    - pass --allow-unindexed-evidence to record anyway (accepting a report blocker).", file=sys.stderr)
-        sys.exit(1)
+
     if _evidence_file_exists(ref, eng_dir, engagement_key):
         return  # existing artifact — the backend registers + links it on record.
+
     looks_like_path = ("/" in ref or "." in ref) and "  " not in ref
     if looks_like_path:
-        print(f"record-finding: evidence_ref '{ref}' looks like a path but no file exists there.", file=sys.stderr)
+        print(
+            f"record-finding: warning — evidence_ref '{ref}' looks like a path but no file exists "
+            "there; recording anyway. check-phase-readiness --phase report will flag it until a real artifact is "
+            "attached. Pass --allow-unindexed-evidence to silence.",
+            file=sys.stderr,
+        )
     else:
-        print(f"record-finding: evidence_ref '{ref}' is free-text prose, not an artifact path or URL.", file=sys.stderr)
-    print("  Evidence must resolve to a real artifact so report-readiness can index it. Fix one of:", file=sys.stderr)
-    print("    - point evidence_ref at an existing file (auto-registered on record),", file=sys.stderr)
-    print("    - put URLs or external references in details.references, or", file=sys.stderr)
-    print("    - pass --allow-unindexed-evidence to record anyway (accepting a report blocker).", file=sys.stderr)
-    sys.exit(1)
+        print(
+            f"record-finding: warning — evidence_ref '{ref}' is free-text prose, not an artifact "
+            "path or URL; recording anyway. Put external links in details.references and attach a "
+            "captured artifact for report-readiness. Pass --allow-unindexed-evidence to silence.",
+            file=sys.stderr,
+        )
 
 
 def _report_validation_errors(payload: dict, errors: list[str]) -> None:
@@ -174,7 +200,7 @@ def run(args) -> None:
         if validation_errors:
             _report_validation_errors(payload, validation_errors)
 
-        _validate_evidence_ref(
+        _normalize_evidence_ref(
             payload,
             eng_dir=eng_dir,
             engagement_key=cfg.engagement_key,

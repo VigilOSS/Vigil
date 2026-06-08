@@ -2,6 +2,7 @@
 name: command-injection
 description: OS command injection and argument injection — detection, blind confirmation, filter bypass, and modern framework realities
 origin: Vigil
+vuln_class: cmdi
 ---
 
 # Command Injection Testing

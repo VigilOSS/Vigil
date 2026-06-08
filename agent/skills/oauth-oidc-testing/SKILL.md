@@ -2,6 +2,7 @@
 name: oauth-oidc-testing
 description: Detect and exploit OAuth 2.0 and OpenID Connect security flaws in authentication flows
 origin: Vigil
+vuln_class: oauth
 ---
 
 # OAuth / OpenID Connect Testing

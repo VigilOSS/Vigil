@@ -162,12 +162,14 @@ def _run_classify(db_path: Path, batch: int = 500, extra_args: list[str] | None 
     module = _load_classify_module()
     extras = extra_args or []
     reclassify_all = "--reclassify-all" in extras
+    reclaim_skipped = "--reclaim-skipped" in extras
     only_unscored = "--only-unscored" in extras  # deprecated alias, kept for back-compat
     module.run(
         SimpleNamespace(
             db_path=str(db_path),
             batch=batch,
             reclassify_all=reclassify_all,
+            reclaim_skipped=reclaim_skipped,
             only_unscored=only_unscored,
         )
     )
@@ -678,6 +680,56 @@ def test_classify_work_inert_type_terminates(tmp_path: Path, capsys) -> None:
     assert row[3] == 0
 
 
+def test_classify_work_reclaim_skipped_unstrands_now_non_inert_rows(tmp_path: Path, capsys) -> None:
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="map:1",
+        url_path="/static/app.js.map",
+        case_type="sourcemap",
+        status="skipped",
+        terminal_reason="inert_type",
+        cluster_key="type:sourcemap",
+    )
+    _insert_work_item(
+        db_path,
+        queue_key="img:1",
+        url_path="/static/logo.png",
+        case_type="image",
+        status="skipped",
+        terminal_reason="inert_type",
+    )
+
+    _run_classify(db_path)
+    capsys.readouterr()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        before = conn.execute(
+            "SELECT status FROM work_items WHERE queue_key = ?", ("map:1",)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert before == "skipped", "default predicate must not touch the stranded row"
+
+    _run_classify(db_path, extra_args=["--reclaim-skipped"])
+    summary = json.loads(capsys.readouterr().out)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = {
+            r[0]: r[1:]
+            for r in conn.execute(
+                "SELECT queue_key, status, terminal_reason FROM work_items"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert rows["map:1"][0] == "pending"
+    assert rows["map:1"][1] is None
+    assert rows["img:1"][0] == "skipped"
+    assert rows["img:1"][1] == "inert_type"
+    assert summary["reclaimed_to_pending"] == 1
+
+
 def test_classify_type_marks_archive_extensions_inert() -> None:
     module = _load_classify_lib_module()
 
@@ -1186,6 +1238,124 @@ def _classify_buckets():
         _sys.path.insert(0, str(scripts))
     import assess.lib.classify_buckets as cb
     return cb
+
+
+def test_classify_matched_buckets_single(tmp_path: Path) -> None:
+    """S14: classify_from_fields exposes a machine-readable matched_buckets list."""
+    cb = _classify_buckets()
+    assignment = cb.classify_from_fields(
+        case_type="api",
+        url_path="/api/users/1024/profile",
+    )
+    assert assignment["cluster_key"] == "gf:idor"
+    assert assignment["matched_buckets"] == ["idor"]
+
+
+def test_classify_matched_buckets_multiple(tmp_path: Path) -> None:
+    """S14: a URL matching TWO buckets surfaces BOTH in matched_buckets, not just
+    the winner — this is what lets the 2b bridge mint two class-typed items."""
+    cb = _classify_buckets()
+    assignment = cb.classify_from_fields(
+        case_type="api",
+        url_path="/api/fetch",
+        query_params=json.dumps({"id": "10", "url": "http://internal/"}),
+    )
+    matched = assignment["matched_buckets"]
+    assert "idor" in matched
+    assert "ssrf" in matched
+    cb2 = _import_vuln_taxonomy()
+    classes = {cb2.GF_BUCKET_TO_CLASS.get(b) for b in matched}
+    assert "idor" in classes
+    assert "ssrf" in classes
+
+
+def _import_vuln_taxonomy():
+    import sys as _sys
+    from pathlib import Path as _Path
+    scripts = _Path(__file__).resolve().parents[3] / "agent" / "scripts"
+    if str(scripts) not in _sys.path:
+        _sys.path.insert(0, str(scripts))
+    import assess.lib.vuln_taxonomy as vt
+    return vt
+
+
+def _run_ingest_bridge(monkeypatch, tmp_path, lines, *, variant_id=501):
+    """Run ingest-endpoints over `lines` with a fake backend, capturing the
+    class-typed coverage-items the 2b bridge POSTs."""
+    module = _load_script_module(
+        "test_ingest_endpoints_bridge",
+        "agent/scripts/assess/commands/ingest_endpoints.py",
+    )
+    db_path = _make_fresh_db(tmp_path)
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "auth_active_context", lambda _eng: "anonymous")
+
+    coverage_posts: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def post(self, endpoint, payload):
+            if endpoint == "request-observations":
+                return {"request_variant": {"id": variant_id}, "service": {"id": 9}}
+            if endpoint == "coverage-items":
+                coverage_posts.append(payload)
+                return {"id": len(coverage_posts), **payload}
+            return {}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    endpoints_file = tmp_path / "endpoints.txt"
+    endpoints_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    module.run(SimpleNamespace(
+        db_path=str(db_path),
+        source="recon",
+        input_file=str(endpoints_file),
+        engagement_dir=str(tmp_path),
+        egress_blocked_hosts=None,
+    ))
+    return coverage_posts
+
+
+def test_ingest_bridges_single_gf_bucket_to_coverage_item(monkeypatch, tmp_path):
+    """2b: an endpoint classifying to the idor bucket POSTs a class-typed
+    coverage_item with attack_family='idor' (additive to the generic baseline)."""
+    posts = _run_ingest_bridge(
+        monkeypatch,
+        tmp_path,
+        ['{"url": "https://shop.example.com/api/users/1024/profile", "method": "GET"}'],
+    )
+    families = {p["attack_family"] for p in posts}
+    assert "idor" in families
+    idor_post = next(p for p in posts if p["attack_family"] == "idor")
+    assert idor_post["request_variant_id"] == 501
+
+
+def test_ingest_bridges_two_buckets_to_two_coverage_items(monkeypatch, tmp_path):
+    """2b/S14: a URL matching TWO gf buckets (idor + ssrf) yields TWO class-typed
+    coverage_items — not just the cluster winner."""
+    posts = _run_ingest_bridge(
+        monkeypatch,
+        tmp_path,
+        ['{"url": "https://shop.example.com/api/fetch", "method": "GET", '
+         '"query_params": {"id": "10", "url": "http://internal/"}}'],
+    )
+    families = {p["attack_family"] for p in posts}
+    assert "idor" in families
+    assert "ssrf" in families
 
 
 def test_reason_tag_helpers_round_trip():
@@ -1829,7 +1999,7 @@ def test_work_buffer_cli_defer_items_reason_tag(tmp_path):
 
 
 def test_host_root_seed_does_not_block_consumption_gate(tmp_path):
-    module = _load_script_module("test_scope_cov_module", "agent/scripts/assess/commands/check_scope_coverage.py")
+    module = _load_script_module("test_scope_cov_module", "agent/scripts/assess/lib/coverage_checks.py")
     db_path = _make_fresh_db(tmp_path)
     _insert_work_item(db_path, queue_key="hr", url_path="/", url="https://seed.example.com/", case_type="host_root")
     _insert_work_item(db_path, queue_key="api", url_path="/api/x", url="https://real.example.com/api/x", case_type="api")
@@ -1864,3 +2034,190 @@ def test_stamp_liveness_clamps_negative_age(monkeypatch):
     monkeypatch.setattr(module.work_items, "AssessmentClient", _C)
     module._stamp_liveness(conn, result, SimpleNamespace(base_url="x", engagement_key="e"))
     assert result[0]["live_status"] == "live"   # negative age → no nonsense @-NNNm suffix
+
+
+
+
+def test_s13_nested_versioned_api_doc_paths_classify_as_api_spec() -> None:
+    """S13: the API-doc classifier must match nested/versioned doc paths, not
+    only top-level ones — a missed spec means its whole endpoint inventory is
+    never ingested."""
+    module = _load_classify_lib_module()
+    nested = [
+        "/api/swagger.json",
+        "/v2/openapi.json",
+        "/docs/openapi.json",
+        "/docs/swagger.yaml",
+        "/api/v1/api-docs",
+    ]
+    for path in nested:
+        assert module.classify_type("GET", path, "", "") == "api-spec", path
+    assert module.classify_type("GET", "/openapi.json", "", "") == "api-spec"
+    assert module.classify_type("GET", "/swagger-ui.html", "", "") == "api-spec"
+    assert module.classify_type("GET", "/myopenapi", "", "") != "api-spec"
+    assert module.classify_type("GET", "/swaggerings/x", "", "") != "api-spec"
+
+
+def test_s15_sourcemap_not_in_inert_set() -> None:
+    """S15: sourcemap is no longer terminally inert."""
+    cb = _classify_buckets()
+    assert "sourcemap" not in cb.INERT_TYPES
+    db = _load_db_module()
+    assert "sourcemap" not in db._SKIP_TYPES
+
+
+def test_s15_sourcemap_classifies_to_secret_surface_not_inert(tmp_path: Path) -> None:
+    """S15: a sourcemap row classifies to a real, non-inert secret/JS surface
+    that downstream analysis can act on (kept pending, no inert terminal_reason)."""
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="sm:1",
+        url_path="/static/app.js.map",
+        case_type="sourcemap",
+    )
+    _run_classify(db_path)
+    row = _classify_one(db_path, "sm:1")
+    assert row[0] == "gf:interestingext"
+    assert row[1] > 0
+    assert row[2] == "gf:interestingext"
+    assert row[3] is None
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        status = conn.execute(
+            "SELECT status FROM work_items WHERE queue_key = ?", ("sm:1",)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert status == "pending"
+
+
+def test_s20_admin_fragment_is_segment_anchored_not_substring() -> None:
+    """S20: `/administration-guide` must NOT match the `/admin` risk fragment,
+    while `/admin` and `/admin/...` still do."""
+    cb = _classify_buckets()
+    assert cb.fragment_in_path("/admin", "/administration-guide") is False
+    assert cb.fragment_in_path("/admin", "/admin") is True
+    assert cb.fragment_in_path("/admin", "/admin/users") is True
+    assert cb.fragment_in_path("/admin", "/v1/admin?x=1") is True
+    assert cb.fragment_in_path(".env", "/.environment") is False
+    assert cb.fragment_in_path(".env", "/app/.env") is True
+    assert cb.fragment_in_path(".config", "/app.configuration") is False
+    assert cb.fragment_in_path("/proxy/", "/proxy/fetch") is True
+    assert cb.fragment_in_path("/proxy/", "/proxyfoo") is False
+
+
+def test_s20_administration_guide_does_not_bucket_as_debug_logic(tmp_path: Path) -> None:
+    """End-to-end S20: a `/administration-guide` doc page no longer falls into
+    the `/admin` (debug_logic) bucket — it lands in the path fallback."""
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="adminguide",
+        url_path="/administration-guide/getting-started",
+    )
+    _insert_work_item(
+        db_path,
+        queue_key="realadmin",
+        url_path="/admin/users",
+    )
+    _run_classify(db_path)
+    guide = _classify_one(db_path, "adminguide")
+    real = _classify_one(db_path, "realadmin")
+    assert not str(guide[0]).startswith("gf:")
+    assert real[0] == "gf:debug_logic"
+
+
+def test_s12_ingest_endpoints_admits_ip_localhost_ipv6_and_skips_malformed(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """S12: IP / localhost / bracketed-IPv6 endpoint lines now ingest (they used
+    to pass through schemeless and fail the POST), template/fuzz lines WARN
+    instead of dropping silently, and a genuinely malformed line is skipped with
+    a WARN rather than failing the POST."""
+    module = _load_ingest_module()
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
+    db_path = engagement_dir / "cases.db"
+    db_path.touch()
+    _load_db_module().db_init(str(db_path))
+
+    input_file = tmp_path / "endpoints.txt"
+    input_file.write_text(
+        "\n".join(
+            [
+                "10.0.0.5/admin",
+                "127.0.0.1:8080/api/login",
+                "localhost/dashboard",
+                "[::1]:8080/health",
+                "https://app.example.com/x",
+                "/relative/only",
+                "GET FUZZ/path",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir=None: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    monkeypatch.setattr(module, "auth_active_context", lambda _eng_dir: "anonymous")
+
+    posted_hosts: list[str] = []
+
+    class FakeClient:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def post(self, endpoint, payload):
+            posted_hosts.append(payload.get("target_hostname"))
+            return {"request_variant": {"id": 100 + len(posted_hosts)}}
+
+        def close(self) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            db_path=str(db_path),
+            source="recon",
+            input_file=str(input_file),
+            engagement_dir=str(engagement_dir),
+            egress_blocked_hosts=None,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "10.0.0.5" in posted_hosts
+    assert "127.0.0.1" in posted_hosts
+    assert "localhost" in posted_hosts
+    assert "::1" in posted_hosts
+    assert "app.example.com" in posted_hosts
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        ingested = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
+    finally:
+        conn.close()
+    assert ingested == 5
+
+    assert "malformed endpoint line" in captured.err
+    assert "template/fuzz-marker" in captured.err
+    assert "Skipped" in captured.err

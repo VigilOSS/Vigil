@@ -2,6 +2,7 @@
 name: graphql-testing
 description: GraphQL security testing — introspection, injection, auth bypass, DoS
 origin: Vigil
+vuln_class: graphql-injection, bola
 ---
 
 # GraphQL Security Testing

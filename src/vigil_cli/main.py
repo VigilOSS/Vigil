@@ -786,11 +786,12 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
             print("[vigil] dry-run: no engagement created", file=sys.stderr)
+            scope_hosts = plan.scope.get("hosts")
             _print_create_summary(
                 plan.engagement_type,
                 target=str(plan.manifest.get("target") or ""),
                 name=plan.report_name,
-                hosts=[str(host) for host in plan.scope.get("hosts", []) or []],
+                hosts=[str(host) for host in scope_hosts] if isinstance(scope_hosts, list) else [],
                 repos=[repo["path"] for repo in plan.repos],
                 artifacts=artifacts,
                 android_package=android_package,

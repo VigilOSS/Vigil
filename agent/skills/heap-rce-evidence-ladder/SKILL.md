@@ -2,6 +2,7 @@
 name: heap-rce-evidence-ladder
 description: Disclosure-grade evidence methodology for heap-OOB-to-RIP-control chains — the rung ladder, per-rung evidence bar, and lab-assist-to-production-equivalent disclosure pattern
 origin: Vigil
+vuln_class: buffer-overflow, use-after-free, type-confusion
 ---
 
 # Heap RCE Evidence Ladder

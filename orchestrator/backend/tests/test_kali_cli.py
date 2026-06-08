@@ -760,6 +760,59 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     assert patch_payload["timed_out"] is False
 
 
+def test_kali_exec_normalizes_technique_and_probe_kind_case(monkeypatch, fake_engagement):
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(kali.subprocess, "Popen", lambda argv, **kw: _FakePopen(returncode=0))
+
+    kali.kali_exec(
+        ["curl", "https://t.example/x"],
+        technique="open_redirect",
+        intent="probe redirect param",
+        probe_kind="PAYLOAD",
+        phase="CONSUME-TEST",
+        timeout=60,
+        agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="curl",
+    )
+    _endpoint, payload = fake_client.posts[0]
+    assert payload["technique"] == "OPEN-REDIRECT"
+    assert payload["probe_kind"] == "payload"
+    assert payload["phase"] == "consume-test"
+
+
+def test_kali_exec_accepts_previously_missing_vuln_class(monkeypatch, fake_engagement):
+    assert "BOLA" in kali_audit_enum_names()
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(kali.subprocess, "Popen", lambda argv, **kw: _FakePopen(returncode=0))
+
+    kali.kali_exec(
+        ["curl", "https://t.example/api/orders/1"],
+        technique="bola",
+        intent="swap object id across tenants",
+        probe_kind="payload",
+        phase="consume-test",
+        timeout=60,
+        agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="curl",
+    )
+    _endpoint, payload = fake_client.posts[0]
+    assert payload["technique"] == "BOLA"
+
+
+def kali_audit_enum_names():
+    return set(_import("assess.lib.audit_enums").TECHNIQUE_ENUM)
+
+
 def test_kali_exec_timeout_kills_process_group_and_marks_timed_out(
     monkeypatch, fake_engagement
 ):
@@ -823,12 +876,7 @@ def test_kali_exec_timeout_kills_process_group_and_marks_timed_out(
     assert patch_payload["partial_results"] is True
 
 
-def test_nuclei_lock_rejects_concurrent_invocation(monkeypatch, fake_engagement):
-    """C32: a per-engagement file lock prevents two concurrent
-    `vigil assess kali nuclei` invocations from corrupting each other's output.
-    Acquire the lock once, then attempt to reacquire under the same engagement
-    and verify the second attempt raises AssessError with a clear message."""
-
+def _import_nuclei_lock_helpers():
     repo_root = Path(__file__).resolve().parents[3]
     scripts_root = repo_root / "agent" / "scripts"
     if str(scripts_root) not in sys.path:
@@ -836,45 +884,60 @@ def test_nuclei_lock_rejects_concurrent_invocation(monkeypatch, fake_engagement)
     for module_name in list(sys.modules):
         if module_name == "assess" or module_name.startswith("assess."):
             sys.modules.pop(module_name, None)
-    from assess.commands.kali_nuclei import _nuclei_engagement_lock  # type: ignore[import-not-found]
+    from assess.commands.kali_nuclei import (  # type: ignore[import-not-found]
+        _nuclei_lock_path_for,
+        _nuclei_output_lock,
+    )
+    return _nuclei_output_lock, _nuclei_lock_path_for
+
+
+def test_nuclei_runs_without_output_take_no_lock(fake_engagement):
+    """L3-1: with no -o file there is nothing to corrupt, so no lock is taken —
+    the swarm runs nuclei fully in parallel."""
+    _nuclei_output_lock, _nuclei_lock_path_for = _import_nuclei_lock_helpers()
+    assert _nuclei_lock_path_for("", Path(fake_engagement)) is None
+
+
+def test_nuclei_distinct_outputs_do_not_contend(fake_engagement):
+    """L3-1: two concurrent nuclei runs with DISTINCT -o files take different
+    locks and both acquire — the swarm is no longer serialized."""
+    _nuclei_output_lock, _nuclei_lock_path_for = _import_nuclei_lock_helpers()
+    eng = Path(fake_engagement)
+    (eng / "scans").mkdir(parents=True, exist_ok=True)
+    lock_a = _nuclei_lock_path_for("scans/a.jsonl", eng)
+    lock_b = _nuclei_lock_path_for("scans/b.jsonl", eng)
+    assert lock_a != lock_b
+    with _nuclei_output_lock(lock_a):
+        with _nuclei_output_lock(lock_b):
+            pass
+
+
+def test_nuclei_same_output_serializes_with_timeout(fake_engagement):
+    """L3-1: two runs targeting the SAME -o file serialize. The contender blocks
+    rather than hard-failing; only a genuinely stuck holder past the timeout
+    raises (we use a tiny timeout to exercise that path deterministically)."""
+    _nuclei_output_lock, _nuclei_lock_path_for = _import_nuclei_lock_helpers()
     from assess.lib.client import AssessError  # type: ignore[import-not-found]
-
-    eng_dir = fake_engagement
-    (eng_dir / "scans").mkdir(parents=True, exist_ok=True)
-
-    # First holder takes the lock; second attempt must fail-fast.
-    with _nuclei_engagement_lock(Path(eng_dir)):
-        with pytest.raises(AssessError, match="nuclei lock already held"):
-            with _nuclei_engagement_lock(Path(eng_dir)):
+    eng = Path(fake_engagement)
+    (eng / "scans").mkdir(parents=True, exist_ok=True)
+    lock_path = _nuclei_lock_path_for("scans/shared.jsonl", eng)
+    with _nuclei_output_lock(lock_path):
+        with pytest.raises(AssessError, match="still held after"):
+            with _nuclei_output_lock(lock_path, timeout_s=0.5):
                 pass  # pragma: no cover — should not reach
 
 
-def test_nuclei_lock_recovers_from_stale_pid(monkeypatch, fake_engagement, capsys):
-    """C32: if the lockfile records a PID that is no longer alive (crashed
-    prior run), the next invocation auto-recovers and acquires the lock."""
-
-    repo_root = Path(__file__).resolve().parents[3]
-    scripts_root = repo_root / "agent" / "scripts"
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
-    for module_name in list(sys.modules):
-        if module_name == "assess" or module_name.startswith("assess."):
-            sys.modules.pop(module_name, None)
-    from assess.commands.kali_nuclei import _nuclei_engagement_lock  # type: ignore[import-not-found]
-
-    eng_dir = fake_engagement
-    scans_dir = eng_dir / "scans"
-    scans_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = scans_dir / ".nuclei.lock"
-    # Write an obviously-dead PID. PID 1 is reserved and we don't own it,
-    # so write something deterministically dead — use a very high PID
-    # that's almost certainly not assigned.
+def test_nuclei_lock_recovers_from_stale_pid(fake_engagement):
+    """If the lockfile records a PID that is no longer alive (crashed prior
+    run), the next invocation auto-recovers and acquires the lock."""
+    _nuclei_output_lock, _nuclei_lock_path_for = _import_nuclei_lock_helpers()
+    eng = Path(fake_engagement)
+    (eng / "scans").mkdir(parents=True, exist_ok=True)
+    lock_path = _nuclei_lock_path_for("scans/nuclei.jsonl", eng)
     lock_path.write_text("99999999\n", encoding="utf-8")
 
-    # Should succeed (stale PID detected → force-release → acquire).
-    with _nuclei_engagement_lock(Path(eng_dir)) as resolved_lock_path:
+    with _nuclei_output_lock(lock_path) as resolved_lock_path:
         assert Path(resolved_lock_path) == lock_path
-        # Our PID is now recorded in the lockfile.
         recorded = lock_path.read_text(encoding="utf-8").strip()
         assert recorded == str(os.getpid())
 
@@ -1633,7 +1696,7 @@ def test_kali_exec_rejects_intent_too_long(monkeypatch, fake_engagement):
         kali.kali_exec(
             ["nmap", "10.0.0.1"],
             technique="RECON",
-            intent="A" * 250,
+            intent="A" * 500,
             probe_kind="fingerprint",
             phase="recon",
             timeout=60,
@@ -4273,11 +4336,12 @@ def test_nuclei_zero_byte_post_check_loader_failure_warns(tmp_path, capsys):
 
 
 def test_nuclei_stale_lock_reacquire_race_raises_assess_error(fake_engagement):
-    """C32 race: when the lockfile records no PID (prior holder mid-acquire —
-    O_CREAT raced with flock), the helper treats the lock as stale and
-    re-flocks. If that re-flock itself races with another live holder, the
-    raw BlockingIOError must NOT escape — operators should see the same
-    actionable AssessError as a normal contention, not an internal traceback.
+    """L3-1 race: the lockfile records no PID (a live holder is mid-acquire —
+    O_CREAT raced with flock), so the helper treats it as stale and re-flocks.
+    When that re-flock races with the still-live holder, the raw BlockingIOError
+    must NOT escape — the contender waits (blocking-with-timeout) and, if the
+    holder never releases within the timeout, raises a clean AssessError rather
+    than an internal traceback.
     """
     import fcntl
     import os as _os
@@ -4292,16 +4356,14 @@ def test_nuclei_stale_lock_reacquire_race_raises_assess_error(fake_engagement):
     lock_path = scans_dir / ".nuclei.lock"
 
     # Simulate the race: lockfile exists, holds the flock, but has no PID
-    # recorded yet (the empty-PID branch is exactly what triggers the
-    # "treat as stale → re-flock" path the fix guards).
     fd = _os.open(str(lock_path), _os.O_RDWR | _os.O_CREAT, 0o644)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     with ExitStack() as stack:
         stack.callback(_os.close, fd)
         stack.callback(lambda: fcntl.flock(fd, fcntl.LOCK_UN))
 
-        with pytest.raises(AssessError, match="nuclei lock contention on retry"):
-            with mod._nuclei_engagement_lock(eng_dir):
+        with pytest.raises(AssessError, match="still held after"):
+            with mod._nuclei_output_lock(lock_path, timeout_s=0.5):
                 pass  # pragma: no cover — should not reach
 
 
@@ -4323,3 +4385,383 @@ def test_nuclei_zero_byte_post_check_non_empty_output_does_not_warn(tmp_path, ca
     mod._zero_byte_post_check(args, result, eng_dir)
     captured = capsys.readouterr()
     assert "WARN nuclei" not in captured.err
+
+
+
+
+def _probe_posts(fake_client):
+    return [payload for ep, payload in fake_client.posts if ep == "probe-runs"]
+
+
+def _run_emit_case(
+    monkeypatch,
+    fake_engagement,
+    *,
+    technique,
+    probe_kind,
+    returncode=0,
+    engagement_type=None,
+    cmd=None,
+    tool_name="sqlmap",
+):
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    if engagement_type is not None:
+        (fake_engagement / "scope.json").write_text(
+            json.dumps({"hostname": "example.com", "engagement_type": engagement_type})
+        )
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=returncode)
+    )
+    result = kali.kali_exec(
+        cmd or ["sqlmap", "-u", "https://shop.example.com/api/orders/1"],
+        technique=technique,
+        intent=f"{technique.lower()} probe",
+        probe_kind=probe_kind,
+        phase="consume-test",
+        timeout=60,
+        agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name=tool_name,
+    )
+    return result, fake_client
+
+
+def test_probe_emit_web_payload_records_class_and_host(monkeypatch, fake_engagement):
+    result, fake_client = _run_emit_case(
+        monkeypatch, fake_engagement, technique="IDOR", probe_kind="payload"
+    )
+    assert result.status == "completed"
+    probes = _probe_posts(fake_client)
+    assert len(probes) == 1
+    probe = probes[0]
+    assert probe["attack_family"] == "idor"
+    assert probe["target_host"] == "shop.example.com"
+    assert probe["result_status"] == "tested"
+    assert probe["tool_name"] == "sqlmap"
+    assert probe["agent_name"] == "vulnerability-analyst"
+    assert probe["target_path"] == "/api/orders/1"
+    assert probe["target_port"] is None
+    assert probe["evidence_ref"].startswith(f"/engagements/{fake_engagement.name}/scans/kali/")
+
+
+def test_probe_emit_curl_raw_exec_captures_host_and_path(monkeypatch, fake_engagement):
+    _result, fake_client = _run_emit_case(
+        monkeypatch, fake_engagement, technique="IDOR", probe_kind="payload",
+        cmd=["curl", "-s", "https://shop.example.com/api/v2/orders/7"], tool_name="curl",
+    )
+    probe = _probe_posts(fake_client)[0]
+    assert probe["target_host"] == "shop.example.com"
+    assert probe["target_path"] == "/api/v2/orders/7"
+
+
+def test_probe_emit_captures_nonstandard_port(monkeypatch, fake_engagement):
+    _result, fake_client = _run_emit_case(
+        monkeypatch, fake_engagement, technique="SQLI", probe_kind="payload",
+        cmd=["httpx", "-u", "https://shop.example.com:8443/admin/api"], tool_name="httpx",
+    )
+    probe = _probe_posts(fake_client)[0]
+    assert probe["target_host"] == "shop.example.com"
+    assert probe["target_path"] == "/admin/api"
+    assert probe["target_port"] == 8443
+
+
+def test_probe_emit_fingerprint_emits_nothing(monkeypatch, fake_engagement):
+    _result, fake_client = _run_emit_case(
+        monkeypatch, fake_engagement, technique="SQLI", probe_kind="fingerprint"
+    )
+    assert _probe_posts(fake_client) == []
+
+
+def test_probe_emit_operational_technique_emits_nothing(monkeypatch, fake_engagement):
+    _result, fake_client = _run_emit_case(
+        monkeypatch, fake_engagement, technique="RECON", probe_kind="payload"
+    )
+    assert _probe_posts(fake_client) == []
+
+
+def test_probe_emit_nonzero_exit_yields_error_status(monkeypatch, fake_engagement):
+    from app.services.state_manager.coverage import PROBE_RESULT_STATUSES_COVERING
+
+    _result, fake_client = _run_emit_case(
+        monkeypatch,
+        fake_engagement,
+        technique="SQLI",
+        probe_kind="payload",
+        returncode=2,
+    )
+    probes = _probe_posts(fake_client)
+    assert len(probes) == 1
+    assert probes[0]["result_status"] == "error"
+    assert "error" not in PROBE_RESULT_STATUSES_COVERING
+
+
+def test_probe_emit_code_engagement_emits_nothing(monkeypatch, fake_engagement):
+    _result, fake_client = _run_emit_case(
+        monkeypatch,
+        fake_engagement,
+        technique="SQLI",
+        probe_kind="payload",
+        engagement_type="code",
+    )
+    assert _probe_posts(fake_client) == []
+
+
+def test_probe_emit_best_effort_never_raises(monkeypatch, fake_engagement):
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    (fake_engagement / "scope.json").write_text(
+        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+    )
+
+    class _RaisingClient(_FakeClient):
+        def post(self, endpoint, payload):
+            if endpoint == "probe-runs":
+                raise RuntimeError("backend down")
+            return super().post(endpoint, payload)
+
+    fake_client = _RaisingClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
+    result = kali.kali_exec(
+        ["sqlmap", "-u", "https://shop.example.com/api/orders/1"],
+        technique="IDOR",
+        intent="idor probe",
+        probe_kind="payload",
+        phase="consume-test",
+        timeout=60,
+        agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="sqlmap",
+    )
+    assert result.status == "completed"
+    assert result.return_code == 0
+
+
+
+
+def _write_multi_identity_auth(eng_dir):
+    (eng_dir / "auth.json").write_text(
+        json.dumps(
+            {
+                "identities": {
+                    "user_a": {"mode": "auth_json", "cookies": {"s": "a"}},
+                    "user_b": {"mode": "auth_json", "cookies": {"s": "b"}},
+                },
+                "active_identity": "user_a",
+            }
+        )
+    )
+
+
+def _command_posts(fake_client):
+    return [payload for ep, payload in fake_client.posts if ep == "command-runs"]
+
+
+def test_kali_identity_stamps_auth_context_on_command_and_probe(monkeypatch, fake_engagement):
+    _write_multi_identity_auth(fake_engagement)
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    (fake_engagement / "scope.json").write_text(
+        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+    )
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
+
+    result = kali.kali_exec(
+        ["sqlmap", "-u", "https://shop.example.com/api/orders/1"],
+        technique="IDOR",
+        intent="idor probe as user_a",
+        probe_kind="payload",
+        phase="consume-test",
+        timeout=60,
+        agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="sqlmap",
+        identity="user_a",
+    )
+    assert result.status == "completed"
+
+    cmd_posts = _command_posts(fake_client)
+    assert len(cmd_posts) == 1
+    assert cmd_posts[0]["auth_context"] == "user_a"
+
+    probes = _probe_posts(fake_client)
+    assert len(probes) == 1
+    assert probes[0]["auth_context"] == "user_a"
+    assert probes[0]["attack_family"] == "idor"
+
+
+def test_kali_without_identity_keeps_derived_auth_context(monkeypatch, fake_engagement):
+    _write_multi_identity_auth(fake_engagement)
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    (fake_engagement / "scope.json").write_text(
+        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+    )
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
+    kali.kali_exec(
+        ["sqlmap", "-u", "https://shop.example.com/api/orders/1"],
+        technique="IDOR",
+        intent="idor probe",
+        probe_kind="payload",
+        phase="consume-test",
+        timeout=60,
+        agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="sqlmap",
+        identity=None,
+    )
+    probes = _probe_posts(fake_client)
+    assert len(probes) == 1
+    assert probes[0]["auth_context"] != "user_a"
+
+
+def test_kali_unknown_identity_does_not_stamp_without_material(monkeypatch, fake_engagement, capsys):
+    _write_multi_identity_auth(fake_engagement)
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    (fake_engagement / "scope.json").write_text(
+        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+    )
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+    )
+    kali.kali_exec(
+        ["sqlmap", "-u", "https://shop.example.com/api/orders/1"],
+        technique="IDOR",
+        intent="idor probe as ghost",
+        probe_kind="payload",
+        phase="consume-test",
+        timeout=60,
+        agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement,
+        engagement_key=fake_engagement.name,
+        tool_name="sqlmap",
+        identity="ghost",
+    )
+    assert _probe_posts(fake_client)[0]["auth_context"] != "ghost"
+    err = capsys.readouterr().err
+    assert "not found in auth.json" in err
+    assert "NOT applied" in err
+
+
+def test_kali_identity_injects_credentials_into_http_command(monkeypatch, fake_engagement):
+    _write_multi_identity_auth(fake_engagement)
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    (fake_engagement / "scope.json").write_text(
+        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+    )
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    captured = {}
+
+    def _fake_popen(argv, **kw):
+        captured["argv"] = argv
+        return _FakePopen(returncode=0)
+
+    monkeypatch.setattr(kali.subprocess, "Popen", _fake_popen)
+    kali.kali_exec(
+        ["curl", "-s", "https://shop.example.com/api/orders/1"],
+        technique="IDOR", intent="idor as user_b", probe_kind="payload",
+        phase="consume-test", timeout=60, agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement, engagement_key=fake_engagement.name,
+        tool_name="curl", identity="user_b",
+    )
+    argv_str = " ".join(captured["argv"])
+    assert "Cookie: s=b" in argv_str, captured["argv"]
+    assert _command_posts(fake_client)[0]["auth_context"] == "user_b"
+    assert _probe_posts(fake_client)[0]["auth_context"] == "user_b"
+
+
+def test_kali_identity_non_http_tool_not_stamped(monkeypatch, fake_engagement, capsys):
+    _write_multi_identity_auth(fake_engagement)
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    (fake_engagement / "scope.json").write_text(
+        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+    )
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
+    kali.kali_exec(
+        ["nmap", "-sV", "shop.example.com"],
+        technique="RECON", intent="scan as user_a", probe_kind="baseline",
+        phase="recon", timeout=60, agent_name="recon-specialist",
+        engagement_dir=fake_engagement, engagement_key=fake_engagement.name,
+        tool_name="nmap", identity="user_a",
+    )
+    assert _command_posts(fake_client)[0]["auth_context"] != "user_a"
+    assert "NOT applied" in capsys.readouterr().err
+
+
+def test_probe_emit_red_engagement_emits(monkeypatch, fake_engagement):
+    """A 'red' engagement_type is web-eligible (the app-unit scorer scores it),
+    so its Kali payload/exploit probes MUST be emitted too — otherwise app units
+    exist but the depth ledger never sees the executed probes."""
+    _result, fake_client = _run_emit_case(
+        monkeypatch, fake_engagement, technique="SQLI", probe_kind="payload",
+        engagement_type="red",
+    )
+    assert len(_probe_posts(fake_client)) == 1
+
+
+def test_kali_identity_shell_wrapper_not_stamped(monkeypatch, fake_engagement, capsys):
+    """A shell-wrapped command (sh -c '...') can't have -H injected into the outer
+    argv (it would become shell positionals, not curl headers), so --identity must
+    NOT relabel auth_context — otherwise it fakes a cross-identity probe."""
+    _write_multi_identity_auth(fake_engagement)
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    (fake_engagement / "scope.json").write_text(
+        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+    )
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    captured = {}
+
+    def _fake_popen(argv, **kw):
+        captured["argv"] = argv
+        return _FakePopen(returncode=0)
+
+    monkeypatch.setattr(kali.subprocess, "Popen", _fake_popen)
+    kali.kali_exec(
+        ["sh", "-c", "curl https://shop.example.com/api/orders/1"],
+        technique="IDOR", intent="idor as user_a via shell", probe_kind="payload",
+        phase="consume-test", timeout=60, agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement, engagement_key=fake_engagement.name,
+        tool_name="curl", identity="user_a",
+    )
+    assert _command_posts(fake_client)[0]["auth_context"] != "user_a"
+    assert "Cookie: s=a" not in " ".join(captured["argv"])
+    assert "NOT applied" in capsys.readouterr().err
+
+
+def test_probe_emit_shell_wrapped_curl_parses_inner_url(monkeypatch, fake_engagement):
+    """A shell-wrapped probe (sh -c 'curl <url>') must still parse the inner URL so
+    the probe carries host+path and can be attributed to its app unit."""
+    _result, fake_client = _run_emit_case(
+        monkeypatch, fake_engagement, technique="IDOR", probe_kind="payload",
+        cmd=["sh", "-c", "curl https://shop.example.com/api/v2/orders/7"], tool_name="curl",
+    )
+    probe = _probe_posts(fake_client)[0]
+    assert probe["target_host"] == "shop.example.com"
+    assert probe["target_path"] == "/api/v2/orders/7"
