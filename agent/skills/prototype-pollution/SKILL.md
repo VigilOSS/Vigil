@@ -2,6 +2,7 @@
 name: prototype-pollution
 description: Detect and exploit JavaScript prototype pollution in client-side and server-side applications
 origin: Vigil
+vuln_class: prototype-pollution
 ---
 
 # Prototype Pollution Testing

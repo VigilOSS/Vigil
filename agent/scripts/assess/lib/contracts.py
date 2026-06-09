@@ -21,9 +21,28 @@ SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
 )
 
 
-_SPECIALIST_DISPATCH_REQUIRED_FIELDS: tuple[str, ...] = (
-    "dispatch_mode",
-)
+_DISPATCH_MODE_BY_ROLE: dict[str, str] = {
+    "vulnerability-analyst": "hypothesis-driven",
+    "exploit-developer": "deep-manual",
+    "recon-specialist": "item-iterating",
+    "osint-analyst": "item-iterating",
+    "code-vuln-hunter": "hypothesis-driven",
+}
+
+_DEFAULT_DISPATCH_MODE = "hypothesis-driven"
+
+
+def default_dispatch_mode_for_role(role: str | None) -> str:
+    """Return the default ``dispatch_mode`` for a role (L2-1).
+
+    Falls back to ``hypothesis-driven`` for unknown/empty roles. Case-
+    insensitive so ``Vulnerability-Analyst`` resolves like the canonical name.
+    """
+    role_key = str(role or "").strip().lower()
+    return _DISPATCH_MODE_BY_ROLE.get(role_key, _DEFAULT_DISPATCH_MODE)
+
+
+_SPECIALIST_DISPATCH_REQUIRED_FIELDS: tuple[str, ...] = ()
 
 
 # Roles exempt from the `skills` requirement. The operator coordinates phases
@@ -94,6 +113,7 @@ def validate_specialist_dispatch_contract(
     payload: Any,
     *,
     engagement_dir: str | None = None,
+    allow_no_skills: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Validate a parsed specialist dispatch payload.
 
@@ -103,6 +123,11 @@ def validate_specialist_dispatch_contract(
     operator-side mistake of dispatching active probing against a related-but-
     out-of-scope domain that recon surfaced. OSINT and recon are NOT gated
     because they legitimately reach adjacent/related domains during discovery.
+
+    L2-2 / L3-6: when ``allow_no_skills`` is set, a missing ``skills`` list is
+    downgraded from an error to a WARNING so ad-hoc roles have a real escape
+    valve (``vigil assess agent start --allow-no-skills``) rather than a hard
+    block on a self-attested signal.
 
     Returns ``(errors, warnings)``.
     """
@@ -126,10 +151,17 @@ def validate_specialist_dispatch_contract(
             errors.append("role and agent_role must match when both are present")
 
     dispatch_mode = payload.get("dispatch_mode")
-    if dispatch_mode is not None and dispatch_mode not in SPECIALIST_DISPATCH_MODES:
-        errors.append(
-            f"dispatch_mode '{dispatch_mode}' is not allowed; "
-            f"valid: {', '.join(SPECIALIST_DISPATCH_MODES)}"
+    if dispatch_mode is None:
+        defaulted_mode = default_dispatch_mode_for_role(role_value)
+        warnings.append(
+            f"dispatch_mode not set; defaulting to '{defaulted_mode}' for role "
+            f"'{role_value or '<unknown>'}'. Pass --dispatch-mode explicitly to override."
+        )
+    elif dispatch_mode not in SPECIALIST_DISPATCH_MODES:
+        warnings.append(
+            f"dispatch_mode '{dispatch_mode}' is not a known mode; "
+            f"known modes: {', '.join(SPECIALIST_DISPATCH_MODES)}. "
+            "Proceeding (stored as-is) in case this is a newly-coined mode."
         )
 
     for str_field in ("role", "agent_role"):
@@ -161,10 +193,18 @@ def validate_specialist_dispatch_contract(
 
     if role_name and role_name.lower() not in _DISPATCH_ROLES_WITHOUT_SKILLS:
         if not skills_list:
-            errors.append(
-                f"skills is required for role '{role_name}'; "
-                "list at least one skill name from `vigil assess list-skills`"
-            )
+            if allow_no_skills:
+                warnings.append(
+                    f"skills not set for role '{role_name}'; proceeding because "
+                    "--allow-no-skills was passed. The dispatch row will carry no "
+                    "skill audit — list skills from `vigil assess list-skills` when possible."
+                )
+            else:
+                errors.append(
+                    f"skills is required for role '{role_name}'; "
+                    "list at least one skill name from `vigil assess list-skills` "
+                    "(or pass --allow-no-skills for an ad-hoc role)"
+                )
 
     if skills_list:
         skills_root = _agent_skills_root()
@@ -191,7 +231,7 @@ def validate_specialist_dispatch_contract(
                     from .scope import host_in_scope, load_scope, scope_entries
                     scope = load_scope(engagement_dir)
                     entries = scope_entries(scope)
-                except SystemExit as exc:
+                except (SystemExit, ValueError, OSError) as exc:
                     warnings.append(f"scope_host gate skipped: {exc}")
                 else:
                     if entries and not host_in_scope(scope_host.strip(), entries):
@@ -563,7 +603,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Each action is a proper subcommand with typed arguments — run `vigil assess artifact <action> --help` for per-action help.",
             "Large/raw files stay on disk. The backend stores hashes, capped previews, presence, and entity links.",
             "Register paths relative to the engagement root; absolute paths are accepted only when they resolve inside the engagement directory.",
-            "`mark-scratch` dismisses a note as non-durable so `check-report-readiness` no longer blocks on it. The row stays searchable.",
+            "`mark-scratch` dismisses a note as non-durable so `check-phase-readiness --phase report` no longer blocks on it. The row stays searchable.",
         ),
         common_mistakes=(
             ("pasting full artifact content into prompts", "search first, then get a specific id; large content remains capped"),
@@ -1613,6 +1653,8 @@ def _dispatch_root_contract() -> CommandContract:
             "agent lifecycle actions never take a cases.db path.",
             "Dispatch state lives in the orchestrator backend. Use `agent start` to log a dispatch, `agent done` "
             "for direct lifecycle patches, `agent handoff` for repeatable checkpoints, `agent close` to consume a ready/blocked handoff into dispatch closure, and `agent render-handoff` to assemble the blob the next dispatch prompt pastes verbatim.",
+            "`agent start` defaults a missing --dispatch-mode from the role (warn, not block) and accepts a newly-coined mode (advisory warn). "
+            "Pass --allow-no-skills to proceed for an ad-hoc role with no --skills (warn instead of error), and --check-overlap to opt into the advisory in-progress-overlap scan.",
             f"Verbs with their own contract entries: {', '.join(AGENT_VERBS)}.",
         ),
         common_mistakes=(
@@ -1781,7 +1823,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                     "command": (
                         "vigil assess agent start --agent-id va-7f3 "
                         "--role vulnerability-analyst --task 'review SSRF candidates' "
-                        "--scope-host api.example.com --model claude-opus-4-7 "
+                        "--scope-host api.example.com --model claude-opus-4-8 "
                         "--reasoning high --dispatch-mode item-iterating "
                         "--skills 'ssrf-testing,case-dispatching'"
                     ),

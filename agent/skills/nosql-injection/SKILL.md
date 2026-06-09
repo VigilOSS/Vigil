@@ -2,6 +2,7 @@
 name: nosql-injection
 description: NoSQL injection detection and exploitation — MongoDB operator injection, Mongoose/ORM bypass, blind extraction, and modern defense realities
 origin: Vigil
+vuln_class: nosqli
 ---
 
 # NoSQL Injection Testing

@@ -42,6 +42,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
     engagement_root = Path(engagement.engagement_root).expanduser().resolve()
     coverage = coverage_readiness(engagement_id)
     blockers: list[dict[str, Any]] = []
+    advisories: list[dict[str, Any]] = []
     if not coverage["ready"]:
         blockers.append(
             {
@@ -52,11 +53,30 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         )
 
     reportable_statuses = {"active", "blocked", "exploited", "contained", "eradicated", "recovered", "reported"}
+    candidate_records = _report_candidate_records(engagement_id)
     candidates = [
         row
-        for row in _report_candidate_records(engagement_id)
+        for row in candidate_records
         if row.get("workflow_status") in reportable_statuses
     ]
+
+    for row in candidate_records:
+        if row.get("workflow_status") != "draft":
+            continue
+        slug = str(row.get("slug", ""))
+        advisories.append(
+            {
+                "kind": "draft_finding_needs_disposition",
+                "slug": slug,
+                "title": row.get("title", ""),
+                "detail": (
+                    f"finding {slug} is parked in workflow_status='draft' and will NOT appear in "
+                    f"the report or export. Disposition it: promote to active with "
+                    f"`vigil assess update-finding {slug} --workflow-status active` so it reports, "
+                    f"or kill it with `vigil assess kill-finding {slug}` if it is not real."
+                ),
+            }
+        )
     candidate_slugs = {str(row.get("slug", "")) for row in candidates if row.get("slug")}
     with _common.get_connection() as connection:
         root_link_rows = connection.execute(
@@ -233,7 +253,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 )
             )
             if not linked:
-                blockers.append(
+                advisories.append(
                     {
                         "kind": "unlinked_markdown_note",
                         "artifact_id": artifact.get("id"),
@@ -410,7 +430,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             (engagement_id,),
         ).fetchall()
         for row in stale_ready:
-            blockers.append(
+            advisories.append(
                 {
                     "kind": "stale_dispatch_ready_handoff",
                     "agent_id": row["agent_id"],
@@ -428,6 +448,8 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         "ready": len(blockers) == 0,
         "blocker_count": len(blockers),
         "blockers": blockers,
+        "advisories": advisories,
+        "advisory_count": len(advisories),
         "coverage": coverage,
     }
 

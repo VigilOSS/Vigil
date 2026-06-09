@@ -2,6 +2,7 @@
 name: sqli-testing
 description: Detect and exploit SQL injection vulnerabilities in web application parameters
 origin: Vigil
+vuln_class: sqli
 ---
 
 # SQL Injection Testing

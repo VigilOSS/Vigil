@@ -14,7 +14,12 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .audit_enums import PROBE_KIND_ENUM, TECHNIQUE_ENUM
+from .audit_enums import (
+    PROBE_KIND_ENUM,
+    TECHNIQUE_ENUM,
+    normalize_probe_kind,
+    normalize_technique,
+)
 from .client import AssessError, AssessmentClient
 from .config import Config
 from .kali_output import _utcnow_iso
@@ -39,7 +44,7 @@ ALLOWED_PHASES: tuple[str, ...] = (
 )
 
 
-_INTENT_MAX_LEN = 200
+_INTENT_MAX_LEN = 400
 
 
 def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
@@ -112,6 +117,63 @@ def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
     return ""
 
 
+def _extract_target_anchor(tool_name: str, cmd: list[str]) -> tuple[str, str, int | None]:
+    """Extract ``(host, path, port)`` of a probe's target URL from a kali argv.
+
+    The depth ledger maps a null-FK probe_run to an app unit by host + PATH
+    containment, so a probe against ``/api/...`` MUST carry its path or it can
+    never cover that unit and the terminal backstop keeps blocking despite real
+    tests. Unlike ``_extract_target_host`` (host only), this returns
+    the path and port too, and also handles the raw ``kali exec curl <url>``
+    fallback (a positional URL token), which the host-only switch missed.
+
+    Returns ``("", "", None)`` for list-mode / unrecognized argv shapes.
+    """
+    from urllib.parse import urlsplit
+
+    if not cmd:
+        return "", "", None
+    tool = (tool_name or "").lower()
+
+    def _flag_value(flags: tuple[str, ...]) -> str:
+        for idx, token in enumerate(cmd):
+            if token in flags and idx + 1 < len(cmd):
+                return cmd[idx + 1]
+        return ""
+
+    url = ""
+    if tool in ("httpx", "nuclei", "sqlmap", "katana"):
+        url = _flag_value(("-u", "--url", "--target", "-target"))
+    elif tool == "ffuf":
+        raw = _flag_value(("-u", "--url"))
+        url = raw.split("FUZZ", 1)[0] if raw else ""
+    else:
+        words = [w for token in cmd[1:] for w in str(token).split()]
+        url = next((w for w in words if w.startswith(("http://", "https://"))), "")
+        if not url:
+            url = next((w for w in words if "://" in w), "")
+        if not url:
+            for word in words:
+                if word.startswith("-"):
+                    continue
+                head = word.split("/", 1)[0]
+                if word.startswith("[") or "." in head:
+                    url = word
+                    break
+    if not url:
+        return "", "", None
+    url = url.split("FUZZ", 1)[0]
+    parse = url if "://" in url else "http://" + url
+    try:
+        split = urlsplit(parse)
+        host = (split.hostname or "").lower()
+        path = split.path or ""
+        port = split.port
+    except ValueError:
+        return "", "", None
+    return host, path, port
+
+
 def _validate_inputs(
     *,
     technique: str,
@@ -123,7 +185,8 @@ def _validate_inputs(
 ) -> None:
     if not technique:
         raise AssessError("--technique is required")
-    if TECHNIQUE_ENUM and technique not in TECHNIQUE_ENUM:
+    canonical_technique = normalize_technique(technique)
+    if TECHNIQUE_ENUM and canonical_technique not in TECHNIQUE_ENUM:
         raise AssessError(
             f"--technique '{technique}' is not in TECHNIQUE_ENUM. "
             f"Allowed values: {', '.join(TECHNIQUE_ENUM)}"
@@ -134,7 +197,8 @@ def _validate_inputs(
         raise AssessError(f"--intent exceeds {_INTENT_MAX_LEN} characters")
     if not probe_kind:
         raise AssessError("--probe-kind is required")
-    if PROBE_KIND_ENUM and probe_kind not in PROBE_KIND_ENUM:
+    canonical_probe_kind = normalize_probe_kind(probe_kind)
+    if PROBE_KIND_ENUM and canonical_probe_kind not in PROBE_KIND_ENUM:
         raise AssessError(
             f"--probe-kind '{probe_kind}' is not in PROBE_KIND_ENUM. "
             f"Allowed values: {', '.join(PROBE_KIND_ENUM)}"
@@ -223,7 +287,7 @@ def _post_pre_exec_row(
         "stderr": "",
         "audit_source": "header",
         "technique": technique,
-        "intent": intent[:_INTENT_MAX_LEN],
+        "intent": intent,
         "probe_kind": probe_kind,
         "destructive": destructive,
         "status": "running",

@@ -41,7 +41,7 @@ constraint set:
 - `agent/skills/report-generation/templates/blue.md`
 
 For blue reports, the operator gates readiness through `vigil assess
-transition-phase report` / `transition-phase complete`; `check-report-readiness`
+transition-phase report` / `transition-phase complete`; `check-phase-readiness --phase report`
 is a generic red report gate and does not own containment semantics.
 
 ## Pre-Work Checkpoint
@@ -65,7 +65,7 @@ The full query set, field descriptions, and generation procedure are in
 Minimum backend pull set:
 
 ```bash
-vigil assess check-report-readiness        # red final reports only
+vigil assess check-phase-readiness --phase report   # red final reports only
 vigil assess list-report-findings --mode final --json
 # or for interim work:
 vigil assess list-report-findings --mode draft --json
@@ -75,7 +75,7 @@ vigil assess fetch credentials
 vigil assess fetch access-records
 vigil assess fetch summary
 ```
-For red final reports, if `check-report-readiness` exits non-zero, report the blockers to the operator and stop. For blue incident reports, rely on the operator's `transition-phase report` gate and the blue template's backend query checklist.
+For red final reports, if `check-phase-readiness --phase report` exits non-zero, report the blockers to the operator and stop. For blue incident reports, rely on the operator's `transition-phase report` gate and the blue template's backend query checklist.
 
 ## Responsibilities
 

@@ -324,7 +324,7 @@ Inputs to consult:
 - `vigil assess fetch surfaces --json` — recorded surfaces per host
 - `vigil assess list-intel tech-component --json` — tech fingerprints; check for missing WAF tier per host
 - `vigil assess list-command-runs --target-host <host>` — coverage per host
-- `agent/scripts/assess/commands/check_scope_coverage.py` output if --by-host gates are available
+- `vigil assess check-phase-readiness --phase recon --by-host` output if per-host gates are available
 
 Review checklist (emit one line per gap, naming the host + the missing outcome):
 

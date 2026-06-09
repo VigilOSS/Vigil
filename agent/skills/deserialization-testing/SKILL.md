@@ -2,6 +2,7 @@
 name: deserialization-testing
 description: Insecure deserialization detection and gadget chain exploitation
 origin: Vigil
+vuln_class: deserialization
 ---
 
 # Insecure Deserialization Testing

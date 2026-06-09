@@ -755,6 +755,66 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     assert [row["slug"] for row in final_report.json()["standalone"]] == ["VA-001"]
 
 
+def test_coverage_item_endpoint_records_class_typed_item(client, isolate_settings):
+    """2b: POST /coverage-items wires the previously-dead record_coverage_item,
+    minting a class-typed coverage_item (the gf-bucket bridge target)."""
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment"
+
+    created = client.post(
+        f"{base}/coverage-items",
+        json={
+            "attack_family": "idor",
+            "auth_context": "anonymous",
+            "input_slot": "endpoint",
+            "status_value": "pending",
+            "notes": "gf bucket 'idor' matched at ingest",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["attack_family"] == "idor"
+
+    items = client.get(f"{base}/coverage-items")
+    assert items.status_code == 200
+    families = {row["attack_family"] for row in items.json()}
+    assert "idor" in families
+
+
+def test_probe_run_endpoint_records_target_anchor(client, isolate_settings):
+    """Wave 5 / S6: probe-runs accept and persist target_host/path/port, and two
+    probes against DISTINCT hosts no longer collide on probe_key."""
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment"
+
+    first = client.post(
+        f"{base}/probe-runs",
+        json={
+            "attack_family": "idor",
+            "tool_name": "sqlmap",
+            "target_host": "a.example.com",
+            "result_status": "tested",
+        },
+    )
+    assert first.status_code == 201, first.text
+    assert first.json()["target_host"] == "a.example.com"
+
+    second = client.post(
+        f"{base}/probe-runs",
+        json={
+            "attack_family": "idor",
+            "tool_name": "sqlmap",
+            "target_host": "b.example.com",
+            "result_status": "tested",
+        },
+    )
+    assert second.status_code == 201, second.text
+
+    probes = client.get(f"{base}/probe-runs")
+    assert probes.status_code == 200
+    hosts = {row["target_host"] for row in probes.json()}
+    assert {"a.example.com", "b.example.com"} <= hosts
+
+
 def test_findings_endpoint_filters_and_paginates_server_side(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
@@ -1144,7 +1204,7 @@ def test_final_report_includes_verified_contained_blue_finding(client, isolate_s
     assert [row["slug"] for row in final_report.json()["standalone"]] == ["IR-001"]
 
 
-def test_coverage_patch_normalizes_tested_to_covered_and_refreshes_service_status(client, isolate_settings):
+def test_coverage_patch_covered_with_rationale_refreshes_service_status(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
     ingest = client.post(
@@ -1160,11 +1220,19 @@ def test_coverage_patch_normalizes_tested_to_covered_and_refreshes_service_statu
     coverage_items = client.get("/engagements/2026-03-30-120000-example/assessment/coverage-items")
     assert coverage_items.status_code == 200
     service_coverage = next(item for item in coverage_items.json() if item["input_slot"] == "service")
-
-    patch = client.patch(
-        f"/engagements/2026-03-30-120000-example/assessment/coverage-items/{service_coverage['id']}",
-        json={"status": "tested", "notes": "Validated service reachability"},
+    item_url = (
+        f"/engagements/2026-03-30-120000-example/assessment/coverage-items/{service_coverage['id']}"
     )
+
+    rejected = client.patch(item_url, json={"status": "tested", "notes": "Validated service reachability"})
+    assert rejected.status_code == 400
+    assert "invalid coverage status" in rejected.text.lower()
+
+    no_rationale = client.patch(item_url, json={"status": "covered", "notes": ""})
+    assert no_rationale.status_code == 422
+    assert "rationale" in no_rationale.text.lower()
+
+    patch = client.patch(item_url, json={"status": "covered", "notes": "Validated service reachability"})
     assert patch.status_code == 200
     assert patch.json()["status"] == "covered"
 

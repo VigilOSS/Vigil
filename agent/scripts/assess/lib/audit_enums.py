@@ -17,9 +17,6 @@ or externally-written rows.
 from __future__ import annotations
 
 
-# 29-value curated enum of vulnerability classes (28 specific classes plus
-# the ``OTHER`` escape hatch). Ordering is stable so the emitted CLI help
-# text is deterministic across builds.
 TECHNIQUE_ENUM: tuple[str, ...] = (
     "SSRF",
     "XSS",
@@ -29,15 +26,33 @@ TECHNIQUE_ENUM: tuple[str, ...] = (
     "SSTI",
     "RCE",
     "CMDI",
-    "IDOR",
     "LFI",
     "RFI",
-    "OPEN-REDIRECT",
+    "PATH-TRAVERSAL",
+    "CRLF",
+    "DESERIALIZATION",
+    "PROTOTYPE-POLLUTION",
+    "MASS-ASSIGNMENT",
+    "IDOR",
+    "BOLA",
+    "BFLA",
     "AUTH",
     "JWT",
+    "OAUTH",
+    "SAML",
+    "SESSION",
+    "USER-ENUMERATION",
+    "OPEN-REDIRECT",
     "CSRF",
     "CORS",
     "REQUEST-SMUGGLING",
+    "HOST-HEADER",
+    "CACHE-POISONING",
+    "WEBSOCKET",
+    "GRAPHQL",
+    "FILE-UPLOAD",
+    "BUSINESS-LOGIC",
+    "RACE-CONDITION",
     "RATE-LIMIT",
     "INFO-DISCLOSURE",
     "RECON",
@@ -51,6 +66,28 @@ TECHNIQUE_ENUM: tuple[str, ...] = (
     "LOG-READ",
     "OTHER",
 )
+
+
+def normalize_technique(value: str) -> str:
+    """Canonicalize a ``--technique`` tag to its ``TECHNIQUE_ENUM`` spelling.
+
+    Case- and separator-insensitive: ``ssrf`` / ``Ssrf`` / ``SSRF`` and
+    ``open_redirect`` / ``open-redirect`` all resolve to the canonical enum
+    value, so a cosmetic mismatch never forces the LLM into a retry (L3-2). A
+    value that does not resolve is returned upper/hyphen-normalized so the
+    caller still raises a clear out-of-enum error — never a silent coercion to
+    ``OTHER``.
+    """
+    if not value:
+        return value
+    return value.strip().upper().replace("_", "-")
+
+
+def normalize_probe_kind(value: str) -> str:
+    """Canonicalize a ``--probe-kind`` to its ``PROBE_KIND_ENUM`` (lowercase) form."""
+    if not value:
+        return value
+    return value.strip().lower()
 
 
 # 6-value probe_kind enum.
@@ -71,4 +108,9 @@ PROBE_KIND_ENUM: tuple[str, ...] = (
 )
 
 
-__all__ = ["TECHNIQUE_ENUM", "PROBE_KIND_ENUM"]
+__all__ = [
+    "TECHNIQUE_ENUM",
+    "PROBE_KIND_ENUM",
+    "normalize_technique",
+    "normalize_probe_kind",
+]

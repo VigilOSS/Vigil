@@ -2,6 +2,7 @@
 name: xss-testing
 description: Detect and exploit cross-site scripting vulnerabilities in web applications — DOM XSS in modern SPAs, framework-specific sinks, CSP bypass, blind XSS, WAF evasion
 origin: Vigil
+vuln_class: xss
 ---
 
 # XSS Testing

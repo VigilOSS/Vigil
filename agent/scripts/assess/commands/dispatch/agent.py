@@ -15,7 +15,10 @@ from typing import Any
 
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
-from assess.lib.contracts import validate_specialist_dispatch_contract
+from assess.lib.contracts import (
+    default_dispatch_mode_for_role,
+    validate_specialist_dispatch_contract,
+)
 
 from assess.commands.dispatch._shared import (
     _utcnow_iso,
@@ -106,6 +109,9 @@ def _build_register_payload(args) -> dict:
         "dispatch_mode": getattr(args, "dispatch_mode_arg", None),
         "skills": getattr(args, "skills", None),
         "tier": getattr(args, "tier", None),
+        "scope_path_prefix": getattr(args, "scope_path_prefix", None),
+        "vuln_classes": getattr(args, "vuln_classes", None),
+        "identity": getattr(args, "dispatch_identity", None),
     }
     for k, v in cli_fields.items():
         if v is not None:
@@ -113,22 +119,44 @@ def _build_register_payload(args) -> dict:
     finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
     if finding_slugs:
         payload["finding_slugs"] = finding_slugs
+    if "agent_role" not in payload and payload.get("role"):
+        payload["agent_role"] = payload.pop("role")
+    elif "role" in payload and "agent_role" in payload:
+        payload.pop("role", None)
     if not payload.get("agent_id"):
         print("agent start: --agent-id is required (or include 'agent_id' in --from-json)", file=sys.stderr)
         sys.exit(1)
     if not payload.get("agent_role"):
         print("agent start: --agent-role is required (or include 'agent_role' in --from-json)", file=sys.stderr)
         sys.exit(1)
+    if not payload.get("dispatch_mode"):
+        _defaulted_mode = default_dispatch_mode_for_role(payload.get("agent_role"))
+        payload["dispatch_mode"] = _defaulted_mode
+        print(
+            f"WARN agent start: dispatch_mode not set; defaulting to "
+            f"'{_defaulted_mode}' for role '{payload.get('agent_role')}'. "
+            "Pass --dispatch-mode explicitly to override.",
+            file=sys.stderr,
+        )
+    allow_no_skills = bool(getattr(args, "allow_no_skills", False))
+    if allow_no_skills:
+        payload["allow_no_skills"] = True
     # Engagement dir lets the validator check scope_host against scope.json
-    # for vulnerability-analyst / exploit-developer dispatches.
     try:
         _cfg_for_validation = load_config(getattr(args, "engagement_dir", None))
         _eng_dir_for_validation = _cfg_for_validation.engagement_dir
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         _eng_dir_for_validation = None
+        print(
+            "WARN agent start: could not load engagement config; the scope-host gate "
+            f"is NOT enforced for this dispatch ({type(exc).__name__}: {exc}). "
+            "Verify scope.json manually before active probing.",
+            file=sys.stderr,
+        )
     errors, warnings = validate_specialist_dispatch_contract(
         payload,
         engagement_dir=_eng_dir_for_validation,
+        allow_no_skills=allow_no_skills,
     )
     for warning in warnings:
         print(f"WARN agent start: {warning}", file=sys.stderr)
@@ -160,7 +188,7 @@ def _register_dispatch(args) -> None:
     payload = _build_register_payload(args)
     client, _ = _client_for(args)
     try:
-        if not getattr(args, "allow_duplicate", False):
+        if getattr(args, "check_overlap", False) and not getattr(args, "allow_duplicate", False):
             _warn_on_overlapping_dispatch(client, payload)
         row = client.record_dispatch(payload)
     finally:

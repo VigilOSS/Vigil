@@ -136,11 +136,19 @@ specialist skill context to triage correctly. Dropping them from the reactive pa
 intel/finding writes (and any future priority-boost mechanism) aligned with genuine
 CVE/misconfig/exposure signal rather than fuzzing noise.
 
-### Single-instance lock + zero-byte detection (C32)
+### Per-output lock + zero-byte detection
 
-The wrapper now enforces a per-engagement file lock at `$ENGAGEMENT_DIR/scans/.nuclei.lock`. Concurrent `vigil assess kali nuclei` invocations against the same engagement fail-fast with a clear error naming the holding PID — the second run does not start. This prevents two parallel runs from corrupting each other's jsonl output when artifact paths collide.
+Concurrent `vigil assess kali nuclei` runs corrupt each other only when they
+append to the **same** `-o` jsonl file. The wrapper therefore locks on the
+**output path**, not the whole engagement: runs with **distinct `-o` files (or
+no `-o`) run fully in parallel** — give each parallel sweep its own `-o` path so
+the 4–6-agent swarm is never serialized. Two runs that target the *same* `-o`
+file serialize: the second **blocks** until the first finishes (it does not
+fail), and only a genuinely hung holder past the timeout raises a clear error.
 
-If the holding PID has died (crashed mid-run), the lock auto-recovers on the next invocation. Manual cleanup: `rm $ENGAGEMENT_DIR/scans/.nuclei.lock` only when both the PID is dead AND the engagement directory is otherwise stable.
+If a holding PID has died (crashed mid-run), the lock auto-recovers on the next
+invocation. Manual cleanup: remove the matching `$ENGAGEMENT_DIR/scans/.<output>.lock`
+sidecar only when the PID is dead AND the engagement directory is otherwise stable.
 
 After each run, the wrapper checks the output artifact and stderr together:
 - Empty `stdout_path` + stderr lacks `"Templates loaded for current scan: N"` → loader failed at startup; the wrapper prints a WARN telling the operator the run is not a legitimate "no matches" result. The audit row records the failed run for sweep-orphans.
@@ -254,7 +262,7 @@ if [ "$GAP_COUNT" -eq 0 ]; then
   COVERED_COUNT=$(wc -l < "$DIR/scans/_in_scope_live_audit_$RID.txt")
   vigil assess log operator \
     "Phase 3a nuclei coverage audit" \
-    "check-scope-coverage --require-stage consumption" \
+    "check-phase-readiness --phase consume" \
     "Reactive sweeps covered all ${COVERED_COUNT} in-scope live URLs; no rerun needed." \
     --actor-kind operator
   exit 0

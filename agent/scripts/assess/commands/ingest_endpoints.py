@@ -5,17 +5,84 @@ Highest volume command. Key improvement: connection reuse eliminates ~3000 subpr
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+from assess.lib import vuln_taxonomy
 from assess.lib.auth import auth_active_context
 from assess.lib.classify import classify_type
+from assess.lib.classify_buckets import classify_from_fields
 from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.db import db_init, db_insert_work_item
 from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
+
+
+def _bridge_gf_coverage_items(
+    client,
+    *,
+    request_variant_id: int,
+    case_type: str,
+    url_path: str,
+    query_params,
+    body_params,
+    path_params,
+    auth_context: str,
+) -> None:
+    """Bridge classified gf buckets -> backend class-typed coverage_items (2b/S14).
+
+    For a row with a resolvable ``request_variant_id`` and matched gf buckets,
+    POST one ``coverage_item`` per matched bucket with the canonical
+    ``attack_family = GF_BUCKET_TO_CLASS[bucket]`` (skipping generic buckets
+    whose map value is None). This is ADDITIVE to the generic baseline
+    ``_auto_request_coverage_candidates`` (which still runs server-side) — it
+    gives the depth ledger a real vuln-class obligation per endpoint, and per
+    S14 it bridges EVERY matched bucket, not just the cluster winner.
+
+    Best-effort per row (no-silent-drop doctrine): a failed POST WARNs and
+    continues so one coverage failure never aborts the ingest batch.
+    """
+    try:
+        assignment = classify_from_fields(
+            case_type=case_type,
+            url_path=url_path,
+            query_params=json.dumps(query_params) if isinstance(query_params, dict) else str(query_params or "{}"),
+            body_params=json.dumps(body_params) if isinstance(body_params, dict) else str(body_params or "{}"),
+            path_params=json.dumps(path_params) if isinstance(path_params, dict) else str(path_params or "{}"),
+        )
+    except Exception as exc:  # noqa: BLE001 — classification must never abort ingest
+        print(
+            f"WARN ingest-endpoints: gf classification failed for variant "
+            f"{request_variant_id}: {exc}; skipping class-typed coverage.",
+            file=sys.stderr,
+        )
+        return
+
+    for bucket in assignment.get("matched_buckets", []):
+        attack_family = vuln_taxonomy.GF_BUCKET_TO_CLASS.get(bucket)
+        if attack_family is None:
+            continue
+        try:
+            client.post(
+                "coverage-items",
+                {
+                    "request_variant_id": int(request_variant_id),
+                    "auth_context": auth_context or "anonymous",
+                    "input_slot": "endpoint",
+                    "attack_family": attack_family,
+                    "status_value": "pending",
+                    "notes": f"gf bucket '{bucket}' matched at ingest",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort, never abort the batch
+            print(
+                f"WARN ingest-endpoints: coverage-item POST failed for variant "
+                f"{request_variant_id} bucket '{bucket}' ({attack_family}): {exc}; continuing.",
+                file=sys.stderr,
+            )
 
 
 def register(subparsers) -> None:
@@ -64,6 +131,35 @@ def _load_egress_blocked_hosts(path: str | None) -> set[str]:
     return blocked
 
 
+_FQDN_RE = re.compile(r"^[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}(?:[:/?#]|$)")
+_IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}(?:[:/?#]|$)")
+_LOCALHOST_RE = re.compile(r"^localhost(?:[:/?#]|$)", re.IGNORECASE)
+_BRACKETED_IPV6_RE = re.compile(r"^\[[0-9A-Fa-f:]+\](?:[:/?#]|$)")
+
+
+def _ensure_url_scheme(url: str) -> str | None:
+    """Return ``url`` with an ``https://`` scheme prefixed when it names a host.
+
+    Handles bare FQDNs, IPv4 literals, ``localhost``, and bracketed IPv6
+    authorities (``[::1]:8080/x``). Returns the URL unchanged when it already
+    carries a scheme. Returns ``None`` for a line that names no recognizable
+    host (a genuinely malformed token) so the caller can WARN+skip it rather
+    than passing it through to fail the POST (S12).
+    """
+    if not url:
+        return None
+    if url.startswith(("http://", "https://")):
+        return url
+    if (
+        _FQDN_RE.match(url)
+        or _IPV4_RE.match(url)
+        or _LOCALHOST_RE.match(url)
+        or _BRACKETED_IPV6_RE.match(url)
+    ):
+        return f"https://{url}"
+    return None
+
+
 def run(args) -> None:
     # Anchor a relative cases.db to the engagement dir (not the cwd) so the
     # is_file() check and db_init() operate on the engagement's database even
@@ -98,6 +194,9 @@ def run(args) -> None:
     input_path = getattr(args, "input_file", None)
     input_stream = open(input_path, "r", encoding="utf-8") if input_path else sys.stdin
     count = 0
+    skipped_template = 0
+    skipped_malformed = 0
+    skipped_badjson = 0
 
     try:
         for line in input_stream:
@@ -118,6 +217,11 @@ def run(args) -> None:
                 try:
                     row = json.loads(line)
                 except json.JSONDecodeError:
+                    skipped_badjson += 1
+                    print(
+                        f"WARN ingest-endpoints: skipping malformed JSON line: {line[:120]}",
+                        file=sys.stderr,
+                    )
                     continue
                 method = row.get("method") or "GET"
                 url = row.get("url") or ""
@@ -128,6 +232,11 @@ def run(args) -> None:
                 path_params = row.get("path_params") or {}
                 cookie_params = row.get("cookie_params") or {}
                 if not url:
+                    skipped_malformed += 1
+                    print(
+                        f"WARN ingest-endpoints: skipping JSON row with no 'url': {line[:120]}",
+                        file=sys.stderr,
+                    )
                     continue
             else:
                 parts = line.split(None, 1)
@@ -140,20 +249,30 @@ def run(args) -> None:
                     method = "GET"
                     url = line
 
-            url = url.split()[0]  # Take first token only
+            url = url.split()[0] if url.split() else ""  # Take first token only
             method = method.upper()
 
-            # Skip template/fuzz URLs
-            if any(tok in url for tok in ("FUZZ", "PARAM", "{{")):
-                continue
             if not url:
+                skipped_template += 1
+                continue
+            if any(tok in url for tok in ("FUZZ", "PARAM", "{{")):
+                skipped_template += 1
+                print(
+                    f"WARN ingest-endpoints: skipping template/fuzz-marker URL: {url[:120]}",
+                    file=sys.stderr,
+                )
                 continue
 
-            # Ensure scheme
-            if not url.startswith(("http://", "https://")):
-                import re
-                if re.match(r"^[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}", url):
-                    url = f"https://{url}"
+            resolved = _ensure_url_scheme(url)
+            if resolved is None:
+                skipped_malformed += 1
+                print(
+                    f"WARN ingest-endpoints: skipping malformed endpoint line "
+                    f"(no resolvable host): {url[:120]}",
+                    file=sys.stderr,
+                )
+                continue
+            url = resolved
 
             if not url_path or url_path == "null":
                 url_path = extract_url_path(url)
@@ -248,8 +367,13 @@ def run(args) -> None:
                 pass
 
             if not request_variant_id and not service_id:
-                print(f"ingest-endpoints: backend response missing request_variant.id/service.id for {url}", file=sys.stderr)
-                sys.exit(1)
+                skipped_malformed += 1
+                print(
+                    f"WARN ingest-endpoints: backend response missing "
+                    f"request_variant.id/service.id for {url}; skipping this line",
+                    file=sys.stderr,
+                )
+                continue
 
             queue_key = ""
             if request_variant_id:
@@ -274,6 +398,17 @@ def run(args) -> None:
                 service_id=int(service_id) if service_id else None,
                 auth_context=auth_context,
             )
+            if request_variant_id:
+                _bridge_gf_coverage_items(
+                    client,
+                    request_variant_id=int(request_variant_id),
+                    case_type=case_type,
+                    url_path=url_path,
+                    query_params=query_params,
+                    body_params=body_params,
+                    path_params=path_params,
+                    auth_context=auth_context,
+                )
             count += 1
     finally:
         if input_path and input_stream is not sys.stdin:
@@ -281,6 +416,15 @@ def run(args) -> None:
         client.close()
 
     print(f"[ingest] Ingested {count} work items from source '{source}'")
+    total_skipped = skipped_template + skipped_malformed + skipped_badjson
+    if total_skipped:
+        print(
+            f"[ingest] Skipped {total_skipped} line(s): "
+            f"{skipped_template} template/fuzz/empty, "
+            f"{skipped_malformed} malformed/unkeyable, "
+            f"{skipped_badjson} bad-JSON (see WARN lines above).",
+            file=sys.stderr,
+        )
     if egress_blocked_count:
         print(
             f"[ingest] Deferred {egress_blocked_count} URL(s) to egress-blocked hosts "

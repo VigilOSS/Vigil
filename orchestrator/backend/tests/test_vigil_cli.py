@@ -3264,6 +3264,8 @@ def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
     }
     older_variant_dispatch = {
         "agent_role": "vulnerability-analyst",
+        "status": "completed",
+        "dispatch_mode": "variant-rotation",
         "task": "Variant hunt for ssrf-host-header siblings",
         "finding_slugs": ["ssrf-host-header"],
     }
@@ -3320,35 +3322,411 @@ def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
     assert "missing_variant_pass" not in err
 
 
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+
+def _setup_transition_env(
+    monkeypatch, module, tmp_path, *, scope, services=None, findings=None,
+    dispatches=None, report_readiness=None, terminal_block=None,
+):
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True, exist_ok=True)
+    (engagement / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
+    decisions: list[dict] = []
+
+    class _Client:
+        def __init__(self, *_a, **_k) -> None:
+            pass
+
+        def get(self, path: str):
+            if path == "services":
+                return services or []
+            if path == "findings":
+                return findings or []
+            if path.startswith("dispatches"):
+                return dispatches or []
+            if path == "report-readiness":
+                return report_readiness or {"ready": True, "blockers": []}
+            if path == "application-units/terminal-block":
+                return terminal_block or {
+                    "skipped": False, "blocking": [], "warned_under_observed": [],
+                    "deferred": [], "deferral_count": 0,
+                }
+            return []
+
+        def record_decision(self, payload):
+            decisions.append(payload)
+            return {"id": len(decisions)}
+
+        def close(self) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.close()
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(engagement),
+            engagement_key=engagement.name,
+            agent_root=str(tmp_path / "agent"),
+        ),
+    )
+    return engagement, decisions
+
+
+def _transition_args(engagement, target_phase, **overrides):
+    base = dict(
+        engagement_dir=str(engagement),
+        target_phase=target_phase,
+        force=False,
+        reason="",
+        track="auto",
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+_CONFIRMED_HIGH = {
+    "slug": "ssrf-1",
+    "severity": "high",
+    "verification_state": "verified",
+    "workflow_status": "active",
+}
+
+
+def test_transition_variant_gate_rejects_incomplete_dispatch(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_variant_incomplete", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "verify"},
+        findings=[_CONFIRMED_HIGH],
+        dispatches=[{
+            "agent_role": "vulnerability-analyst",
+            "status": "in-progress",
+            "dispatch_mode": "variant-rotation",
+            "finding_slugs": ["ssrf-1"],
+        }],
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "exploit"))
+    assert "missing_variant_pass" in capsys.readouterr().err
+
+
+def test_transition_variant_gate_rejects_wrong_dispatch_mode(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_variant_wrongmode", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "verify"},
+        findings=[_CONFIRMED_HIGH],
+        dispatches=[{
+            "agent_role": "vulnerability-analyst",
+            "status": "completed",
+            "dispatch_mode": "hypothesis-driven",
+            "finding_slugs": ["ssrf-1"],
+        }],
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "exploit"))
+    assert "missing_variant_pass" in capsys.readouterr().err
+
+
+def test_transition_variant_gate_satisfied_by_completed_variant_rotation(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_variant_ok", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "verify"},
+        findings=[_CONFIRMED_HIGH],
+        dispatches=[{
+            "agent_role": "vulnerability-analyst",
+            "status": "completed",
+            "dispatch_mode": "variant-rotation",
+            "finding_slugs": ["ssrf-1"],
+        }],
+    )
+    module.run(_transition_args(eng, "exploit"))
+    assert "missing_variant_pass" not in capsys.readouterr().err
+
+
+def test_transition_backward_with_reason_succeeds_and_records_decision(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_backward_reason", "agent/scripts/assess/commands/transition_phase.py")
+    eng, decisions = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+    )
+    module.run(_transition_args(eng, "recon", reason="re-recon after new subdomain surfaced"))
+    scope = json.loads((eng / "scope.json").read_text())
+    assert scope["current_phase"] == "recon"
+    assert len(decisions) == 1
+    assert decisions[0]["kind"] == "phase_regression"
+    assert "re-recon" in decisions[0]["payload"]["reason"]
+
+
+def test_transition_backward_without_reason_or_force_refuses(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_backward_refuse", "agent/scripts/assess/commands/transition_phase.py")
+    eng, decisions = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "recon"))
+    assert "refusing backward transition" in capsys.readouterr().err
+    assert decisions == []
+
+
+def test_transition_force_override_records_decision(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_force_audit", "agent/scripts/assess/commands/transition_phase.py")
+    eng, decisions = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "recon"},
+        services=[],
+    )
+    module.run(_transition_args(eng, "collect", force=True, reason="services known-empty, internal host"))
+    assert len(decisions) == 1
+    assert decisions[0]["kind"] == "forced_transition_override"
+    assert any(b["kind"] == "no_services" for b in decisions[0]["payload"]["overridden_blockers"])
+
+
+def test_transition_generalized_walk_checks_intermediate_gates(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_walk", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "recon"},
+        services=[], findings=[],
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "exploit"))
+    err = capsys.readouterr().err
+    assert "no_services" in err
+
+
+def test_transition_verify_consumption_is_advisory_not_block(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_consume_advisory", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "consume-test"},
+        findings=[{"slug": "f-1", "workflow_status": "active", "severity": "low"}],
+    )
+    conn = sqlite3.connect(str(eng / "cases.db"))
+    conn.execute("CREATE TABLE work_items (id INTEGER PRIMARY KEY, status TEXT, terminal_reason TEXT)")
+    conn.execute("INSERT INTO work_items (status, terminal_reason) VALUES ('pending', NULL)")
+    conn.commit()
+    conn.close()
+    module.run(_transition_args(eng, "verify"))
+    err = capsys.readouterr().err
+    assert "consumption_incomplete" in err
+    assert "not blocking" in err.lower()
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "verify"
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+def _terminal_block_payload(*, blocking=None, warned=None, deferral_count=0):
+    return {
+        "skipped": False,
+        "blocking": blocking or [],
+        "warned_under_observed": warned or [],
+        "deferred": [],
+        "deferral_count": deferral_count,
+    }
+
+
+_BLOCKING_UNIT = {
+    "unit": {"id": 1, "host": "auth.example.com", "path_prefix": "/login",
+             "port_class": "web", "depth_tier": "app-unit", "confidence": "low"},
+    "block_set_via": "decisive risk surface",
+    "decisive_surface": True,
+    "missing_block_families": ["auth", "access-control"],
+}
+
+
+def test_transition_report_depth_backstop_blocks(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_depth_report", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        terminal_block=_terminal_block_payload(blocking=[_BLOCKING_UNIT], deferral_count=2),
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "report"))
+    err = capsys.readouterr().err
+    assert "depth_unsatisfied_units" in err
+    assert "auth.example.com/login" in err
+    assert "depth_deferral" in err
+    assert "--force --reason" in err
+    assert "2 depth_deferral(s) already recorded" in err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "exploit"
+
+
+def test_transition_complete_depth_backstop_blocks(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_depth_complete", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "report"},
+        terminal_block=_terminal_block_payload(blocking=[_BLOCKING_UNIT]),
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "complete"))
+    assert "depth_unsatisfied_units" in capsys.readouterr().err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+
+
+def test_transition_report_depth_deferral_does_not_block(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_depth_deferred", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        terminal_block=_terminal_block_payload(blocking=[], deferral_count=1),
+    )
+    module.run(_transition_args(eng, "report"))
+    assert "depth_unsatisfied_units" not in capsys.readouterr().err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+
+
+def test_transition_report_depth_force_reason_proceeds_and_records(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_depth_force", "agent/scripts/assess/commands/transition_phase.py")
+    eng, decisions = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        terminal_block=_terminal_block_payload(blocking=[_BLOCKING_UNIT]),
+    )
+    module.run(_transition_args(eng, "report", force=True,
+                                reason="auth unit accepted-risk per client"))
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+    assert len(decisions) == 1
+    assert decisions[0]["kind"] == "forced_transition_override"
+    assert any(b["kind"] == "depth_unsatisfied_units"
+               for b in decisions[0]["payload"]["overridden_blockers"])
+
+
+def test_transition_report_under_observed_warns_not_blocks(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_depth_warn", "agent/scripts/assess/commands/transition_phase.py")
+    warned_unit = {
+        "unit": {"host": "blog.example.com", "path_prefix": "/about",
+                 "port_class": "web", "confidence": "low"},
+        "reason": "under-observed (low confidence, no decisive surface)",
+        "missing_block_families": [], "missing_warn_families": ["disclosure"],
+    }
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        terminal_block=_terminal_block_payload(blocking=[], warned=[warned_unit]),
+    )
+    module.run(_transition_args(eng, "report"))
+    err = capsys.readouterr().err
+    assert "depth_under_observed_units" in err
+    assert "blog.example.com/about" in err
+    assert "depth_unsatisfied_units" not in err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+
+
+def test_transition_recon_to_report_jump_walks_depth_backstop(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_depth_walk", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "recon"},
+        services=[{"endpoint": "h:443"}],
+        findings=[{"slug": "f-1", "workflow_status": "active",
+                   "severity": "low", "verification_state": "verified"}],
+        report_readiness={"ready": True, "blockers": []},
+        terminal_block=_terminal_block_payload(blocking=[_BLOCKING_UNIT]),
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "report"))
+    err = capsys.readouterr().err
+    assert "depth_unsatisfied_units" in err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "recon"
+
+
+def test_transition_code_complete_unaffected_by_depth_backstop(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_depth_code", "agent/scripts/assess/commands/transition_phase.py")
+    queried: list[str] = []
+    eng = tmp_path / "agent" / "engagements" / "eng-code"
+    eng.mkdir(parents=True, exist_ok=True)
+    (eng / "scope.json").write_text(
+        json.dumps({"engagement_type": "code", "current_phase": "fuzz"}), encoding="utf-8")
+
+    class _Client:
+        def __init__(self, *_a, **_k) -> None:
+            pass
+        def get(self, path: str):
+            queried.append(path)
+            if path == "findings":
+                return []
+            return []
+        def close(self): return None
+        def __enter__(self): return self
+        def __exit__(self, *_e): return False
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(module, "load_config", lambda *_a, **_k: SimpleNamespace(
+        base_url="http://example.test", engagement_dir=str(eng),
+        engagement_key=eng.name, agent_root=str(tmp_path / "agent")))
+
+    module.run(_transition_args(eng, "complete"))
+    assert "application-units/terminal-block" not in queried
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "complete"
+
+
 def test_check_coverage_reports_partially_covered_surfaces(
     monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`check-coverage` should explain partial-coverage blockers instead of
-    exiting non-zero without naming the follow-up condition."""
+    """The folded surface-coverage gate (old `check-coverage`, now
+    `check-phase-readiness --phase consume`) should EXPLAIN partial-coverage
+    blockers and exit non-zero, instead of failing silently."""
     module = _load_assess_module(
-        "round3_check_coverage_module",
-        "agent/scripts/assess/commands/check_coverage.py",
+        "round3_check_phase_readiness_module",
+        "agent/scripts/assess/commands/check_phase_readiness.py",
     )
+
+    coverage_payload = {
+        "ready": False,
+        "blocker_count": 1,
+        "unresolved_surfaces": [],
+        "partially_covered_surfaces": [
+            {
+                "surface_type": "object_reference",
+                "target_descriptor": "https://example.test/api/users/{id}",
+                "followup_condition": "needs auth re-test",
+            }
+        ],
+        "high_risk_deferred_surfaces": [],
+    }
 
     class _Client:
         def __init__(self, *_args, **_kwargs) -> None:
             pass
 
         def get(self, path: str) -> dict:
-            assert path == "coverage-readiness"
-            return {
-                "ready": False,
-                "blocker_count": 1,
-                "unresolved_surfaces": [],
-                "partially_covered_surfaces": [
-                    {
-                        "surface_type": "object_reference",
-                        "target_descriptor": "https://example.test/api/users/{id}",
-                        "followup_condition": "needs auth re-test",
-                    }
-                ],
-                "high_risk_deferred_surfaces": [],
-            }
+            if path.startswith("phase-readiness"):
+                return {
+                    "phase": "consume",
+                    "coverage": coverage_payload,
+                    "depth_ledger": {"skipped": True, "units": [], "summary": {}},
+                }
+            if path == "services":
+                return []
+            if path == "surfaces":
+                return []
+            if path == "application-units/depth-ledger":
+                return {"skipped": True, "units": [], "summary": {}}
+            raise AssertionError(f"unexpected endpoint {path}")
+
+        def get_engagement(self, path: str, query: str = "") -> dict:
+            return {"applicable": False, "engagement_type": "red",
+                    "open_high_cves": [], "open_leads": [],
+                    "exploited_unlinked_cves": [], "dangling_links": []}
+
+        def list_all_decisions(self, **_filters):
+            return []
 
         def close(self) -> None:
             return None
@@ -3369,14 +3747,32 @@ def test_check_coverage_reports_partially_covered_surfaces(
             agent_root=str(tmp_path),
         ),
     )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc:
-        module.run(SimpleNamespace(engagement_dir=str(tmp_path)))
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                phase="consume",
+                as_json=False,
+                verbose=False,
+                strict_vendor_saas=False,
+                by_host=False,
+                include_discovered=False,
+                auto_redispatch=False,
+                max_recommendations=10,
+                depth=False,
+                by_app_unit=False,
+                include_intel=False,
+                strict=False,
+                strict_deep=False,
+            )
+        )
 
     assert exc.value.code == 1
-    err = capsys.readouterr().err
-    assert "Partially covered surfaces need follow-up" in err
-    assert "needs auth re-test" in err
+    out = capsys.readouterr().out
+    assert "Partially covered surfaces need follow-up" in out
+    assert "needs auth re-test" in out
 
 
 def _load_assess_module(name: str, relative: str):
@@ -5035,6 +5431,180 @@ def test_blue_respond_gate_does_not_treat_approval_as_containment() -> None:
     assert any(blocker["kind"] == "missing_containment_closure" for blocker in blockers)
 
 
+def test_blue_intake_gate_missing_tenant_file_is_advisory_not_block(
+    tmp_path: Path,
+) -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_intake_missing_file",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    eng_dir = tmp_path / "engagement"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "engagement_type": "blue",
+                "tenant_reference_paths": ["references/tenants/does-not-exist.md"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def get_engagement(self, endpoint: str, query: str = ""):
+            assert endpoint == "activity-entries"
+            return {"items": [{"action": "alert_intake"}]}
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    blockers = module._blue_check_intake_to_triage(_Client(), str(eng_dir))
+
+    missing = [b for b in blockers if b["kind"] == "missing_tenant_reference_file"]
+    assert len(missing) == 1
+    assert missing[0]["severity"] == "advisory"
+    hard = [b for b in blockers if b.get("severity", "block") != "advisory"]
+    assert hard == []
+
+
+def test_blue_intake_gate_recorded_alert_passes_without_redundant_metadata(
+    tmp_path: Path,
+) -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_intake_recorded_alert",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    eng_dir = tmp_path / "engagement"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    ref_rel = "references/tenants/acme-corp.md"
+    ref_path = eng_dir / ref_rel
+    ref_path.parent.mkdir(parents=True, exist_ok=True)
+    ref_path.write_text("# tenant\n", encoding="utf-8")
+    (eng_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "engagement_type": "blue",
+                "tenant_reference_paths": [ref_rel],
+                "alert_metadata": {"raw_body": None, "parsed": None},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def get_engagement(self, endpoint: str, query: str = ""):
+            assert endpoint == "activity-entries"
+            return {"items": [{"action": "alert_intake"}]}
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    blockers = module._blue_check_intake_to_triage(_Client(), str(eng_dir))
+
+    assert blockers == []
+    assert not any(b["kind"] == "no_alert_intake" for b in blockers)
+
+
+def test_blue_investigate_gate_missing_mitre_is_advisory_not_block() -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_investigate_mitre_advisory",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+
+    class _Client:
+        def get(self, endpoint: str):
+            if endpoint == "findings":
+                return [
+                    {
+                        "slug": "FIND-001",
+                        "workflow_status": "active",
+                        "verification_state": "verified",
+                        "details_json": {},
+                    }
+                ]
+            if endpoint == "dispatches?status=completed&limit=1000&offset=0":
+                return [
+                    {"agent_role": "investigator", "tier": "L2", "status": "completed"}
+                ]
+            if endpoint == "artifacts/search?finding=FIND-001&limit=1000&offset=0":
+                return [
+                    {
+                        "kind": "ir_evidence",
+                        "relative_path": "e.json",
+                        "related_finding_slug": "FIND-001",
+                    }
+                ]
+            return []
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    blockers = module._blue_check_investigate_to_verify(_Client())
+
+    mitre = [b for b in blockers if b["kind"] == "missing_mitre_techniques"]
+    assert len(mitre) == 1
+    assert mitre[0]["severity"] == "advisory"
+    hard = [b for b in blockers if b.get("severity", "block") != "advisory"]
+    assert hard == []
+
+
+def test_blue_respond_gate_single_finding_no_containment_closes() -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_single_no_containment",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+
+    class _Client:
+        def get(self, endpoint: str):
+            if endpoint == "findings":
+                return [
+                    {
+                        "slug": "FIND-001",
+                        "workflow_status": "active",
+                        "verification_state": "verified",
+                        "verification_disposition": "confirmed",
+                        "severity": "critical",
+                    }
+                ]
+            if endpoint == "artifacts/search?finding=FIND-001&limit=1000&offset=0":
+                return []
+            return []
+
+        def get_engagement(self, endpoint: str, query: str = ""):
+            assert endpoint == "activity-entries"
+            return {
+                "items": [
+                    {
+                        "action": "no_containment_required",
+                        "title": "mitigated by existing EDR policy",
+                    }
+                ]
+            }
+        def close(self) -> None:
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    blockers = module._blue_check_respond_to_report(_Client())
+
+    assert blockers == []
+
+
 def test_blue_phase_gate_pages_activity_entries() -> None:
     module = _load_assess_module(
         "transition_phase_command_module_blue_activity_paging",
@@ -5819,10 +6389,11 @@ def test_validate_dispatch_contract_accepts_list_skills_canonical_name(
     assert "WARN skill" not in captured.err
 
 
-def test_validate_dispatch_contract_rejects_unknown_dispatch_mode(
+def test_validate_dispatch_contract_warns_on_unknown_dispatch_mode(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Unknown dispatch_mode values surface as errors so the contract fails closed."""
+    """L2-4: an unknown dispatch_mode is ADVISORY (warn + proceed), not a hard
+    error, so a newly-coined mode is not blocked at the CLI."""
     assess_main = _load_assess_main()
     payload = {
         "role": "vulnerability-analyst",
@@ -5832,10 +6403,11 @@ def test_validate_dispatch_contract_rejects_unknown_dispatch_mode(
     contract_path = tmp_path / "dispatch.json"
     contract_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(SystemExit):
-        assess_main(["validate-dispatch-contract", str(contract_path)])
-    err = capsys.readouterr().err
-    assert "dispatch_mode" in err and "turbo-mode" in err
+    assess_main(["validate-dispatch-contract", str(contract_path)])
+    captured = capsys.readouterr()
+    assert "OK" in captured.out
+    assert "turbo-mode" in captured.err
+    assert "newly-coined mode" in captured.err
 
 
 def test_validate_dispatch_contract_requires_skills_for_specialist(
@@ -6615,6 +7187,8 @@ def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
         "reasoning": None,
         "dispatch_mode_arg": None,
         "from_json": None,
+        "allow_no_skills": False,
+        "check_overlap": False,
         "dispatch_status": None,
         "completed_at": None,
         "finding_slugs": None,
@@ -6663,6 +7237,8 @@ def _dispatch_args(action: str, *, db_path: str | None = None, extra=None, **fla
         "reasoning": None,
         "dispatch_mode_arg": None,
         "from_json": None,
+        "allow_no_skills": False,
+        "check_overlap": False,
         "dispatch_status": None,
         "completed_at": None,
         "finding_slugs": None,
@@ -6797,6 +7373,143 @@ def test_dispatch_register_rejects_missing_skills_locally(
     assert "skills is required for role 'vulnerability-analyst'" in err
 
 
+def test_dispatch_register_defaults_missing_dispatch_mode_from_role(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """L2-1: a dispatch missing --dispatch-mode no longer hard-errors. The mode
+    is defaulted from the role table, the stored row carries it, and a WARN is
+    emitted."""
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "register",
+        agent_id="AG-NO-MODE",
+        agent_role="vulnerability-analyst",
+        task="IDOR sweep",
+        skills="idor-testing",
+    )
+    err = capsys.readouterr().err
+    assert fake.recorded[0]["dispatch_mode"] == "hypothesis-driven"
+    assert "dispatch_mode not set; defaulting to 'hypothesis-driven'" in err
+
+
+def test_dispatch_register_defaults_mode_for_recon_role(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """L2-1: recon-specialist defaults to item-iterating."""
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "register",
+        agent_id="AG-RECON-NO-MODE",
+        agent_role="recon-specialist",
+        task="subdomain enum",
+        skills="subdomain-enumeration",
+    )
+    capsys.readouterr()
+    assert fake.recorded[0]["dispatch_mode"] == "item-iterating"
+
+
+def test_dispatch_register_allow_no_skills_proceeds_with_warning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """L2-2 / L3-6: --allow-no-skills converts the skills requirement into a
+    WARN and proceeds instead of exiting non-zero."""
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "register",
+        agent_id="AG-ADHOC",
+        agent_role="vulnerability-analyst",
+        task="ad-hoc probe",
+        dispatch_mode_arg="item-iterating",
+        allow_no_skills=True,
+    )
+    err = capsys.readouterr().err
+    assert "skills not set for role 'vulnerability-analyst'" in err
+    assert "--allow-no-skills" in err
+    assert fake.recorded[0]["agent_id"] == "AG-ADHOC"
+    assert fake.recorded[0]["allow_no_skills"] is True
+
+
+def test_dispatch_register_normalizes_role_to_agent_role(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """L2-7: a --from-json payload carrying only `role` is normalized to
+    `agent_role` before POST so the backend never silently 422s, and the
+    `role` alias is dropped (extra='forbid' on the backend model)."""
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        json.dump(
+            {
+                "agent_id": "AG-ROLE-ALIAS",
+                "role": "vulnerability-analyst",
+                "task": "IDOR sweep",
+                "dispatch_mode": "item-iterating",
+                "skills": "idor-testing",
+            },
+            handle,
+        )
+        payload_path = handle.name
+
+    fake = _run_dispatch_verb(monkeypatch, "register", from_json=payload_path)
+    capsys.readouterr()
+    recorded = fake.recorded[0]
+    assert recorded["agent_role"] == "vulnerability-analyst"
+    assert "role" not in recorded
+
+
+def test_dispatch_register_overlap_check_is_opt_in(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """L2-8: without --check-overlap the default `agent start` path performs no
+    list_dispatches query, so an overlapping in-progress row produces no warning."""
+    module = _load_dispatch_module()
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-OLD"] = {
+        "id": 1,
+        "agent_id": "AG-OLD",
+        "agent_role": "vulnerability-analyst",
+        "status": "in-progress",
+        "finding_slugs": ["VA-001"],
+        "task": "Older exploitation attempt",
+    }
+    list_calls: list[dict] = []
+    orig_list = fake.list_dispatches
+
+    def _tracking_list(**filters):
+        list_calls.append(filters)
+        return orig_list(**filters)
+
+    fake.list_dispatches = _tracking_list  # type: ignore[assignment]
+    monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module.agent,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+    module.run(
+        _dispatch_args(
+            "register",
+            agent_id="AG-NEW",
+            agent_role="vulnerability-analyst",
+            task="Follow-up exploitation attempt",
+            finding_slugs="VA-001",
+            dispatch_mode_arg="item-iterating",
+            skills="idor-testing",
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "WARN agent start" not in err
+    assert list_calls == []
+    assert fake.recorded[0]["agent_id"] == "AG-NEW"
+
+
 def test_dispatch_register_warns_on_structured_overlap(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -6831,6 +7544,7 @@ def test_dispatch_register_warns_on_structured_overlap(
             finding_slugs="VA-001",
             dispatch_mode_arg="item-iterating",
             skills="idor-testing",
+            check_overlap=True,
         )
     )
 
@@ -7596,9 +8310,79 @@ def test_validate_dispatch_skips_scope_check_when_engagement_dir_omitted(
     assert not any("scope" in e.lower() for e in errors), errors
 
 
-# ---------------------------------------------------------------------------
+
+
+def test_validate_dispatch_missing_mode_defaults_and_warns_not_errors() -> None:
+    """L2-1: a missing dispatch_mode no longer hard-errors; it warns and names
+    the role default rather than emitting `missing required field`."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_role": "exploit-developer",
+        "task": "Chain primitives",
+        "skills": "idor-testing",
+    }
+    errors, warnings = validate_specialist_dispatch_contract(payload)
+    assert not any("dispatch_mode" in e for e in errors), errors
+    assert not any("missing required field" in e for e in errors), errors
+    assert any("deep-manual" in w for w in warnings), warnings
+
+
+def test_validate_dispatch_unknown_mode_warns_not_errors() -> None:
+    """L2-4: an unknown dispatch_mode is advisory at the validator (warn, not
+    error) so a newly-coined mode is not blocked."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "freshly-coined-mode",
+        "skills": "idor-testing",
+    }
+    errors, warnings = validate_specialist_dispatch_contract(payload)
+    assert not any("dispatch_mode" in e for e in errors), errors
+    assert any("freshly-coined-mode" in w for w in warnings), warnings
+
+
+def test_validate_dispatch_allow_no_skills_downgrades_error_to_warning() -> None:
+    """L2-2 / L3-6: allow_no_skills converts the skills requirement into a
+    warning so an ad-hoc role can proceed."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+    }
+    errors, warnings = validate_specialist_dispatch_contract(
+        payload, allow_no_skills=True
+    )
+    assert not any("skills is required" in e for e in errors), errors
+    assert any("skills not set" in w for w in warnings), warnings
+
+
+def test_validate_dispatch_malformed_scope_warns_not_silently_skipped(
+    tmp_path: Path,
+) -> None:
+    """L2-3: a malformed scope.json must WARN (naming the failure), never
+    silently disable the scope-host gate."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    eng_dir = tmp_path / "eng"
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "scope.json").write_text("{not valid json", encoding="utf-8")
+    payload = {
+        "agent_id": "va-1",
+        "agent_role": "vulnerability-analyst",
+        "scope_host": "app.example.test",
+        "dispatch_mode": "item-iterating",
+        "skills": "idor-testing",
+    }
+    errors, warnings = validate_specialist_dispatch_contract(
+        payload, engagement_dir=str(eng_dir)
+    )
+    assert any("scope_host gate skipped" in w for w in warnings), warnings
+
+
 # Item 11 — scope_host rejection telemetry (audits the C7 gate)
-# ---------------------------------------------------------------------------
 
 
 def _load_auth_status_module():
@@ -8004,9 +8788,7 @@ def test_scope_rejection_writes_dispatch_decision_row(
     assert "not in scope.json" in payload["reason"]
 
 
-# ---------------------------------------------------------------------------
 # Shared-VM preflight: refuse/warn when the runtime tier oversubscribes the VM.
-# ---------------------------------------------------------------------------
 
 def _gib(n: float) -> int:
     return int(n * (1024 ** 3))

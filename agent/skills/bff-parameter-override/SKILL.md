@@ -2,6 +2,7 @@
 name: bff-parameter-override
 description: Test for hidden middleware/BFF parameters that override backend identity, authorization, or object resolution when supplied by the client
 origin: Vigil
+vuln_class: mass-assignment, bola
 ---
 
 # BFF Parameter Override Testing

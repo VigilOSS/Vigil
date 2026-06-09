@@ -39,7 +39,7 @@ vigil assess get-command-run <id>
 vigil assess artifact search <query>
 vigil assess artifact get <id>
 vigil assess agent render-handoff <agent-id>
-vigil assess check-intel-readiness   # advisory (red engagements): open CVEs/leads + dangling finding links
+vigil assess check-phase-readiness --phase report   # advisory (red engagements): open CVEs/leads + dangling finding links + report blockers
 ```
 
 Use command history as a coverage map, not as a reuse gate. If you cite a prior run
@@ -59,7 +59,7 @@ finding, chain, dispatch/agent, surface, request variant, or command run.
 
 After hydration, summarize the resume state in one compact operator note:
 - confirmed, suspicious, killed, and open findings
-- intel that changes targeting or exploitability — and any open high CVEs or open leads from the brief's Intel section that still need to be tested or ruled out (before report, `vigil assess check-intel-readiness` lists these plus any exploited-but-unlinked CVE or dangling finding link)
+- intel that changes targeting or exploitability — and any open high CVEs or open leads from the brief's Intel section that still need to be tested or ruled out (before report, `vigil assess check-phase-readiness --phase report` lists these plus any exploited-but-unlinked CVE or dangling finding link)
 - recent operator decisions and null results
 - last dispatch owner, skills, result, and handoff gaps
 - command-run coverage already performed against the host or keyword

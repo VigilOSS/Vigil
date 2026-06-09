@@ -67,8 +67,14 @@
     },
     "result_status": {
       "default": "tested",
-      "maxLength": 64,
-      "minLength": 1,
+      "enum": [
+        "tested",
+        "signal",
+        "attempted",
+        "blocked",
+        "error",
+        "no-signal"
+      ],
       "title": "Result Status",
       "type": "string"
     },
@@ -94,6 +100,26 @@
       "maxLength": 4096,
       "title": "Notes",
       "type": "string"
+    },
+    "target_host": {
+      "default": "",
+      "maxLength": 256,
+      "title": "Target Host",
+      "type": "string"
+    },
+    "target_path": {
+      "default": "",
+      "maxLength": 2048,
+      "title": "Target Path",
+      "type": "string"
+    },
+    "target_port": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "default": null,
+      "title": "Target Port"
     }
   },
   "required": [

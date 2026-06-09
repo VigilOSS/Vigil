@@ -18,7 +18,7 @@ Use the helper script or `curl` — never query the SQLite database file directl
 
 ```bash
 # Final report gate and grouped final-mode findings
-vigil assess check-report-readiness
+vigil assess check-phase-readiness --phase report
 vigil assess list-report-findings --mode final --json
 
 # Interim grouped findings when the operator explicitly wants a draft before final readiness passes
@@ -178,8 +178,8 @@ Tool output in `<details>` blocks, generated scripts, scope verification table, 
 
 Before generating the report body, run these checks against the backend data. If any check fails, **stop and flag the issue to the operator** — do not silently fix or ignore it.
 
-1. **Readiness gate:** for final reports, run `vigil assess check-report-readiness`. If it fails, stop and flag the blockers to the operator.
-2. **Root-cause consolidation check:** use `vigil assess list-report-findings --mode final --json` and `vigil assess check-report-readiness` to confirm intentional root/sibling groups are already represented. If two reportable findings still share the same vulnerable component or configuration and are not grouped, stop and ask the operator to run `vigil assess link-finding` or merge them. Apply the BugCrowd/HackerOne standard: one root cause, one submission.
+1. **Readiness gate:** for final reports, run `vigil assess check-phase-readiness --phase report`. If it fails, stop and flag the blockers to the operator.
+2. **Root-cause consolidation check:** use `vigil assess list-report-findings --mode final --json` and `vigil assess check-phase-readiness --phase report` to confirm intentional root/sibling groups are already represented. If two reportable findings still share the same vulnerable component or configuration and are not grouped, stop and ask the operator to run `vigil assess link-finding` or merge them. Apply the BugCrowd/HackerOne standard: one root cause, one submission.
 3. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
 4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
 
@@ -376,7 +376,7 @@ vigil blue closeout --engagement-key <key>
 The macros section at the bottom of `templates/blue.md` lists the exact backend queries
 (`list-report-findings`, `fetch activity-entries`, `artifact search`,
 `list-command-runs --phase respond`, `agent list`, `agent render-handoff`,
-`check-report-readiness`) the writer runs to populate each template section.
+`check-phase-readiness --phase report`) the writer runs to populate each template section.
 
 ## Extended Resources
 

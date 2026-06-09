@@ -2,6 +2,7 @@
 name: host-header-injection
 description: Exploit Host header manipulation for password reset poisoning, cache poisoning, SSRF, and access control bypass
 origin: Vigil
+vuln_class: host-header-injection
 ---
 
 # Host Header Injection
