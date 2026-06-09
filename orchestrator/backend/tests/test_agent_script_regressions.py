@@ -189,15 +189,22 @@ def test_list_findings_pushes_filters_and_limit_to_backend(monkeypatch, tmp_path
     assert "VA-123 | high | active | verified/confirmed" in capsys.readouterr().out
 
 
-def test_kali_runtime_dockerfiles_package_audit_enum_module() -> None:
+def test_kali_runtime_dockerfiles_do_not_bake_audit_enums() -> None:
+    """audit_enums.py is a HOST-side assess library (imported by `vigil assess
+    kali` on the host), not a runtime-image artifact. The in-container Kali-MCP
+    server that once imported it is retired and nothing in the image reads it, so
+    the runtime image must NOT bake it: baking coupled the image to host-lib churn
+    and forced spurious `vigil runtime build` rebuilds for changes the container
+    never reads. This guards against re-introducing that coupling."""
     repo_root = Path(__file__).resolve().parents[3]
-    required_copy = "COPY agent/scripts/assess/lib/audit_enums.py /opt/mcp-tools/audit_enums.py"
     for dockerfile in (
         repo_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
         repo_root / "agent" / "docker" / "runtime-lightweight" / "Dockerfile",
     ):
         contents = dockerfile.read_text(encoding="utf-8")
-        assert required_copy in contents
+        assert "audit_enums.py" not in contents, (
+            f"{dockerfile.name} must not bake the host-side audit_enums.py"
+        )
 
 
 def test_kali_runtime_dockerfiles_package_ping_for_mcp_smoke_tests() -> None:

@@ -748,9 +748,8 @@ def _dedicated_dispatch_satisfied(
       * ``status='completed'`` AND
       * (scope_host, scope_path_prefix) contains the unit AND
       * it has corroborating durable output under the unit (≥1 covering probe
-        OR a recorded finding under the unit OR a handoff referencing the
-        unit/class) — ``status='completed'`` ALONE is self-attested and does
-        NOT satisfy.
+        OR a recorded finding under the unit) — ``status='completed'`` ALONE,
+        or accompanied only by a self-attested handoff, does NOT satisfy.
     The union of qualifying dispatches' resolved classes must cover every
     block-level family. When there are NO block-level families (degenerate), a
     deep_required unit still owes ≥1 qualifying dispatch.
@@ -786,8 +785,16 @@ def _dispatch_has_work_evidence(
     findings: list[dict[str, Any]],
 ) -> bool:
     """Corroborating durable output under the unit (S7): ≥1 covering probe_run
-    under the unit OR a recorded finding under the unit OR a handoff (by this
-    dispatch's agent) referencing the unit/class."""
+    under the unit OR a recorded finding under the unit.
+
+    A dispatch handoff is NOT accepted here. The handoff ``summary`` (and the
+    free-form ``coverage_gaps``) are agent-authored self-attestation, and the
+    doctrine forbids counting a self-attested-without-evidence signal: otherwise
+    one completed dispatch with a broad ``scope_path_prefix`` and a bare handoff
+    would mark every unit on the host ``touched`` and downgrade the terminal
+    block from blocking to warning. Only real probe/finding artifacts satisfy;
+    legitimate work the harness missed is recovered via the recorded
+    depth-deferral / ``--force --reason`` valve, not by trusting free text."""
     for p in probes:
         if str(p.get("result_status") or "").strip().lower() not in PROBE_RESULT_STATUSES_COVERING:
             continue
@@ -796,10 +803,6 @@ def _dispatch_has_work_evidence(
     for f in findings:
         if _finding_maps_to_unit(f, host, prefix):
             return True
-    agent_id = str(dispatch.get("agent_id") or "")
-    h = handoff_by_agent.get(agent_id)
-    if h is not None and str(h.get("summary") or "").strip():
-        return True
     return False
 
 

@@ -14,7 +14,7 @@ from .mitmproxy import MitmproxyOptions, start_proxy
 from .oob import OobOptions, oob_options as _oob_options, oob_status, start_oob
 from .orchestrator import OrchestratorOptions, start_orchestrator
 from .paths import default_runtime_container, resolve_source_root
-from .runtime import RuntimeOptions, build_runtime, start_runtime, stop_runtime
+from .runtime import RuntimeOptions, build_runtime, runtime_image_inputs, start_runtime, stop_runtime
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,12 +172,7 @@ def _prompt_frp_token() -> str:
 
 
 def _runtime_image_inputs(install_root: Path) -> list[Path]:
-    return [
-        install_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
-        install_root / "agent" / "scripts" / "assess" / "lib" / "audit_enums.py",
-        install_root / "docker" / "callback_listener.py",
-        install_root / "docker" / "start-callback.sh",
-    ]
+    return runtime_image_inputs(install_root)
 
 
 def _mitmproxy_image_inputs(install_root: Path) -> list[Path]:

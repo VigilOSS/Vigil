@@ -259,3 +259,26 @@ def test_surface_only_decisive_host_materializes_and_blocks(client, isolate_sett
     assert entry["decisive_surface"] is True
     assert entry["block_set_via"] == "decisive risk surface"
     assert "access-control" in entry["missing_block_families"]
+
+
+def test_self_attested_handoff_does_not_downgrade_block(client, isolate_settings):
+    """A completed dispatch covering the unit plus ONLY a bare handoff summary
+    (no covering probe, no finding) must NOT mark the unit 'touched' — the
+    decisive unit stays in `blocking`. A self-attested handoff with a broad
+    scope_path_prefix must not be able to defeat the one hard block (S7)."""
+    key = "2026-06-09-210011-handoff"
+    eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    state_manager.record_dispatch(
+        eng_id, agent_id="va-x", agent_role="vulnerability-analyst",
+        task="review the login area", scope_host="auth.example.com",
+        scope_path_prefix="/", vuln_classes="idor", status_value="completed",
+    )
+    state_manager.update_dispatch(eng_id, agent_id="va-x", status_value="completed",
+                                  completed_at="2026-06-09T12:00:00Z")
+    state_manager.record_handoff(
+        eng_id, agent_id="va-x", agent_role="vulnerability-analyst",
+        summary="looked at the login flow; nothing obvious",
+    )
+    result = _block(eng_id)
+    assert ("auth.example.com", "/login") in _labels(result["blocking"]), result
+    assert ("auth.example.com", "/login") not in _labels(result["warned_under_observed"])

@@ -58,6 +58,8 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
         "run",
         "--directory",
         "orchestrator/backend",
+        "python",
+        "-m",
         "uvicorn",
         "app.main:app",
         "--host",
