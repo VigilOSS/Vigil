@@ -106,8 +106,7 @@ RUN ln -sf /usr/share/wordlists /wordlists && \
     ln -sf /usr/share/seclists /seclists
 
 # Lightweight image is dev-only; massdns/cero/alterx/asnmap/bbot/shuffledns omitted to keep iteration fast.
-RUN mkdir -p /opt/mcp-tools /data
-COPY agent/scripts/assess/lib/audit_enums.py /opt/mcp-tools/audit_enums.py
+RUN mkdir -p /data
 
 WORKDIR /engagement
 ENTRYPOINT ["/usr/bin/tini","--"]

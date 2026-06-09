@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -54,12 +55,59 @@ class RuntimeOptions:
     allow_oversubscribe: bool = False
 
 
+_RUNTIME_INPUTS_LABEL = "com.vigil.runtime-inputs-sha256"
+
+
+def runtime_image_inputs(install_root: Path) -> list[Path]:
+    """Files BAKED into the runtime image. A change to one of these (and ONLY
+    these) requires ``vigil runtime build``; every other file under
+    ``agent/scripts`` is host-side and is live after ``vigil install`` plus a
+    service restart, so it must NOT flag a rebuild."""
+    return [
+        install_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
+        install_root / "docker" / "callback_listener.py",
+        install_root / "docker" / "start-callback.sh",
+    ]
+
+
+def runtime_inputs_digest(install_root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in runtime_image_inputs(install_root):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes() if path.is_file() else b"<absent>")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def runtime_image_build_state(
+    install_root: Path, *, image: str = "vigil:latest", runner: docker.Runner = docker.run_command
+) -> str:
+    """Content-based build state: ``missing`` | ``stale`` | ``current`` |
+    ``unknown``. Compares the current baked-input digest to the digest stamped on
+    the image at build time, so it is NOT fooled by ``vigil install`` rewriting
+    file mtimes. An image built before digest stamping returns ``unknown``."""
+    if not docker.image_exists(image, runner=runner):
+        return "missing"
+    result = runner([
+        "docker", "image", "inspect", "-f",
+        '{{ index .Config.Labels "' + _RUNTIME_INPUTS_LABEL + '" }}', image,
+    ])
+    baked = (result.stdout or "").strip() if result.returncode == 0 else ""
+    if not baked or baked == "<no value>":
+        return "unknown"
+    return "current" if baked == runtime_inputs_digest(install_root) else "stale"
+
+
 def build_runtime(install_root: Path, *, variant: str = "full", dev: bool = False, runner: docker.Runner = docker.run_command_streaming) -> None:
     if variant == "lightweight" and not dev:
         raise SystemExit("The lightweight runtime is development-only. Re-run with --dev to build it.")
     dockerfile = install_root / "agent" / "docker" / ("runtime-lightweight" if variant == "lightweight" else "runtime-full") / "Dockerfile"
     image = "vigil-lightweight:latest" if variant == "lightweight" else "vigil:latest"
-    argv = ["docker", "build", "-t", image, "-f", str(dockerfile), str(install_root)]
+    argv = ["docker", "build", "-t", image, "-f", str(dockerfile)]
+    if variant == "full":
+        argv += ["--label", f"{_RUNTIME_INPUTS_LABEL}={runtime_inputs_digest(install_root)}"]
+    argv.append(str(install_root))
     docker.require_success(runner(argv), argv)
 
 
