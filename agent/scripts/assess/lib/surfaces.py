@@ -12,6 +12,11 @@ RESOLVABLE_STATUSES = frozenset({
     "partially-covered",
 })
 
+CATCH_ALL_SURFACE_TYPES = frozenset({
+    "misconfiguration",
+    "informational",
+})
+
 VALID_SURFACE_TYPES = frozenset({
     "auth_entry",
     "account_recovery",
@@ -21,7 +26,7 @@ VALID_SURFACE_TYPES = frozenset({
     "dynamic_render",
     "api_documentation",
     "workflow_token",
-})
+}) | CATCH_ALL_SURFACE_TYPES
 
 VALID_STATUSES = frozenset({
     "discovered",

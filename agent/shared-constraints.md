@@ -49,18 +49,28 @@ against scoped targets, `docker run` / `docker exec` against the runtime, and
 ad-hoc curl/nmap/sqlmap/etc. from the host. The host boundary is for
 orchestration, not target traffic.
 
-Target-facing dispatches run **synchronously by default**: one blocking
-`vigil assess kali <verb> ... --timeout N` at a time — no `run_in_background`,
-no `vigil assess kali job start`, no dtach, and no watcher/poll loop. A
-specialist must never background target traffic and then halt waiting for a
-completion notification: the harness auto-resumes the halted agent, which
-launches the next detached job and halts again, producing unbounded relaunch
-thrash and duplicate probes (the failure mode that stalled multiple recon
-dispatches — see the engagement post-mortem). A generous `--timeout` is the
-correct tool for a single long probe (`nmap+scripts`, `sqlmap`, `nuclei`
-sweep, `dirb`, `gobuster`, `ffuf` large wordlists): when it expires the audit
-pipeline cascades SIGTERM→SIGKILL into the in-container PID, so a synchronous
-call is killed cleanly and is never orphaned.
+Target-facing dispatches run **synchronously by default**: each
+`vigil assess kali <verb> ... --timeout N` call is blocking and awaited to
+completion in-band — no `run_in_background`, no `vigil assess kali job start`,
+no dtach, and no watcher/poll loop. A specialist must never background target
+traffic and then halt waiting for a completion notification: the harness
+auto-resumes the halted agent, which launches the next detached job and halts
+again, producing unbounded relaunch thrash and duplicate probes (the failure
+mode that stalled multiple recon dispatches — see the engagement post-mortem).
+A generous `--timeout` is the correct tool for a single long probe
+(`nmap+scripts`, `sqlmap`, `nuclei` sweep, `dirb`, `gobuster`, `ffuf` large
+wordlists): when it expires the audit pipeline cascades SIGTERM→SIGKILL into
+the in-container PID, so a synchronous call is killed cleanly and is never
+orphaned.
+
+**"Synchronous" means awaited-in-band, NOT one-call-at-a-time and NOT
+no-parallelism.** The ban is on the backgrounding / `dtach` / fire-and-forget /
+poll-for-completion-later patterns above — not on concurrency. Issuing several
+blocking calls in parallel, each awaited to completion in-band, is fine: the
+prohibited thing is detaching a job and reaping it later, not running more than
+one probe at once. (The operator likewise runs multiple specialists
+concurrently — synchronous execution inside each does not mean a single global
+in-flight call.)
 
 `vigil assess kali job start` — the SQLite-backed, dtach-supervised worker that
 survives calling-shell exit — is reserved for a **single** long-running sweep
@@ -221,7 +231,7 @@ emits the canonical schema and an example):
 
 Verbs **not** covered (skip the contract round-trip — they are read-only or
 have no payload to validate): `fetch`, `list-skills`, `list-clusters`,
-`list-command-runs`, `get-command-run`, `check-scope-coverage`,
+`list-command-runs`, `get-command-run`, `check-phase-readiness`,
 `filter-scope`, `work-buffer <db> stats|peek|fetch|done`,
 `dispatch list`, `dispatch get`. Reading the contract for these adds
 latency without preventing any error class.
@@ -496,6 +506,7 @@ These are the most commonly violated rules — internalize them before you start
 - **Named limit bypass is not automatically High.** For request caps, buffer limits, decompression limits, timeouts, and protocol negotiation limits, prove the limit is a security boundary and prove downstream second-order impact. If equivalent default transports already accept the same logical stream and downstream work is bounded and linear, downgrade to Medium/hardening or docs.
 - **No speculative language.** Write `An attacker can [exact action] by [exact method]`, never `could potentially`, `may allow`, or `might be possible`.
 - **No filler or padding.** Do not use `Furthermore`, `Additionally`, `It should be noted`, or similar filler transitions. Do not restate titles in descriptions. Do not define standard vulnerability classes to a security audience. Every sentence must contribute new information.
+- **Severity by structured field, not shouting or slang.** Convey severity through the `severity` field and the CVSS vector plus calm, precise prose. Do not use ALL-CAPS for emphasis to signal criticality and do not use casual / "reddit" severity language ("this is insane", "game over", "pwned hard"). A critical finding reads as a measured, exact description of the attacker outcome — that is more credible to a triager than capitalized adjectives. (Literal CLI tokens, flags, and enum values written in caps — `REQUIRED`, `IDOR`, `--force` — are vocabulary, not emphasis, and are unaffected.)
 - **Sibling rule.** When one route or method is vulnerable, inspect its siblings before moving on.
 - **Credentials require proof.** Leaked tokens or keys only matter when you show what they actually grant.
 - **Validate before writing.** Do not draft report content before the lead is reproducible and worth a human reader's time.
@@ -719,7 +730,7 @@ register <path> --finding <slug>` (or another entity link) before the dispatch
 closes. Unlinked markdown notes are scratch only and are not valid resume or
 report input — the operator can confirm a note is scratch with `vigil assess
 artifact mark-scratch <path>` (single) or `--under <prefix>` (bulk). A
-`check-report-readiness` `unlinked_markdown_note` blocker names the exact fix
+`check-phase-readiness --phase report` `unlinked_markdown_note` blocker names the exact fix
 per row.
 
 ### Mandatory closing sequence (every specialist runs this before returning)

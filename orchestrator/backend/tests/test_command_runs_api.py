@@ -989,16 +989,16 @@ def test_command_metadata_enum_permissive_accepts_unknown_technique(client, isol
     assert rows[0]["technique"] == "MADEUP"
 
 
-def test_command_metadata_intent_is_trimmed_to_200_chars(client, isolate_settings):
-    """Intent is trimmed server-side to 200 characters."""
+def test_command_metadata_intent_is_trimmed_to_400_chars(client, isolate_settings):
+    """Intent is trimmed server-side to 400 characters (L3-5)."""
     _write_engagement(isolate_settings["engagements_dir"])
-    long_intent = "A" * 500
+    long_intent = "A" * 600
     response = _post(client, _base_payload(intent=long_intent))
     assert response.status_code == 201, response.text
     created = response.json()
     assert created["intent"] is not None
-    assert len(created["intent"]) == 200
-    assert created["intent"] == "A" * 200
+    assert len(created["intent"]) == 400
+    assert created["intent"] == "A" * 400
 
 
 # ──────────────────────────────────────────────────────────────────────────

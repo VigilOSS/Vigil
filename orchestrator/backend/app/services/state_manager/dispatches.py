@@ -61,6 +61,9 @@ def record_dispatch(
     finding_slugs: list[str] | None = None,
     skills: str | None = None,
     tier: str | None = None,
+    scope_path_prefix: str | None = None,
+    vuln_classes: str | None = None,
+    identity: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not (agent_id or "").strip():
@@ -70,6 +73,9 @@ def record_dispatch(
     findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
     skills_value = (skills or "").strip() or None
     tier_value = (tier or "").strip() or None
+    scope_path_prefix_value = (scope_path_prefix or "").strip() or None
+    vuln_classes_value = (vuln_classes or "").strip() or None
+    identity_value = (identity or "").strip() or None
     requested_model_value = requested_model if requested_model is not None else model
     requested_reasoning_value = requested_reasoning if requested_reasoning is not None else reasoning
     with _common.get_connection() as connection:
@@ -89,8 +95,9 @@ def record_dispatch(
                 engagement_id, agent_id, agent_role, task, scope_host,
                 dispatched_at, status, model, reasoning,
                 requested_model, actual_model, requested_reasoning, actual_reasoning,
-                dispatch_mode, finding_slugs_json, skills, tier
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dispatch_mode, finding_slugs_json, skills, tier,
+                scope_path_prefix, vuln_classes, identity
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -110,6 +117,9 @@ def record_dispatch(
                 findings_json,
                 skills_value,
                 tier_value,
+                scope_path_prefix_value,
+                vuln_classes_value,
+                identity_value,
             ),
         )
         row = connection.execute(

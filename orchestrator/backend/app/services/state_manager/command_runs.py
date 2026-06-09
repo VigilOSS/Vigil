@@ -507,10 +507,7 @@ def record_command_run(
         intent_value = None
     else:
         intent_stripped = str(intent).strip()
-        # Trim to 200 chars server-side — the contract in the plan. The API
-        # layer does not enforce max_length because this is the single
-        # authoritative trim point.
-        intent_value = intent_stripped[:200] or None
+        intent_value = intent_stripped[:400] or None
 
     probe_kind_value: str | None
     if probe_kind is None:

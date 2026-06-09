@@ -30,15 +30,51 @@ class CoverageStatus(enum.StrEnum):
 
 # Raw operator-input synonyms → canonical members. Keys stay plain strings
 # (e.g. "done", "n/a") because they are non-member inputs we accept on the wire.
+#
 _COVERAGE_STATUS_SYNONYMS = {
     "done": CoverageStatus.COVERED,
     "not-applicable": CoverageStatus.NOT_APPLICABLE,
     "n/a": CoverageStatus.NOT_APPLICABLE,
-    "tested": CoverageStatus.COVERED,
 }
 
 # Derived membership set (frozenset of members, NOT an alias of the class).
 COVERAGE_STATUSES = frozenset(CoverageStatus)
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+PROBE_RESULT_STATUSES: tuple[str, ...] = (
+    "tested",
+    "signal",
+    "attempted",
+    "blocked",
+    "error",
+    "no-signal",
+)
+
+PROBE_RESULT_STATUSES_COVERING: frozenset[str] = frozenset({"tested", "signal"})
+
+PROBE_RESULT_STATUS_DEFAULT = "tested"
+
+
+def _normalize_probe_result_status(value: str) -> str:
+    """Validate a probe ``result_status`` against the canonical vocabulary.
+
+    Unknown statuses are rejected (400) rather than silently stored, so the
+    free-text column can never drift into an un-interpretable value that a
+    later gate has to guess about. Empty input falls back to the default.
+    """
+    status_value = (value or "").strip().lower()
+    if not status_value:
+        return PROBE_RESULT_STATUS_DEFAULT
+    if status_value not in PROBE_RESULT_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"invalid probe result_status: {value!r}; "
+                f"allowed: {', '.join(PROBE_RESULT_STATUSES)}"
+            ),
+        )
+    return status_value
 
 def _normalize_coverage_status(value: str) -> CoverageStatus:
     status_value = (value or "pending").strip().lower()
@@ -366,6 +402,9 @@ def _probe_key(
     payload_family: str,
     payload_value: str,
     tool_name: str,
+    target_host: str = "",
+    target_path: str = "",
+    target_port: int | None = None,
 ) -> tuple[str, str]:
     payload_hash = hashlib.sha256(payload_value.encode("utf-8")).hexdigest() if payload_value else ""
     probe_key = hashlib.sha256(
@@ -380,6 +419,9 @@ def _probe_key(
                 "payload_family": payload_family,
                 "payload_hash": payload_hash,
                 "tool_name": tool_name,
+                "target_host": target_host,
+                "target_path": target_path,
+                "target_port": target_port,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -406,7 +448,11 @@ def _upsert_probe_run(
     signal_type: str,
     evidence_ref: str,
     notes: str,
+    target_host: str = "",
+    target_path: str = "",
+    target_port: int | None = None,
 ) -> dict[str, Any]:
+    result_status = _normalize_probe_result_status(result_status)
     payload_hash, probe_key = _probe_key(
         request_variant_id=request_variant_id,
         service_id=service_id,
@@ -417,21 +463,27 @@ def _upsert_probe_run(
         payload_family=payload_family,
         payload_value=payload_value,
         tool_name=tool_name,
+        target_host=target_host,
+        target_path=target_path,
+        target_port=target_port,
     )
     connection.execute(
         """
         INSERT INTO assessment_probe_runs (
             engagement_id, request_variant_id, service_id, coverage_item_id, auth_context, input_slot, attack_family,
             payload_family, payload_value_hash, probe_key, tool_name, agent_name, result_status,
-            observed_http_status, signal_type, evidence_ref, notes
+            observed_http_status, signal_type, evidence_ref, notes, target_host, target_path, target_port
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(engagement_id, probe_key) DO UPDATE SET
             agent_name = COALESCE(NULLIF(excluded.agent_name, ''), assessment_probe_runs.agent_name),
             result_status = excluded.result_status,
             observed_http_status = COALESCE(excluded.observed_http_status, assessment_probe_runs.observed_http_status),
             signal_type = COALESCE(NULLIF(excluded.signal_type, ''), assessment_probe_runs.signal_type),
             evidence_ref = COALESCE(NULLIF(excluded.evidence_ref, ''), assessment_probe_runs.evidence_ref),
+            target_host = COALESCE(NULLIF(excluded.target_host, ''), assessment_probe_runs.target_host),
+            target_path = COALESCE(NULLIF(excluded.target_path, ''), assessment_probe_runs.target_path),
+            target_port = COALESCE(excluded.target_port, assessment_probe_runs.target_port),
             notes = CASE
                 WHEN excluded.notes = '' THEN assessment_probe_runs.notes
                 WHEN assessment_probe_runs.notes = '' THEN excluded.notes
@@ -456,6 +508,9 @@ def _upsert_probe_run(
             signal_type,
             evidence_ref,
             notes,
+            target_host,
+            target_path,
+            target_port,
         ),
     )
     row = connection.execute(
@@ -811,6 +866,7 @@ def record_coverage_item(
     attack_family: str,
     status_value: str,
     notes: str,
+    preserve_existing_status: bool = True,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -824,6 +880,7 @@ def record_coverage_item(
             attack_family=attack_family,
             status_value=status_value,
             notes=notes,
+            preserve_existing_status=preserve_existing_status,
         )
 
 def list_coverage_items(engagement_id: int) -> list[dict[str, Any]]:
@@ -867,6 +924,9 @@ def record_probe_run(
     signal_type: str,
     evidence_ref: str,
     notes: str,
+    target_host: str = "",
+    target_path: str = "",
+    target_port: int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -888,6 +948,9 @@ def record_probe_run(
             signal_type=signal_type,
             evidence_ref=evidence_ref,
             notes=notes,
+            target_host=target_host,
+            target_path=target_path,
+            target_port=target_port,
         )
 
 def list_probe_runs(engagement_id: int) -> list[dict[str, Any]]:
@@ -1083,36 +1146,183 @@ def update_surface(
         assert row is not None
         return dict(row)
 
+HIGH_RISK_DEFERRED_SURFACE_TYPES: frozenset[str] = frozenset(
+    {"account_recovery", "dynamic_render", "object_reference", "privileged_write"}
+)
+
+
+def _active_finding_hosts(engagement_id: int) -> set[str]:
+    """Hosts that carry at least one ACTIVE (reportable, non-draft) finding.
+
+    Surfaces have no FK to findings (depth-gate S16), so "this surface is
+    linked to an active finding" is resolved by matching the surface's host to
+    a reportable finding's ``canonical_location`` host. Draft / false-positive /
+    merged findings are excluded — only a finding the engagement is actually
+    standing behind makes its surface a real (non-advisory) blocker (L1-2).
+    """
+    reportable_statuses = (
+        "active",
+        "blocked",
+        "exploited",
+        "contained",
+        "eradicated",
+        "recovered",
+        "reported",
+    )
+    engagement = _engagement_or_404(engagement_id)
+    placeholders = ", ".join("?" for _ in reportable_statuses)
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            f"SELECT canonical_location FROM assessment_findings "
+            f"WHERE engagement_id = ? AND status IN ({placeholders})",
+            (engagement.id, *reportable_statuses),
+        ).fetchall()
+    hosts: set[str] = set()
+    for row in rows:
+        host = _coverage_endpoint_host(str(row["canonical_location"] or ""))
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+def _surface_is_finding_linked(surface: dict[str, Any], active_hosts: set[str]) -> bool:
+    host = _coverage_endpoint_host(str(surface.get("target_descriptor") or ""))
+    return bool(host) and host in active_hosts
+
+
+def _deferral_exempt_surface_types(engagement_id: int) -> set[str]:
+    """Surface types an operator has exempted from the high-risk deferral block
+    via a recorded engagement-wide policy decision (L1-10).
+
+    The policy is a durable ``surface_deferral_exemption`` decision row whose
+    payload lists ``surface_types`` (or ``surface_type``). This is the bounded,
+    visible escape valve the doctrine requires — an exemption is an audited
+    decision, not a transient ``--force`` flag.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    exempt: set[str] = set()
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            "SELECT * FROM assessment_dispatch_decisions "
+            "WHERE engagement_id = ? AND kind = ? AND resolved = 0",
+            (engagement.id, "surface_deferral_exemption"),
+        ).fetchall()
+    for row in rows:
+        payload = _serialize_decision(row).get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        names = payload.get("surface_types")
+        if isinstance(names, str):
+            names = [names]
+        if not isinstance(names, list):
+            single = payload.get("surface_type")
+            names = [single] if isinstance(single, str) else []
+        for name in names:
+            if isinstance(name, str) and name.strip():
+                exempt.add(name.strip())
+    return exempt
+
+
+def _partial_followup_resolved(surface: dict[str, Any]) -> bool:
+    """True when a ``partially-covered`` surface's follow-up is satisfied so it
+    should stop blocking (L1-9 accept-partial path).
+
+    Resolution is recorded durably on the surface itself: clearing the
+    ``followup_condition`` (the follow-up was met — mirrors the existing
+    "covered clears followup_condition" transition in ``update_surface``) marks
+    the partial as accepted. An empty ``followup_condition`` on a
+    partially-covered surface therefore means "the follow-up obligation is
+    resolved" and the surface no longer blocks; a still-present condition keeps
+    it as an advisory item.
+    """
+    return not str(surface.get("followup_condition") or "").strip()
+
+
 def coverage_readiness(engagement_id: int) -> dict[str, Any]:
+    """Surface-coverage readiness for the web/code/blue tracks.
+
+    NOTE (cross-track invariant): this function is shared and NOT
+    engagement_type-gated. The CODE track has no surfaces, so ``list_surfaces``
+    returns ``[]`` and every bucket below is empty → ``ready=True`` trivially.
+    The return SHAPE is load-bearing (``report_readiness`` relays ``ready`` /
+    ``blocker_count`` and the surface buckets); keys are preserved. Wave-2
+    softening (L1-2/L1-9/L1-10) only changes WHICH surfaces count toward
+    ``blocker_count`` and adds advisory buckets — it never changes the shape.
+    """
     surfaces = list_surfaces(engagement_id)
-    unresolved = [row for row in surfaces if row.get("status") == "discovered"]
-    partially_covered = [
-        row for row in surfaces if row.get("status") == "partially-covered"
-    ]
-    high_risk_deferred = [
+
+    if not surfaces:
+        return {
+            "ready": True,
+            "blocker_count": 0,
+            "unresolved_surfaces": [],
+            "partially_covered_surfaces": [],
+            "high_risk_deferred_surfaces": [],
+            "advisory_surfaces": [],
+        }
+
+    active_hosts = _active_finding_hosts(engagement_id)
+    exempt_types = _deferral_exempt_surface_types(engagement_id)
+
+    discovered = [row for row in surfaces if row.get("status") == "discovered"]
+    partial = [row for row in surfaces if row.get("status") == "partially-covered"]
+    deferred_high_risk = [
         row
         for row in surfaces
         if row.get("status") == "deferred"
-        and row.get("surface_type") in {"account_recovery", "dynamic_render", "object_reference", "privileged_write"}
+        and row.get("surface_type") in HIGH_RISK_DEFERRED_SURFACE_TYPES
     ]
-    blocker_count = len(unresolved) + len(partially_covered) + len(high_risk_deferred)
+
+    unresolved_blocking = [
+        row for row in discovered if _surface_is_finding_linked(row, active_hosts)
+    ]
+    unresolved_advisory = [
+        row for row in discovered if not _surface_is_finding_linked(row, active_hosts)
+    ]
+
+    partial_blocking: list[dict[str, Any]] = []
+    partial_advisory: list[dict[str, Any]] = []
+    for row in partial:
+        if _partial_followup_resolved(row):
+            partial_advisory.append(row)
+        elif _surface_is_finding_linked(row, active_hosts):
+            partial_blocking.append(row)
+        else:
+            partial_advisory.append(row)
+
+    deferred_blocking = [
+        row
+        for row in deferred_high_risk
+        if row.get("surface_type") not in exempt_types
+    ]
+    deferred_advisory = [
+        row
+        for row in deferred_high_risk
+        if row.get("surface_type") in exempt_types
+    ]
+
+    blocker_count = (
+        len(unresolved_blocking) + len(partial_blocking) + len(deferred_blocking)
+    )
+    advisory_surfaces = (
+        unresolved_advisory + partial_advisory + deferred_advisory
+    )
+
     return {
         "ready": blocker_count == 0,
         "blocker_count": blocker_count,
-        "unresolved_surfaces": unresolved,
-        "partially_covered_surfaces": partially_covered,
-        "high_risk_deferred_surfaces": high_risk_deferred,
+        "unresolved_surfaces": unresolved_blocking,
+        "partially_covered_surfaces": partial_blocking,
+        "high_risk_deferred_surfaces": deferred_blocking,
+        "advisory_surfaces": advisory_surfaces,
     }
 
-# ---------------------------------------------------------------------------
 # C40 — outcome-based per-host coverage projection
-#
 # The five sub-objectives the recon phase nominally produces per host. None of
 # them check `assessment_command_runs` — every signal is a row in an outcome
 # table the specialists are already writing to. That is the contract: rename
 # wafw00f → wafw00f-ng tomorrow and the gate keeps working as long as the
 # tech-component row still gets recorded.
-# ---------------------------------------------------------------------------
 
 
 PER_HOST_OBJECTIVES: tuple[str, ...] = (
@@ -1170,7 +1380,7 @@ _NON_LIVE_SERVICE_STATES_FOR_INVENTORY: frozenset[str] = frozenset(
 def _coverage_endpoint_host(endpoint: str) -> str:
     """Lowercased host portion of a service endpoint or surface descriptor.
 
-    Mirrors `_endpoint_host` in `check_scope_coverage.py` but the CLI version
+    Mirrors `_endpoint_host` in `lib/coverage_checks.py` but the CLI version
     cannot be imported here. Keep the two in sync — they extract the same
     host string from the same shapes (bare host, host:port, full URL).
     """
@@ -1620,6 +1830,17 @@ def update_coverage_item_status(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     normalized_status = _normalize_coverage_status(status_value)
+    if normalized_status in {CoverageStatus.COVERED, CoverageStatus.NOT_APPLICABLE} and not (
+        notes and notes.strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"a non-empty rationale (notes) is required to mark a coverage "
+                f"item '{normalized_status}'; 'covered' must mean tested with a "
+                "stated reason"
+            ),
+        )
     with _common.get_connection() as connection:
         row = connection.execute(
             "SELECT * FROM assessment_coverage_items WHERE id = ? AND engagement_id = ?",

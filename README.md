@@ -285,7 +285,7 @@ transcript pasting:
   for FTS, and links to a finding/chain/surface/request-variant/command-run.
   `search` is FTS over previews + paths + linked finding slugs.
   `mark-scratch <path-or-id>` dismisses a registered note as scratch so
-  `check-report-readiness` no longer blocks on it (the escape valve for operator or
+  `check-phase-readiness --phase report` no longer blocks on it (the escape valve for operator or
   specialist working notes that are not durable engagement memory).
 - `vigil assess agent close <agent-id>`
   — close an in-progress dispatch when its handoff is `ready` or `blocked`. Records a

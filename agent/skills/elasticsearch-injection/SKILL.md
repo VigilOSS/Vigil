@@ -2,6 +2,7 @@
 name: elasticsearch-injection
 description: Elasticsearch and Lucene query injection — query_string abuse, field enumeration, cross-index access, and data extraction via search syntax
 origin: Vigil
+vuln_class: elasticsearch-injection
 ---
 
 # Elasticsearch / Lucene Injection Testing

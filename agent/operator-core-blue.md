@@ -563,7 +563,7 @@ list and name which gate is satisfied before claiming completion.
 - [ ] **Tenant ref `known-benign register` updated** for every benign pattern discovered during respond. ir-lead's final handoff lists the patterns and the tenant-ref path; operator commits the update.
 - [ ] **Cross-platform correlation gaps documented or closed.** Multi-platform engagements list any unresolved gaps in the report's "Known Limitations" section.
 - [ ] **A final closeout artifact exists.** False-positive/no-incident paths register `closeout.md` as `kind=ir_closeout`; verified incidents register `report.md` as `kind=ir_evidence`.
-- [ ] **Blue transition gates are clean.** `vigil assess transition-phase report` and `vigil assess transition-phase complete` run without `--force`; do not rely on generic red `check-report-readiness` for containment semantics.
+- [ ] **Blue transition gates are clean.** `vigil assess transition-phase report` and `vigil assess transition-phase complete` run without `--force`; do not rely on generic red `check-phase-readiness --phase report` for containment semantics.
 - [ ] **No `evidence_type='theoretical'` findings without `chain_required=true` or an explicit operator deferral.** Theoretical blue findings are unusual — most blue findings should carry `evidence_type=telemetry_corroborated` or `reproduced`. Theoretical findings need either a follow-up investigator pass scheduled or a written rationale for shipping them as-is.
 
 ## Handoff Reference

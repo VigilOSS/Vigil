@@ -314,12 +314,54 @@ def test_patch_surface_resolves_to_partially_covered_with_followup(client, isola
     assert body["followup_condition"] == "needs auth re-test once credentials are issued"
 
 
-def test_partially_covered_surface_blocks_coverage_readiness(client, isolate_settings):
-    """partially-covered records still need follow-up, so coverage and report
-    readiness must count them as blockers."""
+def test_partially_covered_surface_not_finding_linked_is_advisory(client, isolate_settings):
+    """L1-2/L1-9 — a partially-covered surface with an OPEN follow-up but NO
+    linked active finding is ADVISORY, not a hard coverage blocker. It is
+    surfaced in ``advisory_surfaces`` so the operator still sees it, but it does
+    not flip ``ready`` to False (which would block forever with no escape)."""
     _seed_engagement(client, isolate_settings)
     created = _create_surface(client)
     surface_id = created["id"]
+
+    response = client.patch(
+        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
+        json={
+            "status": "partially-covered",
+            "rationale": "unauth path tested; admin path still pending auth",
+            "followup_condition": "needs auth re-test once credentials are issued",
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    coverage = client.get(f"{ASSESSMENT_BASE}/coverage-readiness")
+    assert coverage.status_code == 200, coverage.text
+    coverage_body = coverage.json()
+    assert coverage_body["ready"] is True
+    assert coverage_body["blocker_count"] == 0
+    assert coverage_body["partially_covered_surfaces"] == []
+    assert [row["id"] for row in coverage_body["advisory_surfaces"]] == [surface_id]
+
+
+def test_partially_covered_surface_linked_to_active_finding_blocks(client, isolate_settings):
+    """L1-2 — a partially-covered surface DOES block when it is linked to an
+    active (reportable) finding on the same host: the finding makes the residual
+    follow-up load-bearing."""
+    _seed_engagement(client, isolate_settings)
+    created = _create_surface(client)
+    surface_id = created["id"]
+
+    finding = {
+        "slug": "VA-101",
+        "title": "IDOR on users endpoint",
+        "severity": "high",
+        "workflow_status": "active",
+        "canonical_location": "https://example.test/api/users/1",
+        "summary": "IDOR",
+        "evidence_ref": "findings.md",
+        "source_name": "test",
+    }
+    resp = client.post(f"{ASSESSMENT_BASE}/findings", json=finding)
+    assert resp.status_code in {200, 201}, resp.text
 
     response = client.patch(
         f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
@@ -341,12 +383,6 @@ def test_partially_covered_surface_blocks_coverage_readiness(client, isolate_set
     report = client.get(f"{ASSESSMENT_BASE}/report-readiness")
     assert report.status_code == 200, report.text
     assert report.json()["ready"] is False
-
-    summary = client.get(f"{ASSESSMENT_BASE}/summary")
-    assert summary.status_code == 200, summary.text
-    summary_body = summary.json()
-    assert summary_body["coverage_blocker_count"] == 1
-    assert summary_body["open_surface_count"] == 1
 
 
 def test_patch_surface_partially_covered_requires_followup_condition(client, isolate_settings):

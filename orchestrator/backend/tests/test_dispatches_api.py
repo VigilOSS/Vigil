@@ -229,6 +229,37 @@ def test_dispatch_specialist_requires_skills(client, isolate_settings) -> None:
     assert "skills is required" in bad.text
 
 
+def test_dispatch_allow_no_skills_accepts_skill_less_specialist(client, isolate_settings) -> None:
+    """L2-2 / L3-6: allow_no_skills=true lets an ad-hoc specialist dispatch
+    through instead of 422'ing on the missing skills audit."""
+    _seed(client, isolate_settings)
+    resp = client.post(f"{BASE}/dispatches", json={
+        "agent_id": "ADHOC-1",
+        "agent_role": "vulnerability-analyst",
+        "allow_no_skills": True,
+    })
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["agent_id"] == "ADHOC-1"
+    assert "allow_no_skills" not in resp.json()
+
+
+def test_dispatch_unknown_dispatch_mode_stored_as_text(client, isolate_settings) -> None:
+    """L2-4: a newly-coined dispatch_mode is stored as free text rather than
+    422'd by a closed enum."""
+    _seed(client, isolate_settings)
+    resp = client.post(f"{BASE}/dispatches", json={
+        "agent_id": "NEWMODE-1",
+        "agent_role": "vulnerability-analyst",
+        "skills": "idor-testing",
+        "dispatch_mode": "freshly-coined-mode",
+    })
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["dispatch_mode"] == "freshly-coined-mode"
+    fetched = client.get(f"{BASE}/dispatches/NEWMODE-1")
+    assert fetched.status_code == 200
+    assert fetched.json()["dispatch_mode"] == "freshly-coined-mode"
+
+
 def test_dispatch_operator_role_skills_optional(client, isolate_settings) -> None:
     """Operator coordinates phases and is exempt from the skills requirement."""
     _seed(client, isolate_settings)
@@ -310,3 +341,56 @@ def test_dispatch_requested_actual_fields_post_get_list(client, isolate_settings
         "actual_reasoning",
     ):
         assert listed[0][key] == posted[key]
+
+
+def test_dispatch_structured_depth_metadata_round_trips(client, isolate_settings) -> None:
+    """Wave 6b — scope_path_prefix / vuln_classes / identity persist + read back.
+
+    These are the structured signals the depth ledger matches dispatches on
+    (depth-gate §5.3); they must round-trip through POST -> GET one -> list.
+    """
+    _seed(client, isolate_settings)
+    payload = {
+        "agent_id": "AG-DEPTH-1",
+        "agent_role": "vulnerability-analyst",
+        "task": "Deep IDOR pass on the giving app",
+        "scope_host": "rock.example.com",
+        "scope_path_prefix": "/giving",
+        "vuln_classes": "idor,bola,sqli",
+        "identity": "user_a",
+        "skills": "idor-testing",
+    }
+    resp = client.post(f"{BASE}/dispatches", json=payload)
+    assert resp.status_code == 201, resp.text
+    row = resp.json()
+    assert row["scope_path_prefix"] == "/giving"
+    assert row["vuln_classes"] == "idor,bola,sqli"
+    assert row["identity"] == "user_a"
+
+    fetched = client.get(f"{BASE}/dispatches/AG-DEPTH-1").json()
+    assert fetched["scope_path_prefix"] == "/giving"
+    assert fetched["vuln_classes"] == "idor,bola,sqli"
+    assert fetched["identity"] == "user_a"
+
+    listed = client.get(f"{BASE}/dispatches").json()
+    assert listed[0]["scope_path_prefix"] == "/giving"
+    assert listed[0]["vuln_classes"] == "idor,bola,sqli"
+    assert listed[0]["identity"] == "user_a"
+
+
+def test_dispatch_structured_depth_metadata_optional(client, isolate_settings) -> None:
+    """The new fields are optional — a dispatch without them stores NULL."""
+    _seed(client, isolate_settings)
+    resp = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "AG-DEPTH-2",
+            "agent_role": "vulnerability-analyst",
+            "skills": "sql-injection",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    row = resp.json()
+    assert row["scope_path_prefix"] is None
+    assert row["vuln_classes"] is None
+    assert row["identity"] is None

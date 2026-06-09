@@ -28,6 +28,8 @@ import re
 import sqlite3
 from typing import Any
 
+from . import vuln_taxonomy
+
 
 # gf-style bucket weights. Higher = more likely to yield exploitable signal.
 # Each tuple is (name, weight, parameter-key set, path-fragment tuple). A
@@ -246,37 +248,15 @@ _PATH_OBJECT_REF_SEGMENT = re.compile(
     r"|[0-9a-f]{24,})(?:/|$)"
 )
 
-# gf-bucket -> vulnerability-class skill(s). SINGLE SOURCE OF TRUTH for the
-# "which specialist skill tests this surface" mapping, kept HERE next to the
-# `_BUCKETS` table it keys off so adding a bucket + its skill is one edit in
-# one file. The redispatch recommender in
-# `assess/commands/check_scope_coverage.py` imports this to turn a consumption
 # coverage gap into a concrete `--skills` list.
 #
 # Every value is the bare skill name — the directory under `agent/skills/<name>/`
 # that holds a `SKILL.md`. The recommender validates each name resolves on disk
-# and drops (with a note) any that does not, so a typo here degrades to "skill
 # dropped" rather than recommending a nonexistent skill.
 #
-# Coverage rule: every NON-inert bucket that names a recognizable vuln class
-# SHOULD map to at least one skill. Generic/ambiguous buckets
-# (`interestingparams`, `interestingext`, `trust_surface`, `debug_logic`) are
 # intentionally absent — they are signal that the dominant-bucket tally is
-# ambiguous, which the recommender surfaces as a low-confidence shortlist
-# rather than a forced single-skill guess.
-BUCKET_SKILLS: dict[str, tuple[str, ...]] = {
-    "idor": ("idor-testing", "split-brain-idor"),
-    "sqli": ("sqli-testing",),
-    "ssrf": ("ssrf-testing",),
-    "xss": ("xss-testing",),
-    "ssti": ("ssti-testing",),
-    "lfi": ("file-inclusion",),
-    "img_traversal": ("file-inclusion",),
-    "rce": ("command-injection",),
-    "redirect": ("open-redirect-testing",),
-    "cors": ("cors-testing",),
-    "upload_fields": ("file-upload-testing",),
-}
+#
+BUCKET_SKILLS: dict[str, tuple[str, ...]] = vuln_taxonomy.derive_bucket_skills()
 
 
 # Types that carry no exploitable surface on their own.
@@ -294,12 +274,11 @@ BUCKET_SKILLS: dict[str, tuple[str, ...]] = {
 # - `agent/scripts/assess/commands/classify_work.py` reads it to scope the
 #   `--reclassify-all` WHERE clause to the same set the inline classifier
 #   skips on insert.
-#
 # Adding a new inert type means editing this one place — every consumer
 # picks it up automatically. Hand-maintained copies in any of those files
 # are a drift hazard.
 INERT_TYPES: frozenset[str] = frozenset(
-    {"image", "video", "font", "archive", "sourcemap", "manifest"}
+    {"image", "video", "font", "archive", "manifest"}
 )
 
 # Backwards-compatible alias for the previous private name; new code should
@@ -349,15 +328,19 @@ def reason_tag_of(terminal_reason: str | None) -> str:
 
 _UPLOAD_GENERIC_SHADOWS = frozenset({"lfi", "idor"})
 
+_INTERESTINGEXT_WEIGHT: int = next(
+    weight for name, weight, _, _ in _BUCKETS if name == "interestingext"
+)
+
 
 def classify_row(row: sqlite3.Row) -> dict[str, Any]:
     """Return the per-row assignment dict (always present, never None).
 
-    Inert types (image/video/font/archive/sourcemap/manifest) are stamped
-    with `terminal_reason='inert_type'` so `fetch-by-priority` can skip them
-    with a single predicate. For every other row the highest-weight matching
-    bucket wins; the path fallback gives operators a coarse grouping when
-    no bucket fires.
+    Inert types (image/video/font/archive/manifest) are stamped with
+    `terminal_reason='inert_type'` so `fetch-by-priority` can skip them with a
+    single predicate. For every other row the highest-weight matching bucket
+    wins; the path fallback gives operators a coarse grouping when no bucket
+    fires.
     """
     case_type = (row["type"] or "").lower()
     if case_type in _INERT_TYPES:
@@ -366,6 +349,16 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
             "priority_reason": None,
             "cluster_key": f"type:{case_type}",
             "terminal_reason": "inert_type",
+            "matched_buckets": [],
+        }
+
+    if case_type == "sourcemap":
+        return {
+            "priority_score": _INTERESTINGEXT_WEIGHT,
+            "priority_reason": "gf:interestingext",
+            "cluster_key": "gf:interestingext",
+            "terminal_reason": None,
+            "matched_buckets": ["interestingext"],
         }
 
     if case_type == "host_root":
@@ -379,6 +372,7 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
             "priority_reason": None,
             "cluster_key": "type:host_root",
             "terminal_reason": None,
+            "matched_buckets": [],
         }
 
     url_path = row["url_path"] or ""
@@ -402,11 +396,16 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
         top_buckets = [name for name, weight in matches if weight == best_weight]
         best_name = select_cluster_bucket(case_type, matches, top_buckets[0])
         reason = "+".join(f"gf:{name}" for name, _ in matches)
+        matched_buckets: list[str] = []
+        for name, _ in matches:
+            if name not in matched_buckets:
+                matched_buckets.append(name)
         return {
             "priority_score": best_weight,
             "priority_reason": reason,
             "cluster_key": f"gf:{best_name}",
             "terminal_reason": None,
+            "matched_buckets": matched_buckets,
         }
 
     return {
@@ -414,6 +413,7 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
         "priority_reason": None,
         "cluster_key": f"path:{first_two_path_segments(url_path)}",
         "terminal_reason": None,
+        "matched_buckets": [],
     }
 
 
@@ -474,6 +474,33 @@ def expand_compound_key(key: str) -> set[str]:
     return tokens
 
 
+_FRAGMENT_BOUNDARY = r"(?=[/?#=&]|$)"
+_fragment_pattern_cache: dict[str, "re.Pattern[str]"] = {}
+
+
+def _fragment_pattern(fragment: str) -> "re.Pattern[str]":
+    """Return a cached, boundary-anchored regex for a risk path fragment.
+
+    The fragment is matched literally but must be followed by a segment
+    boundary, so `/admin` matches `/admin` and `/admin/users` but NOT
+    `/administration-guide`, and `.env` matches `/.env` / `/app/.env?x` but NOT
+    `.environment`. A trailing slash on the fragment is the boundary itself, so
+    it is dropped before anchoring (`/proxy/` → `/proxy` + boundary).
+    """
+    cached = _fragment_pattern_cache.get(fragment)
+    if cached is not None:
+        return cached
+    core = fragment[:-1] if fragment.endswith("/") and len(fragment) > 1 else fragment
+    pattern = re.compile(re.escape(core) + _FRAGMENT_BOUNDARY)
+    _fragment_pattern_cache[fragment] = pattern
+    return pattern
+
+
+def fragment_in_path(fragment: str, url_path_lower: str) -> bool:
+    """True when `fragment` occurs in `url_path_lower` at a segment boundary."""
+    return _fragment_pattern(fragment).search(url_path_lower) is not None
+
+
 def bucket_matches(url_path_lower: str, keys: set[str]) -> list[tuple[str, int]]:
     """Return matching buckets in declaration order.
 
@@ -484,7 +511,9 @@ def bucket_matches(url_path_lower: str, keys: set[str]) -> list[tuple[str, int]]
     matches: list[tuple[str, int]] = []
     for name, weight, key_set, path_fragments in _BUCKETS:
         key_hit = bool(keys & key_set) if key_set else False
-        path_hit = any(fragment in url_path_lower for fragment in path_fragments)
+        path_hit = any(
+            fragment_in_path(fragment, url_path_lower) for fragment in path_fragments
+        )
         if key_hit or path_hit:
             matches.append((name, weight))
     return matches
