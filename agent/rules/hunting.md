@@ -234,3 +234,25 @@ specific endpoint to capture the request/response that becomes the finding
 evidence. That follow-up `curl` is not "noisy curl that should have been a
 tool" — it is the surgical capture step the tool cannot perform. Keep
 doing them.
+
+## A URL can be a whole application — go deep on app units
+
+A single host often carries several distinct applications under different
+path-prefixes — `host/giving` (a donations app), `host/admin` (tenant
+admin), `host/api/v2` (a REST surface). Each is its own **app unit**
+`(host, port-class, path-prefix)` with its own auth model and attack
+surface. A shallow pass over many hosts that glances at each prefix hides
+that an entire application went untested — exactly the failure this harness
+exists to catch.
+
+The backend scores each app unit (structure × risk − suppressors) and marks
+the ones worth a dedicated deep campaign as `deep_required`. The score is an
+**advisory** signal, not a wall — it tells you where to dig, it does not
+block you. Inspect it with `vigil assess app-unit list`; re-run discovery
+after more collection with `vigil assess app-unit score`. When you know a
+unit deserves (or does not deserve) a deep pass regardless of the score, set
+a durable manual override with `vigil assess app-unit mark-deep <id>
+--reason ...` or `vigil assess app-unit clear-deep <id> --reason ...` — a
+manual mark always wins over the scorer. Treat a `deep_required` unit as a
+whole application: a dedicated dispatch across every applicable vuln class
+and auth context, not a single surface glance.

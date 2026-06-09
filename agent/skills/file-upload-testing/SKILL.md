@@ -2,6 +2,7 @@
 name: file-upload-testing
 description: File upload vulnerability testing — webshells, bypass, path traversal
 origin: Vigil
+vuln_class: file-upload
 ---
 
 # File Upload Vulnerability Testing

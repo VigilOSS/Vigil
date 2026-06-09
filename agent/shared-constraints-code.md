@@ -311,7 +311,7 @@ For code findings, put code-specific proof fields under finding `details`: `cwe_
 the backend derives `file_id` from that queue item and rejects mismatches when `file_id` is
 supplied as an optional consistency check.
 
-**Report-readiness mandate:** `check-report-readiness` blocks the final report if any
+**Report-readiness mandate:** `check-phase-readiness --phase report` blocks the final report if any
 verified finding is missing `cvss_score`, `cvss_vector`, `steps_to_reproduce`,
 `remediation`, `impact`, or `evidence`. Include all six fields at recording time so
 findings pass readiness without a remediation loop. CVSS must align with severity per

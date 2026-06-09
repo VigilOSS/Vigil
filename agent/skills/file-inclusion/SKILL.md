@@ -2,6 +2,7 @@
 name: file-inclusion
 description: Detect and exploit local and remote file inclusion vulnerabilities for sensitive data access and code execution
 origin: Vigil
+vuln_class: lfi, rfi, path-traversal, img-traversal
 ---
 
 # File Inclusion Testing

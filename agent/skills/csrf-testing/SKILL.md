@@ -2,6 +2,7 @@
 name: csrf-testing
 description: Cross-site request forgery testing for state-changing operations
 origin: Vigil
+vuln_class: csrf
 ---
 
 # CSRF Testing (Cross-Site Request Forgery)

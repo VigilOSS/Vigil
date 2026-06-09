@@ -2,6 +2,7 @@
 name: race-condition-testing
 description: Race condition and TOCTOU exploitation — parallel request attacks
 origin: Vigil
+vuln_class: race-condition
 ---
 
 # Race Condition / TOCTOU Testing

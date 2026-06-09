@@ -2,6 +2,7 @@
 name: saml-sso-testing
 description: SAML SSO security testing — assertion forgery, signature bypass, RelayState redirect, and SP/IdP trust boundary attacks
 origin: Vigil
+vuln_class: saml
 ---
 
 # SAML SSO Security Testing

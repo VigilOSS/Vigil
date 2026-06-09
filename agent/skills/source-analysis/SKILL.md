@@ -2,6 +2,7 @@
 name: source-analysis
 description: Frontend source code analysis for hidden routes, API endpoints, and secrets
 origin: Vigil
+vuln_class: source-disclosure, secrets-exposure
 ---
 
 # Source Code Analysis

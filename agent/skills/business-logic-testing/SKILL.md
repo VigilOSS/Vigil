@@ -2,6 +2,7 @@
 name: business-logic-testing
 description: Business logic vulnerability detection — workflow bypass, price manipulation, state abuse, and application-specific flaws
 origin: Vigil
+vuln_class: business-logic
 ---
 
 # Business Logic Testing

@@ -2,11 +2,14 @@
 name: idor-testing
 description: Insecure direct object reference testing for broken access control
 origin: Vigil
+vuln_class: idor
 ---
 
 # IDOR Testing (Insecure Direct Object Reference)
 
 > **`vigil assess kali` audit flags:** use `--technique IDOR` for object-reference probes, `--technique AUTH` for identity/tenant override. `--probe-kind payload` for ID-swap/divergence tests, `--probe-kind exploit` for confirmed cross-user access.
+>
+> **Named identities (use `--identity`, not hand-pasted tokens).** Cross-user / cross-tenant IDOR is only *real* across **≥2 named identities**. Put each test account in `auth.json` under a name (`user_a`, `user_b`, `admin`) and replay with `vigil assess kali <tool> --identity user_a` / `--identity user_b`. The identity name is stamped as the probe's `auth_context`, so the depth ledger can SEE a cross-identity access-control pass — a single-identity IDOR probe is "started but not cross-identity" and does NOT satisfy access-control depth. Prefer `--identity` over inlining `Cookie: session=...` so the harness records which identity ran which probe.
 
 This is the **entry-point skill** for broken object-level authorization. It covers the
 full BOLA/IDOR workflow and tells you when to escalate into the specialist skills
@@ -113,12 +116,13 @@ leak or write.
 > returning the victim's PII. The write path skipped the read-path authz filter.
 
 ```bash
-# Replay one victim object ID across every verb; rank what diverges
+# Replay one victim object ID across every verb AS user_a; rank what diverges.
+# --identity user_a selects user_a's auth material and stamps the probe so the
+# depth ledger sees who ran it (no hand-pasted Cookie: session= token).
 for m in GET POST PUT PATCH DELETE HEAD OPTIONS; do
-  vigil assess kali exec --technique IDOR --probe-kind payload -- \
+  vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
     curl -s -o /dev/null -w "$m %{http_code} %{size_download}\n" \
-    -X "$m" -H "Cookie: session=USER_A_TOKEN" \
-    "https://target/api/v4/user/VICTIM_ID?include=email"
+    -X "$m" "https://target/api/v4/user/VICTIM_ID?include=email"
 done
 ```
 
@@ -151,24 +155,28 @@ Then replay each harvested ID through the access tests above. For the *predictio
 
 ### 8. Two-Session Differential Replay (Primitive)
 
-Make this a first-class setup step, not an afterthought. Stand up:
+Make this a first-class setup step, not an afterthought. Register each account as a **named
+identity** in `auth.json` so you replay with `--identity` instead of pasting tokens:
 
-- **Account A** = victim (owns objects)
-- **Account B** = attacker at the **same tier** (horizontal) AND a separate run at a **higher
-  tier** (vertical)
-- **Unauthenticated** context (no session)
-- For SaaS, put A and B in **separate tenants/orgs**
+- **`user_a`** = victim (owns objects)
+- **`user_b`** = attacker at the **same tier** (horizontal) AND, for vertical, a higher-tier
+  identity (e.g. `admin`)
+- **Unauthenticated** context (no `--identity`, or an `anon` identity with no auth material)
+- For SaaS, put `user_a` and `user_b` in **separate tenants/orgs**
 
-Replay every owner request under (a) the other-user session and (b) unauthenticated. This is
+Replay every owner request under (a) the other-user identity and (b) unauthenticated. This is
 the **Burp Autorize / Auth Analyzer / AuthMatrix** model — they automate exactly this replay.
+Because each replay is stamped with its identity name, the depth ledger registers a real
+**cross-identity** access-control pass (≥2 distinct identities); a single-identity run does not.
 
 Use **content-length + body-fingerprint** as the oracle, not status code alone.
 
 ```bash
-# Capture each replayed response as a record, then rank divergence
-vigil assess kali exec --technique IDOR --probe-kind payload -- \
+# Replay user_a's object AS user_b; the --identity name is stamped onto the probe
+# so the cross-identity pass is recorded (no hand-pasted Cookie: session= token).
+vigil assess kali exec --technique IDOR --probe-kind payload --identity user_b -- \
   curl -s -o b_resp.json -w '{"url":"%{url_effective}","status":%{http_code},"content_length":%{size_download}}\n' \
-  -H "Cookie: session=USER_B_TOKEN" "https://target/api/orders/VICTIM_ORDER_ID" >> replay.jsonl
+  "https://target/api/orders/VICTIM_ORDER_ID" >> replay.jsonl
 vigil assess anomaly-score replay.jsonl --top 5
 ```
 
@@ -200,9 +208,9 @@ Cross-ref `agent/references/api-security/API01-broken-object-level-authz.md`.
 ```bash
 # Type-confusion / wrapping sweep on a blocked ID
 for body in '1235' '[1234,1235]' 'true' '{"id":1235}' '[1235]' '"1234,1235"' '00001235' '1235.0'; do
-  vigil assess kali exec --technique IDOR --probe-kind payload -- \
+  vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
     curl -s -o /dev/null -w "$body -> %{http_code} %{size_download}\n" \
-    -X PATCH -H "Cookie: session=USER_A_TOKEN" -H "Content-Type: application/json" \
+    -X PATCH -H "Content-Type: application/json" \
     -d "{\"id\":$body}" "https://target/api/orders"
 done
 ```
@@ -285,7 +293,7 @@ in `agent/references/access-control/idor-modern-architectures.md`.
 ## What to Record
 
 - Endpoint, HTTP method, and parameter with IDOR
-- Auth context (which user token was used) and the verb/variant that worked
+- Auth context — the **named identity** (`--identity user_a` / `user_b` / `admin`) that ran the probe — and the verb/variant that worked
 - Object accessed/modified and its owner — **hand-verified** as belonging to another account
 - Horizontal vs vertical access; cross-tenant if SaaS
 - Request/response evidence (redact sensitive data)

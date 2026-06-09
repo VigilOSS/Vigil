@@ -33,7 +33,7 @@ Assertions:
 
 (c) Flag coverage for the highest-drift-risk verbs. The load-bearing
     operator-facing flags on ``verify-finding`` / ``eval-capture`` /
-    ``scaffold-probe`` / ``check-scope-coverage`` must (1) still be real
+    ``scaffold-probe`` / ``check-phase-readiness`` must (1) still be real
     registered flags on that verb and (2) appear somewhere in the corpus.
     Together those two directions catch a rename on either the CLI side or the
     docs side. Internal/advanced knobs are intentionally excluded (see the
@@ -568,8 +568,6 @@ def test_known_undocumented_allowlist_has_no_stale_entries(assess_registries, oo
 #   verify-finding       — omits --reason-code/--artifact-ref/--details-inline
 #                           (advanced provenance knobs, undocumented by design).
 #   scaffold-probe       — omits --purpose/--no-register (advanced).
-#   check-scope-coverage — omits --auto-redispatch/--max-recommendations/
-#                           --include-discovered (advanced tuning, undocumented).
 _EXPECTED_FLAGS = {
     "verify-finding": {
         "--disposition",
@@ -599,10 +597,12 @@ _EXPECTED_FLAGS = {
         "--force",
         "--json",
     },
-    "check-scope-coverage": {
-        "--require-stage",
+    "check-phase-readiness": {
+        "--phase",
         "--by-host",
         "--strict-vendor-saas",
+        "--strict",
+        "--strict-deep",
         "--json",
     },
 }

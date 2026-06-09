@@ -2,6 +2,7 @@
 name: websocket-testing
 description: WebSocket security testing — injection, auth bypass, hijacking
 origin: Vigil
+vuln_class: websocket
 ---
 
 # WebSocket Security Testing

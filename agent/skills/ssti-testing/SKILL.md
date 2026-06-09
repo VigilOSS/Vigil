@@ -2,6 +2,7 @@
 name: ssti-testing
 description: Server-side template injection detection, engine identification, and RCE
 origin: Vigil
+vuln_class: ssti
 ---
 
 # Server-Side Template Injection (SSTI) Testing

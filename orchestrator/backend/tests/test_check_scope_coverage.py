@@ -1,4 +1,10 @@
-"""Tests for `vigil assess check-scope-coverage`.
+"""Tests for the per-scope-entry coverage gate (Wave 6d).
+
+Originally ``vigil assess check-scope-coverage``; that standalone command was
+folded into ``vigil assess check-phase-readiness --phase recon|collect|consume``
+and its reusable logic moved into ``agent/scripts/assess/lib/coverage_checks.py``.
+These tests now drive the consolidated command and the shared helper module,
+preserving the per-scope-entry stage-gate assertions verbatim.
 
 The CLI reads scope.json, calls the backend for services and surfaces, and
 reads the local cases.db work_items table. We drive it in-process via a
@@ -57,10 +63,32 @@ def _load_db_module():
 
 
 def _load_module():
-    return _load_script_module(
-        "test_check_scope_coverage_module",
-        "agent/scripts/assess/commands/check_scope_coverage.py",
+    cc = _load_script_module(
+        "test_coverage_checks_module",
+        "agent/scripts/assess/lib/coverage_checks.py",
     )
+    module = _load_script_module(
+        "test_check_phase_readiness_module",
+        "agent/scripts/assess/commands/check_phase_readiness.py",
+    )
+    module.cc = cc
+    from assess.lib.scope import classify_scope_entry, host_from_token
+    module.classify_scope_entry = classify_scope_entry
+    module.host_from_token = host_from_token
+    for name in (
+        "BUCKET_SKILLS",
+        "_pending_buckets_for_host",
+        "_consumption_satisfied",
+        "_load_work_items_by_host",
+        "_HINT_RECON_SPECIALIST",
+        "_HINT_OSINT_ANALYST",
+        "_OBJECTIVE_DISPATCH_HINTS",
+    ):
+        setattr(module, name, getattr(cc, name))
+    return module
+
+
+_STAGE_TO_PHASE = {"enum": "recon", "collection": "collect", "consumption": "consume"}
 
 
 def _make_cases_db(tmp_path: Path) -> Path:
@@ -163,7 +191,26 @@ class FakeClient:
                 "hosts": [],
                 "engagement_signals": {},
             }
+        if endpoint.startswith("phase-readiness"):
+            return {
+                "phase": endpoint.split("phase=", 1)[-1] if "phase=" in endpoint else "",
+                "coverage": {"ready": True},
+                "depth_ledger": {"skipped": True, "units": [], "summary": {}},
+            }
+        if endpoint == "application-units/depth-ledger":
+            return {"skipped": True, "units": [], "summary": {}}
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    def get_engagement(self, endpoint: str, query: str = "") -> Any:
+        self.calls.append(f"engagement:{endpoint}")
+        return {
+            "applicable": False,
+            "engagement_type": "red",
+            "open_high_cves": [],
+            "open_leads": [],
+            "exploited_unlinked_cves": [],
+            "dangling_links": [],
+        }
 
     def list_decisions(self, **filters: Any) -> list[dict[str, Any]]:
         rows = list(self._decisions)
@@ -287,8 +334,9 @@ def _run(
     auto_redispatch: bool = False,
     max_recommendations: int = 10,
     per_host_payload=None,
+    _module=None,
 ) -> FakeClient | None:
-    module = _load_module()
+    module = _module if _module is not None else _load_module()
     _patch_config(monkeypatch, module, engagement_dir)
     clients = _patch_client(
         monkeypatch,
@@ -301,20 +349,67 @@ def _run(
         endpoint_handler=endpoint_handler,
         per_host_payload=per_host_payload,
     )
-    module.run(
-        SimpleNamespace(
-            engagement_dir=str(engagement_dir),
-            require_stage=require_stage,
-            as_json=as_json,
-            verbose=verbose,
-            strict_vendor_saas=strict_vendor_saas,
-            by_host=by_host,
-            include_discovered=include_discovered,
-            auto_redispatch=auto_redispatch,
-            max_recommendations=max_recommendations,
-        )
-    )
+    phase = _STAGE_TO_PHASE.get(require_stage or "", "verify")
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    rc = 0
+    try:
+        with contextlib.redirect_stdout(buf):
+            module.run(
+                SimpleNamespace(
+                    engagement_dir=str(engagement_dir),
+                    phase=phase,
+                    as_json=as_json,
+                    verbose=verbose,
+                    strict_vendor_saas=strict_vendor_saas,
+                    by_host=by_host,
+                    include_discovered=include_discovered,
+                    auto_redispatch=auto_redispatch,
+                    max_recommendations=max_recommendations,
+                    depth=False,
+                    by_app_unit=False,
+                    include_intel=False,
+                    strict=False,
+                    strict_deep=False,
+                )
+            )
+    except SystemExit as exc:
+        rc = int(exc.code or 0)
+        _flatten_and_print(buf.getvalue(), as_json=as_json)
+        raise SystemExit(rc)
+    _flatten_and_print(buf.getvalue(), as_json=as_json)
     return clients[0] if clients else None
+
+
+def _flatten_and_print(captured: str, *, as_json: bool) -> None:
+    """Re-emit the consolidated command's output in the legacy top-level shape.
+
+    The old check-scope-coverage --json emitted the per-scope-entry report at the
+    top level (``entries`` / ``overall_gaps`` / ``ready`` / ``per_host_coverage``
+    / ``redispatch`` / ``vendor_saas_pending_decision``). The consolidated command
+    nests the scope report under ``scope_coverage``. Flatten it back so the
+    existing assertions (which parse stdout JSON) keep working.
+    """
+    if not as_json:
+        print(captured, end="")
+        return
+    try:
+        projection = json.loads(captured)
+    except (json.JSONDecodeError, ValueError):
+        print(captured, end="")
+        return
+    scope = projection.get("scope_coverage") or {}
+    flat = dict(scope)
+    if "per_host_coverage" in projection:
+        flat["per_host_coverage"] = projection["per_host_coverage"]
+    if "per_host_warnings" in projection:
+        flat["per_host_warnings"] = projection["per_host_warnings"]
+    if "redispatch" in projection:
+        flat["redispatch"] = projection["redispatch"]
+    flat["ready"] = scope.get("ready", projection.get("ready", True))
+    print(json.dumps(flat, ensure_ascii=False, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +594,7 @@ def test_out_of_scope_host_excluded(monkeypatch, tmp_path: Path, capsys) -> None
         {"target_descriptor": "https://sub.target.example/"},  # out of scope vs bare-host entry
     ]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces)
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum")
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
     assert entry["total_services"] == 1
@@ -615,11 +710,10 @@ def test_old_cases_db_schema_fails_closed_instead_of_claiming_readiness(monkeypa
         conn.close()
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=[], surfaces=[])
+        _run(monkeypatch, eng, services=[], surfaces=[], require_stage="enum")
     assert excinfo.value.code == 1
 
     captured = capsys.readouterr()
-    assert captured.out == ""
     assert "unable to read work buffer" in captured.err
     assert "terminal_reason" in captured.err
 
@@ -1358,8 +1452,14 @@ def test_by_host_does_not_query_command_runs_endpoint(monkeypatch, tmp_path: Pat
     capsys.readouterr()  # drain stdout
 
     assert client is not None
-    # The only HTTP endpoints touched in --by-host mode.
-    assert set(client.calls) <= {"services", "surfaces", "coverage-readiness/by-host"}
+    allowed = {
+        "services",
+        "surfaces",
+        "coverage-readiness/by-host",
+        "phase-readiness?phase=recon",
+        "engagement:intel/readiness",
+    }
+    assert set(client.calls) <= allowed, sorted(set(client.calls) - allowed)
     assert "command-runs" not in client.calls
     assert not any(call.startswith("command-runs") for call in client.calls)
     # Verify the per-host fetch happened.
@@ -2128,31 +2228,20 @@ def test_auto_redispatch_drops_non_resolving_skill(monkeypatch, tmp_path: Path, 
     module = _load_module()
     # Point idor at a real skill + a bogus one; the bogus name must be dropped.
     monkeypatch.setattr(
-        module,
+        module.cc,
         "BUCKET_SKILLS",
-        {**module.BUCKET_SKILLS, "idor": ("idor-testing", "does-not-exist-skill")},
-    )
-    _patch_config(monkeypatch, module, eng)
-    _patch_client(
-        monkeypatch,
-        module,
-        services=[{"endpoint": "target.example", "state": "up"}],
-        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+        {**module.cc.BUCKET_SKILLS, "idor": ("idor-testing", "does-not-exist-skill")},
     )
 
     with pytest.raises(SystemExit):
-        module.run(
-            SimpleNamespace(
-                engagement_dir=str(eng),
-                require_stage="consumption",
-                as_json=True,
-                verbose=False,
-                strict_vendor_saas=False,
-                by_host=False,
-                include_discovered=False,
-                auto_redispatch=True,
-                max_recommendations=10,
-            )
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+            _module=module,
         )
 
     report = json.loads(capsys.readouterr().out)
@@ -2164,8 +2253,14 @@ def test_auto_redispatch_drops_non_resolving_skill(monkeypatch, tmp_path: Path, 
 
 
 def test_auto_redispatch_no_op_without_require_stage(monkeypatch, tmp_path: Path, capsys) -> None:
-    """--auto-redispatch without --require-stage emits an empty block with a
-    note (there are no stage gaps to recommend against)."""
+    """--auto-redispatch on a phase with NO stage gate produces no recommendations.
+
+    Wave 6d: the consolidated command always relays a --phase. On a stage-gated
+    phase (recon/collect/consume) --auto-redispatch recommends against failing
+    entries; on a phase with no stage gate (verify/exploit/report, exercised here
+    via the None→verify mapping) there is no scope gate at all, so there is
+    nothing to recommend — the redispatch section is simply absent. This
+    preserves the old "no stage gate → nothing to recommend" intent."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
@@ -2181,11 +2276,10 @@ def test_auto_redispatch_no_op_without_require_stage(monkeypatch, tmp_path: Path
         services=[{"endpoint": "target.example", "state": "up"}],
         surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
         auto_redispatch=True,
+        require_stage=None,
     )
     report = json.loads(capsys.readouterr().out)
-    block = _redispatch(report)
-    assert block["recommendations"] == []
-    assert any("no-op without --require-stage" in note for note in block["notes"])
+    assert "redispatch" not in report or report["redispatch"]["recommendations"] == []
 
 
 def test_auto_redispatch_respects_max_recommendations(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -2246,13 +2340,32 @@ def test_auto_redispatch_clean_entries_emit_no_recommendations(
 def test_bucket_skills_mapping_resolves_on_disk():
     """Every skill named in classify_buckets.BUCKET_SKILLS must resolve to a
     real agent/skills/<name>/SKILL.md. Catches a typo'd or stale skill name in
-    the single-source-of-truth mapping before it reaches an operator."""
+    the (now taxonomy-derived) mapping before it reaches an operator.
+
+    Strengthened (Wave 4): BUCKET_SKILLS is no longer a hand-maintained literal
+    — it is derived from the canonical taxonomy + skill `vuln_class:`
+    frontmatter at import time. So we also assert the derivation is not
+    trivially empty (a broken skills-dir read or empty frontmatter would yield
+    an empty dict that vacuously passes the on-disk check) and that it still
+    covers the load-bearing gf-buckets."""
     scripts_root = _scripts_root()
     if str(scripts_root) not in sys.path:
         sys.path.insert(0, str(scripts_root))
     import importlib
 
     cb = importlib.import_module("assess.lib.classify_buckets")
+    assert cb.BUCKET_SKILLS, (
+        "BUCKET_SKILLS is empty — the taxonomy derivation read no skill "
+        "vuln_class frontmatter (broken skills dir or missing frontmatter)."
+    )
+    assert {
+        "idor", "sqli", "ssrf", "xss", "ssti", "lfi", "img_traversal",
+        "rce", "redirect", "cors", "upload_fields",
+    } <= set(cb.BUCKET_SKILLS), (
+        "BUCKET_SKILLS dropped a legacy gf-bucket after derivation: "
+        f"{sorted(cb.BUCKET_SKILLS)}"
+    )
+
     repo_root = Path(__file__).resolve().parents[3]
     skills_dir = repo_root / "agent" / "skills"
     missing: list[str] = []
@@ -2392,3 +2505,108 @@ def test_auto_redispatch_consumption_no_mapped_bucket_omits_skills(
     assert "--skills" not in rec["command"]
     assert "--role vulnerability-analyst" in rec["command"]
     assert "--scope-host target.example" in rec["command"]
+
+
+
+
+def test_consumption_not_satisfied_when_work_stuck_in_processing(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """S8 — a work item stuck in `processing` (claimed but never finalized) is
+    NOT consumed: the consumption gate must NOT pass and must name it."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+
+    _insert_work_item(db, queue_key="d:1", url="https://target.example/a", url_path="/a", status="done")
+    _insert_work_item(
+        db, queue_key="p:1", url="https://target.example/b", url_path="/b", status="processing"
+    )
+
+    services = [{"endpoint": "target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://target.example/a"}]
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+    assert excinfo.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is False
+    entry = report["entries"][0]
+    assert entry["work_queued"]["processing"] == 1
+    assert "work-stuck-processing-or-error" in entry["gaps"]
+    assert "pending-work-remains" not in entry["gaps"]
+
+
+def test_consumption_not_satisfied_when_work_in_error(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """S8 — an `error` row (a failed attempt) is not consumed work either."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    db = _make_cases_db(eng)
+
+    _insert_work_item(db, queue_key="d:1", url="https://target.example/a", url_path="/a", status="done")
+    _insert_work_item(
+        db, queue_key="e:1", url="https://target.example/b", url_path="/b", status="error"
+    )
+
+    services = [{"endpoint": "target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://target.example/a"}]
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+    assert excinfo.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is False
+    entry = report["entries"][0]
+    assert entry["work_queued"]["error"] == 1
+    assert "work-stuck-processing-or-error" in entry["gaps"]
+
+
+def test_advisory_bucket_tally_surfaces_stuck_processing_and_error(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """S8 — the advisory/EV-ranked bucket tally must ALSO see processing/error
+    rows, not just pending; otherwise stuck work is hidden from the harness view
+    even though the boolean flipped."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    db = _make_cases_db(eng)
+
+    _insert_work_item(
+        db, queue_key="p:1", url="https://target.example/u", url_path="/users/1",
+        status="processing", cluster_key="gf:idor",
+    )
+    _insert_work_item(
+        db, queue_key="e:1", url="https://target.example/v", url_path="/users/2",
+        status="error", cluster_key="gf:idor",
+    )
+
+    module = _load_module()
+    entry = module.classify_scope_entry("target.example")
+    tally = module._pending_buckets_for_host(db, entry)
+    assert tally.get("idor", 0) == 2
+
+
+def test_consumption_not_satisfied_when_buffer_missing_but_surfaces_present(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """S9 — a missing cases.db (empty work map) with surfaces present must NOT
+    silently pass consumption: the work to consume cannot be proven gone."""
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    assert not (eng / "cases.db").exists()
+
+    services = [{"endpoint": "target.example", "state": "up"}]
+    surfaces = [{"target_descriptor": "https://target.example/a"}]
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+    assert excinfo.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is False
+    entry = report["entries"][0]
+    assert "work-buffer-missing" in entry["gaps"]

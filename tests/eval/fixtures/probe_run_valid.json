@@ -6,7 +6,7 @@
   "input_slot": "GET-param",
   "payload_family": "boolean-blind",
   "payload_value": "' AND 1=1-- -",
-  "result_status": "finding",
+  "result_status": "signal",
   "observed_http_status": 200,
   "signal_type": "differential-response",
   "evidence_ref": "scans/sqlmap.txt",

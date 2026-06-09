@@ -143,19 +143,22 @@ def test_all_dispatch_modes_accepted(mode: str):
 
 
 # ---------------------------------------------------------------------------
-# Invalid: missing dispatch_mode
 # ---------------------------------------------------------------------------
 
 
-def test_missing_dispatch_mode_is_rejected():
-    """A dispatch payload without dispatch_mode must surface the missing-field error."""
+def test_missing_dispatch_mode_warns_and_defaults():
+    """A missing dispatch_mode is no longer rejected (L2-1): it defaults from
+    the role table and surfaces an advisory WARNING, never a hard error."""
     payload = {
         "role": "vulnerability-analyst",
         "skills": ["sqli-testing"],
     }
     errors, warnings = _dispatch(payload)
-    assert any("dispatch_mode" in e for e in errors), (
-        f"Expected a dispatch_mode error, got: {errors}"
+    assert not any("dispatch_mode" in e for e in errors), (
+        f"missing dispatch_mode must not be a hard error, got: {errors}"
+    )
+    assert any("dispatch_mode" in w and "default" in w.lower() for w in warnings), (
+        f"Expected a dispatch_mode defaulting warning, got: {warnings}"
     )
 
 
@@ -177,24 +180,27 @@ def test_missing_role_is_rejected():
 
 
 # ---------------------------------------------------------------------------
-# Invalid: bad dispatch_mode value
 # ---------------------------------------------------------------------------
 
 
-def test_invalid_dispatch_mode_value_is_rejected():
-    """An unknown dispatch_mode value must surface an error listing valid modes."""
+def test_invalid_dispatch_mode_value_warns_not_rejected():
+    """An unknown dispatch_mode is advisory (L2-4): it WARNS (listing the known
+    modes) and proceeds, rather than hard-rejecting a possibly newly-coined
+    mode."""
     payload = {
         "role": "vulnerability-analyst",
         "dispatch_mode": "fire-and-forget",
         "skills": ["sqli-testing"],
     }
     errors, warnings = _dispatch(payload)
-    assert any("dispatch_mode" in e and "fire-and-forget" in e for e in errors), (
-        f"Expected a dispatch_mode enum error, got: {errors}"
+    assert not any("fire-and-forget" in e for e in errors), (
+        f"unknown dispatch_mode must not be a hard error, got: {errors}"
     )
-    # Error must mention the valid modes
-    assert any("hypothesis-driven" in e for e in errors), (
-        f"Expected valid modes listed in error, got: {errors}"
+    assert any("dispatch_mode" in w and "fire-and-forget" in w for w in warnings), (
+        f"Expected a dispatch_mode advisory warning, got: {warnings}"
+    )
+    assert any("hypothesis-driven" in w for w in warnings), (
+        f"Expected known modes listed in warning, got: {warnings}"
     )
 
 

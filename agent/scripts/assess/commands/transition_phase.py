@@ -70,6 +70,17 @@ def register(subparsers) -> None:
         help="Override blockers (transition proceeds with warnings)",
     )
     p.add_argument(
+        "--reason",
+        default="",
+        help=(
+            "Stated reason for a deliberate backward transition (regression) or "
+            "for overriding blockers. A backward transition is allowed with "
+            "--reason WITHOUT --force, and the reason is recorded as a durable "
+            "decision row. With --force, the reason is attached to the override "
+            "decision so the deferral/override rate stays auditable."
+        ),
+    )
+    p.add_argument(
         "--track",
         choices=("auto", "web", "code", "blue"),
         default="auto",
@@ -115,16 +126,35 @@ def run(args) -> None:
         )
         sys.exit(2)
 
-    if current_phase and current_phase in order:
-        if order[target_phase] < order[current_phase]:
+    reason = (getattr(args, "reason", "") or "").strip()
+    is_backward = bool(
+        current_phase and current_phase in order
+        and order[target_phase] < order[current_phase]
+    )
+    if is_backward:
+        if not args.force and not reason:
             print(
                 f"transition-phase: refusing backward transition "
-                f"'{current_phase}' -> '{target_phase}'. "
-                f"Use --force to override.",
+                f"'{current_phase}' -> '{target_phase}'. Pass --reason \"<why>\" "
+                "for a deliberate regression, or --force.",
                 file=sys.stderr,
             )
-            if not args.force:
-                sys.exit(1)
+            sys.exit(1)
+        _record_transition_decision(
+            cfg,
+            kind="phase_regression",
+            current_phase=current_phase,
+            target_phase=target_phase,
+            track=track,
+            reason=reason or "(no reason given; --force)",
+            blockers=[],
+        )
+        print(
+            f"transition-phase: deliberate backward transition "
+            f"'{current_phase}' -> '{target_phase}' recorded "
+            f"({'reason: ' + reason if reason else 'via --force'}).",
+            file=sys.stderr,
+        )
 
     blockers: list[dict[str, str]] = []
     for phase_to_check in _precondition_targets_for_transition(
@@ -139,15 +169,36 @@ def run(args) -> None:
             )
         )
 
-    if blockers and not args.force:
-        print(f"transition-phase: {len(blockers)} blocker(s) for '{target_phase}':", file=sys.stderr)
-        for b in blockers:
+    hard = [b for b in blockers if b.get("severity", "block") != "advisory"]
+    advisory = [b for b in blockers if b.get("severity", "block") == "advisory"]
+
+    if advisory:
+        print(
+            f"transition-phase: {len(advisory)} advisory note(s) for "
+            f"'{target_phase}' (steering, not blocking):",
+            file=sys.stderr,
+        )
+        for b in advisory:
+            print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
+
+    if hard and not args.force:
+        print(f"transition-phase: {len(hard)} blocker(s) for '{target_phase}':", file=sys.stderr)
+        for b in hard:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
         sys.exit(1)
 
-    if blockers and args.force:
-        print(f"transition-phase: overriding {len(blockers)} blocker(s) with --force:", file=sys.stderr)
-        for b in blockers:
+    if hard and args.force:
+        _record_transition_decision(
+            cfg,
+            kind="forced_transition_override",
+            current_phase=current_phase,
+            target_phase=target_phase,
+            track=track,
+            reason=reason or "(no reason given; --force)",
+            blockers=hard,
+        )
+        print(f"transition-phase: overriding {len(hard)} blocker(s) with --force:", file=sys.stderr)
+        for b in hard:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
 
     scope[phase_key] = target_phase
@@ -171,13 +222,16 @@ def _precondition_targets_for_transition(
 ) -> list[str]:
     """Return every phase gate that must pass for this transition.
 
-    Blue incident work is frequently non-linear in operator conversation, but
-    durable state cannot skip intake, triage, verification, or closeout gates.
-    A direct jump such as intake -> report therefore checks every intermediate
-    blue target phase in order.
+    A direct FORWARD jump that skips intermediate phases (e.g. web
+    ``recon -> exploit`` or code ``ingest -> complete``) must still satisfy
+    EVERY skipped phase's preconditions — otherwise a non-adjacent transition
+    silently bypasses gates (S1/R-H4). This walk used to be blue-only; it now
+    applies to ALL tracks, because the same bypass existed on web and code
+    (incident work was simply the case where it had already been noticed).
+
+    Backward or same-phase transitions check only the target phase; the
+    backward move itself is gated separately (by --reason/--force in ``run``).
     """
-    if track != "blue":
-        return [target_phase]
     if not current_phase or current_phase not in order:
         return [target_phase]
     start = order[current_phase]
@@ -210,6 +264,48 @@ def _phase_track(engagement_type: str, target_phase: str, requested_track: str) 
     return "web"
 
 
+def _record_transition_decision(
+    cfg: Config,
+    *,
+    kind: str,
+    current_phase: str,
+    target_phase: str,
+    track: str,
+    reason: str,
+    blockers: list[dict[str, str]],
+) -> None:
+    """Record a durable decision row for a forced/backward transition (S3/L1-6).
+
+    Best-effort: a telemetry failure must NEVER block the operator's
+    transition. The row makes override/regression rates auditable via the
+    existing ``GET /dispatch-decisions`` endpoint, feeding the deferral-rate
+    visibility doctrine (the "option D" write-off becomes a recorded decision,
+    not a silent one).
+    """
+    try:
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+            client.record_decision({
+                "kind": kind,
+                "payload": {
+                    "track": track,
+                    "from_phase": current_phase or "(none)",
+                    "to_phase": target_phase,
+                    "reason": reason,
+                    "overridden_blockers": [
+                        {"kind": b.get("kind", ""), "detail": b.get("detail", "")}
+                        for b in blockers
+                    ],
+                },
+                "surfaced_to_user": True,
+            })
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"WARN transition-phase: could not record {kind} decision "
+            f"({type(exc).__name__}: {exc}); transition still proceeds.",
+            file=sys.stderr,
+        )
+
+
 def _check_preconditions(
     target_phase: str,
     track: str,
@@ -236,6 +332,42 @@ def _precondition_check_failed(check_name: str, exc: Exception) -> dict[str, str
     return {
         "kind": "precondition_check_failed",
         "detail": f"{check_name} check failed: {message}",
+    }
+
+
+def _consumption_advisory(engagement_dir: str) -> dict[str, str] | None:
+    """Advisory (never a block) when the consume-test buffer still has genuinely
+    un-consumed work at verify time (S2).
+
+    Counts only ``pending`` rows with NO ``terminal_reason`` — i.e. items that
+    were neither tested nor explicitly deferred/inert — to match the consume
+    gate's honest semantics. Returns None when cases.db is absent or the buffer
+    is essentially worked down.
+    """
+    db_path = os.path.join(engagement_dir, "cases.db")
+    if not os.path.isfile(db_path):
+        return None
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM work_items "
+            "WHERE status = 'pending' AND (terminal_reason IS NULL OR terminal_reason = '')"
+        ).fetchone()[0]
+        conn.close()
+    except Exception:
+        return None
+    if pending <= 0:
+        return None
+    return {
+        "kind": "consumption_incomplete",
+        "severity": "advisory",
+        "detail": (
+            f"{pending} un-consumed work item(s) still pending in cases.db — "
+            "verify is being entered over an unfinished consume-test buffer. "
+            "Not blocking; finish consumption (or defer those items with a "
+            "reason) so verification reflects real testing."
+        ),
     }
 
 
@@ -292,6 +424,9 @@ def _check_web_preconditions(
                     })
         except Exception as exc:
             blockers.append(_precondition_check_failed("verify findings", exc))
+        consumption = _consumption_advisory(engagement_dir)
+        if consumption is not None:
+            blockers.append(consumption)
 
     elif target_phase == "exploit":
         try:
@@ -314,13 +449,8 @@ def _check_web_preconditions(
                         ),
                     })
 
-                # Variant-pass gate: every confirmed high/critical finding should have
-                # at least one vulnerability-analyst dispatch dedicated to sibling /
                 # variant / rotation hunting before the engagement advances to exploit.
                 # Skipping the variant pass is the single most common way real findings
-                # are missed. The check is permissive — task-text match on
-                # variant|sibling|rotat — so any reasonable phrasing satisfies it.
-                # --force overrides if the operator has a stated reason.
                 confirmed_high = [
                     f for f in findings
                     if f.get("severity") in ("critical", "high")
@@ -337,23 +467,18 @@ def _check_web_preconditions(
                         ) or []
                     except Exception:
                         dispatches = []
-                    variant_tasks = [
+                    completed_variant_dispatches = [
                         d for d in dispatches
-                        if any(
-                            kw in (d.get("task") or "").lower()
-                            for kw in ("variant", "sibling", "rotat")
-                        )
+                        if str(d.get("status") or "").lower() == "completed"
+                        and str(d.get("dispatch_mode") or "").lower() == "variant-rotation"
                     ]
                     missing_variant: list[str] = []
                     for finding in confirmed_high:
                         slug = finding.get("slug", "?")
-                        hit = False
-                        for d in variant_tasks:
-                            slugs = d.get("finding_slugs") or []
-                            task = (d.get("task") or "").lower()
-                            if slug in slugs or slug.lower() in task:
-                                hit = True
-                                break
+                        hit = any(
+                            slug in (d.get("finding_slugs") or [])
+                            for d in completed_variant_dispatches
+                        )
                         if not hit:
                             missing_variant.append(slug)
                     if missing_variant:
@@ -362,12 +487,15 @@ def _check_web_preconditions(
                             "kind": "missing_variant_pass",
                             "detail": (
                                 f"{len(missing_variant)} confirmed high/critical finding(s) "
-                                f"have no vulnerability-analyst variant/sibling pass: "
+                                f"have no COMPLETED variant-rotation vulnerability-analyst "
+                                f"dispatch listing them in finding_slugs: "
                                 f"{sample}"
                                 + (" ..." if len(missing_variant) > 5 else "")
-                                + " — dispatch the variant hunt before advancing "
-                                "(skipping is the most common way real findings are missed). "
-                                "Pass --force only with a stated reason."
+                                + " — run the variant/sibling hunt as a "
+                                "--dispatch-mode variant-rotation dispatch and let it "
+                                "complete before advancing (skipping it is the most "
+                                "common way real findings are missed). Pass --force "
+                                "--reason \"...\" to override with an audited decision."
                             ),
                         })
         except Exception as exc:
@@ -385,6 +513,7 @@ def _check_web_preconditions(
                         })
         except Exception as exc:
             blockers.append(_precondition_check_failed("report readiness", exc))
+        blockers.extend(_depth_backstop_blockers(client))
 
     elif target_phase == "complete":
         try:
@@ -396,8 +525,81 @@ def _check_web_preconditions(
                 })
         except Exception as exc:
             blockers.append(_precondition_check_failed("complete readiness", exc))
+        blockers.extend(_depth_backstop_blockers(client))
 
     return blockers
+
+
+def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
+    """The ONE hard block (Wave 7 / S17 resolution; master plan §1A, depth-gate
+    §5.3): the terminal report/complete edge cannot pass with a high-value app
+    unit that is BOTH unsatisfied AND undeferred AND untouched.
+
+    Calls the read-only ``application-units/terminal-block`` endpoint (mirroring
+    how the report branch calls ``report-readiness``). A non-empty ``blocking``
+    set appends ONE ``depth_unsatisfied_units`` blocker at the DEFAULT
+    ``severity="block"`` (the hard block) with the exact escape valves. The
+    ``warned_under_observed`` units are appended as an ``severity="advisory"``
+    blocker so they are surfaced but NEVER block. The deferral rate is visible
+    in both. WEB-ONLY: the endpoint returns ``skipped=True`` (empty blocking)
+    for code/blue, so this never blocks those tracks even when reached.
+    """
+    out: list[dict[str, str]] = []
+    try:
+        result = client.get("application-units/terminal-block")
+    except Exception as exc:
+        out.append(_precondition_check_failed("terminal depth backstop", exc))
+        return out
+    if not isinstance(result, dict) or result.get("skipped"):
+        return out
+
+    deferral_count = int(result.get("deferral_count") or 0)
+    blocking = result.get("blocking") or []
+    warned = result.get("warned_under_observed") or []
+
+    if blocking:
+        names = [_unit_label(b.get("unit", {})) for b in blocking]
+        sample = ", ".join(names[:6]) + (" ..." if len(names) > 6 else "")
+        out.append({
+            "kind": "depth_unsatisfied_units",
+            "severity": "block",
+            "detail": (
+                f"{len(blocking)} high-value app unit(s) are untested, undeferred, "
+                f"and untouched (the engagement never went deep on them): {sample}. "
+                "These carry a high-confidence deep_required tier or a decisive risk "
+                "surface (auth_entry / object_reference / privileged_write / "
+                "api_documentation). Either go deep on them, OR defer with "
+                "`vigil assess agent decision --kind depth_deferral --surfaced-to-user "
+                "--payload-json '{\"host\":\"<host>\",\"path_prefix\":\"<prefix>\","
+                "\"vuln_classes\":[...],\"reason\":\"<why>\"}'` (bounded, recorded), "
+                "OR override with `transition-phase ... --force --reason \"<why>\"`. "
+                f"({deferral_count} depth_deferral(s) already recorded.)"
+            ),
+        })
+
+    if warned:
+        names = [_unit_label(w.get("unit", {})) for w in warned]
+        sample = ", ".join(names[:6]) + (" ..." if len(names) > 6 else "")
+        out.append({
+            "kind": "depth_under_observed_units",
+            "severity": "advisory",
+            "detail": (
+                f"{len(warned)} deep_required app unit(s) are under-observed or "
+                f"started-but-unfinished and could not be confidently scored as "
+                f"deep-tested: {sample}. Not blocking; consider more collection / a "
+                "dedicated deep pass, or record a depth_deferral if intentionally "
+                f"out of scope. ({deferral_count} depth_deferral(s) recorded.)"
+            ),
+        })
+    return out
+
+
+def _unit_label(unit: dict) -> str:
+    host = str(unit.get("host") or "?")
+    prefix = str(unit.get("path_prefix") or "/")
+    pc = str(unit.get("port_class") or "")
+    base = f"{host}{prefix}"
+    return f"{base} [{pc}]" if pc and pc != "web" else base
 
 
 def _check_code_preconditions(
@@ -686,20 +888,6 @@ def _blue_check_intake_to_triage(
         })
         return blockers
 
-    alert_md = scope.get("alert_metadata") or {}
-    raw_body = str(alert_md.get("raw_body") or "").strip()
-    parsed = alert_md.get("parsed")
-    if not raw_body and parsed is None:
-        blockers.append({
-            "kind": "no_alert_intake",
-            "detail": (
-                "scope.json:alert_metadata is empty — paste the alert into the "
-                "operator chat, save it under ir/alerts/, then record it with "
-                "`vigil blue alert record --body-file <path>` before "
-                "transitioning to triage."
-            ),
-        })
-
     tenant_refs = scope.get("tenant_reference_paths") or []
     if not isinstance(tenant_refs, list) or len(tenant_refs) == 0:
         blockers.append({
@@ -717,9 +905,11 @@ def _blue_check_intake_to_triage(
             if not os.path.exists(ref_path):
                 blockers.append({
                     "kind": "missing_tenant_reference_file",
+                    "severity": "advisory",
                     "detail": (
                         f"tenant_reference_paths entry not found on disk: {ref!r} "
-                        f"(resolved to {ref_path}). L1 will halt at first lookup."
+                        f"(resolved to {ref_path}). L1 will halt at first lookup — "
+                        "fix the path or re-run `vigil blue tenant init`."
                     ),
                 })
 
@@ -737,8 +927,9 @@ def _blue_check_intake_to_triage(
                 "kind": "no_alert_intake_audit",
                 "detail": (
                     "no activity_entries row with action='alert_intake' — the "
-                    "alert record wrapper did not log the intake. Re-run "
-                    "`vigil blue alert record --body-file <path>` so the audit row lands."
+                    "alert record wrapper did not log the intake. Record the alert "
+                    "with `vigil blue alert record --body-file <path>` so the audit "
+                    "row lands before transitioning to triage."
                 ),
             })
 
@@ -862,11 +1053,13 @@ def _blue_check_investigate_to_verify(
         sample = ", ".join(missing_mitre[:5])
         blockers.append({
             "kind": "missing_mitre_techniques",
+            "severity": "advisory",
             "detail": (
                 f"{len(missing_mitre)} active finding(s) missing "
                 f"details_json.mitre_techniques: {sample}"
                 + (" ..." if len(missing_mitre) > 5 else "")
-                + " — triage.md rule 11 requires MITRE tagging."
+                + " — triage.md rule 11 asks for MITRE tagging; add it before "
+                "report for a complete ATT&CK mapping."
             ),
         })
 
@@ -993,6 +1186,7 @@ def _blue_check_respond_to_report(
 
     no_containment_slugs: set[str] = set()
     containment_activity_slugs: set[str] = set()
+    saw_no_containment_required = False
     for entry in entries:
         action = str(entry.get("action") or "")
         meta = entry.get("metadata")
@@ -1017,6 +1211,7 @@ def _blue_check_respond_to_report(
                         containment_activity_slugs.add(match)
         if action != "no_containment_required":
             continue
+        saw_no_containment_required = True
         # Preferred path: operator passes ``metadata.finding_slug`` in the
         # ``vigil assess log`` invocation. When present, that single value is
         # the only slug closed by this row — no free-form parsing of titles.
@@ -1035,6 +1230,10 @@ def _blue_check_respond_to_report(
                 if match in known_finding_slugs:
                     no_containment_slugs.add(match)
 
+    single_finding_no_containment = (
+        len(confirmed_high) == 1 and saw_no_containment_required
+    )
+
     missing: list[str] = []
     for finding in confirmed_high:
         slug = str(finding.get("slug") or "?")
@@ -1047,6 +1246,8 @@ def _blue_check_respond_to_report(
         if slug in containment_activity_slugs:
             continue
         if slug in no_containment_slugs:
+            continue
+        if single_finding_no_containment:
             continue
         try:
             artifacts = _blue_artifacts_for_finding(client, slug)
@@ -1065,11 +1266,12 @@ def _blue_check_respond_to_report(
                 f"{len(missing)} verified high/critical finding(s) lack "
                 f"containment closure: {sample}"
                 + (" ..." if len(missing) > 5 else "")
-                + " — either propose+approve+contain (vigil blue propose-contain "
-                "/ vigil assess approve-proposal / vigil blue contain) OR log "
-                "`vigil assess log operator <title> no_containment_required <slug> "
-                "--actor-kind operator` if the threat is already mitigated by "
-                "other controls."
+                + " — for each slug do one of: (1) propose+approve+contain "
+                "(vigil blue propose-contain / vigil assess approve-proposal / "
+                "vigil blue contain), or (2) if already mitigated by other "
+                "controls, log `vigil assess log operator <title> "
+                "no_containment_required <slug> --actor-kind operator` naming "
+                "the finding slug (a single-finding closure may omit the slug)."
             ),
         })
 

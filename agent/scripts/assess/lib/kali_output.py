@@ -48,6 +48,27 @@ def _scope_version(engagement_dir: Path) -> str:
     return digest[:16]
 
 
+def _engagement_type(engagement_dir: Path) -> str:
+    """Read ``engagement_type`` from ``scope.json`` (web/code/blue/both).
+
+    Used by the Wave-5 (2a) probe-run emission WEB-ONLY guard so the depth
+    harness never fires on code/blue engagements. Mirrors the default used by
+    ``transition_phase`` (absent/unreadable scope ⇒ ``"web"``), so a legacy
+    web engagement without the field still emits probes; only an explicit
+    ``code``/``blue`` engagement is skipped.
+    """
+    scope = engagement_dir / "scope.json"
+    if not scope.is_file():
+        return "web"
+    try:
+        data = json.loads(scope.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "web"
+    if not isinstance(data, dict):
+        return "web"
+    return str(data.get("engagement_type", "web")) or "web"
+
+
 def _auth_context(engagement_dir: Path) -> str:
     auth = engagement_dir / "auth.json"
     if not auth.is_file():

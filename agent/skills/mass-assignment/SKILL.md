@@ -2,6 +2,7 @@
 name: mass-assignment
 description: Detect and exploit mass assignment and excessive data exposure in APIs and web applications
 origin: Vigil
+vuln_class: mass-assignment
 ---
 
 # Mass Assignment Testing
