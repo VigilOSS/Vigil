@@ -65,7 +65,7 @@ from .orchestrator import (
     stop_orchestrator,
 )
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
-from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_status, start_runtime, stop_runtime
+from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_image_build_state, runtime_status, start_runtime, stop_runtime
 from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
 
@@ -80,7 +80,16 @@ def _print_post_install(result: InstallResult) -> None:
         if result.image_built:
             print("  - Docker image was rebuilt — running containers use the old image until restarted")
         else:
-            print("  - Docker image:   run  vigil runtime build  if agent scripts or Dockerfile changed")
+            state = runtime_image_build_state(root)
+            if state == "stale":
+                print("  - Docker image:   OUT OF DATE (baked runtime input changed) — run  vigil runtime build")
+            elif state == "missing":
+                print("  - Docker image:   not built yet — run  vigil runtime build")
+            elif state == "current":
+                print("  - Docker image:   up to date — a restart is enough (no rebuild needed)")
+            else:
+                print("  - Docker image:   run  vigil runtime build  only if the runtime Dockerfile or "
+                      "docker/callback_* changed (most code is host-side; restart is enough)")
     else:
         print("Install complete. Next steps:")
         print(f"  1. Configure tokens and API keys in {root / '.env'}")

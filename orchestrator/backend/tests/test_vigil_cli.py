@@ -9179,3 +9179,44 @@ def test_engagement_export_markdown_tree_rejects_unknown_format(
 
     with pytest.raises(SystemExit):
         export_engagement_tree(adapter, tmp_path / "x", fmt="pdf")
+
+
+def test_runtime_image_build_state_is_content_based(tmp_path):
+    """`runtime_image_build_state` reports missing/unknown/current/stale from a
+    content digest stamped on the image, NOT file mtimes — so `vigil install`
+    rewriting the baked inputs with identical content does not falsely flag a
+    rebuild. This is what lets `vigil install` tell users definitively when a
+    `vigil runtime build` is actually required."""
+    from vigil_cli import runtime
+    from vigil_cli.docker import DockerResult
+
+    (tmp_path / "agent" / "docker" / "runtime-full").mkdir(parents=True)
+    (tmp_path / "docker").mkdir()
+    (tmp_path / "agent" / "docker" / "runtime-full" / "Dockerfile").write_text("FROM kali\n")
+    (tmp_path / "docker" / "callback_listener.py").write_text("print(1)\n")
+    (tmp_path / "docker" / "start-callback.sh").write_text("#!/bin/sh\n")
+    digest = runtime.runtime_inputs_digest(tmp_path)
+
+    def make_runner(*, exists=True, label=""):
+        def runner(argv, **kwargs):
+            if argv[:3] == ["docker", "image", "inspect"] and "-f" in argv:
+                return DockerResult(0, label, "")
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return DockerResult(0 if exists else 1, "", "")
+            if argv[:2] == ["docker", "inspect"]:
+                return DockerResult(0 if exists else 1, "", "")
+            if argv[:3] == ["docker", "images", "-q"]:
+                return DockerResult(0, "x" if exists else "", "")
+            return DockerResult(1, "", "")
+        return runner
+
+    assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(exists=False)) == "missing"
+    assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(label="")) == "unknown"
+    assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(label=digest)) == "current"
+    assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(label="deadbeef")) == "stale"
+    # Rewriting a baked input with identical content (an `install` would) must NOT flip to stale.
+    (tmp_path / "docker" / "callback_listener.py").write_text("print(1)\n")
+    assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(label=digest)) == "current"
+    # A real content change DOES flip to stale.
+    (tmp_path / "docker" / "callback_listener.py").write_text("print(2)\n")
+    assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(label=digest)) == "stale"
