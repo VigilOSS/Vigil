@@ -9220,3 +9220,44 @@ def test_runtime_image_build_state_is_content_based(tmp_path):
     # A real content change DOES flip to stale.
     (tmp_path / "docker" / "callback_listener.py").write_text("print(2)\n")
     assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(label=digest)) == "stale"
+
+
+def test_install_built_image_carries_runtime_inputs_label(tmp_path):
+    """A `vigil install` (or `--force-image`) that builds vigil:latest must stamp
+    the same com.vigil.runtime-inputs-sha256 label `vigil runtime build` writes.
+    Without it an install-built image reports `unknown` on the next upgrade's
+    build-state check, so Vigil can never give the stale/current verdict for an
+    image it built itself until the operator manually rebuilds."""
+    from vigil_cli import runtime
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.install import InstallOptions, install_from_source
+
+    source_root = tmp_path / "source"
+    install_root = tmp_path / "install"
+    (source_root / "agent" / "docker" / "runtime-full").mkdir(parents=True)
+    (source_root / "docker").mkdir(parents=True)
+    (source_root / "agent" / "docker" / "runtime-full" / "Dockerfile").write_text("FROM kali\n")
+    (source_root / "docker" / "callback_listener.py").write_text("print(1)\n")
+    (source_root / "docker" / "start-callback.sh").write_text("#!/bin/sh\n")
+
+    calls: list[list[str]] = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        return DockerResult(0, "", "")
+
+    result = install_from_source(
+        InstallOptions(
+            source_root=source_root,
+            install_root=install_root,
+            force_image=True,
+            verify_docker_image=True,
+        ),
+        runner=runner,
+    )
+    assert result.image_built is True
+    build = next(c for c in calls if c[:3] == ["docker", "build", "-t"])
+    assert "--label" in build, f"install build must stamp the digest label; got {build}"
+    label_value = build[build.index("--label") + 1]
+    expected = f"com.vigil.runtime-inputs-sha256={runtime.runtime_inputs_digest(install_root)}"
+    assert label_value == expected
