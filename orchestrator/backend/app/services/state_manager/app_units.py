@@ -547,7 +547,7 @@ def _confidence_for(n_variants: int, n_observations: int) -> str:
 
 def _classify_tier(
     structure: int, risk: int, total: int,
-    decisive_surface: bool, confidence: str,
+    decisive_surface: bool,
 ) -> tuple[str, bool]:
     """Gated tier + deep_required (depth-gate §5.2). Totals alone never promote.
 
@@ -729,7 +729,7 @@ def score_application_units(engagement_id: int) -> dict[str, Any]:
                 total = structure + risk - suppressor
 
                 depth_tier, deep_required = _classify_tier(
-                    structure, risk, total, decisive_surface, confidence,
+                    structure, risk, total, decisive_surface,
                 )
 
                 evidence = {
@@ -1081,7 +1081,7 @@ def set_app_unit_override(
             decisive = bool(ev.get("decisive_surface") or ev.get("decisive_surface_only"))
             tier, deep = _classify_tier(
                 row["structure_score"], row["risk_score"], row["total_score"],
-                decisive, row["confidence"],
+                decisive,
             )
         connection.execute(
             """
