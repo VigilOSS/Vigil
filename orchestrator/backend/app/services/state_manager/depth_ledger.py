@@ -31,6 +31,7 @@ tied to the unit's host. A bare "I looked for secrets" probe never counts
 """
 from __future__ import annotations
 
+import functools
 import json
 from typing import Any
 
@@ -198,12 +199,6 @@ def depth_ledger(engagement_id: int) -> dict[str, Any]:
             "skills, status, finding_slugs_json FROM assessment_dispatches WHERE engagement_id = ?",
             (eng_id,),
         )
-        handoffs = _fetch_all(
-            connection,
-            "SELECT agent_id, summary, coverage_gaps_json, finding_slugs_json "
-            "FROM assessment_dispatch_handoffs WHERE engagement_id = ?",
-            (eng_id,),
-        )
         findings = _fetch_all(
             connection,
             "SELECT slug, canonical_location, defect_family "
@@ -239,11 +234,6 @@ def depth_ledger(engagement_id: int) -> dict[str, Any]:
 
     active_deferrals = _active_depth_deferrals(eng_id)
 
-    handoff_by_agent: dict[str, dict[str, Any]] = {}
-    for h in handoffs:
-        handoff_by_agent[str(h.get("agent_id") or "")] = h
-
-
     result_units: list[dict[str, Any]] = []
     n_satisfied = 0
     for unit in units:
@@ -256,7 +246,6 @@ def depth_ledger(engagement_id: int) -> dict[str, Any]:
             coverage_items=coverage_items,
             probes=probes,
             dispatches=dispatches,
-            handoff_by_agent=handoff_by_agent,
             findings=findings,
             active_deferrals=active_deferrals,
         )
@@ -271,6 +260,7 @@ def depth_ledger(engagement_id: int) -> dict[str, Any]:
     return {
         "skipped": False,
         "units": result_units,
+        "deferral_count": len(active_deferrals),
         "summary": {
             "deep_required": len(units),
             "depth_satisfied": n_satisfied,
@@ -321,7 +311,6 @@ def _unit_ledger(
     coverage_items: list[dict[str, Any]],
     probes: list[dict[str, Any]],
     dispatches: list[dict[str, Any]],
-    handoff_by_agent: dict[str, dict[str, Any]],
     findings: list[dict[str, Any]],
     active_deferrals: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -468,7 +457,6 @@ def _unit_ledger(
         unit_id=unit_id,
         unit_variant_ids=unit_variant_ids,
         dispatches=dispatches,
-        handoff_by_agent=handoff_by_agent,
         probes=probes,
         findings=findings,
     )
@@ -497,7 +485,7 @@ def _unit_ledger(
                 continue
             if _dispatch_has_work_evidence(
                 d, unit_id, unit_variant_ids, host, port_class, prefix,
-                handoff_by_agent, probes, findings,
+                probes, findings,
             ):
                 touched = True
                 break
@@ -704,17 +692,29 @@ def _dispatch_classes(dispatch: dict[str, Any]) -> set[str]:
             if fam:
                 families.add(fam)
     if not families:
-        class_to_skills = vuln_taxonomy.build_class_to_skills()
-        skill_to_classes: dict[str, set[str]] = {}
-        for cls, skills in class_to_skills.items():
-            for sk in skills:
-                skill_to_classes.setdefault(sk, set()).add(cls)
+        skill_to_families = _skill_to_families()
         for sk in str(dispatch.get("skills") or "").replace(",", " ").split():
-            for cls in skill_to_classes.get(sk.strip(), set()):
-                fam = vuln_taxonomy.family_of(cls)
-                if fam:
-                    families.add(fam)
+            families |= skill_to_families.get(sk.strip(), frozenset())
     return families
+
+
+@functools.lru_cache(maxsize=1)
+def _skill_to_families() -> dict[str, frozenset[str]]:
+    """Inverse skill -> declared FAMILIES index, derived once from the canonical
+    taxonomy. ``build_class_to_skills`` re-reads the whole skills dir (a glob plus
+    a frontmatter parse per ``SKILL.md``), so resolving it inside
+    ``_dispatch_classes`` ran it once per dispatch×unit in the synchronous
+    terminal-block request path. The skills tree is baked at install time and
+    does not change while the orchestrator runs, so a process-lifetime cache is
+    safe (a re-install restarts the service)."""
+    skill_to_families: dict[str, set[str]] = {}
+    for cls, skills in vuln_taxonomy.build_class_to_skills().items():
+        fam = vuln_taxonomy.family_of(cls)
+        if not fam:
+            continue
+        for sk in skills:
+            skill_to_families.setdefault(sk, set()).add(fam)
+    return {sk: frozenset(fams) for sk, fams in skill_to_families.items()}
 
 
 def _dispatch_contains_unit(
@@ -737,7 +737,6 @@ def _dedicated_dispatch_satisfied(
     unit_id: int,
     unit_variant_ids: set[int],
     dispatches: list[dict[str, Any]],
-    handoff_by_agent: dict[str, dict[str, Any]],
     probes: list[dict[str, Any]],
     findings: list[dict[str, Any]],
 ) -> bool:
@@ -763,7 +762,7 @@ def _dedicated_dispatch_satisfied(
             continue
         if not _dispatch_has_work_evidence(
             d, unit_id, unit_variant_ids, host, port_class, prefix,
-            handoff_by_agent, probes, findings,
+            probes, findings,
         ):
             continue
         any_qualifying = True
@@ -780,7 +779,6 @@ def _dispatch_has_work_evidence(
     host: str,
     port_class: str,
     prefix: str,
-    handoff_by_agent: dict[str, dict[str, Any]],
     probes: list[dict[str, Any]],
     findings: list[dict[str, Any]],
 ) -> bool:
@@ -886,7 +884,7 @@ def terminal_depth_block(engagement_id: int) -> dict[str, Any]:
             "deferral_count": 0,
         }
 
-    deferral_count = len(_active_depth_deferrals(engagement_id))
+    deferral_count = int(ledger.get("deferral_count") or 0)
 
     blocking: list[dict[str, Any]] = []
     warned: list[dict[str, Any]] = []
