@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import docker
 from .client_rosters import repair_engagement_client_rosters
+from .runtime import build_runtime
 
 
 def _rmtree(path: Path) -> None:
@@ -172,8 +173,12 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
     if options.verify_docker_image:
         image = "vigil:latest"
         if options.force_image or not docker.image_exists(image, runner=runner):
-            argv = ["docker", "build", "-t", image, "-f", str(install_root / "agent" / "docker" / "runtime-full" / "Dockerfile"), str(install_root)]
-            docker.require_success(runner(argv), argv)
+            # Build via build_runtime so the install-built image carries the
+            # com.vigil.runtime-inputs-sha256 label. A bare `docker build` here
+            # leaves the image unstamped, and the next upgrade's build-state
+            # check then reports `unknown` for an image Vigil itself built —
+            # unable to give the stale/current verdict until a manual rebuild.
+            build_runtime(install_root, runner=runner)
             image_built = True
     return InstallResult(install_root=install_root, is_upgrade=is_upgrade, image_built=image_built)
 
