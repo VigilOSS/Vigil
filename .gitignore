@@ -21,3 +21,10 @@ CODEX-FINDINGS.md
 **/build/
 prev-issues.md
 potentially-updated-issues.md
+
+# Benchmark harness (`vigil bench`). Artifacts, manifests, the judge-only
+# answer key, and the plaintext per-run flags live off-tree under
+# $VIGIL_BENCH_HOME (default ~/.vigil-bench) by design; these patterns are a
+# defensive backstop in case that home is ever pointed inside the repo.
+.vigil-bench/
+bench-results/
