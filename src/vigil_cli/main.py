@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import auth as auth_module
 from . import backup as backup_module
+from . import bench as bench_module
 from . import blue as blue_module
 from . import config as config_module
 from .docker import run_command as docker_run_command
@@ -303,6 +304,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     blue_module.register_blue_parser(sub)
+    bench_module.register_bench_parser(sub)
 
     orch_p = sub.add_parser("orchestrator")
     orch_sub = orch_p.add_subparsers(dest="orchestrator_command", required=True)
@@ -507,6 +509,8 @@ def main(argv: list[str] | None = None) -> None:
         _engagement(args, install_root)
     elif args.command == "blue":
         blue_module.run_blue(args, install_root)
+    elif args.command == "bench":
+        bench_module.run_bench(args, install_root)
     elif args.command == "orchestrator":
         _orchestrator(args, install_root)
     elif args.command == "runtime":
