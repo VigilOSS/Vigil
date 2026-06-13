@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -19,6 +20,28 @@ class DatabaseFingerprint:
     path: Path
     device: int
     inode: int
+
+
+def _resolve_busy_timeout_ms() -> int:
+    """SQLite busy-timeout (ms) for short-lived connections.
+
+    Matches the historical implicit sqlite3 default (5000 ms) but is now explicit
+    and overridable via VIGIL_DB_BUSY_TIMEOUT_MS so the BEGIN IMMEDIATE wait can
+    be tuned under multi-worker contention (E1). Invalid/negative values fall back
+    to the default.
+    """
+    raw = os.environ.get("VIGIL_DB_BUSY_TIMEOUT_MS", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value >= 0:
+                return value
+        except ValueError:
+            pass
+    return 5000
+
+
+_BUSY_TIMEOUT_MS = _resolve_busy_timeout_ms()
 
 
 _startup_database_fingerprint: DatabaseFingerprint | None = None
@@ -2788,6 +2811,14 @@ def get_connection() -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(str(db_path))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    # E1: connections are short-lived (opened + closed per request/operation) and
+    # the DB is WAL (single writer, concurrent readers). Set the busy-timeout
+    # explicitly rather than relying on Python's implicit 5 s default so the wait
+    # a concurrent writer takes on the BEGIN IMMEDIATE lock is documented and
+    # tunable. Under multi-worker uvicorn (E1) several processes contend for the
+    # single write lock; this gives the loser room to wait instead of an immediate
+    # SQLITE_BUSY. Value matches the prior implicit default.
+    connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
     try:
         yield connection
         connection.commit()

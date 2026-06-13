@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import anyio
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -527,6 +529,10 @@ class FindingPatchRequest(BaseModel):
     notes_mode: Literal["append", "replace"] = "append"
     source_name: str | None = Field(default=None, max_length=128)
     details: dict[str, Any] | None = None
+    # CR-31: "merge" (default) accretes detail keys across checkpoints; "replace"
+    # overwrites the whole details object so cross-contaminated/stale keys can be
+    # fully removed (merge cannot delete keys). Requires details to be present.
+    details_mode: Literal["merge", "replace"] = "merge"
     provenance: dict[str, Any] | None = None
     # C44: allow retroactive labeling via vigil assess update-finding.
     evidence_type: Literal[
@@ -540,6 +546,14 @@ class FindingPatchRequest(BaseModel):
     def _require_notes_when_replacing(self) -> "FindingPatchRequest":
         if self.notes_mode == "replace" and self.notes is None:
             raise ValueError("notes_mode='replace' requires notes")
+        return self
+
+    @model_validator(mode="after")
+    def _require_details_when_replacing(self) -> "FindingPatchRequest":
+        # details_mode='replace' overwrites the column; without a details payload
+        # it would silently null it. Reject (mirrors the notes_mode guard).
+        if self.details_mode == "replace" and self.details is None:
+            raise ValueError("details_mode='replace' requires details")
         return self
 
 
@@ -875,28 +889,34 @@ def get_command_run(engagement_key: str, command_run_id: int) -> dict[str, Any]:
 
 @router.post("/artifacts", status_code=status.HTTP_201_CREATED)
 async def register_artifact(engagement_key: str, request: ArtifactRegisterRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = artifact_index.register_artifact(
-        engagement.id,
-        path=request.path,
-        kind=request.kind,
-        media_type=request.media_type,
-        sensitive=request.sensitive,
-        producer_agent_id=request.producer_agent_id,
-        producer_agent_role=request.producer_agent_role,
-        producer_command_run_id=request.producer_command_run_id,
-        related_finding_slug=request.related_finding_slug,
-        related_chain_key=request.related_chain_key,
-        related_surface_id=request.related_surface_id,
-        related_request_variant_id=request.related_request_variant_id,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            artifact_index.register_artifact,
+            engagement.id,
+            path=request.path,
+            kind=request.kind,
+            media_type=request.media_type,
+            sensitive=request.sensitive,
+            producer_agent_id=request.producer_agent_id,
+            producer_agent_role=request.producer_agent_role,
+            producer_command_run_id=request.producer_command_run_id,
+            related_finding_slug=request.related_finding_slug,
+            related_chain_key=request.related_chain_key,
+            related_surface_id=request.related_surface_id,
+            related_request_variant_id=request.related_request_variant_id,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="artifact register",
-        action=str(record.get("relative_path") or request.path),
-        actor_name=request.producer_agent_role or request.producer_agent_id or "operator",
-        result=record.get("kind", ""),
-        metadata={"artifact_id": record.get("id"), "relative_path": record.get("relative_path")},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="artifact register",
+            action=str(record.get("relative_path") or request.path),
+            actor_name=request.producer_agent_role or request.producer_agent_id or "operator",
+            result=record.get("kind", ""),
+            metadata={"artifact_id": record.get("id"), "relative_path": record.get("relative_path")},
+        )
     )
     await _broadcast(engagement.key, "artifact", record)
     return record
@@ -904,15 +924,20 @@ async def register_artifact(engagement_key: str, request: ArtifactRegisterReques
 
 @router.post("/artifacts/refresh")
 async def refresh_artifacts(engagement_key: str) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    result = artifact_index.refresh_artifacts(engagement.id)
-    _audit_assessment_mutation(
-        engagement.id,
-        title="artifact refresh",
-        action="refresh",
-        actor_name="operator",
-        result=f"refreshed={result.get('refreshed', 0)} missing={result.get('missing', 0)}",
-        metadata=result,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    result = await anyio.to_thread.run_sync(
+        functools.partial(artifact_index.refresh_artifacts, engagement.id)
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="artifact refresh",
+            action="refresh",
+            actor_name="operator",
+            result=f"refreshed={result.get('refreshed', 0)} missing={result.get('missing', 0)}",
+            metadata=result,
+        )
     )
     await _broadcast(engagement.key, "artifact_refresh", result)
     return result
@@ -957,19 +982,25 @@ async def mark_artifact_scratch(
     artifact_id: int,
     request: ArtifactScratchRequest,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    row = artifact_index.set_scratch_flag(
-        engagement.id,
-        artifact_id=artifact_id,
-        scratch=request.scratch,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    row = await anyio.to_thread.run_sync(
+        functools.partial(
+            artifact_index.set_scratch_flag,
+            engagement.id,
+            artifact_id=artifact_id,
+            scratch=request.scratch,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="artifact mark-scratch" if request.scratch else "artifact unmark-scratch",
-        action=str(row.get("relative_path") or ""),
-        actor_name="operator",
-        result="scratch=1" if request.scratch else "scratch=0",
-        metadata={"artifact_id": row.get("id"), "relative_path": row.get("relative_path")},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="artifact mark-scratch" if request.scratch else "artifact unmark-scratch",
+            action=str(row.get("relative_path") or ""),
+            actor_name="operator",
+            result="scratch=1" if request.scratch else "scratch=0",
+            metadata={"artifact_id": row.get("id"), "relative_path": row.get("relative_path")},
+        )
     )
     await _broadcast(engagement.key, "artifact_scratch", row)
     return row
@@ -980,21 +1011,27 @@ async def mark_artifact_scratch_by_path(
     engagement_key: str,
     request: ArtifactScratchRequest,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     if not (request.path or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path is required")
-    row = artifact_index.set_scratch_flag(
-        engagement.id,
-        path=request.path or "",
-        scratch=request.scratch,
+    row = await anyio.to_thread.run_sync(
+        functools.partial(
+            artifact_index.set_scratch_flag,
+            engagement.id,
+            path=request.path or "",
+            scratch=request.scratch,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="artifact mark-scratch" if request.scratch else "artifact unmark-scratch",
-        action=str(row.get("relative_path") or request.path or ""),
-        actor_name="operator",
-        result="scratch=1" if request.scratch else "scratch=0",
-        metadata={"artifact_id": row.get("id"), "relative_path": row.get("relative_path")},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="artifact mark-scratch" if request.scratch else "artifact unmark-scratch",
+            action=str(row.get("relative_path") or request.path or ""),
+            actor_name="operator",
+            result="scratch=1" if request.scratch else "scratch=0",
+            metadata={"artifact_id": row.get("id"), "relative_path": row.get("relative_path")},
+        )
     )
     await _broadcast(engagement.key, "artifact_scratch", row)
     return row
@@ -1012,19 +1049,25 @@ async def mark_artifacts_scratch_under(
     engagement_key: str,
     request: ArtifactScratchBulkRequest,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    result = artifact_index.set_scratch_under_prefix(
-        engagement.id,
-        prefix=request.prefix,
-        scratch=request.scratch,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    result = await anyio.to_thread.run_sync(
+        functools.partial(
+            artifact_index.set_scratch_under_prefix,
+            engagement.id,
+            prefix=request.prefix,
+            scratch=request.scratch,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="artifact mark-scratch (bulk)" if request.scratch else "artifact unmark-scratch (bulk)",
-        action=f"prefix={request.prefix}",
-        actor_name="operator",
-        result=f"matched={result.get('matched', 0)} scratch={'1' if request.scratch else '0'}",
-        metadata={"prefix": result.get("prefix"), "matched": result.get("matched", 0)},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="artifact mark-scratch (bulk)" if request.scratch else "artifact unmark-scratch (bulk)",
+            action=f"prefix={request.prefix}",
+            actor_name="operator",
+            result=f"matched={result.get('matched', 0)} scratch={'1' if request.scratch else '0'}",
+            metadata={"prefix": result.get("prefix"), "matched": result.get("matched", 0)},
+        )
     )
     await _broadcast(engagement.key, "artifact_scratch_bulk", result)
     return result
@@ -1193,24 +1236,30 @@ def get_blocked_techniques(engagement_key: str) -> list[dict[str, Any]]:
 
 @router.post("/request-observations", status_code=status.HTTP_201_CREATED)
 async def create_request_observation(engagement_key: str, request: RequestObservationIngestRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.ingest_request_observation(engagement.id, **request.model_dump())
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(state_manager.ingest_request_observation, engagement.id, **request.model_dump())
+    )
     await _broadcast(engagement.key, "request_observation", record)
     return record
 
 
 @router.post("/probe-runs", status_code=status.HTTP_201_CREATED)
 async def create_probe_run(engagement_key: str, request: ProbeRunRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_probe_run(engagement.id, **request.model_dump())
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(state_manager.record_probe_run, engagement.id, **request.model_dump())
+    )
     await _broadcast(engagement.key, "probe_run", record)
     return record
 
 
 @router.post("/coverage-items", status_code=status.HTTP_201_CREATED)
 async def create_coverage_item(engagement_key: str, request: CoverageItemRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_coverage_item(engagement.id, **request.model_dump())
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(state_manager.record_coverage_item, engagement.id, **request.model_dump())
+    )
     await _broadcast(engagement.key, "coverage_item", record)
     return record
 
@@ -1220,13 +1269,15 @@ async def create_command_run(
     engagement_key: str,
     request: CommandRunRecordRequest,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     payload = request.model_dump()
     if not payload.get("command_hash"):
         payload["command_hash"] = hashlib.sha256(
             payload["command"].encode("utf-8", errors="replace")
         ).hexdigest()
-    record = state_manager.record_command_run(engagement.id, **payload)
+    record = await anyio.to_thread.run_sync(
+        functools.partial(state_manager.record_command_run, engagement.id, **payload)
+    )
     await _broadcast(engagement.key, "command_run", record)
     return record
 
@@ -1255,14 +1306,16 @@ async def record_host_exec(
     /command-runs``: the same retention, dedup, and artifact-spill logic in
     ``state_manager.record_command_run()`` applies.
     """
-    engagement = get_engagement_or_404(engagement_key)
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     payload = request.model_dump()
     payload["route"] = "host_exec"  # canonical marker, never trust client input
     if not payload.get("command_hash"):
         payload["command_hash"] = hashlib.sha256(
             payload["command"].encode("utf-8", errors="replace")
         ).hexdigest()
-    record = state_manager.record_command_run(engagement.id, **payload)
+    record = await anyio.to_thread.run_sync(
+        functools.partial(state_manager.record_command_run, engagement.id, **payload)
+    )
     await _broadcast(engagement.key, "command_run", record)
     return record
 
@@ -1274,21 +1327,24 @@ async def patch_command_run(
     request: CommandRunFinalize,
 ) -> dict[str, Any]:
     """Finalize a pre-exec command-run row written with status=running."""
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.finalize_command_run(
-        engagement.id,
-        command_run_id=int(command_run_id),
-        status_value=request.status,
-        return_code=request.return_code,
-        ended_at=request.ended_at.isoformat(),
-        duration_ms=request.duration_ms,
-        stdout_preview=request.stdout_preview,
-        stderr_preview=request.stderr_preview,
-        timed_out=request.timed_out,
-        partial_results=request.partial_results,
-        peak_rss_bytes=request.peak_rss_bytes,
-        cpu_user_seconds=request.cpu_user_seconds,
-        cpu_system_seconds=request.cpu_system_seconds,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.finalize_command_run,
+            engagement.id,
+            command_run_id=int(command_run_id),
+            status_value=request.status,
+            return_code=request.return_code,
+            ended_at=request.ended_at.isoformat(),
+            duration_ms=request.duration_ms,
+            stdout_preview=request.stdout_preview,
+            stderr_preview=request.stderr_preview,
+            timed_out=request.timed_out,
+            partial_results=request.partial_results,
+            peak_rss_bytes=request.peak_rss_bytes,
+            cpu_user_seconds=request.cpu_user_seconds,
+            cpu_system_seconds=request.cpu_system_seconds,
+        )
     )
     if not record.get("noop"):
         await _broadcast(engagement.key, "command_run", record)
@@ -1300,18 +1356,21 @@ async def create_job(
     engagement_key: str,
     request: JobCreate,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_job(
-        engagement.id,
-        parent_command_run_id=request.parent_command_run_id,
-        status_value=request.status,
-        started_at=request.started_at.isoformat() if request.started_at else None,
-        ended_at=request.ended_at.isoformat() if request.ended_at else None,
-        exit_code=request.exit_code,
-        dtach_socket_path=request.dtach_socket_path,
-        stdout_path=request.stdout_path,
-        stderr_path=request.stderr_path,
-        audit_metadata=request.audit_metadata,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_job,
+            engagement.id,
+            parent_command_run_id=request.parent_command_run_id,
+            status_value=request.status,
+            started_at=request.started_at.isoformat() if request.started_at else None,
+            ended_at=request.ended_at.isoformat() if request.ended_at else None,
+            exit_code=request.exit_code,
+            dtach_socket_path=request.dtach_socket_path,
+            stdout_path=request.stdout_path,
+            stderr_path=request.stderr_path,
+            audit_metadata=request.audit_metadata,
+        )
     )
     await _broadcast(engagement.key, "job", record)
     return record
@@ -1347,18 +1406,21 @@ async def patch_job(
     job_id: int,
     request: JobUpdate,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.update_job(
-        engagement.id,
-        job_id=int(job_id),
-        status_value=request.status,
-        started_at=request.started_at.isoformat() if request.started_at else None,
-        ended_at=request.ended_at.isoformat() if request.ended_at else None,
-        exit_code=request.exit_code,
-        dtach_socket_path=request.dtach_socket_path,
-        stdout_path=request.stdout_path,
-        stderr_path=request.stderr_path,
-        audit_metadata=request.audit_metadata,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.update_job,
+            engagement.id,
+            job_id=int(job_id),
+            status_value=request.status,
+            started_at=request.started_at.isoformat() if request.started_at else None,
+            ended_at=request.ended_at.isoformat() if request.ended_at else None,
+            exit_code=request.exit_code,
+            dtach_socket_path=request.dtach_socket_path,
+            stdout_path=request.stdout_path,
+            stderr_path=request.stderr_path,
+            audit_metadata=request.audit_metadata,
+        )
     )
     await _broadcast(engagement.key, "job", record)
     return record
@@ -1371,18 +1433,21 @@ async def create_oob_probe(engagement_key: str, request: OobProbeRecordRequest) 
     Idempotent on ``nonce`` — re-minting the same nonce returns the existing
     row rather than erroring, so a retried CLI call is safe.
     """
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_oob_probe(
-        engagement.id,
-        nonce=request.nonce,
-        target_url=request.target_url,
-        param=request.param,
-        technique=request.technique,
-        probe_kind=request.probe_kind,
-        request_hash=request.request_hash,
-        oob_domain=request.oob_domain,
-        notes=request.notes,
-        status_value=request.status,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_oob_probe,
+            engagement.id,
+            nonce=request.nonce,
+            target_url=request.target_url,
+            param=request.param,
+            technique=request.technique,
+            probe_kind=request.probe_kind,
+            request_hash=request.request_hash,
+            oob_domain=request.oob_domain,
+            notes=request.notes,
+            status_value=request.status,
+        )
     )
     await _broadcast(engagement.key, "oob_probe", record)
     return record
@@ -1396,15 +1461,18 @@ async def record_oob_interaction(engagement_key: str, request: OobInteractionRec
     yields ``matched=False`` with HTTP 200 so the poller can collect stray
     callbacks under an "unmatched interactions" section instead of aborting.
     """
-    engagement = get_engagement_or_404(engagement_key)
-    result = state_manager.correlate_oob_interaction(
-        engagement.id,
-        nonce=request.nonce,
-        protocol=request.protocol,
-        remote_address=request.remote_address,
-        query_type=request.query_type,
-        raw_request=request.raw_request,
-        observed_at=request.observed_at,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    result = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.correlate_oob_interaction,
+            engagement.id,
+            nonce=request.nonce,
+            protocol=request.protocol,
+            remote_address=request.remote_address,
+            query_type=request.query_type,
+            raw_request=request.raw_request,
+            observed_at=request.observed_at,
+        )
     )
     if result.get("matched") and result.get("probe") and not result.get("duplicate"):
         await _broadcast(engagement.key, "oob_probe", result["probe"])
@@ -1413,15 +1481,18 @@ async def record_oob_interaction(engagement_key: str, request: OobInteractionRec
 
 @router.post("/surfaces", status_code=status.HTTP_201_CREATED)
 async def create_surface(engagement_key: str, request: SurfaceRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_surface(
-        engagement.id,
-        surface_type=request.surface_type,
-        target_descriptor=request.target_descriptor,
-        source_name=request.source_name,
-        rationale=request.rationale,
-        evidence_ref=request.evidence_ref,
-        status_value=request.status,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_surface,
+            engagement.id,
+            surface_type=request.surface_type,
+            target_descriptor=request.target_descriptor,
+            source_name=request.source_name,
+            rationale=request.rationale,
+            evidence_ref=request.evidence_ref,
+            status_value=request.status,
+        )
     )
     await _broadcast(engagement.key, "surface", record)
     return record
@@ -1440,15 +1511,18 @@ async def update_surface_endpoint(
     the (surface_type, target_descriptor) UPSERT key. ``vigil assess
     resolve-surface`` is the helper that drives this endpoint.
     """
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.update_surface(
-        engagement.id,
-        surface_id,
-        status_value=request.status,
-        rationale=request.rationale,
-        source_name=request.source_name,
-        evidence_ref=request.evidence_ref,
-        followup_condition=request.followup_condition,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.update_surface,
+            engagement.id,
+            surface_id,
+            status_value=request.status,
+            rationale=request.rationale,
+            source_name=request.source_name,
+            evidence_ref=request.evidence_ref,
+            followup_condition=request.followup_condition,
+        )
     )
     await _broadcast(engagement.key, "surface", record)
     return record
@@ -1506,16 +1580,19 @@ def get_terminal_depth_block(engagement_key: str) -> dict[str, Any]:
 
 
 @router.post("/application-units/score")
-async def score_application_units_endpoint(engagement_key: str) -> dict[str, Any]:
+def score_application_units_endpoint(engagement_key: str) -> dict[str, Any]:
     """Run prefix discovery + the depth scorer (idempotent). WEB-ONLY guard
-    inside the scorer makes this a no-op for code/blue engagements."""
+    inside the scorer makes this a no-op for code/blue engagements.
+
+    Plain ``def`` (no broadcast / no await): FastAPI runs it in the threadpool
+    so the synchronous DB scoring work never blocks the event loop (E1)."""
     engagement = get_engagement_or_404(engagement_key)
     result = state_manager.score_application_units(engagement.id)
     return result
 
 
 @router.patch("/application-units/{unit_id}")
-async def update_application_unit_override(
+def update_application_unit_override(
     engagement_key: str,
     unit_id: int,
     request: AppUnitOverrideRequest,
@@ -1524,6 +1601,9 @@ async def update_application_unit_override(
 
     Driven by ``vigil assess app-unit mark-deep|clear-deep``. The override is
     durable and always wins over the scorer (depth-gate §5.2).
+
+    Plain ``def`` (no broadcast / no await): FastAPI runs it in the threadpool
+    so the synchronous DB write never blocks the event loop (E1).
     """
     engagement = get_engagement_or_404(engagement_key)
     try:
@@ -1542,21 +1622,27 @@ async def merge_findings_endpoint(engagement_key: str, request: MergeFindingsReq
     The source finding's status becomes 'merged' and its evidence, notes, and
     links are folded into the target.  The stronger severity and status win.
     """
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.merge_findings(
-        engagement.id,
-        source_slug=request.source_slug,
-        target_slug=request.target_slug,
-        reason=request.reason,
-        source_name=request.source_name,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.merge_findings,
+            engagement.id,
+            source_slug=request.source_slug,
+            target_slug=request.target_slug,
+            reason=request.reason,
+            source_name=request.source_name,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="merge-findings",
-        action=f"{request.source_slug} -> {request.target_slug}",
-        actor_name=request.source_name,
-        result=request.reason or "",
-        metadata={"source_slug": request.source_slug, "target_slug": request.target_slug},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="merge-findings",
+            action=f"{request.source_slug} -> {request.target_slug}",
+            actor_name=request.source_name,
+            result=request.reason or "",
+            metadata={"source_slug": request.source_slug, "target_slug": request.target_slug},
+        )
     )
     await _broadcast(engagement.key, "finding_merge", record)
     return record
@@ -1564,38 +1650,44 @@ async def merge_findings_endpoint(engagement_key: str, request: MergeFindingsReq
 
 @router.post("/findings", status_code=status.HTTP_201_CREATED)
 async def create_finding(engagement_key: str, request: FindingRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.create_finding(
-        engagement.id,
-        slug=request.slug,
-        title=request.title,
-        severity=request.severity,
-        workflow_status=request.workflow_status,
-        verification_state=request.verification_state,
-        verification_disposition=request.verification_disposition,
-        defect_family=request.defect_family,
-        root_cause_key=request.root_cause_key,
-        auth_context=request.auth_context,
-        canonical_location=request.canonical_location,
-        summary=request.summary,
-        evidence_ref=request.evidence_ref,
-        notes=request.notes,
-        source_name=request.source_name,
-        details=request.details,
-        provenance=request.provenance,
-        evidence_type=request.evidence_type,
-        request_variant_id=request.request_variant_id,
-        service_id=request.service_id,
-        surface_id=request.surface_id,
-        links=[item.model_dump() for item in request.links],
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.create_finding,
+            engagement.id,
+            slug=request.slug,
+            title=request.title,
+            severity=request.severity,
+            workflow_status=request.workflow_status,
+            verification_state=request.verification_state,
+            verification_disposition=request.verification_disposition,
+            defect_family=request.defect_family,
+            root_cause_key=request.root_cause_key,
+            auth_context=request.auth_context,
+            canonical_location=request.canonical_location,
+            summary=request.summary,
+            evidence_ref=request.evidence_ref,
+            notes=request.notes,
+            source_name=request.source_name,
+            details=request.details,
+            provenance=request.provenance,
+            evidence_type=request.evidence_type,
+            request_variant_id=request.request_variant_id,
+            service_id=request.service_id,
+            surface_id=request.surface_id,
+            links=[item.model_dump() for item in request.links],
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="record-finding",
-        action=f"finding={record.get('slug', request.slug)} severity={record.get('severity', request.severity)}",
-        actor_name=request.source_name,
-        result=record.get("workflow_status", request.workflow_status) or "",
-        metadata={"finding_slug": record.get("slug", request.slug), "source_name": request.source_name},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="record-finding",
+            action=f"finding={record.get('slug', request.slug)} severity={record.get('severity', request.severity)}",
+            actor_name=request.source_name,
+            result=record.get("workflow_status", request.workflow_status) or "",
+            metadata={"finding_slug": record.get("slug", request.slug), "source_name": request.source_name},
+        )
     )
     await _broadcast(engagement.key, "finding", record)
     return record
@@ -1607,36 +1699,43 @@ async def patch_finding(
     finding_slug: str,
     request: FindingPatchRequest,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.patch_finding(
-        engagement.id,
-        slug=finding_slug,
-        title=request.title,
-        severity=request.severity,
-        workflow_status=request.workflow_status,
-        defect_family=request.defect_family,
-        root_cause_key=request.root_cause_key,
-        auth_context=request.auth_context,
-        canonical_location=request.canonical_location,
-        summary=request.summary,
-        evidence_ref=request.evidence_ref,
-        notes=request.notes,
-        notes_mode=request.notes_mode,
-        source_name=request.source_name,
-        details=request.details,
-        provenance=request.provenance,
-        evidence_type=request.evidence_type,
-        transition_reason_code=request.reason_code,
-        transition_reason_text=request.reason_text,
-        transition_artifact_ref=request.artifact_ref,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.patch_finding,
+            engagement.id,
+            slug=finding_slug,
+            title=request.title,
+            severity=request.severity,
+            workflow_status=request.workflow_status,
+            defect_family=request.defect_family,
+            root_cause_key=request.root_cause_key,
+            auth_context=request.auth_context,
+            canonical_location=request.canonical_location,
+            summary=request.summary,
+            evidence_ref=request.evidence_ref,
+            notes=request.notes,
+            notes_mode=request.notes_mode,
+            source_name=request.source_name,
+            details=request.details,
+            details_mode=request.details_mode,
+            provenance=request.provenance,
+            evidence_type=request.evidence_type,
+            transition_reason_code=request.reason_code,
+            transition_reason_text=request.reason_text,
+            transition_artifact_ref=request.artifact_ref,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="update-finding",
-        action=f"finding={finding_slug}",
-        actor_name=request.source_name,
-        result=request.reason_code or request.reason_text or "",
-        metadata={"finding_slug": finding_slug},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="update-finding",
+            action=f"finding={finding_slug}",
+            actor_name=request.source_name,
+            result=request.reason_code or request.reason_text or "",
+            metadata={"finding_slug": finding_slug},
+        )
     )
     await _broadcast(engagement.key, "finding_patch", record)
     return record
@@ -1648,24 +1747,30 @@ async def set_finding_root_cause(
     finding_slug: str,
     request: RootCauseLinkRequest,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.set_root_cause_link(
-        engagement.id,
-        finding_slug=finding_slug,
-        root_cause_slug=request.root_cause_slug,
-        sibling_order=request.sibling_order,
-        root_cause_effect=request.root_cause_effect,
-        note=request.note,
-        source_name=request.source_name,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.set_root_cause_link,
+            engagement.id,
+            finding_slug=finding_slug,
+            root_cause_slug=request.root_cause_slug,
+            sibling_order=request.sibling_order,
+            root_cause_effect=request.root_cause_effect,
+            note=request.note,
+            source_name=request.source_name,
+            provenance=request.provenance,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="link-finding",
-        action=f"finding={finding_slug} root_cause={request.root_cause_slug}",
-        actor_name=request.source_name,
-        result=request.root_cause_effect,
-        metadata={"finding_slug": finding_slug, "root_cause_slug": request.root_cause_slug},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="link-finding",
+            action=f"finding={finding_slug} root_cause={request.root_cause_slug}",
+            actor_name=request.source_name,
+            result=request.root_cause_effect,
+            metadata={"finding_slug": finding_slug, "root_cause_slug": request.root_cause_slug},
+        )
     )
     await _broadcast(engagement.key, "finding_root_cause", record)
     return record
@@ -1673,15 +1778,20 @@ async def set_finding_root_cause(
 
 @router.delete("/findings/{finding_slug}/root-cause")
 async def clear_finding_root_cause(engagement_key: str, finding_slug: str) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.clear_root_cause_link(engagement.id, finding_slug=finding_slug)
-    _audit_assessment_mutation(
-        engagement.id,
-        title="unlink-finding",
-        action=f"finding={finding_slug} root_cause=clear",
-        actor_name="operator",
-        result=str(record.get("cleared", 0)),
-        metadata={"finding_slug": finding_slug},
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(state_manager.clear_root_cause_link, engagement.id, finding_slug=finding_slug)
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="unlink-finding",
+            action=f"finding={finding_slug} root_cause=clear",
+            actor_name="operator",
+            result=str(record.get("cleared", 0)),
+            metadata={"finding_slug": finding_slug},
+        )
     )
     await _broadcast(engagement.key, "finding_root_cause", record)
     return record
@@ -1693,29 +1803,35 @@ async def create_finding_link(
     finding_slug: str,
     request: FindingLinkRequest,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     if request.link_kind == state_manager.ROOT_CAUSE_LINK_KIND:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="use PUT /findings/{slug}/root-cause for root-cause links",
         )
-    record = state_manager.create_finding_link(
-        engagement.id,
-        finding_slug=finding_slug,
-        link_kind=request.link_kind,
-        target_kind=request.target_kind,
-        target_id=request.target_id,
-        target_ref=request.target_ref,
-        notes=request.notes,
-        provenance=request.provenance,
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.create_finding_link,
+            engagement.id,
+            finding_slug=finding_slug,
+            link_kind=request.link_kind,
+            target_kind=request.target_kind,
+            target_id=request.target_id,
+            target_ref=request.target_ref,
+            notes=request.notes,
+            provenance=request.provenance,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="finding-link",
-        action=f"finding={finding_slug} link={request.link_kind}:{request.target_kind}:{request.target_ref}",
-        actor_name="operator",
-        result="linked",
-        metadata={"finding_slug": finding_slug, "link_id": record.get("id")},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="finding-link",
+            action=f"finding={finding_slug} link={request.link_kind}:{request.target_kind}:{request.target_ref}",
+            actor_name="operator",
+            result="linked",
+            metadata={"finding_slug": finding_slug, "link_id": record.get("id")},
+        )
     )
     await _broadcast(engagement.key, "finding_link", record)
     return record
@@ -1727,28 +1843,34 @@ async def verify_finding(
     finding_slug: str,
     request: FindingVerifyRequest,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.verify_finding(
-        engagement.id,
-        slug=finding_slug,
-        disposition=request.disposition,
-        reason_code=request.reason_code,
-        reason_text=request.reason_text,
-        source_name=request.source_name,
-        evidence_ref=request.evidence_ref,
-        notes=request.notes,
-        details=request.details,
-        provenance=request.provenance,
-        artifact_ref=request.artifact_ref,
-        new_severity=request.new_severity,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.verify_finding,
+            engagement.id,
+            slug=finding_slug,
+            disposition=request.disposition,
+            reason_code=request.reason_code,
+            reason_text=request.reason_text,
+            source_name=request.source_name,
+            evidence_ref=request.evidence_ref,
+            notes=request.notes,
+            details=request.details,
+            provenance=request.provenance,
+            artifact_ref=request.artifact_ref,
+            new_severity=request.new_severity,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="verify-finding",
-        action=f"finding={finding_slug} disposition={request.disposition}",
-        actor_name=request.source_name,
-        result=request.reason_code or request.reason_text or request.disposition,
-        metadata={"finding_slug": finding_slug, "disposition": request.disposition},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="verify-finding",
+            action=f"finding={finding_slug} disposition={request.disposition}",
+            actor_name=request.source_name,
+            result=request.reason_code or request.reason_text or request.disposition,
+            metadata={"finding_slug": finding_slug, "disposition": request.disposition},
+        )
     )
     await _broadcast(engagement.key, "finding_verify", record)
     return record
@@ -1756,17 +1878,20 @@ async def verify_finding(
 
 @router.post("/attack-chains", status_code=status.HTTP_201_CREATED)
 async def create_attack_chain(engagement_key: str, request: AttackChainRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.create_attack_chain(
-        engagement.id,
-        chain_key=request.chain_key,
-        title=request.title,
-        status_value=request.status,
-        severity=request.severity,
-        narrative=request.narrative,
-        evidence_ref=request.evidence_ref,
-        provenance=request.provenance,
-        links=[item.model_dump() for item in request.links],
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.create_attack_chain,
+            engagement.id,
+            chain_key=request.chain_key,
+            title=request.title,
+            status_value=request.status,
+            severity=request.severity,
+            narrative=request.narrative,
+            evidence_ref=request.evidence_ref,
+            provenance=request.provenance,
+            links=[item.model_dump() for item in request.links],
+        )
     )
     await _broadcast(engagement.key, "attack_chain", record)
     return record
@@ -1774,18 +1899,21 @@ async def create_attack_chain(engagement_key: str, request: AttackChainRecordReq
 
 @router.post("/credentials", status_code=status.HTTP_201_CREATED)
 async def create_credential(engagement_key: str, request: CredentialRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_credential(
-        engagement.id,
-        credential_key=request.credential_key,
-        kind=request.kind,
-        principal=request.principal,
-        secret=request.secret,
-        source_name=request.source_name,
-        status_value=request.status,
-        notes=request.notes,
-        provenance=request.provenance,
-        identity=request.identity,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_credential,
+            engagement.id,
+            credential_key=request.credential_key,
+            kind=request.kind,
+            principal=request.principal,
+            secret=request.secret,
+            source_name=request.source_name,
+            status_value=request.status,
+            notes=request.notes,
+            provenance=request.provenance,
+            identity=request.identity,
+        )
     )
     await _broadcast(engagement.key, "credential", record)
     return record
@@ -1793,16 +1921,19 @@ async def create_credential(engagement_key: str, request: CredentialRecordReques
 
 @router.post("/credential-tests", status_code=status.HTTP_201_CREATED)
 async def create_credential_test(engagement_key: str, request: CredentialTestRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_credential_test(
-        engagement.id,
-        credential_id=request.credential_id,
-        service_id=request.service_id,
-        target_ref=request.target_ref,
-        auth_context=request.auth_context,
-        outcome=request.outcome,
-        evidence_ref=request.evidence_ref,
-        notes=request.notes,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_credential_test,
+            engagement.id,
+            credential_id=request.credential_id,
+            service_id=request.service_id,
+            target_ref=request.target_ref,
+            auth_context=request.auth_context,
+            outcome=request.outcome,
+            evidence_ref=request.evidence_ref,
+            notes=request.notes,
+        )
     )
     await _broadcast(engagement.key, "credential_test", record)
     return record
@@ -1810,19 +1941,22 @@ async def create_credential_test(engagement_key: str, request: CredentialTestRec
 
 @router.post("/access-records", status_code=status.HTTP_201_CREATED)
 async def create_access_record(engagement_key: str, request: AccessRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_access_record(
-        engagement.id,
-        access_key=request.access_key,
-        credential_id=request.credential_id,
-        service_id=request.service_id,
-        principal=request.principal,
-        access_level=request.access_level,
-        target_ref=request.target_ref,
-        status_value=request.status,
-        evidence_ref=request.evidence_ref,
-        notes=request.notes,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_access_record,
+            engagement.id,
+            access_key=request.access_key,
+            credential_id=request.credential_id,
+            service_id=request.service_id,
+            principal=request.principal,
+            access_level=request.access_level,
+            target_ref=request.target_ref,
+            status_value=request.status,
+            evidence_ref=request.evidence_ref,
+            notes=request.notes,
+            provenance=request.provenance,
+        )
     )
     await _broadcast(engagement.key, "access_record", record)
     return record
@@ -1830,12 +1964,15 @@ async def create_access_record(engagement_key: str, request: AccessRecordRequest
 
 @router.patch("/coverage-items/{coverage_item_id}")
 async def update_coverage_item(engagement_key: str, coverage_item_id: int, request: CoverageItemUpdateRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.update_coverage_item_status(
-        engagement.id,
-        coverage_item_id=coverage_item_id,
-        status_value=request.status,
-        notes=request.notes,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.update_coverage_item_status,
+            engagement.id,
+            coverage_item_id=coverage_item_id,
+            status_value=request.status,
+            notes=request.notes,
+        )
     )
     await _broadcast(engagement.key, "coverage_item", record)
     return record
@@ -1843,18 +1980,21 @@ async def update_coverage_item(engagement_key: str, coverage_item_id: int, reque
 
 @router.post("/blocked-techniques", status_code=status.HTTP_201_CREATED)
 async def create_blocked_technique(engagement_key: str, request: BlockedTechniqueRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_blocked_technique(
-        engagement.id,
-        technique_key=request.technique_key,
-        technique=request.technique,
-        target_kind=request.target_kind,
-        target_ref=request.target_ref,
-        reason=request.reason,
-        retry_state=request.retry_state,
-        evidence_ref=request.evidence_ref,
-        notes=request.notes,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_blocked_technique,
+            engagement.id,
+            technique_key=request.technique_key,
+            technique=request.technique,
+            target_kind=request.target_kind,
+            target_ref=request.target_ref,
+            reason=request.reason,
+            retry_state=request.retry_state,
+            evidence_ref=request.evidence_ref,
+            notes=request.notes,
+            provenance=request.provenance,
+        )
     )
     await _broadcast(engagement.key, "blocked_technique", record)
     return record
@@ -2231,36 +2371,42 @@ class DecisionUpdate(BaseModel):
 
 @router.post("/dispatches", status_code=status.HTTP_201_CREATED)
 async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_dispatch(
-        engagement.id,
-        agent_id=request.agent_id,
-        agent_role=request.agent_role,
-        task=request.task,
-        scope_host=request.scope_host,
-        dispatched_at=request.dispatched_at,
-        status_value=request.status,
-        model=request.model,
-        reasoning=request.reasoning,
-        requested_model=request.requested_model,
-        actual_model=request.actual_model,
-        requested_reasoning=request.requested_reasoning,
-        actual_reasoning=request.actual_reasoning,
-        dispatch_mode=request.dispatch_mode,
-        finding_slugs=request.finding_slugs,
-        skills=request.skills,
-        tier=request.tier,
-        scope_path_prefix=request.scope_path_prefix,
-        vuln_classes=request.vuln_classes,
-        identity=request.identity,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_dispatch,
+            engagement.id,
+            agent_id=request.agent_id,
+            agent_role=request.agent_role,
+            task=request.task,
+            scope_host=request.scope_host,
+            dispatched_at=request.dispatched_at,
+            status_value=request.status,
+            model=request.model,
+            reasoning=request.reasoning,
+            requested_model=request.requested_model,
+            actual_model=request.actual_model,
+            requested_reasoning=request.requested_reasoning,
+            actual_reasoning=request.actual_reasoning,
+            dispatch_mode=request.dispatch_mode,
+            finding_slugs=request.finding_slugs,
+            skills=request.skills,
+            tier=request.tier,
+            scope_path_prefix=request.scope_path_prefix,
+            vuln_classes=request.vuln_classes,
+            identity=request.identity,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="agent start",
-        action=f"agent_id={request.agent_id} role={request.agent_role}",
-        actor_name=request.agent_role,
-        result=request.status,
-        metadata={"agent_id": request.agent_id, "agent_role": request.agent_role},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="agent start",
+            action=f"agent_id={request.agent_id} role={request.agent_role}",
+            actor_name=request.agent_role,
+            result=request.status,
+            metadata={"agent_id": request.agent_id, "agent_role": request.agent_role},
+        )
     )
     await _broadcast(engagement.key, "dispatch", record)
     return record
@@ -2300,21 +2446,27 @@ async def patch_dispatch(
     agent_id: str,
     request: DispatchUpdate,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.update_dispatch(
-        engagement.id,
-        agent_id=agent_id,
-        status_value=request.status,
-        completed_at=request.completed_at,
-        finding_slugs=request.finding_slugs,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.update_dispatch,
+            engagement.id,
+            agent_id=agent_id,
+            status_value=request.status,
+            completed_at=request.completed_at,
+            finding_slugs=request.finding_slugs,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="agent done",
-        action=f"agent_id={agent_id}",
-        actor_name=agent_id,
-        result=request.status or "",
-        metadata={"agent_id": agent_id, "finding_slugs": request.finding_slugs or []},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="agent done",
+            action=f"agent_id={agent_id}",
+            actor_name=agent_id,
+            result=request.status or "",
+            metadata={"agent_id": agent_id, "finding_slugs": request.finding_slugs or []},
+        )
     )
     await _broadcast(engagement.key, "dispatch", record)
     return record
@@ -2322,32 +2474,38 @@ async def patch_dispatch(
 
 @router.post("/dispatch-handoffs", status_code=status.HTTP_201_CREATED)
 async def create_handoff(engagement_key: str, request: HandoffCreate) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_handoff(
-        engagement.id,
-        agent_id=request.agent_id,
-        agent_role=request.agent_role,
-        summary=request.summary,
-        phase=request.phase,
-        confidence=request.confidence,
-        finding_slugs=request.finding_slugs,
-        coverage_gaps=request.coverage_gaps,
-        next_steps=request.next_steps,
-        runtime_issues=request.runtime_issues,
-        working_artifacts=request.working_artifacts,
-        open_questions=request.open_questions,
-        recommended_next_agent=request.recommended_next_agent,
-        handoff_status=request.handoff_status,
-        closed_dispatch_status=request.closed_dispatch_status,
-        extras=request.extras,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_handoff,
+            engagement.id,
+            agent_id=request.agent_id,
+            agent_role=request.agent_role,
+            summary=request.summary,
+            phase=request.phase,
+            confidence=request.confidence,
+            finding_slugs=request.finding_slugs,
+            coverage_gaps=request.coverage_gaps,
+            next_steps=request.next_steps,
+            runtime_issues=request.runtime_issues,
+            working_artifacts=request.working_artifacts,
+            open_questions=request.open_questions,
+            recommended_next_agent=request.recommended_next_agent,
+            handoff_status=request.handoff_status,
+            closed_dispatch_status=request.closed_dispatch_status,
+            extras=request.extras,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="agent handoff",
-        action=f"agent_id={request.agent_id} role={request.agent_role}",
-        actor_name=request.agent_role,
-        result=request.summary,
-        metadata={"agent_id": request.agent_id, "agent_role": request.agent_role},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="agent handoff",
+            action=f"agent_id={request.agent_id} role={request.agent_role}",
+            actor_name=request.agent_role,
+            result=request.summary,
+            metadata={"agent_id": request.agent_id, "agent_role": request.agent_role},
+        )
     )
     await _broadcast(engagement.key, "dispatch_handoff", record)
     return record
@@ -2381,31 +2539,37 @@ async def patch_handoff(
     agent_id: str,
     request: HandoffUpdate,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.update_handoff(
-        engagement.id,
-        agent_id=agent_id,
-        summary=request.summary,
-        phase=request.phase,
-        confidence=request.confidence,
-        finding_slugs=request.finding_slugs,
-        coverage_gaps=request.coverage_gaps,
-        next_steps=request.next_steps,
-        runtime_issues=request.runtime_issues,
-        working_artifacts=request.working_artifacts,
-        open_questions=request.open_questions,
-        recommended_next_agent=request.recommended_next_agent,
-        handoff_status=request.handoff_status,
-        closed_dispatch_status=request.closed_dispatch_status,
-        extras=request.extras,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.update_handoff,
+            engagement.id,
+            agent_id=agent_id,
+            summary=request.summary,
+            phase=request.phase,
+            confidence=request.confidence,
+            finding_slugs=request.finding_slugs,
+            coverage_gaps=request.coverage_gaps,
+            next_steps=request.next_steps,
+            runtime_issues=request.runtime_issues,
+            working_artifacts=request.working_artifacts,
+            open_questions=request.open_questions,
+            recommended_next_agent=request.recommended_next_agent,
+            handoff_status=request.handoff_status,
+            closed_dispatch_status=request.closed_dispatch_status,
+            extras=request.extras,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="agent handoff",
-        action=f"agent_id={agent_id}",
-        actor_name=agent_id,
-        result=request.summary or "",
-        metadata={"agent_id": agent_id},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="agent handoff",
+            action=f"agent_id={agent_id}",
+            actor_name=agent_id,
+            result=request.summary or "",
+            metadata={"agent_id": agent_id},
+        )
     )
     await _broadcast(engagement.key, "dispatch_handoff", record)
     return record
@@ -2413,19 +2577,25 @@ async def patch_handoff(
 
 @router.post("/dispatch-decisions", status_code=status.HTTP_201_CREATED)
 async def create_decision(engagement_key: str, request: DecisionCreate) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.record_decision(
-        engagement.id,
-        kind=request.kind,
-        payload=request.payload,
-        surfaced_to_user=request.surfaced_to_user,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_decision,
+            engagement.id,
+            kind=request.kind,
+            payload=request.payload,
+            surfaced_to_user=request.surfaced_to_user,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="agent decision",
-        action=f"kind={request.kind}",
-        result="surfaced_to_user" if request.surfaced_to_user else "",
-        metadata={"kind": request.kind, "surfaced_to_user": request.surfaced_to_user},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="agent decision",
+            action=f"kind={request.kind}",
+            result="surfaced_to_user" if request.surfaced_to_user else "",
+            metadata={"kind": request.kind, "surfaced_to_user": request.surfaced_to_user},
+        )
     )
     await _broadcast(engagement.key, "dispatch_decision", record)
     return record
@@ -2455,20 +2625,26 @@ async def patch_decision(
     decision_id: int,
     request: DecisionUpdate,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = state_manager.update_decision(
-        engagement.id,
-        decision_id=int(decision_id),
-        resolved=request.resolved,
-        resolution=request.resolution,
-        surfaced_to_user=request.surfaced_to_user,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.update_decision,
+            engagement.id,
+            decision_id=int(decision_id),
+            resolved=request.resolved,
+            resolution=request.resolution,
+            surfaced_to_user=request.surfaced_to_user,
+        )
     )
-    _audit_assessment_mutation(
-        engagement.id,
-        title="agent decision",
-        action=f"decision_id={decision_id}",
-        result="resolved" if request.resolved else "",
-        metadata={"decision_id": int(decision_id)},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="agent decision",
+            action=f"decision_id={decision_id}",
+            result="resolved" if request.resolved else "",
+            metadata={"decision_id": int(decision_id)},
+        )
     )
     await _broadcast(engagement.key, "dispatch_decision", record)
     return record

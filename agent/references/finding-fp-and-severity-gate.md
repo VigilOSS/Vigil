@@ -16,6 +16,11 @@ by an independent triager — the calculator produced a number, but the proven r
 lower (a "read" that exposed no PII because no read endpoint existed; a "file attach" that was an
 orphan write never proven to land on a real record). This gate catches that before it ships.
 
+This file is the codified home of the recurring FP/overclaim catalog — when a new overclaim pattern
+recurs across engagements, land it here (as a kill/downgrade trigger below or a per-metric C-check),
+so the verifier and the pre-submission blind gate share one bar. The late, zero-context counterpart
+that re-applies these same patterns just before submission is `agent/skills/blind-triage/SKILL.md`.
+
 Each check yields **PASS** (cite evidence at the bar a KILL would), **DOWNGRADE** (lower the
 metric/severity, with the reason), **KILL** (false positive — don't record), or **GAP** (cannot
 resolve → blocks; do not default to PASS). It maps onto the verifier's existing
@@ -52,6 +57,9 @@ cross-references the always-loaded rules rather than restating them.
   - `I:H` only for proven corruption of a real, meaningful record — a 200-but-rejected write, an
     append to one non-critical free-text field, or an orphan write (C6) is **not** `I:H`.
   - `C:H` only for proven read of real sensitive data (see C1).
+  - `C:L`/`C:H` require data that actually **crosses a trust boundary** — a value the attacker
+    supplied, an opaque surrogate that resolves to nothing, or an existence/oracle-only signal is **no
+    confidentiality impact** (C1, C3). "I could see the id changed" is not data crossing the boundary.
   - `PR:N` / `UI:N` / `AC:L` must match the actual attacker steps.
   - **Gut-check:** *"In one sentence, what does a real attacker walk away with?"* If the sentence is
     weaker than the score, the score is wrong.
@@ -77,6 +85,23 @@ Data-exposure-specific:
 - **Single-target dressed as "any/all"** — the mass framing needs enumeration that's actually gated. **[DOWN]**
 - **Compensating control already blocks it** — "no CSRF token" but SameSite/custom-header blocks
   CSRF; "no rate limit" but the action is harmless. **[KILL]**
+
+Overclaim / mis-framing (the recurring patterns an independent triager downgrades):
+- **Self-induced precondition** — the attacker **manufactured the trigger** (disabled a protection
+  they control, supplied their own id/input, set the required state) then presents it as a
+  naturally-occurring weakness. Score on the **incremental impact over the precondition**, not on the
+  state the attacker created (`hunting.md §3`, `reporting.md §3`). **[KILL/DOWN]**
+- **Info-disclosure / stack-trace framed as Medium** — missing headers, stack traces, schema /
+  version / path leakage are **informational** unless they **directly enable a proven higher-impact
+  attack**; "it helps an attacker" is speculative chaining. Authoritative treatment lives in
+  `reporting.md §61` (Chain-Only) — apply it as a downgrade trigger here, do not restate the rule.
+  **[DOWN → informational]**
+- **OOS class in disguise** — a rate-limiting / DoS / third-party issue **re-skinned** as
+  access-control (or another in-scope class) to smuggle it past scope. Classify by the **actual
+  primitive**, not the label chosen (Q3 OOS, `reporting.md` DoS-severity). **[KILL/DOWN]**
+- **"Useful for mapping internals" hand-wave** — "this would help an attacker map the system" with
+  **no proven exploit consequence** is not impact (internal IPs / debug leakage with no downstream
+  use; Chain-Only). **[KILL/DOWN]**
 
 Generic FP triggers — do **not** re-own these; they already live as the verifier's **Chain-Only
 List** + **Fast Kill Signals** in `agent/agents/vulnerability-analyst.md` and `hunting.md §4`
@@ -121,7 +146,8 @@ in `agent/agents/vulnerability-analyst.md`.
 ## Related
 
 - `agent/rules/hunting.md` — §2 (existence-vs-exploitation), §3 (precondition equivalence), §20 (severity-CVSS audit)
-- `agent/rules/reporting.md` — §2 (proof), §3 (severity follows impact + precondition analysis), §4 (non-public data), §5 (distinct identities)
+- `agent/rules/reporting.md` — §2 (proof), §3 (severity follows impact + precondition analysis), §4 (non-public data), §5 (distinct identities), §61 (info-disclosure / stack-trace is informational unless it enables a proven higher-impact attack — the home of that trigger)
+- `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission blind gate that re-applies the same overclaim catalog on the submission bytes before publish (this gate is the in-context Phase-4 version)
 - `agent/agents/vulnerability-analyst.md` — the 8-Question Gate, Chain-Only List, Fast Kill Signals, Four Validation Gates
 - `agent/skills/code-finding-verification/SKILL.md` — the code-finding analog (five-check protocol); use that for source-only findings
 - `agent/references/api-security/API01-broken-object-level-authz.md` — CWE taxonomy + BOLA/BOPLA/BFLA

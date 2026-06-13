@@ -513,6 +513,7 @@ def _check_web_preconditions(
                         })
         except Exception as exc:
             blockers.append(_precondition_check_failed("report readiness", exc))
+        blockers.extend(_blind_triage_blockers(client))
         blockers.extend(_depth_backstop_blockers(client))
 
     elif target_phase == "complete":
@@ -525,7 +526,93 @@ def _check_web_preconditions(
                 })
         except Exception as exc:
             blockers.append(_precondition_check_failed("complete readiness", exc))
+        blockers.extend(_blind_triage_blockers(client))
         blockers.extend(_depth_backstop_blockers(client))
+
+    return blockers
+
+
+def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
+    """Gate the terminal report/complete edge on a recorded blind-triage Accept
+    verdict for every Medium-or-above ACTIVE finding (FIX E3).
+
+    Mirrors the ``missing_variant_pass`` Verify->Exploit gate exactly: it
+    enumerates the at-risk findings (here: severity in {medium,high,critical},
+    ``workflow_status == active``, same query shape as the ``confirmed_high``
+    set), then checks a structured durable signal rather than prose. The signal
+    is a ``kind='blind_triage_verdict'`` decision row (written by the operator
+    via ``vigil assess agent decision --kind blind_triage_verdict
+    --payload-json {finding_slug, verdict, ...}``) whose ``verdict`` starts
+    ``Accept`` for that slug. Any qualifying finding with no such row appends a
+    hard ``missing_blind_triage`` blocker at the DEFAULT ``severity="block"`` —
+    the same enforcement level as ``missing_variant_pass`` — so the existing
+    ``--force``/``--reason`` override (and its audited override-decision row)
+    already covers it. The blind-triage skill is the operator-run Pass-2 review;
+    this is its durable backend gate, not a roster role.
+
+    Best-effort on read failure: a backend error degrades to a single
+    ``precondition_check_failed`` blocker rather than wedging the transition.
+    """
+    blockers: list[dict[str, str]] = []
+    try:
+        findings = client.get("findings")
+    except Exception as exc:
+        blockers.append(_precondition_check_failed("blind-triage findings", exc))
+        return blockers
+    if not isinstance(findings, list):
+        return blockers
+
+    medium_or_above = [
+        f for f in findings
+        if f.get("severity") in ("medium", "high", "critical")
+        and f.get("workflow_status") == "active"
+    ]
+    if not medium_or_above:
+        return blockers
+
+    # Filter the decisions read to kind=blind_triage_verdict server-side and
+    # request the max page size so long engagements don't drop older verdicts
+    # behind the default limit=100 (same shape as the variant-pass dispatch
+    # read above).
+    try:
+        decisions = client.get(
+            "dispatch-decisions?kind=blind_triage_verdict&limit=1000"
+        ) or []
+    except Exception:
+        decisions = []
+    accepted_slugs: set[str] = set()
+    for d in decisions:
+        if not isinstance(d, dict):
+            continue
+        payload = d.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        slug = str(payload.get("finding_slug") or "").strip()
+        verdict = str(payload.get("verdict") or "").strip()
+        if slug and verdict.lower().startswith("accept"):
+            accepted_slugs.add(slug)
+
+    missing = [
+        f.get("slug", "?") for f in medium_or_above
+        if f.get("slug", "?") not in accepted_slugs
+    ]
+    if missing:
+        sample = ", ".join(missing[:5])
+        blockers.append({
+            "kind": "missing_blind_triage",
+            "detail": (
+                f"{len(missing)} Medium-or-above active finding(s) have no recorded "
+                f"blind-triage Accept verdict: {sample}"
+                + (" ..." if len(missing) > 5 else "")
+                + " — run blind-triage Pass 2 (agent/skills/blind-triage/SKILL.md) "
+                "and record the Accept verdict with `vigil assess agent decision "
+                "--kind blind_triage_verdict --payload-json "
+                "'{\"finding_slug\":\"<slug>\",\"verdict\":\"Accept@P3\",...}'` "
+                "before publish (skipping the blind pass is how false-positive / "
+                "over-severity submissions ship). Pass --force --reason \"...\" to "
+                "override with an audited decision."
+            ),
+        })
 
     return blockers
 

@@ -175,6 +175,7 @@ def main(argv: list[str] | None = None) -> None:
         kali_puredns,
         kali_sqlmap,
         kali_subfinder,
+        kali_sweep,
         kali_sweep_orphans,
         kali_wafw00f,
         kali_whatweb,
@@ -290,11 +291,17 @@ def main(argv: list[str] | None = None) -> None:
     ):
         mod.register(sub)
 
+    from assess.lib.kali import ScopedErrorParser
+
     kali = sub.add_parser(
         "kali",
         help="Run Kali tools via host-side docker exec with audit recording.",
     )
-    kali_sub = kali.add_subparsers(dest="kali_verb")
+    # parser_class makes every `kali <verb>` subparser a ScopedErrorParser so a
+    # parse-time enum miss (--technique/--probe-kind/--phase invalid choice) is
+    # re-rendered as a single scoped did-you-mean ERROR line instead of the stock
+    # multi-line top-level usage dump.
+    kali_sub = kali.add_subparsers(dest="kali_verb", parser_class=ScopedErrorParser)
     kali_sub.required = False
     for kali_mod in (
         kali_alterx,
@@ -314,6 +321,7 @@ def main(argv: list[str] | None = None) -> None:
         kali_puredns,
         kali_sqlmap,
         kali_subfinder,
+        kali_sweep,
         kali_sweep_orphans,
         kali_wafw00f,
         kali_whatweb,

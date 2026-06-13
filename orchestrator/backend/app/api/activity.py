@@ -6,8 +6,10 @@ the prose/narrative log that used to live in ``log.md``.
 """
 from __future__ import annotations
 
+import functools
 from typing import Any
 
+import anyio
 from fastapi import APIRouter, Query, status
 
 from ..services import activity as activity_service
@@ -65,18 +67,21 @@ def list_activity_entries(
 async def create_activity_entry(
     engagement_key: str, request: ActivityEntryRecordRequest
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = activity_service.record_activity_entry(
-        engagement.id,
-        occurred_at=request.occurred_at,
-        actor_kind=request.actor_kind,
-        actor_name=request.actor_name,
-        title=request.title,
-        action=request.action,
-        result=request.result,
-        artifact_ref=request.artifact_ref,
-        body_markdown=request.body_markdown,
-        metadata=request.metadata,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            activity_service.record_activity_entry,
+            engagement.id,
+            occurred_at=request.occurred_at,
+            actor_kind=request.actor_kind,
+            actor_name=request.actor_name,
+            title=request.title,
+            action=request.action,
+            result=request.result,
+            artifact_ref=request.artifact_ref,
+            body_markdown=request.body_markdown,
+            metadata=request.metadata,
+        )
     )
     await _broadcast(engagement.key, "activity_entry", record)
     return record

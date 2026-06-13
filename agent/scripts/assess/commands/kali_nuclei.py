@@ -4,6 +4,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import shlex
 import sys
 import time
 from contextlib import contextmanager
@@ -22,6 +23,29 @@ from assess.lib.kali import (
 
 
 _NUCLEI_LOCK_TIMEOUT_S = 1800.0
+
+# Politeness/safety exclude-tags injected by default when the operator does not
+# supply their own. Keeps broad sweeps from firing DoS/fuzz/intrusive/brute-force
+# templates against production-like in-scope targets (CR-27).
+_DEFAULT_EXCLUDE_TAGS = "dos,fuzz,intrusive,brute-force"
+_EXCLUDE_TAGS_FLAGS = ("-exclude-tags", "-etags")
+
+
+def _operator_passed_exclude_tags(args) -> bool:
+    """True when the operator supplied an exclude-tags flag via --extra-args.
+
+    The typed -exclude-tags/-etags flag is handled by argparse; this covers the
+    raw passthrough path so the default injection stays idempotent and never
+    double-adds an exclude-tags flag.
+    """
+    extra = getattr(args, "extra_args", "") or ""
+    if not extra:
+        return False
+    try:
+        tokens = shlex.split(extra)
+    except ValueError:
+        return False
+    return any(tok in _EXCLUDE_TAGS_FLAGS for tok in tokens)
 
 
 def _lock_holder_is_stale(fd: int) -> bool:
@@ -211,6 +235,17 @@ def register(subparsers) -> None:
     p.add_argument("-l", dest="target_list", default="", help="File of newline-separated targets.")
     p.add_argument("-t", dest="templates", default="", help="Comma-separated template list.")
     p.add_argument("-tags", dest="tags", default="", help="Filter by tag list (comma-separated).")
+    p.add_argument(
+        "-exclude-tags",
+        "-etags",
+        dest="exclude_tags",
+        default="",
+        help=(
+            "Comma-separated tags to exclude. When unset, the wrapper injects a "
+            "politeness/safety default of 'dos,fuzz,intrusive,brute-force'. Pass "
+            "your own value to override (it is used verbatim — no merge)."
+        ),
+    )
     p.add_argument("-as", dest="automatic_scan", action="store_true", help="-as automatic scan.")
     p.add_argument("-severity", dest="severity", default="", help="Comma-separated severity list.")
     p.add_argument("-rate-limit", dest="rate_limit", default="", help="Requests per second.")
@@ -235,6 +270,15 @@ def run(args) -> None:
         cmd.extend(["-t", args.templates])
     if args.tags:
         cmd.extend(["-tags", args.tags])
+    # Default-inject a politeness/safety exclude-tags guard so broad sweeps do
+    # not fire DoS/fuzz/intrusive/brute-force templates against production-like
+    # in-scope targets (CR-27). Idempotent + operator-overridable: skip when the
+    # operator supplied -exclude-tags/-etags as a typed flag OR via --extra-args.
+    exclude_tags = (getattr(args, "exclude_tags", "") or "").strip()
+    if exclude_tags:
+        cmd.extend(["-exclude-tags", exclude_tags])
+    elif not _operator_passed_exclude_tags(args):
+        cmd.extend(["-exclude-tags", _DEFAULT_EXCLUDE_TAGS])
     if args.automatic_scan:
         cmd.append("-as")
     if args.severity:

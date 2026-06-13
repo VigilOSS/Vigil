@@ -296,6 +296,119 @@ revalidation; medium → intel; `-as` tech fingerprints → `record-intel tech-c
 the audit result in the engagement activity log even when the gap list is empty — the absence
 of a run is itself coverage evidence, which matters for the report.
 
+## Phase-3 substrate sweep scoping & safety (CR-27 / CR-30)
+
+A broad Phase-3 nuclei sweep (full CVE/exposure/misconfig sets × every in-scope
+host) is **not politely completable** and collides with per-host VA lanes. Scope it
+deliberately along every dimension below before running it.
+
+### Severity: default high+critical for a broad substrate sweep
+
+For a broad host-scale substrate sweep, **default to `-severity high,critical`** — the
+signal-to-request-volume ratio is what makes the sweep completable. (The in-phase
+*reactive* and *gap-audit* passes above deliberately keep `medium,high,critical`
+because their host/template scope is already small and medium hits seed Phase-3
+intel; do not widen a broad substrate sweep to medium.)
+
+### Curated cheap-template subset, scoped by template DIRECTORIES — not broad tags
+
+Even a curated **tag** selection over-pulls at host-scale (a real engagement
+resolved one tag selection to 1,515 templates × 155 hosts = ~561k requests). Bound
+the template dimension by specific template **directories**, not tags:
+
+```
+-t http/takeovers/ -t http/exposed-panels/ -t http/default-logins/
+```
+
+Stick to the cheap, high-signal discovery-phase directories (`http/cves/`,
+`http/misconfiguration/`, `http/exposures/`, `http/default-logins/`,
+`http/technologies/`, `http/exposed-panels/`, `http/takeovers/`); skip
+`http/fuzzing/` and payload-heavy directories — higher FP rate and noisy request
+volume that trips WAFs before real testing starts.
+
+### Host-scale guard: bound the host dimension on large surfaces
+
+`-as` and gap/delta dedup shrink the *template* and *redundant-host* dimensions but
+never cap the **host** dimension, so the templates × hosts blowup can still occur.
+When the in-scope live-host count is large (≳25–50), **bound a broad substrate
+sweep to a small host subset** — dedicated / origin / non-CDN hosts (use the
+asnmap→cero origin-IP axis and the Cloud-fronted-vs-Origin trait rows in
+`agent/references/recon/rate-calibration.md` to identify them). Size the subset
+against the request budget: `templates × hosts ≈ total requests`.
+
+> **Corollary — prefer OSINT CVE matching at host-scale.** OSINT version→CVE
+> matching (`record-intel cve` via osint-analyst) often delivers most of nuclei's
+> CVE-detection value *without* the per-host request volume. On high-friction /
+> large-host-count surfaces, prefer OSINT CVE matching + targeted exploit-developer
+> validation over a broad CVE-template host-scale sweep.
+
+### Per-category split with per-pass watchdogs
+
+Run **one nuclei pass per template directory** rather than a single monolithic
+invocation. Give each pass its own `--timeout` (the per-pass watchdog) and its own
+`-o` path. Distinct `-o` files do not contend on the output lock, so the per-directory
+passes parallelize, and a single hung category times out on its own watchdog instead
+of stalling the whole sweep:
+
+```bash
+for D in http/takeovers/ http/exposed-panels/ http/default-logins/; do
+  CAT=$(echo "$D" | tr '/' '_')
+  vigil assess kali nuclei \
+    -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_substrate_$RID.txt \
+    -t "$D" -severity high,critical -as -stream -jsonl \
+    -rate-limit 150 -c 25 -bs 25 -stats -si 30 \
+    -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_substrate_${CAT}_$RID.jsonl \
+    --technique CVE-VALIDATION --intent "Phase-3 substrate sweep ($D)" \
+    --probe-kind fingerprint --phase consume-test --timeout 1200
+done
+```
+
+The wrapper **injects `-exclude-tags dos,fuzz,intrusive,brute-force` by default**
+(politeness/safety guard) so these passes never fire DoS/fuzz/intrusive/brute-force
+templates against production-like targets — you do not need to pass it yourself
+(passing your own `-exclude-tags`/`-etags` overrides it verbatim).
+
+### Operator-sweep vs VA-lane collision avoidance (CR-30)
+
+A separate operator-run substrate sweep **collides** with the Phase-3 VA fan-out
+when both touch the same hosts (shared rate budget, duplicated traffic, racing
+tools). Pick one of two collision-free patterns:
+
+1. **Run-to-completion first.** Run the bounded substrate sweep to *completion*
+   before any VA lane touches that host subset, so the VA lanes inherit the signal
+   instead of racing it. (This is what the Phase-3a coverage audit already does — it
+   runs once, before the work-buffer/VA loop.)
+2. **Fold into the owning VA lane.** Hand the scoped, per-host-subset nuclei call to
+   the vulnerability-analyst lane that *owns* that subset, so a single lane is the
+   only thing touching those hosts. Use this when the substrate work is naturally
+   per-host-subset rather than engagement-wide.
+
+Never run a third concurrent operator sweep across hosts a VA lane is actively
+testing.
+
+### Prerequisites & lead-quality caveats
+
+- **Templates are not pre-installed.** The runtime images install only the nuclei
+  binary, so the **first** nuclei run in a fresh runtime pays the
+  `nuclei -update-templates` auto-install latency (the templates download before any
+  scan executes). Budget for it: either run the manual `Update Templates` step below
+  before the first sweep, or give the first sweep a generous `--timeout`. This is a
+  one-time, per-runtime cost.
+- **OOB infra must be up before blind-class testing.** Templates that rely on
+  out-of-band callbacks (blind-class probes via `-interactsh-url`) produce false
+  negatives if the shared interactsh infrastructure is not ready. Confirm
+  `vigil oob status --json` shows `server=true` and `frpc=true` **before** running
+  any blind/OOB nuclei templates — see `nuclei.md` "OOB Callbacks". When OOB is
+  unavailable, pass `-no-interactsh` and defer blind-class testing rather than
+  recording a clean OOB template as a true negative.
+- **gf candidate tags are leads, not verdicts.** gf buckets (and any `gf:<bucket>`
+  priority signal) are **high false-positive** — treat a gf hit as a *lead* that
+  points a template/probe at a candidate, never as a confirmed match. Downstream
+  validation (a real template hit or a manual PoC) is always required.
+- **Authenticated surfaces need an authed pass.** Some surfaces only yield to
+  authenticated testing; when credentials are in scope, defer those hosts to an
+  authenticated nuclei pass rather than recording an unauth sweep as full coverage.
+
 ## Methodology
 
 The engagement dir is bind-mounted into Kali at `/engagements/$ENGAGEMENT_KEY/` — write input lists

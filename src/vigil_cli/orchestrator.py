@@ -10,6 +10,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# E1: opt-in multi-worker uvicorn. Default stays 1 (single-process) so existing
+# single-engagement runs are unchanged; raise it only on a dedicated/heavy-tier
+# host where many agents call the backend concurrently. ``workers=None`` means
+# "resolve from the VIGIL_ORCHESTRATOR_WORKERS env" so callers that don't pass an
+# explicit value still pick up the knob.
+WORKERS_ENV = "VIGIL_ORCHESTRATOR_WORKERS"
+
+
 @dataclass(frozen=True, slots=True)
 class OrchestratorOptions:
     install_root: Path
@@ -18,6 +26,31 @@ class OrchestratorOptions:
     build: bool = False
     foreground: bool = False
     allow_existing: bool = False
+    # None -> read VIGIL_ORCHESTRATOR_WORKERS (default 1). An explicit int (e.g.
+    # from a future `--workers N` flag) overrides the env.
+    workers: int | None = None
+
+
+def _resolve_worker_count(options: OrchestratorOptions) -> int:
+    """Resolve the uvicorn worker count: explicit option > env > default 1.
+
+    Returns a value >= 1. A malformed env value falls back to 1 with a warning
+    rather than failing the launch.
+    """
+    if options.workers is not None:
+        return max(1, int(options.workers))
+    raw = os.environ.get(WORKERS_ENV, "").strip()
+    if not raw:
+        return 1
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"orchestrator\twarn\tignoring non-integer {WORKERS_ENV}={raw!r}; using workers=1")
+        return 1
+    if value < 1:
+        print(f"orchestrator\twarn\t{WORKERS_ENV}={raw!r} < 1; using workers=1")
+        return 1
+    return value
 
 
 def start_orchestrator(options: OrchestratorOptions) -> None:
@@ -67,6 +100,13 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
         "--port",
         str(options.port),
     ]
+    # E1: only append --workers when explicitly raised above the default 1. A bare
+    # uvicorn launch is already single-worker, so the default argv is byte-for-byte
+    # unchanged — opt-in only.
+    workers = _resolve_worker_count(options)
+    if workers > 1:
+        argv += ["--workers", str(workers)]
+        _warn_multiworker_caveats(workers)
     if options.foreground:
         os.chdir(install_root)
         os.execvpe("uv", argv, env)
@@ -99,6 +139,31 @@ def start_orchestrator(options: OrchestratorOptions) -> None:
     print(
         f"orchestrator\trunning\thealthy=True\tpid={process.pid}\t"
         f"url=http://{options.host}:{options.port}"
+    )
+
+
+def _warn_multiworker_caveats(workers: int) -> None:
+    """Surface the two known single-process assumptions before going multi-worker.
+
+    These are intentionally WARN-only (the operator opted in via the env/flag),
+    but they must be visible because both regress silently otherwise:
+      * The live-UI WebSocket broadcaster (app/ws.py) keeps connections in an
+        in-process dict, so a write handled by worker A cannot push to a socket
+        held by worker B — the dashboard sees only the events from its own worker.
+      * The 15-minute backup scheduler (app/services/backup.py) arms a per-process
+        timer in each worker's lifespan, so N workers run N concurrent backups
+        unless VIGIL_BACKUP_DISABLED is set on all but one.
+    Cross-process WS fan-out + a single-leader backup are the integrator follow-up
+    that makes workers>1 fully safe (see E1).
+    """
+    print(
+        f"orchestrator\twarn\tworkers={workers}: live-UI WebSocket broadcast is per-worker "
+        f"(dashboard may miss cross-worker events) and the backup scheduler arms once per "
+        f"worker — set VIGIL_BACKUP_DISABLED=1 on all but one to avoid N concurrent backups. "
+        f"The API read/write paths are safe under load: reads run in the threadpool and "
+        f"async write handlers off-load their SQLite work to it too (anyio.to_thread), so a "
+        f"sync write never blocks the event loop, atop SQLite WAL + short-lived per-request "
+        f"connections."
     )
 
 
