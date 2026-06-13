@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gc
 import json
 import re
 import sqlite3
@@ -2786,7 +2785,7 @@ def database_readiness_flags(connection: sqlite3.Connection) -> dict[str, bool]:
 @contextmanager
 def get_connection() -> Iterator[sqlite3.Connection]:
     db_path = _verify_database_fingerprint()
-    connection = sqlite3.connect(str(db_path), cached_statements=0)
+    connection = sqlite3.connect(str(db_path))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     try:
@@ -2794,7 +2793,6 @@ def get_connection() -> Iterator[sqlite3.Connection]:
         connection.commit()
     finally:
         connection.close()
-        gc.collect()
 
 
 def create_engagement(
