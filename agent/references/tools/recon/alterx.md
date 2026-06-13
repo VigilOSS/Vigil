@@ -32,6 +32,23 @@ vigil assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt 
 
 The output then feeds `puredns resolve` (Phase 2 step 2c in the SKILL).
 
+## Operational notes
+
+- **stdin-hang failure mode (raw runs only).** alterx (v0.1.0) blocks forever when
+  given `-l <file>` with stdin still attached — it tries to read stdin for input
+  even though `-l` already supplies the seed list, so it waits on an EOF that never
+  arrives. Symptom: the alterx process is alive, ~0% CPU, produces 0 output, and
+  `ps` shows `STAT=S`. **This cannot occur through the `vigil assess kali alterx`
+  wrapper:** vigil closes stdin centrally (`kali.py` runs the foreground probe with
+  `stdin=subprocess.DEVNULL`, and the background job path wraps the command with
+  `</dev/null`), so alterx always sees an immediate EOF. If you run alterx *raw*
+  (outside the wrapper), redirect `< /dev/null` yourself, or you will hit this hang.
+- **`-disable-update-check` is injected by default.** The wrapper appends
+  `-disable-update-check` to every alterx invocation (the v0.1.0 startup update
+  check is pure noise/latency in an egress-restricted container). It is idempotent —
+  if you pass `-disable-update-check` yourself via `--extra-args` the wrapper does
+  not double-add it.
+
 ## DSL patterns
 
 - `-p '{{sub}}-{{word}}.{{suffix}}'` — fixed-pattern expansion against a payload list.

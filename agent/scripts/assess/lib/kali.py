@@ -35,6 +35,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 from . import vuln_taxonomy
 from .client import AssessError, AssessmentClient, default_runtime_container
@@ -64,6 +65,7 @@ from .kali_audit import (
     _write_failed_audit_marker,
 )
 from .kali_cli import (
+    ScopedErrorParser,
     add_passthrough_args_flag,
     add_required_kali_flags,
     emit_result,
@@ -79,7 +81,10 @@ from .kali_output import (
     _read_safely,
     _scope_version,
     _utcnow_iso,
+    detect_transport_error,
+    is_http_prober,
 )
+from . import kali_resolve
 from .kali_runtime_exec import (
     _build_docker_exec,
     _check_container_running,
@@ -338,6 +343,30 @@ def kali_exec(
                 "command manually if this tool needs it.",
                 file=sys.stderr,
             )
+
+    # CR-36 — host-resolve + --resolve IP-pin. On macOS Docker Desktop the
+    # container resolver flaps (I-013), so a container HTTP probe can return
+    # http=000 for a name that resolves fine on the host. Pin the host-resolved
+    # IP into the argv (curl/httpx/nuclei/ffuf/katana) so target HTTP never
+    # depends on the broken container resolver. Transparent no-op off Docker
+    # Desktop and when the operator opts out (VIGIL_NO_RESOLVE_PIN) — pinning is
+    # idempotent (skipped if a --resolve for this host is already present).
+    pinned_ip: str | None = None
+    pin_host, pin_port = kali_resolve.target_host_port(derived_tool_name, cmd)
+    _pin_eligible = (
+        kali_resolve.is_pin_eligible_runtime()
+        and not kali_resolve.pinning_disabled()
+    )
+    if pin_host and pin_port and _pin_eligible:
+        _pin_ips = kali_resolve.resolve_host_ips(pin_host)
+        pinned_ip = kali_resolve.apply_resolve_pin(
+            cmd, derived_tool_name, ips=_pin_ips
+        )
+        if pinned_ip is not None:
+            kali_resolve.warn_resolved_pin(
+                pin_host, pin_port, pinned_ip, all_ips=_pin_ips
+            )
+
     container_working_dir = f"/engagements/{eng_key}"
     docker_argv = _build_docker_exec(
         cmd,
@@ -398,134 +427,280 @@ def kali_exec(
             _write_failed_audit_marker(eng_dir, run_uuid=run_uuid, error=str(exc))
             audit_failed = True
 
-        # Open output files BEFORE Popen so streaming starts at line 1.
-        with stdout_path.open("wb") as out_fh, stderr_path.open("wb") as err_fh:
-            try:
-                process = subprocess.Popen(  # noqa: S603 — controlled argv
-                    docker_argv,
-                    shell=False,
-                    stdin=subprocess.DEVNULL,
-                    stdout=out_fh,
-                    stderr=err_fh,
-                    start_new_session=True,
-                )
-            except FileNotFoundError as exc:
-                # ``docker`` binary missing on PATH. The pre-exec POST at
-                # line 186 already wrote a status=running audit row; without
-                # this finalize the row stays "running" forever and confuses
-                # sweep-orphans + operator audit. PATCH it to failed before
-                # raising so the row reflects what actually happened.
-                if run_id is not None and not audit_failed:
-                    try:
-                        _patch_finalize(
-                            client,
-                            run_id=run_id,
-                            status="failed",
-                            return_code=None,
-                            ended_at_iso=_utcnow_iso(),
-                            duration_ms=0,
-                            stdout_preview="",
-                            stderr_preview=f"docker not found: {exc}",
-                            timed_out=False,
-                            partial_results=False,
-                            peak_rss_bytes=None,
-                            cpu_user_seconds=None,
-                            cpu_system_seconds=None,
-                        )
-                    except AssessError as patch_exc:
-                        # Belt-and-braces: if the PATCH also fails, drop a
-                        # failed-audit marker so sweep-orphans can pick it up.
-                        _write_failed_audit_marker(
-                            eng_dir,
-                            run_uuid=run_uuid,
-                            error=(
-                                f"docker not found AND finalize PATCH failed: "
-                                f"{patch_exc}"
-                            ),
-                        )
-                raise AssessError(f"docker not found: {exc}") from exc
-            timed_out = False
-            partial_results = False
-            return_code: int | None = None
-            try:
-                return_code = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                # Two-namespace kill cascade. ``os.killpg`` only signals the
-                # host-side ``docker exec`` client and any siblings in our
-                # process group — it cannot reach the user command running
-                # inside the container's PID namespace under ``dockerd+tini``,
-                # and dockerd's signal forwarding is best-effort. SIGTERM-
-                # trapping tools (sqlmap, nuclei) survive that path. The
-                # wrapper shell records the in-container PID to a pid file so
-                # we can also send ``docker exec kill`` directly at the user
-                # command across the namespace boundary.
-                container_pid = _read_container_pid(container_name, run_uuid)
-                if container_pid is not None:
-                    _kill_in_container(container_name, container_pid, "TERM")
-                else:
-                    # If the exact PID is unavailable, avoid argv-pattern
-                    # cleanup. `pkill -f` can match sibling agent runs inside
-                    # the shared runtime container; host-side kill plus
-                    # sweep-orphans is safer than a broad in-container signal.
-                    print(
-                        f"warning: in-container pid file missing for run {run_uuid}; "
-                        "using host process-group cleanup only.",
-                        file=sys.stderr,
+        # One docker-exec attempt + full telemetry snapshot. Factored into a
+        # nested closure so the CR-36 false-negative guard can run it a SECOND
+        # time (a single host-resolved pinned-IP retry) without duplicating the
+        # kill-cascade / rusage / preview logic. Each attempt streams to its own
+        # {run_uuid}[.retryN].{out,err} so both attempts' bytes survive on disk;
+        # the returned ``out_path``/``err_path`` point at THIS attempt's files.
+        # Every existing behavior (FileNotFoundError finalize+raise, the two-
+        # namespace kill cascade, rusage/proc-peak RSS, partial-results flag) is
+        # preserved verbatim inside the closure.
+        def _execute_and_snapshot(
+            *, attempt_uuid: str, out_path: Path, err_path: Path
+        ) -> SimpleNamespace:
+            # Open output files BEFORE Popen so streaming starts at line 1.
+            with out_path.open("wb") as out_fh, err_path.open("wb") as err_fh:
+                try:
+                    process = subprocess.Popen(  # noqa: S603 — controlled argv
+                        docker_argv,
+                        shell=False,
+                        stdin=subprocess.DEVNULL,
+                        stdout=out_fh,
+                        stderr=err_fh,
+                        start_new_session=True,
                     )
+                except FileNotFoundError as exc:
+                    # ``docker`` binary missing on PATH. The pre-exec POST at
+                    # line 186 already wrote a status=running audit row; without
+                    # this finalize the row stays "running" forever and confuses
+                    # sweep-orphans + operator audit. PATCH it to failed before
+                    # raising so the row reflects what actually happened.
+                    if run_id is not None and not audit_failed:
+                        try:
+                            _patch_finalize(
+                                client,
+                                run_id=run_id,
+                                status="failed",
+                                return_code=None,
+                                ended_at_iso=_utcnow_iso(),
+                                duration_ms=0,
+                                stdout_preview="",
+                                stderr_preview=f"docker not found: {exc}",
+                                timed_out=False,
+                                partial_results=False,
+                                peak_rss_bytes=None,
+                                cpu_user_seconds=None,
+                                cpu_system_seconds=None,
+                            )
+                        except AssessError as patch_exc:
+                            # Belt-and-braces: if the PATCH also fails, drop a
+                            # failed-audit marker so sweep-orphans can pick it up.
+                            _write_failed_audit_marker(
+                                eng_dir,
+                                run_uuid=run_uuid,
+                                error=(
+                                    f"docker not found AND finalize PATCH failed: "
+                                    f"{patch_exc}"
+                                ),
+                            )
+                    raise AssessError(f"docker not found: {exc}") from exc
+                a_timed_out = False
+                a_partial = False
+                a_return_code: int | None = None
                 try:
-                    pgid = os.getpgid(process.pid)
-                    os.killpg(pgid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                try:
-                    return_code = process.wait(timeout=5)
+                    a_return_code = process.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
+                    a_timed_out = True
+                    # Two-namespace kill cascade. ``os.killpg`` only signals the
+                    # host-side ``docker exec`` client and any siblings in our
+                    # process group — it cannot reach the user command running
+                    # inside the container's PID namespace under ``dockerd+tini``,
+                    # and dockerd's signal forwarding is best-effort. SIGTERM-
+                    # trapping tools (sqlmap, nuclei) survive that path. The
+                    # wrapper shell records the in-container PID to a pid file so
+                    # we can also send ``docker exec kill`` directly at the user
+                    # command across the namespace boundary.
+                    container_pid = _read_container_pid(container_name, attempt_uuid)
                     if container_pid is not None:
-                        _kill_in_container(container_name, container_pid, "KILL")
+                        _kill_in_container(container_name, container_pid, "TERM")
+                    else:
+                        # If the exact PID is unavailable, avoid argv-pattern
+                        # cleanup. `pkill -f` can match sibling agent runs inside
+                        # the shared runtime container; host-side kill plus
+                        # sweep-orphans is safer than a broad in-container signal.
+                        print(
+                            f"warning: in-container pid file missing for run {attempt_uuid}; "
+                            "using host process-group cleanup only.",
+                            file=sys.stderr,
+                        )
                     try:
                         pgid = os.getpgid(process.pid)
-                        os.killpg(pgid, signal.SIGKILL)
+                        os.killpg(pgid, signal.SIGTERM)
                     except (ProcessLookupError, PermissionError):
                         pass
                     try:
-                        return_code = process.wait(timeout=2)
+                        a_return_code = process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        return_code = None
-                _cleanup_container_pid_file(container_name, run_uuid)
+                        if container_pid is not None:
+                            _kill_in_container(container_name, container_pid, "KILL")
+                        try:
+                            pgid = os.getpgid(process.pid)
+                            os.killpg(pgid, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                        try:
+                            a_return_code = process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            a_return_code = None
+                    _cleanup_container_pid_file(container_name, attempt_uuid)
 
-        # Clean up the pid file on the happy path too so /tmp doesn't grow
-        # unboundedly. The wrapper writes the file then ``exec``s the user
-        # command, so by the time we get here the user command has exited
-        # but the file remains.
-        if not timed_out:
-            _cleanup_container_pid_file(container_name, run_uuid)
+            # Clean up the pid file on the happy path too so /tmp doesn't grow
+            # unboundedly. The wrapper writes the file then ``exec``s the user
+            # command, so by the time we get here the user command has exited
+            # but the file remains.
+            if not a_timed_out:
+                _cleanup_container_pid_file(container_name, attempt_uuid)
+
+            # Resource snapshot. getrusage(RUSAGE_CHILDREN) is rolled-up across
+            # all waited-for children of the calling process; for a single-shot
+            # CLI call the caller is the lone child so the values are accurate.
+            try:
+                usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+                a_cpu_user = float(usage.ru_utime)
+                a_cpu_system = float(usage.ru_stime)
+                a_peak_rss: int | None = _peak_rss_kilobytes_to_bytes(int(usage.ru_maxrss))
+            except OSError:
+                a_cpu_user = None
+                a_cpu_system = None
+                a_peak_rss = None
+
+            proc_peak = _read_proc_peak_rss(process.pid)
+            if proc_peak is not None:
+                a_peak_rss = proc_peak
+
+            a_stdout_preview = _read_safely(out_path)
+            a_stderr_preview = _read_safely(err_path)
+
+            if a_timed_out and (a_stdout_preview or a_stderr_preview):
+                a_partial = True
+
+            return SimpleNamespace(
+                return_code=a_return_code,
+                timed_out=a_timed_out,
+                partial_results=a_partial,
+                cpu_user_seconds=a_cpu_user,
+                cpu_system_seconds=a_cpu_system,
+                peak_rss_bytes=a_peak_rss,
+                stdout_preview=a_stdout_preview,
+                stderr_preview=a_stderr_preview,
+                stdout_path=out_path,
+                stderr_path=err_path,
+            )
+
+        snap = _execute_and_snapshot(
+            attempt_uuid=run_uuid, out_path=stdout_path, err_path=stderr_path
+        )
+
+        # CR-36 — HARD false-negative guard. A container HTTP probe that ends in
+        # the http=000 / connection-failed / DNS-resolution-failure signature
+        # produced NO real HTTP answer, so its terminal status MUST NOT be read
+        # as a target verdict (404/patched/gated). On Docker Desktop this is most
+        # often the I-013 container-resolver flap, so we auto-retry ONCE with a
+        # host-resolved pinned IP before letting the result stand. On native
+        # Linux / remote Docker the container resolver is the real resolver and a
+        # clean connection-refused IS a legitimate verdict — so the guard only
+        # arms on Docker Desktop (no over-flagging elsewhere).
+        transport_error = False
+        transport_error_detail = ""
+        if is_http_prober(derived_tool_name) and kali_resolve.is_pin_eligible_runtime():
+            is_te, te_detail = detect_transport_error(
+                tool_name=derived_tool_name,
+                return_code=snap.return_code,
+                stdout_preview=snap.stdout_preview,
+                stderr_preview=snap.stderr_preview,
+                timed_out=snap.timed_out,
+            )
+            if is_te:
+                # Already pinned on the pre-flight pass and STILL http=000 → a real
+                # transport failure, not a resolver flap. Don't retry (it would
+                # just fail again); keep the run flagged as a transport error.
+                can_retry = not kali_resolve.pinning_disabled() and pinned_ip is None
+                print(
+                    "RUNTIME ERROR: http=000/connection-failed — this is NOT a "
+                    "target verdict; "
+                    + (
+                        "retrying with host-resolved pinned IP."
+                        if can_retry
+                        else "already host-pinned, not retrying."
+                    ),
+                    file=sys.stderr,
+                )
+                if can_retry:
+                    retry_ips = kali_resolve.resolve_host_ips(pin_host) if pin_host else []
+                    new_pin = kali_resolve.apply_resolve_pin(
+                        cmd, derived_tool_name, ips=retry_ips
+                    )
+                    if new_pin is not None:
+                        pinned_ip = new_pin
+                        kali_resolve.warn_resolved_pin(
+                            pin_host, pin_port, new_pin, all_ips=retry_ips
+                        )
+                        # Rebuild docker_argv so it carries the freshly injected
+                        # --resolve, then re-run into retry-suffixed files.
+                        docker_argv = _build_docker_exec(
+                            cmd,
+                            container_name=container_name,
+                            run_uuid=run_uuid,
+                            working_dir=container_working_dir,
+                            engagement_key=eng_key,
+                        )
+                        retry_out = out_dir / f"{run_uuid}.retry1.out"
+                        retry_err = out_dir / f"{run_uuid}.retry1.err"
+                        snap = _execute_and_snapshot(
+                            attempt_uuid=run_uuid, out_path=retry_out, err_path=retry_err
+                        )
+                        is_te, te_detail = detect_transport_error(
+                            tool_name=derived_tool_name,
+                            return_code=snap.return_code,
+                            stdout_preview=snap.stdout_preview,
+                            stderr_preview=snap.stderr_preview,
+                            timed_out=snap.timed_out,
+                        )
+                    else:
+                        # apply_resolve_pin() returned None for one of two distinct
+                        # reasons; name the real one so the operator isn't told
+                        # "resolution failed" when the tool simply takes no --resolve
+                        # pin (e.g. wafw00f/nikto are http probers but NOT in
+                        # RESOLVE_PIN_TOOLS). Message-only — control flow unchanged.
+                        if (
+                            kali_resolve._exe_name(cmd)
+                            not in kali_resolve.RESOLVE_PIN_TOOLS
+                        ):
+                            print(
+                                f"RUNTIME ERROR: {derived_tool_name} takes no --resolve "
+                                "pin (not in the pinnable tool set), so the http=000 result "
+                                "cannot be retried with a host-resolved IP — leaving run "
+                                "flagged as a transport error (NOT a target verdict). Re-run "
+                                "via the host path / verify reachability before any negative "
+                                "disposition.",
+                                file=sys.stderr,
+                            )
+                        else:
+                            print(
+                                "RUNTIME ERROR: host resolution returned no address for "
+                                f"{pin_host or 'target'}; cannot pin — leaving run flagged "
+                                "as a transport error (NOT a target verdict).",
+                                file=sys.stderr,
+                            )
+                # After any retry, a still-true is_te means a real transport error.
+                if is_te:
+                    transport_error = True
+                    transport_error_detail = te_detail
+                    print(
+                        "RUNTIME ERROR: http=000/connection-failed persisted after "
+                        "the host-resolved retry — recording this run as a TRANSPORT "
+                        "ERROR, not a target verdict (404/patched/gated). Re-run "
+                        "via the host path / verify reachability before any negative "
+                        "disposition.",
+                        file=sys.stderr,
+                    )
+
+        # Bind the (possibly retried) attempt's telemetry into the names the
+        # finalize/return path below already uses.
+        return_code = snap.return_code
+        timed_out = snap.timed_out
+        partial_results = snap.partial_results
+        cpu_user_seconds = snap.cpu_user_seconds
+        cpu_system_seconds = snap.cpu_system_seconds
+        peak_rss_bytes = snap.peak_rss_bytes
+        stdout_preview = snap.stdout_preview
+        stderr_preview = snap.stderr_preview
+        final_stdout_path = snap.stdout_path
+        final_stderr_path = snap.stderr_path
 
         ended_at_iso = _utcnow_iso()
         duration_ms = int((time.monotonic() - started_monotonic) * 1000)
-
-        # Resource snapshot. getrusage(RUSAGE_CHILDREN) is rolled-up across all
-        # waited-for children of the calling process; for a single-shot CLI
-        # call the caller is the lone child so the values are accurate.
-        try:
-            usage = resource.getrusage(resource.RUSAGE_CHILDREN)
-            cpu_user_seconds = float(usage.ru_utime)
-            cpu_system_seconds = float(usage.ru_stime)
-            peak_rss_bytes: int | None = _peak_rss_kilobytes_to_bytes(int(usage.ru_maxrss))
-        except OSError:
-            cpu_user_seconds = None
-            cpu_system_seconds = None
-            peak_rss_bytes = None
-
-        proc_peak = _read_proc_peak_rss(process.pid)
-        if proc_peak is not None:
-            peak_rss_bytes = proc_peak
-
-        stdout_preview = _read_safely(stdout_path)
-        stderr_preview = _read_safely(stderr_path)
-
-        if timed_out and (stdout_preview or stderr_preview):
-            partial_results = True
 
         if return_code is None:
             terminal_status = "killed"
@@ -536,12 +711,24 @@ def kali_exec(
         else:
             terminal_status = "completed"
 
+        # The backend command-run status enum is {completed,failed,timed_out,
+        # killed,lost,running} — it has NO 'transport_error' member, so the audit
+        # row stays 'failed' (a connection failure already exits non-zero). The
+        # CR-36 distinction is carried OUT-of-band on the KaliResult flag + the
+        # loud stderr line + the depth ledger's error mapping (a 'failed' run
+        # never counts as 'tested'/covered). The KaliResult.status the AGENT
+        # reads is surfaced as 'transport_error' so it can never be confused with
+        # a real terminal verdict.
+        backend_status = terminal_status
+        if transport_error and backend_status == "failed":
+            terminal_status = "transport_error"
+
         if run_id is not None and not audit_failed:
             try:
                 _patch_finalize(
                     client,
                     run_id=run_id,
-                    status=terminal_status,
+                    status=backend_status,
                     return_code=return_code,
                     ended_at_iso=ended_at_iso,
                     duration_ms=duration_ms,
@@ -565,7 +752,12 @@ def kali_exec(
                 )
 
             if finalize_ok:
-                evidence_ref = f"{container_working_dir}/scans/kali/{run_uuid}.out"
+                # Point evidence at the FINAL attempt's stdout (the retry file
+                # when the http=000 guard re-ran) so the probe-run references the
+                # bytes the verdict was actually derived from.
+                evidence_ref = (
+                    f"{container_working_dir}/scans/kali/{final_stdout_path.name}"
+                )
                 _emit_probe_run(
                     client,
                     engagement_type=_engagement_type(eng_dir),
@@ -584,14 +776,16 @@ def kali_exec(
             run_id=run_id,
             status=terminal_status,
             return_code=return_code,
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
+            stdout_path=str(final_stdout_path),
+            stderr_path=str(final_stderr_path),
             duration_ms=duration_ms,
             peak_rss_bytes=peak_rss_bytes,
             stdout_preview=stdout_preview,
             stderr_preview=stderr_preview,
             timed_out=timed_out,
             partial_results=partial_results,
+            transport_error=transport_error,
+            transport_error_detail=transport_error_detail,
         )
     finally:
         client.close()
@@ -616,6 +810,7 @@ __all__ = [
     "_validate_inputs",
     "_write_failed_audit_marker",
     # CLI scaffolding (from kali_cli)
+    "ScopedErrorParser",
     "add_required_kali_flags",
     "add_passthrough_args_flag",
     "extend_cmd_with_extra_args",

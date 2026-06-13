@@ -37,7 +37,39 @@ DNS resolution success-rate parallels the egress reputation problem: if every ho
 
 ## Docker-resource-safe profiles
 
+> **A DNS brute fans out to PUBLIC RESOLVERS, not to the target — so the rate
+> ceiling is NOT a target-politeness lever.** A puredns/shuffledns/massdns brute
+> sends every candidate query to the configured public-resolver pool (`-r`). The
+> target's authoritative NS sees only a *diluted, cached-NXDOMAIN trickle* —
+> resolvers absorb and cache the bulk of the misses, and only de-duplicated
+> cache-fills reach the apex's NS. So the brute rate is bounded by **(a)
+> public-resolver fair-use** (a too-hot pool gets you REFUSED/throttled by the
+> resolver operators, not by the target) and **(b) local runtime network
+> capacity** — on macOS Docker Desktop the per-packet userspace-proxy / host-NIC
+> overhead, NOT the `--cpus` cgroup (see the Host-CPU note below and
+> `agent/references/runtime-guides/docker-desktop-network-hazards.md`, CR-3). Read
+> the `800/2500/5000` rate numbers below as **resolver-fair-use + runtime-network
+> ceilings**, not as "don't anger the target's DNS." The genuine target-politeness
+> levers live on the dir-fuzz / nuclei / nmap columns of
+> `agent/references/recon/rate-calibration.md`, which DO hit the target directly —
+> the DNS-brute column is governed by resolver load and runtime capacity instead.
+> (The rare exception where the cap really does protect an authoritative server is
+> when the target IS its own resolver / you point `-r` at the target's NS — don't.)
+
 Subdomain enumeration is the highest-CPU-burst phase of recon. Docker's cgroup limits (`VIGIL_RUNTIME_MEMORY_GB` / `VIGIL_RUNTIME_CPUS` / `VIGIL_RUNTIME_PIDS_LIMIT` / `VIGIL_RUNTIME_SHM_SIZE` from `.env.example`) bound container userland, but a DNS-heavy profile against the wrong target tier can still saturate host-side Docker networking. Pick the profile by target shape, not by what the apex looks like — wildcards expand the surface and the rate calibration must match the surface, not the seed.
+
+> **Route DNS-heavy passes to the HOST on macOS Docker Desktop.** The per-packet
+> userspace-proxy overhead (not cgroup CPU) is what crashes Docker Desktop under a
+> brute, and the danger knob is the count of **distinct resolver destination IPs**
+> (>~50 in-container), not qps — see `docker-desktop-network-hazards.md` (CR-3).
+> The composed `vigil assess dns-discovery` verb routes its DNS-heavy stages
+> (subfinder/puredns/dnsx) to the audited host path when you pass `--runtime host`
+> (or set `VIGIL_RECON_RUNTIME=host`; `VIGIL_RECON_RUNTIME=auto` platform-selects
+> host on macOS Docker Desktop). Bare `--runtime auto` stays in-container for
+> back-compat. The shipped premium-anycast brute tier (~40 IPs, below) stays under
+> the in-container dest-IP ceiling; larger validated resolver lists go via the
+> host route. Target HTTP/exploit work always stays in-container — only DNS recon
+> is host-routed.
 
 > **Serialize heavy ops on a shared runtime.** Run DNS-heavy passes (puredns/dnsx) and bulk
 > `httpx` liveness **one at a time** — never stack a DNS brute and an httpx pass, or two httpx
@@ -51,20 +83,22 @@ Subdomain enumeration is the highest-CPU-burst phase of recon. Docker's cgroup l
 
 Profiles and full tier rationale live in `agent/references/tools/recon/subdomain-enumeration-tools.md`; the three operational tiers below are the load-bearing settings, listed from most cautious (default for any unknown target) down to opt-in only.
 
-> **polite-CDN-fronted-target profile** — anything CDN-fronted, behind an enterprise WAF, or in a high-friction policy / regulated category. Target authoritative DNS is rate-limited at the apex; aggressive bursts trigger DNS-tier blocks that persist beyond the engagement.
+> **polite-CDN-fronted-target profile** — anything CDN-fronted, behind an enterprise WAF, or in a high-friction policy / regulated category. The reason to stay slow here is **resolver fair-use + Docker-proxy NAT pressure** (CR-2), NOT the target's authoritative DNS — a CDN-fronted apex sees only the diluted cached-NXDOMAIN trickle, but a hot brute through public resolvers gets *you* REFUSED-throttled and wedges the userspace proxy. The `800` is a resolver+runtime ceiling, not a target-politeness number.
 > - `puredns --rate-limit 800 --wildcard-tests 30`
 > - `dnsx -rl 100 -t 20 -retry 3 -timeout 5`
 > - Use when: scope target is fronted by a major CDN, has a wildcard DNS that returns canonical CNAMEs, or is a household-name brand.
 
-> **polite-residential profile** — small-medium target, public resolvers, available on every runtime tier. Use it after explicit assessment when the target is not CDN/WAF-sensitive.
+> **polite-residential profile** — small-medium target, public resolvers, available on every runtime tier. Use it after explicit assessment when the target is not CDN/WAF-sensitive. (The `2500` is again a resolver-pool + runtime ceiling, not a target-DNS number.)
 > - `puredns --rate-limit 2500 --wildcard-batch 100000`
 > - `dnsx -rl 300 -t 50 -retry 2`
 > - Use when: bug-bounty scope on residential/SMB infrastructure, shared resolver pool, no specific CDN signal.
 
-> **bursty-OK profile (tier-gated)** — private resolver pool, no shared-infra constraints, target authoritative DNS is generous.
+> **bursty-OK profile (tier-gated)** — dedicated/premium resolver pool that behaves under bulk load, no shared-infra constraints, generous local runtime network capacity.
 > - `puredns --rate-limit 5000`
 > - `dnsx -rl 500 -t 100`
-> - Use when: private CTF lab, dedicated resolver list (>100 healthy resolvers), single-engagement runtime.
+> - Use when: private CTF lab, dedicated resolver list (premium-anycast or a validated pool that holds up under bulk load — see the two-tier resolver strategy in Phase 1), single-engagement runtime. On macOS Docker Desktop, run this tier via `--runtime host` so the resolver fan-out is not bounded by the in-container dest-IP ceiling.
+
+> **Composed-verb rate knob.** `vigil assess dns-discovery --dns-rate <qps>` sets the puredns `--rate-limit` (TOTAL qps across the whole resolver pool, NOT per-resolver — CR-1; default 1500). The same resolver-load-not-target-politeness framing applies: pick `--dns-rate` against resolver fair-use + the per-resolver-qps advisory (see "Per-engagement DNS query budget" below), not against the target's apex.
 
 ### Runtime-tier rate ceilings
 
@@ -80,19 +114,40 @@ wildcard-filter dedup map produces silent truncation under heavy bursts on tight
 
 When the runtime tier is tighter than Standard (e.g. `VIGIL_RUNTIME_MEMORY_GB=4`), drop the next tier down regardless of target shape — RAM pressure on puredns's wildcard-filter dedup map produces silent truncation, not a clean OOM.
 
+### Per-engagement DNS query budget
+
+Choose brute scope against a **stated budget up front**, not by discovering the cost mid-run (CR-23). Two numbers, distinct from the total-qps tiers above:
+
+- **Total planned DNS queries** — a brute fans out roughly `wordlist_lines × target_count` queries (plus wildcard tests and the productive-parent re-brutes). The composed verb estimates this before the brute and **WARNs** when it would exceed `--query-budget` (default 5,000,000) — it proceeds (advisory, never a hard block), but the WARN is your cue to trim the wordlist (`--wordlist-head`) or the target set before spending the budget.
+- **Per-resolver qps** — derived as `--dns-rate ÷ healthy-resolver-count` (NOT a separate knob; `--dns-rate`/`--rate-limit` is TOTAL qps across the pool, CR-1). The verb WARNs when the derived per-resolver qps exceeds `--per-resolver-qps` (default 1500) so a small pool driven at a high total rate doesn't burn resolver fair-use. Lower `--dns-rate` or add resolvers.
+
+Both are advisory WARNs surfaced by `vigil assess dns-discovery`, consistent with this skill's "guidance is a cue, not a CLI gate" posture. Size the brute against them before launching, and record the chosen scope-vs-budget call in the bound-rule audit log.
+
 ## Phase 0/1/2/3 staged composition
 
-> **Composed pipeline shortcut.** `vigil assess dns-discovery <apex…>` runs the
-> Phase-0/0b/1 DNS methods (subfinder passive + CT/crt.sh + optional puredns brute)
-> → merge + de-noise → dnsx-resolve in one synchronous, audited command, and
-> `vigil assess web-discovery <resolved_hosts.txt>` runs the Phase-3 web side
-> (de-noise → httpx liveness → auto-populate the `assessment_host_liveness` ledger
-> → katana crawl → optional work-buffer ingest). Both expose every knob as a flag
-> (`--recursive`, `--brute`, `--wordlist`, `--dnsx-profile`, `--ports`,
-> `--katana-depth`/`--katana-extra-args`, …) and bake in the safe defaults this
-> skill documents (non-recursive subfinder, de-noised inputs, status-only bulk
-> httpx, stdin-safe exec). Use them for the mechanical pipe; the manual stages
-> below remain the reference for tuning and for steps the verbs don't cover.
+> **Composed pipeline shortcut.** `vigil assess dns-discovery <apex…>` is the
+> **convergent** DNS spine: it loops the Phase-0/0b/1/1.5 DNS methods (subfinder
+> passive + CT/crt.sh + optional puredns brute + productive-parent recursion) →
+> merge + de-noise → per-parent wildcard pre-strip → dnsx-resolve, **repeating
+> until two consecutive passes add zero net-new resolved hosts** (`--max-passes`,
+> default 3; `--no-converge` for a single pass). `vigil assess web-discovery
+> <resolved_hosts.txt>` runs the Phase-3 web side (de-noise → httpx liveness →
+> auto-populate the `assessment_host_liveness` ledger → katana crawl → optional
+> work-buffer ingest). Both expose every knob as a flag
+> (`--recursive`, `--brute`, `--wordlist`/`--wordlist-head`/`--deep-tail`,
+> `--resolvers`/`--resolvers-trusted`/`--no-default-resolvers`, `--dns-rate`,
+> `--dnsx-profile`, `--runtime {auto,host,container}`, `--max-passes`/`--no-converge`,
+> `--no-parent-recursion`/`--parent-min-children`, `--no-wildcard-strip`,
+> `--query-budget`/`--per-resolver-qps`, opt-in `--js-host-mining`/`--bbot`,
+> `--ports`, `--katana-depth`/`--katana-extra-args`, …) and bake in the safe
+> defaults this skill documents (non-recursive subfinder, brute OFF, two-tier
+> shipped resolvers, HEAD-capped wordlist, de-noised inputs, status-only bulk
+> httpx, stdin-safe exec). On macOS Docker Desktop add `--runtime host` (or set
+> `VIGIL_RECON_RUNTIME=host|auto`) so the DNS-heavy stages route to the audited
+> host path and dodge the userspace-proxy wedge
+> (`agent/references/runtime-guides/docker-desktop-network-hazards.md`). Use the
+> verb for the mechanical pipe; the manual stages below remain the reference for
+> tuning and for steps the verb doesn't cover.
 
 Each phase compounds on the previous one. Stop at any phase when its bound rule fires (see "Bound rules" below). Cross-reference the verb invocations in `agent/skills/kali-exec/SKILL.md` "Subdomain enumeration: Phase A→D workflow" — this section describes operator-phase-flow ordering and resource shaping.
 
@@ -147,31 +202,103 @@ backoff, fall back to certspotter (`https://api.certspotter.com/v1/issuances?dom
 or another CT aggregator. In the reference engagement this fallback recovered 1,916 CT hosts
 once crt.sh was rate-limited. Merge `subs_ct.txt` into the Phase 2.5 union like any other source.
 
+### Phase 0c — GeoDNS multi-region + DNSSEC/AXFR probe-once (cheap one-shots, run before brute)
+
+These are cheap, single-shot DNS probes that belong before/alongside the passive sources, not in the brute loop. The full dnsx/dig mechanics live in `agent/references/tools/recon/dnsx.md` ("GeoDNS multi-region resolver pass" and "DNSSEC / AXFR — probe once, then skip") — call into it rather than duplicating the recipes; the methodology is summarised here (CR-10).
+
+- **GeoDNS / multi-region resolver pass.** Targets on a GeoDNS / GSLB provider return geo-varying A/CNAME records. Re-resolve the apex + a sample of resolved hosts against resolvers pinned to ≥2-3 distinct geographies (a small curated multi-region set — Cloudflare `1.1.1.1`, Google `8.8.8.8`, Quad9 `9.9.9.9` plus a couple region-pinned anycast IPs — or use `dig +subnet=<client-subnet>` EDNS-Client-Subnet to spoof the source region) and **diff the answer sets**. When records vary by region, record each region's A/CNAME set as separate surface and feed the geo-specific origin IPs to the Phase 3 cero/cert grab. Keep the multi-region resolver-IP count small so the pass stays under the Docker per-destination-IP ceiling (`agent/references/runtime-guides/docker-desktop-network-hazards.md`, CR-3); the `dig +subnet=` form avoids the extra dest-IPs entirely.
+- **DNSSEC probe-once.** One `dnsx -ns` to get the authoritative NS, then a single dig DNSKEY/RRSIG presence check (`dig +dnssec DNSKEY <apex> @<ns>` — dnsx has no DNSSEC flag). Only if RRSIG/NSEC records are present **and** the zone is **NSEC** (not NSEC3, which is hashed) is NSEC-walking applicable (`ldns-walk` / `nsec3walker`). Otherwise log `DNSSEC absent / NSEC3 — skip walk` and move on.
+- **AXFR probe-once.** For each authoritative NS, one `dig AXFR @<ns> <apex>` (or nmap `--script dns-zone-transfer`). On the near-universal REFUSED/timeout, record `AXFR refused — skip` so no later step retries it.
+
+Run each probe as a single audited `vigil assess kali` call so it cannot loop or spike DNS, and record the skip decision (DNSSEC absent / NSEC3 / AXFR refused) in the bound-rule audit log so a not-walked zone is an explicit, justified skip rather than a coverage gap (mirror the `vigil assess log operator` pattern used elsewhere in this skill).
+
 ### Phase 1 — Active brute (gated by Phase 0 size, SKIP on DNS-sink apexes)
 
-> **Detect wildcard / DNS-sink apexes BEFORE bruteforcing.** Resolve a handful of random
-> nonexistent labels at the apex (e.g. `rande7x9.<apex>`); if they return a stable A/CNAME the
-> apex is a wildcard *sink* (e.g. `af.mil`, `africom.mil` returned 12,386 raw → 8 real;
-> MAC-shaped and `dhcp-*.rev` PTR floods). On a detected sink, **SKIP DNS brute and PTR
-> entirely** and rely on CT (Phase 0b) + TLS SAN (Phase 3) — DNS-based discovery there is pure
-> noise that burns the rate budget. Only bruteforce apexes that are NOT wildcard sinks.
+> **Detect wildcard / DNS-sink parents BEFORE bruteforcing — probe each discovered
+> parent, not only the apex.** Resolve a handful of random nonexistent labels (3 is
+> the shipped default) against the apex AND against every discovered 2nd/3rd-level
+> *parent cluster* (e.g. `rande7x9.<parent>`); if all the random labels return a
+> stable A/CNAME, that parent is a wildcard *sink*. Apex-only probing misses
+> non-apex sinks — `*.review.library.acme.example` (a wildcard *under* apex `library.acme.example`,
+> incident I-010) is exactly the case an apex probe never catches, and apex-level
+> sinks like `af.mil` / `africom.mil` (12,386 raw → 8 real; MAC-shaped and
+> `dhcp-*.rev` PTR floods) are caught by the apex probe. **Pre-strip every
+> brute/permutation candidate that falls under a detected wildcard parent before
+> spending DNS** — don't rely only on puredns's post-resolution wildcard filter.
+> On a fully-sunk apex, **SKIP DNS brute and PTR entirely** and rely on CT (Phase
+> 0b) + TLS SAN (Phase 3) — DNS-based discovery there is pure noise that burns the
+> rate budget. **Don't discard the detected wildcard environment — record it as a
+> Phase-2 Host/SNI-fuzz surface** (the sink's `*` proves a vhost frontend that
+> answers any name; fuzz `Host: FUZZ.<wildcard-parent>` / SNI against its origin in
+> web-discovery instead of throwing DNS at it).
+>
+> The composed `vigil assess dns-discovery --brute` verb automates this: it probes
+> each discovered parent (`_WILDCARD_PROBE_LABELS=3` random labels), strips
+> candidates under detected sinks before the brute, and writes the sinks to
+> `scans/dns-discovery/wildcard_parents.txt` as the Phase-2 Host/SNI-fuzz handoff.
+> Disable the strip with `--no-wildcard-strip` only when you have a reason to brute
+> into a known sink.
 
 `puredns bruteforce` runs the active brute pass through massdns with wildcard filtering. Apply the tier profile. For wildcard-heavy targets (apex returns a wildcard answer for nonexistent labels), keep `--wildcard-tests` at 30 so the filter probes more candidates per wildcard cluster.
 
+**Two-tier resolver strategy (CR-8/12/18) — brute `-r` many / validate `--resolvers-trusted` few.** The brute pass fans candidates out across a WIDE, behave-under-load resolver pool (`-r`), then cross-checks the survivors against a SMALL, high-trust pool (`--resolvers-trusted`) to kill false positives the wide pool let through. The two tiers ship in-repo:
+
+- `-r` BRUTE tier → `agent/scripts/assess/data/resolvers/premium-anycast.txt` (~40 curated anycast IPs that hold up under bulk/concurrent load: Cloudflare/Google/Quad9/OpenDNS/AdGuard/… primary+secondary pairs).
+- `--resolvers-trusted` VALIDATION tier → `agent/scripts/assess/data/resolvers/trusted-anycast.txt` (~12 IPs, the most reliable subset).
+
+**Resolver QUALITY-under-load, not raw count, governs brute throughput — and single-query "alive" validation does NOT predict bulk behavior.** Engagement evidence (CR-18): ~40 premium anycast IPs sustained ~250-500 names/s at ~0% REFUSED, whereas ~1,349 single-query-"alive" public resolvers managed ~4 names/s at 38% REFUSED. A resolver that answers one probe can still collapse under a brute's concurrency, so default to the shipped premium-anycast tier and step up to a larger pool only after validating it under bulk load (not a single liveness ping). `vigil assess dns-discovery --brute` injects both shipped lists by default; override with `--resolvers <file>` / `--resolvers-trusted <file>`, or pass `--no-default-resolvers` to manage the pool yourself (which leaves puredns's own self-discovered resolver set — and its uncapped dest-IP fan-out — in play; see the CR-3 dest-IP ceiling).
+
+**Wordlist: brute the HEAD, opt into the deep tail (CR-19).** Recommend a cert-derived brute list — **n0kovo_subdomains** — as the primary wordlist (CT-derived, frequency-ordered), with an assetnote best-dns-wordlist final pass. CT-derived / frequency-ordered huge lists (n0kovo, ~3M) keep the real labels in the **head** and CT-hash / one-off junk in the **tail**, so bruting only the head recovers nearly all real hosts at a fraction of the DNS spend. The composed verb brutes the first `--wordlist-head N` labels (default 500000) and opts into the full list with `--deep-tail`; it WARNs when it truncates so the drop is auditable. Don't `sort` an arbitrary `--wordlist` — sorting destroys the frequency order the HEAD cap depends on.
+
 ```bash
-# polite-residential default (Standard runtime, no specific CDN signal)
+# polite-residential default (Standard runtime, no specific CDN signal),
+# two-tier resolvers (shipped premium-anycast brute / trusted-anycast validate).
 vigil assess kali puredns bruteforce \
-  /usr/share/wordlists/SecLists/Discovery/DNS/subdomains-top1million-110000.txt target.example \
-  -r /engagements/$ENGAGEMENT_KEY/wordlists/resolvers.txt \
+  /usr/share/wordlists/n0kovo/n0kovo_subdomains.txt target.example \
+  -r agent/scripts/assess/data/resolvers/premium-anycast.txt \
+  --resolvers-trusted agent/scripts/assess/data/resolvers/trusted-anycast.txt \
   --rate-limit 2500 --wildcard-batch 100000 --wildcard-tests 30 \
   -w /engagements/$ENGAGEMENT_KEY/scans/subs_brute.txt \
-  --technique RECON --intent "Phase 1 active brute @ polite-residential rate" \
+  --technique RECON --intent "Phase 1 active brute @ polite-residential rate (two-tier resolvers)" \
   --probe-kind fingerprint --phase recon --timeout 1800
+
+# OR the composed verb — wildcard pre-strip + two-tier resolvers + HEAD cap +
+# convergence + budget WARN baked in. On macOS Docker Desktop add --runtime host.
+vigil assess dns-discovery target.example --brute \
+  --wordlist /usr/share/wordlists/n0kovo/n0kovo_subdomains.txt \
+  --wordlist-head 500000 --runtime host
 ```
+
+> **Resolver-list provisioning.** The shipped premium/trusted lists are the safe
+> default. The skill's historical `/engagements/$ENGAGEMENT_KEY/wordlists/resolvers.txt`
+> path is an operator-provisioned pool — if you point `-r` at a large public list,
+> validate it under bulk load first (single-query liveness is not enough, CR-18)
+> and keep the in-container distinct-resolver-IP count under the CR-3 ceiling, or
+> route the brute to the host (`--runtime host`).
 
 Skip Phase 1 entirely when Phase 0 returned >5000 unique subs or the target is a top-tier organization — passive sources have already saturated the namespace and permutation bursts add live hosts at <0.1% rate (see `subdomain-enumeration-tools.md` "When NOT to bruteforce").
 
 Conversely, when Phase 0 returned **0 or fewer than 10 subs**, treat that as a signal that either the configured passive-source API keys are misconfigured (check `${SUBFINDER_*_API_KEY}` env vars) or the target genuinely has no public footprint. In both cases Phase 1 brute is the only signal source — run it, BUT cap it at the cautious-tier rate (`polite-CDN-fronted-target` / `puredns --rate-limit 800`) regardless of target shape, since the wordlist is the only signal and faster rates produce noise rather than coverage. Record the rationale via `vigil assess log operator "Phase 0 returned <10 subs — Phase 1 brute @ cautious-tier as sole signal source" "<phase-0 count>" --actor-kind operator`.
+
+### Phase 1.5 — Productive-parent recursion (first-class enum axis)
+
+A brute against the apex finds the *first* level of structure. Real targets nest deeper: once the apex brute resolves `a.origin.api.target.example` and `b.origin.api.target.example`, the parent `origin.api.target.example` is itself a productive namespace worth bruting directly. Make this a first-class axis, not an afterthought (CR-20):
+
+1. **Cluster** the resolved hosts by their 2nd/3rd-level parent (the label sequence one level below the bruted apex).
+2. **Select** parents with **>= N children** (default 5) as "productive", excluding the apex itself and any parent already fully bruted.
+3. **Re-brute** the wordlist against each productive parent (skipping any flagged a wildcard sink by the per-parent probe above), then **re-resolve** the union.
+4. **Feed the new resolutions back** into the convergence loop (below) so a freshly-discovered productive parent can itself spawn a deeper re-brute.
+
+Pair the per-parent re-brute with the CR-19 HEAD cap so a parent count of M does not multiply DNS spend by M × full-list — brute the head against each productive parent. `vigil assess dns-discovery --brute` runs this automatically: after each resolve pass it clusters productive parents (`--parent-min-children`, default 5) and re-brutes the new ones in the next convergence pass; `--no-parent-recursion` turns the axis off.
+
+### Convergence loop — discover → resolve until two consecutive zero-net-new passes (CR-6)
+
+Subdomain discovery is iterative, not linear: each newly-resolved host can seed the host-mining / SAN / permutation / productive-parent axes, which surface more hosts to resolve. The canonical stop criterion is **two consecutive full passes that add zero net-new resolved hosts** (bounded by `--max-passes`, default 3) — run alongside the existing `<5%` marginal-yield bound rule, not instead of it. `vigil assess dns-discovery` is the iterating spine: it loops discover → merge → de-noise → wildcard-strip → dnsx-resolve → productive-parent recursion, folding each pass's resolved set back in as seeds, and stops on the two-zero-pass criterion or `--max-passes`. Use `--no-converge` for a single pass.
+
+Two **opt-in** discovery axes extend the convergence loop's breadth (off by default — they add egress and noise, and harvested names are DNS-validated by the resolve pass before they count):
+
+- **`--js-host-mining`** — mine in-scope hostnames from gau / web-archive (and katana-crawled JS) URLs, filter to the in-scope apexes, and feed them back into the resolve loop. JS/archive bodies routinely reference hosts that never appear in CT or passive sources.
+- **`--bbot`** — bbot passive `subdomain-enum` mop-up. bbot output is unreliable (CR-24: the excavate module emits false hostnames), so harvested `DNS_NAME` events are merged **only after** the normal de-noise and **only counted after** the convergence resolve pass DNS-validates them — never trusted blindly.
 
 ### Phase 2 — Permutation (estimate-first)
 
@@ -191,9 +318,11 @@ vigil assess kali alterx -l /engagements/$ENGAGEMENT_KEY/scans/subs_passive.txt 
   --technique RECON --intent "Phase 2 permutation candidates capped at 100k" \
   --probe-kind fingerprint --phase recon --timeout 600
 
-# Step 2c: resolve the permutation set through puredns (wildcard-aware)
+# Step 2c: resolve the permutation set through puredns (wildcard-aware).
+# Same two-tier resolvers as Phase 1: premium-anycast brute / trusted-anycast validate.
 vigil assess kali puredns resolve /engagements/$ENGAGEMENT_KEY/scans/perms.txt \
-  -r /engagements/$ENGAGEMENT_KEY/wordlists/resolvers.txt \
+  -r agent/scripts/assess/data/resolvers/premium-anycast.txt \
+  --resolvers-trusted agent/scripts/assess/data/resolvers/trusted-anycast.txt \
   --rate-limit 2500 --wildcard-batch 100000 \
   -w /engagements/$ENGAGEMENT_KEY/scans/perms_resolved.txt \
   --technique RECON --intent "Phase 2 permutation resolve through puredns" \
@@ -318,11 +447,14 @@ This section does NOT replace the Phase 3 TLS SAN feedback loop above; it sits a
 Stopping criteria are explicit because subdomain enumeration is the easiest place to burn a runtime budget on diminishing returns.
 
 - **subfinder is non-recursive by default; `-recursive` is dedicated-runtime-only.** On a shared/Standard runtime never pass `-recursive` — it saturated the Docker daemon on large apexes (army.mil, 4,289 subs). On a dedicated runtime, if you do opt into recursion, cap depth ≤ 2 plus one feedback pass on discovered subs; further recursion produces marketing-tracker subs and stale CDN siblings that don't contribute to attack surface.
+- **Convergence: two consecutive passes add zero net-new resolved hosts.** The canonical stop criterion for the discover→resolve loop (CR-6). Run it alongside the `<5%` marginal-yield rule below, not instead of it. `vigil assess dns-discovery` enforces it (bounded by `--max-passes`, default 3); when driving the manual pipeline, stop re-running the host-mining / SAN / permutation / productive-parent axes once two full passes in a row add nothing new.
 - **New-subdomain ratio < 5% of prior round.** When the marginal yield of a new round (additional permutations, deeper bbot modules, expanded wordlist) is under 5% of the cumulative count, stop. The remaining surface is below the cost-per-discovery threshold.
-- **Wildcard ratio > 30% (detect EARLY, before brute).** When more than 30% of resolved hits land on the same wildcard answer (single A record, single CNAME), the apex is a wildcard sink and brute force is pure noise. Detect this up front with the random-label probe in Phase 1, not only mid-run. On a detected sink, route to **CT (Phase 0b) + TLS SAN / asnmap (Phase 3)** and skip DNS brute/PTR entirely — wildcard-fronted hosts still have unique certs, and CT/SAN are the sources that cut through the sink.
+- **Wildcard ratio > 30% (detect EARLY, per discovered parent — not only the apex).** When more than 30% of a parent's resolved hits land on the same wildcard answer (single A record, single CNAME), that parent is a wildcard sink and brute force under it is pure noise. Detect this up front with the per-parent random-label probe in Phase 1 (probe each discovered parent cluster, not only the apex — `*.review.library.acme.example`-style non-apex sinks are invisible to apex-only probing), not only mid-run. On a detected sink, **pre-strip candidates under it before DNS spend**, route the apex to **CT (Phase 0b) + TLS SAN / asnmap (Phase 3)**, skip DNS brute/PTR under the sink — and **record the wildcard parent as a Phase-2 Host/SNI-fuzz surface** (`scans/dns-discovery/wildcard_parents.txt`) rather than discarding it. Wildcard-fronted hosts still have unique certs, and CT/SAN are the sources that cut through the sink.
 - **Permutation estimate > 500k candidates.** Abort Phase 2 and narrow the input set before resolving. A 500k+ candidate run costs ~30+ minutes of runtime CPU at polite-residential rates and produces sub-1% live-host yield.
+- **DNSSEC absent / NSEC3 zone, or AXFR refused — probe once, skip, never retry (CR-10).** A single DNSSEC presence check and a single AXFR attempt per authoritative NS (Phase 0c). On `DNSSEC absent`, an `NSEC3` (hashed) zone, or the near-universal AXFR `REFUSED`/timeout, record the skip and never re-probe — retrying a refused AXFR or walking a non-NSEC zone is wasted DNS spend.
+- **DNS query budget exceeded (advisory WARN).** When the planned brute (`wordlist_lines × target_count`) would exceed `--query-budget`, or the derived per-resolver qps exceeds `--per-resolver-qps`, the verb WARNs (CR-23). It is a cue to trim scope (`--wordlist-head`, fewer targets) or lower `--dns-rate`/add resolvers before launching — not a hard block.
 
-When stopping early, record the rationale via `vigil assess log operator "Subdomain enum bound rule fired" "<rule>" "<round-stats>" --actor-kind operator` so the audit trail explains the missing rounds instead of leaving an unexplained coverage gap.
+When stopping early — or recording a probe-once skip — log the rationale via `vigil assess log operator "Subdomain enum bound rule fired" "<rule>" "<round-stats>" --actor-kind operator` so the audit trail explains the missing rounds instead of leaving an unexplained coverage gap.
 
 ## When bbot replaces the manual pipeline
 
@@ -401,9 +533,13 @@ After ingestion, the operator triggers a reactive nuclei sweep against the newly
 - **Live subdomains** with HTTP status codes.
 - **Interesting subdomains**: staging, dev, admin, api, internal, test, beta.
 - **Services** running on non-standard ports.
-- **Source** of each subdomain (subfinder source, brute-force, alterx permutation, cero SAN, asnmap CIDR).
+- **Source** of each subdomain (subfinder source, brute-force, alterx permutation, productive-parent re-brute, cero SAN, asnmap CIDR, JS/archive host mining, bbot mop-up).
 - Any subdomain pointing to **different infrastructure** (cloud, CDN, third-party).
 - The hypothesis each interesting subdomain suggests: auth bypass, stale deployment, separate trust zone, or chain opportunity.
+- **Wildcard parents** detected (the Phase-2 Host/SNI-fuzz surface from `scans/dns-discovery/wildcard_parents.txt`) and the candidates stripped under them.
+- **Productive parents** re-bruted (>= `--parent-min-children`) and the convergence outcome: how many passes ran, net-new per pass, and whether it stopped on the two-zero-pass criterion or `--max-passes`.
+- **Probe-once skips** (CR-10): GeoDNS region-varying answer sets (each region's A/CNAME), DNSSEC absent / NSEC3, AXFR refused — recorded as explicit, justified skips.
+- **DNS query budget**: planned-vs-budget queries and the per-resolver qps for the brute, plus any budget WARN that fired.
 - Bound-rule firings: any phase that stopped early, the rule that fired, and the cumulative count at the firing.
 
 ## Extended Resources
@@ -412,7 +548,7 @@ After ingestion, the operator triggers a reactive nuclei sweep against the newly
 - `agent/references/tools/recon/subdomain-enumeration-tools.md` — comparison matrix, API-key value-for-cost, puredns rate guidance, alterx permutation chain, cero CIDR-feed, bbot passive preset, when-not-to-bruteforce signals.
 - `agent/skills/kali-exec/SKILL.md` — Phase A→D workflow with example invocations (kali-cli foundational skill).
 - `agent/references/tools/recon/puredns.md` — massdns dependency, wildcard tuning, rate-limit ceilings.
-- `agent/references/tools/recon/dnsx.md` — NXDOMAIN/CPU spike pattern, two-step brute-then-enrich, GOMAXPROCS profile.
+- `agent/references/tools/recon/dnsx.md` — NXDOMAIN/CPU spike pattern, two-step brute-then-enrich, GOMAXPROCS profile, GeoDNS multi-region resolver pass, and DNSSEC/AXFR probe-once-and-skip mechanics (powers Phase 0c).
 - `agent/references/tools/recon/cero.md` — TLS SAN scraper post-asnmap CIDR feed.
 - `agent/references/tools/recon/openssl-sans.md` — per-host TLS SAN extraction loop, cross-host SAN collision counter, vhost / cert mismatch detection, multi-time DNS resolution recipe; powers the "TLS SAN extraction as a primary source" section.
 - `agent/references/tools/recon/alterx.md` — permutation generator with `{{sub}}/{{suffix}}` DSL.
@@ -421,3 +557,5 @@ After ingestion, the operator triggers a reactive nuclei sweep against the newly
 - `agent/references/tools/recon/shuffledns.md` — lighter alternative to puredns.
 - `agent/references/tools/recon/httpx.md` — HTTP probing and TLS-grab.
 - `agent/references/subdomain-enumeration.md` — prioritization, sliding-window, and bound-rule companion doc.
+- `agent/references/runtime-guides/docker-desktop-network-hazards.md` — the macOS Docker Desktop per-destination-IP userspace-proxy wedge (the I-001 incident): why a DNS brute's distinct-resolver-IP count (>~50 in-container), not qps, is the crash knob, and why the DNS-heavy stages route to the host (`--runtime host`).
+- `agent/scripts/assess/data/resolvers/premium-anycast.txt` / `trusted-anycast.txt` — the shipped two-tier resolver lists (brute `-r` ~40 premium-anycast IPs / validate `--resolvers-trusted` ~12 trusted-anycast IPs); the default `vigil assess dns-discovery --brute` resolver pools.

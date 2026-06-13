@@ -260,7 +260,30 @@ decides whether to re-dispatch.
 
 ## Mandatory Closing Sequence
 
-Before your dispatch returns, run in this order:
+### Blocked-claim self-check (run BEFORE writing the handoff)
+
+Before you write **any** `handoff_status=blocked`, any `runtime_issues[].severity=blocker`,
+or any "tool X could not run / was blocked / failed to start" claim, cross-verify it against
+`vigil assess list-command-runs` (narrow with `--tool-bin <bin> --show-matches`, and
+`vigil assess get-command-run <id>` on the matching row). A tool that actually ran — even one
+that ran 30 minutes and produced nothing useful — is **not** "blocked": that is `slow` or
+`dry` (Recon Kill Check), not a blocker, and miscalling it strands the operator with a false
+"can't proceed" signal. Reserve blocked/blocker for a tool that genuinely never executed
+(missing from the image, target unreachable, hard WAF lockout) — and the command-run rows are
+the evidence that proves which it was. This is the recon application of the raw-evidence
+re-derivation rule in `agent/rules/hunting.md §23` ("a prior view is a view to re-verify, not
+ground truth").
+
+**Safe DNS envelope** (what the dispatch should already have given you; verify it held): on
+macOS Docker Desktop the DNS-heavy stages route to the **host path** (`--runtime host` /
+`VIGIL_RECON_RUNTIME=host`) because the per-destination-IP userspace proxy wedges the VM, and
+in-container DNS stays within the **≤~50-distinct-resolver-IP** guard (distinct destination
+IPs, not qps, are the crash knob). If a brute pointed more than ~50 distinct resolver IPs
+in-container, or you fell back to the container resolver, note it — a thrash/false-negative
+from that envelope breach is a runtime issue, not a target verdict. Mechanics:
+`agent/references/runtime-guides/docker-desktop-network-hazards.md`.
+
+Then run, in this order:
 
 1. `vigil assess record-finding recon-specialist <finding-json>` for each finding (already required)
 2. `vigil assess record-intel <type> <intel-json>` for each intel row (already required)

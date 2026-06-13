@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import functools
 from typing import Any, Literal, TypeAlias
 
+import anyio
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -263,8 +265,10 @@ def _audit_code_mutation(
 
 @router.post("/repos", status_code=status.HTTP_201_CREATED)
 async def create_repo(engagement_key: str, request: CodeRepoCreateRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.create_code_repo(engagement.id, **request.model_dump())
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(code_analysis.create_code_repo, engagement.id, **request.model_dump())
+    )
     await _broadcast(engagement.key, "repo", record)
     return record
 
@@ -283,8 +287,10 @@ def get_repo(engagement_key: str, repo_id: int) -> dict[str, Any]:
 
 @router.patch("/repos/{repo_id}")
 async def update_repo(engagement_key: str, repo_id: int, request: dict[str, Any]) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.update_code_repo(engagement.id, repo_id, **request)
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(code_analysis.update_code_repo, engagement.id, repo_id, **request)
+    )
     await _broadcast(engagement.key, "repo", record)
     return record
 
@@ -295,11 +301,14 @@ async def update_repo(engagement_key: str, repo_id: int, request: dict[str, Any]
 
 @router.post("/files", status_code=status.HTTP_201_CREATED)
 async def bulk_create_files(engagement_key: str, request: CodeFilesBulkCreateRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.bulk_create_code_files(
-        engagement.id,
-        repo_id=request.repo_id,
-        files=[f.model_dump() for f in request.files],
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.bulk_create_code_files,
+            engagement.id,
+            repo_id=request.repo_id,
+            files=[f.model_dump() for f in request.files],
+        )
     )
     await _broadcast(engagement.key, "files", record)
     return record
@@ -337,10 +346,13 @@ def get_file(engagement_key: str, file_id: int) -> dict[str, Any]:
 
 @router.post("/files/bulk-classify")
 async def bulk_classify_files(engagement_key: str, request: CodeFilesBulkClassifyRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.bulk_classify_code_files(
-        engagement.id,
-        classifications=[c.model_dump() for c in request.classifications],
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.bulk_classify_code_files,
+            engagement.id,
+            classifications=[c.model_dump() for c in request.classifications],
+        )
     )
     await _broadcast(engagement.key, "file_classification", record)
     return record
@@ -348,8 +360,10 @@ async def bulk_classify_files(engagement_key: str, request: CodeFilesBulkClassif
 
 @router.patch("/files/{file_id}")
 async def update_file(engagement_key: str, file_id: int, request: dict[str, Any]) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.update_code_file(engagement.id, file_id, **request)
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(code_analysis.update_code_file, engagement.id, file_id, **request)
+    )
     await _broadcast(engagement.key, "file", record)
     return record
 
@@ -359,10 +373,13 @@ async def bulk_structural_metadata(
     engagement_key: str,
     request: BulkStructuralMetadataRequest,
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.bulk_update_structural_metadata(
-        engagement.id,
-        updates=[u.model_dump() for u in request.updates],
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.bulk_update_structural_metadata,
+            engagement.id,
+            updates=[u.model_dump() for u in request.updates],
+        )
     )
     await _broadcast(engagement.key, "structural_metadata", record)
     return record
@@ -374,11 +391,14 @@ async def bulk_structural_metadata(
 
 @router.post("/modules", status_code=status.HTTP_201_CREATED)
 async def bulk_create_modules(engagement_key: str, request: CodeModulesBulkCreateRequest) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    records = code_analysis.bulk_create_code_modules(
-        engagement.id,
-        repo_id=request.repo_id,
-        modules=[m.model_dump() for m in request.modules],
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    records = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.bulk_create_code_modules,
+            engagement.id,
+            repo_id=request.repo_id,
+            modules=[m.model_dump() for m in request.modules],
+        )
     )
     await _broadcast(engagement.key, "modules", {"count": len(records)})
     return records
@@ -399,10 +419,13 @@ def list_modules(
 
 @router.post("/analysis-queue", status_code=status.HTTP_201_CREATED)
 async def bulk_create_queue_items(engagement_key: str, request: QueueItemsBulkCreateRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.bulk_create_queue_items(
-        engagement.id,
-        items=[i.model_dump() for i in request.items],
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.bulk_create_queue_items,
+            engagement.id,
+            items=[i.model_dump() for i in request.items],
+        )
     )
     await _broadcast(engagement.key, "analysis_queue", record)
     return record
@@ -416,11 +439,14 @@ def get_queue_stats(engagement_key: str) -> dict[str, Any]:
 
 @router.post("/analysis-queue/fetch")
 async def fetch_queue_items(engagement_key: str, request: QueueFetchRequest) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    records = code_analysis.fetch_queue_items(
-        engagement.id,
-        limit=request.limit,
-        agent_name=request.agent_name,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    records = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.fetch_queue_items,
+            engagement.id,
+            limit=request.limit,
+            agent_name=request.agent_name,
+        )
     )
     await _broadcast(engagement.key, "queue_fetch", {"count": len(records)})
     return records
@@ -428,21 +454,27 @@ async def fetch_queue_items(engagement_key: str, request: QueueFetchRequest) -> 
 
 @router.post("/analysis-queue/done")
 async def complete_queue_items(engagement_key: str, request: QueueCompleteRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.complete_queue_items(
-        engagement.id,
-        item_ids=request.item_ids,
-        disposition=request.disposition,
-        notes=request.notes,
-        cwe_coverage=request.cwe_coverage,
-        skip_reason=request.skip_reason,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.complete_queue_items,
+            engagement.id,
+            item_ids=request.item_ids,
+            disposition=request.disposition,
+            notes=request.notes,
+            cwe_coverage=request.cwe_coverage,
+            skip_reason=request.skip_reason,
+        )
     )
-    _audit_code_mutation(
-        engagement.id,
-        title="code-dispatch done",
-        action=f"item_ids={request.item_ids} disposition={request.disposition}",
-        result=request.notes,
-        metadata={"item_ids": request.item_ids, "disposition": request.disposition},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_code_mutation,
+            engagement.id,
+            title="code-dispatch done",
+            action=f"item_ids={request.item_ids} disposition={request.disposition}",
+            result=request.notes,
+            metadata={"item_ids": request.item_ids, "disposition": request.disposition},
+        )
     )
     await _broadcast(engagement.key, "queue_done", record)
     return record
@@ -450,11 +482,14 @@ async def complete_queue_items(engagement_key: str, request: QueueCompleteReques
 
 @router.post("/analysis-queue/error")
 async def error_queue_items(engagement_key: str, request: QueueErrorRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.error_queue_items(
-        engagement.id,
-        item_ids=request.item_ids,
-        notes=request.notes,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.error_queue_items,
+            engagement.id,
+            item_ids=request.item_ids,
+            notes=request.notes,
+        )
     )
     await _broadcast(engagement.key, "queue_error", record)
     return record
@@ -462,11 +497,14 @@ async def error_queue_items(engagement_key: str, request: QueueErrorRequest) -> 
 
 @router.post("/analysis-queue/needs-context")
 async def needs_context_queue_items(engagement_key: str, request: QueueNeedsContextRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.needs_context_queue_items(
-        engagement.id,
-        item_ids=request.item_ids,
-        expansion_request=request.expansion_request,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.needs_context_queue_items,
+            engagement.id,
+            item_ids=request.item_ids,
+            expansion_request=request.expansion_request,
+        )
     )
     await _broadcast(engagement.key, "queue_needs_context", record)
     return record
@@ -474,10 +512,13 @@ async def needs_context_queue_items(engagement_key: str, request: QueueNeedsCont
 
 @router.post("/analysis-queue/reset-stale")
 async def reset_stale_queue_items(engagement_key: str, request: QueueResetStaleRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.reset_stale_queue_items(
-        engagement.id,
-        minutes=request.minutes,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.reset_stale_queue_items,
+            engagement.id,
+            minutes=request.minutes,
+        )
     )
     await _broadcast(engagement.key, "queue_reset_stale", record)
     return record
@@ -485,16 +526,22 @@ async def reset_stale_queue_items(engagement_key: str, request: QueueResetStaleR
 
 @router.post("/analysis-queue/requeue", status_code=status.HTTP_201_CREATED)
 async def requeue_triggered_files(engagement_key: str, request: RequeueRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.requeue_triggered_files(
-        engagement.id,
-        items=[item.model_dump() for item in request.items],
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.requeue_triggered_files,
+            engagement.id,
+            items=[item.model_dump() for item in request.items],
+        )
     )
-    _audit_code_mutation(
-        engagement.id,
-        title="code-dispatch requeue-triggers",
-        action=f"count={len(request.items)}",
-        metadata={"count": len(request.items)},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_code_mutation,
+            engagement.id,
+            title="code-dispatch requeue-triggers",
+            action=f"count={len(request.items)}",
+            metadata={"count": len(request.items)},
+        )
     )
     await _broadcast(engagement.key, "queue_requeue", record)
     return record
@@ -516,19 +563,25 @@ def list_code_triggers(
 
 @router.post("/triggers/resolve")
 async def resolve_code_triggers(engagement_key: str, request: TriggerResolveRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.resolve_code_triggers(
-        engagement.id,
-        items=[item.model_dump() for item in request.items],
-        resolution_status=request.resolution_status,
-        resolution_note=request.resolution_note,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.resolve_code_triggers,
+            engagement.id,
+            items=[item.model_dump() for item in request.items],
+            resolution_status=request.resolution_status,
+            resolution_note=request.resolution_note,
+        )
     )
-    _audit_code_mutation(
-        engagement.id,
-        title="code-dispatch resolve-triggers",
-        action=f"status={request.resolution_status} count={len(request.items)}",
-        result=request.resolution_note,
-        metadata={"count": len(request.items), "resolution_status": request.resolution_status},
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_code_mutation,
+            engagement.id,
+            title="code-dispatch resolve-triggers",
+            action=f"status={request.resolution_status} count={len(request.items)}",
+            result=request.resolution_note,
+            metadata={"count": len(request.items), "resolution_status": request.resolution_status},
+        )
     )
     await _broadcast(engagement.key, "triggers_resolve", record)
     return record
@@ -540,20 +593,25 @@ async def resolve_code_triggers(engagement_key: str, request: TriggerResolveRequ
 
 @router.post("/analysis-results", status_code=status.HTTP_201_CREATED)
 async def create_analysis_result(engagement_key: str, request: AnalysisResultRecord) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.create_analysis_result(engagement.id, request.model_dump())
-    _audit_code_mutation(
-        engagement.id,
-        title="code-record-analysis",
-        action=f"file_id={record['file_id']} function={request.function_name or '(file)'}",
-        actor_name=request.agent_name,
-        result=request.disposition,
-        metadata={
-            "file_id": record["file_id"],
-            "queue_item_id": request.queue_item_id,
-            "finding_slug": request.finding_slug,
-            "disposition": request.disposition,
-        },
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(code_analysis.create_analysis_result, engagement.id, request.model_dump())
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_code_mutation,
+            engagement.id,
+            title="code-record-analysis",
+            action=f"file_id={record['file_id']} function={request.function_name or '(file)'}",
+            actor_name=request.agent_name,
+            result=request.disposition,
+            metadata={
+                "file_id": record["file_id"],
+                "queue_item_id": request.queue_item_id,
+                "finding_slug": request.finding_slug,
+                "disposition": request.disposition,
+            },
+        )
     )
     await _broadcast(engagement.key, "analysis_result", record)
     return record
@@ -579,11 +637,14 @@ def list_analysis_results(
 
 @router.post("/threat-model")
 async def create_threat_model(engagement_key: str, request: ThreatModelRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = code_analysis.record_threat_model(
-        engagement.id,
-        repo_id=request.repo_id,
-        threat_model=request.threat_model,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.record_threat_model,
+            engagement.id,
+            repo_id=request.repo_id,
+            threat_model=request.threat_model,
+        )
     )
     await _broadcast(engagement.key, "threat_model", record)
     return record

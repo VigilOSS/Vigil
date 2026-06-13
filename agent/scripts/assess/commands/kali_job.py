@@ -16,13 +16,16 @@ from pathlib import Path
 
 from assess.lib.client import AssessError, default_runtime_container
 from assess.lib.config import load_config
+from assess.lib.audit_enums import normalize_technique
 from assess.lib.kali import (
     ALLOWED_PHASES,
     PROBE_KIND_ENUM,
     TECHNIQUE_ENUM,
+    ScopedErrorParser,
     _INTENT_MAX_LEN,
     _resolve_agent_name,
 )
+from assess.lib.kali_audit import _enum_reject_message
 from assess.lib.kali_jobs import job_list, job_status, job_stop, job_tail, start_job
 
 
@@ -34,15 +37,24 @@ def register(subparsers) -> None:
         "job",
         help="Async-job lifecycle (start | status | tail | stop | list).",
     )
-    job_sub = p.add_subparsers(dest="job_action")
+    # parser_class routes a parse-time --probe-kind/--phase enum miss through the
+    # same scoped did-you-mean formatter the typed kali verbs use, instead of the
+    # stock top-level usage dump.
+    job_sub = p.add_subparsers(dest="job_action", parser_class=ScopedErrorParser)
     job_sub.required = False
 
     start = job_sub.add_parser("start", help="Spawn a dtach-supervised job.")
+    # --technique carries NO argparse choices= so it defers to the same
+    # technique enum validation the typed verbs run (see _run_start), giving an
+    # identical scoped did-you-mean error everywhere. (probe-kind/phase keep
+    # choices, now re-rendered by ScopedErrorParser.)
     start.add_argument(
         "--technique",
         required=True,
-        choices=list(TECHNIQUE_ENUM) if TECHNIQUE_ENUM else None,
-        help=", ".join(TECHNIQUE_ENUM) if TECHNIQUE_ENUM else "",
+        help=(
+            "Vulnerability-class technique tag (e.g. RECON, SSRF, SQLI). "
+            f"Allowed: {', '.join(TECHNIQUE_ENUM) if TECHNIQUE_ENUM else 'see audit_enums.py'}"
+        ),
     )
     start.add_argument("--intent", required=True)
     start.add_argument(
@@ -120,6 +132,19 @@ def _print_help_when_missing(args) -> None:
 
 
 def _run_start(args) -> None:
+    # --technique has no argparse choices= (CLI-1 reconciliation), so validate it
+    # here through the exact same enum check + scoped formatter the typed verbs'
+    # _validate_inputs uses, so `kali job start --technique FINGERPRINT` errors
+    # identically to `kali exec --technique FINGERPRINT`.
+    technique = args.technique or ""
+    if not technique:
+        raise AssessError("--technique is required")
+    if TECHNIQUE_ENUM and normalize_technique(technique) not in TECHNIQUE_ENUM:
+        raise AssessError(_enum_reject_message(
+            "--technique", technique, TECHNIQUE_ENUM,
+            hint="--technique is the vuln-class tag for the AUDIT row, not the probe step; "
+                 "the per-step kind is --probe-kind. For initial mapping use RECON.",
+        ))
     intent = args.intent or ""
     if len(intent) > _INTENT_MAX_LEN:
         raise AssessError(f"--intent exceeds {_INTENT_MAX_LEN} characters")

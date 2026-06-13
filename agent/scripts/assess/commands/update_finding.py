@@ -45,6 +45,15 @@ def register(subparsers) -> None:
              "contradicted internal text (notes is append-only by default). Pair with --notes.",
     )
     p.add_argument(
+        "--details-replace",
+        dest="details_replace",
+        action="store_true",
+        help="Overwrite the whole details object instead of merging into it. Use to "
+             "remove stale or cross-contaminated detail keys (details is merge-only by "
+             "default, so a merge can shadow but never delete keys). Pair with "
+             "--details-inline.",
+    )
+    p.add_argument(
         "--evidence-type",
         dest="evidence_type",
         default=None,
@@ -68,6 +77,14 @@ def run(args) -> None:
               "notes column; running it without --notes would wipe existing notes).", file=sys.stderr)
         sys.exit(1)
     raw_payload = args.inline_payload if args.inline_payload is not None else args.payload
+    # --details-replace overwrites the whole details object; without a details
+    # payload (--details-inline, or "details" in a file/--inline payload) it would
+    # null the column. Reject that, mirroring the --notes-replace guard.
+    if getattr(args, "details_replace", False) and args.details_inline is None and raw_payload is None:
+        print("update-finding: --details-replace requires --details-inline <json> (it overwrites "
+              "the details object; running it without details would wipe existing details).",
+              file=sys.stderr)
+        sys.exit(1)
     if raw_payload is not None:
         try:
             payload, _ = parse_json_argument(
@@ -113,6 +130,7 @@ def run(args) -> None:
             "notes_mode": "replace" if getattr(args, "notes_replace", False) else None,
             "source_name": args.source_name,
             "details": details,
+            "details_mode": "replace" if getattr(args, "details_replace", False) else None,
             "provenance": provenance,
             # getattr fallback so callers that build args via SimpleNamespace
             # (test fixtures pre-dating C44) don't AttributeError.
@@ -132,6 +150,17 @@ def run(args) -> None:
     if not isinstance(payload, dict):
         print("finding patch payload must be a JSON object", file=sys.stderr)
         sys.exit(1)
+
+    # --details-replace also applies when the patch came from a file/--inline
+    # payload: set the mode so the backend overwrites rather than merges. The
+    # backend rejects replace without a details payload, so require one here too.
+    if getattr(args, "details_replace", False):
+        if payload.get("details") is None:
+            print("update-finding: --details-replace requires a 'details' object in the payload "
+                  "(it overwrites the details object; without details it would wipe existing details).",
+                  file=sys.stderr)
+            sys.exit(1)
+        payload["details_mode"] = "replace"
 
     cfg = load_config(args.engagement_dir)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:

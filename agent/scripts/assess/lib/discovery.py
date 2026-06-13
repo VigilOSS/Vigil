@@ -95,3 +95,113 @@ def denoise_hosts(lines: list[str]) -> tuple[list[str], int]:
             continue
         kept.add(host)
     return sorted(kept), dropped
+
+
+# --------------------------------------------------------------------------- #
+# CR-19 — brute the WORDLIST HEAD (frequency-ordered lists have junk tails)
+# --------------------------------------------------------------------------- #
+
+
+def wordlist_head(lines: list[str], cap: int) -> list[str]:
+    """Return the first ``cap`` entries of a frequency-ordered wordlist (CR-19).
+
+    CT-derived / frequency-ordered huge lists (e.g. n0kovo_subdomains, 3M) put the
+    real labels in the HEAD and CT-hash / one-off junk in the TAIL — so bruting
+    only the head recovers nearly all real hosts at a fraction of the DNS spend.
+    This is the pure head-slice the brute path applies before puredns; it assumes
+    the input is already frequency-ordered (it does NOT sort — sorting would
+    destroy that order). Identity (returns ``lines`` unchanged-by-content) when the
+    list is at or under ``cap``; ``cap <= 0`` yields an empty list.
+    """
+    if cap <= 0:
+        return []
+    if len(lines) <= cap:
+        return list(lines)
+    return list(lines[:cap])
+
+
+# --------------------------------------------------------------------------- #
+# CR-17 / CR-20 — parent clustering (wildcard pre-strip + productive-parent axis)
+# --------------------------------------------------------------------------- #
+
+
+def _norm_host_token(host: str) -> str:
+    """Lowercase, strip a trailing dot and any port; '' for blanks/comments."""
+    h = (host or "").strip().lower().rstrip(".")
+    if not h or h.startswith("#"):
+        return ""
+    # Drop a host:port suffix (single colon; bare IPv6 has >=2 colons — leave it).
+    if h.count(":") == 1:
+        h = h.split(":", 1)[0]
+    return h
+
+
+def _immediate_parent(host: str) -> str:
+    """The parent one label up from *host* (drop the leftmost label).
+
+    ``a.origin.api.t.com`` → ``origin.api.t.com``. A 2-label host (``t.com``) has
+    no deeper parent → ''.
+    """
+    labels = [p for p in host.split(".") if p]
+    if len(labels) <= 2:
+        return ""
+    return ".".join(labels[1:])
+
+
+def cluster_productive_parents(
+    resolved_hosts: list[str],
+    *,
+    min_children: int = 5,
+    bruted_apexes: list[str],
+) -> list[str]:
+    """Cluster resolved hosts by immediate parent; return productive parents (CR-20).
+
+    Groups resolved hosts by the parent ONE label below each host (e.g. both
+    ``a.origin.api.t.com`` and ``b.origin.api.t.com`` cluster under
+    ``origin.api.t.com``) and returns the parents with at least ``min_children``
+    distinct child hosts — the "productive parents" worth re-bruting a wordlist
+    against (``<word>.origin.api.t.com``), the biggest depth win in the convergence
+    loop. The bruted apexes themselves are excluded (re-bruting an apex you already
+    bruted yields nothing); a parent equal to a bruted apex is skipped.
+
+    Pure (no I/O), deterministic (sorted output), so it is unit-tested like
+    :func:`denoise_hosts`.
+
+    Args:
+        resolved_hosts: the hosts resolved so far this pass.
+        min_children: minimum distinct children for a parent to count as productive.
+        bruted_apexes: apexes already bruted (excluded from the returned parents).
+    """
+    apex_set = {a for a in (_norm_host_token(x) for x in bruted_apexes) if a}
+    children: dict[str, set[str]] = {}
+    for raw in resolved_hosts:
+        host = _norm_host_token(raw)
+        if not host:
+            continue
+        parent = _immediate_parent(host)
+        if not parent or parent in apex_set:
+            continue
+        children.setdefault(parent, set()).add(host)
+    productive = [p for p, kids in children.items() if len(kids) >= min_children]
+    return sorted(productive)
+
+
+def wildcard_parent_candidates(hosts: list[str]) -> list[str]:
+    """Cluster hosts by 2nd/3rd-level parent → candidate parents to wildcard-probe (CR-17).
+
+    Before a permutation brute, each discovered parent that has children should be
+    random-label probed for a wildcard sink (I-010: ``*.review.library.acme.example`` — a
+    non-apex parent that apex-only detection misses). This pure helper returns the
+    distinct candidate parents (the immediate parent of every multi-label host that
+    actually has a child in the set), so a probe stage can test each one and strip
+    permutations under any that wildcards. Deterministic (sorted, de-duped).
+    """
+    candidates: set[str] = set()
+    for raw in hosts:
+        host = _norm_host_token(raw)
+        if not host:
+            continue
+        parent = _immediate_parent(host)
+        if parent:
+            candidates.add(parent)
+    return sorted(candidates)

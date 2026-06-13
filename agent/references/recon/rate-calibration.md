@@ -17,13 +17,33 @@ this table loaded on every dispatch.
 
 ## Trait-row table
 
-| Target trait | nmap profile | dir-fuzz rate | nuclei | DNS brute (puredns rl) | concurrent nmap procs |
+> **The DNS-brute column is NOT a per-target-politeness lever** — read the footnote below before
+> using it. The nmap / dir-fuzz / nuclei columns *are* genuine per-target politeness (they hit the
+> target directly); the DNS-brute column is governed by **resolver fair-use + runtime network
+> capacity**, not by the target.
+
+| Target trait | nmap profile | dir-fuzz rate | nuclei | DNS brute† (puredns rl) | concurrent nmap procs |
 |---|---|---|---|---|---|
-| Cloud-fronted (any major CDN/edge — examples: Cloudflare, Akamai, Fastly, CloudFront) | `-T3 --max-rate 100` | 50–100 req/s | `--rate-limit 100-150 -bs 25 -c 25` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| Origin / single-server (no CDN, no WAF) | `-T2 --max-rate 30` | 5–10 req/s | `--rate-limit 30 -bs 10 -c 10` | 2500 (polite-residential) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| WAF-protected (any vendor WAF tier — Cloudflare WAF, Akamai App & API, F5 ASM, AWS WAF, Imperva) | `-T2 --max-rate 30` | 1–3 req/s | `--rate-limit 30 -bs 10 -c 10` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| High-friction policy / regulated (`.gov`, `.mil`, finance, healthcare) | `-T2 --max-rate 50 --host-timeout 1500s` | ≤2 req/s | `--rate-limit 30 -bs 10 -c 10` | 800 (polite-CDN-fronted-target) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
-| Vendor SaaS (e.g., Salesforce, ServiceNow, StatusPage, Auth0, Okta) | `-T3 --max-rate 60` | 20 req/s | `--rate-limit 60 -bs 15 -c 15` | 800 (polite-CDN-fronted-target — vendor-controlled DNS, lower rate) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
+| Cloud-fronted (any major CDN/edge — examples: Cloudflare, Akamai, Fastly, CloudFront) | `-T3 --max-rate 100` | 50–100 req/s | `--rate-limit 100-150 -bs 25 -c 25` | 800 (cautious resolver-load) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
+| Origin / single-server (no CDN, no WAF) | `-T2 --max-rate 30` | 5–10 req/s | `--rate-limit 30 -bs 10 -c 10` | 2500 (moderate resolver-load) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
+| WAF-protected (any vendor WAF tier — Cloudflare WAF, Akamai App & API, F5 ASM, AWS WAF, Imperva) | `-T2 --max-rate 30` | 1–3 req/s | `--rate-limit 30 -bs 10 -c 10` | 800 (cautious resolver-load) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
+| High-friction policy / regulated (`.gov`, `.mil`, finance, healthcare) | `-T2 --max-rate 50 --host-timeout 1500s` | ≤2 req/s | `--rate-limit 30 -bs 10 -c 10` | 800 (cautious resolver-load) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
+| Vendor SaaS (e.g., Salesforce, ServiceNow, StatusPage, Auth0, Okta) | `-T3 --max-rate 60` | 20 req/s | `--rate-limit 60 -bs 15 -c 15` | 800 (cautious resolver-load) | runtime-tier (Standard 2 / Heavy 4 / Comfortable 8) |
+
+> **† The DNS-brute column is governed by resolver load + runtime capacity, NOT target politeness.**
+> A `puredns`/`shuffledns`/`massdns` brute fans out to the configured **public-resolver pool**, not
+> the target — the target's authoritative NS sees only a **diluted, cached-NXDOMAIN trickle**. So the
+> `puredns rl` ceiling is bounded by (a) **public-resolver fair-use / per-resolver rate-limits** and
+> (b) **local runtime network capacity** (the Docker Desktop userspace proxy / host NIC —
+> `agent/references/runtime-guides/docker-desktop-network-hazards.md`, where the dominant knob is the
+> **count of distinct resolver IPs**, not the qps), **not** by "don't anger the target's
+> authoritative DNS." The `puredns rl` number is also **total qps across the whole resolver pool**,
+> not per-resolver. The values stay cautious on CDN/WAF/regulated rows for **resolver fair-use +
+> Docker-proxy NAT pressure**, not because the *target's* DNS is delicate (Vendor-SaaS included — the
+> reason is resolver fair-use, not vendor-controlled DNS). The genuine exception is the rare case
+> where you brute **directly against the target's own authoritative NS** (no public-resolver pool) —
+> only then is the brute rate a target-politeness concern. The `nmap` / `dir-fuzz` / `nuclei` columns,
+> by contrast, hit the target directly and *are* genuine per-target politeness.
 
 ## DNS-brute profile × runtime tier matrix
 
@@ -31,6 +51,13 @@ The DNS-brute column matches the canonical SKILL profile names in
 `agent/skills/subdomain-enumeration/SKILL.md` "Docker-resource-safe profiles".
 Available profiles per runtime tier (read `vigil runtime resources` to confirm
 the active tier):
+
+> The profile **key names** below (`polite-CDN-fronted-target` etc.) are historical
+> labels kept in sync with the SKILL / dnsx-wrapper keys. Per the footnote above,
+> their *meaning* is **resolver-load + runtime-capacity caution**, not target
+> politeness — read them as "cautious / moderate / bursty resolver-load tiers." A
+> key rename is a cross-cutting code+docs follow-up; the reframe here is the
+> load-bearing fix.
 
 | Runtime tier | `polite-CDN-fronted-target` (cautious 800) | `polite-residential` (2500) | `bursty-OK` (5000) |
 |---|---|---|---|
