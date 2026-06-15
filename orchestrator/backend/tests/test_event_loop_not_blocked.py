@@ -26,7 +26,6 @@ import time
 from pathlib import Path
 
 import httpx
-import pytest
 
 from app.main import app
 from app.services import state_manager
@@ -160,7 +159,6 @@ def test_healthz_stays_responsive_while_a_write_handler_runs(
             )
 
             write_response = await write_task
-            write_elapsed = 0.0  # measured below
             return write_response.status_code, list(health_latencies), 0
 
     start = time.perf_counter()
