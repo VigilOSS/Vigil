@@ -225,14 +225,68 @@ def _exec(args, cmd, intent, tool_name, *, route="container"):
 # --------------------------------------------------------------------------- #
 
 
+def _descendant_pids(root_pid: int) -> set[int]:
+    """Best-effort set of PIDs that descend from *root_pid* (children, grandchildren,
+    …), via repeated ``pgrep -P``. Returns an empty set if ``pgrep`` is unavailable.
+
+    Used to scope the stall-kill (I-009) to the process tree *this* dns-discovery
+    invocation actually launched: the host brute runs as a child of this Python
+    process (host_exec.run → subprocess.run(["puredns", …])) and puredns spawns
+    massdns beneath it, so both are descendants here.
+    """
+    seen: set[int] = set()
+    frontier = [root_pid]
+    while frontier:
+        parent = frontier.pop()
+        try:
+            res = subprocess.run(
+                ["pgrep", "-P", str(parent)],
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            break
+        for line in res.stdout.split():
+            try:
+                child = int(line)
+            except ValueError:
+                continue
+            if child not in seen:
+                seen.add(child)
+                frontier.append(child)
+    return seen
+
+
 def _kill_brute_processes(route: str) -> None:
     """Best-effort kill of a frozen puredns/massdns process tree so the blocking
-    brute exec returns. Container route → `docker exec <c> pkill`; host → `pkill`."""
+    brute exec returns.
+
+    Host route → kill ONLY the massdns/puredns processes that descend from this
+    dns-discovery process (the brute this stage launched), never a host-wide
+    ``pkill -f`` that would also reap a concurrent engagement's brute or an
+    unrelated operator job sharing the host. Container route → ``docker exec <c>
+    pkill`` (the runtime container is Vigil's own single-tenant container)."""
     targets = ("massdns", "puredns")
     try:
         if route == "host":
+            descendants = _descendant_pids(os.getpid())
+            if not descendants:
+                return
             for name in targets:
-                subprocess.run(["pkill", "-9", "-f", name], capture_output=True, check=False, timeout=10)
+                try:
+                    matched = subprocess.run(
+                        ["pgrep", "-f", name],
+                        capture_output=True, text=True, check=False, timeout=10,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                for line in matched.stdout.split():
+                    try:
+                        pid = int(line)
+                    except ValueError:
+                        continue
+                    if pid in descendants:
+                        subprocess.run(["kill", "-9", str(pid)],
+                                       capture_output=True, check=False, timeout=10)
         else:
             from assess.lib.client import default_runtime_container
             container = default_runtime_container()
@@ -938,12 +992,15 @@ def run(args) -> None:
         if not _select_parent_targets(args, resolved_all, bruted_apexes):
             break
 
-    # Persist the union as the canonical resolved set.
+    # Persist the union as the canonical resolved set. Always write the canonical
+    # path (empty on a no-result run) so a prior run for a DIFFERENT apex — or an
+    # earlier run that resolved hosts — cannot leave STALE entries that follow-on
+    # automation (e.g. `vigil assess web-discovery`) would then consume.
     resolved_host, _ = _paths(cfg, "resolved_hosts.txt")
     if resolved_all:
         resolved_host.write_text("\n".join(sorted(resolved_all)) + "\n", encoding="utf-8")
-
-    if not resolved_all:
+    else:
+        resolved_host.write_text("", encoding="utf-8")
         print("dns-discovery: no hosts resolved.", file=sys.stderr)
         sys.exit(0)
 
