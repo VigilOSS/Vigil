@@ -13,6 +13,33 @@ Read alongside this file:
   file owns a contract, and which generated files must stay in sync. This guide does not restate it;
   consult it whenever a change might move a boundary.
 
+# Version control: Jujutsu (jj)
+
+This repository is managed with **[Jujutsu (`jj`)](https://github.com/jj-vcs/jj)** (v0.40+),
+**colocated** with Git — a `.jj/` and a `.git/` sit side by side. Plain `git` *read* commands
+(`git log`, `git status`, `git diff`) still work and reflect the live state, but make all
+commits / branches / pushes with `jj`, **not** `git` — mixing in `git commit`/`checkout`/`branch`
+desyncs the colocation. If you only know Git, internalize these differences first:
+
+- **No staging area.** The working copy *is* a commit (the change at `@`). `jj` auto-snapshots your
+  edits into it on every command — there is no `git add`. `jj st` shows the working-copy diff and the
+  current change.
+- **Describe, then start the next change.** `jj describe -m "msg"` sets the current change's commit
+  message; `jj new` opens a fresh empty change on top (so the described one becomes its parent).
+  `jj log` shows the graph: the short *change-id* on the left, the Git commit hash on the right, and
+  any bookmarks inline.
+- **Bookmarks are branches.** `jj` uses *bookmarks* instead of Git branches. PRs here are created with
+  `jj git push --change @` (alias `-c`), which mints an auto-named `push-<random>` bookmark and pushes
+  it — that is why the PR head branches are named e.g. `push-ommwlslwsorl`. To update an open PR,
+  re-run `jj git push` (the bookmark tracks your change). Create/move a named bookmark with
+  `jj bookmark set <name> -r @`.
+- **Nothing is "detached" or dangling.** Unlike Git there is no detached-HEAD hazard: every change is
+  tracked, and `jj op log` + `jj undo` recover any prior state. A Git-style "this commit isn't on a
+  branch, move it before you lose it" instinct does **not** apply here.
+- **Common map:** `git switch`→`jj edit <rev>` / `jj new <rev>`; `git commit -a`→`jj describe`;
+  `git rebase`→`jj rebase`; `git push -u origin HEAD`→`jj git push -c @`; `git stash`→just `jj new`
+  (the WIP stays its own change). Pull with `jj git fetch`.
+
 # Newcomer walkthrough: clone to first dispatch
 
 This is the shortest path from a fresh clone to a running operator loop. It points at `README.md`
