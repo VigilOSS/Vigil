@@ -123,8 +123,9 @@ host-routing guidance does not apply. Any code-side guard should detect the runt
 - `agent/skills/subdomain-enumeration/SKILL.md` "Host-CPU note" / "Docker-resource-safe
   profiles" — the in-skill mechanics and the resolver-IP cap near the `puredns -r`
   examples. The host-execution path for DNS-heavy recon (the escape hatch this guide
-  routes large resolver sets to) is the forthcoming host-routing layer the composed
-  `dns-discovery` / `web-discovery` verbs auto-select on macOS.
+  routes large resolver sets to) is the host-routing layer the composed
+  `dns-discovery` / `web-discovery` verbs auto-select on macOS (pass `--runtime host`
+  to force it; `--runtime auto` is the default).
 - `agent/references/tools/recon/puredns.md` and
   `agent/references/tools/recon/dnsx.md` — DNS-brute/resolve mechanics; the
   `--rate-limit` knob is **total qps** (not per-resolver), and is the *secondary*

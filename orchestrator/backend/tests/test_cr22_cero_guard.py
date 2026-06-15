@@ -200,8 +200,13 @@ def _run_cero_with_input_list(monkeypatch, tmp_path, list_lines, *, runtime):
         )
 
     monkeypatch.setattr(cero_mod, "kali_exec", fake_kali_exec)
-    # Pin the runtime so the guard gate is deterministic (no docker probe).
-    monkeypatch.setattr(rr, "detect_runtime", lambda *a, **k: runtime)
+    # Pin the runtime so the guard gate is deterministic (no docker probe). Patch
+    # detect_runtime on the SAME runtime_route module object kali_cero imported,
+    # NOT this test's top-level `rr`: a sibling test file's autouse fixture pops
+    # `assess.*` from sys.modules, so a re-imported kali_cero binds a FRESH
+    # runtime_route instance that is not the stale `rr` captured at collection.
+    # Patching cero_mod.runtime_route makes the pin survive any import order.
+    monkeypatch.setattr(cero_mod.runtime_route, "detect_runtime", lambda *a, **k: runtime)
 
     cli.main(
         [

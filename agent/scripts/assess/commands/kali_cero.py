@@ -117,9 +117,16 @@ def _warn_excessive_target_ips(args) -> None:
 
     cero is dispatched via kali_exec, which is in-container-only, so the route is
     fixed to ``container``. (A host path for cero is a separate, larger change.)
+
+    The runtime is resolved ONCE here and threaded explicitly into the guard so the
+    Docker-Desktop gate is decided by a single, visible ``detect_runtime()`` call
+    rather than by a hidden re-detect inside ``warn_excessive_target_ips``. This
+    keeps the guard's behaviour deterministic and independently testable (the guard
+    never falls back to a fresh global detection that a caller can't observe).
     """
+    runtime = runtime_route.detect_runtime()
     n = runtime_route.count_distinct_target_ips(_target_entries(args))
-    runtime_route.warn_excessive_target_ips(n, route="container", tool="cero")
+    runtime_route.warn_excessive_target_ips(n, route="container", tool="cero", runtime=runtime)
 
 
 def run(args) -> None:
