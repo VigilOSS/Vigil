@@ -1192,3 +1192,66 @@ def test_supersede_404_messages_differ_for_engagement_type_id(client, isolate_se
     assert "engagement" in engagement_detail
     assert "no-such-type" in type_detail
     assert "9999999" in id_detail
+
+
+# ──────────────────────────────────────────────────────────────
+# CR-29 — `superseded_by_id` is a server-managed field, never a record input
+# ──────────────────────────────────────────────────────────────
+
+# (endpoint segment, minimal valid record payload) per intel type. Mirrors the
+# natural-key minimums of the per-type request models in app.api.intel_schemas.
+_CR29_MINIMAL_PAYLOADS: dict[str, dict[str, Any]] = {
+    "tech-components": {"component": "nginx"},
+    "people": {"name": "Jane Operator"},
+    "emails": {"address": "jane@example.com"},
+    "domains": {"identity": "api.example.com"},
+    "cves": {"cve_id": "CVE-2024-0001"},
+    "dns-records": {"record_type": "A", "name": "api.example.com"},
+    "social-profiles": {"subject_kind": "person", "platform": "github"},
+    "breach-records": {"subject": "jane@example.com", "breach_name": "ExampleLeak"},
+    "org-facts": {"fact_key": "hq_city"},
+    "notes": {"title": "CR-29 regression note"},
+}
+
+
+def test_record_intel_rejects_superseded_by_id_on_every_type(client, isolate_settings):
+    """Adopting CR-29 option (b): supersession is a server-managed op via
+    ``supersede-intel`` only. A record-time payload carrying ``superseded_by_id``
+    must be rejected (extra="forbid" → 422) for every intel type, so an agent
+    cannot manually point one row at another and forge a supersession chain."""
+    _seed_engagement(client, isolate_settings)
+    for segment, payload in _CR29_MINIMAL_PAYLOADS.items():
+        # Baseline: the minimal payload itself is accepted.
+        ok = client.post(f"{INTEL_BASE}/{segment}", json=payload)
+        assert ok.status_code == 201, f"{segment} baseline: {ok.text}"
+        # Same payload + the server-managed field → rejected, never silently
+        # honored on the write path.
+        bad = client.post(
+            f"{INTEL_BASE}/{segment}",
+            json={**payload, "superseded_by_id": 1},
+        )
+        assert bad.status_code == 422, f"{segment} must reject superseded_by_id: {bad.text}"
+
+
+def test_intel_record_schemas_omit_superseded_by_id():
+    """Anti-drift guard for CR-29. The bundled ``agent/schemas/intel-*.schema.json``
+    record schemas are hand-maintained mirrors of the ``extra="forbid"`` POST
+    request models (their ``$comment`` names the orchestrator as source of truth).
+    Re-declaring ``superseded_by_id`` as a writable property is exactly the drift
+    that let the CLI validator pass a payload the backend then 422s. Assert the
+    field is absent from every record schema so the two cannot diverge again."""
+    import json
+    from pathlib import Path
+
+    schema_dir = Path(__file__).resolve().parents[3] / "agent" / "schemas"
+    schema_files = sorted(schema_dir.glob("intel-*.schema.json"))
+    assert schema_files, f"no intel schemas found under {schema_dir}"
+    offenders = []
+    for schema_file in schema_files:
+        schema = json.loads(schema_file.read_text(encoding="utf-8"))
+        if "superseded_by_id" in schema.get("properties", {}):
+            offenders.append(schema_file.name)
+    assert not offenders, (
+        "superseded_by_id is server-managed (supersede-intel); it must not be a "
+        f"record-schema property. Offending schemas: {offenders}"
+    )

@@ -22,7 +22,7 @@ Skills should point you at `vigil assess contract kali <verb>` for field tables 
 
 ## Verb menu
 
-20 verbs total: 17 typed, 2 fallback, and 1 host-side maintenance command. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the maintenance command reconciles stuck audit rows.
+21 verbs total: 17 typed, 2 fallback, 1 batch fan-out, and 1 host-side maintenance command. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the batch verb fans one audited command out across an operator-supplied value list; the maintenance command reconciles stuck audit rows.
 
 | Verb | Use | Paired reference |
 |------|-----|------------------|
@@ -45,6 +45,7 @@ Skills should point you at `vigil assess contract kali <verb>` for field tables 
 | `kali whatweb` | Deep web technology fingerprinting. | `references/tools/recon/whatweb.md` |
 | `kali exec <cmd>` | Raw passthrough for tools not yet typed. Same audit metadata flags. | `references/runtime-guides/kali-cli.md` |
 | `kali job <start\|status\|tail\|stop\|list>` | **Operator-only** async-job lifecycle for a single authorized long sweep that must outlive its dispatch. Specialists run synchronously instead — see the sync-vs-async decision below. | `references/runtime-guides/kali-cli.md` |
+| `kali sweep` | Value-agnostic batch: runs one audited `kali exec` per `--values` entry (a literal list and/or inclusive integer ranges `a-b`) with `{}` substituted into the command template, then clusters the responses by distinct signature (reachability class + status + body marker) — distinguishing reachable vs. dns-failure vs. connection-refused via the shared reachability taxonomy. One `command-runs` audit row per value. Politeness: `--max-values 200` cap, default `--concurrency 1` (>1 needs `--allow-concurrent`, I-013 per-host rule). It expands ONLY the values you supply — no ID/host generation. | `references/runtime-guides/kali-cli.md` |
 | `kali sweep-orphans` | Host-side reconciler for `assessment_command_runs` rows stuck in `status=running` past `--max-age-seconds` (default 3600s). Probes the in-container PID via `kill -0`; finalizes dead rows to `status=lost`. No audit flags — it is maintenance, not a probe. | `references/runtime-guides/kali-cli.md` |
 
 `kali exec` is the escape hatch — use it for tools the typed surface does not yet model (dirb, gobuster, hydra, john, hashcat, custom scripts, etc.) and pass the same audit-metadata flags as a typed verb. `kali job` is the supervisor — see the sync-vs-async decision below.
@@ -435,6 +436,33 @@ vigil assess kali exec \
 
 The same files are visible from the host at `$DIR/scans/health.json` and
 `$DIR/scans/health.err` for review and for `vigil assess record-*` references.
+
+### Batch one command across a value list and cluster the responses
+
+When you want to probe the SAME command across many literal values you already
+have (e.g. an enumerated set of object ids you captured from recon), use
+`vigil assess kali sweep` instead of hand-looping `kali exec`. It fans one
+audited `kali exec` out per value — `{}` is substituted into the template — so
+every value gets its own `command-runs` row, then it prints a compact table
+clustered by distinct response signature (reachability class + status + body
+marker). The clustering reuses the shared reachability taxonomy, so a
+reachable-but-blocked cluster reads differently from a `dns-failure` /
+`connection-refused` cluster. It is value-agnostic: it expands ONLY the values
+you supply (a literal list and/or inclusive integer ranges `a-b`) and never
+generates ids or hosts. Politeness guards: `--max-values 200` cap, default
+`--concurrency 1` (`>1` requires `--allow-concurrent`, the I-013 per-host rule).
+
+```bash
+vigil assess kali sweep \
+    --technique RECON --intent "object-id reachability sweep" \
+    --probe-kind baseline --phase recon --timeout 30 \
+    --values "1,2,7-9,42" \
+    -- curl -s -o /dev/null -w '%{http_code}' https://target.example/item/{}
+```
+
+Recover the whole fan-out afterward with
+`vigil assess list-command-runs --intent-q "sweep"`; add `--json` to the sweep
+to get cluster objects that carry each value's `run_id` for audit linkage.
 
 ### Wrap a long-running custom command as a job
 

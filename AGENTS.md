@@ -13,6 +13,33 @@ Read alongside this file:
   file owns a contract, and which generated files must stay in sync. This guide does not restate it;
   consult it whenever a change might move a boundary.
 
+# Version control: Jujutsu (jj)
+
+This repository is managed with **[Jujutsu (`jj`)](https://github.com/jj-vcs/jj)** (v0.40+),
+**colocated** with Git — a `.jj/` and a `.git/` sit side by side. Plain `git` *read* commands
+(`git log`, `git status`, `git diff`) still work and reflect the live state, but make all
+commits / branches / pushes with `jj`, **not** `git` — mixing in `git commit`/`checkout`/`branch`
+desyncs the colocation. If you only know Git, internalize these differences first:
+
+- **No staging area.** The working copy *is* a commit (the change at `@`). `jj` auto-snapshots your
+  edits into it on every command — there is no `git add`. `jj st` shows the working-copy diff and the
+  current change.
+- **Describe, then start the next change.** `jj describe -m "msg"` sets the current change's commit
+  message; `jj new` opens a fresh empty change on top (so the described one becomes its parent).
+  `jj log` shows the graph: the short *change-id* on the left, the Git commit hash on the right, and
+  any bookmarks inline.
+- **Bookmarks are branches.** `jj` uses *bookmarks* instead of Git branches. PRs here are created with
+  `jj git push --change @` (alias `-c`), which mints an auto-named `push-<random>` bookmark and pushes
+  it — that is why the PR head branches are named e.g. `push-ommwlslwsorl`. To update an open PR,
+  re-run `jj git push` (the bookmark tracks your change). Create/move a named bookmark with
+  `jj bookmark set <name> -r @`.
+- **Nothing is "detached" or dangling.** Unlike Git there is no detached-HEAD hazard: every change is
+  tracked, and `jj op log` + `jj undo` recover any prior state. A Git-style "this commit isn't on a
+  branch, move it before you lose it" instinct does **not** apply here.
+- **Common map:** `git switch`→`jj edit <rev>` / `jj new <rev>`; `git commit -a`→`jj describe`;
+  `git rebase`→`jj rebase`; `git push -u origin HEAD`→`jj git push -c @`; `git stash`→just `jj new`
+  (the WIP stays its own change). Pull with `jj git fetch`.
+
 # Newcomer walkthrough: clone to first dispatch
 
 This is the shortest path from a fresh clone to a running operator loop. It points at `README.md`
@@ -345,6 +372,32 @@ instructions. Keep durable contracts in code-owned surfaces instead: CLI helpers
 models, schema generation, API/service behavior, and tests for those executable contracts. For
 prompt/doc changes, rerender generated artifacts when required and review the markdown diffs.
 
+# Tests & verification
+
+The verification surface is **not one command**: 4 pytest scopes + a render-check + a schema-check + lint/types + the bench rungs, each with a different venv, prereqs, and cost. CI (`.github/workflows/ci.yml`) is authoritative for the blocking gates — backend pytest, the markdown-vs-CLI sync-lint, the deterministic eval, ruff, and mypy.
+
+> **Never run a bare `pytest` from the repo root, and always go through the backend venv.** Scope every run to one suite — duplicate `test_vigil_cli.py` basenames in `tests/` and `agent/scripts/assess/tests/` collide under a single collection. The backend venv (`uv run --directory orchestrator/backend --extra dev …`) is the one interpreter that can collect every suite; the root `.venv` hard-errors on `tests/eval` (unconditional `import yaml`), and `uv run` *without* `--extra dev` fails to spawn pytest in a clean env.
+
+| Suite / gate | Command | Cost |
+|---|---|---|
+| Backend (incl. sync-lint) | `uv run --directory orchestrator/backend --extra dev pytest` | free |
+| Root CLI / bench harness | `uv run --directory orchestrator/backend --extra dev pytest "$(git rev-parse --show-toplevel)/tests"` | free |
+| Assess CLI | `uv run --directory orchestrator/backend --extra dev pytest "$(git rev-parse --show-toplevel)/agent/scripts/assess/tests"` | free |
+| Deterministic eval (absolute path is load-bearing) | `uv run --directory orchestrator/backend --extra dev pytest "$(git rev-parse --show-toplevel)/tests/eval"` | free |
+| Prompt render-check | `cd agent && ./scripts/render-operator-prompts.sh check` | free |
+| Schema `--check` | `uv run --directory orchestrator/backend python scripts/generate_agent_schemas.py --check` | free |
+| Lint / types | `uvx ruff check .`  ·  `uvx --with-editable . mypy src/vigil_cli` | free |
+| Bench factory solvability gate | `python -m vigil_cli.bench.factory.verify --family <id> --seeds 0 1 2` | free, **docker** |
+| Bench selftest (pipeline, no LLM) | `vigil bench selftest` | free |
+| Bench run (live agent) | `vigil bench run --launch auto …` | **BILLED** — see Live tests |
+
+- **Integration tests are deselected by default** (`-m 'not integration'` in both pyprojects); opt in with `pytest -m integration` only after rebuilding the runtime image (`test_oob_correlate.py`, backend `test_runtime_tooling_contract.py`, `test_kali_cli.py`).
+- **CI gap:** CI does not gate the root `tests/` (bench harness) or the assess CLI suite — run those two locally before handing off harness/recon changes.
+
+## Live tests (billed — read before launching)
+
+`vigil bench run --launch auto` spawns real Claude/Codex agents against generated targets: it **costs money and runs for hours** (reference: a full K=5 × 3 seed-0 run is ~5–6h / ~$50). Validate without a model first via the free paths — `--launch scripted` (reference solver, docker) and `vigil bench selftest`. Do not launch `--launch auto` without an explicit go-ahead.
+
 # Orchestrator backend
 
 The backend is Python 3.11+ and `uv`-first. Use `uv`, not ad hoc `pip` installs:
@@ -354,10 +407,10 @@ uv sync --directory orchestrator/backend --extra dev
 uv run --directory orchestrator/backend uvicorn app.main:app --reload
 ```
 
-Run the backend tests with `uv`:
+Run the backend tests with `uv` (see **Tests & verification** for the full matrix):
 
 ```bash
-uv run --directory orchestrator/backend pytest
+uv run --directory orchestrator/backend --extra dev pytest
 ```
 
 # Orchestrator frontend

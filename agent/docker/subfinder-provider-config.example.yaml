@@ -1,0 +1,82 @@
+# subfinder provider-config.yaml — TEMPLATE / REFERENCE ONLY
+# =============================================================================
+# You normally do NOT hand-edit or copy this file. `vigil runtime start`
+# GENERATES the real provider-config.yaml inside the runtime container from the
+# non-empty SUBFINDER_* variables in your <install>/.env (see agent/.env.example).
+# This template documents subfinder's native on-disk schema and which keys each
+# SUBFINDER_* env var maps to, so you know what the generator emits.
+#
+# Generation point (src/vigil_cli/runtime.py :: generate_subfinder_provider_config):
+#   - keys are passed to the container via `docker run --env-file .env`
+#   - at runtime start, the container reads its OWN env vars and writes
+#     ~/.config/subfinder/provider-config.yaml (this schema) with 0600 perms
+#   - only non-empty keys are emitted; subfinder is fail-open and useful keyless
+#   - keys are NEVER baked into the image and never appear in host-side argv
+#
+# Fail-open: with zero keys configured, subfinder still runs over its free
+# sources (~60-70% of full-key coverage) and the generator only prints a WARN.
+#
+# Schema: each top-level key is a subfinder source name; the value is a YAML
+# list of credentials. Multi-part credentials (Censys, PassiveTotal) are a
+# single ":"-joined string. Full reference:
+#   https://github.com/projectdiscovery/subfinder#post-installation-instructions
+# Per-source setup notes: agent/references/tools/recon/subfinder.md
+# =============================================================================
+
+# --- FREE keys — the recommended minimum (configure these two first) ---------
+
+# Chaos (ProjectDiscovery) — free, high-signal passive dataset.
+# env: SUBFINDER_CHAOS_API_KEY    key: https://chaos.projectdiscovery.io/
+chaos:
+  - "CHAOS_API_KEY"
+
+# GitHub — free; mines code search for subdomains in source/configs.
+# A classic (or fine-grained, no scopes needed) personal access token works.
+# env: SUBFINDER_GITHUB_TOKEN     key: https://github.com/settings/tokens
+github:
+  - "GITHUB_TOKEN"
+
+# --- PAID / rate-limited keys — add when the engagement budget supports them --
+
+# SecurityTrails — highest unique-coverage delta; free tier ~50 req/month.
+# env: SUBFINDER_SECURITYTRAILS_API_KEY
+securitytrails:
+  - "SECURITYTRAILS_API_KEY"
+
+# Censys — value is "API_ID:API_SECRET" (legacy) joined with a colon. Newer
+# subfinder builds accept a Personal Access Token as "PAT:ORG_ID" (ORG_ID
+# optional for free accounts); the generator emits whatever the two env vars
+# hold, joined by ":".
+# env: SUBFINDER_CENSYS_API_ID + SUBFINDER_CENSYS_API_SECRET
+censys:
+  - "CENSYS_API_ID:CENSYS_API_SECRET"
+
+# VirusTotal — large historical coverage; free tier is rate-limited (4/min).
+# env: SUBFINDER_VIRUSTOTAL_API_KEY
+virustotal:
+  - "VIRUSTOTAL_API_KEY"
+
+# Shodan — banner-derived subdomains.
+# env: SUBFINDER_SHODAN_API_KEY
+shodan:
+  - "SHODAN_API_KEY"
+
+# IntelX — value is "API_HOST:API_KEY" (HOST FIRST, e.g. "2.intelx.io:<key>");
+# subfinder expects the host before the key. The single env var below is emitted
+# as-is, so set SUBFINDER_INTELX_API_KEY to the full "host:key" string.
+# env: SUBFINDER_INTELX_API_KEY
+intelx:
+  - "INTELX_API_HOST:INTELX_API_KEY"
+
+# URLScan.
+# env: SUBFINDER_URLSCAN_API_KEY
+urlscan:
+  - "URLSCAN_API_KEY"
+
+# PassiveTotal (RiskIQ) — value is "USERNAME:API_KEY".
+# Supported by older subfinder builds; newer builds may have dropped this source
+# (the generator still emits it when both env vars are set — subfinder ignores
+# config keys it does not recognize).
+# env: SUBFINDER_PASSIVETOTAL_USERNAME + SUBFINDER_PASSIVETOTAL_API_KEY
+passivetotal:
+  - "PASSIVETOTAL_USERNAME:PASSIVETOTAL_API_KEY"

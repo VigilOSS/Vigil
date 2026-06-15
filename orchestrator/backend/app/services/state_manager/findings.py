@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 from fastapi import HTTPException, status
 
@@ -84,6 +85,22 @@ def _raise_stale_finding_conflict() -> None:
         status_code=status.HTTP_409_CONFLICT,
         detail="finding changed since it was loaded; refetch and retry",
     )
+
+
+# CR-31 (slug atomicity): the (engagement_id, slug) UNIQUE index in db.py is the
+# hard DB-level backstop against two concurrent record-finding lanes minting the
+# same auto-assigned slug (e.g. both VA-012). ``BEGIN IMMEDIATE`` serializes the
+# MAX-scan + INSERT so the second lane normally sees the first's committed slug,
+# but we still treat the constraint as authoritative: an auto-generated slug that
+# collides is retried (recomputed against the now-larger MAX), never surfaced as
+# an unhandled IntegrityError / HTTP 500. The retry cap bounds the loop so a
+# genuinely stuck writer fails loudly instead of spinning.
+_SLUG_INSERT_MAX_ATTEMPTS = 8
+
+
+def _is_slug_unique_violation(exc: sqlite3.IntegrityError) -> bool:
+    message = str(exc).lower()
+    return "unique" in message and "slug" in message
 
 def _finding_state_snapshot(row: dict[str, Any] | Any) -> dict[str, str]:
     if isinstance(row, dict):
@@ -359,6 +376,7 @@ def create_finding(
     transition_metadata: dict[str, Any] | None = None,
     expected_updated_at: str | None = None,
     notes_mode: str = "append",
+    details_mode: str = "merge",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if slug:
@@ -383,36 +401,64 @@ def create_finding(
         )
         before_state = _finding_state_snapshot(existing) if existing is not None else None
         if existing is None:
-            resolved_slug = _finding_slug(connection, engagement.id, slug, title, canonical_location, source_name)
-            cursor = connection.execute(
-                """
-                INSERT INTO assessment_findings (
-                    engagement_id, slug, title, severity, status, verification_state, verification_disposition, defect_family, root_cause_key, auth_context,
-                    canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    engagement.id,
-                    resolved_slug,
-                    title,
-                    incoming_severity,
-                    incoming_workflow_status,
-                    incoming_verification_state,
-                    incoming_verification_disposition,
-                    defect_family,
-                    root_cause_key,
-                    auth_context,
-                    canonical_location,
-                    source_name,
-                    summary,
-                    evidence_ref,
-                    notes,
-                    _json_text(details),
-                    _json_text(provenance),
-                    evidence_type,
-                ),
-            )
+            # CR-31: allocate the slug + INSERT under the (engagement_id, slug)
+            # UNIQUE backstop. An auto-assigned slug that loses a race recomputes
+            # against the now-committed MAX and retries; a caller-supplied slug
+            # that collides is a genuine duplicate → 409 (never a silent clobber
+            # or an unhandled 500). ``slug`` truthy here means caller-supplied.
+            caller_supplied_slug = bool(slug)
+            cursor = None
+            for attempt in range(_SLUG_INSERT_MAX_ATTEMPTS):
+                resolved_slug = _finding_slug(connection, engagement.id, slug, title, canonical_location, source_name)
+                try:
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO assessment_findings (
+                            engagement_id, slug, title, severity, status, verification_state, verification_disposition, defect_family, root_cause_key, auth_context,
+                            canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            engagement.id,
+                            resolved_slug,
+                            title,
+                            incoming_severity,
+                            incoming_workflow_status,
+                            incoming_verification_state,
+                            incoming_verification_disposition,
+                            defect_family,
+                            root_cause_key,
+                            auth_context,
+                            canonical_location,
+                            source_name,
+                            summary,
+                            evidence_ref,
+                            notes,
+                            _json_text(details),
+                            _json_text(provenance),
+                            evidence_type,
+                        ),
+                    )
+                    break
+                except sqlite3.IntegrityError as exc:
+                    if not _is_slug_unique_violation(exc):
+                        raise
+                    if caller_supplied_slug:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=f"finding slug '{resolved_slug}' already exists for this engagement",
+                        ) from exc
+                    if attempt == _SLUG_INSERT_MAX_ATTEMPTS - 1:
+                        # Should be unreachable under BEGIN IMMEDIATE serialization;
+                        # surface loudly rather than spin or return a bad slug.
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail="could not allocate a unique finding slug; retry the record",
+                        ) from exc
+                    # Auto-assigned slug raced a concurrent insert; recompute.
+                    continue
+            assert cursor is not None
             row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (cursor.lastrowid,)).fetchone()
         else:
             if expected_updated_at is not None and str(existing["updated_at"]) != expected_updated_at:
@@ -472,7 +518,13 @@ def create_finding(
                     # Default appends (record-finding/verify-finding checkpoints);
                     # notes_mode="replace" overwrites so stale text can be scrubbed.
                     notes if notes_mode == "replace" else _common._append_notes(existing["notes"], notes),
-                    _merge_object_text(existing["details_json"], details),
+                    # CR-31: details default-merge (so checkpoints accrete keys);
+                    # details_mode="replace" overwrites the whole object so
+                    # cross-contaminated/stale detail keys can be fully removed,
+                    # not just shadowed (merge cannot delete keys). The CLI/API
+                    # require details to be present when replace is requested, so
+                    # this won't silently null an unspecified payload.
+                    _json_text(details) if details_mode == "replace" else _merge_object_text(existing["details_json"], details),
                     _merge_object_text(existing["provenance_json"], provenance),
                     evidence_type,
                     existing["id"],
@@ -661,11 +713,20 @@ def patch_finding(
     allow_verification_mutation: bool = False,
     expected_updated_at: str | None = None,
     notes_mode: str = "append",
+    details_mode: str = "merge",
 ) -> dict[str, Any]:
     if notes_mode == "replace" and notes is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="notes_mode='replace' requires notes",
+        )
+    if details_mode == "replace" and details is None:
+        # Replace overwrites the whole details object; without an explicit
+        # details payload it would silently null the column. Reject (mirrors the
+        # notes_mode='replace' guard).
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="details_mode='replace' requires details",
         )
 
     engagement = _engagement_or_404(engagement_id)
@@ -677,6 +738,7 @@ def patch_finding(
         ).fetchone()
 
     existing_workflow = _row_workflow_status(existing)
+    existing_verification = _row_verification_state(existing)
     current_updated_at = str(existing["updated_at"])
 
     if not allow_verification_mutation:
@@ -700,6 +762,17 @@ def patch_finding(
         if existing_workflow == "false_positive" and workflow_status is not None and workflow_status != "false_positive":
             verification_state = "unreviewed"
             verification_disposition = "none"
+        elif existing_verification == "disputed" and workflow_status is not None:
+            # CR-31 (clear-disputed): a `disputed` verdict previously could only
+            # be cleared by the verifier re-issuing verify-finding (which lands
+            # `verified`, not a re-queue). Let a specialist reopen via reset-finding
+            # return it to `unreviewed`/`none` — re-queues for verification without
+            # forcing a verdict. Only on an explicit workflow reopen, and only out
+            # of `disputed` (does not touch verified/false_positive verdicts).
+            verification_state = "unreviewed"
+            verification_disposition = "none"
+            if transition_action is None:
+                transition_action = "verification_recleared"
 
     return create_finding(
         engagement.id,
@@ -736,6 +809,7 @@ def patch_finding(
         transition_metadata=transition_metadata,
         expected_updated_at=expected_updated_at or current_updated_at,
         notes_mode=notes_mode,
+        details_mode=details_mode,
     )
 
 def verify_finding(

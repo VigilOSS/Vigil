@@ -31,6 +31,160 @@ class KaliResult:
     stderr_preview: str
     timed_out: bool
     partial_results: bool
+    # CR-36 false-negative guard. True when the run ended in the
+    # http=000 / connection-failed / DNS-resolution-failure transport signature
+    # — i.e. NO real HTTP answer came back — so an agent must NOT read the
+    # terminal status as a target verdict (404/patched/gated). Stays False on a
+    # legitimate, body-bearing answer (incl. 4xx/5xx walls) and for non-HTTP
+    # tools. ``transport_error_detail`` carries a one-line human reason.
+    transport_error: bool = False
+    transport_error_detail: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# CR-36 false-negative (http=000 / connection-failed / DNS-failure) detection
+# --------------------------------------------------------------------------- #
+
+# HTTP prober tools whose run can be classified by the transport-error guard.
+# A non-HTTP tool (nmap, subfinder, puredns, ...) never trips the guard — its
+# non-zero exit is a legitimate signal, not a masked target verdict.
+_HTTP_PROBER_TOOLS = frozenset({"curl", "httpx", "nuclei", "ffuf", "katana", "wafw00f", "nikto"})
+
+# curl/libcurl exit codes that mean the transport never completed an HTTP
+# exchange (no answer came back): 6 DNS-resolve-failure, 7 couldn't-connect,
+# 28 timeout, 35 TLS-handshake error. These are NOT a target verdict.
+_CURL_TRANSPORT_FAIL_EXITS = frozenset({6, 7, 28, 35})
+
+# Telltale stderr fragments emitted by curl / httpx / the underlying resolver
+# on the http=000 transport-failure path. Matched case-insensitively. Kept tight
+# so a body that merely mentions these words does not trip the guard (we only
+# inspect stderr, never stdout/the response body).
+_TRANSPORT_FAIL_STDERR_NEEDLES = (
+    "could not resolve host",
+    "couldn't resolve host",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "no address associated with hostname",
+    "failed to connect",
+    "connection refused",
+    "connection timed out",
+    "could not connect to server",
+    "no route to host",
+    "network is unreachable",
+    "operation timed out",
+    "empty reply from server",
+    "ssl_connect",
+    "no such host",
+    "i/o timeout",
+    "lookup ",  # Go/httpx 'lookup host: no such host'
+)
+
+
+def is_http_prober(tool_name: str) -> bool:
+    """True when ``tool_name`` is an HTTP prober the http=000 guard applies to."""
+    return (tool_name or "").strip().lower() in _HTTP_PROBER_TOOLS
+
+
+def detect_transport_error(
+    *,
+    tool_name: str,
+    return_code: int | None,
+    stdout_preview: str,
+    stderr_preview: str,
+    timed_out: bool,
+) -> tuple[bool, str]:
+    """Detect the http=000 / connection-failed / DNS-failure signature (CR-36).
+
+    Returns ``(is_transport_error, detail)``. This is the SINGLE in-process
+    detector the kali path uses to decide a run produced NO real HTTP answer and
+    so MUST NOT be read as a target verdict (404/patched/gated). It composes the
+    exit-code + empty-body + telltale-stderr signature and delegates the verdict
+    semantics to :func:`reachability.classify_probe` (the project-wide single
+    source of truth for "a bare http=000 is not a blocked signal").
+
+    The signature requires ALL of:
+      * the tool is an HTTP prober (non-HTTP tools never trip the guard);
+      * the run did NOT time out (a timeout is its own terminal status, kept
+        distinct — it is partial-but-real, handled by the existing cascade);
+      * a transport-level failure exit code OR a telltale resolver/connect stderr
+        fragment is present; AND
+      * the stdout body is empty (a real HTTP answer — even a 4xx/5xx wall — that
+        produced ANY body is LIVE and must stand as a verdict).
+
+    A non-HTTP tool, a clean ``return_code == 0``, or any body-bearing answer
+    yields ``(False, "")``.
+    """
+    from . import reachability
+
+    if not is_http_prober(tool_name):
+        return False, ""
+    if timed_out:
+        return False, ""
+    # A successful exit with no transport-failure stderr is a real answer.
+    if return_code == 0:
+        return False, ""
+
+    stderr_l = (stderr_preview or "").lower()
+    exit_is_transport_fail = isinstance(return_code, int) and return_code in _CURL_TRANSPORT_FAIL_EXITS
+    stderr_needle = next((n for n in _TRANSPORT_FAIL_STDERR_NEEDLES if n in stderr_l), "")
+
+    if not exit_is_transport_fail and not stderr_needle:
+        return False, ""
+
+    # A non-empty stdout body does NOT by itself prove an HTTP answer came back:
+    # the project's canonical liveness probe
+    # ``curl -o /dev/null -w "%{http_code} %{time_connect} %{remote_ip}"`` writes a
+    # write-out line (e.g. ``000 0.000000 ``) to stdout EVEN on a transport
+    # failure, so a naive "non-empty stdout = LIVE" shortcut would let the most
+    # common failed-curl shape through as a clean verdict — the exact false
+    # negative CR-36 exists to prevent. Parse the body as a curl ``-w`` write-out
+    # and feed the REAL parsed values into the classifier:
+    #   * a real (>0) HTTP status, or a body that is not a write-out line at all
+    #     (actual HTML/JSON response content) → a genuine verdict (bail);
+    #   * a ``000``/empty write-out → no answer; fall through to flag it.
+    # Using the parsed time_connect/remote_ip (not a hard-coded http_code="000")
+    # also lets the classifier distinguish "connected but no HTTP" (LIVE — a real,
+    # if degraded, reach) from "never connected" (the resolver-flap false negative).
+    body = (stdout_preview or "").strip()
+    parsed = (
+        reachability.parse_curl_w(body.splitlines()[0])
+        if body
+        else {"http_code": "", "time_connect": 0.0, "remote_ip": ""}
+    )
+    if body:
+        try:
+            body_is_real_answer = int(str(parsed["http_code"]).strip()) > 0
+        except (TypeError, ValueError):
+            # First token is not a numeric status → the body is actual response
+            # content, not a write-out line → keep it as a real verdict.
+            body_is_real_answer = True
+        if body_is_real_answer:
+            return False, ""
+
+    # Confirm via the project-wide classifier. With no real answer in the body the
+    # parsed http_code is 000/empty; classify_probe returns BLACKHOLED (clean
+    # connect failure) or UNKNOWN (DNS-resolve failure / TLS) — both mean "no real
+    # HTTP verdict came back", which the false-negative guard must flag. Only an
+    # explicit LIVE (e.g. TCP connected, write-out carried a remote_ip) keeps the
+    # run as a verdict.
+    verdict = reachability.classify_probe(
+        http_code=parsed["http_code"] or "000",
+        time_connect=parsed["time_connect"],
+        remote_ip=parsed["remote_ip"],
+        curl_exit=return_code if exit_is_transport_fail else None,
+        stderr=stderr_preview or "",
+    )
+    if verdict == reachability.LIVE:
+        return False, ""
+
+    reason = stderr_needle or (
+        f"exit {return_code}" if exit_is_transport_fail else "http=000"
+    )
+    detail = (
+        f"http=000/connection-failed signature (tool={tool_name}, "
+        f"return_code={return_code}, reachability={verdict}, signal='{reason}')"
+    )
+    return True, detail
 
 
 def _utcnow_iso() -> str:

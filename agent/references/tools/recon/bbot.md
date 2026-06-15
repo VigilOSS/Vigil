@@ -31,6 +31,43 @@ vigil assess kali bbot -t target.example -m crt -m dnsdumpster -rf passive \
   --probe-kind fingerprint --phase recon --timeout 600
 ```
 
+## Output reliability — harvest JSON, never the final txt (CR-24 / I-011)
+
+bbot v2.6.0's `dnsresolve` module crash-loops mid-run and **truncates the final
+`*.txt` outputs to ~250 B**, and the `excavate` module emits mangled, false
+hostnames. Trusting bbot's raw txt output is therefore unsafe. The
+`vigil assess kali bbot` wrapper neutralizes this by **emitting machine-parseable
+JSON by default**: it injects `-om json` and writes `output.json` into the output
+dir (defaulting the dir to `/engagements/$ENGAGEMENT_KEY/scans/bbot_<ts>` when you
+do not pass `-o`). The injection is idempotent — if you supply your own `-om` via
+`--extra-args` the wrapper does not add a second one, and an explicit `-o` is never
+overridden.
+
+**Harvest workflow (always JSON, never txt):**
+
+1. Read `output.json` from the bbot output dir — one JSON event per line.
+2. Select **only events of type `DNS_NAME`** (`jq -r 'select(.type=="DNS_NAME") | .data'`).
+   Do NOT harvest `excavate`-derived hostnames — they are frequently mangled/false.
+3. **DNS-validate every harvested name before it enters the candidate set** — resolve
+   each via the host resolver (the host-exec / dnsx host path, never the container
+   resolver) and keep only names that resolve. Drop unresolvable / excavate-false names.
+
+```bash
+# After the bbot run, harvest validated DNS_NAME candidates from output.json:
+jq -r 'select(.type=="DNS_NAME") | .data' \
+  /engagements/$ENGAGEMENT_KEY/scans/bbot_<ts>/output.json | sort -u \
+  > /engagements/$ENGAGEMENT_KEY/scans/bbot_dns_names.txt
+# Then DNS-validate (host path) before merging into the candidate set.
+```
+
+**Positioning: passive convergence cross-check only.** Because of the output
+unreliability above, treat bbot as a *passive convergence cross-check* — a final
+mop-up source that confirms/adds the occasional name the keyed-passive + CT + brute
+pipeline missed — **not** a trusted standalone breadth source whose raw output you
+ingest wholesale. Run it `-rf passive` (no target traffic), harvest validated
+DNS_NAME events, and feed them through the same DNS-validate gate as every other
+recon source.
+
 ## When to use vs. alternatives
 
 - **vs. subfinder alone:** bbot is materially deeper. Run subfinder first as Phase 0 baseline; reach for bbot when subfinder returned a thin set or budget allows the wall-clock.

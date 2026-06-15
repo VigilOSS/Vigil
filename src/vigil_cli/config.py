@@ -5,6 +5,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 CONFIG_ENV = "VIGIL_CONFIG"
 CONFIG_DIR = Path.home() / ".config" / "vigil"
@@ -15,6 +16,26 @@ DEFAULT_RUNTIME_CPUS = 4
 DEFAULT_RUNTIME_PIDS_LIMIT = 512
 DEFAULT_RUNTIME_SHM_SIZE = "1g"
 
+# Proxy URL schemes a tool's libcurl/Go-net stack understands for HTTP(S)_PROXY /
+# ALL_PROXY. socks5h keeps DNS resolution on the proxy side (the privacy-correct
+# choice for egress separation); plain socks5 resolves locally.
+_RUNTIME_EGRESS_PROXY_SCHEMES = frozenset(
+    {"http", "https", "socks5", "socks5h", "socks4", "socks4a"}
+)
+
+# Hosts that MUST bypass the egress proxy/VPN so orchestrator/backend traffic
+# (host.docker.internal -> the host-gateway) never routes through the
+# target-facing egress and break the audit/state pipeline. Always prepended to
+# any operator-supplied NO_PROXY additions. host.docker.internal is the stable
+# alias docker.HOST_GATEWAY_ARG maps to the host-gateway, so excluding the name
+# covers the gateway regardless of the gateway's runtime IP.
+RUNTIME_EGRESS_NO_PROXY_DEFAULTS: tuple[str, ...] = (
+    "host.docker.internal",
+    "localhost",
+    "127.0.0.1",
+    "::1",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeResources:
@@ -24,6 +45,26 @@ class RuntimeResources:
     shm_size: str
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeEgress:
+    """Opt-in, off-by-default egress-separation knobs for the runtime container.
+
+    All fields default to the no-egress (current) behaviour: ``proxy`` and
+    ``network`` unset means the container uses Docker's default bridge and NATs
+    out the host's default route — exactly as before. ``no_proxy`` always carries
+    the mandatory backend/orchestrator exclusions even when a proxy is set, so
+    ``vigil assess`` backend calls never traverse the target-facing proxy.
+    """
+
+    proxy: str | None
+    network: str | None
+    no_proxy: str
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.proxy or self.network)
+
+
 def runtime_resources() -> RuntimeResources:
     return RuntimeResources(
         memory_gb=_int_env("VIGIL_RUNTIME_MEMORY_GB", DEFAULT_RUNTIME_MEMORY_GB),
@@ -31,6 +72,82 @@ def runtime_resources() -> RuntimeResources:
         pids_limit=_int_env("VIGIL_RUNTIME_PIDS_LIMIT", DEFAULT_RUNTIME_PIDS_LIMIT),
         shm_size=os.environ.get("VIGIL_RUNTIME_SHM_SIZE", DEFAULT_RUNTIME_SHM_SIZE).strip() or DEFAULT_RUNTIME_SHM_SIZE,
     )
+
+
+def runtime_egress() -> RuntimeEgress:
+    """Resolve the opt-in egress-separation config from the environment.
+
+    Reads three optional vars; all unset = current no-egress behaviour:
+
+    * ``VIGIL_RUNTIME_EGRESS_PROXY`` — upstream HTTP/HTTPS/SOCKS proxy URL wired
+      into the container as HTTP(S)_PROXY / ALL_PROXY. Malformed values fail
+      clearly here rather than silently dropping egress separation.
+    * ``VIGIL_RUNTIME_EGRESS_NETWORK`` — a named, pre-existing Docker network to
+      attach with ``--network`` (e.g. a VPN-sidecar net for a true separate IP).
+    * ``VIGIL_RUNTIME_EGRESS_NO_PROXY`` — extra comma-separated NO_PROXY entries
+      appended to the mandatory backend/orchestrator exclusions.
+    """
+    proxy = _validate_proxy_url(_str_env("VIGIL_RUNTIME_EGRESS_PROXY"))
+    network = _validate_network_name(_str_env("VIGIL_RUNTIME_EGRESS_NETWORK"))
+    no_proxy = _compose_no_proxy(_str_env("VIGIL_RUNTIME_EGRESS_NO_PROXY"))
+    return RuntimeEgress(proxy=proxy, network=network, no_proxy=no_proxy)
+
+
+def _str_env(name: str) -> str | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    raw = raw.strip()
+    return raw or None
+
+
+def _validate_proxy_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        parts = urlsplit(value)
+    except ValueError as exc:
+        raise SystemExit(
+            f"VIGIL_RUNTIME_EGRESS_PROXY is not a valid URL ({value!r}): {exc}"
+        ) from exc
+    scheme = parts.scheme.lower()
+    if scheme not in _RUNTIME_EGRESS_PROXY_SCHEMES:
+        raise SystemExit(
+            f"VIGIL_RUNTIME_EGRESS_PROXY scheme {parts.scheme or '(none)'!r} is not supported "
+            f"(got {value!r}). Use one of: {', '.join(sorted(_RUNTIME_EGRESS_PROXY_SCHEMES))} "
+            "(e.g. http://proxy:8080, socks5h://proxy:1080)."
+        )
+    if not parts.hostname:
+        raise SystemExit(
+            f"VIGIL_RUNTIME_EGRESS_PROXY is missing a host ({value!r}); "
+            "expected scheme://host[:port]."
+        )
+    return value
+
+
+def _validate_network_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    # Docker network names are a restricted charset; reject embedded whitespace or
+    # argv-splitting characters so a typo can't smuggle extra docker-run args.
+    if any(ch.isspace() for ch in value) or any(ch in value for ch in ("\t", "\n")):
+        raise SystemExit(
+            f"VIGIL_RUNTIME_EGRESS_NETWORK must be a single Docker network name "
+            f"(got {value!r})."
+        )
+    return value
+
+
+def _compose_no_proxy(extra: str | None) -> str:
+    entries: list[str] = list(RUNTIME_EGRESS_NO_PROXY_DEFAULTS)
+    seen = {item.lower() for item in entries}
+    if extra:
+        for token in extra.split(","):
+            token = token.strip()
+            if token and token.lower() not in seen:
+                entries.append(token)
+                seen.add(token.lower())
+    return ",".join(entries)
 
 
 def _int_env(name: str, default: int) -> int:

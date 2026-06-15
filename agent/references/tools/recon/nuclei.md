@@ -20,7 +20,7 @@ Flag reference (used inside `vigil assess kali nuclei`):
 **Multiple targets:** `-l /engagements/$ENGAGEMENT_KEY/scans/targets.txt`
 **By severity:** `-severity critical,high`
 **By tag:** `-tags cve,rce,misconfig`
-**Exclude tags:** `-exclude-tags dos,fuzz`
+**Exclude tags:** `-exclude-tags dos,fuzz,intrusive,brute-force` — the canonical politeness/safety exclusion set. The `vigil assess kali nuclei` wrapper **injects this set by default** when you do not pass your own `-exclude-tags`/`-etags`, so broad sweeps never fire DoS/fuzz/intrusive/brute-force templates against production-like in-scope targets (CR-27). Passing your own `-exclude-tags` overrides it verbatim (no merge).
 
 ## Template Selection
 
