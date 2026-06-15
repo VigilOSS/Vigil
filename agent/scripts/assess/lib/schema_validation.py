@@ -37,6 +37,17 @@ def _suggest_close_match(unknown_field: str, allowed_fields: list[str]) -> str |
     return ", ".join(matches)
 
 
+def suggest_close_match(unknown_field: str, allowed_fields: list[str]) -> str | None:
+    """Public alias of the difflib close-match suggester (CLI-1 reuse).
+
+    Non-schema callers (e.g. the kali enum-rejection formatter) reuse the exact
+    ``difflib.get_close_matches`` behaviour the schema validator uses for unknown
+    payload fields, so the "Did you mean: ...?" hint text stays consistent across
+    the whole CLI rather than each call site rolling its own fuzzy matcher.
+    """
+    return _suggest_close_match(unknown_field, allowed_fields)
+
+
 def collect_validation_errors(payload: Any, schema: dict[str, Any], *, path: str = "payload") -> list[str]:
     errors: list[str] = []
     _validate_value(payload, schema, path, errors)

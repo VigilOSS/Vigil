@@ -3329,11 +3329,13 @@ def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
 def _setup_transition_env(
     monkeypatch, module, tmp_path, *, scope, services=None, findings=None,
     dispatches=None, report_readiness=None, terminal_block=None,
+    decisions_by_kind=None,
 ):
     engagement = tmp_path / "agent" / "engagements" / "eng-test"
     engagement.mkdir(parents=True, exist_ok=True)
     (engagement / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
     decisions: list[dict] = []
+    decisions_by_kind = decisions_by_kind or {}
 
     class _Client:
         def __init__(self, *_a, **_k) -> None:
@@ -3344,6 +3346,11 @@ def _setup_transition_env(
                 return services or []
             if path == "findings":
                 return findings or []
+            if path.startswith("dispatch-decisions"):
+                for kind, rows in decisions_by_kind.items():
+                    if f"kind={kind}" in path:
+                        return rows
+                return []
             if path.startswith("dispatches"):
                 return dispatches or []
             if path == "report-readiness":
@@ -3674,6 +3681,207 @@ def test_transition_code_complete_unaffected_by_depth_backstop(monkeypatch, tmp_
     module.run(_transition_args(eng, "complete"))
     assert "application-units/terminal-block" not in queried
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "complete"
+
+
+# ---------------------------------------------------------------------------
+# Chain-construction pass gate (Exploit -> Report / -> complete).
+# Mirrors the variant-pass gate: enumerates confirmed high/critical findings
+# (>=2, since the chain runs ACROSS the confirmed set) and demands a COMPLETED
+# exploit-developer dispatch on record. Hard `missing_chain_construction`
+# blocker at the same enforcement level as `missing_variant_pass`.
+# ---------------------------------------------------------------------------
+
+_CONFIRMED_HIGH_2 = {
+    "slug": "redirect-2",
+    "severity": "high",
+    "verification_state": "verified",
+    "workflow_status": "active",
+}
+
+
+def _accept_verdicts(*slugs: str) -> dict[str, list[dict]]:
+    """Blind-triage Accept verdict rows so the (separately-enforced)
+    ``missing_blind_triage`` gate is satisfied and the chain gate is isolated.
+    The report/complete edge runs both gates; these tests target only the chain
+    gate, so they must clear blind-triage independently."""
+    return {
+        "blind_triage_verdict": [
+            {"id": i, "kind": "blind_triage_verdict",
+             "payload": {"finding_slug": slug, "verdict": "Accept@P3"}}
+            for i, slug in enumerate(slugs, start=1)
+        ]
+    }
+
+
+def test_transition_chain_gate_blocks_when_no_exploit_developer_dispatch(
+    monkeypatch, tmp_path, capsys
+):
+    module = _load_assess_module("tp_chain_block", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        findings=[_CONFIRMED_HIGH, _CONFIRMED_HIGH_2],
+        dispatches=[],
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "report"))
+    err = capsys.readouterr().err
+    assert "missing_chain_construction" in err
+    assert "ssrf-1" in err
+    # Phase must NOT have advanced.
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "exploit"
+
+
+def test_transition_chain_gate_satisfied_by_completed_exploit_developer_dispatch(
+    monkeypatch, tmp_path, capsys
+):
+    module = _load_assess_module("tp_chain_ok", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        findings=[_CONFIRMED_HIGH, _CONFIRMED_HIGH_2],
+        dispatches=[{
+            "agent_role": "exploit-developer",
+            "status": "completed",
+            "dispatch_mode": "deep-manual",
+            "task": "chain A->B candidates across confirmed set",
+        }],
+        decisions_by_kind=_accept_verdicts("ssrf-1", "redirect-2"),
+    )
+    module.run(_transition_args(eng, "report"))
+    assert "missing_chain_construction" not in capsys.readouterr().err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+
+
+def test_transition_chain_gate_does_not_block_single_confirmed_finding(
+    monkeypatch, tmp_path, capsys
+):
+    """Nothing to chain ACROSS with only one confirmed high/critical finding —
+    the gate is conservative and never fires below two."""
+    module = _load_assess_module("tp_chain_single", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        findings=[_CONFIRMED_HIGH],
+        dispatches=[],
+        decisions_by_kind=_accept_verdicts("ssrf-1"),
+    )
+    module.run(_transition_args(eng, "report"))
+    assert "missing_chain_construction" not in capsys.readouterr().err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+
+
+def test_transition_chain_gate_ignores_incomplete_exploit_developer_dispatch(
+    monkeypatch, tmp_path, capsys
+):
+    """A still-running exploit-developer dispatch is not chain-pass evidence;
+    the server-side ``status=completed`` filter excludes it (and the client-side
+    re-check guards against a backend that ignores the filter)."""
+    module = _load_assess_module("tp_chain_incomplete", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        findings=[_CONFIRMED_HIGH, _CONFIRMED_HIGH_2],
+        dispatches=[{
+            "agent_role": "exploit-developer",
+            "status": "in-progress",
+            "dispatch_mode": "deep-manual",
+        }],
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "report"))
+    assert "missing_chain_construction" in capsys.readouterr().err
+
+
+def test_transition_chain_gate_requests_full_completed_exploit_dev_page(
+    monkeypatch, tmp_path, capsys
+):
+    """The chain gate must request the full backend page filtered by role and
+    status so long engagements don't drop the chain pass behind limit=100
+    (same pagination contract as the variant-pass gate)."""
+    module = _load_assess_module("tp_chain_pagination", "agent/scripts/assess/commands/transition_phase.py")
+    captured: list[str] = []
+    eng = tmp_path / "agent" / "engagements" / "eng-chain-page"
+    eng.mkdir(parents=True, exist_ok=True)
+    (eng / "scope.json").write_text(
+        json.dumps({"engagement_type": "web", "current_phase": "exploit"}),
+        encoding="utf-8",
+    )
+
+    class _Client:
+        def __init__(self, *_a, **_k) -> None:
+            pass
+
+        def get(self, path: str):
+            captured.append(path)
+            if path == "findings":
+                return [_CONFIRMED_HIGH, _CONFIRMED_HIGH_2]
+            if path == "report-readiness":
+                return {"ready": True, "blockers": []}
+            if path == "application-units/terminal-block":
+                return {"skipped": False, "blocking": [], "warned_under_observed": [],
+                        "deferred": [], "deferral_count": 0}
+            if path.startswith("dispatch-decisions"):
+                return _accept_verdicts("ssrf-1", "redirect-2")["blind_triage_verdict"]
+            if path.startswith("dispatches"):
+                return [{"agent_role": "exploit-developer", "status": "completed"}]
+            return []
+
+        def close(self): return None
+        def __enter__(self): return self
+        def __exit__(self, *_e): return False
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(module, "load_config", lambda *_a, **_k: SimpleNamespace(
+        base_url="http://example.test", engagement_dir=str(eng),
+        engagement_key=eng.name, agent_root=str(tmp_path / "agent")))
+
+    module.run(_transition_args(eng, "report"))
+    chain_queries = [
+        p for p in captured
+        if p.startswith("dispatches") and "role=exploit-developer" in p
+    ]
+    assert chain_queries, "chain gate did not query exploit-developer dispatches"
+    q = chain_queries[0]
+    assert "status=completed" in q
+    assert "limit=1000" in q
+
+
+def test_transition_chain_gate_force_overrides_and_records_decision(
+    monkeypatch, tmp_path, capsys
+):
+    module = _load_assess_module("tp_chain_force", "agent/scripts/assess/commands/transition_phase.py")
+    eng, decisions = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        findings=[_CONFIRMED_HIGH, _CONFIRMED_HIGH_2],
+        dispatches=[],
+    )
+    module.run(_transition_args(eng, "report", force=True,
+                                reason="findings are independent, no chain plausible"))
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+    override = [d for d in decisions if d["kind"] == "forced_transition_override"]
+    assert len(override) == 1
+    assert any(
+        b["kind"] == "missing_chain_construction"
+        for b in override[0]["payload"]["overridden_blockers"]
+    )
+
+
+def test_transition_chain_gate_also_fires_on_complete(monkeypatch, tmp_path, capsys):
+    """A direct report -> complete edge (where only `complete` preconditions are
+    walked) must still enforce the chain pass, mirroring blind-triage/depth."""
+    module = _load_assess_module("tp_chain_complete", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "report"},
+        findings=[_CONFIRMED_HIGH, _CONFIRMED_HIGH_2],
+        dispatches=[],
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "complete"))
+    assert "missing_chain_construction" in capsys.readouterr().err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
 
 
 def test_check_coverage_reports_partially_covered_surfaces(

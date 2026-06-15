@@ -1,9 +1,12 @@
 """vigil assess kali bbot — typed wrapper around bbot (multi-module recon scanner)."""
 from __future__ import annotations
 
+import shlex
 import sys
+import time
 
 from assess.lib.client import AssessError
+from assess.lib.config import load_config
 from assess.lib.kali import (
     add_passthrough_args_flag,
     add_required_kali_flags,
@@ -12,6 +15,44 @@ from assess.lib.kali import (
     kali_args_to_kwargs,
     kali_exec,
 )
+
+
+def _operator_passed_output_module(args) -> bool:
+    """True when the operator already supplied an output module via --extra-args.
+
+    The typed verb has no -om flag, so the only way to override the default JSON
+    output module is through the raw passthrough. Honor that so the default
+    injection stays idempotent and never double-adds -om.
+    """
+    extra = getattr(args, "extra_args", "") or ""
+    if not extra:
+        return False
+    try:
+        tokens = shlex.split(extra)
+    except ValueError:
+        return False
+    return "-om" in tokens or "--output-modules" in tokens
+
+
+def _default_output_dir() -> str:
+    """Container path for the bbot output dir when the operator did not set one.
+
+    bbot's final txt output is crash-truncated (I-011: v2.6.0 dnsresolve
+    crash-loop), so a JSON output module + a deterministic output dir is the
+    default. Resolve the engagement key for the canonical
+    /engagements/<key>/scans/... path; fall back to a working-dir-relative
+    path (kali_exec runs with cwd=/engagements/<key>) when config is
+    unavailable.
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    try:
+        cfg = load_config(None)
+        key = cfg.engagement_key
+    except SystemExit:
+        key = ""
+    if key:
+        return f"/engagements/{key}/scans/bbot_{stamp}"
+    return f"scans/bbot_{stamp}"
 
 
 def register(subparsers) -> None:
@@ -80,7 +121,12 @@ def register(subparsers) -> None:
         "--output-dir",
         dest="output_dir",
         default="",
-        help="bbot output directory.",
+        help=(
+            "bbot output directory. When unset, defaults to "
+            "/engagements/<key>/scans/bbot_<ts>. The wrapper always emits JSON "
+            "(-om json) into this dir — harvest DNS_NAME events from output.json, "
+            "not the crash-truncated final txt (CR-24)."
+        ),
     )
     p.add_argument(
         "--allow-deadly",
@@ -109,6 +155,16 @@ def run(args) -> None:
         )
         raise AssessError("--allow-deadly without --destructive")
 
+    # Default to machine-parseable JSON output. bbot's final txt output is
+    # crash-truncated (I-011 / CR-24: v2.6.0 dnsresolve crash-loop truncates the
+    # txt to ~250 B), so harvest DNS_NAME events from output.json instead. Default
+    # the output dir when the operator did not set one so output.json has a
+    # deterministic home. Both injections are idempotent: skip -om if the operator
+    # supplied their own output module via --extra-args, and never override an
+    # explicit -o.
+    output_dir = args.output_dir or _default_output_dir()
+    inject_json_module = not _operator_passed_output_module(args)
+
     cmd: list[str] = ["bbot"]
     for target in args.targets or []:
         cmd.extend(["-t", target])
@@ -124,8 +180,9 @@ def run(args) -> None:
         cmd.extend(["-m", module])
     for module in args.excluded_modules or []:
         cmd.extend(["-em", module])
-    if args.output_dir:
-        cmd.extend(["-o", args.output_dir])
+    cmd.extend(["-o", output_dir])
+    if inject_json_module:
+        cmd.extend(["-om", "json"])
     if args.allow_deadly:
         cmd.append("--allow-deadly")
     extend_cmd_with_extra_args(cmd, args)

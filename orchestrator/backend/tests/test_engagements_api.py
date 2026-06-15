@@ -2981,3 +2981,207 @@ def test_markdown_tree_draft_projection_excludes_pending_runtime_proof(client, i
     assert draft.status_code == 200
     assert "VA-072" not in _all_report_finding_slugs(draft.json()), draft.json()
     assert draft.json()["finding_count"] == 0, draft.json()
+
+
+# ──────────────────────────────────────────────────────────────
+# CR-31 — concurrent slug atomicity, details-replace, clear-disputed
+# ──────────────────────────────────────────────────────────────
+
+
+def _record_va_finding(client, *, location: str, summary: str, details: dict | None = None):
+    """POST an auto-slugged VA finding (no explicit slug -> backend allocates)."""
+    body = {
+        "title": f"Auto-slug finding {location}",
+        "severity": "medium",
+        "workflow_status": "active",
+        "verification_state": "unreviewed",
+        "verification_disposition": "none",
+        # Distinct canonical_location per call so _semantic_finding_match does
+        # NOT dedup them onto one row — each must mint its own slug.
+        "canonical_location": location,
+        "summary": summary,
+        "evidence_ref": "findings.md",
+        "source_name": "vulnerability-analyst",
+    }
+    if details is not None:
+        body["details"] = details
+    return client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json=body,
+    )
+
+
+def test_concurrent_record_finding_allocates_distinct_sequential_slugs(client, isolate_settings):
+    """CR-31(a): N parallel record-finding writes against one engagement must each
+    receive a distinct sequential VA-### slug with zero UNIQUE-constraint 500s. The
+    (engagement_id, slug) UNIQUE backstop + BEGIN IMMEDIATE serialization +
+    insert-retry guarantee two lanes can never both land VA-012."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    write_engagement(isolate_settings["engagements_dir"])
+    # Force engagement-row discovery before the fan-out so the threads don't race
+    # the first-touch creation.
+    assert client.get("/engagements/2026-03-30-120000-example").status_code == 200
+
+    n = 12
+
+    def _post(i: int):
+        return _record_va_finding(
+            client,
+            location=f"https://example.com/concurrent/{i}",
+            summary=f"Concurrent lane {i}.",
+        )
+
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        responses = list(pool.map(_post, range(n)))
+
+    statuses = [r.status_code for r in responses]
+    assert all(s == 201 for s in statuses), (
+        f"all concurrent records must succeed; got {statuses} "
+        f"-> {[r.text for r in responses if r.status_code != 201]}"
+    )
+    slugs = sorted(r.json()["finding"]["slug"] for r in responses)
+    # All distinct (no duplicate slug minted under the race).
+    assert len(set(slugs)) == n, f"duplicate slug allocated under concurrency: {slugs}"
+    # All canonical VA-### and contiguous 001..n (sequential allocation held).
+    assert slugs == [f"VA-{i:03d}" for i in range(1, n + 1)], slugs
+
+
+def test_patch_finding_details_replace_overwrites_stale_keys(client, isolate_settings):
+    """CR-31(c): details_mode='replace' overwrites the whole details object so
+    cross-contaminated/stale keys are removed; the default 'merge' accretes."""
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = _record_va_finding(
+        client,
+        location="https://example.com/details/replace",
+        summary="Details replace target.",
+        details={"stale_key": "leaked-from-other-lane", "keep": "original"},
+    )
+    assert created.status_code == 201, created.text
+    slug = created.json()["finding"]["slug"]
+
+    # Default merge: a new key accretes, prior keys survive.
+    merged = client.patch(
+        f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}",
+        json={"details": {"added": "by-merge"}},
+    )
+    assert merged.status_code == 200, merged.text
+
+    findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
+    row = next(item for item in findings.json() if item["slug"] == slug)
+    merged_details = json.loads(row["details_json"])
+    assert merged_details.get("stale_key") == "leaked-from-other-lane"
+    assert merged_details.get("added") == "by-merge"
+
+    # Replace: only the supplied keys remain; stale_key is GONE (merge could
+    # never delete it).
+    replaced = client.patch(
+        f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}",
+        json={"details": {"clean": "rewritten"}, "details_mode": "replace"},
+    )
+    assert replaced.status_code == 200, replaced.text
+
+    findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
+    row = next(item for item in findings.json() if item["slug"] == slug)
+    replaced_details = json.loads(row["details_json"])
+    assert replaced_details == {"clean": "rewritten"}, replaced_details
+    assert "stale_key" not in replaced_details
+    assert "keep" not in replaced_details
+
+
+def test_patch_finding_details_replace_without_details_rejected(client, isolate_settings):
+    """CR-31(c): replace without a details payload would null the column -> 422
+    (model validator) rather than silent data loss."""
+    write_engagement(isolate_settings["engagements_dir"])
+
+    created = _record_va_finding(
+        client,
+        location="https://example.com/details/guard",
+        summary="Replace guard.",
+        details={"keep": "me"},
+    )
+    assert created.status_code == 201, created.text
+    slug = created.json()["finding"]["slug"]
+
+    bad = client.patch(
+        f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}",
+        json={"details_mode": "replace", "notes": "no details supplied"},
+    )
+    assert bad.status_code == 422, bad.text
+
+
+def _make_disputed(client, *, location: str, summary: str) -> str:
+    created = _record_va_finding(client, location=location, summary=summary)
+    assert created.status_code == 201, created.text
+    slug = created.json()["finding"]["slug"]
+    disputed = client.post(
+        f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}/verify",
+        json={
+            "disposition": "disputed",
+            "reason_code": "contested",
+            "reason_text": "Two lanes disagree on whether this reproduces.",
+            "source_name": "code-vuln-verifier",
+        },
+    )
+    assert disputed.status_code == 200, disputed.text
+    assert disputed.json()["finding"]["verification_state"] == "disputed"
+    return slug
+
+
+def test_verify_finding_confirmed_clears_disputed(client, isolate_settings):
+    """CR-31(b): the verifier re-issuing verify-finding --disposition confirmed
+    clears a prior disputed verdict (lands verified/confirmed)."""
+    write_engagement(isolate_settings["engagements_dir"])
+    slug = _make_disputed(
+        client,
+        location="https://example.com/disputed/verify",
+        summary="Disputed then confirmed.",
+    )
+
+    confirmed = client.post(
+        f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}/verify",
+        json={
+            "disposition": "confirmed",
+            "reason_code": "reproduced",
+            "reason_text": "Re-ran the PoC; it reproduces deterministically.",
+            "source_name": "code-vuln-verifier",
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    finding = confirmed.json()["finding"]
+    assert finding["verification_state"] == "verified"
+    assert finding["verification_disposition"] == "confirmed"
+
+
+def test_reset_finding_clears_disputed_to_unreviewed(client, isolate_settings):
+    """CR-31(b): a specialist can re-queue a disputed finding via reset-finding
+    (PATCH with a workflow reopen) -> verification returns to unreviewed/none
+    without forcing a verdict, and a verification_recleared transition is recorded."""
+    write_engagement(isolate_settings["engagements_dir"])
+    slug = _make_disputed(
+        client,
+        location="https://example.com/disputed/reset",
+        summary="Disputed then re-queued.",
+    )
+
+    # reset-finding sends a workflow_status reopen (default "draft") + reason.
+    reset = client.patch(
+        f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}",
+        json={
+            "workflow_status": "draft",
+            "reason_text": "Re-queue for a fresh verification pass.",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert reset.status_code == 200, reset.text
+    finding = reset.json()["finding"]
+    assert finding["verification_state"] == "unreviewed", finding
+    assert finding["verification_disposition"] == "none", finding
+
+    transitions = client.get(
+        f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}/transitions"
+    )
+    assert transitions.status_code == 200
+    actions = [item["action"] for item in transitions.json()]
+    assert "verification_recleared" in actions, actions
