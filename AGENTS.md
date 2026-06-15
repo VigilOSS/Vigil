@@ -345,6 +345,32 @@ instructions. Keep durable contracts in code-owned surfaces instead: CLI helpers
 models, schema generation, API/service behavior, and tests for those executable contracts. For
 prompt/doc changes, rerender generated artifacts when required and review the markdown diffs.
 
+# Tests & verification
+
+The verification surface is **not one command**: 4 pytest scopes + a render-check + a schema-check + lint/types + the bench rungs, each with a different venv, prereqs, and cost. CI (`.github/workflows/ci.yml`) is authoritative for the blocking gates — backend pytest, the markdown-vs-CLI sync-lint, the deterministic eval, ruff, and mypy.
+
+> **Never run a bare `pytest` from the repo root, and always go through the backend venv.** Scope every run to one suite — duplicate `test_vigil_cli.py` basenames in `tests/` and `agent/scripts/assess/tests/` collide under a single collection. The backend venv (`uv run --directory orchestrator/backend --extra dev …`) is the one interpreter that can collect every suite; the root `.venv` hard-errors on `tests/eval` (unconditional `import yaml`), and `uv run` *without* `--extra dev` fails to spawn pytest in a clean env.
+
+| Suite / gate | Command | Cost |
+|---|---|---|
+| Backend (incl. sync-lint) | `uv run --directory orchestrator/backend --extra dev pytest` | free |
+| Root CLI / bench harness | `uv run --directory orchestrator/backend --extra dev pytest "$(git rev-parse --show-toplevel)/tests"` | free |
+| Assess CLI | `uv run --directory orchestrator/backend --extra dev pytest "$(git rev-parse --show-toplevel)/agent/scripts/assess/tests"` | free |
+| Deterministic eval (absolute path is load-bearing) | `uv run --directory orchestrator/backend --extra dev pytest "$(git rev-parse --show-toplevel)/tests/eval"` | free |
+| Prompt render-check | `cd agent && ./scripts/render-operator-prompts.sh check` | free |
+| Schema `--check` | `uv run --directory orchestrator/backend python scripts/generate_agent_schemas.py --check` | free |
+| Lint / types | `uvx ruff check .`  ·  `uvx --with-editable . mypy src/vigil_cli` | free |
+| Bench factory solvability gate | `python -m vigil_cli.bench.factory.verify --family <id> --seeds 0 1 2` | free, **docker** |
+| Bench selftest (pipeline, no LLM) | `vigil bench selftest` | free |
+| Bench run (live agent) | `vigil bench run --launch auto …` | **BILLED** — see Live tests |
+
+- **Integration tests are deselected by default** (`-m 'not integration'` in both pyprojects); opt in with `pytest -m integration` only after rebuilding the runtime image (`test_oob_correlate.py`, backend `test_runtime_tooling_contract.py`, `test_kali_cli.py`).
+- **CI gap:** CI does not gate the root `tests/` (bench harness) or the assess CLI suite — run those two locally before handing off harness/recon changes.
+
+## Live tests (billed — read before launching)
+
+`vigil bench run --launch auto` spawns real Claude/Codex agents against generated targets: it **costs money and runs for hours** (reference: a full K=5 × 3 seed-0 run is ~5–6h / ~$50). Validate without a model first via the free paths — `--launch scripted` (reference solver, docker) and `vigil bench selftest`. Do not launch `--launch auto` without an explicit go-ahead.
+
 # Orchestrator backend
 
 The backend is Python 3.11+ and `uv`-first. Use `uv`, not ad hoc `pip` installs:
@@ -354,10 +380,10 @@ uv sync --directory orchestrator/backend --extra dev
 uv run --directory orchestrator/backend uvicorn app.main:app --reload
 ```
 
-Run the backend tests with `uv`:
+Run the backend tests with `uv` (see **Tests & verification** for the full matrix):
 
 ```bash
-uv run --directory orchestrator/backend pytest
+uv run --directory orchestrator/backend --extra dev pytest
 ```
 
 # Orchestrator frontend
