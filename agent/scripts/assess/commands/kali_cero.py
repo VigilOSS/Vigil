@@ -4,6 +4,7 @@ from __future__ import annotations
 import shlex
 import sys
 
+from assess.lib import runtime_route
 from assess.lib.client import AssessError
 from assess.lib.kali import (
     add_passthrough_args_flag,
@@ -92,6 +93,42 @@ def _build_cero_argv(args) -> list[str]:
     return cmd
 
 
+def _target_entries(args) -> list[str]:
+    """Collect cero's target entries from the single-target arg + the -l file.
+
+    The -l file is read HOST-side, best-effort: a missing/unreadable file (cero
+    runs in-container, so the path may not exist host-side) simply contributes no
+    file entries — the guard is a WARN, never a hard dependency on the file.
+    """
+    entries: list[str] = []
+    if args.domain:
+        entries.append(args.domain)
+    if args.input_list:
+        try:
+            with open(args.input_list, encoding="utf-8", errors="ignore") as fh:
+                entries.extend(fh.read().splitlines())
+        except OSError:
+            pass
+    return entries
+
+
+def _warn_excessive_target_ips(args) -> None:
+    """CR-22 — estimate cero's distinct target-IP fan-out and WARN if it's too big.
+
+    cero is dispatched via kali_exec, which is in-container-only, so the route is
+    fixed to ``container``. (A host path for cero is a separate, larger change.)
+
+    The runtime is resolved ONCE here and threaded explicitly into the guard so the
+    Docker-Desktop gate is decided by a single, visible ``detect_runtime()`` call
+    rather than by a hidden re-detect inside ``warn_excessive_target_ips``. This
+    keeps the guard's behaviour deterministic and independently testable (the guard
+    never falls back to a fresh global detection that a caller can't observe).
+    """
+    runtime = runtime_route.detect_runtime()
+    n = runtime_route.count_distinct_target_ips(_target_entries(args))
+    runtime_route.warn_excessive_target_ips(n, route="container", tool="cero", runtime=runtime)
+
+
 def run(args) -> None:
     if not args.domain and not args.input_list:
         print("cero: pass --target/--domain <host-or-cidr> or -l <file>", file=sys.stderr)
@@ -99,6 +136,11 @@ def run(args) -> None:
 
     cero_argv = _build_cero_argv(args)
     extend_cmd_with_extra_args(cero_argv, args)
+
+    # CR-22 — WARN (never raise) when the distinct target-IP fan-out is too large
+    # for the in-container path on macOS Docker Desktop. cero always runs
+    # in-container here (kali_exec is container-only), so the route is fixed.
+    _warn_excessive_target_ips(args)
 
     if args.input_list:
         # cero reads targets from stdin when no positional args are provided.

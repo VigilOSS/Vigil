@@ -27,12 +27,17 @@ def register(subparsers) -> None:
     p.add_argument("domain", nargs="?", default="", help="Target domain (bruteforce only).")
     p.add_argument("-r", dest="resolvers", default="", help="-r resolvers file.")
     p.add_argument("--resolvers-trusted", dest="resolvers_trusted", default="", help="--resolvers-trusted file.")
-    p.add_argument("--rate-limit", dest="rate_limit", default="", help="--rate-limit (per resolver).")
+    p.add_argument(
+        "--rate-limit",
+        dest="rate_limit",
+        default="",
+        help="--rate-limit: TOTAL queries/sec across the whole resolver pool (not per-resolver).",
+    )
     p.add_argument(
         "--rate-limit-trusted",
         dest="rate_limit_trusted",
         default="",
-        help="--rate-limit-trusted.",
+        help="--rate-limit-trusted: TOTAL qps cap for the trusted-resolver pool (not per-resolver).",
     )
     p.add_argument("--wildcard-batch", dest="wildcard_batch", default="", help="--wildcard-batch size.")
     p.add_argument("--wildcard-tests", dest="wildcard_tests", default="", help="--wildcard-tests count.")

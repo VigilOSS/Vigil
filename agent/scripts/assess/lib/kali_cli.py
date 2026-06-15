@@ -11,7 +11,9 @@ argparse helpers, not on the orchestrator's deeper imports.
 """
 from __future__ import annotations
 
+import argparse
 import json
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -19,8 +21,70 @@ from typing import Any
 
 from .audit_enums import PROBE_KIND_ENUM, TECHNIQUE_ENUM
 from .client import AssessError, default_runtime_container
-from .kali_audit import ALLOWED_PHASES, _INTENT_MAX_LEN
+from .kali_audit import (
+    ALLOWED_PHASES,
+    _INTENT_MAX_LEN,
+    _enum_reject_message,
+    _resolve_agent_name,
+)
 from .kali_output import KaliResult
+
+
+# Maps each enum-bearing audit flag back to its allowed-value tuple so the
+# parse-time argparse "invalid choice" rejection can be re-rendered through the
+# SAME scoped formatter the post-parse AssessError path uses. Keep this in lock-
+# step with the choices= wired into add_required_kali_flags / kali_job.
+_ENUM_FLAG_TO_VALUES: dict[str, tuple[str, ...]] = {
+    "--technique": TECHNIQUE_ENUM,
+    "--probe-kind": PROBE_KIND_ENUM,
+    "--phase": ALLOWED_PHASES,
+}
+
+# argparse renders an enum miss as:
+#   argument --probe-kind: invalid choice: 'BOGUS' (choose from 'a', 'b', ...)
+# Capture the flag and the offending value so we can rebuild a scoped message.
+_INVALID_CHOICE_RE = re.compile(
+    r"argument\s+(?P<flag>-\S+):\s+invalid choice:\s+'(?P<value>.*?)'\s+\(choose from",
+    re.DOTALL,
+)
+
+
+class ScopedErrorParser(argparse.ArgumentParser):
+    """ArgumentParser that re-renders enum ``invalid choice`` errors as scoped
+    did-you-mean text and suppresses the multi-line top-level usage dump for a
+    subcommand enum miss.
+
+    Stock argparse prints the full ``usage: ...`` block plus a terse
+    ``invalid choice: 'X' (choose from ...)`` and exits 2. For a 46-value
+    ``--technique`` (and the lowercase ``--probe-kind`` / ``--phase`` enums)
+    that buries the value the operator actually meant. This subclass intercepts
+    only the enum-miss case, routes it through :func:`_enum_reject_message` (the
+    same formatter the post-parse AssessError path uses, so every site agrees),
+    and emits a single ``ERROR:`` line with no usage block. Every other parser
+    error (missing required flag, unrecognized argument, bad int) keeps the
+    default argparse behavior unchanged.
+    """
+
+    def error(self, message: str) -> None:  # noqa: D102 - argparse override
+        match = _INVALID_CHOICE_RE.search(message or "")
+        if match:
+            flag = match.group("flag")
+            value = match.group("value")
+            allowed = _ENUM_FLAG_TO_VALUES.get(flag)
+            if allowed is not None:
+                # Scoped, single-line rejection — no usage dump. Exit 2 keeps
+                # parity with argparse's own parse-error exit code (the
+                # AssessError path through cli.main exits 1; this is a parse-time
+                # SystemExit, deliberately distinct).
+                print(
+                    f"ERROR: {_enum_reject_message(flag, value, allowed)}",
+                    file=sys.stderr,
+                )
+                self.exit(2)
+        # Not an enum miss we own — fall back to argparse's default rendering
+        # (usage block + message) so missing-required / unrecognized-arg errors
+        # behave exactly as before.
+        super().error(message)
 
 
 def add_required_kali_flags(parser) -> None:
@@ -87,8 +151,20 @@ def add_required_kali_flags(parser) -> None:
         dest="kali_agent_name",
         default=None,
         help=(
-            "Dispatching agent name. Defaults to $AGENT_NAME / $VIGIL_AGENT_NAME / "
-            "'operator'; specialists should pass this explicitly if wrapper env is missing."
+            "Dispatching agent name. Defaults to --agent-id / $AGENT_NAME / "
+            "$VIGIL_AGENT_NAME / 'operator'; specialists should pass this explicitly "
+            "if wrapper env is missing."
+        ),
+    )
+    parser.add_argument(
+        "--agent-id",
+        dest="kali_agent_id",
+        default=None,
+        help=(
+            "Dispatch agent_id (e.g. va-7f3) from your Runtime Identity block. "
+            "Companion to --agent-name: when --agent-name is omitted, the agent_id "
+            "is used verbatim as the deterministic audit attribution (no backend "
+            "lookup) so the run is tied to your dispatch instead of 'operator'."
         ),
     )
     parser.add_argument(
@@ -175,6 +251,17 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
     "Cannot resolve engagement directory" even when they passed it.
     """
     explicit_dir = getattr(args, "engagement_dir", None)
+    # Resolve the audit attribution here (where --phase is in scope) so the
+    # CR-35 deterministic carrier (--agent-name > --agent-id > env > operator)
+    # and the specialist-phase WARN run exactly once per CLI invocation. The
+    # resolved value is passed to kali_exec as `agent_name`; kali_exec re-runs
+    # the resolver, but on a now-explicit value that is a no-op passthrough.
+    resolved_agent_name = _resolve_agent_name(
+        getattr(args, "kali_agent_name", None),
+        agent_id=getattr(args, "kali_agent_id", None),
+        phase=getattr(args, "phase", None),
+        warn=True,
+    )
     kwargs: dict[str, Any] = {
         "technique": args.technique,
         "intent": args.intent,
@@ -182,7 +269,7 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "phase": args.phase,
         "destructive": bool(getattr(args, "destructive", False)),
         "timeout": int(args.timeout),
-        "agent_name": getattr(args, "kali_agent_name", None),
+        "agent_name": resolved_agent_name,
         "force": bool(getattr(args, "force", False)),
         "container_name": getattr(args, "container_name", None),
         "identity": getattr(args, "identity", None),

@@ -22,23 +22,30 @@ The typed kali verbs map to the phases as: subfinder → A, bbot → A+, cero �
 
 ## subfinder — API key value-for-cost
 
-subfinder is fail-open without provider keys: it queries every source, drops the ones that fail, and aggregates whatever the free sources return. Coverage without keys is roughly 60-70% of the full-key set. Worth-it free keys, ranked by signal-per-key:
+subfinder is fail-open without provider keys: it queries every source, drops the ones that fail, and aggregates whatever the free sources return. Coverage without keys is roughly 60-70% of the full-key set.
 
-1. **SecurityTrails** — highest unique-coverage delta. Free tier is 50 requests/month, which is enough for ~50 wildcard scope entries per engagement.
-2. **Censys** — CT-derived plus internet-wide certificate scans. Free tier covers most engagement-scale work.
-3. **VirusTotal** — large historical coverage. Free tier is rate-limited (4/min) but works for batch enumeration.
-4. **Shodan** — banner-derived sub discovery. Less unique value than the top three; useful when the target has many internet-exposed services.
+**Free-key minimum — configure these two first (both free):**
 
-Configure via `${SUBFINDER_SECURITYTRAILS_API_KEY}`, `${SUBFINDER_CENSYS_API_ID}` + `${SUBFINDER_CENSYS_API_SECRET}`, `${SUBFINDER_VIRUSTOTAL_API_KEY}`, `${SUBFINDER_SHODAN_API_KEY}` in `agent/.env.example`. The runtime exposes these to subfinder via the standard provider-config.yaml lookup chain — populating the env vars is enough.
+1. **Chaos** (ProjectDiscovery) — `${SUBFINDER_CHAOS_API_KEY}` — free, high-signal passive dataset. Key at https://chaos.projectdiscovery.io/.
+2. **GitHub** — `${SUBFINDER_GITHUB_TOKEN}` — free; mines code search for leaked subdomains. A classic or fine-grained PAT with no scopes works.
 
-PassiveTotal, Chaos, IntelX, URLScan, and GitHub tokens are also wired in `.env.example` (lines 71-85). Add them when the engagement budget supports the upstream API costs; the top four cover the high-signal cases.
+**Paid / rate-limited keys, ranked by signal-per-key (add when budget supports):**
+
+1. **SecurityTrails** — `${SUBFINDER_SECURITYTRAILS_API_KEY}` — highest unique-coverage delta. Free tier is 50 requests/month, which is enough for ~50 wildcard scope entries per engagement.
+2. **Censys** — `${SUBFINDER_CENSYS_API_ID}` + `${SUBFINDER_CENSYS_API_SECRET}` — CT-derived plus internet-wide certificate scans. Free tier covers most engagement-scale work.
+3. **VirusTotal** — `${SUBFINDER_VIRUSTOTAL_API_KEY}` — large historical coverage. Free tier is rate-limited (4/min) but works for batch enumeration.
+4. **Shodan** — `${SUBFINDER_SHODAN_API_KEY}` — banner-derived sub discovery. Less unique value than the top three; useful when the target has many internet-exposed services.
+
+IntelX, URLScan, and PassiveTotal are also wired in `.env.example`.
+
+**How the keys actually reach subfinder:** subfinder reads keys ONLY from its on-disk `~/.config/subfinder/provider-config.yaml`, NOT from arbitrary `SUBFINDER_*` env vars. `vigil runtime start` GENERATES that file inside the container from the non-empty `SUBFINDER_*` vars in `<install>/.env` and regenerates it on every start — so populating the env vars and (re)starting the runtime is what makes them take effect. Full setup, the env→source mapping, fail-open keyless behaviour, and the per-domain `-timeout` default are documented in `agent/references/tools/recon/subfinder.md`; the schema template is `agent/docker/subfinder-provider-config.example.yaml`.
 
 ## puredns — rate-limit reality
 
-puredns wraps massdns + wildcard filter. Performance is governed by the resolver pool plus the per-resolver rate cap, not local CPU.
+puredns wraps massdns + wildcard filter. `--rate-limit` is the TOTAL queries/sec across the whole resolver pool (not a per-resolver value). Performance is governed by the resolver pool size plus that total qps cap, not local CPU.
 
-- **5000 qps** — safe across a healthy resolver list (curated `resolvers.txt`, ~30 trusted resolvers). This is the default we use in Phase C.
-- **8-10k qps** — upper bound when the resolver list is large (>100 resolvers) and the wordlist is large enough that the work spreads. Past this you hit per-resolver rate-limits, not local saturation.
+- **5000 qps** — safe TOTAL rate across a healthy resolver list (curated `resolvers.txt`, ~30 trusted resolvers). This is the default we use in Phase C.
+- **8-10k qps** — upper bound TOTAL rate when the resolver list is large (>100 resolvers) and the wordlist is large enough that the work spreads across them. Past this, throughput is bounded by the upstream resolvers throttling (each may rate-limit per source IP) rather than by local saturation.
 - **RAM** — ~500 MB at 5000 qps for a 200k-entry permutation set. RAM is dominated by the wildcard-filter dedup map.
 
 When the target's authoritative DNS is rate-limited at the apex, drop the rate cap to 1000-2000 qps. Otherwise puredns consumes the full bandwidth of the resolvers without protecting them.
@@ -86,6 +93,7 @@ When skipping C, jump from Phase B to Phase D directly. Record the skip rational
 ## Cross-references
 
 - Phase A→D workflow with example invocations: `agent/skills/kali-exec/SKILL.md` "Subdomain enumeration: Phase A→D workflow"
+- subfinder keyed-source setup (provider-config generation, free-key minimum, per-domain `-timeout`): `agent/references/tools/recon/subfinder.md`
 - subdomain-enumeration skill (when this matters in operator phase flow): `agent/skills/subdomain-enumeration/SKILL.md`
 - Prioritization and sliding-window rules: `agent/references/subdomain-enumeration.md`
 - puredns + dnsx flag detail: `agent/references/tools/recon/puredns.md`, `agent/references/tools/recon/dnsx.md`

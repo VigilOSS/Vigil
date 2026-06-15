@@ -1,6 +1,7 @@
 """vigil assess kali alterx — typed wrapper around alterx (subdomain permutation generator)."""
 from __future__ import annotations
 
+import shlex
 import sys
 
 from assess.lib.client import AssessError
@@ -12,6 +13,27 @@ from assess.lib.kali import (
     kali_args_to_kwargs,
     kali_exec,
 )
+
+_DISABLE_UPDATE_CHECK_FLAG = "-disable-update-check"
+
+
+def _operator_passed_disable_update_check(args) -> bool:
+    """True when the operator already supplied -disable-update-check via --extra-args.
+
+    The typed verb has no dedicated flag for it, so the only way an operator can
+    pass it explicitly is through the raw passthrough. Honor that so the default
+    injection stays idempotent and never double-adds the flag.
+    """
+    extra = getattr(args, "extra_args", "") or ""
+    if not extra:
+        return False
+    try:
+        tokens = shlex.split(extra)
+    except ValueError:
+        # Malformed quoting is reported later by extend_cmd_with_extra_args;
+        # treat as "not present" here so we don't suppress the safe default.
+        return False
+    return _DISABLE_UPDATE_CHECK_FLAG in tokens
 
 
 def register(subparsers) -> None:
@@ -87,6 +109,11 @@ def run(args) -> None:
         print("alterx: pass -l <list> or -d <domain>", file=sys.stderr)
         raise AssessError("missing -l/--list or -d/--domain")
     cmd: list[str] = ["alterx"]
+    # Inject -disable-update-check by default: alterx v0.1.0's startup update
+    # check is pure noise/latency in an egress-restricted container. Idempotent —
+    # skip if the operator already passed it via --extra-args.
+    if not _operator_passed_disable_update_check(args):
+        cmd.append(_DISABLE_UPDATE_CHECK_FLAG)
     if args.input_list:
         cmd.extend(["-l", args.input_list])
     elif args.domain:

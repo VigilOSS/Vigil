@@ -34,7 +34,7 @@ Match the rate-limit to the runtime/target tier — full tier rationale in `agen
 
 `--wildcard-batch 100000` is the default for the polite-residential profile; drop to `50000` on tight-RAM containers (`VIGIL_RUNTIME_MEMORY_GB=4` or lower) because the wildcard-filter dedup map dominates puredns's RAM usage and silent truncation produces missing subs without a clean OOM.
 
-`--rate-limit-trusted 200` is the ceiling for the trusted-resolver pool — exceeding it triggers per-resolver rate-limits at the upstream, not local saturation, and the resulting failures look like wildcard misses rather than rate errors.
+`--rate-limit-trusted 200` is the TOTAL qps ceiling for the trusted-resolver pool as a whole (not a per-resolver cap). Separately, individual upstream resolvers may independently throttle traffic per source IP; when they do, the resulting failures look like wildcard misses rather than rate errors. Keep these two ideas distinct: the flag sets one total qps budget across the pool, while upstream per-source throttling is a property of the resolvers themselves. Neither is local saturation.
 
 ## Common invocations
 

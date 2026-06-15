@@ -48,15 +48,6 @@
           "type": "string"
         }
       }
-    },
-    "superseded_by_id": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "minimum": 1,
-      "default": null,
-      "description": "Backend id of the intel row that superseded this one. Set automatically by `vigil assess supersede-intel`; report-writer filters on this so stale rows do not appear in reports."
     }
   }
 }

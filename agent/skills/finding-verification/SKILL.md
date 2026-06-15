@@ -1,0 +1,116 @@
+---
+name: finding-verification
+description: Adversarial Phase-4 verification of runtime/web findings produced by other agents — reproduce the PoC, ground severity in the trust boundary, run the C1-C6 FP & severity gate, and author the report-ready story. Loaded by vulnerability-analyst in review mode. The web analog of code-finding-verification.
+origin: Vigil
+---
+
+# Finding Verification — adversarial Phase-4 review
+
+## When to Activate
+
+Load this skill when `vulnerability-analyst` is dispatched in **review mode** (Phase 4,
+`mode=deep-manual` or `mode=root_cause_review`) to verify findings produced by other agents
+**before** exploitation investment. Catching a false positive, a severity inflation, or weak
+evidence here is far cheaper than discovering it after an exploit-developer pass.
+
+This is the **runtime/web** analog of `code-finding-verification/SKILL.md` (which owns
+source-only findings via its five-check protocol). Use that one for `file:<path>:<line>`
+findings; use this one for findings with a live HTTP/runtime PoC.
+
+## Scope your mandate (do not inflate)
+
+You are the adversary of the evidence, not of the finding count. Challenge only what
+affects a finding's **disposition, severity, or reachability**. Do not manufacture new
+findings, re-litigate settled scope, or downgrade on stylistic grounds — a reviewer
+prompted to "find gaps" will invent them. Every disposition you write must cite specific
+counter-evidence or a reproduced result.
+
+## Division of Labor
+
+- **Operator** selects the review scope (all HIGH/CRITICAL; MEDIUMs with escalation potential)
+  and passes the trust-boundary / threat-model summary, the finding slugs + payloads, and the
+  matching vuln-class skill. See operator-core Phase 4.
+- **You (vulnerability-analyst, review mode)** re-test against the live target via
+  `vigil assess kali ...` — you reproduce, you do not merely read the evidence text — then write
+  a disposition per finding and author the report-ready story for the ones that survive.
+
+## Canonical gates — load, do not restate
+
+This skill operationalizes gates that live elsewhere; read them rather than re-deriving:
+
+- **8-Question Gate, Four Validation Gates, Chain-Only List, Fast Kill Signals** —
+  `agent/agents/vulnerability-analyst.md`. These are your reviewer toolkit; they are part of
+  your role prompt already.
+- **C1–C6 FP & severity-downgrade gate** — `agent/references/finding-fp-and-severity-gate.md`.
+  Run every confirmed data-exposure / write finding through it: it catches the real-world-impact
+  gaps a CVSS-band check misses (no-PII "reads", orphan writes, insider-only enumerability,
+  inflated `S:C`/`I:H`).
+- **Severity ↔ CVSS bands** — `agent/shared-constraints.md §4` (the canonical band table).
+
+## Methodology
+
+For each finding under review:
+
+1. **Reproduce the PoC against the live target.** Re-run the claimed request via
+   `vigil assess kali ...` with an explicit `--timeout`. A finding you cannot reproduce is a
+   kill candidate (note transient vs. genuinely-unreproducible). A non-conclusive response
+   (validation error short of a real auth decision, a status code with no body captured, an
+   `http=000`/connection-failed runtime error) is a **lead, not a verdict** — push it before
+   closing (`agent/rules/hunting.md` §23).
+2. **Ground severity in the trust boundary.** Using the operator's threat-model summary, decide:
+   is the entry point unauthenticated or privileged? Is the input attacker-controlled or
+   operator-trusted (config, internal caller)? Reachability and auth-path severity calls depend
+   on this grounding — without it the triager is overconfident.
+3. **Prove the attacker OUTCOME, not the vulnerability's existence.** Captured credentials must
+   be replayed; leaked tokens must be used; a file-read primitive must read a meaningful file.
+   "Vulnerability exists" is not a finding — "attacker extracts session token and accesses the
+   victim's vault" is. If the proof requires the triager to imagine the next step, send it back.
+4. **Run the C1–C6 FP & severity gate** (above) on data-exposure / write findings.
+5. **Recompute the CVSS vector** from the reproduced impact; correct `cvss_vector` / `cvss_score`
+   if the band drifted.
+
+## Dispositions
+
+Write exactly one per reviewed finding (these are the operator-facing verbs, kept in
+operator-core Phase 4 — listed here so the reviewer self-serves them):
+
+- **Confirmed** — reproduced, severity accurate → `vigil assess verify-finding <slug> --disposition confirmed --reason "..."`
+- **Upgraded** — real, severity understated → `vigil assess update-finding <slug> --severity <higher> --reason "..."` then `verify-finding ... --disposition confirmed`
+- **Downgraded** — real, severity overstated → `vigil assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity <lower>`
+- **Killed** — false positive / unreproducible / stacked self-induced preconditions → `vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-6>`
+
+**Dedup:** merge findings with overlapping `canonical_location` + similar `defect_family` across
+agent prefixes — `vigil assess merge-finding <source-slug> <target-slug> "<reason>"`.
+
+**Chain-only primitives** stay in the normal finding table: when a finding is real only as part
+of a proved/expected escalation path, `vigil assess update-finding <slug>` to populate
+`details.chain_required`, `details.chain_rationale`, `details.required_followup`. Do not invent a
+chain-specific status.
+
+## Author the report-ready story (Four Validation Gates, Gate 3)
+
+For every Confirmed/Downgraded finding, write the report-ready `evidence` / `impact` /
+`remediation` and the justified CVSS vector into `details`. The report-writer **formats** this
+story; it does not re-derive it. A finding disposed but not authored is half-done.
+
+## Output Contract
+
+Per finding: the disposition + verb run, the reproduced evidence (or the kill counter-evidence),
+the corrected severity/CVSS if changed, and — for survivors — confirmation the report-ready story
+was authored into `details`. End with the review-scope summary: HIGH/CRITICAL all dispositioned;
+which MEDIUMs were reviewed and why; the kill rate (if >50%, flag that Phase-3 dispatch context
+may be producing speculative findings).
+
+## Root-Cause Review Mode (Phase 4 → 5 exit)
+
+When dispatched as `mode=root_cause_review`, additionally run the operator's root-cause grouping
+intent: group intentional root/sibling relationships (`vigil assess link-finding`), picking the
+root as the broadest attacker-controllable cause. See "Root-Cause Review Mode" in
+`agent/agents/vulnerability-analyst.md`.
+
+## Extended Resources
+
+- `agent/agents/vulnerability-analyst.md` — 8-Question Gate, Four Validation Gates, Chain-Only List
+- `agent/references/finding-fp-and-severity-gate.md` — C1–C6 FP & severity gate
+- `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission gate that re-applies the overclaim catalog on the submission bytes (this skill is the in-context Phase-4 version)
+- `agent/skills/code-finding-verification/SKILL.md` — the source-only analog (five-check protocol)

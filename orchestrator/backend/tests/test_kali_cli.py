@@ -3429,7 +3429,15 @@ def test_alterx_domain_mode_uses_dash_d(monkeypatch):
             "120",
         ]
     )
-    assert captured["cmd"][:3] == ["alterx", "-d", "example.com"]
+    # CR-15: `-disable-update-check` is injected by default (right after the
+    # `alterx` argv head) so the wrapper can never hang on the update check.
+    assert captured["cmd"][0] == "alterx"
+    assert "-disable-update-check" in captured["cmd"]
+    # Domain mode must use `-d <domain>` (not `-l`, the list-file flag) — assert
+    # the adjacent pair by position rather than a brittle full-prefix match.
+    dash_d = captured["cmd"].index("-d")
+    assert captured["cmd"][dash_d + 1] == "example.com"
+    assert "-l" not in captured["cmd"]
 
 
 def _patch_dnsx_exec(monkeypatch):
