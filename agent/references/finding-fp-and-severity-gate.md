@@ -94,7 +94,8 @@ Overclaim / mis-framing (the recurring patterns an independent triager downgrade
 - **Info-disclosure / stack-trace framed as Medium** — missing headers, stack traces, schema /
   version / path leakage are **informational** unless they **directly enable a proven higher-impact
   attack**; "it helps an attacker" is speculative chaining. Authoritative treatment lives in
-  `reporting.md §61` (Chain-Only) — apply it as a downgrade trigger here, do not restate the rule.
+  `reporting.md §3` (the "informational unless it directly enables a proven higher-impact attack"
+  rule) — apply it as a downgrade trigger here, do not restate the rule.
   **[DOWN → informational]**
 - **OOS class in disguise** — a rate-limiting / DoS / third-party issue **re-skinned** as
   access-control (or another in-scope class) to smuggle it past scope. Classify by the **actual
@@ -146,7 +147,7 @@ in `agent/agents/vulnerability-analyst.md`.
 ## Related
 
 - `agent/rules/hunting.md` — §2 (existence-vs-exploitation), §3 (precondition equivalence), §20 (severity-CVSS audit)
-- `agent/rules/reporting.md` — §2 (proof), §3 (severity follows impact + precondition analysis), §4 (non-public data), §5 (distinct identities), §61 (info-disclosure / stack-trace is informational unless it enables a proven higher-impact attack — the home of that trigger)
+- `agent/rules/reporting.md` — §2 (proof), §3 (severity follows impact + precondition analysis; also the home of the info-disclosure / stack-trace "informational unless it enables a proven higher-impact attack" rule), §4 (non-public data), §5 (distinct identities)
 - `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission blind gate that re-applies the same overclaim catalog on the submission bytes before publish (this gate is the in-context Phase-4 version)
 - `agent/agents/vulnerability-analyst.md` — the 8-Question Gate, Chain-Only List, Fast Kill Signals, Four Validation Gates
 - `agent/skills/code-finding-verification/SKILL.md` — the code-finding analog (five-check protocol); use that for source-only findings

@@ -514,6 +514,7 @@ def _check_web_preconditions(
         except Exception as exc:
             blockers.append(_precondition_check_failed("report readiness", exc))
         blockers.extend(_blind_triage_blockers(client))
+        blockers.extend(_chain_construction_blockers(client))
         blockers.extend(_depth_backstop_blockers(client))
 
     elif target_phase == "complete":
@@ -527,8 +528,98 @@ def _check_web_preconditions(
         except Exception as exc:
             blockers.append(_precondition_check_failed("complete readiness", exc))
         blockers.extend(_blind_triage_blockers(client))
+        blockers.extend(_chain_construction_blockers(client))
         blockers.extend(_depth_backstop_blockers(client))
 
+    return blockers
+
+
+def _chain_construction_blockers(client: AssessmentClient) -> list[dict[str, str]]:
+    """Gate the terminal report/complete edge on a completed cross-finding
+    chain-construction pass — the second Mandatory Phase-Exit Pass (Exploit ->
+    Report).
+
+    Mirrors the structural shape of ``_blind_triage_blockers`` /
+    ``missing_variant_pass``: it enumerates the at-risk state (here: confirmed
+    high/critical ACTIVE findings, the same ``confirmed_high`` predicate the
+    Verify->Exploit variant gate uses) and then checks a structured durable
+    signal rather than prose — the existence of a COMPLETED
+    ``exploit-developer`` dispatch. The chain pass enumerates A->B candidates
+    *across* the confirmed set, so it is only meaningful, and only blocks, when
+    there are at least TWO confirmed high/critical findings to chain between;
+    0 or 1 leaves nothing to chain across and never blocks (conservative — this
+    only ever fires when the prose pass was genuinely owed).
+
+    The signal is intentionally coarse: role=exploit-developer + status=completed.
+    Unlike the variant gate (which mandates ``--dispatch-mode variant-rotation``
+    in operator-core), the chain prose does NOT mandate a specific dispatch_mode
+    for the chain pass (exploit-developer defaults to ``deep-manual``), so keying
+    on a mode the operator was never told to set would be a false gate. As with
+    the variant gate, only the operator can confirm the chains were *genuinely*
+    sought; a completed dispatch row is the deterministic floor, the rest stays
+    prose in the Definition of Done.
+
+    A non-empty unsatisfied set appends ONE hard ``missing_chain_construction``
+    blocker at the DEFAULT ``severity="block"`` — the same enforcement level as
+    ``missing_variant_pass`` / ``missing_blind_triage`` — so the existing
+    ``--force``/``--reason`` override (and its audited override-decision row)
+    already covers it. Best-effort on read failure: a backend error degrades to
+    a single ``precondition_check_failed`` blocker rather than wedging the
+    transition.
+    """
+    blockers: list[dict[str, str]] = []
+    try:
+        findings = client.get("findings")
+    except Exception as exc:
+        blockers.append(_precondition_check_failed("chain-construction findings", exc))
+        return blockers
+    if not isinstance(findings, list):
+        return blockers
+
+    confirmed_high = [
+        f for f in findings
+        if f.get("severity") in ("critical", "high")
+        and f.get("verification_state") == "verified"
+        and f.get("workflow_status") == "active"
+    ]
+    # The chain pass runs ACROSS the confirmed set: nothing to chain with fewer
+    # than two confirmed high/critical findings, so never block in that case.
+    if len(confirmed_high) < 2:
+        return blockers
+
+    # Filter to completed exploit-developer dispatches server-side and request
+    # the max page size so long engagements don't drop the chain pass behind
+    # the default limit=100 (same shape as the variant-pass dispatch read).
+    try:
+        dispatches = client.get(
+            "dispatches?role=exploit-developer&status=completed&limit=1000"
+        ) or []
+    except Exception:
+        dispatches = []
+    completed_chain_dispatches = [
+        d for d in dispatches
+        if isinstance(d, dict)
+        and str(d.get("status") or "").lower() == "completed"
+    ]
+    if completed_chain_dispatches:
+        return blockers
+
+    sample = ", ".join(f.get("slug", "?") for f in confirmed_high[:5])
+    blockers.append({
+        "kind": "missing_chain_construction",
+        "detail": (
+            f"{len(confirmed_high)} confirmed high/critical finding(s) and NO "
+            f"completed exploit-developer dispatch on record: {sample}"
+            + (" ..." if len(confirmed_high) > 5 else "")
+            + " — the cross-finding chain-construction pass (Exploit -> Report) "
+            "was not run. Dispatch one exploit-developer pass that enumerates "
+            "A->B candidates across the confirmed set (info-disclosure + "
+            "open-redirect, SSRF + token leak, IDOR + impersonation) and let it "
+            "complete before advancing (it is what turns a list of mediums into "
+            "a high). Pass --force --reason \"...\" to override with an audited "
+            "decision."
+        ),
+    })
     return blockers
 
 

@@ -55,9 +55,7 @@ the active tier):
 > The profile **key names** below (`polite-CDN-fronted-target` etc.) are historical
 > labels kept in sync with the SKILL / dnsx-wrapper keys. Per the footnote above,
 > their *meaning* is **resolver-load + runtime-capacity caution**, not target
-> politeness — read them as "cautious / moderate / bursty resolver-load tiers." A
-> key rename is a cross-cutting code+docs follow-up; the reframe here is the
-> load-bearing fix.
+> politeness — read them as "cautious / moderate / bursty resolver-load tiers."
 
 | Runtime tier | `polite-CDN-fronted-target` (cautious 800) | `polite-residential` (2500) | `bursty-OK` (5000) |
 |---|---|---|---|
