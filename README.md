@@ -51,6 +51,7 @@ Vigil's docs are spread across operator prompts, a code map, and a deep referenc
 |----------|----------------|
 | [`agent/AGENTS.md`](agent/AGENTS.md) | The operator prompt — the workflow every engagement runs. |
 | [`docs/engagement-prompt-playbook.md`](docs/engagement-prompt-playbook.md) | Operator steering playbook — the human-side prompts for pushing an engagement when the model goes shallow, overclaims severity, or forgets the core loop. |
+| [`docs/benchmarking.md`](docs/benchmarking.md) | The `vigil bench` harness — measure the unmodified agent against the XBEN and procedural-generated suites, launch modes, run flags, cost accounting, and anti-cheat. |
 | [`AGENTS.md`](AGENTS.md) | Maintainer/contributor workflow: clone-to-first-dispatch walkthrough and recipes for adding a skill, an `vigil assess` verb, an oracle, or an eval case. |
 | [`CODE-MAP.md`](CODE-MAP.md) | Map of the codebase — where each subsystem lives. |
 | [`agent/references/`](agent/references/) | Reference library (payloads, tactics, recon, tenants, tools) — discover with `vigil assess list-references` (self-registering; `--skill <name>` filters to a skill's paired refs). |

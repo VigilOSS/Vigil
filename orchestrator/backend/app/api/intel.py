@@ -7,8 +7,10 @@ list endpoint is a thin passthrough to ``services.intel``; search hits
 """
 from __future__ import annotations
 
+import functools
 from typing import Any
 
+import anyio
 from fastapi import APIRouter, HTTPException, Query, status
 
 from ..services import intel as intel_service
@@ -223,18 +225,21 @@ def list_notes(
 async def create_tech_component(
     engagement_key: str, request: TechComponentRecordRequest
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = intel_service.record_tech_component(
-        engagement.id,
-        component=request.component,
-        version=request.version,
-        source_name=request.source_name,
-        confidence=request.confidence,
-        evidence_ref=request.evidence_ref,
-        first_seen_at=request.first_seen_at,
-        last_seen_at=request.last_seen_at,
-        notes=request.notes,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.record_tech_component,
+            engagement.id,
+            component=request.component,
+            version=request.version,
+            source_name=request.source_name,
+            confidence=request.confidence,
+            evidence_ref=request.evidence_ref,
+            first_seen_at=request.first_seen_at,
+            last_seen_at=request.last_seen_at,
+            notes=request.notes,
+            provenance=request.provenance,
+        )
     )
     await _broadcast(engagement.key, "tech_component", record)
     return record
@@ -242,16 +247,19 @@ async def create_tech_component(
 
 @router.post("/people", status_code=status.HTTP_201_CREATED)
 async def create_person(engagement_key: str, request: PersonRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = intel_service.record_person(
-        engagement.id,
-        name=request.name,
-        role=request.role,
-        organization=request.organization,
-        email=request.email,
-        source_name=request.source_name,
-        notes=request.notes,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.record_person,
+            engagement.id,
+            name=request.name,
+            role=request.role,
+            organization=request.organization,
+            email=request.email,
+            source_name=request.source_name,
+            notes=request.notes,
+            provenance=request.provenance,
+        )
     )
     await _broadcast(engagement.key, "person", record)
     return record
@@ -259,15 +267,18 @@ async def create_person(engagement_key: str, request: PersonRecordRequest) -> di
 
 @router.post("/emails", status_code=status.HTTP_201_CREATED)
 async def create_email(engagement_key: str, request: EmailRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = intel_service.record_email(
-        engagement.id,
-        address=request.address,
-        role_hint=request.role_hint,
-        linked_person_id=request.linked_person_id,
-        source_name=request.source_name,
-        notes=request.notes,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.record_email,
+            engagement.id,
+            address=request.address,
+            role_hint=request.role_hint,
+            linked_person_id=request.linked_person_id,
+            source_name=request.source_name,
+            notes=request.notes,
+            provenance=request.provenance,
+        )
     )
     await _broadcast(engagement.key, "email", record)
     return record
@@ -275,16 +286,19 @@ async def create_email(engagement_key: str, request: EmailRecordRequest) -> dict
 
 @router.post("/domains", status_code=status.HTTP_201_CREATED)
 async def create_domain(engagement_key: str, request: DomainRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = intel_service.record_domain(
-        engagement.id,
-        identity=request.identity,
-        kind=request.kind,
-        value=request.value,
-        source_name=request.source_name,
-        live_status=request.live_status,
-        notes=request.notes,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.record_domain,
+            engagement.id,
+            identity=request.identity,
+            kind=request.kind,
+            value=request.value,
+            source_name=request.source_name,
+            live_status=request.live_status,
+            notes=request.notes,
+            provenance=request.provenance,
+        )
     )
     await _broadcast(engagement.key, "domain", record)
     return record
@@ -292,22 +306,25 @@ async def create_domain(engagement_key: str, request: DomainRecordRequest) -> di
 
 @router.post("/cves", status_code=status.HTTP_201_CREATED)
 async def create_cve(engagement_key: str, request: CveRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = intel_service.record_cve(
-        engagement.id,
-        cve_id=request.cve_id,
-        affected_component=request.affected_component,
-        affected_version_range=request.affected_version_range,
-        cvss_score=request.cvss_score,
-        cvss_vector=request.cvss_vector,
-        cwe_id=request.cwe_id,
-        poc_available=request.poc_available,
-        source_name=request.source_name,
-        validation_status=request.validation_status,
-        linked_finding_slug=request.linked_finding_slug,
-        notes=request.notes,
-        details=request.details,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.record_cve,
+            engagement.id,
+            cve_id=request.cve_id,
+            affected_component=request.affected_component,
+            affected_version_range=request.affected_version_range,
+            cvss_score=request.cvss_score,
+            cvss_vector=request.cvss_vector,
+            cwe_id=request.cwe_id,
+            poc_available=request.poc_available,
+            source_name=request.source_name,
+            validation_status=request.validation_status,
+            linked_finding_slug=request.linked_finding_slug,
+            notes=request.notes,
+            details=request.details,
+            provenance=request.provenance,
+        )
     )
     await _broadcast(engagement.key, "cve", record)
     return record
@@ -315,17 +332,20 @@ async def create_cve(engagement_key: str, request: CveRecordRequest) -> dict[str
 
 @router.post("/dns-records", status_code=status.HTTP_201_CREATED)
 async def create_dns_record(engagement_key: str, request: DnsRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = intel_service.record_dns_record(
-        engagement.id,
-        record_type=request.record_type,
-        name=request.name,
-        value=request.value,
-        first_seen=request.first_seen,
-        last_seen=request.last_seen,
-        source_name=request.source_name,
-        notes=request.notes,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.record_dns_record,
+            engagement.id,
+            record_type=request.record_type,
+            name=request.name,
+            value=request.value,
+            first_seen=request.first_seen,
+            last_seen=request.last_seen,
+            source_name=request.source_name,
+            notes=request.notes,
+            provenance=request.provenance,
+        )
     )
     await _broadcast(engagement.key, "dns_record", record)
     return record
@@ -335,17 +355,20 @@ async def create_dns_record(engagement_key: str, request: DnsRecordRequest) -> d
 async def create_social_profile(
     engagement_key: str, request: SocialProfileRecordRequest
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = intel_service.record_social_profile(
-        engagement.id,
-        subject_kind=request.subject_kind,
-        subject_ref=request.subject_ref,
-        platform=request.platform,
-        handle=request.handle,
-        url=request.url,
-        source_name=request.source_name,
-        notes=request.notes,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.record_social_profile,
+            engagement.id,
+            subject_kind=request.subject_kind,
+            subject_ref=request.subject_ref,
+            platform=request.platform,
+            handle=request.handle,
+            url=request.url,
+            source_name=request.source_name,
+            notes=request.notes,
+            provenance=request.provenance,
+        )
     )
     await _broadcast(engagement.key, "social_profile", record)
     return record
@@ -355,16 +378,19 @@ async def create_social_profile(
 async def create_breach_record(
     engagement_key: str, request: BreachRecordRequest
 ) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = intel_service.record_breach_record(
-        engagement.id,
-        subject=request.subject,
-        breach_name=request.breach_name,
-        breach_date=request.breach_date,
-        data_types=request.data_types,
-        source_name=request.source_name,
-        notes=request.notes,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.record_breach_record,
+            engagement.id,
+            subject=request.subject,
+            breach_name=request.breach_name,
+            breach_date=request.breach_date,
+            data_types=request.data_types,
+            source_name=request.source_name,
+            notes=request.notes,
+            provenance=request.provenance,
+        )
     )
     await _broadcast(engagement.key, "breach_record", record)
     return record
@@ -372,14 +398,17 @@ async def create_breach_record(
 
 @router.post("/org-facts", status_code=status.HTTP_201_CREATED)
 async def create_org_fact(engagement_key: str, request: OrgFactRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = intel_service.record_org_fact(
-        engagement.id,
-        fact_key=request.fact_key,
-        fact_value=request.fact_value,
-        source_name=request.source_name,
-        notes=request.notes,
-        provenance=request.provenance,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.record_org_fact,
+            engagement.id,
+            fact_key=request.fact_key,
+            fact_value=request.fact_value,
+            source_name=request.source_name,
+            notes=request.notes,
+            provenance=request.provenance,
+        )
     )
     await _broadcast(engagement.key, "org_fact", record)
     return record
@@ -387,16 +416,19 @@ async def create_org_fact(engagement_key: str, request: OrgFactRecordRequest) ->
 
 @router.post("/notes", status_code=status.HTTP_201_CREATED)
 async def create_note(engagement_key: str, request: NoteRecordRequest) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    record = intel_service.record_note(
-        engagement.id,
-        title=request.title,
-        body_markdown=request.body_markdown,
-        source_agent=request.source_agent,
-        tags=request.tags,
-        source_name=request.source_name,
-        provenance=request.provenance,
-        lead_status=request.lead_status,
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.record_note,
+            engagement.id,
+            title=request.title,
+            body_markdown=request.body_markdown,
+            source_agent=request.source_agent,
+            tags=request.tags,
+            source_name=request.source_name,
+            provenance=request.provenance,
+            lead_status=request.lead_status,
+        )
     )
     await _broadcast(engagement.key, "note", record)
     return record
@@ -433,9 +465,13 @@ async def patch_intel_record(
     so callers can disambiguate without parsing the URL back out of the
     request.
     """
-    engagement = get_engagement_or_404(engagement_key)
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     intel_type = _resolve_intel_plural(intel_type_plural)
-    record = intel_service.update_intel(engagement.id, intel_type, intel_id, request.payload)
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.update_intel, engagement.id, intel_type, intel_id, request.payload
+        )
+    )
     await _broadcast(engagement.key, intel_type.replace("-", "_"), record)
     return record
 
@@ -452,14 +488,17 @@ async def supersede_intel_record(
     Returns ``{"superseded": {...}, "current": {...}}`` so callers can render
     both rows side-by-side without a second fetch.
     """
-    engagement = get_engagement_or_404(engagement_key)
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     intel_type = _resolve_intel_plural(intel_type_plural)
-    result = intel_service.supersede_intel(
-        engagement.id,
-        intel_type,
-        intel_id,
-        request.payload,
-        rationale=request.rationale,
+    result = await anyio.to_thread.run_sync(
+        functools.partial(
+            intel_service.supersede_intel,
+            engagement.id,
+            intel_type,
+            intel_id,
+            request.payload,
+            rationale=request.rationale,
+        )
     )
     await _broadcast(engagement.key, intel_type.replace("-", "_"), result.get("current", {}))
     return result

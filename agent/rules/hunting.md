@@ -108,6 +108,26 @@ Switch endpoint, method, surface, or hypothesis when a lead is genuinely exhaust
 
 Being thorough and refusing to rush is what earns high confidence that no vulnerability was left undiscovered; a pass that finishes fast but shallow has not done the job. Do not trade coverage or validation depth for speed, and do not abandon a live lead because it is taking time. This is not license to grind genuinely dead surface — rules 5 and 15 govern that: rotate only when a surface is truly exhausted, then spend the reclaimed time going deep on live surface.
 
+## 16b. Exhaust confirmed leads first; break the same-response-class loop
+
+A *confirmed* lead — a host that answers but blocks, a gate that rejects (any
+auth/permission wall), a partial primitive that half-works — must be either
+driven to its attacker outcome or explicitly dispositioned ("dead because X")
+before you declare stuck or fall back to brute-force discovery. Confirmed-but-
+unexploited is not a stopping point; it is the highest-value work on the board.
+
+Anything proven on one confirmed surface gets tried on every other confirmed
+surface of the same shape before you rotate away — the sibling rule (rule 9)
+applied to leads, not just bugs.
+
+Circuit-breaker (a cue, not a counter): if your last several *varied* attempts
+on a lead all returned the same response CLASS — same status family, same
+error shape, no new state (rule 15's "no new information") — STOP issuing more
+of that shape and go to rule 17. Re-issuing the same response class is the dry
+signal. This does NOT apply to a probe you are repeating on purpose to detect
+state divergence (rule 4's push-harder signals) — that is new information, not
+a stall.
+
 ## 17. Stuck-state recovery
 
 When progress stalls, use this table to pick a concrete next action instead of grinding:
@@ -211,6 +231,14 @@ the engagement VDP, then use the appropriate Kali verb (`ffuf` for paths,
 `nuclei` for template-based CVE/misconfig, `httpx`/`whatweb`/`wafw00f` for
 fingerprinting).
 
+Before you brute-force a *format* — guessing parameter names, ID shapes, path
+segments, or value encodings — re-read the recon output you already captured,
+verbatim, for the exact shape. Self-describing surfaces hand you the format for
+free: machine-readable API descriptions, queryable type/field-definition endpoints,
+`.well-known/` resources, sitemaps, and routes embedded in served source. Mine
+and ingest those first; a guessed variant you could have read off a captured
+artifact is wasted traffic and lower-quality evidence.
+
 Both modes are valid. The failure modes are symmetrical: a fan-out tool
 fired when you have specific targets wastes traffic, may trip WAFs, and
 loses the surgical evidence quality triagers want; a hand-built `curl` loop
@@ -234,6 +262,56 @@ specific endpoint to capture the request/response that becomes the finding
 evidence. That follow-up `curl` is not "noisy curl that should have been a
 tool" — it is the surgical capture step the tool cannot perform. Keep
 doing them.
+
+## 23. A non-conclusive response is a LEAD, not a verdict
+
+A response only becomes a verdict when it actually answers the question. A status
+code on its own, a non-401 error on a protected op, and a transport failure are all
+**non-conclusive** — each is a lead to push, never a "tested / clean / patched / not-present"
+closure. Recording a closure from any of them buries a real finding behind a wrong disposition.
+
+**(a) A raw status code is not a disposition for a body-dependent class.** For any class
+where the proof lives in the response — file uploads, injection, IDOR reads, reflection,
+auth-skip, stored-XSS (including SVG payloads), the *serving* `Content-Type`/CSP — a `200`/`403`/`404` status
+alone decides nothing. Capture and inspect the response **body and headers**, not just the
+code: a `200` on an upload can be the bypass; a `403` can carry a leaked body; the serving
+`Content-Type` + CSP, not the upload status, decide whether an SVG executes. `curl -o /dev/null`
+(status/timing only) is for **pure liveness or timing probes** — never for a candidate whose
+verdict depends on what came back. A re-pass that only added body inspection is exactly how
+missed upload and stored-XSS findings get recovered.
+
+**(b) A 401/403 means the auth gate fired; any other outcome on a protected op did NOT.**
+A `401`/`403` from the gateway is the auth gate rejecting you — that, and only that, is an
+auth-rejection verdict. **Any other outcome** on a protected operation — a field/schema
+**validation error** (`400`/`422`), a `500`/parse error, a `missing required argument` /
+`did you mean` message, or silent acceptance — proves the request was parsed and reached the
+**resolver / business-logic / handler layer WITHOUT being auth-rejected**, i.e. the surface is
+**anonymously reachable up to validation**. That is a **LEAD**, not a closure: re-send with
+**valid-shape arguments** (correct types, all required fields, a syntactically valid body) to
+drive past validation to the *real* authorization decision. Treating a validation error as
+"tested / clean / not-vulnerable" closes a surface that was never actually auth-tested. (The
+narrow worked instances — a denylist `400`/`403` documented in the relevant request-forgery skill,
+and resolver-authz notes in `agent/skills/graphql-testing/SKILL.md` — are this rule applied to
+one class; this is the general form. Use `vigil assess list-skills` to find the matching skill.)
+
+**(c) An `http=000` / connection-failed / DNS-failure response is a RUNTIME ERROR, not a
+target verdict.** A failed connection tells you nothing about the target. On the kali path
+this now surfaces as `status=transport_error` (never a target verdict like `404`/`patched`/
+`gated`/`not-present`) and auto-retries once on a **host-pinned IP** (`--resolve <host>:443:<IP>`).
+Never record "404 / patched / gated / not-present" from a transport failure: re-run host-pinned
+(or via the host route — `--runtime host` / `VIGIL_RECON_RUNTIME=host`) and let a *real* HTTP
+response — or a clean, fast connection-refused — be the verdict. See
+`agent/references/runtime-guides/docker-desktop-network-hazards.md`.
+
+**Re-derive un-pushed signals from RAW evidence.** A prior agent's stopping point — a
+"tested / clean / disproven" note, a `notes/PHASE-3-REMAINING-WORK.md` line, an inherited
+disposition — is a **view to re-verify, not ground truth**. Before accepting any negative
+disposition on a protected op, re-open the raw `get-command-run` rows behind that signal
+(`vigil assess get-command-run <id>`, `vigil assess list-command-runs --tool-bin <bin> --show-matches`)
+and re-derive the disposition from the actual request/response bytes. A `403` recorded by a
+prior pass may have been a downstream validation error mistaken for an auth gate (b); a "patched"
+may have been an `http=000` transport error (c); a "clean" may have been a status-only probe that
+never read the body (a).
 
 ## A URL can be a whole application — go deep on app units
 

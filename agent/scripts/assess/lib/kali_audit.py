@@ -11,6 +11,7 @@ makes it onto the wire at all.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,67 @@ ALLOWED_PHASES: tuple[str, ...] = (
 
 
 _INTENT_MAX_LEN = 400
+
+
+def _enum_reject_message(
+    flag: str, bad_value: str, allowed: tuple[str, ...], *, hint: str = ""
+) -> str:
+    """One-line, scoped enum-rejection text: closest matches first, then the full list.
+
+    Leads with up to 3 edit-distance suggestions + the offending flag, so the
+    caller does not have to scan a 46-value table to find the value they meant.
+    The full allowed list is ALWAYS appended after the suggestion — the
+    suggestion is additive, never a replacement — so validation behavior is
+    unchanged and only the error TEXT becomes scoped.
+
+    Matching is case-insensitive: both the offending value and the allowed
+    values are upper-cased before ``difflib.get_close_matches`` so a lowercase
+    ``--probe-kind`` typo or an upper-cased ``--technique`` both surface a
+    suggestion, while the echoed suggestion and allowed list keep each enum's
+    own canonical casing.
+    """
+    from .schema_validation import suggest_close_match
+
+    bad_upper = (bad_value or "").upper()
+    canonical_by_upper = {value.upper(): value for value in allowed}
+    raw_suggestion = suggest_close_match(bad_upper, list(canonical_by_upper.keys()))
+    upper_matches: list[str]
+    if raw_suggestion:
+        upper_matches = [token.strip() for token in raw_suggestion.split(",")]
+    else:
+        # Difflib's 0.55 edit-distance cutoff misses the "spelled-out
+        # abbreviation" shape — e.g. a user typing the full word ``SQLINJECTION``
+        # for the abbreviated enum ``SQLI`` (ratio 0.50) — because the long
+        # operator word dilutes the ratio. Fall back to a conservative
+        # substring/prefix check: an allowed token of length >= 3 that is wholly
+        # contained in the bad value (or vice-versa) is a strong "you wrote the
+        # long form of what we abbreviate" signal. Still additive (the full list
+        # is always appended) and tight enough that unrelated tokens do not hit.
+        upper_matches = [
+            key
+            for key in canonical_by_upper
+            if len(key) >= 3 and bad_upper and (key in bad_upper or bad_upper in key)
+        ][:3]
+    head = f"{flag} '{bad_value}' is not valid."
+    if upper_matches:
+        # Map the upper-cased matches back to each enum's canonical spelling.
+        canonical_matches = ", ".join(
+            canonical_by_upper.get(token, token) for token in upper_matches
+        )
+        head += f" Did you mean: {canonical_matches}?"
+    if hint:
+        head += f" {hint}"
+    return head + f" (allowed: {', '.join(allowed)})"
+
+
+# Phases where a kali run resolving to the "operator" default is almost
+# certainly a misattributed specialist call. Operators legitimately run
+# mechanical probes in `recon`/`consume-test` (tier-pick smoke, runtime
+# health, credential validation), so those are deliberately EXCLUDED — the
+# WARN must stay non-noisy. `exploit`/`verify` are specialist-owned phases
+# operators essentially never run mechanical kali in, so a fall-through to
+# "operator" there is the misattribution signal CR-35 targets.
+_SPECIALIST_ONLY_PHASES: frozenset[str] = frozenset({"exploit", "verify"})
 
 
 def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
@@ -187,10 +249,11 @@ def _validate_inputs(
         raise AssessError("--technique is required")
     canonical_technique = normalize_technique(technique)
     if TECHNIQUE_ENUM and canonical_technique not in TECHNIQUE_ENUM:
-        raise AssessError(
-            f"--technique '{technique}' is not in TECHNIQUE_ENUM. "
-            f"Allowed values: {', '.join(TECHNIQUE_ENUM)}"
-        )
+        raise AssessError(_enum_reject_message(
+            "--technique", technique, TECHNIQUE_ENUM,
+            hint="--technique is the vuln-class tag for the AUDIT row, not the probe step; "
+                 "the per-step kind is --probe-kind. For initial mapping use RECON.",
+        ))
     if not intent:
         raise AssessError("--intent is required")
     if len(intent) > _INTENT_MAX_LEN:
@@ -199,16 +262,15 @@ def _validate_inputs(
         raise AssessError("--probe-kind is required")
     canonical_probe_kind = normalize_probe_kind(probe_kind)
     if PROBE_KIND_ENUM and canonical_probe_kind not in PROBE_KIND_ENUM:
-        raise AssessError(
-            f"--probe-kind '{probe_kind}' is not in PROBE_KIND_ENUM. "
-            f"Allowed values: {', '.join(PROBE_KIND_ENUM)}"
-        )
+        raise AssessError(_enum_reject_message(
+            "--probe-kind", probe_kind, PROBE_KIND_ENUM,
+            hint="--probe-kind is the step type (recon vs. crafted payload vs. proof); "
+                 "the vuln-class tag is --technique.",
+        ))
     if not phase:
         raise AssessError("--phase is required (no env-var fallback)")
     if phase not in ALLOWED_PHASES:
-        raise AssessError(
-            f"--phase '{phase}' is not allowed. Allowed values: {', '.join(ALLOWED_PHASES)}"
-        )
+        raise AssessError(_enum_reject_message("--phase", phase, ALLOWED_PHASES))
     if timeout is None or timeout <= 0:
         raise AssessError("--timeout (seconds) is required and must be > 0")
     if not agent_name:
@@ -220,21 +282,54 @@ def _validate_inputs(
         raise AssessError("internal error: agent_name unexpectedly empty")
 
 
-def _resolve_agent_name(explicit: str | None) -> str:
-    """Resolve --agent-name with env-var fallback and an "operator" default.
+def _resolve_agent_name(
+    explicit: str | None,
+    *,
+    agent_id: str | None = None,
+    phase: str | None = None,
+    warn: bool = False,
+) -> str:
+    """Resolve the kali audit attribution with a deterministic carrier.
 
-    Precedence: explicit flag > $AGENT_NAME > $VIGIL_AGENT_NAME > "operator".
-    The default lets the operator run mechanical pipeline checks (tier-pick
-    smoke, runtime health, credential validation) without remembering to set
-    --agent-name. Specialist dispatch wrappers are responsible for exporting
-    AGENT_NAME=<role>; if that wrapper context is absent, the caller should
-    pass --agent-name explicitly to avoid operator misattribution.
+    Precedence (CR-35):
+        explicit ``--agent-name`` > ``--agent-id`` > $AGENT_NAME >
+        $VIGIL_AGENT_NAME > "operator".
+
+    The ``--agent-id`` companion is a deterministic carrier for the common
+    case where a specialist knows its dispatch id (from its Runtime Identity
+    block) but not its role string: the dispatch id (e.g. ``va-7f3``) is
+    itself a non-"operator" attribution that ties the row to a specific
+    dispatch, so it is used verbatim WITHOUT a backend lookup (no hot-path
+    GET, no auto-inference of the in-progress dispatch — parallel lanes make
+    that ambiguous). Env is an unreliable carrier because Claude Code
+    subagent shells do not inherit AGENT_NAME and Bash env does not persist
+    across calls, so the explicit flags are the real fix.
+
+    The "operator" default lets the operator run mechanical pipeline checks
+    (tier-pick smoke, runtime health, credential validation) without
+    remembering to set an attribution.
+
+    WARN (only when ``warn=True``): a single concise stderr line nudging
+    ``--agent-name <role>`` fires ONLY when the run falls through to the
+    "operator" default while ``phase`` is a specialist-only phase
+    (``exploit``/``verify``). It deliberately does NOT fire in
+    ``recon``/``consume-test`` where operators legitimately run mechanical
+    probes, so routine operator calls stay silent.
     """
     if explicit:
         return explicit
+    if agent_id:
+        return agent_id
     env_value = os.environ.get("AGENT_NAME") or os.environ.get("VIGIL_AGENT_NAME") or ""
     if env_value:
         return env_value
+    if warn and (phase or "").strip().lower() in _SPECIALIST_ONLY_PHASES:
+        print(
+            f"warning: kali run in --phase '{phase}' resolved to agent_name='operator' "
+            "(no --agent-name/--agent-id and no AGENT_NAME env). If you are a specialist, "
+            "pass --agent-name <role> so coverage is attributed to you, not the operator.",
+            file=sys.stderr,
+        )
     return "operator"
 
 
