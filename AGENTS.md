@@ -398,6 +398,12 @@ The verification surface is **not one command**: 4 pytest scopes + a render-chec
 
 `vigil bench run --launch auto` spawns real Claude/Codex agents against generated targets: it **costs money and runs for hours** (reference: a full K=5 × 3 seed-0 run is ~5–6h / ~$50). Validate without a model first via the free paths — `--launch scripted` (reference solver, docker) and `vigil bench selftest`. Do not launch `--launch auto` without an explicit go-ahead.
 
+## Per-family wall-clock timeouts (D-5)
+
+The benchmark harness kills a stuck run at a **per-family** wall-clock budget, defined in the editable table `FAMILY_TIMEOUTS` in `src/vigil_cli/bench/models.py`. A measured family uses a budget derived from its observed runs (≈1.5–2× the observed max wall time under `~/.vigil-bench/runs/`); an unmeasured family (no table entry) falls back to the generous `GENEROUS_UNKNOWN_FAMILY_TIMEOUT` so it is never killed before its real duration is known.
+
+- [ ] **TODO — record a new family's wall time and set its timeout.** When a new benchmark family is run for the first time, record its observed wall-clock time and set/refresh its per-family timeout in the codebase (`FAMILY_TIMEOUTS` in `src/vigil_cli/bench/models.py`) if none exists yet. Until then it runs under the generous unmeasured-family fallback; do not leave a family on the fallback once you have real timing data.
+
 # Orchestrator backend
 
 The backend is Python 3.11+ and `uv`-first. Use `uv`, not ad hoc `pip` installs:

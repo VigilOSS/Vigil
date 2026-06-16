@@ -471,9 +471,45 @@ def regex_fragment_in_path(pattern: str, url_path_lower: str) -> bool:
 # the score (never the routing) via `max(match, floor)`. `api_spec` is a
 # label-only floor bucket (no `_BUCKETS` entry) — like `interestingext` is used
 # as the sourcemap cluster label.
+#
+# PRODUCER-VOCABULARY ALIGNMENT (do not let this silently drift). The keys here
+# MUST match the types the producer actually emits, NOT plan-invented names.
+# There are TWO producer typing paths and they emit DIFFERENT spellings of the
+# same semantic type:
+#
+#   * `assess.lib.classify.classify_type()` — the dominant categorizer that every
+#     ingest path (ingest-endpoints / ingest-spec / ingest-candidates / dispatch)
+#     runs. It emits the canonical, content-derived types: `api` (the dominant
+#     API type — 1,002 rows in acme-agency-example, 92 in xfinity), `api-spec` (HYPHEN — the
+#     OpenAPI/Swagger/api-docs type), `graphql`, `sourcemap`, `host_root`, etc.
+#   * `assess.lib.candidate_records.candidate_type()` — a SECONDARY signal-driven
+#     path that RELABELS `api` → `api_route` (underscore) and adds the
+#     surface-flavored types `auth_entry`, `portal_session`, `debug_config`,
+#     `event_feed`, `workflow`. These are the minority types (e.g. 41 `api_route`
+#     in acme-agency-example) layered on top of the `classify_type` output.
+#
+# Therefore:
+#   * `api` and `api_route` are the SAME semantic type (api_route is just
+#     candidate_type's relabel of api) → both floor to `gf:api` at weight 20.
+#   * `api-spec` (hyphen, real) and `api_spec` (underscore) are pure
+#     hyphen/underscore SPELLING DRIFT of one type → both floor to the label-only
+#     `gf:api_spec` at weight 40. The underscore form `api_spec` is also the
+#     taxonomy key in `vuln_taxonomy.GF_BUCKET_TO_CLASS`, so the FLOOR BUCKET
+#     LABEL stays underscore even though the producer emits a hyphen.
+#
+# Robustness: the lookup normalizes the row's `type` (lowercase + hyphen→
+# underscore) via `_normalize_floor_type()` BEFORE indexing this table, so a new
+# hyphen/underscore/case variant of an existing type can never silently lose its
+# floor again. The table itself is keyed on the NORMALIZED (underscore) form.
+# Keep every key below in normalized form (no hyphens, lowercase).
 _TYPE_FLOOR: dict[str, tuple[str, int]] = {
     "graphql": ("graphql", 45),
+    # api family: `api` (classify_type, dominant) + `api_route`
+    # (candidate_type's relabel) are one type → gf:api / 20.
+    "api": ("api", 20),
     "api_route": ("api", 20),
+    # api-spec family: `api-spec` (classify_type, hyphen) normalizes to
+    # `api_spec`; the floor bucket LABEL is the underscore taxonomy key.
     "api_spec": ("api_spec", 40),
     "auth_entry": ("auth", 40),
     "form": ("auth", 30),
@@ -482,6 +518,21 @@ _TYPE_FLOOR: dict[str, tuple[str, int]] = {
     "workflow": ("idor", 30),
     "event_feed": ("ssrf", 25),
 }
+
+
+def _normalize_floor_type(case_type: str) -> str:
+    """Normalize a producer `type` for the `_TYPE_FLOOR` lookup ONLY.
+
+    Lowercases and unifies hyphen/underscore so producer spelling drift (the
+    real `api-spec` hyphen vs the `api_spec` underscore floor key, or any future
+    case/separator variant) cannot silently drop a row's floor. This is applied
+    EXCLUSIVELY at the floor-lookup site — the inert/sourcemap/host_root
+    early-returns above compare against their own (already-lowercased) literals
+    and are deliberately NOT routed through this, so the floor stage's normalize
+    cannot perturb that precedence. `case_type` is expected pre-lowercased by the
+    caller; the `.lower()` here is a belt-and-suspenders guard for direct callers.
+    """
+    return case_type.lower().replace("-", "_")
 
 
 # Canonical UUID and long-hex (Mongo ObjectId / SHA prefix) segment shapes,
@@ -710,8 +761,11 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
     # Producer-`type` floor (§2.2, override #4). Applied AFTER the
     # inert/sourcemap/host_root early-returns (those still win above). The floor
     # NEVER lowers a bucket-driven score (`score = max(match, floor)`); when a
-    # bucket matched it only raises the number, not the routing.
-    floor = _TYPE_FLOOR.get(case_type)
+    # bucket matched it only raises the number, not the routing. The lookup key
+    # is normalized (lowercase + hyphen→underscore) so the producer's real
+    # `api-spec` (hyphen) and the `api`/`api_route` spellings all resolve to
+    # their intended floor — see `_TYPE_FLOOR`'s producer-vocabulary note.
+    floor = _TYPE_FLOOR.get(_normalize_floor_type(case_type))
     floor_weight = floor[1] if floor else 0
 
     if matches:

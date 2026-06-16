@@ -45,12 +45,18 @@ def _classify_buckets():
 def _classify(
     url_path: str,
     *,
-    case_type: str = "api",
+    case_type: str = "unknown",
     query_params: dict | None = None,
     body_params: dict | None = None,
 ):
     """Thin wrapper around ``classify_from_fields`` matching the
-    ``test_work_buffer.py`` call convention (JSON-encoded param strings)."""
+    ``test_work_buffer.py`` call convention (JSON-encoded param strings).
+
+    Default ``case_type`` is the floor-less, non-inert ``unknown`` so these
+    bucket-precision tests isolate bucket matching from the producer-``type``
+    floor (the real ``api`` type floors to gf:api/20, which would make every
+    bucket-less negative guard floor instead of falling through to path:*; the
+    floor is covered by ``test_classify_type_floor.py``)."""
     cb = _classify_buckets()
     return cb.classify_from_fields(
         case_type=case_type,

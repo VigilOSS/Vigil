@@ -260,3 +260,94 @@ def test_floor_only_branch_has_no_terminal_reason() -> None:
     fetch-by-priority does not exclude them."""
     a = _floor_assignment("workflow", "/wizard/step/two")
     assert a["terminal_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# Behaviour 5: producer-vocabulary alignment (regression for the floor-key
+# mismatch). The floor table MUST key on the types the producer actually emits.
+# `assess.lib.classify.classify_type()` (the dominant categorizer) emits `api`
+# (the dominant API type) and `api-spec` (HYPHEN); `candidate_type()` relabels
+# `api` -> `api_route`. The original floor table only had `api_route` and an
+# underscore `api_spec`, so the 1,000+ producer-`api` rows and the real
+# hyphenated `api-spec` rows silently got NO floor. These tests pin the fix.
+# ---------------------------------------------------------------------------
+
+
+def test_producer_api_type_floors_to_gf_api_weight_20() -> None:
+    """REGRESSION: the producer's dominant `api` type (NOT `api_route`) floors to
+    gf:api at weight 20 when no bucket fires. `/api/...` is deliberately not an
+    `api` bucket fragment, so a params-less `/api/testplans` row matches no
+    bucket and MUST be rescued by the type floor — previously it scored 0."""
+    a = _floor_assignment("api", "/api/testplans")
+    assert a["priority_score"] == 20
+    assert a["cluster_key"] == "gf:api"
+    assert a["priority_reason"] == "gf:api"
+    assert a["matched_buckets"] == ["api"]
+    assert a["terminal_reason"] is None
+
+
+def test_producer_api_and_api_route_resolve_to_same_floor() -> None:
+    """`api` (classify_type) and `api_route` (candidate_type's relabel) are the
+    SAME semantic type and MUST produce an identical floor assignment."""
+    a_api = _floor_assignment("api", "/api/testplans")
+    a_route = _floor_assignment("api_route", "/api/testplans")
+    assert a_api == a_route
+
+
+def test_producer_api_spec_hyphen_floors_like_api_spec_underscore() -> None:
+    """REGRESSION: the producer emits `api-spec` (HYPHEN) but the floor key was
+    `api_spec` (underscore). The hyphen→underscore normalization must make the
+    real `api-spec` type floor to the label-only gf:api_spec at weight 40,
+    exactly as the underscore spelling does."""
+    a_hyphen = _floor_assignment("api-spec", "/api/swagger.json")
+    a_underscore = _floor_assignment("api_spec", "/api/swagger.json")
+    assert a_hyphen["priority_score"] == 40
+    assert a_hyphen["cluster_key"] == "gf:api_spec"
+    assert a_hyphen["priority_reason"] == "gf:api_spec"
+    assert a_hyphen["matched_buckets"] == ["api_spec"]
+    assert a_hyphen == a_underscore
+
+
+def test_floor_type_normalization_is_case_and_separator_insensitive() -> None:
+    """The floor lookup normalizes case + hyphen/underscore, so any spelling
+    variant of a floored type resolves to the same floor. Pins the durable
+    mechanism (not just the two specific api spellings)."""
+    cb = _classify_buckets()
+    # Direct unit check of the normalizer helper.
+    assert cb._normalize_floor_type("API-Spec") == "api_spec"
+    assert cb._normalize_floor_type("api_route") == "api_route"
+    assert cb._normalize_floor_type("GraphQL") == "graphql"
+    # End-to-end: an upper/mixed-case + hyphen variant still floors.
+    a = _floor_assignment("API-SPEC", "/openapi.json")
+    assert a["cluster_key"] == "gf:api_spec"
+    assert a["priority_score"] == 40
+
+
+def test_existing_floor_types_unaffected_by_normalization() -> None:
+    """Negative guard: the normalization + new api keys must NOT change any of
+    the other floor types. graphql/auth_entry/form/portal_session/debug_config/
+    workflow/event_feed all keep their exact (bucket, weight)."""
+    cases = {
+        "graphql": ("gf:graphql", 45),
+        "auth_entry": ("gf:auth", 40),
+        "form": ("gf:auth", 30),
+        "portal_session": ("gf:auth", 35),
+        "debug_config": ("gf:debug_logic", 35),
+        "workflow": ("gf:idor", 30),
+        "event_feed": ("gf:ssrf", 25),
+    }
+    for case_type, (expected_cluster, expected_score) in cases.items():
+        a = _floor_assignment(case_type, "/some/opaque/route")
+        assert a["cluster_key"] == expected_cluster, case_type
+        assert a["priority_score"] == expected_score, case_type
+        assert a["terminal_reason"] is None, case_type
+
+
+def test_producer_api_floor_does_not_lower_a_real_bucket_match() -> None:
+    """The §2.2 max(floor,match) invariant holds for the new `api` key too: a
+    real graphql bucket (45) on an `api`-typed graphql route keeps score 45 and
+    cluster gf:graphql — the api floor (20) never lowers it or hijacks routing."""
+    a = _floor_assignment("api", "/api/graphql", query_params={"query": "{x}"})
+    assert a["priority_score"] == 45
+    assert a["cluster_key"] == "gf:graphql"
+    assert "gf:graphql" in a["priority_reason"]

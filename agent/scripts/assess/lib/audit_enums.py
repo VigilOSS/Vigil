@@ -57,6 +57,7 @@ TECHNIQUE_ENUM: tuple[str, ...] = (
     "INFO-DISCLOSURE",
     "RECON",
     "DISCOVERY",
+    "PARAM-DISCOVERY",
     "FUZZ",
     "OSINT",
     "CVE-VALIDATION",

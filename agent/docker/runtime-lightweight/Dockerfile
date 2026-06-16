@@ -2,7 +2,10 @@ FROM kalilinux/kali-rolling@sha256:dddc31e0f4bc57b4b91e9027762544506bf91c7cdd7ff
 ARG INSTALL_VERSION_STAMP=2026.05.05-84a231c
 LABEL vigil.install-versions="${INSTALL_VERSION_STAMP}"
 
-ARG APT_PACKAGES="nmap whatweb bind9-dnsutils iputils-ping whois ffuf gobuster wfuzz dirb sqlmap hydra john hashcat nuclei subfinder curl wget jq ripgrep unzip python3 python3-dev python3-pip python3-aiohttp netcat-openbsd openssl chromium chromium-driver sublist3r testssl.sh proxychains4 openssh-client socat tcpdump tmux ruby-full golang-go dtach libxml2-utils sudo tini rlwrap wordlists seclists nikto strace"
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG APT_PACKAGES="nmap whatweb bind9-dnsutils iputils-ping whois ffuf gobuster wfuzz dirb sqlmap hydra john hashcat nuclei subfinder curl wget jq ripgrep unzip python3 python3-dev python3-pip python3-venv python3-aiohttp netcat-openbsd openssl chromium chromium-driver sublist3r testssl.sh proxychains4 openssh-client socat tcpdump tmux ruby-full golang-go dtach libxml2-utils sudo tini rlwrap wordlists seclists nikto strace build-essential git"
+ARG CURL_RETRY_FLAGS="--retry 5 --retry-delay 2 --retry-all-errors"
 ARG PIP_VERSION=26.0.1
 ARG EVIL_WINRM_VERSION=3.9
 ARG RESPONDER_REF=fb29fe25db9135a9487c961783254b56a20f58ac
@@ -23,9 +26,11 @@ ARG DALFOX_VERSION=v2.12.0
 ARG PUREDNS_VERSION=v2.1.1
 ARG FEROXBUSTER_VERSION=2.13.1
 ARG TRUFFLEHOG_VERSION=3.94.3
+ARG JSLUICE_VERSION=v0.0.0-20240110145140-0ddfab153e06
+ARG ARJUN_VERSION=2.2.7
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PATH="/opt/Responder:${PATH}"
+ENV PATH="/opt/Responder:/opt/offsec-venv/bin:/opt/pwncat-venv/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends $APT_PACKAGES \
     && apt-get clean \
@@ -36,19 +41,21 @@ RUN git init /opt/Responder && \
     git -C /opt/Responder remote add origin https://github.com/lgandx/Responder.git && \
     git -C /opt/Responder fetch --depth 1 origin "${RESPONDER_REF}" && \
     git -C /opt/Responder checkout --detach FETCH_HEAD
-RUN python3 -m pip install --no-cache-dir --break-system-packages \
-    "impacket==${IMPACKET_VERSION}" \
-    "mitm6==${MITM6_VERSION}" \
-    "dpapick3==${DPAPICK3_VERSION}" \
-    "aioquic==${AIOQUIC_VERSION}" \
-    "flask==${FLASK_VERSION}"
+RUN python3 -m venv /opt/offsec-venv && \
+    /opt/offsec-venv/bin/pip install --no-cache-dir "pip==${PIP_VERSION}" && \
+    /opt/offsec-venv/bin/pip install --no-cache-dir \
+      "impacket==${IMPACKET_VERSION}" \
+      "mitm6==${MITM6_VERSION}" \
+      "dpapick3==${DPAPICK3_VERSION}" \
+      "aioquic==${AIOQUIC_VERSION}" \
+      "flask==${FLASK_VERSION}"
 RUN arch="$(dpkg --print-architecture)" && \
     case "$arch" in \
       amd64) release_arch=amd64 ;; \
       arm64) release_arch=arm64 ;; \
       *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
     esac && \
-    curl -fsSL "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${release_arch}.gz" \
+    curl -fsSL $CURL_RETRY_FLAGS "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${release_arch}.gz" \
     | gunzip > /usr/local/bin/chisel && chmod +x /usr/local/bin/chisel
 RUN arch="$(dpkg --print-architecture)" && \
     case "$arch" in \
@@ -57,7 +64,7 @@ RUN arch="$(dpkg --print-architecture)" && \
       *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
     esac && \
     mkdir -p /tmp/ligolo && \
-    curl -fsSL "https://github.com/nicocha30/ligolo-ng/releases/download/v${LIGOLO_VERSION}/ligolo-ng_proxy_${LIGOLO_VERSION}_linux_${release_arch}.tar.gz" \
+    curl -fsSL $CURL_RETRY_FLAGS "https://github.com/nicocha30/ligolo-ng/releases/download/v${LIGOLO_VERSION}/ligolo-ng_proxy_${LIGOLO_VERSION}_linux_${release_arch}.tar.gz" \
       | tar xzf - -C /tmp/ligolo && \
     find /tmp/ligolo -type f -perm /111 -exec mv {} /usr/local/bin/ligolo-proxy \; && \
     chmod +x /usr/local/bin/ligolo-proxy && \
@@ -67,6 +74,10 @@ RUN python3 -m venv /opt/pwncat-venv && \
     /opt/pwncat-venv/bin/pip install --no-cache-dir "pwncat-vl==${PWNCAT_VL_VERSION}" && \
     ln -sf /opt/pwncat-venv/bin/pwncat-vl /usr/local/bin/pwncat && \
     ln -sf /opt/pwncat-venv/bin/pwncat-vl /usr/local/bin/pwncat-vl
+RUN python3 -m venv /opt/arjun-venv && \
+    /opt/arjun-venv/bin/pip install --no-cache-dir "pip==${PIP_VERSION}" && \
+    /opt/arjun-venv/bin/pip install --no-cache-dir "arjun==${ARJUN_VERSION}" && \
+    ln -sf /opt/arjun-venv/bin/arjun /usr/local/bin/arjun
 RUN GOPATH=/root/go go install "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION}" && \
     cp /root/go/bin/nuclei /usr/local/bin/nuclei && \
     GO111MODULE=on GOPATH=/root/go go install "github.com/projectdiscovery/katana/cmd/katana@${KATANA_VERSION}" && \
@@ -81,6 +92,8 @@ RUN GOPATH=/root/go go install "github.com/projectdiscovery/nuclei/v3/cmd/nuclei
     cp /root/go/bin/dalfox /usr/local/bin/dalfox && \
     GOPATH=/root/go go install "github.com/d3mondev/puredns/v2@${PUREDNS_VERSION}" && \
     cp /root/go/bin/puredns /usr/local/bin/puredns && \
+    GOPATH=/root/go go install "github.com/BishopFox/jsluice/cmd/jsluice@${JSLUICE_VERSION}" && \
+    cp /root/go/bin/jsluice /usr/local/bin/jsluice && \
     rm -rf /root/go
 RUN arch="$(dpkg --print-architecture)" && \
     case "$arch" in \
@@ -89,8 +102,8 @@ RUN arch="$(dpkg --print-architecture)" && \
       *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
     esac && \
     mkdir -p /tmp/ferox && \
-    curl -fsSL "https://github.com/epi052/feroxbuster/releases/download/v${FEROXBUSTER_VERSION}/${ferox_arch}-linux-feroxbuster.zip" \
-    -o /tmp/ferox/ferox.zip && unzip /tmp/ferox/ferox.zip -d /tmp/ferox && \
+    curl -fsSL $CURL_RETRY_FLAGS "https://github.com/epi052/feroxbuster/releases/download/v${FEROXBUSTER_VERSION}/${ferox_arch}-linux-feroxbuster.zip" \
+    -o /tmp/ferox/ferox.zip && unzip -q /tmp/ferox/ferox.zip -d /tmp/ferox && \
     mv /tmp/ferox/feroxbuster /usr/local/bin/feroxbuster && chmod +x /usr/local/bin/feroxbuster && rm -rf /tmp/ferox
 RUN arch="$(dpkg --print-architecture)" && \
     case "$arch" in \
@@ -98,7 +111,7 @@ RUN arch="$(dpkg --print-architecture)" && \
       arm64) th_arch=arm64 ;; \
       *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
     esac && \
-    curl -fsSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_${th_arch}.tar.gz" \
+    curl -fsSL $CURL_RETRY_FLAGS "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_${th_arch}.tar.gz" \
       | tar -xzf - -C /usr/local/bin trufflehog && \
     chmod +x /usr/local/bin/trufflehog
 
@@ -107,6 +120,7 @@ RUN ln -sf /usr/share/wordlists /wordlists && \
 
 # Lightweight image is dev-only; massdns/cero/alterx/asnmap/bbot/shuffledns omitted to keep iteration fast.
 RUN mkdir -p /data
+RUN printf '%s\n' 'export PATH="/opt/Responder:/opt/offsec-venv/bin:/opt/pwncat-venv/bin:$PATH"' > /etc/profile.d/vigil-path.sh
 
 WORKDIR /engagement
 ENTRYPOINT ["/usr/bin/tini","--"]

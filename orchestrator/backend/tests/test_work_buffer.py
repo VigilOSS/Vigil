@@ -121,7 +121,12 @@ def _insert_work_item(
     url_path: str,
     url: str | None = None,
     method: str = "GET",
-    case_type: str = "api",
+    # Floor-less, non-inert default so rows that match no bucket fall through to
+    # the path:* fallback (these tests isolate bucket matching). The producer's
+    # real `api` type DOES carry a gf:api/20 floor (see classify_buckets
+    # `_TYPE_FLOOR`); tests that specifically need that floor pass case_type
+    # explicitly. The floor itself is covered by test_classify_type_floor.py.
+    case_type: str = "unknown",
     status: str = "pending",
     query_params: dict | None = None,
     body_params: dict | None = None,
@@ -894,7 +899,14 @@ def test_proxy_insert_uses_shared_inline_classification(tmp_path: Path) -> None:
     collector, entry = _make_collector_with_engagement(module, engagements_root)
 
     case_type = collector._classify_type("GET", "/oauth/callback", "", {})
-    assert case_type == "unknown"
+    # Updated 2026-06 (typer lexical app-route rescue): `/oauth/callback` now
+    # types `auth_entry` via the segment-anchored `oauth` auth route, where it
+    # previously fell through to `unknown`. This is the intended recall
+    # improvement (an OAuth callback is a real auth surface), not a regression.
+    # The test's purpose — that the proxy's `_classify_type` + `_insert_case`
+    # use the SHARED inline classification pipeline — is unchanged and is still
+    # proven by the inserted row landing on the `gf:trust_surface` cluster below.
+    assert case_type == "auth_entry"
     collector._insert_case(
         entry,
         queue_key="variant:1:unknown",
@@ -934,7 +946,12 @@ def test_proxy_insert_uses_shared_inline_classification(tmp_path: Path) -> None:
     finally:
         conn.close()
 
-    assert row == ("unknown", "pending", 35, "gf:trust_surface", "gf:trust_surface")
+    # `/oauth/callback` matches the `trust_surface` bucket (weight 35) via its
+    # `/oauth`+`/callback` path fragments, so the cluster/reason stay
+    # `gf:trust_surface`. The new `auth_entry` producer type carries a
+    # `_TYPE_FLOOR` of (auth, 40), which raises the score via max(35, 40)=40
+    # without changing the routing. (Was: type `unknown`, score 35.)
+    assert row == ("auth_entry", "pending", 40, "gf:trust_surface", "gf:trust_surface")
 
 
 def test_proxy_insert_reuses_open_db_connection(tmp_path: Path, monkeypatch) -> None:
