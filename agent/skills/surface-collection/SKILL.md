@@ -255,6 +255,36 @@ vigil assess record-surface ssrf-candidate "<endpoint>" surface-collector-url-sh
 
 Then dispatch `vulnerability-analyst` with `--skills ssrf-testing` against the highest-yield candidates — typically admin/settings/enterprise pages, integration list endpoints, and any connection-test handler. See `agent/skills/ssrf-testing/SKILL.md` "SaaS Integration Connector Pattern" for the full testing recipe.
 
+### Step 6.6: Hidden-parameter discovery via Arjun (collect→consume bridge)
+
+The triage above keys on parameters the corpus already shows. Arjun discovers parameters an
+endpoint silently accepts but never advertised — inputs no crawl or archive surfaced. Run it on
+the param-poor dynamic endpoints with a **bounded first pass** (focused wordlist + `--stable --rate-limit`), escalating for depth.
+
+```bash
+# Gate the target list (live + dynamic + template-deduped + param-poor).
+# This engagement has no liveness ledger? add --include-unknown.
+vigil assess arjun-select "$DB" -o "$DIR/scans/arjun/targets.txt" --param-poor-only --max-per-host 5
+
+# Bounded first pass — a focused -w list + --stable --rate-limit keep the run gentle; the default
+# list expands to ~100+ chunks/host, enough to overload a rate-sensitive or production target. Keep
+# batches small (--max-per-host above) so one endpoint that returns an unexpected status can't abort
+# the whole -i list (an Arjun 2.2.7 quirk).
+vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt -m GET \
+  -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 \
+  --technique PARAM-DISCOVERY --intent "bounded hidden-param discovery over gated buffer" \
+  --probe-kind fingerprint --phase collect --timeout 1800
+
+# Fold discovered params back in — they re-route the endpoint to its real bucket:
+vigil assess ingest-arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
+```
+
+For more depth on a high-value endpoint, drop `-w` (full default list) and/or add `--passive`
+(it archive-augments the wordlist — note it still actively scans, so it adds traffic, not
+politeness; see `agent/skills/parameter-fuzzing/SKILL.md` and `references/tools/recon/arjun.md`).
+Enriched rows carry `selected_by=arjun` and a `triage_rationale` (which names `kali sqlmap` for
+DB-class params), so Phase 3 dispatch picks them up like any other high-priority cluster.
+
 ### Step 7: Surface and Finding Recording
 
 Before returning to the operator:

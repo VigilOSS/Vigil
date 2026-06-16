@@ -294,3 +294,99 @@ def test_run_requires_one_of_u_or_i(captured_cmd):
         kali_arjun.run(_arjun_ns(target_url="", import_file=""))
     with pytest.raises(AssessError):
         kali_arjun.run(_arjun_ns(target_url="http://t/", import_file="/tmp/x.txt"))
+
+
+# --------------------------------------------------------------------------
+# ingest-arjun — a missing JSON is a clean no-op (arjun writes none on 0 finds)
+# --------------------------------------------------------------------------
+def test_ingest_arjun_missing_json_is_noop(tmp_path, capsys):
+    from assess.commands import ingest_arjun
+
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # exists; the no-op returns before db_init/load_config
+    ns = argparse.Namespace(
+        db_path=str(db),
+        json_file=str(tmp_path / "absent.json"),
+        source="arjun",
+        default_method="GET",
+        engagement_dir=str(tmp_path),
+    )
+    ingest_arjun.run(ns)  # must NOT raise SystemExit
+    out = json.loads(capsys.readouterr().out)
+    assert out["records"] == 0
+    assert out["enriched"] == 0
+    assert "note" in out
+
+
+def test_run_writes_empty_json_artifact_when_arjun_finds_nothing(
+    tmp_path, monkeypatch, captured_cmd
+):
+    # arjun (faked via captured_cmd) writes no -oJ file; the verb must guarantee
+    # an empty {} so the artifact always exists for ingest-arjun.
+    class _Cfg:
+        engagement_dir = str(tmp_path)
+
+    monkeypatch.setattr("assess.lib.config.load_config", lambda *a, **k: _Cfg())
+    ns = _arjun_ns(target_url="http://host.example/path")
+    ns.engagement_dir = str(tmp_path)
+    kali_arjun.run(ns)
+    found = list((tmp_path / "scans" / "arjun" / "host.example").glob("*.json"))
+    assert found, "verb did not create the guaranteed JSON artifact"
+    assert found[0].read_text() == "{}"
+
+
+# --------------------------------------------------------------------------
+# ingest-arjun row matching + non-destructive enrichment (regression bugs found
+# on the live cms.gov run: host-blind matching + curated-priority downgrade)
+# --------------------------------------------------------------------------
+def _mem_db():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE work_items (id INTEGER PRIMARY KEY, method TEXT, url TEXT, url_path TEXT, "
+        "type TEXT, query_params TEXT, body_params TEXT, path_params TEXT, priority_score INTEGER, "
+        "priority_reason TEXT, cluster_key TEXT, terminal_reason TEXT, signals TEXT, selected_by TEXT, "
+        "triage_rationale TEXT, params_key_sig TEXT, status TEXT)"
+    )
+    return conn
+
+
+def test_match_existing_row_distinguishes_same_path_different_host():
+    from assess.commands import ingest_arjun
+
+    conn = _mem_db()
+    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (1,'GET','https://aps.example/u/apps','/u/apps')")
+    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (2,'GET','https://elmo.example/u/apps','/u/apps')")
+    aps = ingest_arjun._match_existing_row(conn, method="GET", url_path="/u/apps", url="https://aps.example/u/apps")
+    elmo = ingest_arjun._match_existing_row(conn, method="GET", url_path="/u/apps", url="https://elmo.example/u/apps")
+    assert aps["id"] == 1
+    assert elmo["id"] == 2
+
+
+def test_enrich_existing_never_downgrades_curated_priority():
+    from assess.commands import ingest_arjun
+
+    conn = _mem_db()
+    conn.execute(
+        "INSERT INTO work_items (id, method, url, url_path, type, query_params, body_params, path_params, "
+        "priority_score, cluster_key, priority_reason, selected_by, signals, status) "
+        "VALUES (1,'GET','https://h/apps','/apps','unknown','{}','{}','{}',95,'curated:high','curated','curated-src','[\"curated-sig\"]','pending')"
+    )
+    row = dict(conn.execute("SELECT * FROM work_items WHERE id=1").fetchone())
+    record = {"endpoint": "https://h/apps", "method": "GET", "params": ["automation"], "header_params": []}
+    ingest_arjun._enrich_existing(conn, row, record)
+    after = dict(conn.execute("SELECT * FROM work_items WHERE id=1").fetchone())
+    assert after["priority_score"] == 95            # not downgraded to gf:api (20)
+    assert after["cluster_key"] == "curated:high"   # curated cluster preserved
+    assert after["selected_by"] == "curated-src"    # provenance preserved
+    assert "automation" in after["query_params"]    # discovered param still added
+    sigs = json.loads(after["signals"])
+    assert "curated-sig" in sigs and "arjun:automation" in sigs  # signals merged, not replaced
+
+
+def test_merge_signal_lists_dedups_and_preserves():
+    assert arjun_enrich.merge_signal_lists('["a"]', ["a", "b"]) == ["a", "b"]
+    assert arjun_enrich.merge_signal_lists(None, ["x"]) == ["x"]
+    assert arjun_enrich.merge_signal_lists("garbage{", ["x"]) == ["x"]
