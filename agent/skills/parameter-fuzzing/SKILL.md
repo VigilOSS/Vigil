@@ -97,8 +97,9 @@ vigil assess arjun-select "$DB" -o "$DIR/scans/arjun/targets.txt" --param-poor-o
 
 # (b) BOUNDED first pass — a focused -w list + --stable --rate-limit keep the run gentle; Arjun's
 #     default list expands to ~100+ chunks/host, enough to overload a rate-sensitive or production
-#     target. Auth via --headers. Keep the batch small (--max-per-host above) so one endpoint that
-#     returns an unexpected status can't abort the whole -i list (an Arjun 2.2.7 quirk).
+#     target. Auth via --headers. Keep the batch small (--max-per-host above) for politeness and a
+#     small blast radius. (The runtime patches Arjun so one endpoint returning 4xx/5xx is skipped,
+#     not fatal — a 429 no longer ends the run — but a tight batch is still the polite default.)
 vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt -m GET \
   -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 \
   --headers $'Authorization: Bearer TOKEN' \

@@ -146,9 +146,11 @@ def register(subparsers) -> None:
         nargs="?",
         const="",
         help=(
-            "Collect param names PASSIVELY from wayback / commoncrawl / otx (no/low "
-            "target traffic). Optional source list (e.g. --passive 'wayback,otx'); "
-            "bare --passive uses all sources."
+            "Augment the wordlist with parameter names harvested from passive sources "
+            "(wayback / commoncrawl / otx), then scan actively. Bare --passive harvests "
+            "for the -u target's OWN domain (arjun derives the host from the URL, so it "
+            "needs -u). Pass an explicit host (--passive example.com) to harvest a "
+            "different domain's parameter names."
         ),
     )
 
@@ -269,6 +271,19 @@ def run(args) -> None:
     if args.target_url and args.import_file:
         print("arjun: pass only one of -u <url> / -i <file>", file=sys.stderr)
         raise AssessError("-u and -i are mutually exclusive")
+
+    # Bare `--passive` (and the explicit `--passive -`) tells arjun to harvest
+    # parameter names for the -u target's OWN domain — arjun derives that host
+    # from the URL. With -i there is no single URL to derive from, so arjun would
+    # harvest for an empty host and find nothing. An explicit host value
+    # (`--passive example.com`) is fine with either input.
+    if args.import_file and args.passive in ("", "-"):
+        print(
+            "arjun: bare --passive harvests for the -u target's domain and needs -u; "
+            "with -i pass an explicit host (--passive <domain>) or drop --passive.",
+            file=sys.stderr,
+        )
+        raise AssessError("--passive (bare) requires -u, not -i")
 
     cmd: list[str] = ["arjun"]
 

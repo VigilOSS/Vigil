@@ -75,6 +75,15 @@ def select_targets(
         url = (row.get("url") or "").strip()
         if not url:
             continue
+        # Arjun speaks HTTP(S) to an absolute URL only; a ws://, mailto:, or
+        # relative entry that slipped into the buffer is unusable and would just
+        # make arjun print "not a valid URL" and skip — keep it out of the list.
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            continue
+        if (parsed.scheme or "").lower() not in ("http", "https") or not parsed.hostname:
+            continue
         case_type = (row.get("type") or "").lower()
         if case_type in inert:
             continue

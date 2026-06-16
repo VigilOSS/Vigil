@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ "${PRELOADED_TOOLS:-0}" == "1" ]]; then
-  exit 0
-fi
-
 log() {
   printf '==> %s\n' "$*" >&2
 }
@@ -28,6 +24,36 @@ copy_go_binary() {
   local binary="$1"
   install -m 0755 "/root/go/bin/${binary}" "/usr/local/bin/${binary}"
   command -v "${binary}" >/dev/null
+}
+
+require_command() {
+  local binary="$1"
+  if ! command -v "${binary}" >/dev/null; then
+    echo "PRELOADED_TOOLS=1 but required tool is missing: ${binary}" >&2
+    return 1
+  fi
+}
+
+validate_go_tools() {
+  local binary
+  for binary in \
+    nuclei katana httpx dnsx gau dalfox puredns shuffledns alterx asnmap cero gf jsluice
+  do
+    require_command "${binary}"
+  done
+}
+
+validate_gf_patterns() {
+  shopt -s nullglob
+  local patterns=(/root/.gf/*.json)
+  if [[ "${#patterns[@]}" -eq 0 ]]; then
+    echo "PRELOADED_TOOLS=1 but no gf pattern JSON files exist in /root/.gf" >&2
+    return 1
+  fi
+}
+
+validate_feroxbuster() {
+  require_command feroxbuster
 }
 
 go_install() {
@@ -109,8 +135,26 @@ EOF
 }
 
 case "${1:-}" in
-  go-tools) install_go_tools ;;
-  gf-patterns) install_gf_patterns ;;
-  feroxbuster) install_feroxbuster ;;
+  go-tools)
+    if [[ "${PRELOADED_TOOLS:-0}" == "1" ]]; then
+      validate_go_tools
+    else
+      install_go_tools
+    fi
+    ;;
+  gf-patterns)
+    if [[ "${PRELOADED_TOOLS:-0}" == "1" ]]; then
+      validate_gf_patterns
+    else
+      install_gf_patterns
+    fi
+    ;;
+  feroxbuster)
+    if [[ "${PRELOADED_TOOLS:-0}" == "1" ]]; then
+      validate_feroxbuster
+    else
+      install_feroxbuster
+    fi
+    ;;
   *) usage; exit 2 ;;
 esac

@@ -14,7 +14,12 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from . import docker
-from .client_rosters import ensure_claude_agents_link, ensure_claude_settings, ensure_codex_agents_link
+from .client_rosters import (
+    ensure_claude_agents_link,
+    ensure_claude_settings,
+    ensure_codex_agents_link,
+    ensure_opencode_agents_link,
+)
 from .paths import (
     DEFAULT_ORCHESTRATOR_BASE_URL,
     engagements_root,
@@ -393,6 +398,13 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         _write_codex_config(agent_root, eng_dir)
     if client_kind in {"claude", "both"}:
         _write_claude_config(agent_root, eng_dir)
+    # OpenCode parity: the standard plugin (scope-check + activity-log) and the
+    # specialist roster install for every kind that also gets start_opencode.sh
+    # (codex/claude/both), so an `--client opencode` run — including `vigil bench`,
+    # whose engagement creation routes through here — has the standard logging
+    # plugin in place. The bench then layers its guard-only plugin beside it.
+    if client_kind in {"codex", "claude", "both"}:
+        _write_opencode_config(agent_root, eng_dir)
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
     _emit_bootstrap_scope_summary(scope)
     _verify_backend_install_root(install_root, eng_dir)
@@ -1272,6 +1284,69 @@ def _write_claude_config(agent_root: Path, eng_dir: Path) -> None:
     claude_dir = eng_dir / ".claude"
     ensure_claude_settings(agent_root, claude_dir)
     ensure_claude_agents_link(agent_root, claude_dir)
+
+
+def _write_opencode_config(agent_root: Path, eng_dir: Path) -> None:
+    """Install the standard OpenCode plugin + specialist roster into an engagement.
+
+    Mirrors ``_write_codex_config`` / ``_write_claude_config``: OpenCode reads
+    neither Claude's ``settings.json`` nor Codex's ``config.toml``, so the standard
+    scope-check + activity-log hooks ship as an OpenCode *plugin* copied from the
+    agent-root template ``agent/.opencode/plugin/standard-hooks.js``. The plugin is
+    written to BOTH ``.opencode/plugin/`` and ``.opencode/plugins/`` so it loads
+    regardless of which directory name the installed OpenCode honours (the binary
+    documents both; the singular ``plugin/`` is predominant). The specialist roster
+    is exposed via symlink, exactly like Codex/Claude.
+
+    This is the source of the standard PostToolUse logging for OpenCode — on the
+    bench the guard-only ``bench-guard.js`` plugin is layered beside this file, so
+    blocking (bench) and logging (standard) are both present, exactly like the
+    Claude/Codex layering.
+    """
+    src = agent_root / ".opencode" / "plugin" / "standard-hooks.js"
+    if src.exists():
+        body = src.read_text(encoding="utf-8")
+        for dirname in ("plugin", "plugins"):
+            plugin_dir = eng_dir / ".opencode" / dirname
+            plugin_dir.mkdir(parents=True, exist_ok=True)
+            (plugin_dir / "standard-hooks.js").write_text(body, encoding="utf-8")
+    ensure_opencode_agents_link(agent_root, eng_dir / ".opencode")
+
+
+# DeepSeek thinking levels → opencode per-model options. OpenCode deep-merges this
+# project config over the global provider definition (baseURL/apiKey), so only the
+# per-model options are written. The operator model deepseek-v4-pro takes the
+# requested level; deepseek-v4-flash is always pinned thinking-off (bounded
+# recon/parsing — reasoning adds latency without a quality gain).
+_DEEPSEEK_THINKING_OPTIONS: dict[str, dict] = {
+    "off":  {"thinking": {"type": "disabled"}},
+    "high": {"thinking": {"type": "enabled"}, "reasoningEffort": "high"},
+    "max":  {"thinking": {"type": "enabled"}, "reasoningEffort": "max"},
+}
+
+
+def write_opencode_reasoning_config(eng_dir: Path, thinking: str) -> None:
+    """Seed ``<engagement>/opencode.json`` with the DeepSeek thinking options.
+
+    ``thinking`` is one of ``off`` | ``high`` | ``max``; an empty/unknown value
+    writes nothing (the client/global default applies). deepseek-v4-pro takes the
+    requested level; deepseek-v4-flash is pinned thinking-off.
+    """
+    pro_options = _DEEPSEEK_THINKING_OPTIONS.get((thinking or "").strip().lower())
+    if pro_options is None:
+        return
+    config = {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "deepseek": {
+                "models": {
+                    "deepseek-v4-pro": {"options": pro_options},
+                    "deepseek-v4-flash": {"options": dict(_DEEPSEEK_THINKING_OPTIONS["off"])},
+                }
+            }
+        },
+    }
+    (eng_dir / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
 def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_permissions: bool) -> None:

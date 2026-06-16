@@ -176,21 +176,18 @@ RUN set -eux; \
       rm -rf /tmp/seclists; \
     fi
 
-# Target-class wordlists not in SecLists by default. These are the lists most
-# commonly hand-rolled during enterprise SaaS engagements (Salesforce, Visualforce,
-# SwaggerHub spec discovery, OpenAPI route patterns). Pinning them in the image
-# means specialists reach the right list with -w /usr/share/wordlists/<vendor>/...
-# instead of falling back to 60-100 entry hand-seeded lists. Source-of-truth URLs
-# are stable Assetnote CDN paths.
+# OpenAPI route wordlist not in SecLists by default. This Assetnote path is part
+# of their documented kiterunner data set; keep it optional so CDN drift cannot
+# break runtime builds.
 RUN set -eux; \
     if [ "$PRELOADED_TOOLS" != "1" ]; then \
-      mkdir -p /usr/share/wordlists/assetnote /usr/share/wordlists/openapi && \
+      mkdir -p /usr/share/wordlists/openapi && \
       download_optional_wordlist() { \
         url="$1"; \
         dest="$2"; \
         label="$3"; \
         tmp="${dest}.tmp"; \
-        if curl -fsSL --retry 3 --retry-delay 1 "$url" -o "$tmp"; then \
+        if curl -fsSL $CURL_RETRY_FLAGS "$url" -o "$tmp"; then \
           mv "$tmp" "$dest"; \
         else \
           rm -f "$tmp" "$dest"; \
@@ -198,17 +195,9 @@ RUN set -eux; \
         fi; \
       }; \
       download_optional_wordlist \
-        "https://wordlists-cdn.assetnote.io/data/technologies/salesforce.txt" \
-        "/usr/share/wordlists/assetnote/salesforce.txt" \
-        "assetnote salesforce.txt"; \
-      download_optional_wordlist \
-        "https://wordlists-cdn.assetnote.io/data/technologies/visualforce.txt" \
-        "/usr/share/wordlists/assetnote/visualforce.txt" \
-        "assetnote visualforce.txt"; \
-      download_optional_wordlist \
-        "https://wordlists-cdn.assetnote.io/data/manual/swagger-paths.txt" \
-        "/usr/share/wordlists/openapi/swagger-paths.txt" \
-        "swagger-paths.txt"; \
+        "https://wordlists-cdn.assetnote.io/data/kiterunner/swagger-wordlist.txt" \
+        "/usr/share/wordlists/openapi/swagger-wordlist.txt" \
+        "assetnote swagger-wordlist.txt"; \
     fi
 
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
@@ -240,6 +229,19 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "bbot==${BBOT_VERSION}" && \
       PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "arjun==${ARJUN_VERSION}"; \
     fi
+
+# Harden Arjun: its per-URL loop in main() catches only KeyboardInterrupt, so one
+# endpoint returning 4xx/5xx (which trips an upstream `request.status_code` typo on
+# a dict) or any per-URL error aborts an ENTIRE `-i` batch. The patch fixes the typo
+# and wraps the per-URL call so one bad endpoint is skipped, not fatal. Idempotent;
+# runs unconditionally (also covers a PRELOADED_TOOLS base) and is a no-op if absent.
+COPY agent/docker/patches/arjun-batch-resilience.py /tmp/arjun-batch-resilience.py
+RUN ARJUN_PY=/opt/pipx/venvs/arjun/bin/python; \
+    if [ -x "$ARJUN_PY" ]; then \
+      "$ARJUN_PY" /tmp/arjun-batch-resilience.py \
+        "$("$ARJUN_PY" -c 'import importlib.util as u; print(u.find_spec("arjun.__main__").origin)')"; \
+    fi; \
+    rm -f /tmp/arjun-batch-resilience.py
 
 RUN mkdir -p /opt/mcp-tools /data
 COPY docker/callback_listener.py /opt/mcp-tools/callback_listener.py

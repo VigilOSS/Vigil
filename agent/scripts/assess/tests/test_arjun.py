@@ -194,6 +194,20 @@ def test_select_targets_param_poor_only():
     assert arjun_select.select_targets(rows, param_poor_only=True) == ["http://h/poor"]
 
 
+def test_select_targets_skips_non_http_and_hostless():
+    rows = [
+        {"url": "ws://h/socket", "url_path": "/socket", "type": "form", "status": "pending",
+         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        {"url": "mailto:a@b.com", "url_path": "", "type": "form", "status": "pending",
+         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        {"url": "/relative/only", "url_path": "/relative/only", "type": "form", "status": "pending",
+         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        {"url": "https://h/ok", "url_path": "/ok", "type": "form", "status": "pending",
+         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+    ]
+    assert arjun_select.select_targets(rows) == ["https://h/ok"]
+
+
 def test_select_targets_max_per_host():
     rows = [
         {"url": f"http://h/p{i}", "url_path": f"/p{i}", "type": "form", "status": "pending",
@@ -270,10 +284,31 @@ def test_run_json_method_and_headers_and_passive(captured_cmd):
     assert "--passive" in cmd  # bare passive, no source arg follows
 
 
-def test_run_passive_with_sources(captured_cmd):
-    kali_arjun.run(_arjun_ns(passive="wayback,otx"))
+def test_run_passive_with_explicit_host(captured_cmd):
+    # arjun's --passive value is a HOST to harvest params for (not a source list);
+    # passing it through verbatim lets the operator harvest a different domain.
+    kali_arjun.run(_arjun_ns(passive="example.com"))
     cmd = captured_cmd["cmd"]
-    assert cmd[cmd.index("--passive") + 1] == "wayback,otx"
+    assert cmd[cmd.index("--passive") + 1] == "example.com"
+
+
+def test_run_bare_passive_with_import_file_is_rejected(captured_cmd):
+    # Bare --passive harvests for the -u target's own domain (arjun derives the
+    # host from the URL); with -i there is no single URL, so it must be rejected.
+    from assess.lib.client import AssessError
+
+    with pytest.raises(AssessError):
+        kali_arjun.run(_arjun_ns(target_url="", import_file="/tmp/targets.txt", passive=""))
+    with pytest.raises(AssessError):  # explicit `--passive -` is the same derive-from-url mode
+        kali_arjun.run(_arjun_ns(target_url="", import_file="/tmp/targets.txt", passive="-"))
+
+
+def test_run_passive_explicit_host_allowed_with_import_file(captured_cmd):
+    # An explicit harvest host IS valid with -i (harvest that domain, scan the list).
+    kali_arjun.run(_arjun_ns(target_url="", import_file="/tmp/targets.txt", passive="example.com"))
+    cmd = captured_cmd["cmd"]
+    assert cmd[cmd.index("--passive") + 1] == "example.com"
+    assert "-i" in cmd
 
 
 def test_run_burp_sentinels(captured_cmd):
@@ -365,6 +400,26 @@ def test_match_existing_row_distinguishes_same_path_different_host():
     elmo = ingest_arjun._match_existing_row(conn, method="GET", url_path="/u/apps", url="https://elmo.example/u/apps")
     assert aps["id"] == 1
     assert elmo["id"] == 2
+
+
+def test_match_existing_row_does_not_match_substring_or_subdomain_host():
+    from assess.commands import ingest_arjun
+
+    conn = _mem_db()
+    # Rows on a subdomain and on a substring-containing host, sharing the path.
+    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (1,'GET','https://app.cms.example/apps','/apps')")
+    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (2,'GET','https://evilcms.example/apps','/apps')")
+    # An endpoint on the APEX host must match NEITHER (different origins) — the old
+    # `LIKE '%cms.example%'` fallback would have wrongly matched both.
+    apex = ingest_arjun._match_existing_row(
+        conn, method="GET", url_path="/apps", url="https://cms.example/apps"
+    )
+    assert apex is None
+    # The exact subdomain endpoint still matches its own row.
+    sub = ingest_arjun._match_existing_row(
+        conn, method="GET", url_path="/apps", url="https://app.cms.example/apps"
+    )
+    assert sub["id"] == 1
 
 
 def test_enrich_existing_never_downgrades_curated_priority():

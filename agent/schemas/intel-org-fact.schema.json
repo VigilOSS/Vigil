@@ -18,17 +18,20 @@
     "fact_value": {
       "type": "string",
       "maxLength": 4096,
-      "default": ""
+      "default": "",
+      "description": "Value of the fact (e.g., '2008', '$4.2B', 'Alphabet Inc.')."
     },
     "source_name": {
       "type": "string",
       "maxLength": 128,
-      "default": ""
+      "default": "",
+      "description": "Tool or agent that produced this record (e.g., 'osint-analyst', 'crunchbase-scraper')."
     },
     "notes": {
       "type": "string",
       "maxLength": 4096,
-      "default": ""
+      "default": "",
+      "description": "Analyst commentary, caveats, or follow-up questions about this fact."
     },
     "provenance": {
       "type": "object",
@@ -36,16 +39,20 @@
       "default": {},
       "properties": {
         "agent_name": {
-          "type": "string"
+          "type": "string",
+          "description": "Agent that retrieved or inferred this data."
         },
         "artifact_ref": {
-          "type": "string"
+          "type": "string",
+          "description": "File or URL reference to the raw artifact (e.g., 'file:artifacts/crunchbase.html:42')."
         },
         "captured_at": {
-          "type": "string"
+          "type": "string",
+          "description": "ISO8601 timestamp when the data was captured."
         },
         "evidence_quote": {
-          "type": "string"
+          "type": "string",
+          "description": "Verbatim excerpt from the source that supports this record."
         }
       }
     }

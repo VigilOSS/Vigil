@@ -7,44 +7,51 @@
       "maxLength": 256,
       "type": "string",
       "default": null,
-      "title": "Chain Key"
+      "title": "Chain Key",
+      "description": "Stable kebab-case identifier for this chain (e.g. 'anon-rce-via-sqli-lfi'). Omit to auto-generate."
     },
     "title": {
       "maxLength": 512,
       "minLength": 1,
       "title": "Title",
-      "type": "string"
+      "type": "string",
+      "description": "One-line chain summary: initial access + pivots + terminal impact (e.g. 'Anon SQLi → LFI → RCE on app server')."
     },
     "status": {
       "default": "active",
       "maxLength": 32,
       "minLength": 1,
       "title": "Status",
-      "type": "string"
+      "type": "string",
+      "description": "Chain lifecycle state (e.g. 'active', 'exploited', 'reported'). Mirrors finding workflow_status vocabulary."
     },
     "severity": {
       "default": "info",
       "maxLength": 32,
       "minLength": 1,
       "title": "Severity",
-      "type": "string"
+      "type": "string",
+      "description": "Combined chain severity — set to the highest severity of constituent findings unless the chain itself escalates impact."
     },
     "narrative": {
       "default": "",
       "maxLength": 20000,
       "title": "Narrative",
-      "type": "string"
+      "type": "string",
+      "description": "Step-by-step attack story: initial foothold, each pivot, and terminal impact. Reference linked finding slugs inline."
     },
     "evidence_ref": {
       "default": "",
       "maxLength": 1024,
       "title": "Evidence Ref",
-      "type": "string"
+      "type": "string",
+      "description": "Path or ID of the artifact documenting the chain (e.g. 'scans/chain-rce-proof.txt'). Leave empty if evidence is in linked findings."
     },
     "provenance": {
       "additionalProperties": true,
       "title": "Provenance",
-      "type": "object"
+      "type": "object",
+      "description": "Agent that assembled this chain (e.g. {\"agent_name\": \"vulnerability-analyst\"})."
     },
     "links": {
       "items": {
@@ -54,36 +61,42 @@
             "maxLength": 64,
             "minLength": 1,
             "title": "Relation",
-            "type": "string"
+            "type": "string",
+            "description": "How this entity participates in the chain (e.g. 'step', 'prerequisite', 'outcome', 'credential-used')."
           },
           "entity_kind": {
             "maxLength": 64,
             "minLength": 1,
             "title": "Entity Kind",
-            "type": "string"
+            "type": "string",
+            "description": "Type of the linked entity (e.g. 'finding', 'credential', 'access_record')."
           },
           "entity_id": {
             "type": "integer",
             "default": null,
             "title": "Entity Id",
-            "minimum": 1
+            "minimum": 1,
+            "description": "Database ID of the linked entity. Provide entity_id OR entity_ref, not both."
           },
           "entity_ref": {
             "default": "",
             "maxLength": 1024,
             "title": "Entity Ref",
-            "type": "string"
+            "type": "string",
+            "description": "Slug or string reference when entity_id is unavailable (e.g. 'sqli-search-q')."
           },
           "notes": {
             "default": "",
             "maxLength": 4096,
             "title": "Notes",
-            "type": "string"
+            "type": "string",
+            "description": "How this step connects to the next or why this entity is part of the chain."
           },
           "provenance": {
             "additionalProperties": true,
             "title": "Provenance",
-            "type": "object"
+            "type": "object",
+            "description": "Agent that created this link (e.g. {\"agent_name\": \"vulnerability-analyst\"})."
           }
         },
         "required": [

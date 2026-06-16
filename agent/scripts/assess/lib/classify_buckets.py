@@ -962,23 +962,6 @@ def _suppress_auth_on_sso_route(
     return [(name, weight) for name, weight in matches if name != "auth"]
 
 
-def first_two_path_segments(url_path: str) -> str:
-    """Return `/seg1/seg2` (or fewer) for the path-fallback cluster key.
-
-    Two segments is the community default for quick-look triage: deeper
-    slicing fragments the cluster set to the point of uselessness (each item
-    ends up in its own cluster), while a single segment collapses every
-    `/api/...` into one bucket.
-    """
-    if not url_path:
-        return "/"
-    stripped = url_path.strip("/")
-    if not stripped:
-        return "/"
-    segments = stripped.split("/")[:2]
-    return "/" + "/".join(segments)
-
-
 _CLUSTER_PLACEHOLDERS = frozenset({"{id}", "{n}", "{uuid}", "{token}", "{year}"})
 
 
@@ -1014,7 +997,7 @@ def normalize_path_for_cluster(url_path: str) -> str:
     one cluster (e.g. `/explore-mvps/2024/M0004` and `/explore-mvps/2023/G0058`
     both cluster as `path:/explore-mvps/{year}`). After substitution, runs of
     identical adjacent placeholders are collapsed, then the first two segments
-    (the `first_two_path_segments` rule) are joined.
+    are joined.
     """
     if not url_path:
         return "/"
