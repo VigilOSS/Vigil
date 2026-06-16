@@ -35,7 +35,7 @@ def _classify_buckets():
 
 def _classify(
     *,
-    case_type: str = "api",
+    case_type: str = "unknown",
     url_path: str,
     query_params: dict | None = None,
     body_params: dict | None = None,
@@ -43,6 +43,13 @@ def _classify(
     """Thin wrapper over `classify_from_fields` matching test_work_buffer.py's
     JSON-string parameter convention. Params are dicts here; we JSON-encode them
     exactly as `_insert_work_item` does before they reach `collect_keys`.
+
+    The default `case_type` is `unknown` — a non-inert type with NO entry in
+    `_TYPE_FLOOR` — so these bucket-precision tests isolate bucket matching from
+    the producer-`type` floor. (The producer's real `api` type DOES carry a
+    floor to gf:api/20; using it as the placeholder here would make every
+    bucket-less negative guard floor instead of falling through to path:*. The
+    floor itself is covered by `test_classify_type_floor.py`.)
     """
     cb = _classify_buckets()
     return cb.classify_from_fields(

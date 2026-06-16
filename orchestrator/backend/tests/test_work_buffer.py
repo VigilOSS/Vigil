@@ -121,7 +121,12 @@ def _insert_work_item(
     url_path: str,
     url: str | None = None,
     method: str = "GET",
-    case_type: str = "api",
+    # Floor-less, non-inert default so rows that match no bucket fall through to
+    # the path:* fallback (these tests isolate bucket matching). The producer's
+    # real `api` type DOES carry a gf:api/20 floor (see classify_buckets
+    # `_TYPE_FLOOR`); tests that specifically need that floor pass case_type
+    # explicitly. The floor itself is covered by test_classify_type_floor.py.
+    case_type: str = "unknown",
     status: str = "pending",
     query_params: dict | None = None,
     body_params: dict | None = None,

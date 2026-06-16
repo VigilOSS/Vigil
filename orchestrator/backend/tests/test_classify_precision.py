@@ -40,9 +40,14 @@ def _classify_buckets():
     return cb
 
 
-def _classify(url_path: str, *, case_type: str = "api", query_params=None, body_params=None):
+def _classify(url_path: str, *, case_type: str = "unknown", query_params=None, body_params=None):
     """Thin wrapper over `classify_from_fields` matching the call convention in
-    `test_work_buffer.py` (keyword-only, JSON-encoded param strings)."""
+    `test_work_buffer.py` (keyword-only, JSON-encoded param strings).
+
+    Default `case_type` is the floor-less, non-inert `unknown` so these
+    precision tests isolate the path-object-ref / bucket logic from the
+    producer-`type` floor (the real `api` type floors to gf:api/20; the floor is
+    covered by `test_classify_type_floor.py`)."""
     cb = _classify_buckets()
     return cb.classify_from_fields(
         case_type=case_type,
