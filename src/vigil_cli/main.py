@@ -248,7 +248,7 @@ def main(argv: list[str] | None = None) -> None:
     start_p = engagement_sub.add_parser("start")
     start_p.add_argument("key", nargs="?")
     start_p.add_argument("--select", action="store_true")
-    start_p.add_argument("--client", choices=["codex", "claude"], required=True)
+    start_p.add_argument("--client", choices=["codex", "claude", "opencode"], required=True)
     start_p.add_argument("client_args", nargs="*")
     open_p = engagement_sub.add_parser("open")
     open_p.add_argument("key", nargs="?")

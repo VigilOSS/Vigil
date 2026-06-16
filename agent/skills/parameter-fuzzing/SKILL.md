@@ -86,11 +86,38 @@ ffuf -u "https://TARGET/endpoint?W1=W2" -w params.txt:W1 -w values.txt:W2 \
   -mode clusterbomb -fs BASELINE_SIZE
 ```
 
-### 8. Arjun
+### 8. Arjun (typed verb + work-buffer enrichment)
+
+Prefer Arjun through the audited verb so the run is recorded AND its findings flow back into the work buffer (where the classifier re-routes the now-parameterized endpoint). Passive-first, then escalate.
+
 ```bash
-arjun -u "https://TARGET/endpoint" -m GET    # or POST, JSON
-arjun -u "https://TARGET/endpoint" -w custom_params.txt
+# (a) GATE the target list from the buffer (live + dynamic + template-deduped + param-poor).
+#     On an engagement with no liveness ledger, add --include-unknown.
+vigil assess arjun-select "$DB" -o "$DIR/scans/arjun/targets.txt" --param-poor-only --max-per-host 5
+
+# (b) BOUNDED first pass — a focused -w list + --stable --rate-limit keep the run gentle; Arjun's
+#     default list expands to ~100+ chunks/host, enough to overload a rate-sensitive or production
+#     target. Auth via --headers. Keep the batch small (--max-per-host above) so one endpoint that
+#     returns an unexpected status can't abort the whole -i list (an Arjun 2.2.7 quirk).
+vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt -m GET \
+  -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 \
+  --headers $'Authorization: Bearer TOKEN' \
+  --technique PARAM-DISCOVERY --intent "bounded hidden-param discovery" \
+  --probe-kind fingerprint --phase consume-test --timeout 1800
+
+# (c) ESCALATE for depth on one high-value endpoint: drop -w (full ~25k list) and/or add --passive.
+#     --passive folds wayback/otx param names into the wordlist and then scans actively, so it adds
+#     coverage and request volume; keep --stable --rate-limit set and give it a single -u target.
+vigil assess kali arjun -u "https://TARGET/high-value" --passive --stable --rate-limit 10 \
+  --technique PARAM-DISCOVERY --intent "deep archive-augmented hidden-param discovery" \
+  --probe-kind fingerprint --phase consume-test --timeout 1800
+
+# (d) FOLD findings back in — discovered params re-route the endpoint (file=->gf:lfi, url=->gf:ssrf,
+#     id=->gf:sqli/idor) and stamp a triage_rationale that names `kali sqlmap` for DB-class params:
+vigil assess ingest-arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
 ```
+
+Use raw `arjun -u …` only for a one-off manual check; the verb path is what feeds Phase 3. Full reference: `references/tools/recon/arjun.md`.
 
 ### 9. ParamSpider (Historical Parameter Mining)
 ```bash

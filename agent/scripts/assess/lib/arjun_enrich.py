@@ -217,3 +217,25 @@ def merge_params_into_field(existing_json: str | None, new_params: list[str]) ->
         if token and token not in base:
             base[token] = ""
     return json.dumps(base, sort_keys=True)
+
+
+def merge_signal_lists(existing_json: str | None, new_signals: list[str]) -> list[str]:
+    """Merge ``new_signals`` into an existing JSON signals list, dedup, order-preserving.
+
+    Enrichment must ADD its discovered-param signals without erasing whatever the
+    row already carried (e.g. a curated source's signals). Malformed/empty input
+    is treated as no prior signals.
+    """
+    base: list[str] = []
+    if existing_json:
+        try:
+            decoded = json.loads(existing_json)
+            if isinstance(decoded, list):
+                base = [str(x) for x in decoded]
+        except (TypeError, ValueError):
+            base = []
+    out = list(base)
+    for sig in new_signals:
+        if sig not in out:
+            out.append(sig)
+    return out

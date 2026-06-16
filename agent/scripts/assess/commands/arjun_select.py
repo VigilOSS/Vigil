@@ -178,6 +178,17 @@ def run(args: argparse.Namespace) -> None:
         param_poor_only=bool(args.param_poor_only),
     )
 
+    # Common foot-gun: an engagement whose liveness ledger was never populated
+    # (no `ingest-httpx`) has empty live_status on every row, so the default
+    # live-only gate selects nothing. Surface the fix instead of failing silent.
+    if not targets and rows and not args.include_unknown:
+        print(
+            "arjun-select: 0 targets — work_items appear to have no live_status. "
+            "Run `vigil assess ingest-httpx` to populate liveness, or pass "
+            "--include-unknown to include NULL/unknown rows.",
+            file=sys.stderr,
+        )
+
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(targets) + ("\n" if targets else ""), encoding="utf-8")
