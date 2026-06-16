@@ -378,6 +378,43 @@ def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkey
         assert connection.execute("SELECT value FROM marker").fetchone() == ("custom",)
 
 
+def test_engagement_create_prunes_old_backend_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from vigil_cli import engagements as engagements_module
+
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    data_dir = install_root / "orchestrator" / "backend" / "data"
+    _write_marker_database(data_dir / "orchestrator.sqlite3", "live")
+    old_snapshots = []
+    for idx in range(4):
+        path = data_dir / f"orchestrator.sqlite3.bak.20260425T01000{idx}Z.11111"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("old\n", encoding="utf-8")
+        old_snapshots.append(path)
+    _isolate_orchestrator_url(monkeypatch)
+    monkeypatch.setenv("VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES", "3")
+    monkeypatch.setattr(engagements_module, "_emit_post_create_footer", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(engagements_module, "_verify_backend_install_root", lambda *_args, **_kwargs: None)
+
+    engagements_module.create_engagement(
+        engagements_module.CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://app.example.com",
+        )
+    )
+
+    remaining = sorted(data_dir.glob("orchestrator.sqlite3.bak.*"))
+    assert len(remaining) == 3
+    assert not old_snapshots[0].exists()
+    assert not old_snapshots[1].exists()
+    assert old_snapshots[2].exists()
+    assert old_snapshots[3].exists()
+    created = next(path for path in remaining if path not in old_snapshots)
+    with sqlite3.connect(created) as connection:
+        assert connection.execute("SELECT value FROM marker").fetchone() == ("live",)
+
+
 class _TTYStdin:
     """Stdin stand-in whose isatty() is True, for wizard-path tests."""
 
