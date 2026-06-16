@@ -622,7 +622,7 @@ The orchestrator UI is served from the backend at `http://127.0.0.1:18000` once 
 The backend stores canonical engagement state in a single SQLite file and keeps rotated snapshots next to it:
 
 - **Live DB**: `<install-root>/orchestrator/backend/data/orchestrator.sqlite3`
-- **Scheduled backups**: `<install-root>/orchestrator/backend/data/backups/orchestrator.<UTC-timestamp>.sqlite3` — a WAL-coherent snapshot every 15 minutes, last 60 copies retained (~15 hours of continuous coverage). Written by the backend process itself; independent of the per-engagement snapshot that `vigil engagement create` takes before creating an engagement.
+- **Scheduled backups**: `<install-root>/orchestrator/backend/data/backups/orchestrator.<UTC-timestamp>.sqlite3` — a WAL-coherent snapshot every 15 minutes, last 12 copies retained by default (~3 hours of continuous coverage; override with `VIGIL_BACKUP_MAX_COPIES`). Written by the backend process itself; independent of the per-engagement snapshot that `vigil engagement create` takes before creating an engagement.
 
 Override the data location with env vars (first match wins):
 

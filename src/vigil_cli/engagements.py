@@ -24,6 +24,8 @@ from .paths import (
 
 ENGAGEMENT_TYPES = {"web", "code", "both", "android", "blue"}
 ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
+ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV = "VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES"
+DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -1153,8 +1155,40 @@ def _snapshot_orchestrator_database(install_root: Path) -> None:
     try:
         with sqlite3.connect(str(db_path)) as source, sqlite3.connect(str(backup)) as dest:
             source.backup(dest)
+        _prune_orchestrator_database_snapshots(
+            data_dir,
+            max_copies=_engagement_db_snapshot_max_copies(),
+        )
     except sqlite3.Error as exc:
         print(f"[vigil] warning: orchestrator DB snapshot failed for {db_path}: {exc}", file=sys.stderr)
+    except OSError as exc:
+        print(f"[vigil] warning: orchestrator DB snapshot pruning failed for {data_dir}: {exc}", file=sys.stderr)
+
+
+def _engagement_db_snapshot_max_copies() -> int:
+    raw = os.environ.get(ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV, "").strip()
+    if not raw:
+        return DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV} must be an integer >= 1") from exc
+    if value < 1:
+        raise SystemExit(f"{ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV} must be an integer >= 1")
+    return value
+
+
+def _prune_orchestrator_database_snapshots(data_dir: Path, *, max_copies: int) -> list[Path]:
+    if max_copies < 1:
+        raise ValueError("max_copies must be >= 1")
+    snapshots = sorted(data_dir.glob("orchestrator.sqlite3.bak.*"), key=lambda path: path.name)
+    if len(snapshots) <= max_copies:
+        return []
+    removed: list[Path] = []
+    for path in snapshots[: len(snapshots) - max_copies]:
+        path.unlink()
+        removed.append(path)
+    return removed
 
 
 def _install_client_kind(agent_root: Path) -> str:
