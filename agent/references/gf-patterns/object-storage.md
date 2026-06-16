@@ -90,7 +90,7 @@ Domino/Lotus Notes:
 in the third targeted sweep, dominated by Domino/Lotus `.nsf`, `$FILE`, `docscat`, and
 document-library paths. The Domino-specific discriminators (`$file`, `.nsf`, `files.nsf`,
 `docscat`, `didc`) were added specifically to capture this corpus signal.
-See `docs/plans/classify-surface-rd-2026-06-15.md` §4b and the long-tail sections.
+See `docs/plans/research/classify-surface-2026-06/README.md` §4b (object-storage long-tail validation).
 
 ## Sources
 

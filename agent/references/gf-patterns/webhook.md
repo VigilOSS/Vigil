@@ -86,7 +86,7 @@ Param-key matches (co-fire with path):
 
 1 actionable `webhook` template (6 rows) in the first cms-gov deep sweep and 1 template (6 rows)
 in the third targeted sweep. Low volume confirmed the P3 classification in the implementation
-roadmap. See `docs/plans/classify-surface-rd-2026-06-15.md` §4b.
+roadmap. See `docs/plans/research/classify-surface-2026-06/README.md` §4b.
 
 ## Sources
 

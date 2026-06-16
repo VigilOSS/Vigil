@@ -207,6 +207,7 @@ TECHNIQUE_TO_CLASS: dict[str, str | None] = {
     "INFO-DISCLOSURE": "info-disclosure",
     "RECON": None,
     "DISCOVERY": None,
+    "PARAM-DISCOVERY": None,
     "FUZZ": None,
     "OSINT": None,
     "CVE-VALIDATION": None,

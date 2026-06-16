@@ -75,7 +75,7 @@ Type-floor only (no path fragment fires, `api_route` type rescues the row):
 actionable `api` templates (937 rows) in the first deep sweep. Zendesk (modern SaaS, third
 validation corpus): 1,023 of 1,540 proxy-captured rows are `api`-typed, spanning
 `/api/v2/users/me.json`, `/api/v2/account/settings.json`, `/billing/api/subscriptions`, and
-onboarding workflow endpoints. See `docs/plans/classify-surface-rd-2026-06-15.md` §4b.
+onboarding workflow endpoints. See `docs/plans/research/classify-surface-2026-06/README.md` §4b.
 
 ## Sources
 

@@ -274,6 +274,7 @@ KALI_TARGET_VERBS: tuple[str, ...] = (
     "nikto",
     "katana",
     "gau",
+    "arjun",
     "whatweb",
     "cero",
     "alterx",
@@ -1294,6 +1295,15 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     "sqlmap": (
         "sqlmap's own `--technique` is exposed as `--sql-technique` so it doesn't collide with the audit `--technique` flag.",
     ),
+    "arjun": (
+        "Hidden-parameter discovery. Pass -u <url> for one endpoint or -i <file> for a gated list (build the list with `vigil assess arjun-select` — never aim Arjun at a raw URL dump or inert assets).",
+        "JSON output (-oJ) is ALWAYS written under scans/arjun/<target>/<hash>.json even if you also pass -oT/-oB, so the run is captured for `vigil assess ingest-arjun`, the host-side step that folds discovered params into the work buffer and re-routes the now-parameterized endpoint (url=->gf:ssrf, file=->gf:lfi, id=->gf:idor/sqli).",
+        "-m selects the method: GET (default) | POST | XML | JSON. JSON/XML matter for modern APIs — GET-discovered params land in query_params, POST/XML/JSON in body_params on ingest.",
+        "--passive collects param names from wayback / commoncrawl / otx with no/low target traffic — use it first on rate-sensitive or content-heavy targets, or when active discovery is out of budget.",
+        "--headers is auth-aware discovery: pass an authenticated session (Authorization / Cookie) to surface params only visible behind auth. Header-only params are recorded as a signal on ingest (no classifier field maps to a header).",
+        "Default wordlist is Arjun's own db/large.txt (most thorough). Override with -w for a faster list. Politeness knobs: --stable, -d (delay), -T (timeout), -t (threads), --rate-limit.",
+        "SQLMAP doctrine: when an enriched row routes to gf:sqli (or carries an id=/numeric param on a DB-ish route), ingest-arjun names `vigil assess kali sqlmap` in the triage_rationale as the confirmation/extraction step. Arjun + the classifier ISOLATE the injectable param; sqlmap (operator-invoked, never auto-fired) confirms and does the high-volume blind/time-based extraction. See references/tools/recon/arjun.md.",
+    ),
     "cero": (
         "TLS-handshake SAN scraper — connects to TCP/TLS on the listed ports and harvests certificate Subject Alternative Names. Complements CT-log enumeration when targets issue private certs.",
         "Feed CIDR ranges (after asnmap CIDR mapping) for non-DNS subdomain discovery. Pass --only-cidrs when the input is exclusively CIDR.",
@@ -1353,6 +1363,17 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     "sqlmap": (
         {
             "command": "vigil assess kali sqlmap -u 'https://target/?id=1' --batch --sql-technique BEUSTQ --level 3 --risk 2 --technique SQLI --intent 'verify SQLi on id parameter' --probe-kind payload --phase consume-test --timeout 1800",
+        },
+    ),
+    "arjun": (
+        {
+            "command": "vigil assess kali arjun -u https://target/api/item --technique DISCOVERY --intent 'hidden GET param discovery on item endpoint' --probe-kind fingerprint --phase consume-test --timeout 1800",
+        },
+        {
+            "command": "vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt -m JSON --headers $'Authorization: Bearer TOKEN' --stable --rate-limit 10 --technique DISCOVERY --intent 'authed JSON-API hidden-param discovery on gated route list' --probe-kind fingerprint --phase consume-test --timeout 3600",
+        },
+        {
+            "command": "vigil assess kali arjun -u https://target/search --passive --technique OSINT --intent 'passive param-name harvest (wayback/otx/commoncrawl)' --probe-kind fingerprint --phase recon --timeout 600",
         },
     ),
     "cero": (
