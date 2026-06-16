@@ -20,7 +20,11 @@ Run all target-facing Arjun via `vigil assess kali arjun` (typed verb, audit-fla
 1. **Gate the target list.** NEVER aim Arjun at a raw URL dump or inert assets — on a content-heavy target that's thousands of requests for nothing. Build a disciplined list first:
    `vigil assess arjun-select <cases.db> -o <list> [--param-poor-only] [--max-per-host N]`
    (live + dynamic + path-template-deduped + param-poor — collapses id-varied URLs to one route).
-2. **Run** the verb against it: `vigil assess kali arjun -i <list>` (or `-u <url>` for one endpoint).
+2. **Run — bounded first, escalate for depth.** Start with a focused `-w` list and `--stable --rate-limit` so the run stays gentle; Arjun's default wordlist expands to ~100+ request chunks per host, enough to overload a rate-sensitive or production target if left unbounded:
+   `vigil assess kali arjun -i <list> -m GET -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 --technique PARAM-DISCOVERY …`
+   Escalate for depth by dropping `-w` (Arjun's full ~25k default list) and/or adding `--passive`.
+   - **Reach for `--passive` to deepen coverage on a single `-u` endpoint** — it folds wayback/commoncrawl/otx parameter names into the wordlist and then scans actively, so it raises request volume rather than lowering it. Keep `--stable --rate-limit` set, and give it a `-u` target (an `-i` list leaves it no domain to harvest from).
+   - **Run high-value endpoints with `-u`, or keep `-i` batches small via `arjun-select --max-per-host`** — Arjun 2.2.7 aborts the whole batch when a single endpoint returns an unexpected status (an upstream bug in its error path), so a small blast radius keeps one bad URL from ending the run. The verb writes an empty `{}` artifact even on a failed or partial run, so `ingest-arjun` always has a file to read.
 3. **Enrich:** `vigil assess ingest-arjun <cases.db> <arjun.json>` folds the discovered params onto the matching work-buffer row (GET→`query_params`, POST/JSON/XML→`body_params`; header-mode params recorded as a signal) and re-runs the EXISTING classifier. The now-parameterized endpoint **auto-routes** — `url=`→`gf:ssrf`, `file=`→`gf:lfi`, `id=`→`gf:idor`/`gf:sqli` — with no new classification logic. Rows are stamped `selected_by=arjun`, the discovered params land in `signals`, and an LLM instruction in `triage_rationale`.
 
 ## SQLMAP doctrine

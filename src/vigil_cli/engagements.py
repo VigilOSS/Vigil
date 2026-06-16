@@ -1279,10 +1279,56 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
         _write_launcher(agent_root, eng_dir, "codex", "--full-auto" if skip_permissions else "")
     if client_kind in {"claude", "both"}:
         _write_launcher(agent_root, eng_dir, "claude", "--dangerously-skip-permissions" if skip_permissions else "")
+    # OpenCode reads the same engagement-local AGENTS.md as Codex (written for every
+    # real client kind), so the operator prompt drives it unchanged. We always emit
+    # start_opencode.sh so `--client opencode` (engagement start and `vigil bench`)
+    # works regardless of install kind. It execs `opencode run …` (the headless
+    # subcommand) and exports the DeepSeek/OpenRouter provider key from the same env
+    # files the launcher already sources for ORCHESTRATOR_BASE_URL.
+    if client_kind in {"codex", "claude", "both"}:
+        _write_launcher(
+            agent_root, eng_dir, "opencode",
+            "--dangerously-skip-permissions" if skip_permissions else "",
+            exec_cmd="opencode run",
+            provider_keys=("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"),
+        )
 
 
-def _write_launcher(agent_root: Path, eng_dir: Path, client: str, permission_arg: str) -> None:
+def _write_launcher(
+    agent_root: Path,
+    eng_dir: Path,
+    client: str,
+    permission_arg: str,
+    *,
+    exec_cmd: str | None = None,
+    provider_keys: tuple[str, ...] = (),
+) -> None:
     extra = f" {permission_arg}" if permission_arg else ""
+    # The command the launcher execs. Defaults to the bare client binary (claude,
+    # codex); a client whose headless entrypoint is a subcommand (opencode → "opencode
+    # run") passes it explicitly. The launcher FILE is still start_<client>.sh.
+    exec_cmd = exec_cmd or client
+    # Optional provider-key export block (runner clients only). Built as a plain
+    # string so its bash ${...} expansions are inserted literally into the f-string
+    # template below; empty for claude/codex so their launchers stay byte-for-byte
+    # identical to before.
+    provider_block = ""
+    if provider_keys:
+        key_list = " ".join(provider_keys)
+        provider_block = (
+            "\n# Export provider API keys for the runner client from the same env files\n"
+            "# the launcher already sources for ORCHESTRATOR_BASE_URL (first hit wins;\n"
+            "# a value already in the environment is never overwritten).\n"
+            'for env_file in "$ENGAGEMENT_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.env"; do\n'
+            '  [[ -f "$env_file" ]] || continue\n'
+            f"  for key in {key_list}; do\n"
+            '    if [[ -z "${!key:-}" ]]; then\n'
+            '      candidate="$(grep -E "^${key}=" "$env_file" | tail -n1 | cut -d= -f2- || true)"\n'
+            '      [[ -n "$candidate" ]] && export "${key}=${candidate}"\n'
+            "    fi\n"
+            "  done\n"
+            "done\n"
+        )
     # The launcher exports operator-side env from the per-engagement
     # .orchestrator.env, with install-root .orchestrator.env / .env kept as
     # legacy fallbacks. Parent-shell ORCHESTRATOR_BASE_URL remains the
@@ -1319,8 +1365,8 @@ if [[ -z "${{ORCHESTRATOR_BASE_URL:-}}" ]]; then
     fi
   done
 fi
-
-exec {client}{extra} "$@"
+{provider_block}
+exec {exec_cmd}{extra} "$@"
 """
     path = eng_dir / f"start_{client}.sh"
     path.write_text(script, encoding="utf-8")

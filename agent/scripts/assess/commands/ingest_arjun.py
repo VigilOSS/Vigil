@@ -25,11 +25,13 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from assess.lib.arjun_enrich import (
     build_signals,
     build_triage_rationale,
     merge_params_into_field,
+    merge_signal_lists,
     parse_arjun_json,
     slot_for_method,
 )
@@ -66,29 +68,35 @@ def _match_existing_row(conn, *, method: str, url_path: str, url: str) -> dict |
     """Find the work-buffer row this endpoint enriches.
 
     Match precedence (most to least specific):
-      1. exact method + url_path
-      2. url_path alone (any method) — a discovered param attaches to the route
-      3. exact url
+      1. exact full URL (host + path) — endpoints that SHARE a path across hosts
+         (e.g. `/portal/.../applications` on aps. vs elmo.) MUST NOT collapse onto
+         one row, so the host-bearing full URL is tried first.
+      2. method + url_path, constrained to the same host.
+      3. url_path alone, constrained to the same host.
 
-    The path-template match (1/2) is what makes thousands of id-varied URLs
-    collapse onto one route, mirroring arjun_select's dedup. Returns the row as
-    a dict, or None when no row matches (caller then creates a candidate).
+    The host constraint on the fallbacks keeps a same-path-different-host endpoint
+    from matching a sibling on another host. Returns the row dict, or None (the
+    caller then creates a candidate).
     """
-    row = conn.execute(
-        "SELECT * FROM work_items WHERE method = ? AND url_path = ? ORDER BY id LIMIT 1",
-        (method, url_path),
-    ).fetchone()
-    if row is None:
-        row = conn.execute(
-            "SELECT * FROM work_items WHERE url_path = ? ORDER BY id LIMIT 1",
-            (url_path,),
-        ).fetchone()
-    if row is None:
-        row = conn.execute(
-            "SELECT * FROM work_items WHERE url = ? ORDER BY id LIMIT 1",
-            (url,),
-        ).fetchone()
-    return dict(row) if row is not None else None
+    host = (urlparse(url).hostname or "").lower()
+    host_like = f"%{host}%" if host else "%"
+    for sql, params in (
+        ("SELECT * FROM work_items WHERE url = ? ORDER BY id LIMIT 1", (url,)),
+        (
+            "SELECT * FROM work_items WHERE method = ? AND url_path = ? "
+            "AND lower(url) LIKE ? ORDER BY id LIMIT 1",
+            (method, url_path, host_like),
+        ),
+        (
+            "SELECT * FROM work_items WHERE url_path = ? AND lower(url) LIKE ? "
+            "ORDER BY id LIMIT 1",
+            (url_path, host_like),
+        ),
+    ):
+        row = conn.execute(sql, params).fetchone()
+        if row is not None:
+            return dict(row)
+    return None
 
 
 def _enrich_existing(conn, row: dict, record: dict) -> dict:
@@ -119,7 +127,8 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
         path_params=row.get("path_params") or "{}",
     )
 
-    signals = build_signals(params, header_params=header_params)
+    new_signals = build_signals(params, header_params=header_params)
+    merged_signals = merge_signal_lists(row.get("signals"), new_signals)
     rationale = build_triage_rationale(
         method=method,
         params=params,
@@ -127,6 +136,23 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
         header_params=header_params,
     )
     params_sig = generate_params_sig(new_query, new_body)
+
+    # Enrichment ADDS a discovered param + signal; it must never DOWNGRADE a row
+    # that already scored higher (e.g. a curated high-value cluster). Keep the
+    # better classification and adopt the recomputed one only when it ranks at
+    # least as high. Preserve a curated `selected_by` — arjun's contribution is
+    # recorded in the signals, not by erasing provenance.
+    existing_priority = int(row.get("priority_score") or 0)
+    new_priority = int(assignment["priority_score"] or 0)
+    if new_priority >= existing_priority:
+        final_priority = new_priority
+        final_cluster = assignment["cluster_key"]
+        final_reason = assignment["priority_reason"]
+    else:
+        final_priority = existing_priority
+        final_cluster = row.get("cluster_key")
+        final_reason = row.get("priority_reason")
+    final_selected_by = row.get("selected_by") or "arjun"
 
     conn.execute(
         """
@@ -139,7 +165,7 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
             cluster_key = ?,
             terminal_reason = COALESCE(?, terminal_reason),
             signals = ?,
-            selected_by = 'arjun',
+            selected_by = ?,
             triage_rationale = ?,
             status = CASE WHEN status = 'skipped' THEN status ELSE 'pending' END
         WHERE id = ?
@@ -148,11 +174,12 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
             new_query,
             new_body,
             params_sig,
-            assignment["priority_score"],
-            assignment["priority_reason"],
-            assignment["cluster_key"],
+            final_priority,
+            final_reason,
+            final_cluster,
             assignment["terminal_reason"],
-            json.dumps(signals, sort_keys=True),
+            json.dumps(merged_signals, sort_keys=True),
+            final_selected_by,
             rationale,
             row["id"],
         ),
@@ -163,8 +190,8 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
         "row_id": int(row["id"]),
         "slot": slot,
         "params": params,
-        "cluster_key": assignment["cluster_key"],
-        "priority_score": assignment["priority_score"],
+        "cluster_key": final_cluster,
+        "priority_score": final_priority,
     }
 
 
@@ -229,8 +256,30 @@ def run(args: argparse.Namespace) -> None:
         print(f"ERROR: database not found: {db_path}", file=sys.stderr)
         sys.exit(1)
     if not Path(json_file).is_file():
-        print(f"ERROR: arjun JSON file not found: {json_file}", file=sys.stderr)
-        sys.exit(1)
+        # Arjun writes NO -oJ file when it discovers 0 parameters (the common
+        # case, confirmed against v2.2.7), so a missing file means "nothing to
+        # ingest" — a clean no-op, not an error.
+        print(
+            json.dumps(
+                {
+                    "verb": "ingest-arjun",
+                    "json_file": json_file,
+                    "db_path": db_path,
+                    "records": 0,
+                    "enriched": 0,
+                    "created": 0,
+                    "skipped_empty": 0,
+                    "note": (
+                        "no arjun JSON at this path; arjun writes none when it "
+                        "discovers 0 params, so there is nothing to ingest"
+                    ),
+                    "results": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
 
     db_init(db_path)
 

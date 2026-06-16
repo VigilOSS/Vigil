@@ -21,8 +21,10 @@ sources) under the same egress isolation. The host never makes the request.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sys
+from pathlib import Path
 from urllib.parse import urlparse
 
 from assess.lib.client import AssessError
@@ -216,6 +218,50 @@ def _default_json_path(args) -> str:
     return f"scans/arjun/{token}/{digest}.json"
 
 
+def _host_json_path(args, json_path: str) -> str | None:
+    """Best-effort map the container ``-oJ`` path to its host path.
+
+    Used to guarantee the JSON artifact exists post-run (arjun writes none on
+    zero findings). Resolves the engagement dir via the canonical loader and
+    maps a relative path or a ``/engagements/<key>/...`` absolute path onto it.
+    Returns None when it can't be resolved (caller then skips silently).
+    """
+    try:
+        from assess.lib.config import load_config
+
+        eng_dir = load_config(getattr(args, "engagement_dir", None)).engagement_dir
+    except (Exception, SystemExit):
+        # load_config may sys.exit when no engagement context is resolvable;
+        # the artifact guard is best-effort, so swallow and skip.
+        return None
+    if not eng_dir:
+        return None
+    if json_path.startswith("/engagements/") and json_path.count("/") >= 3:
+        return os.path.join(eng_dir, json_path.split("/", 3)[3])
+    if json_path.startswith("/"):
+        return None
+    return os.path.join(eng_dir, json_path)
+
+
+def _ensure_json_artifact(args, json_path: str) -> None:
+    """Write an empty ``{}`` at the -oJ path if arjun produced no file.
+
+    Arjun omits the -oJ file entirely when it discovers 0 params; this keeps the
+    run's artifact present + auditable and lets ``ingest-arjun`` always find a
+    file. Best-effort — never raises into the verb.
+    """
+    host = _host_json_path(args, json_path)
+    if not host:
+        return
+    try:
+        p = Path(host)
+        if not p.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("{}", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def run(args) -> None:
     if not args.target_url and not args.import_file:
         print("arjun: pass -u <url> or -i <file>", file=sys.stderr)
@@ -287,4 +333,10 @@ def run(args) -> None:
     extend_cmd_with_extra_args(cmd, args)
 
     result = kali_exec(cmd, tool_name="arjun", **kali_args_to_kwargs(args))
+
+    # Arjun writes NO -oJ file when it discovers 0 params; guarantee the
+    # artifact exists (empty object) so the run is always captured and
+    # ingest-arjun always finds a file. Best-effort, never fatal.
+    _ensure_json_artifact(args, json_path)
+
     emit_result(result)
