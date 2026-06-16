@@ -31,9 +31,12 @@ When adding a bucket, update `_BUCKETS`, add or update the matching `gf-patterns
 
 ## Accepted Bucket-Expansion Decisions (2026-06 surface taxonomy)
 
-**Research basis:** three-corpus label study (cms-gov/xfinity/zendesk, ~8,000 labeled templates
-across multiple deep sweeps with GPT-5.5 xhigh correction) documented in
-`docs/plans/classify-surface-rd-2026-06-15.md`. Tests in
+**Decision of record:** `docs/adr/0004-modern-surface-taxonomy.md` (deterministic-first taxonomy:
+type-floor + 13 buckets + normalization + precision). **Research basis:** three-corpus label study
+(cms-gov/xfinity/zendesk, ~8,000 labeled templates across multiple deep sweeps with GPT-5.5 xhigh
+correction) documented in `docs/plans/research/classify-surface-2026-06/README.md` (see its §4b
+cross-corpus validation); the implementation contract is
+`docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`. Tests in
 `orchestrator/backend/tests/test_classify_buckets_api_auth.py` and
 `orchestrator/backend/tests/test_classify_buckets_storage_deser_debug.py`.
 
@@ -198,8 +201,9 @@ Three corpora, ~8,000 labeled templates (worker labels, GPT-5.5 xhigh correction
   used qualitatively to validate `graphql` (392 rows) and `api` (1,023 rows) as dominant
   surface shapes in production SaaS
 
-Full research artifacts: `docs/plans/classify-surface-rd-2026-06-15.md` (in-repo) and
-machine-local archive at `~/vigil-research/classify-surface-2026-06/` (not committed, ~156M).
+Full research artifacts: `docs/plans/research/classify-surface-2026-06/` (in-repo: README +
+IMPLEMENTATION-SPEC + curated label batches) and machine-local archive at
+`~/vigil-research/classify-surface-2026-06/` (not committed, ~156M).
 Test files: `orchestrator/backend/tests/test_classify_buckets_api_auth.py`,
 `orchestrator/backend/tests/test_classify_buckets_storage_deser_debug.py`,
 `orchestrator/backend/tests/test_classify_type_floor.py`.

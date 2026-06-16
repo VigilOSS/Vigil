@@ -93,7 +93,7 @@ Param-key matches:
 Long-tail cms-gov sweeps found 46 actionable `auth` templates (4,201 underlying rows) in
 the first deep sweep and 19 more (38 rows) in the second, concentrated in `/efi/*` account
 lifecycle, Spring Security login, PIV login, and portal session routes. Third targeted sweep:
-173 actionable `auth_entry` templates. See `docs/plans/classify-surface-rd-2026-06-15.md` §4b.
+173 actionable `auth_entry` templates. See `docs/plans/research/classify-surface-2026-06/README.md` §4b.
 
 ## Sources
 
