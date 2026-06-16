@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vigil.local/schemas/intel-dns-record.schema.json",
   "$comment": "Mirrors app.api.intel_schemas.DnsRecordRequest.",
-  "title": "Intel DNS Record",
+  "title": "Intel DNS Record — single RR observed for a target domain. Use intel-domain for hosts/IPs/ASNs; use this type for raw resolver output.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -14,39 +14,43 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 16,
-      "description": "DNS record type (A, AAAA, CNAME, MX, TXT, NS, CERT, CAA, etc.)."
+      "description": "DNS RR type in uppercase (e.g., 'A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'CAA', 'SOA')."
     },
     "name": {
       "type": "string",
       "minLength": 1,
       "maxLength": 512,
-      "description": "Record name / owner."
+      "description": "Fully qualified owner name of the record (e.g., 'api.example.com', 'example.com')."
     },
     "value": {
       "type": "string",
       "maxLength": 4096,
-      "default": ""
+      "default": "",
+      "description": "RDATA value (e.g., IP address for A, target FQDN for CNAME/MX, string for TXT)."
     },
     "first_seen": {
       "type": "string",
       "maxLength": 64,
       "default": "",
-      "description": "ISO8601 or free-form date string for first observation."
+      "description": "ISO8601 or free-form date of first observation (e.g., '2024-11-03', '~Nov 2024')."
     },
     "last_seen": {
       "type": "string",
       "maxLength": 64,
-      "default": ""
+      "default": "",
+      "description": "ISO8601 or free-form date of most recent observation; omit if same as first_seen."
     },
     "source_name": {
       "type": "string",
       "maxLength": 128,
-      "default": ""
+      "default": "",
+      "description": "Tool or passive-DNS source (e.g., 'dnsx', 'subfinder', 'securitytrails', 'virustotal')."
     },
     "notes": {
       "type": "string",
       "maxLength": 4096,
-      "default": ""
+      "default": "",
+      "description": "Contextual flags: dangling CNAME, wildcard match, interesting SPF include, zone-transfer output, etc."
     },
     "provenance": {
       "type": "object",
@@ -54,16 +58,20 @@
       "default": {},
       "properties": {
         "agent_name": {
-          "type": "string"
+          "type": "string",
+          "description": "Specialist agent role that recorded this row (e.g., 'recon-specialist')."
         },
         "artifact_ref": {
-          "type": "string"
+          "type": "string",
+          "description": "vigil artifact ID or path that contains the raw evidence."
         },
         "captured_at": {
-          "type": "string"
+          "type": "string",
+          "description": "ISO8601 timestamp when this row was written."
         },
         "evidence_quote": {
-          "type": "string"
+          "type": "string",
+          "description": "Verbatim resolver output line that supports this record."
         }
       }
     }

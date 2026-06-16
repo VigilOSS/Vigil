@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vigil.local/schemas/intel-cve.schema.json",
   "$comment": "Mirrors app.api.intel_schemas.CveRecordRequest. CVE intel is not a confirmed finding — record-finding stays gated on exploit-developer validation.",
-  "title": "Intel CVE Record",
+  "title": "Intel CVE Record — version-matched or disclosed vulnerability on a target component. NOT a finding; use record-finding only after exploit-developer confirms exploitability.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -34,17 +34,20 @@
       ],
       "default": null,
       "minimum": 0,
-      "maximum": 10
+      "maximum": 10,
+      "description": "CVSS base score 0.0–10.0 from the authoritative source; null if not published."
     },
     "cvss_vector": {
       "type": "string",
       "maxLength": 256,
-      "default": ""
+      "default": "",
+      "description": "Full CVSS vector string (e.g., 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H')."
     },
     "cwe_id": {
       "type": "string",
       "maxLength": 64,
-      "default": ""
+      "default": "",
+      "description": "CWE identifier for the root-cause weakness (e.g., 'CWE-79', 'CWE-89')."
     },
     "poc_available": {
       "type": "boolean",
@@ -54,7 +57,8 @@
     "source_name": {
       "type": "string",
       "maxLength": 128,
-      "default": ""
+      "default": "",
+      "description": "Tool or feed that surfaced this CVE (e.g., 'nvd', 'nuclei', 'osint-analyst', 'exploitdb')."
     },
     "validation_status": {
       "type": "string",
@@ -66,18 +70,20 @@
         "exploited",
         "ruled_out"
       ],
-      "default": "unverified"
+      "default": "unverified",
+      "description": "Exploitation validation state. Use: 'unverified'=just recorded; 'version_match'=target version is in affected range (not yet probed); 'poc_available_unverified'=public PoC exists but not yet run against target; 'attempted_blocked'=exploit attempt was blocked by WAF/IPS (set details.block_reason); 'exploited'=confirmed exploitable — link finding via linked_finding_slug; 'ruled_out'=patched, misconfigured, or otherwise not exploitable on this target."
     },
     "linked_finding_slug": {
       "type": "string",
       "maxLength": 256,
       "default": "",
-      "description": "assessment_findings.slug once exploitation confirms this CVE."
+      "description": "assessment_findings.slug to populate once exploit-developer confirms exploitability (status='exploited')."
     },
     "notes": {
       "type": "string",
       "maxLength": 4096,
-      "default": ""
+      "default": "",
+      "description": "Operator analysis: patch evidence, version mismatch reasoning, environment constraints, or next-step dispatch context."
     },
     "details": {
       "type": "object",
@@ -97,16 +103,20 @@
       "default": {},
       "properties": {
         "agent_name": {
-          "type": "string"
+          "type": "string",
+          "description": "Specialist agent role that recorded this row (e.g., 'osint-analyst')."
         },
         "artifact_ref": {
-          "type": "string"
+          "type": "string",
+          "description": "vigil artifact ID or path that contains the raw evidence."
         },
         "captured_at": {
-          "type": "string"
+          "type": "string",
+          "description": "ISO8601 timestamp when this row was written."
         },
         "evidence_quote": {
-          "type": "string"
+          "type": "string",
+          "description": "Verbatim excerpt from the source that supports this record."
         }
       }
     }

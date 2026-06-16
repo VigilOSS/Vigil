@@ -13,6 +13,22 @@ Read alongside this file:
   file owns a contract, and which generated files must stay in sync. This guide does not restate it;
   consult it whenever a change might move a boundary.
 
+# Code quality
+
+This is production security tooling held to a top-tier bar: the standard is what a leading
+autonomous-offensive-security company (XBOW, Horizon3, Armadin) would ship and maintain for years —
+not a prototype. Every change should leave the codebase clearer than it found it.
+
+- **Correctness over speed.** Verify behavior (the right test scope, or a real run) before calling
+  something done — never hedge a passing result or bury a failure. "Probably works" is not finished.
+- **Every line earns its place.** Prefer deleting to adding; match the surrounding idiom, naming, and
+  comment density; a comment explains *why*, not what. No dead code, no speculative abstraction, no
+  second copy of a value that already has a single source of truth.
+- **Land changes whole.** Touch every registration point a change needs (see the recipes + `CODE-MAP.md`)
+  so nothing half-lands, and keep generated artifacts, schemas, and the map in sync in the same change.
+- **Durable over expedient.** Fix the root cause, not the symptom. Choose the design that still reads
+  well in a year and write it so the next maintainer needs no archaeology.
+
 # Version control: Jujutsu (jj)
 
 This repository is managed with **[Jujutsu (`jj`)](https://github.com/jj-vcs/jj)** (v0.40+),

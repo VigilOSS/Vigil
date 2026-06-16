@@ -78,6 +78,15 @@ RUN python3 -m venv /opt/arjun-venv && \
     /opt/arjun-venv/bin/pip install --no-cache-dir "pip==${PIP_VERSION}" && \
     /opt/arjun-venv/bin/pip install --no-cache-dir "arjun==${ARJUN_VERSION}" && \
     ln -sf /opt/arjun-venv/bin/arjun /usr/local/bin/arjun
+# Harden Arjun: one endpoint returning 4xx/5xx (an upstream `request.status_code`
+# typo on a dict) or any per-URL error otherwise aborts an entire `-i` batch, since
+# main() catches only KeyboardInterrupt. Fixes the typo + wraps the per-URL call so
+# a bad endpoint is skipped, not fatal. Idempotent — see runtime-full for rationale.
+COPY agent/docker/patches/arjun-batch-resilience.py /tmp/arjun-batch-resilience.py
+RUN ARJUN_PY=/opt/arjun-venv/bin/python; \
+    "$ARJUN_PY" /tmp/arjun-batch-resilience.py \
+      "$("$ARJUN_PY" -c 'import importlib.util as u; print(u.find_spec("arjun.__main__").origin)')" && \
+    rm -f /tmp/arjun-batch-resilience.py
 RUN GOPATH=/root/go go install "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION}" && \
     cp /root/go/bin/nuclei /usr/local/bin/nuclei && \
     GO111MODULE=on GOPATH=/root/go go install "github.com/projectdiscovery/katana/cmd/katana@${KATANA_VERSION}" && \

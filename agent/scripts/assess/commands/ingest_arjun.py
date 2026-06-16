@@ -64,6 +64,14 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.set_defaults(func=run)
 
 
+def _host_of(url: str) -> str:
+    """Lowercased hostname of ``url`` (empty string if unparseable/absent)."""
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 def _match_existing_row(conn, *, method: str, url_path: str, url: str) -> dict | None:
     """Find the work-buffer row this endpoint enriches.
 
@@ -71,31 +79,31 @@ def _match_existing_row(conn, *, method: str, url_path: str, url: str) -> dict |
       1. exact full URL (host + path) — endpoints that SHARE a path across hosts
          (e.g. `/portal/.../applications` on aps. vs elmo.) MUST NOT collapse onto
          one row, so the host-bearing full URL is tried first.
-      2. method + url_path, constrained to the same host.
-      3. url_path alone, constrained to the same host.
+      2. method + url_path, constrained to the SAME host.
+      3. url_path alone, constrained to the SAME host.
 
-    The host constraint on the fallbacks keeps a same-path-different-host endpoint
-    from matching a sibling on another host. Returns the row dict, or None (the
-    caller then creates a candidate).
+    Host equality on the fallbacks is checked in Python on the parsed hostname,
+    not via a `LIKE '%host%'` substring (which would let an apex endpoint match a
+    subdomain row — `cms.gov` vs `app.cms.gov` — or a substring host —
+    `cms.gov` vs `evilcms.gov` — i.e. a different origin). `url_path` is selective
+    enough that the candidate set per fallback is tiny. Returns the row dict, or
+    None (the caller then creates a candidate).
     """
-    host = (urlparse(url).hostname or "").lower()
-    host_like = f"%{host}%" if host else "%"
+    target_host = _host_of(url)
+
+    exact = conn.execute(
+        "SELECT * FROM work_items WHERE url = ? ORDER BY id LIMIT 1", (url,)
+    ).fetchone()
+    if exact is not None:
+        return dict(exact)
+
     for sql, params in (
-        ("SELECT * FROM work_items WHERE url = ? ORDER BY id LIMIT 1", (url,)),
-        (
-            "SELECT * FROM work_items WHERE method = ? AND url_path = ? "
-            "AND lower(url) LIKE ? ORDER BY id LIMIT 1",
-            (method, url_path, host_like),
-        ),
-        (
-            "SELECT * FROM work_items WHERE url_path = ? AND lower(url) LIKE ? "
-            "ORDER BY id LIMIT 1",
-            (url_path, host_like),
-        ),
+        ("SELECT * FROM work_items WHERE method = ? AND url_path = ? ORDER BY id", (method, url_path)),
+        ("SELECT * FROM work_items WHERE url_path = ? ORDER BY id", (url_path,)),
     ):
-        row = conn.execute(sql, params).fetchone()
-        if row is not None:
-            return dict(row)
+        for row in conn.execute(sql, params).fetchall():
+            if _host_of(row["url"]) == target_host:
+                return dict(row)
     return None
 
 

@@ -165,6 +165,27 @@ def test_runtime_full_dockerfile_declares_android_apk_binaries():
     )
 
 
+def test_external_installer_validates_preloaded_go_tools(tmp_path):
+    """PRELOADED_TOOLS=1 is allowed only for a base image that already carries
+    the script-owned tools. Missing tools must fail loudly during build instead
+    of producing a successful image with degraded runtime coverage."""
+    bash = shutil.which("bash")
+    assert bash, "bash is required to run the runtime external installer"
+    empty_path = tmp_path / "bin"
+    empty_path.mkdir()
+
+    proc = subprocess.run(
+        [bash, str(RUNTIME_FULL_EXTERNAL_INSTALLER), "go-tools"],
+        env={"PRELOADED_TOOLS": "1", "PATH": str(empty_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "PRELOADED_TOOLS=1 but required tool is missing: nuclei" in proc.stderr
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not installed on host")
 def test_runtime_full_container_has_subdomain_enum_binaries():
