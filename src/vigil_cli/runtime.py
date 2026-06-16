@@ -190,6 +190,7 @@ def runtime_image_inputs(install_root: Path) -> list[Path]:
     service restart, so it must NOT flag a rebuild."""
     return [
         install_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
+        install_root / "agent" / "docker" / "runtime-full" / "install-external-tools.sh",
         install_root / "docker" / "callback_listener.py",
         install_root / "docker" / "start-callback.sh",
     ]

@@ -180,8 +180,10 @@ def parse_arjun_json(text: str, *, default_method: str = "GET") -> list[dict[str
             if isinstance(payload, dict):
                 params = _normalize_param_list(payload.get("params") or payload.get("parameters"))
                 method = str(payload.get("method") or default_method)
-                header_params = _normalize_param_list(payload.get("headers"))
-                _emit(endpoint, method, params, header_params)
+                # Arjun's per-endpoint `headers` echoes the REQUEST headers that were
+                # sent (e.g. our own auth/identification headers), not discovered
+                # parameters — so it is never a findings source.
+                _emit(endpoint, method, params, [])
             else:
                 _emit(endpoint, default_method, _normalize_param_list(payload), [])
     elif isinstance(data, list):
@@ -191,8 +193,7 @@ def parse_arjun_json(text: str, *, default_method: str = "GET") -> list[dict[str
             endpoint = str(entry.get("url") or entry.get("endpoint") or "")
             method = str(entry.get("method") or default_method)
             params = _normalize_param_list(entry.get("params") or entry.get("parameters"))
-            header_params = _normalize_param_list(entry.get("headers"))
-            _emit(endpoint, method, params, header_params)
+            _emit(endpoint, method, params, [])
 
     return records
 
