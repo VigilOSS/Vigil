@@ -9438,6 +9438,7 @@ def test_runtime_image_build_state_is_content_based(tmp_path):
     (tmp_path / "agent" / "docker" / "runtime-full").mkdir(parents=True)
     (tmp_path / "docker").mkdir()
     (tmp_path / "agent" / "docker" / "runtime-full" / "Dockerfile").write_text("FROM kali\n")
+    (tmp_path / "agent" / "docker" / "runtime-full" / "install-external-tools.sh").write_text("#!/bin/sh\n")
     (tmp_path / "docker" / "callback_listener.py").write_text("print(1)\n")
     (tmp_path / "docker" / "start-callback.sh").write_text("#!/bin/sh\n")
     digest = runtime.runtime_inputs_digest(tmp_path)
@@ -9465,6 +9466,9 @@ def test_runtime_image_build_state_is_content_based(tmp_path):
     # A real content change DOES flip to stale.
     (tmp_path / "docker" / "callback_listener.py").write_text("print(2)\n")
     assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(label=digest)) == "stale"
+    (tmp_path / "docker" / "callback_listener.py").write_text("print(1)\n")
+    (tmp_path / "agent" / "docker" / "runtime-full" / "install-external-tools.sh").write_text("#!/bin/sh\n# changed\n")
+    assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(label=digest)) == "stale"
 
 
 def test_install_built_image_carries_runtime_inputs_label(tmp_path):
@@ -9482,6 +9486,7 @@ def test_install_built_image_carries_runtime_inputs_label(tmp_path):
     (source_root / "agent" / "docker" / "runtime-full").mkdir(parents=True)
     (source_root / "docker").mkdir(parents=True)
     (source_root / "agent" / "docker" / "runtime-full" / "Dockerfile").write_text("FROM kali\n")
+    (source_root / "agent" / "docker" / "runtime-full" / "install-external-tools.sh").write_text("#!/bin/sh\n")
     (source_root / "docker" / "callback_listener.py").write_text("print(1)\n")
     (source_root / "docker" / "start-callback.sh").write_text("#!/bin/sh\n")
 

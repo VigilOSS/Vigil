@@ -97,7 +97,9 @@ def test_parse_arjun_json_per_endpoint_object_with_method_and_headers():
     recs = arjun_enrich.parse_arjun_json(json.dumps(payload))
     assert recs[0]["method"] == "POST"
     assert recs[0]["params"] == ["p"]
-    assert recs[0]["header_params"] == ["H"]
+    # `headers` echoes the REQUEST headers arjun was given, not discovered params,
+    # so it must NOT become a finding.
+    assert recs[0]["header_params"] == []
 
 
 def test_parse_arjun_json_list_of_records():

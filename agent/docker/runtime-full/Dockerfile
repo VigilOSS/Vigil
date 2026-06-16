@@ -139,62 +139,17 @@ RUN set -eux; \
       rm -rf /tmp/ligolo; \
     fi
 
-RUN set -eux; \
-    if [ "$PRELOADED_TOOLS" != "1" ]; then \
-      GOPATH=/root/go go install "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${NUCLEI_VERSION}" && \
-      cp /root/go/bin/nuclei /usr/local/bin/nuclei && \
-      GO111MODULE=on GOPATH=/root/go go install "github.com/projectdiscovery/katana/cmd/katana@${KATANA_VERSION}" && \
-      cp /root/go/bin/katana /usr/local/bin/katana && \
-      GOPATH=/root/go go install "github.com/projectdiscovery/httpx/cmd/httpx@${HTTPX_VERSION}" && \
-      cp /root/go/bin/httpx /usr/local/bin/httpx && \
-      GOPATH=/root/go go install "github.com/projectdiscovery/dnsx/cmd/dnsx@${DNSX_VERSION}" && \
-      cp /root/go/bin/dnsx /usr/local/bin/dnsx && \
-      GOPATH=/root/go go install "github.com/lc/gau/v2/cmd/gau@${GAU_VERSION}" && \
-      cp /root/go/bin/gau /usr/local/bin/gau && \
-      GOPATH=/root/go go install "github.com/hahwul/dalfox/v2@${DALFOX_VERSION}" && \
-      cp /root/go/bin/dalfox /usr/local/bin/dalfox && \
-      GOPATH=/root/go go install "github.com/d3mondev/puredns/v2@${PUREDNS_VERSION}" && \
-      cp /root/go/bin/puredns /usr/local/bin/puredns && \
-      GOPATH=/root/go go install "github.com/projectdiscovery/shuffledns/cmd/shuffledns@${SHUFFLEDNS_VERSION}" && \
-      cp /root/go/bin/shuffledns /usr/local/bin/shuffledns && \
-      GOPATH=/root/go go install "github.com/projectdiscovery/alterx/cmd/alterx@${ALTERX_VERSION}" && \
-      cp /root/go/bin/alterx /usr/local/bin/alterx && \
-      GOPATH=/root/go go install "github.com/projectdiscovery/asnmap/cmd/asnmap@${ASNMAP_VERSION}" && \
-      cp /root/go/bin/asnmap /usr/local/bin/asnmap && \
-      GOPATH=/root/go go install "github.com/glebarez/cero@${CERO_VERSION}" && \
-      cp /root/go/bin/cero /usr/local/bin/cero && \
-      GOPATH=/root/go go install "github.com/tomnomnom/gf@${GF_VERSION}" && \
-      cp /root/go/bin/gf /usr/local/bin/gf && \
-      GOPATH=/root/go go install "github.com/BishopFox/jsluice/cmd/jsluice@${JSLUICE_VERSION}" && \
-      cp /root/go/bin/jsluice /usr/local/bin/jsluice && \
-      rm -rf /root/go; \
-    fi
+COPY agent/docker/runtime-full/install-external-tools.sh /usr/local/bin/install-external-tools
+RUN chmod +x /usr/local/bin/install-external-tools
 
 RUN set -eux; \
-    if [ "$PRELOADED_TOOLS" != "1" ]; then \
-      mkdir -p /root/.gf && \
-      git init /tmp/gf-patterns && \
-      git -C /tmp/gf-patterns remote add origin https://github.com/1ndianl33t/Gf-Patterns && \
-      git -C /tmp/gf-patterns fetch --depth 1 origin "${GF_PATTERNS_REF}" && \
-      git -C /tmp/gf-patterns checkout --detach FETCH_HEAD && \
-      cp /tmp/gf-patterns/*.json /root/.gf/ && \
-      rm -rf /tmp/gf-patterns; \
-    fi
+    install-external-tools go-tools
 
 RUN set -eux; \
-    if [ "$PRELOADED_TOOLS" != "1" ]; then \
-      arch="$(dpkg --print-architecture)" && \
-      case "$arch" in \
-        amd64) ferox_arch=x86_64 ;; \
-        arm64) ferox_arch=aarch64 ;; \
-        *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
-      esac && \
-      mkdir -p /tmp/ferox && \
-      curl -fsSL $CURL_RETRY_FLAGS "https://github.com/epi052/feroxbuster/releases/download/v${FEROXBUSTER_VERSION}/${ferox_arch}-linux-feroxbuster.zip" \
-        -o /tmp/ferox/ferox.zip && unzip /tmp/ferox/ferox.zip -d /tmp/ferox && \
-      mv /tmp/ferox/feroxbuster /usr/local/bin/feroxbuster && chmod +x /usr/local/bin/feroxbuster && \
-      rm -rf /tmp/ferox; \
-    fi
+    install-external-tools gf-patterns
+
+RUN set -eux; \
+    install-external-tools feroxbuster
 
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       arch="$(dpkg --print-architecture)" && \
