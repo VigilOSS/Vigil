@@ -193,6 +193,22 @@ def test_select_targets_dedups_id_varied_paths_by_template():
     assert len(out) == 1
 
 
+def test_select_targets_keeps_distinct_sibling_routes():
+    # Two distinct routes that merely share a 2-segment prefix must BOTH be
+    # probed: the old 2-segment cluster key collapsed /api/users/search and
+    # /api/users/export to /api/users and silently dropped one from Arjun.
+    rows = [
+        {"url": "http://h/api/users/search", "url_path": "/api/users/search",
+         "type": "api", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        {"url": "http://h/api/users/export", "url_path": "/api/users/export",
+         "type": "api", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+    ]
+    out = arjun_select.select_targets(rows, max_per_host=50)
+    assert sorted(out) == ["http://h/api/users/export", "http://h/api/users/search"]
+
+
 def test_select_targets_param_poor_only():
     rows = [
         {"url": "http://h/rich", "url_path": "/rich", "type": "form", "status": "pending",
@@ -248,8 +264,8 @@ def test_select_targets_stats_account_for_every_scanned_row():
         _r("http://h/a.png", "/a.png", type="image"),         # dropped_inert
         _r("http://h/sk", "/sk", status="skipped"),           # dropped_skipped_status
         _r("http://h/dead", "/dead", live_status="blackholed"),  # dropped_not_live
-        _r("http://h/p/2024/A", "/p/2024/A"),                 # \ collapse to one
-        _r("http://h/p/2023/B", "/p/2023/B"),                 # / template
+        _r("http://h/p/2024/M0004", "/p/2024/M0004"),         # \ id-varied: collapse
+        _r("http://h/p/2023/G0058", "/p/2023/G0058"),         # / to one template
         _r("http://h/one", "/one"),                           # template 2 (budget keeps 1)
         _r("http://h/two", "/two"),                           # template 3 (budget drops)
     ]
@@ -485,6 +501,42 @@ def test_ingest_arjun_run_creates_new_and_enriches_existing(tmp_path, monkeypatc
         str(db), "SELECT query_params FROM work_items WHERE url = ?", ("https://h.example/known",)
     )
     assert "debug" in json.loads(enriched[0]["query_params"])
+
+
+def test_ingest_arjun_candidates_on_two_hosts_create_two_rows(tmp_path, monkeypatch, capsys):
+    # Same method/path/params discovered on two in-scope hosts must create TWO
+    # work items. A host-blind candidate queue_key (`arjun:METHOD:url_path:sig`)
+    # collapsed them into one via UNIQUE(queue_key); the key must carry the host.
+    from assess.commands import ingest_arjun
+    from assess.lib.db import db_init, db_query
+
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")
+    db_init(str(db))
+
+    arjun_json = {
+        "https://aps.example/u/apps": {"params": ["file"], "method": "POST"},
+        "https://elmo.example/u/apps": {"params": ["file"], "method": "POST"},
+    }
+    jf = tmp_path / "arjun.json"
+    jf.write_text(json.dumps(arjun_json), encoding="utf-8")
+
+    class _Cfg:
+        engagement_dir = str(tmp_path)
+
+    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
+
+    ns = argparse.Namespace(
+        db_path=str(db), json_file=str(jf), source="arjun",
+        default_method="POST", engagement_dir=str(tmp_path),
+    )
+    ingest_arjun.run(ns)
+
+    rows = db_query(str(db), "SELECT url FROM work_items ORDER BY url", ())
+    urls = [r["url"] for r in rows]
+    assert urls == ["https://aps.example/u/apps", "https://elmo.example/u/apps"], \
+        "host-blind queue_key collapsed two distinct host surfaces into one row"
 
 
 def test_run_writes_empty_json_artifact_when_arjun_finds_nothing(

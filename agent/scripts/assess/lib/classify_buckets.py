@@ -1015,6 +1015,33 @@ def normalize_path_for_cluster(url_path: str) -> str:
     return "/" + "/".join(normalized[:2])
 
 
+def normalize_route_template(url_path: str) -> str:
+    """Full route template: id-shaped segments collapsed, NO segment truncation.
+
+    Same per-segment id/uuid/hex/year/token collapsing as
+    `normalize_path_for_cluster`, but keeps EVERY structural segment instead of
+    truncating to the first two. Used for Arjun target dedup, where two distinct
+    routes that merely share a 2-segment prefix (e.g. `/api/users/search` and
+    `/api/users/export`) must stay SEPARATE targets so hidden-parameter discovery
+    runs on both — while id-varied siblings (`/api/users/123/profile`,
+    `/api/users/456/profile` -> `/api/users/{n}/profile`) still collapse to one.
+    """
+    if not url_path:
+        return "/"
+    stripped = url_path.strip("/")
+    if not stripped:
+        return "/"
+    normalized: list[str] = []
+    prev: str | None = None
+    for raw_seg in stripped.split("/"):
+        seg = _normalize_cluster_segment(raw_seg.lower())
+        if seg in _CLUSTER_PLACEHOLDERS and seg == prev:
+            continue  # collapse adjacent identical placeholders
+        normalized.append(seg)
+        prev = seg
+    return "/" + "/".join(normalized)
+
+
 def classify_from_fields(
     *,
     case_type: str,

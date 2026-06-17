@@ -397,6 +397,7 @@ def run(args) -> None:
                 body_params=json.dumps(body_params) if isinstance(body_params, dict) else str(body_params),
                 path_params=json.dumps(path_params) if isinstance(path_params, dict) else str(path_params),
                 cookie_params=json.dumps(cookie_params) if isinstance(cookie_params, dict) else str(cookie_params),
+                content_type=row_content_type,
                 case_type=case_type,
                 source=source,
                 params_key_sig=params_sig,
