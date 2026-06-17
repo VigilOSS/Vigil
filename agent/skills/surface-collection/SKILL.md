@@ -266,14 +266,21 @@ the param-poor dynamic endpoints with a **bounded first pass** (focused wordlist
 # This engagement has no liveness ledger? add --include-unknown.
 vigil assess arjun-select "$DB" -o "$DIR/scans/arjun/targets.txt" --param-poor-only --max-per-host 5
 
-# Bounded first pass — a focused -w list + --stable --rate-limit keep the run gentle; the default
+# arjun-select also writes a per-method list (targets.txt.GET / .POST / .JSON / .XML) for each verb
+# the buffer exposes on a route. `kali arjun -i` takes ONE global -m, so scanning the union under a
+# single method would miss the others' hidden params — run one bounded pass per method-list present,
+# so POST/JSON body surfaces are scanned under their own verb (not silently as GET).
+# Bounded first pass — a focused -w list + --stable --rate-limit keep each run gentle; the default
 # list expands to ~100+ chunks/host, enough to overload a rate-sensitive or production target. Keep
 # batches small (--max-per-host above) for politeness and a small blast radius. (The runtime patches
 # Arjun so one endpoint returning 4xx/5xx is skipped, not fatal — a 429 no longer ends the batch.)
-vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt -m GET \
-  -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 \
-  --technique PARAM-DISCOVERY --intent "bounded hidden-param discovery over gated buffer" \
-  --probe-kind fingerprint --phase collect --timeout 1800
+for M in GET POST JSON XML; do
+  [ -s "$DIR/scans/arjun/targets.txt.$M" ] || continue   # only methods the buffer actually exposed
+  vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt.$M -m "$M" \
+    -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 \
+    --technique PARAM-DISCOVERY --intent "bounded hidden-param discovery over gated buffer" \
+    --probe-kind fingerprint --phase collect --timeout 1800
+done
 
 # Fold discovered params back in — they re-route the endpoint to its real bucket:
 vigil assess ingest-arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json

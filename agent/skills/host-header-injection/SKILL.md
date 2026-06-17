@@ -20,7 +20,7 @@ vuln_class: host-header-injection
 
 - `vigil assess kali exec -- curl ...` (Host header manipulation, override header injection, response inspection — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools (verify reflected Host in rendered pages and network responses)
-- `vigil oob mint` / `vigil oob poll` — for the SSRF-via-Host vector (§4) and password-reset poisoning (§2): mint a nonce-tagged callback host, send it in the `Host`/`X-Forwarded-Host` header, then `poll` to confirm the backend resolved it. Replaces reading the raw listener log. Readiness: `vigil oob status --json`; start a named client with `vigil oob client start <name> --engagement <key> --agent <agent>` if none is running.
+- `vigil oob mint` / `vigil oob poll` — for the SSRF-via-Host vector (§4) and password-reset poisoning (§2): `mint` binds the nonce under a running client's interactsh id and prints the exact callback host (`$OOB_HOST`, of shape `<nonce>.<client-id>.researcher.example`) so `poll` can correlate it — pass `--client <name>` when several clients run. Send the exact host mint prints in the `Host`/`X-Forwarded-Host` header, then `poll` to confirm the backend resolved it. Replaces reading the raw listener log. Readiness: `vigil oob status --json`; start a named client with `vigil oob client start <name> --engagement <key> --agent <agent>` if none is running.
 - `vigil assess anomaly-score` — for virtual-host enumeration (§6) and Host-based port scanning (§4): pipe the per-Host response records (status/length) and let it rank the odd-one-out instead of eyeballing the loop output.
 
 ## Methodology
@@ -88,8 +88,9 @@ done | vigil assess anomaly-score --top 5
 - [ ] Internal host access: `Host: 192.168.1.1`, `Host: 10.0.0.1`
 - [ ] Blind SSRF confirmation when no response diff leaks: mint a callback host and route the server to it via the Host header, then poll for the hit:
 ```bash
-vigil oob mint --technique ssrf --target-url https://target/ --param Host --probe-kind host-header
-curl -H "Host: <nonce>.researcher.example" https://target/
+vigil oob mint --client <name> --technique ssrf --target-url https://target/ --param Host --probe-kind host-header
+# → host  <nonce>.<client-id>.researcher.example   (= $OOB_HOST)
+curl -H "Host: $OOB_HOST" https://target/
 vigil oob poll --client <name>    # a matched row = the backend resolved your Host
 ```
 

@@ -11,21 +11,23 @@ timing verdict; the authoritative OOB correlation happens on the HOST with
 Bespoke logic (mint-carry, timing measurement, dual-signal verdict) that no typed
 `kali` verb expresses — see agent/skills/write-probe-script/SKILL.md. Stdlib-only.
 
-Two-step usage (mint on the HOST first — the nonce is the correlation token):
+Two-step usage (mint on the HOST first — mint binds the nonce under your running
+client's interactsh id and prints the full host as $OOB_HOST; pass that EXACT host
+in, never a hand-built bare <nonce>.oob... host, or poll cannot correlate it):
   vigil oob status --json
-  vigil oob mint --technique ssrf --target-url https://t/fetch --param url
-  # -> http  http://<nonce>.oob.example.com/
+  vigil oob mint --client <your-client-name> --technique ssrf --target-url https://t/fetch --param url
+  # -> host  <nonce>.<client-id>.oob.example.com   (= $OOB_HOST)
 
   vigil assess kali exec \\
     --technique SSRF --intent "blind SSRF via url param, oob + timing" \\
     --probe-kind payload --phase consume-test --timeout 120 -- \\
     python3 /engagements/$ENGAGEMENT_KEY/scripts/blind_callback_timing.py \\
       --target "https://t/fetch" --param url \\
-      --callback "http://<nonce>.oob.example.com/ssrf-probe" \\
+      --callback "http://$OOB_HOST/ssrf-probe" \\
       --baseline-url "https://t/fetch?url=http://127.0.0.1:1/" \\
       --out /engagements/$ENGAGEMENT_KEY/scans/ssrf_blind.json
 
-  # Then correlate the callback (nonce <-> probe) on the HOST:
+  # Then correlate the callback (nonce <-> probe) on the HOST (same client):
   vigil oob poll --client <your-client-name>
 
 Output contract: the LAST stdout line is the JSON verdict
@@ -69,7 +71,8 @@ def main() -> int:
     ap.add_argument(
         "--callback",
         required=True,
-        help="Minted http://<nonce>.oob.../ host (from `vigil oob mint`). The nonce is the correlation token.",
+        help="The EXACT minted callback URL from `vigil oob mint --client <name>` (http://<nonce>.<client-id>.oob.../). "
+        "The nonce bound under the client id is the correlation token; do not hand-build a bare <nonce>.oob... host.",
     )
     ap.add_argument(
         "--baseline-url",

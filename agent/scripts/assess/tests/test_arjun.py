@@ -155,7 +155,7 @@ def test_select_targets_live_only_by_default():
          "live_status": "", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
     ]
     out = arjun_select.select_targets(rows)
-    assert out == ["http://h/a"]
+    assert out == [("GET", "http://h/a")]
 
 
 def test_select_targets_include_unknown_opts_in_blank_status():
@@ -163,7 +163,7 @@ def test_select_targets_include_unknown_opts_in_blank_status():
         {"url": "http://h/c", "url_path": "/c", "type": "form", "status": "pending",
          "live_status": "", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
     ]
-    assert arjun_select.select_targets(rows, include_unknown=True) == ["http://h/c"]
+    assert arjun_select.select_targets(rows, include_unknown=True) == [("GET", "http://h/c")]
 
 
 def test_select_targets_excludes_inert_and_skipped():
@@ -206,7 +206,7 @@ def test_select_targets_keeps_distinct_sibling_routes():
          "query_params": "{}", "body_params": "{}", "path_params": "{}"},
     ]
     out = arjun_select.select_targets(rows, max_per_host=50)
-    assert sorted(out) == ["http://h/api/users/export", "http://h/api/users/search"]
+    assert sorted(out) == [("GET", "http://h/api/users/export"), ("GET", "http://h/api/users/search")]
 
 
 def test_select_targets_param_poor_only():
@@ -217,7 +217,7 @@ def test_select_targets_param_poor_only():
         {"url": "http://h/poor", "url_path": "/poor", "type": "form", "status": "pending",
          "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
     ]
-    assert arjun_select.select_targets(rows, param_poor_only=True) == ["http://h/poor"]
+    assert arjun_select.select_targets(rows, param_poor_only=True) == [("GET", "http://h/poor")]
 
 
 def test_arjun_select_run_writes_list_and_reports_budget_drops(tmp_path, capsys):
@@ -295,7 +295,7 @@ def test_select_targets_skips_non_http_and_hostless():
         {"url": "https://h/ok", "url_path": "/ok", "type": "form", "status": "pending",
          "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
     ]
-    assert arjun_select.select_targets(rows) == ["https://h/ok"]
+    assert arjun_select.select_targets(rows) == [("GET", "https://h/ok")]
 
 
 def test_select_targets_max_per_host():
@@ -306,6 +306,205 @@ def test_select_targets_max_per_host():
     ]
     out = arjun_select.select_targets(rows, max_per_host=2)
     assert len(out) == 2
+
+
+def test_select_targets_keeps_method_variants_separate():
+    # Same route exposed as GET (query surface) AND POST (body surface). The old
+    # (host, template) key collapsed them to one URL, and since `kali arjun -i`
+    # applies a single global `-m`, the discarded verb's hidden body params were
+    # never scanned. Method is now part of the dedup key, so BOTH survive, each
+    # tagged with its own method.
+    rows = [
+        {"url": "http://h/api/search", "url_path": "/api/search", "method": "GET",
+         "type": "api", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        {"url": "http://h/api/search", "url_path": "/api/search", "method": "POST",
+         "type": "api", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+    ]
+    out = arjun_select.select_targets(rows)
+    assert sorted(out) == [("GET", "http://h/api/search"), ("POST", "http://h/api/search")]
+
+
+def test_select_targets_keeps_same_host_different_port_separate():
+    # The same hostname on two ports is two live listeners; stripping the port
+    # before the dedup key collapsed them and silently skipped one service. The
+    # origin (scheme/host/port) is now in the key, so both are scanned.
+    rows = [
+        {"url": "https://app.example:8443/login", "url_path": "/login", "method": "GET",
+         "type": "form", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        {"url": "https://app.example/login", "url_path": "/login", "method": "GET",
+         "type": "form", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+    ]
+    out = arjun_select.select_targets(rows)
+    assert sorted(u for _m, u in out) == [
+        "https://app.example/login",
+        "https://app.example:8443/login",
+    ]
+
+
+def test_select_targets_collapses_explicit_default_port():
+    # An explicit default port and a bare URL are the SAME service; the origin
+    # normalizes the scheme default away so they collapse (no spurious fork).
+    rows = [
+        {"url": "https://app.example:443/login", "url_path": "/login", "method": "GET",
+         "type": "form", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        {"url": "https://app.example/login", "url_path": "/login", "method": "GET",
+         "type": "form", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+    ]
+    out = arjun_select.select_targets(rows)
+    assert len(out) == 1
+
+
+def test_select_targets_budget_is_per_origin_not_hostname():
+    # Per-host budget keys on ORIGIN: two ports on one hostname are distinct
+    # services and each gets its own cap (the politeness limit protects a single
+    # listener's request volume, and these are two listeners).
+    rows = [
+        {"url": "https://app.example:8443/a", "url_path": "/a", "method": "GET",
+         "type": "form", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        {"url": "https://app.example:8443/b", "url_path": "/b", "method": "GET",
+         "type": "form", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        {"url": "https://app.example/c", "url_path": "/c", "method": "GET",
+         "type": "form", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        {"url": "https://app.example/d", "url_path": "/d", "method": "GET",
+         "type": "form", "status": "pending", "live_status": "live",
+         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+    ]
+    out = arjun_select.select_targets(rows, max_per_host=1)
+    # One per origin: the :8443 service AND the :443 service each keep 1.
+    assert len(out) == 2
+    has_8443 = {("8443" in u) for _m, u in out}
+    assert has_8443 == {True, False}, "budget must keep one URL from EACH port-origin"
+
+
+def test_arjun_select_run_writes_method_specific_sidecars(tmp_path, capsys):
+    # run() must emit per-method sidecar lists so `kali arjun -i <out>.POST -m POST`
+    # scans the body surface separately from the GET query surface — a single flat
+    # list scanned under one -m would miss the other verb's hidden params.
+    from assess.commands import arjun_select as asel
+    from assess.lib.db import db_init, db_insert_work_item
+
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")
+    db_init(str(db))
+    db_insert_work_item(
+        str(db), queue_key="k:get", method="GET",
+        url="https://h.example/api/search", url_path="/api/search",
+        case_type="api", live_status="live",
+    )
+    db_insert_work_item(
+        str(db), queue_key="k:post", method="POST",
+        url="https://h.example/api/search", url_path="/api/search",
+        case_type="api", live_status="live",
+    )
+    out_file = tmp_path / "targets.txt"
+    ns = argparse.Namespace(
+        db_path=str(db), out=str(out_file), include_unknown=False,
+        max_per_host=0, param_poor_only=False, engagement_dir=str(tmp_path),
+    )
+    asel.run(ns)
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["selected"] == 2
+    assert summary["selected_by_method"] == {"GET": 1, "POST": 1}
+
+    get_sidecar = tmp_path / "targets.txt.GET"
+    post_sidecar = tmp_path / "targets.txt.POST"
+    assert get_sidecar.read_text().splitlines() == ["https://h.example/api/search"]
+    assert post_sidecar.read_text().splitlines() == ["https://h.example/api/search"]
+    assert summary["method_outputs"]["GET"] == str(get_sidecar)
+    assert summary["method_outputs"]["POST"] == str(post_sidecar)
+    # The union --out still carries every URL (backward-compatible).
+    assert out_file.read_text().count("https://h.example/api/search") == 2
+
+
+def test_arjun_select_run_anchors_relative_db_to_engagement(tmp_path, capsys, monkeypatch):
+    # U4: a bare `cases.db` with --engagement-dir <eng> must resolve against the
+    # engagement root, not the (drifted) process cwd. The DB lives in <eng>; the
+    # cwd is elsewhere and has NO cases.db, so an unanchored is_file() check would
+    # fail (or read the wrong DB). Anchoring makes the drift-tolerant call work.
+    from assess.commands import arjun_select as asel
+    from assess.lib.db import db_init, db_insert_work_item
+
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    (eng / "scope.json").write_text("{}", encoding="utf-8")
+    db = eng / "cases.db"
+    db.write_bytes(b"")
+    db_init(str(db))
+    db_insert_work_item(
+        str(db), queue_key="k:a", method="GET",
+        url="https://h.example/a", url_path="/a", case_type="form", live_status="live",
+    )
+
+    # Drift the cwd away from the engagement; it has no cases.db.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+
+    out_file = eng / "scans" / "arjun.txt"
+    ns = argparse.Namespace(
+        db_path="cases.db", out=str(out_file), include_unknown=False,
+        max_per_host=0, param_poor_only=False, engagement_dir=str(eng),
+    )
+    asel.run(ns)  # must NOT exit(1) "database not found"
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["db_path"] == str(db)
+    assert summary["selected"] == 1
+
+
+def test_ingest_arjun_anchors_relative_db_to_engagement(tmp_path, capsys, monkeypatch):
+    # U4 (ingest side): a bare `cases.db` from a drifted cwd must anchor to the
+    # engagement before rows are mutated, so enrichment never writes to an
+    # unrelated cwd database.
+    from assess.commands import ingest_arjun
+    from assess.lib.db import db_init, db_insert_work_item, db_query
+
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    (eng / "scope.json").write_text("{}", encoding="utf-8")
+    db = eng / "cases.db"
+    db.write_bytes(b"")
+    db_init(str(db))
+    db_insert_work_item(
+        str(db), queue_key="seed:GET:/known", method="GET",
+        url="https://h.example/known", url_path="/known", case_type="unknown", source="seed",
+    )
+
+    arjun_json = {"https://h.example/known": {"params": ["debug"], "method": "GET"}}
+    jf = eng / "arjun.json"
+    jf.write_text(json.dumps(arjun_json), encoding="utf-8")
+
+    class _Cfg:
+        engagement_dir = str(eng)
+
+    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
+
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+
+    ns = argparse.Namespace(
+        db_path="cases.db", json_file=str(jf), source="arjun",
+        default_method="GET", engagement_dir=str(eng),
+    )
+    ingest_arjun.run(ns)  # must NOT exit(1) and must mutate the ENGAGEMENT db
+    out = json.loads(capsys.readouterr().out)
+    assert out["db_path"] == str(db)
+    assert out["enriched"] == 1
+
+    enriched = db_query(
+        str(db), "SELECT query_params FROM work_items WHERE url = ?", ("https://h.example/known",)
+    )
+    assert "debug" in json.loads(enriched[0]["query_params"])
 
 
 # --------------------------------------------------------------------------
