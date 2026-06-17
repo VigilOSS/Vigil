@@ -9,12 +9,39 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from . import docker
-from .config import RuntimeEgress, RuntimeResources, runtime_egress, runtime_resources
-from .paths import container_host_url, default_runtime_container, read_env_file, resolve_orchestrator_base_url
+from .config import (
+    DEFAULT_RUNTIME_PIDS_LIMIT,
+    DEFAULT_RUNTIME_SHM_SIZE,
+    RuntimeEgress,
+    RuntimeResources,
+    runtime_egress,
+    runtime_resources,
+)
+from .paths import (
+    container_host_url,
+    default_runtime_container,
+    engagements_root,
+    read_env_file,
+    resolve_install_root,
+    resolve_orchestrator_base_url,
+)
 
 
 HEAVY_TIER_HOST_GB_THRESHOLD = 32
 HEAVY_TIER_TARGET_GB = 16
+
+# Lightweight resource tier for an EPHEMERAL per-bench-attempt Kali runtime.
+# Deliberately small (a single attempt's tooling, not the operator's full recon
+# workload), and intentionally NOT the 8 GB operator tier from
+# ``runtime_resources()`` — a bench run can fan many of these out concurrently,
+# so each must claim only a thin slice of the shared Docker VM. Reuses the same
+# pids/shm shape as the operator tier.
+BENCH_RUNTIME_RESOURCES = RuntimeResources(
+    memory_gb=2,
+    cpus=2,
+    pids_limit=DEFAULT_RUNTIME_PIDS_LIMIT,
+    shm_size=DEFAULT_RUNTIME_SHM_SIZE,
+)
 
 ULIMIT_NOFILE_RECOMMENDED = 65536
 ULIMIT_NPROC_RECOMMENDED = 8192
@@ -406,6 +433,76 @@ def stop_runtime(container_name: str | None = None, *, runner: docker.Runner = d
     container_name = container_name or default_runtime_container()
     if docker.container_exists(container_name, runner=runner):
         runner(["docker", "rm", "-f", container_name])
+
+
+def start_bench_runtime(
+    container_name: str,
+    *,
+    net: str,
+    image: str = "vigil:latest",
+    runner: docker.Runner = docker.run_command,
+) -> None:
+    """Start an EPHEMERAL per-bench-attempt Kali runtime on ``net`` ONLY.
+
+    This is the bench analogue of ``start_runtime``, but deliberately much
+    simpler and, critically, ISOLATED: the container is born on the attempt's
+    ``--internal`` FRONT net via ``--network <net>`` at creation time, so it
+    NEVER joins the host-routable default ``bridge`` (and so it cannot reach the
+    host gateway or a sibling attempt's target). It is NOT the shared operator
+    runtime — each attempt gets its own, torn down with the attempt.
+
+    The bench runtime makes ZERO backend calls (the host-side ``vigil`` CLI does
+    every backend write and merely ``docker exec``s into this container), so it
+    needs the FRONT net and the ``/engagements`` mount and NOTHING else — no
+    ``--add-host`` host gateway, no ``--env-file``, no ``ORCHESTRATOR_BASE_URL``,
+    and no ``--restart`` (it is reaped at teardown, never meant to survive).
+    Runs at the lightweight ``BENCH_RUNTIME_RESOURCES`` tier, not the 8 GB
+    operator tier, so many attempts can fan out concurrently on one Docker VM.
+    The keep-alive is the image's own default CMD (``sleep infinity``), same as
+    the shared runtime.
+    """
+    engagements_dir = engagements_root(resolve_install_root()).expanduser().resolve()
+    engagements_dir.mkdir(parents=True, exist_ok=True)
+    resources = BENCH_RUNTIME_RESOURCES
+    argv = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        container_name,
+        "--network",
+        net,
+        "--cap-add=NET_RAW",
+        "--cap-add=NET_ADMIN",
+        "--cap-add=SYS_PTRACE",
+        f"--memory={resources.memory_gb}g",
+        f"--memory-swap={resources.memory_gb}g",
+        "--memory-swappiness=0",
+        f"--cpus={_format_cpus(resources.cpus)}",
+        f"--pids-limit={resources.pids_limit}",
+        f"--shm-size={resources.shm_size}",
+        "--oom-score-adj=-500",
+        "-v",
+        f"{engagements_dir}:/engagements",
+        image,
+    ]
+    # Raise a RuntimeError (not require_success's SystemExit) so a start failure
+    # surfaces as a regular Exception, homogeneous with the network.create/connect
+    # failures staging already handles on its one cleanup path.
+    result = runner(argv)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"failed to start bench runtime {container_name}: "
+            f"{(result.stderr or result.stdout or '').strip() or 'docker run failed'}"
+        )
+
+
+def stop_bench_runtime(container_name: str, *, runner: docker.Runner = docker.run_command) -> None:
+    """Reap an ephemeral per-attempt bench runtime (the ``docker rm -f`` body of
+    ``stop_runtime``). No-op on an empty name or an already-gone container."""
+    if not container_name:
+        return
+    stop_runtime(container_name, runner=runner)
 
 
 def runtime_status(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> str:

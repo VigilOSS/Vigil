@@ -92,35 +92,47 @@ def oob_status(
     *,
     oob_domain: str | None = None,
     runner: docker.Runner = docker.run_command,
+    deep: bool = True,
 ) -> dict[str, object]:
     """Live OOB state plus an active HEALTH verdict.
 
     Liveness alone (tmux sessions exist) masks the failure mode that bit us: every
     interactsh-client can be "running" yet failing to register because the OOB
-    domain does not resolve (broken Route53 delegation). So this also checks, for
-    each RUNNING client, whether it actually registered an interactsh payload, and
-    whether the OOB domain resolves from inside the runtime, then derives a
-    ``health`` (`ok`/`degraded`/`down`) + human ``issues`` so the problem is
-    surfaced instead of buried in per-client retry logs.
+    domain does not resolve (broken Route53 delegation). So with ``deep=True``
+    (the default, used by ``vigil oob status``) this also checks, for each RUNNING
+    client, whether it actually registered an interactsh payload, and whether the
+    OOB domain resolves from inside the runtime, then derives a ``health``
+    (`ok`/`degraded`/`down`) + human ``issues``.
+
+    ``deep=False`` skips those per-client log reads and the DNS probe for the
+    lightweight aggregate callers (`vigil status`, `vigil up`): registration is
+    reported as unknown (``None``) and health reflects only session liveness, so
+    those hot paths keep their original cost. ``domain`` is always resolved to the
+    default when not supplied so the verdict is never silently a false ``ok``.
     """
     container_name = container_name or default_runtime_container()
+    domain = oob_domain or DEFAULT_OOB_DOMAIN
     if not docker.container_running(container_name, runner=runner):
         return {
             "state": "stopped", "health": "down", "server": False, "frpc": False,
-            "clients": [], "running": [], "client_health": [], "domain": oob_domain,
+            "clients": [], "running": [], "client_health": [], "domain": domain,
             "domain_resolves": None,
             "issues": ["Kali runtime container is not running — start it with `vigil runtime start`."],
         }
     server = _tmux_has_session(container_name, "oob-server", runner=runner)
     frpc = _tmux_has_session(container_name, "frpc", runner=runner)
     running = list_running_oob_clients(container_name, runner=runner)
-    clients = list_oob_clients(container_name, runner=runner)
-    domain = oob_domain or DEFAULT_OOB_DOMAIN
-    client_health = [
-        {"name": name, "registered": bool(client_payload_host(name, container_name, runner=runner, oob_domain=domain))}
-        for name in running
-    ]
-    domain_resolves = _oob_domain_resolves(container_name, domain, runner=runner) if oob_domain else None
+    # Reuse the already-fetched running set instead of re-querying tmux inside list_oob_clients.
+    clients = sorted(set(running) | _configured_oob_clients(container_name, runner=runner))
+    if deep:
+        client_health = [
+            {"name": name, "registered": bool(client_payload_host(name, container_name, runner=runner, oob_domain=domain))}
+            for name in running
+        ]
+        domain_resolves = _oob_domain_resolves(container_name, domain, runner=runner)
+    else:
+        client_health = [{"name": name, "registered": None} for name in running]
+        domain_resolves = None
     if server and frpc:
         state = "running"
     elif server or frpc or clients:
@@ -129,7 +141,7 @@ def oob_status(
         state = "stopped"
     health, issues = _assess_oob_health(
         server=server, frpc=frpc, state=state, running=running,
-        client_health=client_health, domain=oob_domain, domain_resolves=domain_resolves,
+        client_health=client_health, domain=domain, domain_resolves=domain_resolves,
     )
     return {
         "state": state,
@@ -139,7 +151,7 @@ def oob_status(
         "clients": clients,
         "running": running,
         "client_health": client_health,
-        "domain": oob_domain,
+        "domain": domain,
         "domain_resolves": domain_resolves,
         "issues": issues,
     }
@@ -170,8 +182,10 @@ def _assess_oob_health(
             f"OOB domain '{domain}' does not resolve from the runtime — callbacks cannot land. "
             f"Check the Route53 NS delegation of '{domain}' to the frp host (must be the host NAME, not a raw IP)."
         )
-    registered = [c for c in client_health if c.get("registered")]
-    if running and not registered:
+    # Only flag registration when it was actually checked (deep=True); a None
+    # entry means "not probed" (deep=False) and must not read as unregistered.
+    known = [c for c in client_health if c.get("registered") is not None]
+    if running and known and not any(c.get("registered") for c in known):
         issues.append(
             f"{len(running)} OOB client(s) running but NONE registered an interactsh payload — clients cannot "
             "reach the server (usually DNS/registration failure). Inspect `vigil oob client logs <name>`."
@@ -188,9 +202,10 @@ def _assess_oob_health(
 def _oob_domain_resolves(container_name: str, domain: str, *, runner: docker.Runner) -> bool:
     """True if a wildcard subdomain of ``domain`` resolves from inside the runtime.
 
-    Exercises the real callback path (delegation → frp host → interactsh) with a
-    marker label so a positive result is not a stale apex cache. Failure is the
-    exact signal the broken-NS outage produced.
+    Queries a ``healthcheck.<domain>`` label so it exercises the wildcard
+    delegation path real callbacks use (delegation → frp host → interactsh),
+    not just an apex A record. Failure is the exact signal the broken-NS outage
+    produced. Capped at one ~3s try so a dead delegation cannot hang status.
     """
     marker = f"healthcheck.{domain}"
     result = _run_exec(
@@ -251,18 +266,22 @@ def list_running_oob_clients(container_name: str | None = None, *, runner: docke
     return sorted({line.strip() for line in result.stdout.splitlines() if line.strip()})
 
 
-def list_oob_clients(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> list[str]:
-    container_name = container_name or default_runtime_container()
-    live: set[str] = set(list_running_oob_clients(container_name, runner=runner))
-    configured: set[str] = set()
+def _configured_oob_clients(container_name: str, *, runner: docker.Runner) -> set[str]:
+    """Names with a persisted ``<name>.json`` metadata file (configured, maybe dead)."""
     cfg_result = _run_exec(
         container_name,
         f"ls {OOB_ROOT}/clients/*.json 2>/dev/null | xargs -I{{}} basename {{}} .json",
         runner=runner, check=False,
     )
-    if cfg_result.returncode == 0:
-        configured = {line.strip() for line in cfg_result.stdout.splitlines() if line.strip()}
-    return sorted(live | configured)
+    if cfg_result.returncode != 0:
+        return set()
+    return {line.strip() for line in cfg_result.stdout.splitlines() if line.strip()}
+
+
+def list_oob_clients(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> list[str]:
+    container_name = container_name or default_runtime_container()
+    live = set(list_running_oob_clients(container_name, runner=runner))
+    return sorted(live | _configured_oob_clients(container_name, runner=runner))
 
 
 def test_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command) -> None:
