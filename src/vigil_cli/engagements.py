@@ -427,7 +427,7 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
     try:
         from .oob import oob_status
 
-        oob_state = str(oob_status(runner=runner).get("state", "unknown"))
+        oob_state = str(oob_status(runner=runner, deep=False).get("state", "unknown"))
     except Exception:
         oob_state = "unknown"
 
