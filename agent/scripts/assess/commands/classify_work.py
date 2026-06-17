@@ -352,21 +352,22 @@ def _retype_pass(db_path: str, *, batch: int, retype_all: bool) -> None:
                     "path_params": row["path_params"],
                 }
                 assignment = _classify_row(mirror)
-                # queue_key embeds the type as its trailing ':'-delimited segment
-                # (`variant:<id>:<type>` / `service:<id>:<type>`); re-ingest dedups
-                # on queue_key (UNIQUE + INSERT OR IGNORE), so the stored key must
-                # track the new type or a later re-ingest inserts a duplicate row
-                # for the same variant. Preserve the `<scheme>:<id>:` prefix (the
-                # id is not re-derivable here) and swap only the trailing type.
-                # UPDATE OR IGNORE: in the rare case a `<scheme>:<id>:<new_type>`
-                # row already exists, skip this row rather than tripping the
-                # UNIQUE(queue_key) constraint mid-pass.
+                # queue_key embeds the type only for variant:/service:/coverage:
+                # keys, where it is the trailing ':'-segment. Detect that precisely
+                # by the trailing segment matching the OLD type; arjun:/deferred:/
+                # seed: keys carry a params_sig or URL there, not a type, and must
+                # NOT be rewritten (doing so corrupts the key). When it IS the type,
+                # re-ingest dedups on queue_key (UNIQUE + INSERT OR IGNORE), so the
+                # stored key must track the new type or a later re-ingest inserts a
+                # duplicate row; preserve the `<scheme>:<id>:` prefix and swap only
+                # the trailing type. UPDATE OR IGNORE: in the rare case a
+                # `<scheme>:<id>:<new_type>` row already exists, skip this row rather
+                # than tripping the UNIQUE(queue_key) constraint mid-pass.
                 old_qk = row["queue_key"] or ""
-                new_qk = (
-                    old_qk.rsplit(":", 1)[0] + ":" + new_type
-                    if ":" in old_qk
-                    else old_qk
-                )
+                if ":" in old_qk and old_qk.rsplit(":", 1)[1] == old_type:
+                    new_qk = old_qk.rsplit(":", 1)[0] + ":" + new_type
+                else:
+                    new_qk = old_qk
                 conn.execute(
                     """
                     UPDATE OR IGNORE work_items
@@ -376,7 +377,11 @@ def _retype_pass(db_path: str, *, batch: int, retype_all: bool) -> None:
                         priority_reason = ?,
                         cluster_key = ?,
                         terminal_reason = ?,
-                        status = CASE WHEN ? IS NOT NULL THEN 'skipped' ELSE 'pending' END
+                        status = CASE
+                            WHEN ? IS NOT NULL THEN 'skipped'
+                            WHEN status = 'skipped' THEN 'pending'
+                            ELSE status
+                        END
                     WHERE id = ?
                     """,
                     (
