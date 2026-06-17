@@ -43,7 +43,9 @@ from .oob import (
     OOB_ROOT,
     OobOptions,
     callback_urls,
+    client_payload_host,
     list_oob_clients,
+    list_running_oob_clients,
     match_interactions_to_nonces,
     mint_nonce,
     oob_options as _oob_options,
@@ -426,6 +428,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     oob_mint.add_argument("--engagement")
     oob_mint.add_argument("--select", action="store_true")
+    oob_mint.add_argument(
+        "--client",
+        default=None,
+        help="Running OOB client whose interactsh id the nonce binds under so `poll` can see the hit "
+        "(see `vigil oob client list`). Optional when exactly one client is running; required to disambiguate.",
+    )
     oob_mint.add_argument("--target-url", default="", help="URL/endpoint the payload targets (for correlation context).")
     oob_mint.add_argument("--param", default="", help="Injected parameter/slot name.")
     oob_mint.add_argument("--technique", default="", help="e.g. ssrf, blind-xss, cmdi, xxe.")
@@ -1160,6 +1168,38 @@ def _backup(args: argparse.Namespace, install_root: Path) -> None:
         print(backup_module.restore_backup(install_root, backup))
 
 
+def _print_oob_status(payload: dict[str, object], *, as_json: bool) -> None:
+    """Render `vigil oob status` and make a non-ok health loud + machine-detectable.
+
+    Liveness used to print green even when every client was failing to register;
+    now a ``degraded``/``down`` health prints its issues to stderr and exits
+    non-zero so scripts/agents that gate on OOB readiness catch the outage
+    instead of proceeding into blind tests with no working callback path.
+    """
+    health = str(payload.get("health", ""))
+    running = payload.get("running") or []
+    client_health = payload.get("client_health") or []
+    registered = sum(1 for c in client_health if isinstance(c, dict) and c.get("registered"))
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        clients = payload.get("clients")
+        client_count = len(clients) if isinstance(clients, list) else 0
+        resolves = payload.get("domain_resolves")
+        resolves_str = "n/a" if resolves is None else str(bool(resolves)).lower()
+        print(
+            f"{payload.get('state')}\thealth={health}\tserver={payload.get('server')}\tfrpc={payload.get('frpc')}"
+            f"\tclients={client_count}\trunning={len(running)}\tregistered={registered}/{len(running)}"
+            f"\tdomain_resolves={resolves_str}\tdomain={payload.get('domain')}"
+        )
+    issues = payload.get("issues") or []
+    if isinstance(issues, list):
+        for issue in issues:
+            print(f"  ! {issue}", file=sys.stderr)
+    if health in {"degraded", "down"}:
+        raise SystemExit(1)
+
+
 def _oob(args: argparse.Namespace, install_root: Path) -> None:
     options = _oob_options(install_root)
     if args.oob_command == "start":
@@ -1171,15 +1211,7 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
         start_oob(options, runner=docker_run_command)
     elif args.oob_command == "status":
         payload = oob_status(oob_domain=options.oob_domain, runner=docker_run_command)
-        if args.json:
-            print(json.dumps(payload, indent=2))
-        else:
-            clients = payload["clients"]
-            client_count = len(clients) if isinstance(clients, list) else 0
-            print(
-                f"{payload['state']}\tserver={payload['server']}\tfrpc={payload['frpc']}"
-                f"\tclients={client_count}\tdomain={payload['domain']}"
-            )
+        _print_oob_status(payload, as_json=args.json)
     elif args.oob_command == "test":
         test_oob(options, runner=docker_run_command)
     elif args.oob_command == "mint":
@@ -1256,11 +1288,62 @@ def _build_assessment_client(install_root: Path, engagement_key: str):
     return AssessmentClient(base_url, engagement_key)
 
 
+def _resolve_mint_client(args: argparse.Namespace, options: OobOptions) -> tuple[str, str]:
+    """Pick the running OOB client to bind a minted nonce under, and resolve its
+    interactsh payload host.
+
+    A minted callback only reaches ``vigil oob poll`` when its host carries a
+    running client's correlation id, so mint must bind the nonce under one.
+    Auto-selects the sole running client; with several, requires ``--client``;
+    with none (or one that has not registered yet) it fails with guidance rather
+    than emitting an un-pollable bare URL. Returns ``(client_name, payload_host)``.
+    """
+    running = list_running_oob_clients(runner=docker_run_command)
+    if args.client:
+        name = sanitize_name(args.client)
+        if name not in running:
+            raise SystemExit(
+                f"OOB client {name!r} is not running, so a minted nonce could not be correlated.\n"
+                f"Running clients: {', '.join(running) if running else '(none)'}\n"
+                f"Start it:  vigil oob client start {name} --engagement {options_engagement_hint()}"
+            )
+    elif not running:
+        raise SystemExit(
+            "No OOB client is running. `vigil oob mint` binds the nonce under a client's interactsh id "
+            "so `vigil oob poll` can see the callback (a bare nonce only shows in the raw server log).\n"
+            "Start one:  vigil oob client start <name> --engagement <key> --agent <agent>\n"
+            "Then check: vigil oob status --json"
+        )
+    elif len(running) > 1:
+        raise SystemExit(
+            f"Multiple OOB clients are running ({', '.join(running)}). "
+            "Pass --client <name> to choose which one's interactsh id the nonce binds under."
+        )
+    else:
+        name = running[0]
+    payload_host = client_payload_host(name, runner=docker_run_command, oob_domain=options.oob_domain)
+    if not payload_host:
+        raise SystemExit(
+            f"OOB client {name!r} is running but has not registered an interactsh payload yet, "
+            "so the nonce cannot be bound to it.\n"
+            f"Wait for the '<id>.{options.oob_domain}' line, then retry:\n"
+            f"  vigil oob client logs {name}"
+        )
+    return name, payload_host
+
+
+def options_engagement_hint() -> str:
+    """Best-effort current engagement key for error hints (never raises)."""
+    current = current_engagement_path()
+    return current.name if current else "<key>"
+
+
 def _oob_mint(args: argparse.Namespace, install_root: Path, options: OobOptions) -> None:
     engagement_path = _resolve_command_engagement(install_root, args)
     engagement_key = engagement_path.name
+    client_name, payload_host = _resolve_mint_client(args, options)
     nonce = mint_nonce(prefix=sanitize_name(engagement_key), token_factory=_oob_nonce_token_factory)
-    urls = callback_urls(nonce, options.oob_domain)
+    urls = callback_urls(nonce, payload_host)
     with _build_assessment_client(install_root, engagement_key) as client:
         record = client.post(
             "oob-probes",
@@ -1276,12 +1359,17 @@ def _oob_mint(args: argparse.Namespace, install_root: Path, options: OobOptions)
             },
         )
     if args.json:
-        print(json.dumps({"nonce": nonce, "urls": urls, "probe": record}, indent=2))
+        print(json.dumps(
+            {"nonce": nonce, "client": client_name, "payload_host": payload_host, "urls": urls, "probe": record},
+            indent=2,
+        ))
         return
     print(f"nonce\t{nonce}")
+    print(f"client\t{client_name}\t({payload_host})")
     print(f"http\t{urls['http']}")
     print(f"dns\t{urls['dns']}")
     print(f"probe\tid={record.get('id')}\tstatus={record.get('status')}\ttechnique={record.get('technique') or '-'}")
+    print(f"note\tfire the EXACT host above; it embeds client '{client_name}', so `vigil oob poll --client {client_name}` correlates the hit")
 
 
 def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions) -> None:

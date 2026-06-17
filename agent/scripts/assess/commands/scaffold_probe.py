@@ -222,8 +222,10 @@ def main() -> int:
     # ap.add_argument("--payload", default="", help="Crafted input under test.")
     # ap.add_argument("--marker", default="", help="Response marker that proves the hypothesis.")
     # Blind-callback hook — mint the host on the HOST first, pass it in here:
-    #   vigil oob mint --technique <t> --target-url <url> --param <p>
-    # ap.add_argument("--callback", default="", help="Minted http://<nonce>.oob.../ host.")
+    #   vigil oob mint --client <name> --technique <t> --target-url <url> --param <p>
+    #   (mint binds the nonce under the client's id; pass the EXACT host it prints —
+    #    a bare <nonce>.oob... host never reaches `vigil oob poll`.)
+    # ap.add_argument("--callback", default="", help="Exact minted http://<nonce>.<client-id>.oob.../ host from `vigil oob mint`.")
     args = ap.parse_args()
 
     # ---- TODO: replace this passive baseline with the real probe logic. -------

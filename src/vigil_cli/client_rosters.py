@@ -3,28 +3,33 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def _ensure_agents_link(agents_src: Path, client_dir: Path, *, link_name: str = "agents") -> None:
+def _ensure_agents_link(
+    agents_src: Path, client_dir: Path, *, link_names: tuple[str, ...] = ("agents",)
+) -> None:
     """Expose a generated specialist roster inside an engagement client dir.
 
-    ``link_name`` is the directory name the link takes inside ``client_dir``.
-    Codex/Claude expose the roster as ``agents``; OpenCode reads ``agent``.
+    ``link_names`` are the directory name(s) the link takes inside ``client_dir``;
+    one symlink per name, all pointing at ``agents_src``. Codex/Claude expose the
+    roster as ``agents``; OpenCode is given both ``agent`` and ``agents`` (see
+    ``ensure_opencode_agents_link``).
     """
     if not agents_src.is_dir():
         return
 
     client_dir.mkdir(parents=True, exist_ok=True)
-    agents_dest = client_dir / link_name
-    if agents_dest.is_symlink():
-        try:
-            if agents_dest.resolve() == agents_src.resolve():
-                return
-        except FileNotFoundError:
-            pass
-        agents_dest.unlink()
-    elif agents_dest.exists():
-        return
+    for link_name in link_names:
+        agents_dest = client_dir / link_name
+        if agents_dest.is_symlink():
+            try:
+                if agents_dest.resolve() == agents_src.resolve():
+                    continue
+            except FileNotFoundError:
+                pass
+            agents_dest.unlink()
+        elif agents_dest.exists():
+            continue
 
-    agents_dest.symlink_to(agents_src.resolve(), target_is_directory=True)
+        agents_dest.symlink_to(agents_src.resolve(), target_is_directory=True)
 
 
 def ensure_codex_agents_link(agent_root: Path, codex_dir: Path) -> None:
@@ -40,11 +45,16 @@ def ensure_claude_agents_link(agent_root: Path, claude_dir: Path) -> None:
 def ensure_opencode_agents_link(agent_root: Path, opencode_dir: Path) -> None:
     """Expose the generated OpenCode specialist roster inside an engagement cwd.
 
-    OpenCode reads project agents from ``.opencode/agent/`` (singular), so the
-    link target file name differs from Codex/Claude (which use ``agents``). The
-    generated roster lives at ``agent/.opencode/agent``.
+    OpenCode globs project agents from BOTH ``.opencode/agent/`` and
+    ``.opencode/agents/`` (the 1.17.5 loader scans ``{agent,agents}/**/*.md`` and
+    follows symlinks), so — mirroring the dual ``plugin``/``plugins`` write — link
+    the roster under both names. Both point at the single generated source roster
+    ``agent/.opencode/agent``; the singular name remains the canonical one the
+    committed wrappers and the render-check use.
     """
-    _ensure_agents_link(agent_root / ".opencode" / "agent", opencode_dir, link_name="agent")
+    _ensure_agents_link(
+        agent_root / ".opencode" / "agent", opencode_dir, link_names=("agent", "agents")
+    )
 
 
 def ensure_claude_settings(agent_root: Path, claude_dir: Path) -> None:
