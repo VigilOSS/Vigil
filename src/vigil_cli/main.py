@@ -648,7 +648,7 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
     elif command == "start":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         client_args = args.client_args[1:] if args.client_args[:1] == ["--"] else args.client_args
-        if args.client == "opencode" and getattr(args, "thinking", None):
+        if args.client == "opencode":
             from .engagements import write_opencode_reasoning_config
             write_opencode_reasoning_config(path, args.thinking)
         start_engagement(install_root, path, args.client, client_args)
