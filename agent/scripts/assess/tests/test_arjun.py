@@ -586,6 +586,86 @@ def test_match_existing_row_distinguishes_same_path_different_host():
     assert elmo["id"] == 2
 
 
+def test_match_existing_row_distinguishes_same_url_different_method():
+    # Same url present as BOTH a GET and a POST work item: a POST Arjun run must
+    # enrich the POST row, not the lowest-id GET row. The old exact-URL lookup
+    # (`WHERE url = ? ORDER BY id LIMIT 1`) ignored method and returned the GET
+    # row (id 1), writing the discovered body params onto the wrong surface.
+    from assess.commands import ingest_arjun
+
+    conn = _mem_db()
+    # GET row gets the LOWER id so the old ORDER BY id LIMIT 1 picks it wrongly.
+    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (1,'GET','https://h.example/api/item','/api/item')")
+    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (2,'POST','https://h.example/api/item','/api/item')")
+    post = ingest_arjun._match_existing_row(
+        conn, method="POST", url_path="/api/item", url="https://h.example/api/item"
+    )
+    get = ingest_arjun._match_existing_row(
+        conn, method="GET", url_path="/api/item", url="https://h.example/api/item"
+    )
+    assert post["id"] == 2, "POST run must match the POST row, not the lower-id GET row"
+    assert get["id"] == 1, "GET run must still match the GET row"
+
+
+def test_ingest_arjun_post_enriches_post_row_not_get_row(tmp_path, monkeypatch, capsys):
+    # End-to-end over the REAL schema: a url present as BOTH a GET and a POST work
+    # item, with the GET row at the LOWER id. A POST Arjun enrichment for that url
+    # must write the discovered body param onto the POST row and leave the GET
+    # row's params untouched — the old url-only match enriched the wrong (GET) row.
+    from assess.commands import ingest_arjun
+    from assess.lib.db import db_init, db_insert_work_item, db_query
+
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")
+    db_init(str(db))
+    # Insert the GET row first so it lands at the lower id.
+    db_insert_work_item(
+        str(db), queue_key="seed:GET:/api/item", method="GET",
+        url="https://h.example/api/item", url_path="/api/item",
+        case_type="unknown", source="seed",
+    )
+    db_insert_work_item(
+        str(db), queue_key="seed:POST:/api/item", method="POST",
+        url="https://h.example/api/item", url_path="/api/item",
+        case_type="unknown", source="seed",
+    )
+
+    arjun_json = {"https://h.example/api/item": {"params": ["payload"], "method": "POST"}}
+    jf = tmp_path / "arjun.json"
+    jf.write_text(json.dumps(arjun_json), encoding="utf-8")
+
+    class _Cfg:
+        engagement_dir = str(tmp_path)
+
+    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
+
+    ns = argparse.Namespace(
+        db_path=str(db), json_file=str(jf), source="arjun",
+        default_method="POST", engagement_dir=str(tmp_path),
+    )
+    ingest_arjun.run(ns)
+    out = json.loads(capsys.readouterr().out)
+    assert out["enriched"] == 1
+    assert out["created"] == 0
+
+    post_row = db_query(
+        str(db),
+        "SELECT body_params, query_params FROM work_items WHERE method = 'POST' AND url = ?",
+        ("https://h.example/api/item",),
+    )[0]
+    get_row = db_query(
+        str(db),
+        "SELECT body_params, query_params FROM work_items WHERE method = 'GET' AND url = ?",
+        ("https://h.example/api/item",),
+    )[0]
+    # The POST row (correct surface) received the discovered body param...
+    assert "payload" in json.loads(post_row["body_params"])
+    # ...and the GET row (wrong surface) was left untouched.
+    assert "payload" not in json.loads(get_row["body_params"])
+    assert "payload" not in json.loads(get_row["query_params"])
+
+
 def test_match_existing_row_does_not_match_substring_or_subdomain_host():
     from assess.commands import ingest_arjun
 
