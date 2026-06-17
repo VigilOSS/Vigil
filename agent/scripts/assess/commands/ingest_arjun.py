@@ -76,9 +76,13 @@ def _match_existing_row(conn, *, method: str, url_path: str, url: str) -> dict |
     """Find the work-buffer row this endpoint enriches.
 
     Match precedence (most to least specific):
-      1. exact full URL (host + path) — endpoints that SHARE a path across hosts
-         (e.g. `/portal/.../applications` on aps. vs elmo.) MUST NOT collapse onto
-         one row, so the host-bearing full URL is tried first.
+      1. exact method + full URL (host + path) — endpoints that SHARE a path
+         across hosts (e.g. `/portal/.../applications` on aps. vs elmo.) MUST NOT
+         collapse onto one row, so the host-bearing full URL is tried first.
+         Method is part of this match because the SAME url can exist as both a
+         GET and a POST work item (no UNIQUE(url) constraint; their queue_keys
+         differ by method), and a POST/JSON Arjun run must enrich the POST row's
+         body surface — not the lowest-id GET row, whose query surface is wrong.
       2. method + url_path, constrained to the SAME host.
       3. url_path alone, constrained to the SAME host.
 
@@ -92,7 +96,8 @@ def _match_existing_row(conn, *, method: str, url_path: str, url: str) -> dict |
     target_host = _host_of(url)
 
     exact = conn.execute(
-        "SELECT * FROM work_items WHERE url = ? ORDER BY id LIMIT 1", (url,)
+        "SELECT * FROM work_items WHERE method = ? AND url = ? ORDER BY id LIMIT 1",
+        (method, url),
     ).fetchone()
     if exact is not None:
         return dict(exact)
