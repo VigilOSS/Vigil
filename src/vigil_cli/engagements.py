@@ -1286,6 +1286,39 @@ def _write_claude_config(agent_root: Path, eng_dir: Path) -> None:
     ensure_claude_agents_link(agent_root, claude_dir)
 
 
+# OpenCode's --dangerously-skip-permissions is honored ONLY for the PRIMARY session.
+# A task-dispatched sub-agent runs in a child session whose permission prompts the CLI
+# loop never answers, so any child tool call that resolves to "ask" — most often
+# external_directory (a specialist reading a file outside the engagement cwd, e.g. a
+# skill/reference under the agent root) — freezes the child forever, hanging the parent
+# task for the whole budget (opencode#12566/#7474/#16367, unfixed in 1.17.5). Resolving
+# every tool to "allow" at the PROJECT-config level means no prompt is ever raised, so
+# specialist (task) dispatch works. Per-agent roster frontmatter permission is NOT honored
+# for task children — it must be this project opencode.json. Engagements run isolated with
+# full authorization, so blanket-allow is the intended posture.
+_OPENCODE_PERMISSION: dict = {"*": "allow", "external_directory": "allow", "doom_loop": "allow"}
+
+
+def _load_opencode_config(eng_dir: Path) -> dict:
+    """The engagement's opencode.json as a dict, guaranteeing the permission block."""
+    path = eng_dir / "opencode.json"
+    config: dict = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                config = loaded
+        except (OSError, json.JSONDecodeError):
+            config = {}
+    config.setdefault("$schema", "https://opencode.ai/config.json")
+    config.setdefault("permission", dict(_OPENCODE_PERMISSION))
+    return config
+
+
+def _write_opencode_json(eng_dir: Path, config: dict) -> None:
+    (eng_dir / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+
 def _write_opencode_config(agent_root: Path, eng_dir: Path) -> None:
     """Install the standard OpenCode plugin + specialist roster into an engagement.
 
@@ -1311,6 +1344,10 @@ def _write_opencode_config(agent_root: Path, eng_dir: Path) -> None:
             plugin_dir.mkdir(parents=True, exist_ok=True)
             (plugin_dir / "standard-hooks.js").write_text(body, encoding="utf-8")
     ensure_opencode_agents_link(agent_root, eng_dir / ".opencode")
+    # Seed opencode.json with the project-level permission block REQUIRED for task
+    # sub-agent dispatch to work headlessly (see _OPENCODE_PERMISSION); thinking options
+    # are merged on top later by write_opencode_reasoning_config.
+    _write_opencode_json(eng_dir, _load_opencode_config(eng_dir))
 
 
 # DeepSeek thinking levels → opencode per-model options. OpenCode deep-merges this
@@ -1326,27 +1363,20 @@ _DEEPSEEK_THINKING_OPTIONS: dict[str, dict] = {
 
 
 def write_opencode_reasoning_config(eng_dir: Path, thinking: str) -> None:
-    """Seed ``<engagement>/opencode.json`` with the DeepSeek thinking options.
+    """Merge the DeepSeek thinking options into ``<engagement>/opencode.json``.
 
-    ``thinking`` is one of ``off`` | ``high`` | ``max``; an empty/unknown value
-    writes nothing (the client/global default applies). deepseek-v4-pro takes the
-    requested level; deepseek-v4-flash is pinned thinking-off.
+    Preserves the permission block (and any other keys) seeded by ``_write_opencode_config``.
+    ``thinking`` is ``off`` | ``high`` | ``max``; a blank/unknown level leaves the provider
+    options untouched but still ensures the permission block is present. deepseek-v4-pro
+    takes the level; deepseek-v4-flash is pinned thinking-off.
     """
+    config = _load_opencode_config(eng_dir)
     pro_options = _DEEPSEEK_THINKING_OPTIONS.get((thinking or "").strip().lower())
-    if pro_options is None:
-        return
-    config = {
-        "$schema": "https://opencode.ai/config.json",
-        "provider": {
-            "deepseek": {
-                "models": {
-                    "deepseek-v4-pro": {"options": pro_options},
-                    "deepseek-v4-flash": {"options": dict(_DEEPSEEK_THINKING_OPTIONS["off"])},
-                }
-            }
-        },
-    }
-    (eng_dir / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    if pro_options is not None:
+        models = config.setdefault("provider", {}).setdefault("deepseek", {}).setdefault("models", {})
+        models["deepseek-v4-pro"] = {"options": pro_options}
+        models["deepseek-v4-flash"] = {"options": dict(_DEEPSEEK_THINKING_OPTIONS["off"])}
+    _write_opencode_json(eng_dir, config)
 
 
 def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_permissions: bool) -> None:

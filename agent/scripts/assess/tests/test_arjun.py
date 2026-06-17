@@ -132,6 +132,16 @@ def test_merge_params_into_field_idempotent():
     assert once == twice
 
 
+def test_merge_params_into_field_refuses_to_overwrite_malformed_existing():
+    # A non-empty value that is not a JSON object must NOT be silently replaced by
+    # `{new}` (that would destroy whatever the column held) — it raises so the
+    # caller can preserve the original and record the discovery in signals instead.
+    with pytest.raises(ValueError):
+        arjun_enrich.merge_params_into_field("not-json{", ["a"])
+    with pytest.raises(ValueError):
+        arjun_enrich.merge_params_into_field('["a","list","not","an","object"]', ["a"])
+
+
 # --------------------------------------------------------------------------
 # arjun_select.select_targets — the gating that keeps Arjun off raw URL dumps
 # --------------------------------------------------------------------------
@@ -192,6 +202,70 @@ def test_select_targets_param_poor_only():
          "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
     ]
     assert arjun_select.select_targets(rows, param_poor_only=True) == ["http://h/poor"]
+
+
+def test_arjun_select_run_writes_list_and_reports_budget_drops(tmp_path, capsys):
+    # End-to-end run(): the gated list is written, the summary carries the per-gate
+    # drop breakdown, and a budget-truncated host warns on stderr (not silent).
+    from assess.commands import arjun_select as asel
+    from assess.lib.db import db_init, db_insert_work_item
+
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")
+    db_init(str(db))
+    for name in ("alpha", "beta", "gamma"):
+        db_insert_work_item(
+            str(db), queue_key=f"k:{name}", method="GET",
+            url=f"https://h.example/{name}", url_path=f"/{name}",
+            case_type="form", live_status="live",
+        )
+    out_file = tmp_path / "targets.txt"
+    ns = argparse.Namespace(
+        db_path=str(db), out=str(out_file), include_unknown=True,
+        max_per_host=1, param_poor_only=False, engagement_dir=str(tmp_path),
+    )
+    asel.run(ns)
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert summary["selected"] == 1
+    assert summary["drops"]["dropped_by_budget"] == 2
+    assert "max-per-host" in captured.err           # truncation surfaced, not silent
+    assert len([ln for ln in out_file.read_text().splitlines() if ln.strip()]) == 1
+
+
+def test_select_targets_stats_account_for_every_scanned_row():
+    # Every scanned row is either selected or dropped by exactly one gate; the
+    # stats must balance so a truncated run can never look like full coverage.
+    def _r(url, path, **over):
+        base = {"url": url, "url_path": path, "type": "form", "status": "pending",
+                "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"}
+        base.update(over)
+        return base
+
+    rows = [
+        _r("", ""),                                            # dropped_no_url
+        _r("ws://h/s", "/s"),                                  # dropped_non_http
+        _r("http://h/a.png", "/a.png", type="image"),         # dropped_inert
+        _r("http://h/sk", "/sk", status="skipped"),           # dropped_skipped_status
+        _r("http://h/dead", "/dead", live_status="blackholed"),  # dropped_not_live
+        _r("http://h/p/2024/A", "/p/2024/A"),                 # \ collapse to one
+        _r("http://h/p/2023/B", "/p/2023/B"),                 # / template
+        _r("http://h/one", "/one"),                           # template 2 (budget keeps 1)
+        _r("http://h/two", "/two"),                           # template 3 (budget drops)
+    ]
+    stats: dict = {}
+    out = arjun_select.select_targets(rows, max_per_host=1, stats=stats)
+
+    assert stats["scanned"] == len(rows)
+    pre = (stats["dropped_no_url"] + stats["dropped_non_http"] + stats["dropped_inert"]
+           + stats["dropped_skipped_status"] + stats["dropped_not_live"]
+           + stats["dropped_param_rich"])
+    assert pre + stats["eligible"] == stats["scanned"]                       # nothing vanishes
+    assert stats["collapsed_by_dedup"] + stats["templates_after_dedup"] == stats["eligible"]
+    assert stats["dropped_by_budget"] + stats["selected"] == stats["templates_after_dedup"]
+    assert stats["collapsed_by_dedup"] == 1                                  # the 2024/2023 pair
+    assert stats["dropped_by_budget"] == 2                                   # 3 templates, cap 1
+    assert len(out) == stats["selected"] == 1
 
 
 def test_select_targets_skips_non_http_and_hostless():
@@ -355,6 +429,64 @@ def test_ingest_arjun_missing_json_is_noop(tmp_path, capsys):
     assert "note" in out
 
 
+def test_ingest_arjun_run_creates_new_and_enriches_existing(tmp_path, monkeypatch, capsys):
+    # End-to-end over a REAL schema: a discovered endpoint that is not yet in the
+    # buffer must actually LAND in it (the create path), and a matching one must be
+    # enriched — proving neither finding is silently dropped between JSON and DB.
+    from assess.commands import ingest_arjun
+    from assess.lib.db import db_init, db_insert_work_item, db_query
+
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # db_init requires the file to already exist
+    db_init(str(db))
+    db_insert_work_item(
+        str(db),
+        queue_key="seed:GET:/known",
+        method="GET",
+        url="https://h.example/known",
+        url_path="/known",
+        case_type="unknown",
+        source="seed",
+    )
+
+    arjun_json = {
+        "https://h.example/known": {"params": ["debug"], "method": "GET"},
+        "https://h.example/brand-new": {"params": ["id"], "method": "GET"},
+    }
+    jf = tmp_path / "arjun.json"
+    jf.write_text(json.dumps(arjun_json), encoding="utf-8")
+
+    class _Cfg:
+        engagement_dir = str(tmp_path)
+
+    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
+
+    ns = argparse.Namespace(
+        db_path=str(db), json_file=str(jf), source="arjun",
+        default_method="GET", engagement_dir=str(tmp_path),
+    )
+    ingest_arjun.run(ns)
+    out = json.loads(capsys.readouterr().out)
+    assert out["enriched"] == 1
+    assert out["created"] == 1
+    assert out["malformed_preserved"] == 0
+
+    created = db_query(
+        str(db),
+        "SELECT query_params, selected_by FROM work_items WHERE url = ?",
+        ("https://h.example/brand-new",),
+    )
+    assert len(created) == 1, "new arjun endpoint was silently dropped, not inserted"
+    assert "id" in json.loads(created[0]["query_params"])
+    assert created[0]["selected_by"] == "arjun"
+
+    enriched = db_query(
+        str(db), "SELECT query_params FROM work_items WHERE url = ?", ("https://h.example/known",)
+    )
+    assert "debug" in json.loads(enriched[0]["query_params"])
+
+
 def test_run_writes_empty_json_artifact_when_arjun_finds_nothing(
     tmp_path, monkeypatch, captured_cmd
 ):
@@ -443,7 +575,36 @@ def test_enrich_existing_never_downgrades_curated_priority():
     assert "curated-sig" in sigs and "arjun:automation" in sigs  # signals merged, not replaced
 
 
+def test_enrich_existing_preserves_malformed_param_column():
+    # If the target param column is corrupt JSON, enrichment must PRESERVE it
+    # (never overwrite/destroy it) while still capturing the discovery in signals.
+    from assess.commands import ingest_arjun
+
+    conn = _mem_db()
+    conn.execute(
+        "INSERT INTO work_items (id, method, url, url_path, type, query_params, body_params, path_params, "
+        "priority_score, cluster_key, priority_reason, selected_by, signals, params_key_sig, status) "
+        "VALUES (1,'GET','https://h/x','/x','unknown','THIS-IS-NOT-JSON','{}','{}',50,'c','r','seed','[\"s\"]','sig0','pending')"
+    )
+    row = dict(conn.execute("SELECT * FROM work_items WHERE id=1").fetchone())
+    record = {"endpoint": "https://h/x", "method": "GET", "params": ["foo"], "header_params": []}
+    res = ingest_arjun._enrich_existing(conn, row, record)
+    after = dict(conn.execute("SELECT * FROM work_items WHERE id=1").fetchone())
+    assert after["query_params"] == "THIS-IS-NOT-JSON"      # corrupt column NOT destroyed
+    assert after["params_key_sig"] == "sig0"                # signature not recomputed from garbage
+    sigs = json.loads(after["signals"])
+    assert "arjun:foo" in sigs                              # discovery NOT lost
+    assert "arjun-param-field-malformed-preserved" in sigs  # and loudly flagged
+    assert "s" in sigs                                      # original signal preserved
+    assert res["malformed_param_field"] is True
+
+
 def test_merge_signal_lists_dedups_and_preserves():
     assert arjun_enrich.merge_signal_lists('["a"]', ["a", "b"]) == ["a", "b"]
     assert arjun_enrich.merge_signal_lists(None, ["x"]) == ["x"]
-    assert arjun_enrich.merge_signal_lists("garbage{", ["x"]) == ["x"]
+    # A corrupt prior signals value is unrecoverable, but the loss is FLAGGED
+    # (marker prepended) rather than silently dropped.
+    assert arjun_enrich.merge_signal_lists("garbage{", ["x"]) == [
+        arjun_enrich.SIGNALS_UNPARSED_MARKER,
+        "x",
+    ]

@@ -119,23 +119,45 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
 
     existing_query = row.get("query_params")
     existing_body = row.get("body_params")
-    if slot == "query_params":
-        new_query = merge_params_into_field(existing_query, params)
-        new_body = existing_body if existing_body is not None else "{}"
-    else:
+    # Merge the discovered params into the right slot. If that slot's column holds
+    # corrupt / non-object JSON, merging would silently overwrite (destroy) it, so
+    # `merge_params_into_field` raises instead: we then PRESERVE the column verbatim
+    # and still record the discovery in signals/rationale below — the finding is not
+    # lost, the corrupt data is not destroyed, and the problem is logged loudly.
+    malformed_field = False
+    try:
+        if slot == "query_params":
+            new_query = merge_params_into_field(existing_query, params)
+            new_body = existing_body if existing_body is not None else "{}"
+        else:
+            new_query = existing_query if existing_query is not None else "{}"
+            new_body = merge_params_into_field(existing_body, params)
+    except ValueError as exc:
+        malformed_field = True
+        print(
+            f"ingest-arjun: row {row['id']} {slot} is malformed ({exc}); preserving it "
+            f"unchanged and recording params {params} in signals only.",
+            file=sys.stderr,
+        )
         new_query = existing_query if existing_query is not None else "{}"
-        new_body = merge_params_into_field(existing_body, params)
+        new_body = existing_body if existing_body is not None else "{}"
 
     case_type = row.get("type") or "unknown"
+    # Route on safe inputs only — a malformed slot is treated as empty for routing,
+    # but its corrupt column value is preserved verbatim above (never rewritten).
+    classify_query = "{}" if (malformed_field and slot == "query_params") else new_query
+    classify_body = "{}" if (malformed_field and slot == "body_params") else new_body
     assignment = classify_from_fields(
         case_type=case_type,
         url_path=row.get("url_path") or "",
-        query_params=new_query,
-        body_params=new_body,
+        query_params=classify_query,
+        body_params=classify_body,
         path_params=row.get("path_params") or "{}",
     )
 
     new_signals = build_signals(params, header_params=header_params)
+    if malformed_field:
+        new_signals.append("arjun-param-field-malformed-preserved")
     merged_signals = merge_signal_lists(row.get("signals"), new_signals)
     rationale = build_triage_rationale(
         method=method,
@@ -143,7 +165,11 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
         url_path=row.get("url_path") or "",
         header_params=header_params,
     )
-    params_sig = generate_params_sig(new_query, new_body)
+    # On a malformed column we keep the existing signature (recomputing from the
+    # corrupt value is meaningless); otherwise recompute from the merged columns.
+    params_sig = (
+        row.get("params_key_sig") if malformed_field else generate_params_sig(new_query, new_body)
+    )
 
     # Enrichment ADDS a discovered param + signal; it must never DOWNGRADE a row
     # that already scored higher (e.g. a curated high-value cluster). Keep the
@@ -200,6 +226,7 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
         "params": params,
         "cluster_key": final_cluster,
         "priority_score": final_priority,
+        "malformed_param_field": malformed_field,
     }
 
 
@@ -352,6 +379,12 @@ def run(args: argparse.Namespace) -> None:
         "enriched": enriched,
         "created": created,
         "skipped_empty": skipped_empty,
+        # Rows whose target param column was corrupt JSON: preserved (not
+        # overwritten) with the discovered params kept in signals. Non-zero here
+        # means a column needs manual repair — it is surfaced, never silent.
+        "malformed_preserved": sum(
+            1 for r in results if r.get("malformed_param_field")
+        ),
         "results": results,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
