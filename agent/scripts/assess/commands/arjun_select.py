@@ -8,9 +8,11 @@ requests for nothing. This command emits a disciplined target list:
                           --include-unknown opts NULL/unknown rows back in).
   2. DYNAMIC, non-inert — exclude classify_buckets.INERT_TYPES and skipped rows.
   3. DEDUP by template  — collapse id/uuid/hex/year-varied paths to ONE route via
-                          classify_buckets.normalize_path_for_cluster, so
+                          classify_buckets.normalize_route_template, so
                           /explore/2024/M0004 and /explore/2023/G0058 test once.
-                          This is the single biggest volume cut.
+                          Distinct sibling routes that merely share a 2-segment
+                          prefix (/api/users/search vs /api/users/export) stay
+                          separate. This is the single biggest volume cut.
   4. PREFER param-poor  — endpoints with 0-1 known params first (hidden-param
                           yield is highest where the surface looks "empty").
   5. PER-HOST budget    — --max-per-host caps templates/host (politeness).
@@ -25,7 +27,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from assess.lib.classify_buckets import INERT_TYPES, normalize_path_for_cluster
+from assess.lib.classify_buckets import INERT_TYPES, normalize_route_template
 
 
 def _param_count(row: dict) -> int:
@@ -129,7 +131,7 @@ def select_targets(
             s["dropped_param_rich"] += 1
             continue
         host = _host_of(url)
-        template = normalize_path_for_cluster(row.get("url_path") or urlparse(url).path)
+        template = normalize_route_template(row.get("url_path") or urlparse(url).path)
         eligible.append((pcount, host, template, url))
 
     s["eligible"] = len(eligible)

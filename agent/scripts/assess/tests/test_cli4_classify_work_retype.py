@@ -316,6 +316,50 @@ def test_retype_newly_inert_row_is_skipped(tmp_path):
     assert row["cluster_key"] == "type:image"
 
 
+def test_retype_updates_queue_key_to_new_type(tmp_path):
+    """queue_key embeds the type as its trailing ':'-delimited segment
+    (`variant:<id>:<type>`). A retype that changes the type must rewrite
+    queue_key too — otherwise a later re-ingest (which dedups on queue_key)
+    computes the NEW `variant:<id>:api` key, misses the stale `:unknown` row,
+    and inserts a DUPLICATE work item for the same request variant."""
+    db_path = _make_db(tmp_path)
+    rid = _insert_row(
+        db_path, queue_key="variant:42:unknown", method="GET",
+        url="http://t/api/users", url_path="/api/users",
+        content_type="application/json", case_type="unknown",
+    )
+
+    _run(_args(db_path, retype=True))
+
+    row = _row(db_path, rid)
+    assert row["type"] == "api"
+    assert row["queue_key"] == "variant:42:api"
+
+
+def test_retype_inert_to_actionable_restores_pending(tmp_path):
+    """An inert row auto-skipped at ingest (status='skipped',
+    terminal_reason='inert_type') that `--retype-all` re-types to an actionable
+    type must be RESTORED to status='pending' (terminal_reason cleared) — else
+    `work-buffer fetch`, which only dispatches status='pending', would never
+    pick it up despite the new actionable classification."""
+    db_path = _make_db(tmp_path)
+    # Mis-typed `image` + skipped at ingest, but its stored path + content_type
+    # actually classify as `api`.
+    rid = _insert_row(
+        db_path, queue_key="variant:7:image", method="POST",
+        url="http://t/api/orders", url_path="/api/orders",
+        content_type="application/json", case_type="image",
+        status="skipped", terminal_reason="inert_type",
+    )
+
+    _run(_args(db_path, retype_all=True))
+
+    row = _row(db_path, rid)
+    assert row["type"] == "api"
+    assert row["status"] == "pending"
+    assert row["terminal_reason"] is None
+
+
 def test_retype_no_change_leaves_row_alone(tmp_path):
     """When classify_type returns the SAME type, the row's downstream fields
     are not rewritten (a no-op type is not a change)."""

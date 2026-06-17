@@ -255,7 +255,10 @@ def _create_candidate(db_path: str, *, conn, record: dict, source: str, auth_con
         url_path=url_path,
         header_params=header_params,
     )
-    queue_key = f"arjun:{method}:{url_path}:{params_sig}"
+    # Include the full host-bearing URL (not the host-stripped url_path) so the
+    # same method/path/params on two in-scope hosts don't collapse to one row
+    # under the UNIQUE(queue_key) dedup in db_insert_work_item.
+    queue_key = f"arjun:{method}:{endpoint}:{params_sig}"
 
     db_insert_work_item(
         db_path,
