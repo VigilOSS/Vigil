@@ -10,14 +10,19 @@ requests for nothing. This command emits a disciplined target list:
   3. DEDUP by template  — collapse id/uuid/hex/year-varied paths to ONE route via
                           classify_buckets.normalize_route_template, so
                           /explore/2024/M0004 and /explore/2023/G0058 test once.
-                          Distinct sibling routes that merely share a 2-segment
-                          prefix (/api/users/search vs /api/users/export) stay
+                          The dedup key is (origin, method, template): distinct
+                          sibling routes (/api/users/search vs /api/users/export),
+                          verb variants (GET vs POST /api/search), and same-host
+                          different-port services (app:8443 vs app:443) all stay
                           separate. This is the single biggest volume cut.
   4. PREFER param-poor  — endpoints with 0-1 known params first (hidden-param
                           yield is highest where the surface looks "empty").
-  5. PER-HOST budget    — --max-per-host caps templates/host (politeness).
+  5. PER-ORIGIN budget  — --max-per-host caps templates per scheme/host/port
+                          service (politeness).
 
-The output file is what `vigil assess kali arjun -i <file>` consumes.
+`vigil assess kali arjun -i <file>` applies a SINGLE global `-m`, so this command
+writes per-method sidecar lists (<out>.GET, <out>.POST, ...) alongside the union
+`--out`, letting each verb's surface be scanned under its own `-m`.
 """
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from assess.lib.classify_buckets import INERT_TYPES, normalize_route_template
+from assess.lib.config import anchor_engagement_relative
 
 
 def _param_count(row: dict) -> int:
@@ -50,11 +56,44 @@ def _param_count(row: dict) -> int:
     return total
 
 
-def _host_of(url: str) -> str:
+def _origin_of(url: str) -> str:
+    """Scheme + host + port identity of ``url`` (empty string if unparseable).
+
+    Used as the dedup/budget unit instead of the bare hostname so the SAME
+    hostname exposed on two ports (``https://app:8443/login`` vs
+    ``https://app/login``) is two distinct services — collapsing them would skip
+    a live listener Arjun never scans. The scheme's DEFAULT port is normalized
+    away (an explicit ``https://app:443`` and a bare ``https://app`` are one
+    service), so only a genuinely non-default port forks the origin.
+    """
     try:
-        return (urlparse(url).hostname or "").lower()
+        parsed = urlparse(url)
     except ValueError:
         return ""
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return ""
+    scheme = (parsed.scheme or "").lower()
+    try:
+        port = parsed.port
+    except ValueError:  # malformed port (e.g. "host:abc") — treat as unspecified
+        port = None
+    default_port = {"http": 80, "https": 443}.get(scheme)
+    if port is None or port == default_port:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def _method_of(row: dict) -> str:
+    """Uppercased HTTP method of ``row`` (defaults to GET when absent/blank).
+
+    The method is part of the dedup identity: a host can expose the same route
+    under multiple verbs (a GET query surface AND a POST/JSON body surface), and
+    Arjun's body-param discovery only fires under the right ``-m``. Collapsing
+    GET and POST ``/api/search`` to one entry would silently drop the body
+    surface from the scan.
+    """
+    return (row.get("method") or "GET").strip().upper() or "GET"
 
 
 def select_targets(
@@ -64,18 +103,25 @@ def select_targets(
     max_per_host: int = 0,
     param_poor_only: bool = False,
     stats: dict | None = None,
-) -> list[str]:
+) -> list[tuple[str, str]]:
     """Pure selection over already-fetched work_items rows (unit-testable).
 
     Applies the live / non-inert / template-dedup / param-poor-preference /
-    per-host-budget gates and returns a deduped, ordered URL list. Ordering:
-    param-poor rows first (ascending param count), then by URL for determinism.
-    Dedup key is (host, normalized-path-template) so id-varied URLs collapse.
+    per-origin-budget gates and returns a deduped, ordered list of
+    ``(method, url)`` pairs. Ordering: param-poor rows first (ascending param
+    count), then by (method, url) for determinism.
+
+    Dedup key is (origin, method, normalized-path-template) so id-varied URLs
+    collapse but distinct method variants and same-host-different-port services
+    are kept separate — each needs its own Arjun run (a single global ``-m``,
+    one scan per listener). The per-host budget is applied per ORIGIN
+    (scheme/host/port) so politeness is enforced per live service.
 
     Every gate DROPS rows; that reduction is coverage the operator did not scan.
     Pass a ``stats`` dict to receive a per-gate drop breakdown (scanned, dropped_*,
     collapsed_by_dedup, dropped_by_budget, selected) so a truncated run is never
-    mistaken for full coverage. ``select_targets(rows)`` (no stats) is unchanged.
+    mistaken for full coverage. ``select_targets(rows)`` (no stats) returns the
+    same ordering as before, now as (method, url) pairs.
     """
     s = {
         "scanned": len(rows),
@@ -93,7 +139,8 @@ def select_targets(
     }
 
     inert = {t.lower() for t in INERT_TYPES}
-    eligible: list[tuple[int, str, str, str]] = []  # (param_count, host, template, url)
+    # (param_count, origin, method, template, url)
+    eligible: list[tuple[int, str, str, str, str]] = []
     for row in rows:
         url = (row.get("url") or "").strip()
         if not url:
@@ -130,46 +177,56 @@ def select_targets(
         if param_poor_only and pcount > 1:
             s["dropped_param_rich"] += 1
             continue
-        host = _host_of(url)
+        origin = _origin_of(url)
+        method = _method_of(row)
         template = normalize_route_template(row.get("url_path") or urlparse(url).path)
-        eligible.append((pcount, host, template, url))
+        eligible.append((pcount, origin, method, template, url))
 
     s["eligible"] = len(eligible)
 
-    # Dedup by (host, template): keep the lowest param-count representative.
-    best: dict[tuple[str, str], tuple[int, str]] = {}
-    for pcount, host, template, url in eligible:
-        key = (host, template)
+    # Dedup by (origin, method, template): keep the lowest param-count
+    # representative. Method and port (carried by origin) stay in the key so a
+    # GET/POST verb pair or a same-host-different-port service is never collapsed.
+    best: dict[tuple[str, str, str], tuple[int, str]] = {}
+    for pcount, origin, method, template, url in eligible:
+        key = (origin, method, template)
         if key not in best or pcount < best[key][0]:
             best[key] = (pcount, url)
 
     s["templates_after_dedup"] = len(best)
     s["collapsed_by_dedup"] = len(eligible) - len(best)
 
-    # Order param-poor first, then deterministic by url.
+    # Order param-poor first, then deterministic by (method, url).
     chosen = sorted(
-        ((pcount, host, url) for (host, _t), (pcount, url) in best.items()),
-        key=lambda x: (x[0], x[2]),
+        (
+            (pcount, origin, method, url)
+            for (origin, method, _t), (pcount, url) in best.items()
+        ),
+        key=lambda x: (x[0], x[2], x[3]),
     )
 
     # Per-host budget — a HARD cap that drops covered routes; count what it sheds.
+    # Keyed on ORIGIN (scheme/host/port) so politeness is enforced per live
+    # service: two ports on one hostname each get their own budget (distinct
+    # listeners), while method variants on the SAME origin share it (they hit one
+    # listener, so the request volume the cap protects against is shared).
     if max_per_host and max_per_host > 0:
-        seen_per_host: dict[str, int] = {}
-        budgeted: list[tuple[int, str, str]] = []
-        for pcount, host, url in chosen:
-            n = seen_per_host.get(host, 0)
+        seen_per_origin: dict[str, int] = {}
+        budgeted: list[tuple[int, str, str, str]] = []
+        for pcount, origin, method, url in chosen:
+            n = seen_per_origin.get(origin, 0)
             if n >= max_per_host:
                 s["dropped_by_budget"] += 1
                 continue
-            seen_per_host[host] = n + 1
-            budgeted.append((pcount, host, url))
+            seen_per_origin[origin] = n + 1
+            budgeted.append((pcount, origin, method, url))
         chosen = budgeted
 
     s["selected"] = len(chosen)
     if stats is not None:
         stats.update(s)
 
-    return [url for _pc, _host, url in chosen]
+    return [(method, url) for _pc, _origin, method, url in chosen]
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -183,7 +240,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "--out",
         dest="out",
         required=True,
-        help="Output file path for the gated URL list (consumed by `kali arjun -i`).",
+        help=(
+            "Output file path for the gated URL list. The union of all methods is "
+            "written here; a per-method sidecar (<out>.<METHOD>) is also written so "
+            "`kali arjun -i <out>.POST -m POST` scans the body surface separately."
+        ),
     )
     p.add_argument(
         "--include-unknown",
@@ -208,7 +269,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> None:
-    db_path = args.db_path
+    # Anchor a relative cases.db to the engagement dir (not the process cwd) so a
+    # subagent whose cwd drifted between bash calls can't probe/read an unrelated
+    # cwd database — the is_file() check below must test the engagement's DB.
+    db_path = anchor_engagement_relative(args.db_path, getattr(args, "engagement_dir", None))
+    if db_path != args.db_path:
+        print(
+            f"arjun-select: anchored relative db path '{args.db_path}' -> '{db_path}'",
+            file=sys.stderr,
+        )
     if not Path(db_path).is_file():
         print(f"ERROR: database not found: {db_path}", file=sys.stderr)
         sys.exit(1)
@@ -217,7 +286,7 @@ def run(args: argparse.Namespace) -> None:
 
     rows = db_query(
         db_path,
-        "SELECT url, url_path, type, status, live_status, "
+        "SELECT url, url_path, method, type, status, live_status, "
         "query_params, body_params, path_params FROM work_items",
     )
     drop_stats: dict = {}
@@ -251,14 +320,35 @@ def run(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
 
+    # Group selected targets by method so the operator can apply the right `-m` to
+    # each list. `kali arjun -i <file>` takes a SINGLE global `-m`, so a list that
+    # mixes GET (query surface) and POST/JSON (body surface) would scan every URL
+    # with one method and miss the others' hidden params. Per-method sidecars
+    # (<out>.GET, <out>.POST, ...) let each surface be scanned under its own verb.
+    by_method: dict[str, list[str]] = {}
+    for method, url in targets:
+        by_method.setdefault(method, []).append(url)
+
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(targets) + ("\n" if targets else ""), encoding="utf-8")
+    # Primary --out keeps the full URL union (backward-compatible).
+    union_urls = [url for _m, url in targets]
+    out_path.write_text("\n".join(union_urls) + ("\n" if union_urls else ""), encoding="utf-8")
+
+    method_outputs: dict[str, str] = {}
+    for method, urls in sorted(by_method.items()):
+        sidecar = out_path.with_name(f"{out_path.name}.{method}")
+        sidecar.write_text("\n".join(urls) + ("\n" if urls else ""), encoding="utf-8")
+        method_outputs[method] = str(sidecar)
 
     summary = {
         "verb": "arjun-select",
         "db_path": db_path,
         "out": str(out_path),
+        # Per-method sidecar files: scan each with its own `-m` so POST/JSON body
+        # surfaces are not silently scanned under GET (or vice versa).
+        "method_outputs": method_outputs,
+        "selected_by_method": {m: len(u) for m, u in sorted(by_method.items())},
         "scanned_rows": len(rows),
         "selected": len(targets),
         "include_unknown": bool(args.include_unknown),

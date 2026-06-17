@@ -261,8 +261,10 @@ Agents do their own readiness and evidence checks through `vigil`:
    start|list|stop`. Per-agent interactsh clients are correlation handles, not
    shared tunnel infrastructure, so specialists can manage them directly.
 4. Get correlated callback hits with `vigil oob poll --client <name>` — mint a
-   nonce-tagged URL per payload with `vigil oob mint`, then `poll` matches each
-   probe to its callback. `vigil oob client logs <name> --lines 80` and `vigil
+   nonce-tagged URL per payload with `vigil oob mint --client <name>` (it binds the
+   nonce under that running client's interactsh id and prints the exact host to
+   fire; pass `--client` to pick which one when several run), then `poll` matches
+   each probe to its callback. `vigil oob client logs <name> --lines 80` and `vigil
    logs oob --lines 80` are raw listener-log tails for server/FRP debugging only,
    never for correlation.
 
@@ -628,11 +630,13 @@ and exploitation needs one, record a blocked technique via `vigil assess post
 blocked-techniques <json-file>` instead of attempting to bind a port yourself.
 
 OOB callback domains are not engagement files. Get readiness and the configured
-base domain from `vigil oob status --json`; create or reuse a named listener
-client with `vigil oob client start <name> --engagement <key> --agent <agent>`;
-mint a nonce-tagged callback URL per payload with `vigil oob mint` and embed its
-`http` host in the payload; then correlate each probe to its callback with `vigil
-oob poll --client <name>`. `vigil oob client logs <name> --lines 80` is a raw tail
+base domain from `vigil oob status --json` (expect `health=ok`); create or reuse a
+named listener client with `vigil oob client start <name> --engagement <key>
+--agent <agent>`; mint a nonce-tagged callback URL per payload with `vigil oob mint
+--client <name>` (it binds the nonce under that client's interactsh id and prints
+the exact host) and embed the **exact host it prints** in the payload — never
+hand-build a bare `<nonce>.oob...` host, which would never reach `poll`; then
+correlate each probe to its callback with `vigil oob poll --client <name>`. `vigil oob client logs <name> --lines 80` is a raw tail
 of that client's listener log for infra debugging only — it does NOT correlate
 nonces to probes, so never read it for hits. If OOB is unavailable, fall back to
 time-based detection and note the substitution in your output.

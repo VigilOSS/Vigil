@@ -93,25 +93,118 @@ def oob_status(
     oob_domain: str | None = None,
     runner: docker.Runner = docker.run_command,
 ) -> dict[str, object]:
+    """Live OOB state plus an active HEALTH verdict.
+
+    Liveness alone (tmux sessions exist) masks the failure mode that bit us: every
+    interactsh-client can be "running" yet failing to register because the OOB
+    domain does not resolve (broken Route53 delegation). So this also checks, for
+    each RUNNING client, whether it actually registered an interactsh payload, and
+    whether the OOB domain resolves from inside the runtime, then derives a
+    ``health`` (`ok`/`degraded`/`down`) + human ``issues`` so the problem is
+    surfaced instead of buried in per-client retry logs.
+    """
     container_name = container_name or default_runtime_container()
     if not docker.container_running(container_name, runner=runner):
-        return {"state": "stopped", "server": False, "frpc": False, "clients": [], "domain": oob_domain}
+        return {
+            "state": "stopped", "health": "down", "server": False, "frpc": False,
+            "clients": [], "running": [], "client_health": [], "domain": oob_domain,
+            "domain_resolves": None,
+            "issues": ["Kali runtime container is not running — start it with `vigil runtime start`."],
+        }
     server = _tmux_has_session(container_name, "oob-server", runner=runner)
     frpc = _tmux_has_session(container_name, "frpc", runner=runner)
+    running = list_running_oob_clients(container_name, runner=runner)
     clients = list_oob_clients(container_name, runner=runner)
+    domain = oob_domain or DEFAULT_OOB_DOMAIN
+    client_health = [
+        {"name": name, "registered": bool(client_payload_host(name, container_name, runner=runner, oob_domain=domain))}
+        for name in running
+    ]
+    domain_resolves = _oob_domain_resolves(container_name, domain, runner=runner) if oob_domain else None
     if server and frpc:
         state = "running"
     elif server or frpc or clients:
         state = "partial"
     else:
         state = "stopped"
+    health, issues = _assess_oob_health(
+        server=server, frpc=frpc, state=state, running=running,
+        client_health=client_health, domain=oob_domain, domain_resolves=domain_resolves,
+    )
     return {
         "state": state,
+        "health": health,
         "server": server,
         "frpc": frpc,
         "clients": clients,
+        "running": running,
+        "client_health": client_health,
         "domain": oob_domain,
+        "domain_resolves": domain_resolves,
+        "issues": issues,
     }
+
+
+def _assess_oob_health(
+    *,
+    server: bool,
+    frpc: bool,
+    state: str,
+    running: list[str],
+    client_health: list[dict[str, object]],
+    domain: str | None,
+    domain_resolves: bool | None,
+) -> tuple[str, list[str]]:
+    """Derive an OOB health verdict + human issues from gathered signals (PURE).
+
+    ``degraded`` means the sessions are up but OOB cannot actually carry a
+    callback (the masked-failure class); ``down`` means it is not running.
+    """
+    issues: list[str] = []
+    if not server:
+        issues.append("interactsh-server session (oob-server) is down — run `vigil oob start`.")
+    if not frpc:
+        issues.append("frpc tunnel session is down — run `vigil oob start`.")
+    if domain and domain_resolves is False:
+        issues.append(
+            f"OOB domain '{domain}' does not resolve from the runtime — callbacks cannot land. "
+            f"Check the Route53 NS delegation of '{domain}' to the frp host (must be the host NAME, not a raw IP)."
+        )
+    registered = [c for c in client_health if c.get("registered")]
+    if running and not registered:
+        issues.append(
+            f"{len(running)} OOB client(s) running but NONE registered an interactsh payload — clients cannot "
+            "reach the server (usually DNS/registration failure). Inspect `vigil oob client logs <name>`."
+        )
+    if state == "stopped":
+        health = "down"
+    elif issues:
+        health = "degraded"
+    else:
+        health = "ok"
+    return health, issues
+
+
+def _oob_domain_resolves(container_name: str, domain: str, *, runner: docker.Runner) -> bool:
+    """True if a wildcard subdomain of ``domain`` resolves from inside the runtime.
+
+    Exercises the real callback path (delegation → frp host → interactsh) with a
+    marker label so a positive result is not a stale apex cache. Failure is the
+    exact signal the broken-NS outage produced.
+    """
+    marker = f"healthcheck.{domain}"
+    result = _run_exec(
+        container_name,
+        f"dig +short +time=3 +tries=1 {shlex.quote(marker)} A 2>/dev/null",
+        runner=runner,
+        check=False,
+    )
+    return any(_looks_like_ip(line.strip()) for line in result.stdout.splitlines())
+
+
+def _looks_like_ip(value: str) -> bool:
+    parts = value.split(".")
+    return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
 
 
 def start_oob_client(
@@ -145,12 +238,22 @@ def stop_oob_client(name: str, container_name: str | None = None, *, runner: doc
     _run_exec(container_name, f"tmux kill-session -t oob-client-{shlex.quote(client_name)} 2>/dev/null || true", runner=runner, check=False)
 
 
+def list_running_oob_clients(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> list[str]:
+    """Names of OOB clients with a LIVE tmux session (running, not merely configured).
+
+    This is the set ``vigil oob mint`` binds a nonce to — only a running client
+    polls interactsh, so only a running client's id can receive a callback.
+    """
+    container_name = container_name or default_runtime_container()
+    result = _run_exec(container_name, "tmux list-sessions -F '#S' 2>/dev/null | sed -n 's/^oob-client-//p'", runner=runner, check=False)
+    if result.returncode != 0:
+        return []
+    return sorted({line.strip() for line in result.stdout.splitlines() if line.strip()})
+
+
 def list_oob_clients(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> list[str]:
     container_name = container_name or default_runtime_container()
-    live: set[str] = set()
-    result = _run_exec(container_name, "tmux list-sessions -F '#S' 2>/dev/null | sed -n 's/^oob-client-//p'", runner=runner, check=False)
-    if result.returncode == 0:
-        live = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    live: set[str] = set(list_running_oob_clients(container_name, runner=runner))
     configured: set[str] = set()
     cfg_result = _run_exec(
         container_name,
@@ -195,10 +298,15 @@ _DEFAULT_NONCE_LENGTH = 16
 
 # Picks the nonce subdomain label out of a callback host. interactsh hosts
 # look like ``<33-char-clientid><nonce>.oob.example.com`` when a tool
-# appends its own id, or just ``<nonce>.oob.example.com`` when we mint
-# the label directly. The parser keys correlation off the recorded nonce
-# set, so it extracts the FULL leftmost label and the matcher checks whether
-# any recorded nonce is a substring of it (handles both shapes).
+# (nuclei/dalfox) prepends its own id to the leftmost label, or
+# ``<nonce>.<33-char-clientid>.oob.example.com`` when ``vigil oob mint``
+# binds the nonce under a running client's registered payload host (the nonce
+# is then the leftmost label, the client id the next one to its right). Both
+# shapes carry the client id so interactsh delivers the hit to that client's
+# poll; the parser extracts the FULL leftmost label and the matcher checks
+# whether any recorded nonce is a substring of it (handles both shapes). A bare
+# ``<nonce>.oob.example.com`` is NOT minted anymore — it never reaches the
+# per-client log ``poll`` reads (see :func:`callback_urls`).
 _INTERACTSH_VERBOSE_RE = re.compile(
     r"Received\s+(?P<protocol>[A-Za-z0-9]+)\s+interaction"
     r"(?:\s*\((?P<qtype>[^)]*)\))?"
@@ -258,20 +366,68 @@ def mint_nonce(
     return token
 
 
-def callback_urls(nonce: str, oob_domain: str = DEFAULT_OOB_DOMAIN) -> dict[str, str]:
-    """Build the callback URLs for a minted nonce.
+def callback_urls(nonce: str, base_host: str) -> dict[str, str]:
+    """Build the callback URLs for a minted nonce bound under a client.
 
-    ``http`` is the full HTTP callback URL; ``dns`` is the bare host (for
-    payloads that only trigger a DNS lookup); ``host`` is the canonical
-    ``<nonce>.<domain>`` form both share.
+    ``base_host`` is a running interactsh-client's registered payload host
+    (``<clientid>.<oob_domain>``), so the result is
+    ``<nonce>.<clientid>.<oob_domain>``. Binding under the client id is what
+    lets the callback reach that client's poll: interactsh keys delivery off the
+    registered correlation id (read from the RIGHTMOST subdomain label), so a
+    bare ``<nonce>.<oob_domain>`` is recorded only in the raw server log and
+    never delivered to the per-client log ``vigil oob poll`` reads.
+
+    ``http``/``https`` are full callback URLs; ``dns`` is the bare host (for
+    payloads that only trigger a DNS lookup); ``host`` is the form they share.
     """
-    host = f"{nonce}.{oob_domain}"
+    host = f"{nonce}.{base_host}"
     return {
         "host": host,
         "http": f"http://{host}/",
         "https": f"https://{host}/",
         "dns": host,
     }
+
+
+# Strips terminal colour codes interactsh-client emits so the registration line
+# parses regardless of TTY styling.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def parse_client_payload_host(log_text: str, oob_domain: str = DEFAULT_OOB_DOMAIN) -> str:
+    """Extract a client's registered interactsh payload host from its log (PURE).
+
+    interactsh-client prints its registered callback domain once per
+    registration, right after the banner::
+
+        [INF] Listing 1 payload for OOB Testing
+        [INF] <33-char-id>.oob.example.com
+
+    That ``<id>`` is the correlation handle interactsh keys delivery on, so a
+    minted probe must be fired *under* it (``<nonce>.<id>.oob...``) to land in
+    THIS client's poll. Returns the MOST RECENT such host (a restart re-registers
+    and may rotate the id), or ``""`` if the client has not registered yet.
+
+    Robust against: terminal colour codes; the ``[INF]``/``[VER]``/``[FTL]``
+    level tags (their bracket has no dot); and real callback lines
+    ``[<host>] Received ... interaction`` (their bracket holds an FQDN and the
+    line carries trailing text, so the anchored host match rejects them). No
+    network / filesystem — feed it the client-log tail.
+    """
+    domain = oob_domain.strip().rstrip(".").lower()
+    if not domain:
+        return ""
+    host_re = re.compile(r"^(?P<host>[a-z0-9-]+\." + re.escape(domain) + r")$")
+    found = ""
+    for raw_line in log_text.splitlines():
+        line = _ANSI_RE.sub("", raw_line).strip()
+        bracket = re.match(r"^\[(?P<tag>[^\]]*)\]\s*(?P<rest>.*)$", line)
+        if bracket and "." not in bracket.group("tag"):
+            line = bracket.group("rest").strip()
+        match = host_re.match(line.lower())
+        if match:
+            found = match.group("host")
+    return found
 
 
 def parse_interactsh_log(log_text: str) -> list[OobInteraction]:
@@ -428,6 +584,26 @@ def read_client_log(
     command = f"tail -n {int(lines)} {log_path} 2>/dev/null || true"
     result = _run_exec(container_name, command, runner=runner, check=False)
     return result.stdout or ""
+
+
+def client_payload_host(
+    name: str,
+    container_name: str | None = None,
+    *,
+    runner: docker.Runner = docker.run_command,
+    oob_domain: str = DEFAULT_OOB_DOMAIN,
+    lines: int = 400,
+) -> str:
+    """Live interactsh payload host for client ``name`` (``<id>.<oob_domain>``), or "".
+
+    Reads the client's interaction log (same source as :func:`read_client_log`)
+    and extracts the registered-payload line via
+    :func:`parse_client_payload_host`. Empty means the client is not running or
+    has not registered an interactsh id yet — in which case a minted nonce
+    cannot be bound to it and could not be correlated by ``vigil oob poll``.
+    """
+    log_text = read_client_log(name, container_name, runner=runner, lines=lines)
+    return parse_client_payload_host(log_text, oob_domain)
 
 
 def _kill_stale_oob_processes(container_name: str, *, runner: docker.Runner) -> None:

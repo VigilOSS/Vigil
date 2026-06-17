@@ -37,7 +37,7 @@ from assess.lib.arjun_enrich import (
 )
 from assess.lib.auth import auth_active_context
 from assess.lib.classify_buckets import classify_from_fields
-from assess.lib.config import load_config
+from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.db import db_init, db_insert_work_item
 from assess.lib.params import extract_url_path, generate_params_sig
 
@@ -292,7 +292,15 @@ def _create_candidate(db_path: str, *, conn, record: dict, source: str, auth_con
 
 
 def run(args: argparse.Namespace) -> None:
-    db_path = args.db_path
+    # Anchor a relative cases.db to the engagement dir (not the process cwd) so a
+    # subagent whose cwd drifted between bash calls can't mutate an unrelated cwd
+    # database — every row write below must target the engagement's DB.
+    db_path = anchor_engagement_relative(args.db_path, getattr(args, "engagement_dir", None))
+    if db_path != args.db_path:
+        print(
+            f"ingest-arjun: anchored relative db path '{args.db_path}' -> '{db_path}'",
+            file=sys.stderr,
+        )
     json_file = args.json_file
 
     if not Path(db_path).is_file():

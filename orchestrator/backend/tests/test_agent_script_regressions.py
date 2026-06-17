@@ -3099,3 +3099,48 @@ def test_s11_spec_parses_refs_composed_form_and_pathlevel_params(monkeypatch, tm
     post_path = json.loads(by_method["POST"][4])
     assert {"file", "a", "b"} <= set(post_body.keys())
     assert "id" in post_path
+
+
+def test_opencode_inline_probe_carveout_is_durable_and_scoped() -> None:
+    """Finding #3 (Option A): operator-core.md carries an OpenCode-only carve-out
+    in the Runtime Dispatch Syntax block — on OpenCode the operator issues target
+    probes INLINE rather than delegating via ``task`` (broken + uncovered by the
+    audit hooks: opencode#5894). The carve-out must be (a) present in the source,
+    (b) rendered into AGENTS.md, and (c) scoped to OpenCode so Claude/Codex still
+    dispatch normally. When opencode#5894's hook coverage + ``task`` reliability
+    land, this carve-out AND this test are deleted together — see
+    docs/plans/opencode-deepseek-hardening-2026-06-16.md §K.3.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    agents = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert "### Runtime Dispatch Syntax" in core
+
+    # (a) the carve-out exists, names both reasons and the exit condition.
+    for anchor in (
+        "OpenCode-only carve-out",
+        "issue target probes INLINE",
+        "opencode#5894",
+        "Claude Code and Codex dispatch normally",
+        "rejoins the standard dispatch model",
+    ):
+        assert anchor in core, f"operator-core.md missing carve-out anchor: {anchor!r}"
+
+    # (b) it propagated into the rendered AGENTS.md. render-check guards EXACT
+    #     operator-core -> AGENTS sync; this guards that the carve-out specifically
+    #     survives the render (a delete-and-re-render would pass render-check).
+    assert "OpenCode-only carve-out" in agents
+    assert "issue target probes INLINE" in agents
+
+    # (c) scoped to OpenCode: the carve-out sits under the OpenCode bullet, not the
+    #     Claude Code / Codex bullets — Claude/Codex must not inherit an inline-probe
+    #     override.
+    claude_idx = core.index("- **Claude Code**")
+    codex_idx = core.index("- **Codex**")
+    oc_idx = core.index("- **OpenCode**")
+    carve_idx = core.index("OpenCode-only carve-out")
+    assert claude_idx < codex_idx < oc_idx < carve_idx
+    claude_bullet = core[claude_idx:codex_idx]
+    assert "carve-out" not in claude_bullet
+    assert "INLINE" not in claude_bullet

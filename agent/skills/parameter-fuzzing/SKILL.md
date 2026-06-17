@@ -95,16 +95,21 @@ Prefer Arjun through the audited verb so the run is recorded AND its findings fl
 #     On an engagement with no liveness ledger, add --include-unknown.
 vigil assess arjun-select "$DB" -o "$DIR/scans/arjun/targets.txt" --param-poor-only --max-per-host 5
 
-# (b) BOUNDED first pass — a focused -w list + --stable --rate-limit keep the run gentle; Arjun's
-#     default list expands to ~100+ chunks/host, enough to overload a rate-sensitive or production
-#     target. Auth via --headers. Keep the batch small (--max-per-host above) for politeness and a
-#     small blast radius. (The runtime patches Arjun so one endpoint returning 4xx/5xx is skipped,
-#     not fatal — a 429 no longer ends the run — but a tight batch is still the polite default.)
-vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt -m GET \
-  -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 \
-  --headers $'Authorization: Bearer TOKEN' \
-  --technique PARAM-DISCOVERY --intent "bounded hidden-param discovery" \
-  --probe-kind fingerprint --phase consume-test --timeout 1800
+# (b) BOUNDED first pass — arjun-select wrote a per-method list (targets.txt.GET / .POST / .JSON /
+#     .XML); `kali arjun -i` takes ONE global -m, so run one bounded pass per method-list present so
+#     POST/JSON body surfaces are scanned under their own verb (not silently as GET). A focused -w
+#     list + --stable --rate-limit keep each run gentle; Arjun's default list expands to ~100+
+#     chunks/host, enough to overload a rate-sensitive or production target. Auth via --headers. Keep
+#     the batch small (--max-per-host above) for politeness. (The runtime patches Arjun so one
+#     endpoint returning 4xx/5xx is skipped, not fatal — a 429 no longer ends the run.)
+for M in GET POST JSON XML; do
+  [ -s "$DIR/scans/arjun/targets.txt.$M" ] || continue
+  vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt.$M -m "$M" \
+    -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 \
+    --headers $'Authorization: Bearer TOKEN' \
+    --technique PARAM-DISCOVERY --intent "bounded hidden-param discovery" \
+    --probe-kind fingerprint --phase consume-test --timeout 1800
+done
 
 # (c) ESCALATE for depth on one high-value endpoint: drop -w (full ~25k list) and/or add --passive.
 #     --passive folds wayback/otx param names into the wordlist and then scans actively, so it adds

