@@ -249,6 +249,10 @@ def main(argv: list[str] | None = None) -> None:
     start_p.add_argument("key", nargs="?")
     start_p.add_argument("--select", action="store_true")
     start_p.add_argument("--client", choices=["codex", "claude", "opencode"], required=True)
+    start_p.add_argument("--thinking", choices=["off", "high", "max"], default=None,
+                         help="DeepSeek thinking level for --client opencode: off=disabled, "
+                              "high=on, max=maximum (default: client default — thinking on). "
+                              "Ignored for claude/codex.")
     start_p.add_argument("client_args", nargs="*")
     open_p = engagement_sub.add_parser("open")
     open_p.add_argument("key", nargs="?")
@@ -644,6 +648,9 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
     elif command == "start":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         client_args = args.client_args[1:] if args.client_args[:1] == ["--"] else args.client_args
+        if args.client == "opencode":
+            from .engagements import write_opencode_reasoning_config
+            write_opencode_reasoning_config(path, args.thinking)
         start_engagement(install_root, path, args.client, client_args)
     elif command == "open":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)

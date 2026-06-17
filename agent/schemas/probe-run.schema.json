@@ -7,63 +7,73 @@
       "type": "integer",
       "default": null,
       "title": "Request Variant Id",
-      "minimum": 1
+      "minimum": 1,
+      "description": "ID of the request variant this probe targeted. Ties the probe to a specific endpoint definition."
     },
     "service_id": {
       "type": "integer",
       "default": null,
       "title": "Service Id",
-      "minimum": 1
+      "minimum": 1,
+      "description": "ID of the service under test. Omit when request_variant_id is provided (service is inferred)."
     },
     "coverage_item_id": {
       "type": "integer",
       "default": null,
       "title": "Coverage Item Id",
-      "minimum": 1
+      "minimum": 1,
+      "description": "ID of the coverage item this probe fulfills. Links probe runs to the coverage tracking table."
     },
     "auth_context": {
       "default": "anonymous",
       "maxLength": 128,
       "minLength": 1,
       "title": "Auth Context",
-      "type": "string"
+      "type": "string",
+      "description": "Authentication state used during the probe (e.g. 'anonymous', 'user', 'admin', or a credential slug)."
     },
     "input_slot": {
       "default": "unknown",
       "maxLength": 64,
       "minLength": 1,
       "title": "Input Slot",
-      "type": "string"
+      "type": "string",
+      "description": "Attack surface class where the payload was injected (e.g. 'query-param', 'json-body', 'http-header', 'path-segment', 'cookie')."
     },
     "attack_family": {
       "maxLength": 64,
       "minLength": 1,
       "title": "Attack Family",
-      "type": "string"
+      "type": "string",
+      "description": "Vuln class being tested (e.g. 'sqli', 'xss', 'ssrf', 'lfi', 'rce', 'auth-bypass'). Required."
     },
     "payload_family": {
       "default": "",
       "maxLength": 128,
       "title": "Payload Family",
-      "type": "string"
+      "type": "string",
+      "description": "Payload sub-category or wordlist name (e.g. 'boolean-blind', 'time-based', 'polyglot-xss')."
     },
     "payload_value": {
       "default": "",
       "maxLength": 16384,
       "title": "Payload Value",
-      "type": "string"
+      "type": "string",
+      "description": "Exact payload string sent in the probe. Include URL-encoding if relevant."
     },
     "tool_name": {
       "maxLength": 128,
       "minLength": 1,
       "title": "Tool Name",
-      "type": "string"
+      "type": "string",
+      "description": "Tool or script that sent the probe (e.g. 'sqlmap', 'ffuf', 'burp', 'custom-script'). Required."
     },
     "agent_name": {
       "default": "",
       "maxLength": 128,
       "title": "Agent Name",
-      "type": "string"
+      "type": "string",
+      "description": "Agent that dispatched this probe (e.g. 'vulnerability-analyst'). Defaults to empty when tool ran directly."
     },
     "result_status": {
       "default": "tested",
@@ -76,42 +86,49 @@
         "no-signal"
       ],
       "title": "Result Status",
-      "type": "string"
+      "type": "string",
+      "description": "Outcome: 'signal' = anomaly detected, warrants escalation to a finding. 'tested' = ran cleanly, no anomaly. 'no-signal' = explicit negative result. 'attempted' = sent but outcome unclear. 'blocked' = WAF/control stopped probe. 'error' = tool or network failure."
     },
     "observed_http_status": {
       "type": "integer",
       "default": null,
-      "title": "Observed Http Status"
+      "title": "Observed Http Status",
+      "description": "HTTP response status code received (e.g. 200, 403, 500). Null for non-HTTP probes."
     },
     "signal_type": {
       "default": "",
       "maxLength": 128,
       "title": "Signal Type",
-      "type": "string"
+      "type": "string",
+      "description": "What anomaly was detected when result_status is 'signal' (e.g. 'time-delay', 'error-disclosure', 'different-response-length')."
     },
     "evidence_ref": {
       "default": "",
       "maxLength": 1024,
       "title": "Evidence Ref",
-      "type": "string"
+      "type": "string",
+      "description": "Path or ID of the artifact capturing the probe exchange (e.g. 'scans/ffuf-run1.json')."
     },
     "notes": {
       "default": "",
       "maxLength": 4096,
       "title": "Notes",
-      "type": "string"
+      "type": "string",
+      "description": "Freeform observations about this probe run (anomalies, tool warnings, raw output excerpts)."
     },
     "target_host": {
       "default": "",
       "maxLength": 256,
       "title": "Target Host",
-      "type": "string"
+      "type": "string",
+      "description": "Hostname or IP of the probed target (e.g. 'api.example.com', '10.0.1.5')."
     },
     "target_path": {
       "default": "",
       "maxLength": 2048,
       "title": "Target Path",
-      "type": "string"
+      "type": "string",
+      "description": "URL path probed (e.g. '/api/v1/search'). Include query string only if it was fixed across all payloads."
     },
     "target_port": {
       "type": [
@@ -119,7 +136,8 @@
         "null"
       ],
       "default": null,
-      "title": "Target Port"
+      "title": "Target Port",
+      "description": "TCP port probed. Omit when port is implied by the scheme (80/443)."
     }
   },
   "required": [

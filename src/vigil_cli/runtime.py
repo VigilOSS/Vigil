@@ -191,6 +191,7 @@ def runtime_image_inputs(install_root: Path) -> list[Path]:
     return [
         install_root / "agent" / "docker" / "runtime-full" / "Dockerfile",
         install_root / "agent" / "docker" / "runtime-full" / "install-external-tools.sh",
+        install_root / "agent" / "docker" / "patches" / "arjun-batch-resilience.py",
         install_root / "docker" / "callback_listener.py",
         install_root / "docker" / "start-callback.sh",
     ]
@@ -199,7 +200,11 @@ def runtime_image_inputs(install_root: Path) -> list[Path]:
 def runtime_inputs_digest(install_root: Path) -> str:
     digest = hashlib.sha256()
     for path in runtime_image_inputs(install_root):
-        digest.update(path.name.encode("utf-8"))
+        try:
+            label = path.relative_to(install_root).as_posix()
+        except ValueError:
+            label = str(path)
+        digest.update(label.encode("utf-8"))
         digest.update(b"\0")
         digest.update(path.read_bytes() if path.is_file() else b"<absent>")
         digest.update(b"\0")

@@ -100,6 +100,7 @@ set_output_paths() {
   AGENTS_OUT="$OUTPUT_DIR/AGENTS.md"
   CLAUDE_AGENTS_DIR="$OUTPUT_DIR/.claude/agents"
   CODEX_AGENTS_DIR="$OUTPUT_DIR/.codex/agents"
+  OPENCODE_AGENTS_DIR="$OUTPUT_DIR/.opencode/agent"
 }
 set_output_paths
 
@@ -160,6 +161,40 @@ agent_description() {
   esac
 }
 
+# -----------------------------------------------------------------------------
+# OpenCode per-role model routing (workstream E).
+#
+# OpenCode subagents INHERIT the invoking primary's model unless they set `model`
+# explicitly, so every generated `.opencode/agent/<name>.md` pins a model. The
+# classification below splits the roster on task shape, not on red/blue:
+#
+#   deepseek-v4-pro   — the operator/primary and HARD multi-step reasoning roles:
+#       exploit chaining, auth/access-control reasoning, deep taint analysis,
+#       false-positive verification, and full-state synthesis. Pro is also the
+#       safe default for anything ambiguous (Terminal-Bench agentic: Pro 67.9%).
+#   deepseek-v4-flash — BOUNDED recon / parsing / enumeration / high-fan-out
+#       sweep roles where the work is mechanical and cheap (Flash 56.9%; only
+#       used where the task is simple and bounded).
+#
+# When adding a role, default it to Pro unless it is clearly a bounded,
+# high-fan-out, mechanical sweep.
+OPENCODE_PRO_MODEL="deepseek/deepseek-v4-pro"
+OPENCODE_FLASH_MODEL="deepseek/deepseek-v4-flash"
+
+agent_model() {
+  case "$1" in
+    # Flash — bounded recon/parsing/enumeration/high-fan-out sweeps.
+    recon-specialist|source-analyzer|surface-collector|fuzzer|code-variant-hunter|alert-triage-specialist)
+      printf '%s\n' "$OPENCODE_FLASH_MODEL" ;;
+    # Pro — operator + hard multi-step exploit/analysis/verification/synthesis.
+    # (operator, vulnerability-analyst, exploit-developer, osint-analyst,
+    #  report-writer, code-architect, code-vuln-hunter, code-vuln-verifier,
+    #  code-fuzz-engineer, investigator, incident-verifier, ir-lead, + default.)
+    *)
+      printf '%s\n' "$OPENCODE_PRO_MODEL" ;;
+  esac
+}
+
 agent_prompt_body() {
   local agent_name="$1"
   local source="$SOURCE_DIR/agents/$agent_name.md"
@@ -186,7 +221,7 @@ render_prompt_locality() {
 
 - Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
-- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md`
+- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md` / `.opencode/agent/*.md`
 - Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 - Skill discovery: `vigil assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
@@ -412,6 +447,57 @@ EOF
   perl -0pi -e 's/\n+\z/\n/' "$out"
 }
 
+render_opencode_wrapper() {
+  local agent_name="$1"
+  local description
+  description=$(agent_description "$agent_name")
+  local model
+  model=$(agent_model "$agent_name")
+  local out="$OPENCODE_AGENTS_DIR/$agent_name.md"
+  mkdir -p "$(dirname "$out")"
+
+  # OpenCode agent frontmatter: description + mode + model. `mode: subagent`
+  # keeps every role dispatchable only via the operator's `task`/@mention (never
+  # a primary entrypoint). `model` is pinned on EVERY role because OpenCode
+  # subagents otherwise inherit the invoking primary's model, defeating routing.
+  if [[ "$agent_name" == "operator" ]]; then
+    cat > "$out" <<EOF
+---
+description: Lead red team operator. Drives pentest methodology, coordinates phases, and manages state.
+mode: subagent
+model: $model
+---
+
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/operator.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
+You are the lead red team operator.
+
+Load and follow the complete operator instructions from \`AGENTS.md\` in the project root.
+This wrapper exists only so OpenCode can expose an \`operator\` agent entrypoint without duplicating prompt text.
+EOF
+    return
+  fi
+
+  {
+    cat <<EOF
+---
+description: $description
+mode: subagent
+model: $model
+---
+
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/$agent_name.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
+EOF
+    agent_prompt_body "$agent_name"
+  } > "$out"
+  perl -0pi -e 's/\n+\z/\n/' "$out"
+}
+
 # Render the active roster's wrappers (red or blue) selected by $TYPE.
 render_all_wrappers() {
   local agent_name
@@ -424,6 +510,7 @@ render_all_wrappers() {
   for agent_name in "${roster[@]}"; do
     render_claude_wrapper "$agent_name"
     render_codex_wrapper "$agent_name"
+    render_opencode_wrapper "$agent_name"
   done
 }
 
@@ -498,10 +585,12 @@ check_render_one() {
   for agent_name in "${roster[@]}"; do
     local claude_rel=".claude/agents/$agent_name.md"
     local codex_rel=".codex/agents/$agent_name.toml"
+    local opencode_rel=".opencode/agent/$agent_name.md"
     local target_claude="$source_output_dir/$claude_rel"
     local target_codex="$source_output_dir/$codex_rel"
+    local target_opencode="$source_output_dir/$opencode_rel"
     # Missing wrapper IS drift — the render produced it but the checked-in
-    # copy is absent. Operators reading from .claude/.codex hit nothing.
+    # copy is absent. Operators reading from .claude/.codex/.opencode hit nothing.
     if [[ ! -f "$target_claude" ]]; then
       printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$claude_rel" >&2
       drift=1
@@ -516,6 +605,14 @@ check_render_one() {
     elif ! diff -q "$target_codex" "$tmp_dir/$codex_rel" >/dev/null 2>&1; then
       printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$codex_rel" >&2
       diff -u "$target_codex" "$tmp_dir/$codex_rel" >&2 || true
+      drift=1
+    fi
+    if [[ ! -f "$target_opencode" ]]; then
+      printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$opencode_rel" >&2
+      drift=1
+    elif ! diff -q "$target_opencode" "$tmp_dir/$opencode_rel" >/dev/null 2>&1; then
+      printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$opencode_rel" >&2
+      diff -u "$target_opencode" "$tmp_dir/$opencode_rel" >&2 || true
       drift=1
     fi
   done

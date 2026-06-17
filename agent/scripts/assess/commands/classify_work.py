@@ -300,7 +300,7 @@ def _retype_pass(db_path: str, *, batch: int, retype_all: bool) -> None:
         while True:
             rows = conn.execute(
                 f"""
-                SELECT id, method, type, url_path, content_type, body,
+                SELECT id, method, type, url_path, content_type, body, queue_key,
                        query_params, body_params, path_params
                 FROM work_items
                 WHERE {where_clause}
@@ -338,9 +338,12 @@ def _retype_pass(db_path: str, *, batch: int, retype_all: bool) -> None:
                 # Re-apply downstream classification for the NEW type. Build a
                 # lightweight row mirror that carries the new type so the bucket
                 # classifier sees it (it reads `type`, `url_path`, and the param
-                # columns). The inert-skip below mirrors the insert path in
-                # db_insert_work_item: a row newly typed into INERT_TYPES is
-                # stamped status='skipped'; non-inert rows keep their status.
+                # columns). The skip/restore below mirrors the --reclaim-skipped
+                # pass: a row whose new classification is terminal (e.g. newly
+                # typed into INERT_TYPES → terminal_reason='inert_type') is
+                # stamped status='skipped'; a row that re-types to an actionable
+                # (non-terminal) type is restored to status='pending' so an
+                # inert→actionable retype becomes dispatchable again.
                 mirror = {
                     "type": new_type,
                     "url_path": row["url_path"],
@@ -349,25 +352,46 @@ def _retype_pass(db_path: str, *, batch: int, retype_all: bool) -> None:
                     "path_params": row["path_params"],
                 }
                 assignment = _classify_row(mirror)
-                newly_inert = new_type in INERT_TYPES
+                # queue_key embeds the type only for variant:/service:/coverage:
+                # keys, where it is the trailing ':'-segment. Detect that precisely
+                # by the trailing segment matching the OLD type; arjun:/deferred:/
+                # seed: keys carry a params_sig or URL there, not a type, and must
+                # NOT be rewritten (doing so corrupts the key). When it IS the type,
+                # re-ingest dedups on queue_key (UNIQUE + INSERT OR IGNORE), so the
+                # stored key must track the new type or a later re-ingest inserts a
+                # duplicate row; preserve the `<scheme>:<id>:` prefix and swap only
+                # the trailing type. UPDATE OR IGNORE: in the rare case a
+                # `<scheme>:<id>:<new_type>` row already exists, skip this row rather
+                # than tripping the UNIQUE(queue_key) constraint mid-pass.
+                old_qk = row["queue_key"] or ""
+                if ":" in old_qk and old_qk.rsplit(":", 1)[1] == old_type:
+                    new_qk = old_qk.rsplit(":", 1)[0] + ":" + new_type
+                else:
+                    new_qk = old_qk
                 conn.execute(
                     """
-                    UPDATE work_items
+                    UPDATE OR IGNORE work_items
                     SET type = ?,
+                        queue_key = ?,
                         priority_score = ?,
                         priority_reason = ?,
                         cluster_key = ?,
                         terminal_reason = ?,
-                        status = CASE WHEN ? THEN 'skipped' ELSE status END
+                        status = CASE
+                            WHEN ? IS NOT NULL THEN 'skipped'
+                            WHEN status = 'skipped' THEN 'pending'
+                            ELSE status
+                        END
                     WHERE id = ?
                     """,
                     (
                         new_type,
+                        new_qk,
                         assignment["priority_score"],
                         assignment["priority_reason"],
                         assignment["cluster_key"],
                         assignment["terminal_reason"],
-                        1 if newly_inert else 0,
+                        assignment["terminal_reason"],
                         row["id"],
                     ),
                 )

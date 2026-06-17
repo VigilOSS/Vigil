@@ -204,15 +204,24 @@ def merge_params_into_field(existing_json: str | None, new_params: list[str]) ->
     The work-item param columns store a JSON object ``{name: value}``. We add
     each discovered param with an empty-string value (Arjun finds the NAME, not
     a value), preserving any params already present. Returns a JSON string.
+
+    Raises ``ValueError`` when ``existing_json`` is non-empty but does NOT decode
+    to a JSON object. Returning ``{<new params>}`` in that case would silently
+    overwrite — and permanently destroy — whatever the corrupt column held; the
+    caller is expected to catch this, preserve the original value untouched, and
+    record the discovered params in ``signals`` so the finding is never lost.
     """
     base: dict[str, Any] = {}
     if existing_json:
         try:
             decoded = json.loads(existing_json)
-            if isinstance(decoded, dict):
-                base = decoded
-        except (TypeError, ValueError):
-            base = {}
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"existing param field is not valid JSON: {exc}") from exc
+        if not isinstance(decoded, dict):
+            raise ValueError(
+                f"existing param field is a JSON {type(decoded).__name__}, not an object"
+            )
+        base = decoded
     for name in new_params:
         token = str(name).strip()
         if token and token not in base:
@@ -220,21 +229,31 @@ def merge_params_into_field(existing_json: str | None, new_params: list[str]) ->
     return json.dumps(base, sort_keys=True)
 
 
+# Marker recorded when a row's prior ``signals`` value could not be parsed as a
+# list. The unreadable content cannot be recovered, but flagging it keeps the loss
+# visible (never silent) so the row can be spotted and repaired.
+SIGNALS_UNPARSED_MARKER = "signals-prior-value-unparsed"
+
+
 def merge_signal_lists(existing_json: str | None, new_signals: list[str]) -> list[str]:
     """Merge ``new_signals`` into an existing JSON signals list, dedup, order-preserving.
 
     Enrichment must ADD its discovered-param signals without erasing whatever the
-    row already carried (e.g. a curated source's signals). Malformed/empty input
-    is treated as no prior signals.
+    row already carried (e.g. a curated source's signals). Empty input is treated
+    as no prior signals. A non-empty value that does NOT parse to a list is corrupt
+    and its entries are unrecoverable; rather than drop it silently, a
+    ``SIGNALS_UNPARSED_MARKER`` is prepended so the loss is flagged on the row.
     """
     base: list[str] = []
     if existing_json:
         try:
             decoded = json.loads(existing_json)
-            if isinstance(decoded, list):
-                base = [str(x) for x in decoded]
         except (TypeError, ValueError):
-            base = []
+            decoded = None
+        if isinstance(decoded, list):
+            base = [str(x) for x in decoded]
+        else:
+            base = [SIGNALS_UNPARSED_MARKER]
     out = list(base)
     for sig in new_signals:
         if sig not in out:

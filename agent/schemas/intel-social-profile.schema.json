@@ -33,22 +33,26 @@
     "handle": {
       "type": "string",
       "maxLength": 256,
-      "default": ""
+      "default": "",
+      "description": "Username or screen name on the platform (e.g., '@alice', 'alice-smith-42b')."
     },
     "url": {
       "type": "string",
       "maxLength": 2048,
-      "default": ""
+      "default": "",
+      "description": "Direct URL to the profile page."
     },
     "source_name": {
       "type": "string",
       "maxLength": 128,
-      "default": ""
+      "default": "",
+      "description": "Tool or agent that produced this record (e.g., 'osint-analyst', 'linkedin-scraper')."
     },
     "notes": {
       "type": "string",
       "maxLength": 4096,
-      "default": ""
+      "default": "",
+      "description": "Analyst commentary, caveats, or context that doesn't fit structured fields."
     },
     "provenance": {
       "type": "object",
@@ -56,16 +60,20 @@
       "default": {},
       "properties": {
         "agent_name": {
-          "type": "string"
+          "type": "string",
+          "description": "Agent that retrieved or inferred this data."
         },
         "artifact_ref": {
-          "type": "string"
+          "type": "string",
+          "description": "File or URL reference to the raw artifact (e.g., 'file:artifacts/linkedin-profile.html:1')."
         },
         "captured_at": {
-          "type": "string"
+          "type": "string",
+          "description": "ISO8601 timestamp when the data was captured."
         },
         "evidence_quote": {
-          "type": "string"
+          "type": "string",
+          "description": "Verbatim excerpt from the source that supports this record."
         }
       }
     }

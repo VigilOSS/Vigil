@@ -64,6 +64,14 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.set_defaults(func=run)
 
 
+def _host_of(url: str) -> str:
+    """Lowercased hostname of ``url`` (empty string if unparseable/absent)."""
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 def _match_existing_row(conn, *, method: str, url_path: str, url: str) -> dict | None:
     """Find the work-buffer row this endpoint enriches.
 
@@ -71,31 +79,31 @@ def _match_existing_row(conn, *, method: str, url_path: str, url: str) -> dict |
       1. exact full URL (host + path) — endpoints that SHARE a path across hosts
          (e.g. `/portal/.../applications` on aps. vs elmo.) MUST NOT collapse onto
          one row, so the host-bearing full URL is tried first.
-      2. method + url_path, constrained to the same host.
-      3. url_path alone, constrained to the same host.
+      2. method + url_path, constrained to the SAME host.
+      3. url_path alone, constrained to the SAME host.
 
-    The host constraint on the fallbacks keeps a same-path-different-host endpoint
-    from matching a sibling on another host. Returns the row dict, or None (the
-    caller then creates a candidate).
+    Host equality on the fallbacks is checked in Python on the parsed hostname,
+    not via a `LIKE '%host%'` substring (which would let an apex endpoint match a
+    subdomain row — `acme-agency.example` vs `app.acme-agency.example` — or a substring host —
+    `acme-agency.example` vs `evilacme-agency.example` — i.e. a different origin). `url_path` is selective
+    enough that the candidate set per fallback is tiny. Returns the row dict, or
+    None (the caller then creates a candidate).
     """
-    host = (urlparse(url).hostname or "").lower()
-    host_like = f"%{host}%" if host else "%"
+    target_host = _host_of(url)
+
+    exact = conn.execute(
+        "SELECT * FROM work_items WHERE url = ? ORDER BY id LIMIT 1", (url,)
+    ).fetchone()
+    if exact is not None:
+        return dict(exact)
+
     for sql, params in (
-        ("SELECT * FROM work_items WHERE url = ? ORDER BY id LIMIT 1", (url,)),
-        (
-            "SELECT * FROM work_items WHERE method = ? AND url_path = ? "
-            "AND lower(url) LIKE ? ORDER BY id LIMIT 1",
-            (method, url_path, host_like),
-        ),
-        (
-            "SELECT * FROM work_items WHERE url_path = ? AND lower(url) LIKE ? "
-            "ORDER BY id LIMIT 1",
-            (url_path, host_like),
-        ),
+        ("SELECT * FROM work_items WHERE method = ? AND url_path = ? ORDER BY id", (method, url_path)),
+        ("SELECT * FROM work_items WHERE url_path = ? ORDER BY id", (url_path,)),
     ):
-        row = conn.execute(sql, params).fetchone()
-        if row is not None:
-            return dict(row)
+        for row in conn.execute(sql, params).fetchall():
+            if _host_of(row["url"]) == target_host:
+                return dict(row)
     return None
 
 
@@ -111,23 +119,45 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
 
     existing_query = row.get("query_params")
     existing_body = row.get("body_params")
-    if slot == "query_params":
-        new_query = merge_params_into_field(existing_query, params)
-        new_body = existing_body if existing_body is not None else "{}"
-    else:
+    # Merge the discovered params into the right slot. If that slot's column holds
+    # corrupt / non-object JSON, merging would silently overwrite (destroy) it, so
+    # `merge_params_into_field` raises instead: we then PRESERVE the column verbatim
+    # and still record the discovery in signals/rationale below — the finding is not
+    # lost, the corrupt data is not destroyed, and the problem is logged loudly.
+    malformed_field = False
+    try:
+        if slot == "query_params":
+            new_query = merge_params_into_field(existing_query, params)
+            new_body = existing_body if existing_body is not None else "{}"
+        else:
+            new_query = existing_query if existing_query is not None else "{}"
+            new_body = merge_params_into_field(existing_body, params)
+    except ValueError as exc:
+        malformed_field = True
+        print(
+            f"ingest-arjun: row {row['id']} {slot} is malformed ({exc}); preserving it "
+            f"unchanged and recording params {params} in signals only.",
+            file=sys.stderr,
+        )
         new_query = existing_query if existing_query is not None else "{}"
-        new_body = merge_params_into_field(existing_body, params)
+        new_body = existing_body if existing_body is not None else "{}"
 
     case_type = row.get("type") or "unknown"
+    # Route on safe inputs only — a malformed slot is treated as empty for routing,
+    # but its corrupt column value is preserved verbatim above (never rewritten).
+    classify_query = "{}" if (malformed_field and slot == "query_params") else new_query
+    classify_body = "{}" if (malformed_field and slot == "body_params") else new_body
     assignment = classify_from_fields(
         case_type=case_type,
         url_path=row.get("url_path") or "",
-        query_params=new_query,
-        body_params=new_body,
+        query_params=classify_query,
+        body_params=classify_body,
         path_params=row.get("path_params") or "{}",
     )
 
     new_signals = build_signals(params, header_params=header_params)
+    if malformed_field:
+        new_signals.append("arjun-param-field-malformed-preserved")
     merged_signals = merge_signal_lists(row.get("signals"), new_signals)
     rationale = build_triage_rationale(
         method=method,
@@ -135,7 +165,11 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
         url_path=row.get("url_path") or "",
         header_params=header_params,
     )
-    params_sig = generate_params_sig(new_query, new_body)
+    # On a malformed column we keep the existing signature (recomputing from the
+    # corrupt value is meaningless); otherwise recompute from the merged columns.
+    params_sig = (
+        row.get("params_key_sig") if malformed_field else generate_params_sig(new_query, new_body)
+    )
 
     # Enrichment ADDS a discovered param + signal; it must never DOWNGRADE a row
     # that already scored higher (e.g. a curated high-value cluster). Keep the
@@ -192,6 +226,7 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
         "params": params,
         "cluster_key": final_cluster,
         "priority_score": final_priority,
+        "malformed_param_field": malformed_field,
     }
 
 
@@ -220,7 +255,10 @@ def _create_candidate(db_path: str, *, conn, record: dict, source: str, auth_con
         url_path=url_path,
         header_params=header_params,
     )
-    queue_key = f"arjun:{method}:{url_path}:{params_sig}"
+    # Include the full host-bearing URL (not the host-stripped url_path) so the
+    # same method/path/params on two in-scope hosts don't collapse to one row
+    # under the UNIQUE(queue_key) dedup in db_insert_work_item.
+    queue_key = f"arjun:{method}:{endpoint}:{params_sig}"
 
     db_insert_work_item(
         db_path,
@@ -344,6 +382,12 @@ def run(args: argparse.Namespace) -> None:
         "enriched": enriched,
         "created": created,
         "skipped_empty": skipped_empty,
+        # Rows whose target param column was corrupt JSON: preserved (not
+        # overwritten) with the discovered params kept in signals. Non-zero here
+        # means a column needs manual repair — it is surfaced, never silent.
+        "malformed_preserved": sum(
+            1 for r in results if r.get("malformed_param_field")
+        ),
         "results": results,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))

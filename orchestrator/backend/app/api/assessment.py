@@ -387,7 +387,7 @@ class CredentialRecordRequest(BaseModel):
     credential_key: str = Field(min_length=1, max_length=256)
     kind: str = Field(min_length=1, max_length=64)
     principal: str = Field(min_length=1, max_length=256)
-    secret: str = Field(default="", max_length=1024, description="The credential secret value (password, token, key)")
+    secret: str = Field(default="", max_length=1024, description="Literal secret value (password, token, key material). Redact if policy prohibits storage; record 'REDACTED' and describe in notes.")
     source_name: str = Field(default="", max_length=128)
     status: str = Field(default="discovered", min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)

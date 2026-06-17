@@ -9,13 +9,15 @@
       "type": "string",
       "default": null,
       "title": "Slug",
-      "minLength": 1
+      "minLength": 1,
+      "description": "Stable kebab-case identifier for this finding (e.g. 'sqli-search-q'). Omit to auto-generate."
     },
     "title": {
       "maxLength": 512,
       "minLength": 1,
       "title": "Title",
-      "type": "string"
+      "type": "string",
+      "description": "One-line finding name: vuln class + location (e.g. 'Blind SQL injection in /search?q')."
     },
     "severity": {
       "default": "info",
@@ -23,6 +25,7 @@
       "minLength": 1,
       "title": "Severity",
       "type": "string",
+      "description": "CVSS-aligned impact rating. Use 'critical' only for CVSS >=9.0 or trivially exploitable RCE/auth-bypass.",
       "enum": [
         "info",
         "low",
@@ -37,6 +40,7 @@
       "minLength": 1,
       "title": "Workflow Status",
       "type": "string",
+      "description": "Lifecycle state. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'.",
       "enum": [
         "draft",
         "active",
@@ -53,6 +57,7 @@
       "minLength": 1,
       "title": "Verification State",
       "type": "string",
+      "description": "Human review state. Leave 'unreviewed' when first recording; set 'verified' after confirming exploitability; 'disputed' when contested.",
       "enum": [
         "unreviewed",
         "verified",
@@ -65,6 +70,7 @@
       "minLength": 1,
       "title": "Verification Disposition",
       "type": "string",
+      "description": "Verifier outcome. 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable.",
       "enum": [
         "none",
         "pending_runtime_proof",
@@ -77,50 +83,58 @@
       "default": "",
       "maxLength": 128,
       "title": "Defect Family",
-      "type": "string"
+      "type": "string",
+      "description": "Short vuln-class label for grouping (e.g. 'sql-injection', 'buffer-overflow', 'ssrf'). Use kebab-case."
     },
     "root_cause_key": {
       "default": "",
       "maxLength": 256,
       "title": "Root Cause Key",
-      "type": "string"
+      "type": "string",
+      "description": "Stable key linking variants to a shared root cause (e.g. 'missing-input-sanitization-search'). Omit if not part of a variant cluster."
     },
     "auth_context": {
       "default": "anonymous",
       "maxLength": 128,
       "minLength": 1,
       "title": "Auth Context",
-      "type": "string"
+      "type": "string",
+      "description": "Authentication state when the finding was triggered. Use 'anonymous', a role name (e.g. 'user', 'admin'), or credential slug."
     },
     "canonical_location": {
       "default": "",
       "maxLength": 1024,
       "title": "Canonical Location",
-      "type": "string"
+      "type": "string",
+      "description": "Primary affected location. URL for network findings (e.g. 'https://target.example/search?q'); 'file:path:line' for code findings."
     },
     "summary": {
       "default": "",
       "maxLength": 4096,
       "title": "Summary",
-      "type": "string"
+      "type": "string",
+      "description": "2-5 sentence description: what is vulnerable, how it is triggered, and the attacker impact."
     },
     "evidence_ref": {
       "default": "",
       "maxLength": 1024,
       "title": "Evidence Ref",
-      "type": "string"
+      "type": "string",
+      "description": "Path or identifier for supporting artifact (e.g. 'scans/sqlmap.txt', 'artifacts/burp-export.xml'). Leave empty if evidence is inline in details.evidence."
     },
     "notes": {
       "default": "",
       "maxLength": 20000,
       "title": "Notes",
-      "type": "string"
+      "type": "string",
+      "description": "Freeform operational notes: retesting observations, partial progress, raw tool output. Not shown in reports."
     },
     "source_name": {
       "default": "",
       "maxLength": 128,
       "title": "Source Name",
-      "type": "string"
+      "type": "string",
+      "description": "Agent or tool that produced this record (e.g. 'vulnerability-analyst', 'nuclei'). Mirrors provenance.agent_name for quick filtering."
     },
     "details": {
       "additionalProperties": false,
@@ -133,93 +147,93 @@
       "properties": {
         "discovered_by": {
           "type": "string",
-          "description": "Agent name that first identified this finding"
+          "description": "Agent name that first identified this finding (e.g. 'vulnerability-analyst')."
         },
         "owasp_category": {
           "type": "string",
-          "description": "OWASP Top 10 category (for example, A03:2021 Injection)"
+          "description": "OWASP Top 10 2021 category code and name (e.g. 'A03:2021 Injection')."
         },
         "cwe_id": {
           "type": "string",
-          "description": "CWE identifier (for example, CWE-89 for SQL injection)"
+          "description": "CWE identifier (e.g. 'CWE-89' for SQL injection, 'CWE-122' for heap buffer overflow)."
         },
         "parameter": {
           "type": "string",
-          "description": "Affected parameter name or input vector"
+          "description": "Exact name of the affected input: query param, header, JSON key, or form field (e.g. 'q', 'X-User-Id', 'username')."
         },
         "slot_type": {
           "type": "string",
-          "description": "Code-analysis slot type or attack input class associated with the finding"
+          "description": "Code-analysis input class for the attack (e.g. 'URL-COMPONENT', 'NETWORK-INPUT', 'PROTOCOL-FIELD')."
         },
         "request_method": {
           "type": "string",
-          "description": "HTTP method or triggering action (for example, GET, POST, PUT, DELETE)"
+          "description": "HTTP verb that triggers the finding (e.g. 'GET', 'POST', 'PUT', 'DELETE')."
         },
         "evidence": {
           "type": "string",
           "minLength": 1,
-          "description": "Exact response excerpt, artifact reference, or replayable proof"
+          "description": "Verbatim proof: exact response excerpt, artifact path, or replayable request/response. Must be sufficient to reproduce independently."
         },
         "kill_reason": {
           "type": "string",
-          "description": "Structured verifier rationale when a finding is marked false_positive"
+          "description": "Verifier rationale for false_positive verdict: which check failed and why the issue is not exploitable."
         },
         "kill_check": {
           "type": "integer",
           "minimum": 1,
           "maximum": 5,
-          "description": "Verification check number responsible for the false-positive verdict"
+          "description": "Verification check number (1-5) that produced the false-positive verdict."
         },
         "entry_point": {
           "type": "string",
-          "description": "Source of attacker-controlled data (for example, function name, HTTP parameter, file read site)"
+          "description": "Where attacker-controlled data enters the program (e.g. 'curl_url_set(CURLURLPART_URL, attacker_url)', 'POST /upload body field filename')."
         },
         "sink": {
           "type": "string",
-          "description": "Dangerous operation receiving tainted data (for example, memcpy call, SQL query, exec invocation)"
+          "description": "Dangerous operation that consumes tainted data (e.g. 'memcpy(buf, scheme, schemelen) at lib/urlapi.c:342', 'sqlite3_exec(db, query)')."
         },
         "taint_path": {
           "type": "string",
-          "description": "Ordered attacker-controlled data flow from entry point to sink (narrative form)"
+          "description": "Arrow-delimited data flow from entry_point to sink (e.g. 'curl_url_set -> parseurl() -> memcpy(buf, scheme, schemelen)')."
         },
         "guards_evaluated": {
           "type": "string",
-          "description": "Guard analysis showing which checks exist and why they fail or can be bypassed"
+          "description": "List each relevant bounds/validation check and state whether it is absent, bypassable, or ineffective (e.g. 'No bounds check on schemelen before memcpy')."
         },
         "impact": {
           "type": "string",
           "minLength": 1,
-          "description": "Concrete attacker outcome and affected scope"
+          "description": "Concrete attacker outcome: what data is exposed or what action can be taken, and who is affected (e.g. 'Anonymous attacker can read all DB rows', 'Remote code execution via heap corruption')."
         },
         "cvss_vector": {
           "type": "string",
           "minLength": 1,
-          "description": "CVSS 3.1 vector string (for example, CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N)"
+          "description": "CVSS 3.1 vector string (e.g. 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N')."
         },
         "cvss_score": {
           "type": "number",
           "exclusiveMinimum": 0,
           "maximum": 10,
-          "description": "Numeric CVSS 3.1 base score"
+          "description": "CVSS 3.1 base score (0.1-10.0). Must match cvss_vector."
         },
         "remediation": {
           "type": "string",
-          "description": "Recommended fix or the control that failed"
+          "description": "Specific fix or missing control (e.g. 'Use parameterized queries', 'Add bounds check on schemelen before memcpy')."
         },
         "steps_to_reproduce": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Ordered reproduction steps, one string per step"
+          "description": "Ordered reproduction steps, one action per string. Start from initial access state; end at impact observation."
         },
         "poc_code": {
           "type": "string",
-          "description": "Proof-of-concept exploit code or script that demonstrates the vulnerability"
+          "description": "Minimal exploit code or script that reproduces the finding. Omit if poc_request/poc_response is sufficient."
         },
         "poc_request": {
           "type": "object",
-          "description": "Structured HTTP request that triggers the vulnerability",
+          "description": "HTTP request that triggers the vulnerability.",
           "properties": {
             "method": {
               "type": "string"
@@ -240,7 +254,7 @@
         },
         "poc_response": {
           "type": "object",
-          "description": "Observed HTTP response confirming the vulnerability",
+          "description": "Observed HTTP response that confirms the vulnerability.",
           "properties": {
             "status": {
               "type": "integer"
@@ -261,30 +275,30 @@
           "items": {
             "type": "string"
           },
-          "description": "External references such as CVE IDs, advisory URLs, or related documentation links"
+          "description": "CVE IDs, NVD/advisory URLs, or CWE links relevant to this finding."
         },
         "chain_required": {
           "type": "boolean",
-          "description": "Whether this finding remains actionable only as part of a larger exploit chain"
+          "description": "Set true only when this finding has no standalone impact and is meaningful only as part of an exploit chain."
         },
         "chain_rationale": {
           "type": "string",
-          "description": "Why the finding matters primarily as a chain step instead of a standalone report item"
+          "description": "Required when chain_required is true: explain which chain step this enables and why standalone impact is insufficient."
         },
         "required_followup": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Concrete follow-up steps needed to validate or complete the chain"
+          "description": "Concrete next steps needed to validate or complete the chain (e.g. 'Confirm reachable network caller for the URL parser')."
         },
         "variant_of": {
           "type": "string",
-          "description": "Finding slug of the original finding when this record is a verified variant"
+          "description": "Slug of the root finding when this record is a verified same-class variant (e.g. 'sqli-search-q')."
         },
         "original_pattern": {
           "type": "string",
-          "description": "Abstract pattern signature copied from the original finding during variant analysis"
+          "description": "Abstract pattern signature copied verbatim from the root finding during variant analysis."
         }
       }
     },
@@ -295,11 +309,11 @@
       "properties": {
         "agent_name": {
           "type": "string",
-          "description": "Name of the agent that produced this finding"
+          "description": "Agent that produced this finding (e.g. 'vulnerability-analyst'). Mirror of source_name."
         },
         "artifact": {
           "type": "string",
-          "description": "Optional artifact reference associated with the finding provenance"
+          "description": "Path or ID of the artifact this finding was derived from."
         }
       }
     },
@@ -315,7 +329,8 @@
         "null"
       ],
       "default": null,
-      "title": "Evidence Type"
+      "title": "Evidence Type",
+      "description": "Strength of evidence. 'network-confirmed': live exploit or observed response. 'code-inferred': static/dataflow analysis without runtime proof. 'theoretical': logic-based hypothesis, no code or traffic evidence. 'informational': non-exploitable observation."
     },
     "request_variant_id": {
       "type": "integer",
@@ -343,31 +358,36 @@
             "maxLength": 64,
             "minLength": 1,
             "title": "Link Kind",
-            "type": "string"
+            "type": "string",
+            "description": "Relationship type (e.g. 'related', 'exploits', 'chained-with', 'variant-of')."
           },
           "target_kind": {
             "maxLength": 64,
             "minLength": 1,
             "title": "Target Kind",
-            "type": "string"
+            "type": "string",
+            "description": "Entity type of the link target (e.g. 'finding', 'credential', 'access_record', 'attack_chain')."
           },
           "target_id": {
             "type": "integer",
             "default": null,
             "title": "Target Id",
-            "minimum": 1
+            "minimum": 1,
+            "description": "Database ID of the target entity. Provide target_id OR target_ref, not both."
           },
           "target_ref": {
             "default": "",
             "maxLength": 1024,
             "title": "Target Ref",
-            "type": "string"
+            "type": "string",
+            "description": "Slug or string reference for the target when target_id is unavailable."
           },
           "notes": {
             "default": "",
             "maxLength": 4096,
             "title": "Notes",
-            "type": "string"
+            "type": "string",
+            "description": "Why this link exists or how the two entities are related."
           },
           "provenance": {
             "additionalProperties": false,

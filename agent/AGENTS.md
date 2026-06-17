@@ -11,7 +11,7 @@ When a session starts, display:
 
 - Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
-- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md`
+- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md` / `.opencode/agent/*.md`
 - Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 - Skill discovery: `vigil assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
@@ -226,6 +226,7 @@ Subagent invocation is runtime-specific. **Invoke the registered wrapper**, neve
 
 - **Claude Code**: dispatch with `@agent-name` (e.g. `@recon-specialist`). Wrappers are registered in `.claude/agents/*.md`. The built-in `Task`/`Agent` tool spawns an unregistered subagent and skips the wrapper entirely, so the specialist would operate without its role context — do not use it for registered roles.
 - **Codex**: dispatch via the registered agent roster (`.codex/agents/*.toml`) using Codex's subagent-invocation mechanism. The TOML wrapper does the same role-bootstrap work as the Claude wrapper.
+- **OpenCode**: dispatch with the built-in `task` tool, passing `subagent_type: <role>` (e.g. `subagent_type: recon-specialist`), or with an `@role` mention (e.g. `@recon-specialist`). Wrappers are registered in `.opencode/agent/*.md` and pin the per-role model. Do not hand-roll a generic spawn — `subagent_type`/`@mention` is what loads the registered role wrapper and its model. (Known limitation, opencode#5894: the scope/log hook in `.opencode/plugin/` does not fire for `task`-dispatched subagent tool calls, so a dispatched specialist's host commands are not scope-checked or activity-logged by the plugin; network isolation still constrains all target traffic.)
 
 Generated specialist definitions embed the canonical prompt body from `agent/agents/<name>.md`, so registered subagents start with their role instructions already in context. The embedded role prompt's "Load First" section then bootstraps `shared-constraints.md` (web agents) or `shared-constraints-code.md` (code agents) plus the primary skill. Specialists never load the operator prompt (`CLAUDE.md`/`AGENTS.md`) — that's operator context, not theirs.
 

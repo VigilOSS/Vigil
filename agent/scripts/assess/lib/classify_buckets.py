@@ -962,23 +962,6 @@ def _suppress_auth_on_sso_route(
     return [(name, weight) for name, weight in matches if name != "auth"]
 
 
-def first_two_path_segments(url_path: str) -> str:
-    """Return `/seg1/seg2` (or fewer) for the path-fallback cluster key.
-
-    Two segments is the community default for quick-look triage: deeper
-    slicing fragments the cluster set to the point of uselessness (each item
-    ends up in its own cluster), while a single segment collapses every
-    `/api/...` into one bucket.
-    """
-    if not url_path:
-        return "/"
-    stripped = url_path.strip("/")
-    if not stripped:
-        return "/"
-    segments = stripped.split("/")[:2]
-    return "/" + "/".join(segments)
-
-
 _CLUSTER_PLACEHOLDERS = frozenset({"{id}", "{n}", "{uuid}", "{token}", "{year}"})
 
 
@@ -1014,7 +997,7 @@ def normalize_path_for_cluster(url_path: str) -> str:
     one cluster (e.g. `/explore-mvps/2024/M0004` and `/explore-mvps/2023/G0058`
     both cluster as `path:/explore-mvps/{year}`). After substitution, runs of
     identical adjacent placeholders are collapsed, then the first two segments
-    (the `first_two_path_segments` rule) are joined.
+    are joined.
     """
     if not url_path:
         return "/"
@@ -1030,6 +1013,33 @@ def normalize_path_for_cluster(url_path: str) -> str:
         normalized.append(seg)
         prev = seg
     return "/" + "/".join(normalized[:2])
+
+
+def normalize_route_template(url_path: str) -> str:
+    """Full route template: id-shaped segments collapsed, NO segment truncation.
+
+    Same per-segment id/uuid/hex/year/token collapsing as
+    `normalize_path_for_cluster`, but keeps EVERY structural segment instead of
+    truncating to the first two. Used for Arjun target dedup, where two distinct
+    routes that merely share a 2-segment prefix (e.g. `/api/users/search` and
+    `/api/users/export`) must stay SEPARATE targets so hidden-parameter discovery
+    runs on both — while id-varied siblings (`/api/users/123/profile`,
+    `/api/users/456/profile` -> `/api/users/{n}/profile`) still collapse to one.
+    """
+    if not url_path:
+        return "/"
+    stripped = url_path.strip("/")
+    if not stripped:
+        return "/"
+    normalized: list[str] = []
+    prev: str | None = None
+    for raw_seg in stripped.split("/"):
+        seg = _normalize_cluster_segment(raw_seg.lower())
+        if seg in _CLUSTER_PLACEHOLDERS and seg == prev:
+            continue  # collapse adjacent identical placeholders
+        normalized.append(seg)
+        prev = seg
+    return "/" + "/".join(normalized)
 
 
 def classify_from_fields(

@@ -316,6 +316,112 @@ def test_retype_newly_inert_row_is_skipped(tmp_path):
     assert row["cluster_key"] == "type:image"
 
 
+def test_retype_updates_queue_key_to_new_type(tmp_path):
+    """queue_key embeds the type as its trailing ':'-delimited segment
+    (`variant:<id>:<type>`). A retype that changes the type must rewrite
+    queue_key too — otherwise a later re-ingest (which dedups on queue_key)
+    computes the NEW `variant:<id>:api` key, misses the stale `:unknown` row,
+    and inserts a DUPLICATE work item for the same request variant."""
+    db_path = _make_db(tmp_path)
+    rid = _insert_row(
+        db_path, queue_key="variant:42:unknown", method="GET",
+        url="http://t/api/users", url_path="/api/users",
+        content_type="application/json", case_type="unknown",
+    )
+
+    _run(_args(db_path, retype=True))
+
+    row = _row(db_path, rid)
+    assert row["type"] == "api"
+    assert row["queue_key"] == "variant:42:api"
+
+
+def test_retype_inert_to_actionable_restores_pending(tmp_path):
+    """An inert row auto-skipped at ingest (status='skipped',
+    terminal_reason='inert_type') that `--retype-all` re-types to an actionable
+    type must be RESTORED to status='pending' (terminal_reason cleared) — else
+    `work-buffer fetch`, which only dispatches status='pending', would never
+    pick it up despite the new actionable classification."""
+    db_path = _make_db(tmp_path)
+    # Mis-typed `image` + skipped at ingest, but its stored path + content_type
+    # actually classify as `api`.
+    rid = _insert_row(
+        db_path, queue_key="variant:7:image", method="POST",
+        url="http://t/api/orders", url_path="/api/orders",
+        content_type="application/json", case_type="image",
+        status="skipped", terminal_reason="inert_type",
+    )
+
+    _run(_args(db_path, retype_all=True))
+
+    row = _row(db_path, rid)
+    assert row["type"] == "api"
+    assert row["status"] == "pending"
+    assert row["terminal_reason"] is None
+
+
+def test_retype_does_not_corrupt_arjun_queue_key(tmp_path):
+    """`arjun:<method>:<url>:<params_sig>` keys (ingest_arjun) carry a params_sig
+    in their trailing ':'-segment, NOT a type. An `unknown` arjun row on an
+    `/api/...` path re-types to `api`, but its queue_key must be left EXACTLY as
+    stored — blindly swapping the trailing segment would corrupt the params_sig
+    (the historical bug rewrote `...:deadbeefcafef00d` → `...:api`)."""
+    db_path = _make_db(tmp_path)
+    qk = "arjun:POST:https://h.example/api/users:deadbeefcafef00d"
+    rid = _insert_row(
+        db_path, queue_key=qk, method="POST",
+        url="https://h.example/api/users", url_path="/api/users",
+        content_type="application/json", case_type="unknown",
+    )
+
+    _run(_args(db_path, retype=True))
+
+    row = _row(db_path, rid)
+    assert row["type"] == "api"
+    assert row["queue_key"] == qk  # unchanged — params_sig not a type
+
+
+def test_retype_does_not_corrupt_deferred_queue_key(tmp_path):
+    """`deferred:egress-blocked:<host>:<url>` keys (ingest_endpoints) carry a URL
+    in their trailing ':'-segment, NOT a type. An `unknown` deferred row that
+    re-types to `api` must keep its queue_key intact — the historical bug split
+    on the URL's `https:` colon and corrupted the key."""
+    db_path = _make_db(tmp_path)
+    qk = "deferred:egress-blocked:h.example:https://h.example/api/x"
+    rid = _insert_row(
+        db_path, queue_key=qk, method="GET",
+        url="https://h.example/api/x", url_path="/api/x",
+        content_type="application/json", case_type="unknown",
+    )
+
+    _run(_args(db_path, retype=True))
+
+    row = _row(db_path, rid)
+    assert row["type"] == "api"
+    assert row["queue_key"] == qk  # unchanged — trailing segment is a URL
+
+
+def test_retype_preserves_non_skipped_status(tmp_path):
+    """Under `--retype-all`, a row whose status is a NON-skipped terminal/active
+    state (e.g. 'deferred', 'done', 'processing', 'error') must keep that status
+    when it re-types to an actionable type. Only previously-`skipped` rows are
+    restored to 'pending'; the historical bug's `ELSE 'pending'` resurrected
+    deferred/done/processing/error rows."""
+    db_path = _make_db(tmp_path)
+    rid = _insert_row(
+        db_path, queue_key="variant:9:image", method="GET",
+        url="http://t/api/orders", url_path="/api/orders",
+        content_type="application/json", case_type="image",
+        status="deferred",
+    )
+
+    _run(_args(db_path, retype_all=True))
+
+    row = _row(db_path, rid)
+    assert row["type"] == "api"  # actionable, non-terminal
+    assert row["status"] == "deferred"  # preserved, NOT flipped to pending
+
+
 def test_retype_no_change_leaves_row_alone(tmp_path):
     """When classify_type returns the SAME type, the row's downstream fields
     are not rewritten (a no-op type is not a change)."""
