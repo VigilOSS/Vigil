@@ -331,7 +331,9 @@ EOF
 - Use absolute paths: `/usr/bin/curl`, `/bin/cat`, `/usr/bin/grep`, etc.
 - Do NOT use `grep -P` (Perl regex). Use `grep -E` (extended) or `rg` instead.
 - HEREDOC: Use unquoted delimiter (`<< EOF`), NOT single-quoted (`<< 'EOF'`).
-- New files: use bash commands (mkdir, cat >, echo >). Existing files: use Edit tool.
+- Make file edits through the active coding environment's patch/edit tool. Avoid shell
+  redirection (`cat >`, `echo >`) for manual file creation or modification because it
+  bypasses reviewable patch diffs and is easy to quote incorrectly in zsh.
 
 ## Tool Promotion Workflow
 
