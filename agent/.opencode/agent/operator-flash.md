@@ -1,6 +1,6 @@
 ---
 description: Lead red team operator. Drives pentest methodology, coordinates phases, and manages state. — fast (Flash) variant
-mode: subagent
+mode: primary
 model: deepseek/deepseek-v4-flash
 ---
 

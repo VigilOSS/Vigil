@@ -168,6 +168,8 @@ against an unknown CDN-fronted target:
 - `agent/references/recon/rate-calibration.md` — the per-target rate trait table
   (nmap/dir-fuzz/nuclei/DNS); use it to pick the trait row, then this file for the
   katana crawl rate + edge-behavior reads it does not carry.
+- `agent/references/tools/recon/katana.md` — live crawl doctrine, JS-aware
+  defaults, headless escalation, and ingestion handoff.
 - `agent/skills/web-recon/SKILL.md` — wafw00f→tier mapping; this file is the
   edge-behavior detail behind that step.
 - `agent/skills/rate-limit-bypass/SKILL.md` and

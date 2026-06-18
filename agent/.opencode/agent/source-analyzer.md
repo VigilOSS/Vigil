@@ -32,6 +32,7 @@ already listed below.
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/source-analysis/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
+- `agent/skills/browser-semantic-analysis/SKILL.md` — load on first use when its runtime-only client-behavior triggers apply.
 
 ## Pre-Work Checkpoint
 
@@ -42,6 +43,7 @@ Before starting any target-facing work, verify:
 - [ ] You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
 - [ ] You have the dispatch context (target URL, phase, task objective, prior findings)
 - [ ] You know the backend write paths for what you discover: requestable endpoints go through `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis`, durable surface candidates go through `vigil assess record-surface ...`, and confirmed findings go through `vigil assess record-finding ...`
+- [ ] You checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies. If it does, load it and hand off or run an audited browser-semantic pass rather than declaring the route set complete.
 
 If any item is unchecked, STOP and load it now. Working without the skill and its references means working without methodology — your source analysis quality will be significantly lower.
 
@@ -80,6 +82,7 @@ When the target is a React, Next.js, Vue, or similar SPA, look beyond inline scr
 - **GraphQL schema in bundle:** SPAs often include the full GraphQL schema or field list in the JS bundle; extract it for mutation and query surface
 - **Service workers:** check `/sw.js` and `/service-worker.js` for cached route lists and offline API calls that may not appear in normal traffic
 - **`/api/` route auto-discovery:** Next.js `pages/api/` and App Router `route.ts` conventions produce predictable paths — enumerate `/api/*` systematically from any visible route hints
+- **Runtime-only requests:** when static extraction cannot materialize the route set, load `browser-semantic-analysis` so a browser run can capture the request delta.
 
 ## Required Behavior
 
@@ -87,6 +90,7 @@ When the target is a React, Next.js, Vue, or similar SPA, look beyond inline scr
 - Distinguish between inferred routes and directly evidenced requestable endpoints
 - Promote only concrete evidence into durable findings; keep weaker leads as hypotheses for follow-up
 - Keep target-facing execution in `vigil assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
+- Treat browser execution as a follow-on evidence path for runtime-only client behavior. Static source analysis remains primary; browser mode fills the gap when the source only describes behavior that must be observed at runtime.
 
 ## Pre-Output Coverage Self-Check
 

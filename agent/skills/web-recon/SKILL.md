@@ -53,6 +53,9 @@ of the dispatch.
 3. **`httpx` fingerprint** — `-tech-detect -title -tls-grab -status-code` for live host
    confirmation, technology fingerprint, TLS metadata, and status. Drives the conditional
    nikto trigger evaluation in step 6 (server banner, basic-auth realm, WebDAV indicators).
+   After httpx, check `agent/skills/browser-semantic-analysis/SKILL.md`
+   activation triggers. Load it when the baseline may not represent the
+   browser-visible application.
 4. **`whatweb`** — second-source technology fingerprinting. Cross-validate the httpx
    `-tech-detect` output; whatweb catches stacks httpx misses (and vice versa).
 5. **`nuclei` with curated templates** — mandatory web-vuln pass. Templates:
@@ -75,6 +78,13 @@ of the dispatch.
    webserver banners, WebDAV, basic-auth realms, internal/intranet scope). Skip nikto
    entirely when no trigger fires — nuclei already covers the common-case web-vuln
    surface.
+
+8. **`aem-hacker` on Adobe Experience Manager fingerprints** — only run when
+   `httpx`, `whatweb`, headers, paths, or nuclei technologies identify AEM
+   (`/crx/`, `/content/dam/`, `/libs/granite/`, `AEM`, `Adobe Experience
+   Manager`). Start with inventory/read-only checks through
+   `vigil assess kali exec`; destructive or exploit modules require a
+   vulnerability-analyst/exploit-developer dispatch and explicit authorization.
 
 Run each sweep synchronously — one blocking `vigil assess kali <verb> … --timeout N` at a time. Specialists do NOT background target traffic or use `vigil assess kali job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f nmap`) — it stomps sibling agents' processes in the shared runtime. See
 `agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for the full
@@ -237,6 +247,13 @@ vigil assess kali exec --technique RECON --intent "OPTIONS for DAV / methods det
 
 Differences across routes often expose reverse proxies, app servers, framework routing,
 and auth enforcement boundaries.
+
+#### Browser-semantic trigger check
+
+If the httpx/curl baseline may not represent the browser-visible app, load
+`agent/skills/browser-semantic-analysis/SKILL.md` before settling recon coverage.
+Record the baseline command-run id, the browser-mode command-run id or coverage
+gap, and the delta because downstream specialists need the true coverage state.
 
 ### Step 3 — whatweb (verify httpx tech)
 
@@ -509,12 +526,15 @@ downstream specialists can parse the output consistently.
 
 - `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table (cautious tier, CDN-fronted, WAF-protected, vendor SaaS, origin)
 - `agent/references/runtime-guides/cdn-ip-blocking.md` — egress reputation check, four mitigation options (allowlist / proxy / browser / accept gap), give-up-vs-escalate rule
+- `agent/references/tools/recon/katana.md` — live crawl doctrine, JS-aware defaults, headless escalation, and ingestion handoff
+- `agent/skills/browser-semantic-analysis/SKILL.md` — browser execution decision tree for JS-heavy apps, soft errors, browser-originated APIs, and headless/headed deltas
+- `agent/references/runtime-guides/browser-semantic-evidence.md` — evidence contract and headed-browser escalation rules
 - `agent/references/tools/recon/nmap.md` — port/service discovery, cautious-tier profile, TLS SAN extraction, rDNS, multi-host `-iL`, port-data presence assertion
 - `agent/references/tools/recon/whatweb.md` — web technology fingerprinting depth levels
 - `agent/references/tools/recon/httpx.md` — HTTP probing, tech detection, live host confirmation
 - `agent/references/tools/recon/wafw00f.md` — WAF identification, scan-ordering ("run FIRST"), WAF-tier rate adjustment table, multi-host batch
 - `agent/references/tools/recon/nikto.md` — conditional trigger fingerprint list, `-Tuning x60` profile, cautious-tier rate guidance, evasion modes
-- `agent/references/tools/recon/curl.md` — HTTP request crafting and manual inspection
+- `agent/references/tools/recon/curl.md` — HTTP request crafting, manual inspection, and `curl_chrome116` baseline notes
 - `agent/references/tools/fuzzing/ffuf.md` — directory/parameter/vhost fuzzing, L1/L2/L3 wordlist escalation
 - `agent/references/payloads/info-disclosure-probes.md` — standard endpoint checklist (/metrics, /.env, /actuator, cloud metadata)
 - `agent/references/tools/recon/openssl-sans.md` — per-host TLS SAN extraction, cross-host SAN collision detection (shared multi-tenant cert flag), vhost / cert mismatch detection, multi-time DNS resolution recipe (powers Step 8a)
