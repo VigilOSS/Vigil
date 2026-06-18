@@ -107,8 +107,14 @@ def _render_markdown(brief: dict) -> str:
         lines.append(f"- {bucket}:")
         if not rows:
             lines.append("  - none")
-        for row in rows[:6]:
+            continue
+        shown = _select_findings(rows)
+        for row in shown:
             lines.append("  - " + _finding_line(row))
+        if len(shown) < len(rows):
+            lines.append(f"  - … showing {len(shown)} of {len(rows)} (medium+ always shown)")
+    _render_surfaces(lines, brief.get("surfaces") or {})
+    _render_work_buffer(lines, brief.get("work_buffer") or {})
     lines.extend(["", "## Dispatches"])
     dispatches = brief.get("dispatches") or {}
     for row in dispatches.get("stale_in_progress_dispatches") or []:
@@ -180,6 +186,15 @@ def _render_markdown(brief: dict) -> str:
             lines.append("  - none")
         for row in open_leads:
             lines.append(f"  - id={row.get('id')} [{row.get('lead_status')}] {_trim(row.get('title') or '', 100)}")
+        read_first = intel.get("read_first_notes") or []
+        if read_first:
+            lines.append(f"- read-first / coverage notes ({len(read_first)}):")
+            for row in read_first:
+                tags = ", ".join(row.get("tags") or []) or "-"
+                status_suffix = f" [{row.get('lead_status')}]" if row.get("lead_status") else ""
+                lines.append(
+                    f"  - id={row.get('id')} ({tags}){status_suffix} {_trim(row.get('title') or '', 100)}"
+                )
     lines.extend(["", "## Next Actions"])
     for row in brief.get("recommended_next_actions") or []:
         entity = ""
@@ -187,6 +202,80 @@ def _render_markdown(brief: dict) -> str:
             entity = f" [{row.get('entity_kind')} {row.get('entity_id')}]"
         lines.append(f"- {row.get('reason')}{entity}: `{row.get('command')}`")
     return "\n".join(lines)
+
+
+_SURFACE_ROLLUP_LIMIT = 12
+_WORK_BUFFER_BUCKET_LIMIT = 12
+
+
+def _render_surfaces(lines: list, surfaces: dict) -> None:
+    """Render the ## Surfaces coverage rollup. No-op when the brief carries no
+    surfaces block (older backend or empty engagement)."""
+    if not surfaces:
+        return
+    lines.extend(["", "## Surfaces"])
+    lines.append(f"- total: {surfaces.get('total', 0)} (open: {surfaces.get('open_count', 0)})")
+    by_status = surfaces.get("by_status") or {}
+    compact = ", ".join(f"{name}={count}" for name, count in sorted(by_status.items())) or "-"
+    lines.append(f"- by status: {compact}")
+    rollup = surfaces.get("by_status_type") or []
+    if rollup:
+        lines.append("- by status×type:")
+        for entry in rollup[:_SURFACE_ROLLUP_LIMIT]:
+            lines.append(f"  - {entry.get('status')}/{entry.get('surface_type')}: {entry.get('count')}")
+        if len(rollup) > _SURFACE_ROLLUP_LIMIT:
+            lines.append(f"  - … showing {_SURFACE_ROLLUP_LIMIT} of {len(rollup)} combinations")
+    top = surfaces.get("top_uncovered") or []
+    lines.append(f"- top uncovered ({len(top)}):")
+    if not top:
+        lines.append("  - none")
+    for entry in top:
+        src = f" [{entry.get('source_name')}]" if entry.get("source_name") else ""
+        lines.append(
+            f"  - {entry.get('status')} {entry.get('surface_type')}: "
+            f"{_trim(entry.get('target_descriptor') or '', 100)}{src}"
+        )
+
+
+def _render_work_buffer(lines: list, work_buffer: dict) -> None:
+    """Render the ## Work Buffer pending-by-gf-bucket rollup. No-op when absent."""
+    if not work_buffer:
+        return
+    lines.extend(["", "## Work Buffer"])
+    lines.append(f"- pending total: {work_buffer.get('pending_total', 0)}")
+    by_bucket = work_buffer.get("by_bucket") or {}
+    if not by_bucket:
+        lines.append("- pending by gf-bucket: -")
+        return
+    lines.append("- pending by gf-bucket:")
+    items = list(by_bucket.items())
+    for name, count in items[:_WORK_BUFFER_BUCKET_LIMIT]:
+        lines.append(f"  - {name}: {count}")
+    if len(items) > _WORK_BUFFER_BUCKET_LIMIT:
+        lines.append(f"  - … showing {_WORK_BUFFER_BUCKET_LIMIT} of {len(items)} buckets")
+
+
+_SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+_MEDIUM_RANK = 2
+_FINDING_ROW_FLOOR = 6
+
+
+def _severity_rank(value) -> int:
+    return _SEVERITY_RANK.get(str(value or "").strip().lower(), 0)
+
+
+def _select_findings(rows: list) -> list:
+    """Always include every medium+ finding; fill the rest up to a floor of 6.
+
+    The old ``rows[:6]`` slice could bury a critical behind six low/info rows.
+    Medium-and-above are never truncated; lower-severity rows are shown only
+    while the running total is under the floor. Original order is preserved.
+    """
+    shown: list = []
+    for row in rows:
+        if _severity_rank(row.get("severity")) >= _MEDIUM_RANK or len(shown) < _FINDING_ROW_FLOOR:
+            shown.append(row)
+    return shown
 
 
 def _finding_line(row: dict) -> str:
