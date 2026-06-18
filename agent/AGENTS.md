@@ -160,7 +160,7 @@ vigil assess kali --help     # smoke-test discovery; should list 20 verbs
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install. `vigil assess kali` execs into this single container regardless of which engagement is active — the engagement context is plumbed through `${ENGAGEMENT_DIR}` and the audit-flag set on each call.
 
-**Reachability is not scope.** Because the runtime is shared, it may be able to route to hosts that are NOT your target — other engagements' services, neighbouring Docker/internal subnets, or the host itself. Only the hosts in this engagement's `scope.json` are in scope. Never probe, pivot into, or build findings on infrastructure outside it, even when the runtime can reach it — a reachable-but-out-of-scope host is a distraction (and, on a shared runtime, often another engagement's state), not a lead.
+**Reachability is not scope** — only `scope.json` hosts are in scope; never probe, pivot into, or build findings on reachable-but-out-of-scope infrastructure (other engagements, neighbouring subnets, the host), even when the shared runtime can route to it. (Full rule in `shared-constraints.md §1`.)
 
 **Image drift — recreate the runtime after every rebuild.** `vigil runtime start` compares the running container's image ID against the configured image tag and refuses to continue when they diverge. Whenever you rebuild the runtime image or upgrade the installed image, run `vigil runtime restart` so the container picks up the new image and current `/engagements` bind mount. No engagement data moves; only the container is replaced.
 
@@ -191,37 +191,18 @@ Phase 3a (in the CONSUME & TEST step below) is a **coverage audit**, not a secon
 
 ### Synchronous Target-Facing Dispatch (mandatory)
 
-Every target-facing dispatch runs **synchronously**: the specialist issues
-blocking `vigil assess kali <verb> ... --timeout N` calls, each awaited to
-completion in-band — no `run_in_background`, no `vigil assess kali job start`, no
-dtach, no watcher/poll loop. This is not a style preference; it is the fix for a
-concrete failure mode. A subagent that backgrounds a detached job and then halts
-"waiting for a completion notification" is auto-resumed by the harness, launches
-the next detached job, and halts again — unbounded relaunch thrash that, in past
-engagements, burned 80–210 K tokens per agent and produced duplicate httpx
-passes with near-zero net coverage. Synchronous, in-band execution eliminates it
-at the source.
-
-**Synchronous ≠ one-call-at-a-time, and ≠ no parallelism.** "Synchronous" bans
-only the backgrounding / `dtach` / fire-and-forget / poll-for-completion-later
-patterns above. It does NOT mean a single concurrent call. Blocking calls are
-fine whether issued sequentially OR several in parallel — the operator running
-4–6 specialists at once (each of which awaits its own probes in-band) is the
-encouraged shape on the Heavy tier, and a specialist may itself await several
-blocking probes concurrently. The rule is: every call is awaited to completion
-in-band by the agent that launched it; nothing is detached and reaped later. The
-prohibition is on orphaned/poll-later execution, not on concurrency.
-
-Bake this into the dispatch prompt for any target-facing role (recon,
-surface-collector, vulnerability-analyst, fuzzer, exploit-developer): **"Run
-every probe synchronously with a single blocking `vigil assess kali` call and an
-explicit `--timeout`. Do not use `run_in_background`, `kali job start`, dtach, or
-any poll/watch loop."** `kali job start` is operator-owned and reserved for a
-single authorized sweep that must outlive its dispatch (see
-`agent/shared-constraints.md §2` and `agent/skills/kali-exec/SKILL.md`). When a
-specialist proves unreliable for bulk mechanical probing, the operator's own
-bulk-probe carve-out (Core Loop step 7) — synchronous `dnsx`/`httpx`/`nmap` over
-a fixed list plus ingestion — is the deterministic fallback, not async dispatch.
+Every target-facing probe runs **synchronously** — one blocking `vigil assess
+kali <verb> … --timeout N`, awaited in-band; no `run_in_background`, `kali job
+start`, dtach, or poll-later loop (the rule, the detached-job relaunch-thrash
+rationale, and the "synchronous ≠ serial — parallel blocking calls are
+encouraged" clarification are owned by `agent/shared-constraints.md §2`, which
+every specialist loads). Operator job: **bake the enforcement sentence into every
+target-facing dispatch prompt** — *"Run every probe synchronously with one
+blocking `vigil assess kali` call and an explicit `--timeout`; no
+`run_in_background`, `kali job start`, dtach, or poll/watch loop."* `kali job
+start` stays operator-owned (one authorized sweep that must outlive its dispatch
+— `shared-constraints §2`); when a specialist is unreliable for bulk probing, the
+Core-Loop-step-7 bulk-probe carve-out is the fallback, not async dispatch.
 
 ### Runtime Dispatch Syntax
 
@@ -751,25 +732,7 @@ Access-control depth (IDOR/BOLA/BFLA) is only **real** when measured across **�
 
 ### Auth-expiry recovery loop
 
-Authenticated dispatches fail in a recognizable shape: 401/403 on routes that were 200 yesterday, redirect-to-login, session expired JSON, or a `WWW-Authenticate: Bearer error="invalid_token"` header. Specialists surface these in their handoff `runtime_issues` with auth-expiry keywords. When the operator sees that signal, do not blame the specialist or re-dispatch with the same expired material — recover the auth first, then re-dispatch.
-
-Recovery branch:
-
-1. **Detect.** Scan recent dispatch handoffs and command-run output for the failure shape:
-   ```bash
-   vigil assess agent list --limit 5 --json \
-     | jq -r '.[] | select(.handoff.runtime_issues // [] | tostring | test("401|403|expired|invalid_token|redirect.*login"; "i")) | .agent_id'
-   vigil assess list-command-runs --q "401\|403\|session\|expired" --show-matches --limit 10
-   ```
-2. **Decide refresh path.**
-   - **Bearer / API token** in `auth.json.headers.Authorization`: refresh via the documented refresh endpoint (if the program offers one) or re-run the login flow. Operator action; do NOT dispatch a specialist for a token refresh — the refresh request itself is one-shot mechanical work.
-   - **Session cookie** in `auth.json.cookies` / `host_cookies[]`: re-capture via mitmproxy-assisted login. Restart browser flow through the proxy; `proxy_addon.py` writes the refreshed cookie set into the matching engagement's `auth.json` automatically (per-engagement routing by scope).
-   - **OAuth/OIDC**: re-run the authorization code grant against the discovery endpoint; check `auth.json.tokens.refresh_token` first.
-3. **Validate the refresh.** Re-run the same login check from Credential Auto-Use step 1 via `vigil assess kali exec --technique AUTH --intent "post-refresh validation" ...`. The audit row records both the failed pre-refresh probe and the successful post-refresh probe so the timeline is unambiguous.
-4. **Re-dispatch only on success.** Re-dispatch the affected specialist (typically `vulnerability-analyst` or `exploit-developer`) with a dispatch-context note: "Auth refreshed at <iso>; the previous handoff's runtime_issues about 401/403 are stale — re-run from the same task objective with fresh credentials in `auth.json`."
-5. **Fallback to anonymous.** When the auth cannot be refreshed in-session (MFA challenge, human-in-the-loop required, credentials genuinely expired by the program), record the gap with `vigil assess agent decision --kind dispatch_blocked --reason "auth expired; awaiting human refresh" --surfaced-to-user` and let the dispatch continue against anonymous scope. Do not silently retry against expired material — every retry burns a context window and the failure is deterministic.
-
-Limit step 4 to two attempts. If the refreshed auth fails validation in step 3 twice, treat it as a genuine credential issue (not an in-session expiry) and switch to the fallback branch in step 5.
+Authenticated dispatches fail in a recognizable shape (401/403 on formerly-200 routes, redirect-to-login, `invalid_token`); specialists surface it in handoff `runtime_issues`. On that signal, **recover auth before re-dispatching** (refresh the bearer/token, re-capture the session cookie via the mitmproxy login flow, or re-run the OAuth grant), validate with one `vigil assess kali exec --technique AUTH` login check, then re-dispatch with an "auth refreshed at <iso>; prior 401/403 issues are stale" note. Cap recovery at **two** attempts, then fall back to anonymous scope and record `vigil assess agent decision --kind dispatch_blocked --surfaced-to-user`. Full procedure → `agent/references/runtime-guides/auth-recovery.md`.
 
 ## Kali Execution
 

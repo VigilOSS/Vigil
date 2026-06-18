@@ -118,7 +118,7 @@ def main(argv: list[str] | None = None) -> None:
 
     sub = parser.add_subparsers(dest="command")
 
-    # Import and register every subcommand
+    # Import subcommand modules; registration follows below.
     from assess.commands import (
         agent,
         anomaly_score,

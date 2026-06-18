@@ -128,8 +128,8 @@ def _validate_proxy_url(value: str | None) -> str | None:
 def _validate_network_name(value: str | None) -> str | None:
     if value is None:
         return None
-    # Docker network names are a restricted charset; reject embedded whitespace or
-    # argv-splitting characters so a typo can't smuggle extra docker-run args.
+    # Docker network names are a restricted charset; reject embedded whitespace so a
+    # typo can't split this single token into extra docker-run argv args.
     if any(ch.isspace() for ch in value) or any(ch in value for ch in ("\t", "\n")):
         raise SystemExit(
             f"VIGIL_RUNTIME_EGRESS_NETWORK must be a single Docker network name "

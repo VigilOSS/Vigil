@@ -210,6 +210,7 @@ def _resolve_max_copies(value: int | None, *, env_name: str) -> int:
     return parsed
 
 
-# Used by tests only — mypy/IDEs can resolve shutil for the copy fallback path.
+# Not referenced at runtime in this module; bound to _ so linters don't flag
+# the imports as unused.
 _ = shutil
 _ = db_module

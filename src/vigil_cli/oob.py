@@ -315,15 +315,20 @@ def sanitize_name(value: str) -> str:
 _NONCE_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 _DEFAULT_NONCE_LENGTH = 16
 
-# Picks the nonce subdomain label out of a callback host. interactsh hosts
-# look like ``<33-char-clientid><nonce>.researcher.example`` when a tool
-# (nuclei/dalfox) prepends its own id to the leftmost label, or
+# Matches the verbose text a ``-v`` interactsh-client line emits for a received
+# interaction: ``Received <protocol> interaction (qtype) ... from <remote> at
+# <observed>``. Used by ``_parse_verbose_interaction`` to extract the protocol,
+# remote address, query type, and timestamp from the text that follows the
+# ``[<host>]`` bracket.
+#
+# Callback host shape context: interactsh hosts look like
+# ``<33-char-clientid><nonce>.researcher.example`` when a tool (nuclei/dalfox)
+# prepends its own id to the leftmost label, or
 # ``<nonce>.<33-char-clientid>.researcher.example`` when ``vigil oob mint``
-# binds the nonce under a running client's registered payload host (the nonce
-# is then the leftmost label, the client id the next one to its right). Both
-# shapes carry the client id so interactsh delivers the hit to that client's
-# poll; the parser extracts the FULL leftmost label and the matcher checks
-# whether any recorded nonce is a substring of it (handles both shapes). A bare
+# binds the nonce under a running client's registered payload host. Both shapes
+# carry the client id so interactsh delivers the hit to that client's poll; the
+# parser extracts the FULL leftmost label and the matcher checks whether any
+# recorded nonce is a substring of it (handles both shapes). A bare
 # ``<nonce>.researcher.example`` is NOT minted anymore — it never reaches the
 # per-client log ``poll`` reads (see :func:`callback_urls`).
 _INTERACTSH_VERBOSE_RE = re.compile(

@@ -127,7 +127,7 @@ def run(args) -> None:
             }
         )
 
-    # Print a concise success marker — matches record-finding's style.
+    # Print a concise success marker.
     if record_id is not None:
         print(f"Recorded intel {intel_type} id={record_id}")
     else:

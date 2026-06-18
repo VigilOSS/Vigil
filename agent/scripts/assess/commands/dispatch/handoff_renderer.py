@@ -206,12 +206,11 @@ def _render_handoff_blob(
 ) -> str:
     """Build the markdown handoff blob with the documented section order.
 
-    Round 9 section order: header / summary / confidence / findings /
-    coverage gaps / next steps / open questions / working artifacts /
-    runtime issues / recommended next agent. Trim policy on overflow:
-    findings list collapses first ("... and N more"), then runtime_issues,
-    then working_artifacts. Summary, next_steps, coverage_gaps are NEVER
-    trimmed (they are the load-bearing handoff content).
+    Section order: header / summary / confidence / findings / coverage gaps /
+    next steps / open questions / working artifacts / runtime issues /
+    recommended next agent. Trim policy on overflow: findings list collapses
+    first ("... and N more"), then runtime_issues, then working_artifacts.
+    Summary, next_steps, coverage_gaps are NEVER trimmed (load-bearing content).
     """
     head = [
         f"#### Handoff from {role} dispatch {agent_id}",

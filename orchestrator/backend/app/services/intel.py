@@ -1168,8 +1168,7 @@ def supersede_intel(
         )
 
     # Reuse the per-type record helpers so the new row is upserted on the
-    # natural key and the FTS shadow is written. Importing locally avoids a
-    # circular reference via the module-level ``record_*`` symbols.
+    # natural key and the FTS shadow is written.
     record_dispatch: dict[str, Any] = {
         "tech-component": record_tech_component,
         "person": record_person,

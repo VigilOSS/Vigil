@@ -1043,10 +1043,8 @@ class CaseCollector:
         # Auth capture (side-effect: writes auth.json with per-host cookies)
         self._capture_auth(entry, flow)
 
-        # Extract parameters
         params = self._extract_params(flow)
 
-        # Request headers as JSON
         req_headers_dict = dict(req.headers)
         req_headers_json = json.dumps(req_headers_dict)
         auth_context = self._request_auth_context(entry, req_headers_dict, params)
@@ -1057,13 +1055,10 @@ class CaseCollector:
         raw_req_body = self._safe_content(req)
         content_length = len(raw_req_body)
 
-        # Classification
         case_type = self._classify_type(req.method, path, content_type, req_headers_dict)
 
-        # Body save policy
         saved_body, request_body_truncated = self._apply_body_policy(raw_req_body, content_type)
 
-        # Response info
         response_status = resp.status_code
         resp_headers_json = json.dumps(dict(resp.headers))
         resp_body = self._safe_content(resp)
@@ -1080,7 +1075,6 @@ class CaseCollector:
             response_snippet = resp_body[:RESPONSE_SNIPPET_BYTES].decode("utf-8", errors="replace")
             response_truncated = len(resp_body) > RESPONSE_SNIPPET_BYTES
 
-        # Dedup signature
         params_key_sig = self._generate_sig(
             params.get("query_params"), params.get("body_params")
         )
@@ -1107,7 +1101,6 @@ class CaseCollector:
         service_id = service.get("id")
         queue_key = f"variant:{request_variant_id}:{case_type}"
 
-        # Insert
         self._insert_case(
             entry,
             queue_key=queue_key,

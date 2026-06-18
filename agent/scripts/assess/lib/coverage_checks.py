@@ -200,8 +200,8 @@ def render_intel_readiness(data: Any) -> tuple[bool, list[str]]:
 # ===========================================================================
 
 # Services count as "live" when the backend state is anything except
-# `down`/`filtered`/`unreachable`. Allow-list keeps the audit optimistic during
-# backend schema evolution (new state values default to counting as live).
+# `down`/`filtered`/`unreachable`. This denylist keeps the audit optimistic
+# during backend schema evolution (new state values default to counting as live).
 _NON_LIVE_SERVICE_STATES: frozenset[str] = frozenset({"down", "filtered", "unreachable"})
 
 
