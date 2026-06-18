@@ -40,6 +40,14 @@ cross-tenant log rows into `ir/reports/` or `ir/evidence/`.
 
 ---
 
+## 1a. CLI path convention
+
+All assessment operations use `vigil assess <subcommand>` from any directory. Blue-specific verbs
+live under `vigil blue <subcommand>`. Use `ENGAGEMENT_DIR` or `--engagement-dir` for path
+resolution — hardcoded absolute paths break across environments.
+
+---
+
 ## 2. Read-only by default; WRITE goes through propose / approve / execute / record
 
 Every command run under this engagement is read-only unless explicitly marked
