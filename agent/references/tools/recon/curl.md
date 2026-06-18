@@ -48,3 +48,21 @@ For live target requests during an engagement, execute `curl` via `vigil assess 
 **Timeout:** `--connect-timeout 5 --max-time 30`
 **HTTP/2:** `--http2`
 **URL encode data:** `--data-urlencode "q=hello world"`
+
+## Browser-Like Curl Baseline
+
+If `curl_chrome116` exists in the runtime, use it as a narrow baseline when a
+CDN/Bot-Manager or TLS-client-fingerprint difference is suspected:
+
+```bash
+vigil assess kali exec \
+  --technique RECON --intent "browser-like curl baseline for edge/TLS ambiguity" \
+  --probe-kind fingerprint --phase recon --timeout 60 -- \
+  curl_chrome116 -sS -D - https://target.example/
+```
+
+This is still HTTP request evidence. It can help distinguish scanner-client
+blocks from app behavior, but it does not execute JavaScript, maintain DOM
+state, or prove browser-enforced security behavior. Load
+`agent/skills/browser-semantic-analysis/SKILL.md` when runtime browser semantics
+are required.

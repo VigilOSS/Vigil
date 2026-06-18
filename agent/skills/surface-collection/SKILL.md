@@ -43,8 +43,10 @@ cat "$DIR/scans/source-endpoints.txt" | vigil assess ingest-endpoints "$DB" sour
 
 ### Step 2: Live Crawl via Katana
 
-Run Katana via `vigil assess kali katana` to crawl live targets. Katana is installed in the
-runtime container; the typed verb wraps it with audit recording.
+Run Katana via `vigil assess kali katana` to crawl live targets. Katana is
+installed in the runtime container; the typed verb wraps it with audit
+recording. Use `agent/references/tools/recon/katana.md` for crawl depth,
+headless escalation, rate, exclusion, and ingestion doctrine.
 
 ```bash
 vigil assess kali katana \
@@ -54,17 +56,32 @@ vigil assess kali katana \
   --probe-kind fingerprint --phase collect --timeout 1800
 ```
 
-**TLS handling:** Katana does not provide a TLS-verification-skip flag in the runtime this
-repo builds. If a target only responds behind an invalid or self-signed certificate, use
-`vigil assess kali exec --technique RECON --intent "spot-validate invalid TLS response" --probe-kind baseline --phase collect --timeout 60 -- curl -k` for spot validation and continue with other collection
-sources instead of relying on Katana to bypass TLS checks.
+**Browser-semantic crawl trigger:** add `-headless` and load
+`agent/skills/browser-semantic-analysis/SKILL.md` when that skill's activation
+triggers apply. Browser mode is a targeted evidence-correction lane because
+API-only and high-volume work stays more accurate in the normal
+gau/httpx/fuzzing path.
+
+```bash
+vigil assess kali katana \
+  -u https://target.example -d 3 -jc -jsl -headless -c 5 -rl 10 \
+  -o /engagements/$ENGAGEMENT_KEY/scans/katana_headless_output.txt \
+  --technique DISCOVERY --intent "browser-semantic crawl of target.example" \
+  --probe-kind fingerprint --phase collect --timeout 1800
+```
+
+**TLS handling:** If the installed Katana version cannot skip invalid TLS, use
+audited `curl -k` for spot validation and continue with other collection sources
+instead of assuming Katana can crawl it. See the Katana reference before using
+version-specific `--extra-args`.
 
 **Auth-aware crawl:** If `auth.json` has `use_for_requests` set to `true` and `state` set
 to `available`, pass cookies/headers:
 
 ```bash
 vigil assess kali katana \
-  -u URL -H "Cookie: ..." -H "Authorization: ..." -d 3 -jc -jsl -c 10 -rl 20 \
+  -u URL -d 3 -jc -jsl -c 10 -rl 20 \
+  --extra-args '-H "Cookie: ..." -H "Authorization: Bearer ..."' \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_auth_output.txt \
   --technique DISCOVERY --intent "auth-aware crawl of URL" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -345,6 +362,9 @@ The surface-collector agent prompt defines the full output format. Key sections:
 
 ## Extended Resources
 
+- `agent/references/tools/recon/katana.md` — live crawl doctrine, JS-aware defaults, headless escalation, and ingestion handoff
 - `references/tools/recon/gau.md` — gau CLI reference and pipeline patterns
 - `references/tools/recon/httpx.md` — HTTP probing reference for URL validation
+- `agent/skills/browser-semantic-analysis/SKILL.md` — browser execution decision tree for JS-heavy apps, soft errors, browser-originated APIs, and headless/headed deltas
+- `agent/references/runtime-guides/browser-semantic-evidence.md` — evidence contract and headed-browser escalation rules
 - `agent/skills/gau-triage/SKILL.md` — deeper follow-up pass for large historical URL corpora: cluster review on top of inline-classified buffer, httpx body capture, and trufflehog secret scan

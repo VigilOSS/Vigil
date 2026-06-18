@@ -13,10 +13,13 @@ vuln_class: source-disclosure, secrets-exposure
 - SPA framework detected (React, Vue, Angular)
 - Directory fuzzing sparse — source analysis reveals paths fuzzing misses
 - GraphQL/REST API schema discovery needed
+- Browser execution needed to materialize dynamic imports, service-worker routes,
+  client-side redirects, or API calls only visible at runtime
 
 ## Tools
 
-- `LinkFinder` — automated endpoint extraction from JavaScript files
+- `LinkFinder` — automated endpoint extraction from JavaScript files; prefer
+  `vigil assess gau-js-endpoints` for corpus-scale extraction from saved JS bodies
 - `SecretFinder` — scan JS files for API keys, tokens, and secrets
 - `trufflehog` — scan saved JS/source-map artifacts through `vigil assess kali exec --` (host-side installs
   aren't required; the runtime image ships trufflehog)
@@ -65,18 +68,18 @@ vigil assess kali exec --technique DISCOVERY \
 #### Automated JS Endpoint Extraction
 
 ```bash
-# LinkFinder — extract endpoints from JS (far more thorough than manual grep on minified code)
+# LinkFinder — extract endpoints from JS when a direct runtime install exists
 vigil assess kali exec --technique DISCOVERY \
   --intent "LinkFinder endpoint extraction from app.js" \
   --probe-kind fingerprint --phase recon --timeout 300 -- \
-  python3 linkfinder.py -i https://TARGET/static/js/app.js -o cli
+  LinkFinder -i https://TARGET/static/js/app.js -o cli
 
 # Batch all JS files discovered in step 1
 vigil assess kali exec --technique DISCOVERY \
   --intent "LinkFinder batch endpoint extraction from all JS files" \
   --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
 for js_url in $(cat /engagements/$ENGAGEMENT_KEY/scans/js_files.txt); do
-  python3 linkfinder.py -i "$js_url" -o cli
+  LinkFinder -i "$js_url" -o cli
 done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_endpoints.txt
 '
 
@@ -96,8 +99,13 @@ done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_secrets.txt
 '
 ```
 
-Use LinkFinder and SecretFinder as the primary extraction pass. Fall back to manual grep
-for edge cases they miss (inline scripts, dynamically loaded chunks, non-standard patterns).
+Use LinkFinder and SecretFinder as the primary narrow extraction pass. If
+`LinkFinder` is not installed as a command, check for the older
+`python3 linkfinder.py` form in the runtime before declaring the tool missing.
+For large historical corpora, prefer `vigil assess gau-js-endpoints` because it
+pairs body capture, LinkFinder-style extraction, URL resolution, and ingestion.
+Fall back to manual grep for edge cases they miss (inline scripts, dynamically
+loaded chunks, non-standard patterns).
 When scanning saved artifacts for secrets, invoke `trufflehog filesystem` via
 `vigil assess kali exec --technique INFO-DISCLOSURE --intent "secret scan on saved JS/source-map artifacts" --probe-kind fingerprint --phase recon --timeout 600 -- trufflehog filesystem ...`
 against `/engagements/$ENGAGEMENT_KEY/...` paths so the runtime-owned install is used consistently
@@ -116,6 +124,12 @@ explicitly queued rather than silently absent from backend `code/files`.
 - Webpack: chunk manifest, chunk URLs, `window.__INITIAL_STATE__`
 - Infer more than strings: auth role checks, feature flags, internal-only branches, tenant IDs,
   object naming patterns, callback routes, proxy base paths, and debugging toggles.
+
+When static extraction finds route constructors, dynamic import paths, service-worker
+fetch handlers, or client-side redirects that cannot be resolved from source alone,
+load `agent/skills/browser-semantic-analysis/SKILL.md`. Runtime observation should
+capture the generated request URLs and the baseline-vs-browser delta instead of
+guessing paths from minified code.
 
 ### 4. CSS Analysis
 Extract `url()` refs, `@import` paths, source map refs.
@@ -278,3 +292,5 @@ consistently.
 
 - `agent/references/payloads/info-disclosure-probes.md` — standard probe endpoints, metadata paths, and environment file paths
 - `agent/references/tools/exploitation/dalfox.md` — for JS-discovered parameterized URLs that may be XSS candidates
+- `agent/skills/browser-semantic-analysis/SKILL.md` — runtime-observation path for routes/API calls that static bundle analysis cannot materialize
+- `agent/references/runtime-guides/browser-semantic-evidence.md` — browser-mode triggers, tool choices, and evidence contract

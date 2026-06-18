@@ -30,6 +30,27 @@ from .paths import (
 HEAVY_TIER_HOST_GB_THRESHOLD = 32
 HEAVY_TIER_TARGET_GB = 16
 
+# Name prefix of an EPHEMERAL per-bench-attempt Kali runtime (``vbench-kali-<id>``,
+# minted by ``bench.staging.bench_runtime_name``). The SHARED ``start_runtime`` path
+# below — which is host-bridged (``--add-host`` host-gateway), mounts ``/data``, and
+# uses the 8 GB operator tier — must NEVER recreate one of these: a bench attempt
+# exports ``VIGIL_RUNTIME_CONTAINER=vbench-kali-<id>`` so every ``vigil assess kali``
+# execs into the attempt's OWN FRONT-net-only runtime (ADR 0005), and the same env
+# channel makes a bare ``vigil runtime start``/``restart`` (run by the operator e.g.
+# to clear a spurious "/data mount drift" on the bench kali, which legitimately lacks
+# ``/data``) resolve to that bench kali and re-home it onto the host ``bridge``. That
+# drops its FRONT-net membership, so ``target-<id>`` stops resolving (the intermittent
+# "Could not resolve host" flake) AND breaks the isolation contract. The guard keeps
+# the shared-runtime lifecycle off the bench kali entirely; bench owns its start/stop
+# via ``start_bench_runtime``/``stop_bench_runtime``.
+BENCH_RUNTIME_NAME_PREFIX = "vbench-kali-"
+
+
+def is_bench_runtime_name(container_name: str) -> bool:
+    """True if ``container_name`` is a per-attempt bench Kali runtime (``vbench-kali-*``)."""
+    return container_name.startswith(BENCH_RUNTIME_NAME_PREFIX)
+
+
 # Lightweight resource tier for an EPHEMERAL per-bench-attempt Kali runtime.
 # Deliberately small (a single attempt's tooling, not the operator's full recon
 # workload), and intentionally NOT the 8 GB operator tier from
@@ -343,6 +364,25 @@ def start_runtime(
     validate_tools: bool = True,
     allow_existing: bool = False,
 ) -> None:
+    # Never let the SHARED (host-bridged, 8 GB, /data-mounted) runtime lifecycle
+    # touch a per-attempt bench Kali runtime. A bench attempt sets
+    # VIGIL_RUNTIME_CONTAINER=vbench-kali-<id>, which `default_runtime_container()`
+    # feeds into RuntimeOptions.container_name — so a bare `vigil runtime
+    # start`/`restart` run inside the operator's env would otherwise resolve to the
+    # bench kali and recreate it on the host `bridge` (dropping its FRONT-net
+    # membership -> `target-<id>` stops resolving, and breaking ADR-0005 isolation).
+    # Refuse deterministically with a directive pointing at the right tool.
+    if is_bench_runtime_name(options.container_name):
+        raise SystemExit(
+            f"Refusing to start/recreate the shared runtime on a per-attempt bench "
+            f"container ({options.container_name}).\n"
+            "  VIGIL_RUNTIME_CONTAINER points at a bench attempt's own FRONT-net-only "
+            "Kali runtime (ADR 0005); the bench owns its lifecycle and recreating it on "
+            "the host bridge would break target DNS + isolation.\n"
+            "  This bench runtime needs no `vigil runtime start` — the harness started it "
+            "and `vigil assess kali` already targets it. A '/data mount drift' notice on a "
+            "bench kali is expected (it intentionally has no /data mount) and is not a fault."
+        )
     install_root = options.install_root.expanduser().resolve()
     data_dir = _resolve_runtime_data_dir(install_root)
     engagements_dir = install_root / "agent" / "engagements"
@@ -431,6 +471,17 @@ def start_runtime(
 
 def stop_runtime(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> None:
     container_name = container_name or default_runtime_container()
+    # Same guard as start_runtime: a `vigil runtime stop`/`restart` run inside a
+    # bench attempt's env resolves container_name to that attempt's vbench-kali-<id>
+    # and would `docker rm -f` it out from under the live attempt. The bench owns
+    # the bench kali's lifecycle (stop_bench_runtime at teardown); refuse here so the
+    # shared-runtime CLI can't reap it. stop_bench_runtime calls in NOT through here.
+    if is_bench_runtime_name(container_name):
+        raise SystemExit(
+            f"Refusing to stop a per-attempt bench Kali runtime ({container_name}) via the "
+            "shared-runtime command. The bench harness owns its lifecycle and reaps it at "
+            "attempt teardown; `vigil runtime stop`/`restart` is for the shared `vigil` runtime."
+        )
     if docker.container_exists(container_name, runner=runner):
         runner(["docker", "rm", "-f", container_name])
 
@@ -498,11 +549,19 @@ def start_bench_runtime(
 
 
 def stop_bench_runtime(container_name: str, *, runner: docker.Runner = docker.run_command) -> None:
-    """Reap an ephemeral per-attempt bench runtime (the ``docker rm -f`` body of
-    ``stop_runtime``). No-op on an empty name or an already-gone container."""
+    """Reap an ephemeral per-attempt bench runtime. No-op on an empty name or an
+    already-gone container.
+
+    This is the bench-OWNED reap path (called only from ``staging.teardown``). It
+    intentionally does the ``docker rm -f`` directly rather than delegating to
+    ``stop_runtime`` — ``stop_runtime`` now REFUSES ``vbench-kali-*`` names (so a
+    shared-runtime ``vigil runtime stop``/``restart`` can't reap a live attempt's
+    kali), and routing teardown through it would make teardown raise on its own
+    container."""
     if not container_name:
         return
-    stop_runtime(container_name, runner=runner)
+    if docker.container_exists(container_name, runner=runner):
+        runner(["docker", "rm", "-f", container_name])
 
 
 def runtime_status(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> str:
