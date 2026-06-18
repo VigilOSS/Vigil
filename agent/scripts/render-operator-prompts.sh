@@ -178,6 +178,19 @@ agent_description() {
 #
 # When adding a role, default it to Pro unless it is clearly a bounded,
 # high-fan-out, mechanical sweep.
+#
+# Fast+deep variant pairs (OpenCode ONLY): OpenCode subagents inherit the
+# invoking primary's model unless the wrapper pins `model:`, and OpenCode's
+# task/dispatch has no per-call model override — the model is strictly the
+# wrapper file's frontmatter `model:` at dispatch time. So for OpenCode we emit,
+# for every role, the canonical tier (from agent_model below) AND an
+# opposite-tier sibling so the operator can dispatch either a fast (Flash) or a
+# deep (Pro) variant of any specialist by name (`<role>` + `<role>-pro` or
+# `<role>-flash`). The sibling shares the canonical's prompt body verbatim; only
+# the `model:` frontmatter and a short description suffix differ. This is
+# OpenCode-only: `.claude`/`.codex` wrappers do NOT consume wrapper `model:`
+# frontmatter, so no variants are emitted there (pure clutter). See
+# render_opencode_wrapper / opencode_variant_suffix below.
 OPENCODE_PRO_MODEL="deepseek/deepseek-v4-pro"
 OPENCODE_FLASH_MODEL="deepseek/deepseek-v4-flash"
 
@@ -193,6 +206,34 @@ agent_model() {
     *)
       printf '%s\n' "$OPENCODE_PRO_MODEL" ;;
   esac
+}
+
+# The OpenCode opposite-tier sibling: given a role's canonical model, return the
+# OTHER tier's model. Used to emit the fast+deep variant pair (OpenCode only).
+agent_opposite_model() {
+  if [[ "$(agent_model "$1")" == "$OPENCODE_PRO_MODEL" ]]; then
+    printf '%s\n' "$OPENCODE_FLASH_MODEL"
+  else
+    printf '%s\n' "$OPENCODE_PRO_MODEL"
+  fi
+}
+
+# The dispatchable name suffix + description suffix for a variant pinned to
+# $model. Pro siblings get `-pro`; Flash siblings get `-flash`.
+opencode_variant_name_suffix() {
+  if [[ "$1" == "$OPENCODE_PRO_MODEL" ]]; then
+    printf '%s\n' "-pro"
+  else
+    printf '%s\n' "-flash"
+  fi
+}
+
+opencode_variant_desc_suffix() {
+  if [[ "$1" == "$OPENCODE_PRO_MODEL" ]]; then
+    printf '%s\n' " — deep (Pro) variant"
+  else
+    printf '%s\n' " — fast (Flash) variant"
+  fi
 }
 
 agent_prompt_body() {
@@ -447,13 +488,22 @@ EOF
   perl -0pi -e 's/\n+\z/\n/' "$out"
 }
 
-render_opencode_wrapper() {
+# Write a single OpenCode wrapper for $agent_name pinned to $model. The optional
+# $name_suffix/$desc_suffix produce an opposite-tier VARIANT sibling
+# (`<role>-pro.md` / `<role>-flash.md`); empty suffixes produce the canonical
+# `<role>.md` (kept byte-identical to legacy output). Both the canonical and the
+# variant share ONE code path here; only the filename, `model:`, and the
+# description suffix differ. The GENERATED-FILE banner still points at the
+# canonical source (`agent/agents/<role>.md`) so the variant's provenance and
+# "DO NOT EDIT / Regenerate with" guidance stay intact.
+render_one_opencode_wrapper() {
   local agent_name="$1"
+  local model="$2"
+  local name_suffix="${3:-}"
+  local desc_suffix="${4:-}"
   local description
   description=$(agent_description "$agent_name")
-  local model
-  model=$(agent_model "$agent_name")
-  local out="$OPENCODE_AGENTS_DIR/$agent_name.md"
+  local out="$OPENCODE_AGENTS_DIR/$agent_name$name_suffix.md"
   mkdir -p "$(dirname "$out")"
 
   # OpenCode agent frontmatter: description + mode + model. `mode: subagent`
@@ -463,7 +513,7 @@ render_opencode_wrapper() {
   if [[ "$agent_name" == "operator" ]]; then
     cat > "$out" <<EOF
 ---
-description: Lead red team operator. Drives pentest methodology, coordinates phases, and manages state.
+description: Lead red team operator. Drives pentest methodology, coordinates phases, and manages state.$desc_suffix
 mode: subagent
 model: $model
 ---
@@ -483,7 +533,7 @@ EOF
   {
     cat <<EOF
 ---
-description: $description
+description: $description$desc_suffix
 mode: subagent
 model: $model
 ---
@@ -496,6 +546,24 @@ EOF
     agent_prompt_body "$agent_name"
   } > "$out"
   perl -0pi -e 's/\n+\z/\n/' "$out"
+}
+
+# Emit the OpenCode wrappers for a role: the canonical tier AND the opposite-tier
+# sibling. OpenCode-only fast+deep pairing (see the routing block above). The
+# canonical (empty suffixes) stays byte-identical to legacy; the sibling pins the
+# opposite model with a `-pro`/`-flash` name + description suffix.
+render_opencode_wrapper() {
+  local agent_name="$1"
+  local canonical_model opposite_model variant_name_suffix variant_desc_suffix
+  canonical_model=$(agent_model "$agent_name")
+  opposite_model=$(agent_opposite_model "$agent_name")
+  variant_name_suffix=$(opencode_variant_name_suffix "$opposite_model")
+  variant_desc_suffix=$(opencode_variant_desc_suffix "$opposite_model")
+
+  # Canonical (byte-identical to legacy).
+  render_one_opencode_wrapper "$agent_name" "$canonical_model"
+  # Opposite-tier sibling (OpenCode-only fast+deep pair).
+  render_one_opencode_wrapper "$agent_name" "$opposite_model" "$variant_name_suffix" "$variant_desc_suffix"
 }
 
 # Render the active roster's wrappers (red or blue) selected by $TYPE.
@@ -613,6 +681,22 @@ check_render_one() {
     elif ! diff -q "$target_opencode" "$tmp_dir/$opencode_rel" >/dev/null 2>&1; then
       printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$opencode_rel" >&2
       diff -u "$target_opencode" "$tmp_dir/$opencode_rel" >&2 || true
+      drift=1
+    fi
+    # OpenCode-only opposite-tier variant sibling (fast+deep pair). No
+    # corresponding .claude/.codex variant exists by design, so this is checked
+    # only for the opencode path.
+    local opp_model variant_suffix opencode_variant_rel target_opencode_variant
+    opp_model=$(agent_opposite_model "$agent_name")
+    variant_suffix=$(opencode_variant_name_suffix "$opp_model")
+    opencode_variant_rel=".opencode/agent/$agent_name$variant_suffix.md"
+    target_opencode_variant="$source_output_dir/$opencode_variant_rel"
+    if [[ ! -f "$target_opencode_variant" ]]; then
+      printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$opencode_variant_rel" >&2
+      drift=1
+    elif ! diff -q "$target_opencode_variant" "$tmp_dir/$opencode_variant_rel" >/dev/null 2>&1; then
+      printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$opencode_variant_rel" >&2
+      diff -u "$target_opencode_variant" "$tmp_dir/$opencode_variant_rel" >&2 || true
       drift=1
     fi
   done
