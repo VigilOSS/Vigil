@@ -186,7 +186,7 @@ def resolve_base_url(engagement_dir: str, agent_root: str) -> str:
 def load_config(engagement_dir_flag: str | None = None) -> Config:
     """Load full config from environment and file chain."""
     eng_dir = resolve_engagement_dir(engagement_dir_flag)
-    # agent_root is <eng_dir>/../../ (engagements/<key> -> agent/)
+    # agent_root is <eng_dir>/../.. (engagements/<key> -> <install_root>/agent)
     agent_root = str(Path(eng_dir).parent.parent)
     eng_key = Path(eng_dir).name
     base_url = resolve_base_url(eng_dir, agent_root)

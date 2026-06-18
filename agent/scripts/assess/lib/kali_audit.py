@@ -301,9 +301,9 @@ def _resolve_agent_name(
     itself a non-"operator" attribution that ties the row to a specific
     dispatch, so it is used verbatim WITHOUT a backend lookup (no hot-path
     GET, no auto-inference of the in-progress dispatch — parallel lanes make
-    that ambiguous). Env is an unreliable carrier because Claude Code
-    subagent shells do not inherit AGENT_NAME and Bash env does not persist
-    across calls, so the explicit flags are the real fix.
+    that ambiguous). Env is an unreliable carrier because subagent shells do
+    not inherit AGENT_NAME and Bash env does not persist across calls, so the
+    explicit flags are the real fix.
 
     The "operator" default lets the operator run mechanical pipeline checks
     (tier-pick smoke, runtime health, credential validation) without

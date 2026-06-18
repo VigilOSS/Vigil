@@ -1,6 +1,6 @@
 """vigil assess record-finding — most complex command.
 
-Schema validate → slug allocate → POST → emit event.
+Slug allocate → normalize defaults → schema validate → POST → emit event.
 """
 from __future__ import annotations
 

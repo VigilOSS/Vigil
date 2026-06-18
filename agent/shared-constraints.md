@@ -23,6 +23,8 @@ Read `scope.json` before making target-facing decisions. Confirm:
 
 All testing stays within listed scope hosts. Exploit policy escalation requires operator approval.
 
+**Reachability is not scope.** The Kali runtime is shared infrastructure, so it may be able to route to hosts that are NOT your target — other engagements' services, neighbouring Docker/internal subnets, or the host itself. Only the hosts in this engagement's `scope.json` are in scope. Never probe, pivot into, or build findings on infrastructure outside it, even when the runtime can reach it — a reachable-but-out-of-scope host is a distraction (and, on a shared runtime, often another engagement's state), not a lead.
+
 ---
 
 ## 2. `vigil assess kali` for All Target Work
@@ -55,8 +57,10 @@ completion in-band — no `run_in_background`, no `vigil assess kali job start`,
 no dtach, and no watcher/poll loop. A specialist must never background target
 traffic and then halt waiting for a completion notification: the harness
 auto-resumes the halted agent, which launches the next detached job and halts
-again, producing unbounded relaunch thrash and duplicate probes (the failure
-mode that stalled multiple recon dispatches — see the engagement post-mortem).
+again, producing unbounded relaunch thrash and duplicate probes — in past
+engagements this burned 80–210 K tokens per agent and produced duplicate httpx
+passes with near-zero net coverage (the failure mode that stalled multiple recon
+dispatches — see the engagement post-mortem).
 A generous `--timeout` is the correct tool for a single long probe
 (`nmap+scripts`, `sqlmap`, `nuclei` sweep, `dirb`, `gobuster`, `ffuf` large
 wordlists): when it expires the audit pipeline cascades SIGTERM→SIGKILL into

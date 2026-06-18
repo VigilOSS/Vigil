@@ -8,7 +8,7 @@ heuristic: the cluster with the single highest-signal row wins, and for ties
 the noisier cluster surfaces first because deferring it buys the most
 throughput when it turns out to be low-signal.
 
-We surface 3-5 representative URLs per cluster so the operator can sanity-check
+We surface up to 5 representative URLs per cluster so the operator can sanity-check
 the cluster label at a glance without running a separate query. Earliest/latest
 timestamps let operators spot stale clusters that outlived an earlier ingest.
 """

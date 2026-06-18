@@ -266,8 +266,6 @@ class AssessmentClient:
         except json.JSONDecodeError:
             return {"raw": resp_body}
 
-    # ── Round 9: dispatch / handoff / decision helpers ────────────────────
-
     def record_dispatch(self, payload: dict) -> dict:
         return self.post("dispatches", payload)
 
