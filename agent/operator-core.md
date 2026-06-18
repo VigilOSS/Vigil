@@ -10,8 +10,7 @@ Always-active rules:
 - `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
 
-Path convention:
-- All assessment operations use `vigil assess <subcommand>` from any directory.
+CLI path convention is owned by `agent/shared-constraints.md` §9.
 
 ## Resume Gate
 
@@ -114,7 +113,7 @@ Before initializing any engagement, ensure the shared Kali runtime container is 
 
 ```bash
 vigil runtime start
-vigil assess kali --help     # smoke-test discovery; should list 20 verbs
+vigil assess kali --help     # smoke-test discovery; lists available verbs
 ```
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install. `vigil assess kali` execs into this single container regardless of which engagement is active — the engagement context is plumbed through `${ENGAGEMENT_DIR}` and the audit-flag set on each call.

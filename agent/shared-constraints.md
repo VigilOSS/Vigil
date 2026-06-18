@@ -543,8 +543,8 @@ API security: `agent/references/api-security/`
 
 ## 9. Script Path Convention
 
-All assessment operations use `vigil assess <subcommand>` resolved from the agent workspace
-root after `cd agent`. JSON payloads are always in files, never inline shell arguments.
+All assessment operations use `vigil assess <subcommand>` from any directory. JSON payloads are
+always in files, never inline shell arguments.
 
 Use `ENGAGEMENT_DIR` or `--engagement-dir` for path resolution — hardcoded absolute paths break across environments.
 
