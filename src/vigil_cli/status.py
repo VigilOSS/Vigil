@@ -67,7 +67,9 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
             "image_exists": docker.image_exists("vigil-proxy:latest", runner=runner),
             "ca_volume": docker.volume_exists("mitmproxy-ca", runner=runner),
         },
-        "oob": oob_status(oob_domain=oob_domain, runner=runner) | {"frp_token_configured": oob_token_configured},
+        # deep=False keeps `vigil status` cheap (no per-client log reads / DNS probe);
+        # `vigil oob status` runs the full health check.
+        "oob": oob_status(oob_domain=oob_domain, runner=runner, deep=False) | {"frp_token_configured": oob_token_configured},
         "backup": {
             "latest": str(backup.path) if backup else None,
             "modified_at": backup.modified_at if backup else None,

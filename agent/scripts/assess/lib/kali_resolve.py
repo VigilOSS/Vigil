@@ -50,10 +50,9 @@ from . import runtime_route
 from .kali_audit import _extract_target_anchor
 
 # Tools whose HTTP request honors a ``--resolve host:port:ip`` pin with curl's
-# syntax. This is the _IDENTITY_INJECTABLE_TOOLS set MINUS sqlmap: sqlmap does
-# NOT accept ``--resolve`` (it has no equivalent host-pin flag), so pinning it
-# would inject a flag the tool rejects. curl/httpx/nuclei/ffuf/katana all accept
-# the identical ``host:port:ip`` form.
+# syntax. sqlmap is excluded — it has no equivalent host-pin flag, so injecting
+# ``--resolve`` would cause it to reject the argument. curl/httpx/nuclei/ffuf/
+# katana all accept the identical ``host:port:ip`` form.
 RESOLVE_PIN_TOOLS: frozenset[str] = frozenset({"curl", "httpx", "nuclei", "ffuf", "katana"})
 
 # Operator escape hatch. Truthy disables host-resolve + --resolve pinning even on

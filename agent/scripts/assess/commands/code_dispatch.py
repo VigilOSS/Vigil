@@ -526,7 +526,8 @@ def _normalize_queue_items(cfg, raw_items: list[dict]) -> list[dict]:
 def _queue(cfg, queue_items_file: str) -> None:
     """Queue analysis items. Items can include batch_theme, slot_types, and
     guidance_hypotheses fields alongside the existing format — those are
-    passed through as-is to the backend."""
+    normalized (priority clamped, string lists flattened) before being posted
+    to the backend."""
     fp = Path(queue_items_file)
     if not fp.is_file():
         print(f"Queue items JSON file not found: {queue_items_file}", file=sys.stderr)

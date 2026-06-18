@@ -427,7 +427,7 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
     try:
         from .oob import oob_status
 
-        oob_state = str(oob_status(runner=runner).get("state", "unknown"))
+        oob_state = str(oob_status(runner=runner, deep=False).get("state", "unknown"))
     except Exception:
         oob_state = "unknown"
 
@@ -1390,11 +1390,21 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
     # works regardless of install kind. It execs `opencode run …` (the headless
     # subcommand) and exports the DeepSeek/OpenRouter provider key from the same env
     # files the launcher already sources for ORCHESTRATOR_BASE_URL.
+    #
+    # `--agent operator` is REQUIRED for specialist dispatch to happen at all. With
+    # no `--agent`, `opencode run` uses its built-in default primary "build" agent,
+    # which reads AGENTS.md as mere context and does every probe/analysis inline
+    # (the observed "0 specialist dispatches" bug — empty sessions/index.json).
+    # Our `operator` wrapper (.opencode/agent/operator.md) is rendered `mode: primary`
+    # precisely so this `--agent operator` launch is accepted; a `mode: subagent`
+    # entrypoint is silently rejected by OpenCode 1.17.5 (it falls back to "build").
+    # The operator-as-primary has the `task` tool and dispatches the subagent roster
+    # via `subagent_type: <role>` / `@<role>`, each loading its mandatory skill.
     if client_kind in {"codex", "claude", "both"}:
         _write_launcher(
             agent_root, eng_dir, "opencode",
             "--dangerously-skip-permissions" if skip_permissions else "",
-            exec_cmd="opencode run",
+            exec_cmd="opencode run --agent operator",
             provider_keys=("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"),
         )
 

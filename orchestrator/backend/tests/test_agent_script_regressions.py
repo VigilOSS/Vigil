@@ -2742,6 +2742,99 @@ def test_resume_brief_dict_body_still_renders(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Resume Brief: eng" in out
     assert "phase: recon" in out
+    # A minimal body carries no surfaces/work_buffer block — those sections must
+    # stay absent rather than render empty headers.
+    assert "## Surfaces" not in out
+    assert "## Work Buffer" not in out
+
+
+def test_resume_brief_renders_surfaces_and_work_buffer(monkeypatch, tmp_path, capsys):
+    body = {
+        "engagement": {"key": "eng"},
+        "surfaces": {
+            "total": 4,
+            "open_count": 3,
+            "by_status": {"discovered": 2, "covered": 1, "deferred": 1},
+            "by_status_type": [
+                {"status": "discovered", "surface_type": "auth_entry", "count": 1},
+                {"status": "discovered", "surface_type": "object_reference", "count": 1},
+            ],
+            "top_uncovered": [
+                {"status": "discovered", "surface_type": "auth_entry", "target_descriptor": "https://x/login", "source_name": "surface-collector"},
+                {"status": "deferred", "surface_type": "file_handling", "target_descriptor": "https://x/upload", "source_name": ""},
+            ],
+        },
+        "work_buffer": {"pending_total": 3, "by_bucket": {"idor": 2, "ssrf": 1}},
+    }
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    assert "## Surfaces" in out
+    assert "total: 4 (open: 3)" in out
+    assert "discovered/auth_entry: 1" in out
+    assert "discovered auth_entry: https://x/login [surface-collector]" in out
+    assert "## Work Buffer" in out
+    assert "pending total: 3" in out
+    assert "idor: 2" in out
+    assert "ssrf: 1" in out
+
+
+def test_resume_brief_renders_zero_state_surfaces_and_work_buffer(monkeypatch, tmp_path, capsys):
+    # A real backend on an empty engagement emits the keys with zero counts, so
+    # the headers DO render (with explicit zero-state lines) — unlike a synthetic
+    # body that omits the keys entirely (which stays header-less).
+    body = {
+        "engagement": {"key": "eng"},
+        "surfaces": {"total": 0, "open_count": 0, "by_status": {}, "by_status_type": [], "top_uncovered": []},
+        "work_buffer": {"pending_total": 0, "by_bucket": {}},
+    }
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    assert "## Surfaces" in out
+    assert "total: 0 (open: 0)" in out
+    assert "top uncovered (0):" in out
+    assert "## Work Buffer" in out
+    assert "pending by gf-bucket: -" in out
+
+
+def test_resume_brief_findings_always_show_medium_plus(monkeypatch, tmp_path, capsys):
+    def _finding(slug, severity):
+        return {
+            "slug": slug,
+            "severity": severity,
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "title": f"{slug} title",
+        }
+
+    rows = [_finding(f"L{i}", "low") for i in range(1, 8)] + [_finding("CRIT-1", "critical")]
+    body = {"engagement": {"key": "eng"}, "findings": {"active": rows}}
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    # The critical is shown even though it sits behind 7 low rows; the 7th low
+    # (beyond the 6-row floor) is dropped, and the truncation note is printed.
+    assert "CRIT-1 critical" in out
+    assert "L7 low" not in out
+    assert "showing 7 of 8 (medium+ always shown)" in out
+
+
+def test_resume_brief_renders_read_first_intel_notes(monkeypatch, tmp_path, capsys):
+    body = {
+        "engagement": {"key": "eng"},
+        "intel": {
+            "summary": {"notes": 2},
+            "open_high_cves": [],
+            "open_leads": [],
+            "read_first_notes": [
+                {"id": 5, "title": "Coverage map for /api", "tags": ["coverage"], "lead_status": ""},
+                {"id": 6, "title": "Read me: WAF bypass", "tags": ["read-first"], "lead_status": "open"},
+            ],
+        },
+    }
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    assert "read-first / coverage notes (2):" in out
+    assert "id=5 (coverage) Coverage map for /api" in out
+    assert "id=6 (read-first) [open] Read me: WAF bypass" in out
 
 
 # ---------------------------------------------------------------------------
@@ -3101,15 +3194,18 @@ def test_s11_spec_parses_refs_composed_form_and_pathlevel_params(monkeypatch, tm
     assert "id" in post_path
 
 
-def test_opencode_inline_probe_carveout_is_durable_and_scoped() -> None:
-    """Finding #3 (Option A): operator-core.md carries an OpenCode-only carve-out
-    in the Runtime Dispatch Syntax block — on OpenCode the operator issues target
-    probes INLINE rather than delegating via ``task`` (broken + uncovered by the
-    audit hooks: opencode#5894). The carve-out must be (a) present in the source,
-    (b) rendered into AGENTS.md, and (c) scoped to OpenCode so Claude/Codex still
-    dispatch normally. When opencode#5894's hook coverage + ``task`` reliability
-    land, this carve-out AND this test are deleted together — see
-    docs/plans/opencode-deepseek-hardening-2026-06-16.md §K.3.
+def test_opencode_dispatches_normally_no_inline_probe_carveout() -> None:
+    """The former OpenCode-only inline-probing carve-out (Finding #3 / Option A)
+    has been RETIRED: OpenCode now dispatches specialists exactly like
+    Claude/Codex. Reliability is restored by the project-level permission block
+    (``_OPENCODE_PERMISSION`` in ``engagements.py``) that fixed the child-session
+    ``task`` deadlock, and audit coverage holds because a sanctioned ``vigil
+    assess kali`` probe is recorded host-side in ``command-runs`` for the taint
+    audit regardless of who issues it (opencode#5894's plugin-hook gap is
+    contained by that record + ADR-0005 FRONT-net-only isolation + the
+    never-raw-host-Bash rule). This guards that operator-core.md no longer
+    mandates inline probing on OpenCode and that the retirement rendered into
+    AGENTS.md.
     """
     repo_root = Path(__file__).resolve().parents[3]
     core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
@@ -3117,30 +3213,20 @@ def test_opencode_inline_probe_carveout_is_durable_and_scoped() -> None:
 
     assert "### Runtime Dispatch Syntax" in core
 
-    # (a) the carve-out exists, names both reasons and the exit condition.
-    for anchor in (
-        "OpenCode-only carve-out",
-        "issue target probes INLINE",
-        "opencode#5894",
-        "Claude Code and Codex dispatch normally",
-        "rejoins the standard dispatch model",
-    ):
-        assert anchor in core, f"operator-core.md missing carve-out anchor: {anchor!r}"
+    # The retired inline-probe mandate is GONE from both the source and the render.
+    for gone in ("OpenCode-only carve-out", "issue target probes INLINE", "silently not execute"):
+        assert gone not in core, f"operator-core.md still carries retired carve-out text: {gone!r}"
+        assert gone not in agents, f"AGENTS.md still carries retired carve-out text: {gone!r}"
 
-    # (b) it propagated into the rendered AGENTS.md. render-check guards EXACT
-    #     operator-core -> AGENTS sync; this guards that the carve-out specifically
-    #     survives the render (a delete-and-re-render would pass render-check).
-    assert "OpenCode-only carve-out" in agents
-    assert "issue target probes INLINE" in agents
+    # Dispatch-normally is the rule on every runtime (incl. OpenCode) and rendered.
+    assert "Dispatch specialists normally" in core
+    assert "Dispatch specialists normally" in agents
+    # The factual opencode#5894 audit note remains (now framed as contained).
+    assert "opencode#5894" in core
 
-    # (c) scoped to OpenCode: the carve-out sits under the OpenCode bullet, not the
-    #     Claude Code / Codex bullets — Claude/Codex must not inherit an inline-probe
-    #     override.
+    # Claude/Codex bullets still carry no inline-probe override.
     claude_idx = core.index("- **Claude Code**")
     codex_idx = core.index("- **Codex**")
     oc_idx = core.index("- **OpenCode**")
-    carve_idx = core.index("OpenCode-only carve-out")
-    assert claude_idx < codex_idx < oc_idx < carve_idx
-    claude_bullet = core[claude_idx:codex_idx]
-    assert "carve-out" not in claude_bullet
-    assert "INLINE" not in claude_bullet
+    assert claude_idx < codex_idx < oc_idx
+    assert "INLINE" not in core[claude_idx:codex_idx]

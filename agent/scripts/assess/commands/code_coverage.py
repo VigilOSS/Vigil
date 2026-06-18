@@ -242,7 +242,7 @@ def _print_structural_verification(files: list[dict]) -> None:
 
 
 def _check_effort_gaps(files: list[dict]) -> bool:
-    """Return True if any critical-classified file has effort below threshold."""
+    """Return True if any classified file has effort below its tier threshold (critical/high/medium)."""
     for f in files:
         classification = f.get('classification', '')
         threshold = EFFORT_THRESHOLDS.get(classification, 0)

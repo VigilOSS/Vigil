@@ -90,9 +90,9 @@ class ScopedErrorParser(argparse.ArgumentParser):
 def add_required_kali_flags(parser) -> None:
     """Register the audit/lifecycle flags every kali_* subcommand needs.
 
-    Author note: every flag here is intentionally `required=True` so the LLM
-    cannot accidentally skip the audit context. Per-tool flags layer on top
-    via the calling subcommand's argparse spec.
+    Every flag here is intentionally ``required=True`` so the audit context
+    cannot be omitted. Per-tool flags layer on top via the calling
+    subcommand's argparse spec.
     """
     parser.add_argument(
         "--technique",

@@ -40,8 +40,6 @@ _COVERAGE_STATUS_SYNONYMS = {
 # Derived membership set (frozenset of members, NOT an alias of the class).
 COVERAGE_STATUSES = frozenset(CoverageStatus)
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 PROBE_RESULT_STATUSES: tuple[str, ...] = (
     "tested",
     "signal",
@@ -1990,7 +1988,7 @@ def egress_block_status(engagement_id: int) -> dict[str, Any]:
     "not yet sampled" state instead of a stale percentage.
 
     ``pattern`` is one of ``unknown`` / ``cdn-403`` / ``geoblock-reset`` /
-    ``mixed``, derived from the `403`/`000` ratio in the run output. The
+    ``mixed``, derived from the 403/000 ratio in the run output. The
     pattern is informational; the operator confirms the cause via the
     Egress reputation checkpoint.
     """

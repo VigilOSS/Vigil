@@ -60,10 +60,11 @@ def host_is_vendor_saas(host: str | None) -> str | None:
     never a customer asset; only ``<tenant>.salesforce.com`` and similar
     subdomains return a vendor label.
 
-    Returns the vendor label (e.g. ``"salesforce"``, ``"servicenow"``,
-    ``"statuspage"``, ``"govdelivery"``, ``"awsconnect"``) on the first
-    matching suffix, or ``None`` when nothing matches. Lookup is O(N) over a
-    small fixed list; the cost is negligible.
+    Returns the vendor label on the first matching suffix (e.g.
+    ``"salesforce"``, ``"servicenow"``, ``"statuspage"``, ``"govdelivery"``,
+    ``"awsconnect"``, ``"auth0"``, ``"okta"``, ``"zendesk"``,
+    ``"freshdesk"``, ``"intercom"``), or ``None`` when nothing matches.
+    Lookup is O(N) over a small fixed list.
     """
     if not host:
         return None

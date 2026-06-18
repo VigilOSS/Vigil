@@ -1,8 +1,7 @@
 """vigil assess ingest-httpx — ingest httpx -json output into the backend host-liveness ledger.
 
 httpx writes liveness verdicts to scattered ``.jsonl`` files that nothing
-reconciles back into the backend (the §10.5 gap: ``work_items.live_status`` is
-100% NULL, 77 runs stranded on disk). This verb parses an httpx ``-json`` file,
+reconciles back into the backend without this verb. This verb parses an httpx ``-json`` file,
 classifies each host with the shared :mod:`assess.lib.reachability` verdict, and
 upserts one ``assessment_host_liveness`` row per host so "is this host live now"
 becomes a backend query that dispatch context can carry.

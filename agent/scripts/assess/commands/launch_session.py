@@ -50,7 +50,6 @@ def run(args) -> None:
         print(f"session already exists: {session_id}", file=sys.stderr)
         sys.exit(1)
 
-    # Fetch findings from backend
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         findings = client.get("findings")
 
@@ -65,7 +64,6 @@ def run(args) -> None:
         print(f"target slug(s) not approved for exploitation: {', '.join(disallowed)}", file=sys.stderr)
         sys.exit(1)
 
-    # Create session directory structure
     proposals_dir = session_dir / "proposals"
     artifacts_dir = session_dir / "artifacts"
     notes_dir = session_dir / "notes"
@@ -76,7 +74,6 @@ def run(args) -> None:
     proposals_file = proposals_dir / "proposals.jsonl"
     proposals_file.write_text("", encoding="utf-8")
 
-    # Write assignment.json
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     assignment = {
         "session_id": session_id,
@@ -86,7 +83,6 @@ def run(args) -> None:
     }
     write_assignment_file(session_dir, assignment)
 
-    # Write prompt.md
     assigned_targets = [findings_by_slug[slug] for slug in requested_slugs]
     prompt_lines = [
         f"# Exploit Session {session_id}",
@@ -110,7 +106,6 @@ def run(args) -> None:
     prompt_file = session_dir / "prompt.md"
     prompt_file.write_text("\n".join(prompt_lines) + "\n", encoding="utf-8")
 
-    # Update session index
     index.append({
         "session_id": session_id,
         "created_at": timestamp,

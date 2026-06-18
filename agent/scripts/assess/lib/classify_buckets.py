@@ -544,8 +544,9 @@ _UUID_RE = re.compile(
 _LONG_HEX_RE = re.compile(r"^[0-9a-f]{24,}$")
 _YEAR_RE = re.compile(r"^(?:19|20)[0-9]{2}$")
 _NUMERIC_RE = re.compile(r"^[0-9]+$")
-# Opaque app token: starts with a letter, contains at least one digit, length
-# >= 5 (e.g. `M0004`, `G0058`). Used only by the cluster normalizer (§5).
+# Opaque app token: starts with a lowercase letter, contains at least one digit
+# (e.g. `M0004`, `G0058` after lowercasing). The len >= 5 guard lives at the
+# call site in `_normalize_cluster_segment`. Used only by the cluster normalizer (§5).
 _OPAQUE_TOKEN_RE = re.compile(r"^[a-z][0-9a-z]*[0-9][0-9a-z]*$")
 # Literal pre-normalized template placeholders (override #5): `{id}`,`{uuid}`,
 # `{n}` (case-insensitive on the word; braces literal).
@@ -603,14 +604,6 @@ def path_has_object_ref(url_path_lower: str) -> bool:
             seen_context = True
     return False
 
-# coverage gap into a concrete `--skills` list.
-#
-# Every value is the bare skill name — the directory under `agent/skills/<name>/`
-# that holds a `SKILL.md`. The recommender validates each name resolves on disk
-# dropped" rather than recommending a nonexistent skill.
-#
-# intentionally absent — they are signal that the dominant-bucket tally is
-#
 BUCKET_SKILLS: dict[str, tuple[str, ...]] = vuln_taxonomy.derive_bucket_skills()
 
 

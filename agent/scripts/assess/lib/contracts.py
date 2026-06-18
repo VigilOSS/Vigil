@@ -572,6 +572,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "First resume primitive — use instead of manually chaining findings, handoffs, command-runs, and local notes.",
             "Output is bounded; use get-command-run and artifact get for drill-down.",
+            "Carries aggregate Surfaces (status×type + top uncovered) and Work Buffer (pending coverage by gf-bucket) rollups plus coverage/read-first intel notes — drill into per-item coverage-items / request-variants / work-buffer only when a rollup flags a bucket.",
         ),
         common_mistakes=(
             ("loading local notes first", "run resume-brief, then artifact search/get for linked files"),

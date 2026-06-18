@@ -1,13 +1,13 @@
 """vigil assess approve-proposal — operator-approval ledger PATCH.
 
 Marks a containment-proposal decision row (kind=``containment_proposal``)
-as ``resolved=1`` with ``resolution_json={"approved_by": <name>,
+as ``resolved=true`` with ``resolution={"approved_by": <name>,
 "approved_at": <utc-iso>}``. ``vigil blue contain`` refuses to execute
 unless the proposal it references is approved here first.
 
-Backend endpoint: PATCH /engagements/{key}/dispatch-decisions/{id} with
-``{"resolved": true, "resolution": {...}}`` (see
-orchestrator/backend/app/api/assessment.py:1980).
+Backend endpoint: PATCH /engagements/{key}/assessment/dispatch-decisions/{id}
+with ``{"resolved": true, "resolution": {...}}`` (see ``patch_decision`` in
+orchestrator/backend/app/api/assessment.py).
 """
 from __future__ import annotations
 

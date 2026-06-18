@@ -431,11 +431,8 @@ def kali_exec(
         # nested closure so the CR-36 false-negative guard can run it a SECOND
         # time (a single host-resolved pinned-IP retry) without duplicating the
         # kill-cascade / rusage / preview logic. Each attempt streams to its own
-        # {run_uuid}[.retryN].{out,err} so both attempts' bytes survive on disk;
+        # {run_uuid}[.retry1].{out,err} so both attempts' bytes survive on disk;
         # the returned ``out_path``/``err_path`` point at THIS attempt's files.
-        # Every existing behavior (FileNotFoundError finalize+raise, the two-
-        # namespace kill cascade, rusage/proc-peak RSS, partial-results flag) is
-        # preserved verbatim inside the closure.
         def _execute_and_snapshot(
             *, attempt_uuid: str, out_path: Path, err_path: Path
         ) -> SimpleNamespace:
@@ -451,11 +448,11 @@ def kali_exec(
                         start_new_session=True,
                     )
                 except FileNotFoundError as exc:
-                    # ``docker`` binary missing on PATH. The pre-exec POST at
-                    # line 186 already wrote a status=running audit row; without
-                    # this finalize the row stays "running" forever and confuses
-                    # sweep-orphans + operator audit. PATCH it to failed before
-                    # raising so the row reflects what actually happened.
+                    # ``docker`` binary missing on PATH. The pre-exec POST already
+                    # wrote a status=running audit row; without this finalize the
+                    # row stays "running" forever and confuses sweep-orphans +
+                    # operator audit. PATCH it to failed before raising so the row
+                    # reflects what actually happened.
                     if run_id is not None and not audit_failed:
                         try:
                             _patch_finalize(
@@ -536,15 +533,13 @@ def kali_exec(
                     _cleanup_container_pid_file(container_name, attempt_uuid)
 
             # Clean up the pid file on the happy path too so /tmp doesn't grow
-            # unboundedly. The wrapper writes the file then ``exec``s the user
-            # command, so by the time we get here the user command has exited
-            # but the file remains.
+            # unboundedly.
             if not a_timed_out:
                 _cleanup_container_pid_file(container_name, attempt_uuid)
 
-            # Resource snapshot. getrusage(RUSAGE_CHILDREN) is rolled-up across
-            # all waited-for children of the calling process; for a single-shot
-            # CLI call the caller is the lone child so the values are accurate.
+            # Resource snapshot. getrusage(RUSAGE_CHILDREN) accumulates across
+            # all waited-for children; for a single-shot CLI call the values are
+            # accurate. _read_proc_peak_rss overrides if available (more precise).
             try:
                 usage = resource.getrusage(resource.RUSAGE_CHILDREN)
                 a_cpu_user = float(usage.ru_utime)
@@ -791,13 +786,13 @@ def kali_exec(
         client.close()
 
 
-# Backward-compat re-exports for callers and test mocks. These names live in
-# this module's globals so:
-#   1. ``from assess.lib.kali import _resolve_agent_name`` keeps resolving for
-#      ``kali_job.py`` and friends.
-#   2. ``monkeypatch.setattr(kali, "_check_container_running", stub)`` replaces
-#      the name the orchestrator code calls, since orchestrator code looks up
-#      these helpers via the module globals (the names imported above).
+# Re-exports for callers and test mocks. These names live in this module's
+# globals so:
+#   1. ``from assess.lib.kali import <name>`` keeps resolving for command
+#      files (kali_job.py, kali_alterx.py, etc.) that import from here.
+#   2. ``monkeypatch.setattr(kali, "_check_container_running", stub)``
+#      replaces the name the orchestrator code calls, since command code
+#      looks up these helpers via the module globals (the imported names).
 __all__ = [
     # Audit + validation (from kali_audit)
     "ALLOWED_PHASES",

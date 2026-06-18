@@ -411,9 +411,9 @@ def search_artifacts(
             "OR a.relative_path LIKE ? ESCAPE '\\')"
         )
         params.extend([canonical_finding, f"%{escaped_slug}%", f"%{escaped_slug}%"])
-    # Optional ``kind`` filter (e.g. ``alert_paste``, ``ir_log``,
-    # ``containment_proof``). No new index — v1 query volumes are small enough
-    # that a WHERE on ``kind`` is fine even with a full scan per engagement.
+    # Optional ``kind`` filter (e.g. ``note``, ``ir-alert``, ``scan-report``).
+    # No new index — v1 query volumes are small enough that a WHERE on ``kind``
+    # is fine even with a full scan per engagement.
     if kind:
         where.append("a.kind = ?")
         params.append(kind)

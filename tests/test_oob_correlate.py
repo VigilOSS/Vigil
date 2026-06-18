@@ -463,6 +463,23 @@ def test_oob_mint_cli_errors_when_multiple_clients_and_no_selection(monkeypatch,
     assert "--client" in msg and "agent-1" in msg and "agent-2" in msg
 
 
+def test_oob_mint_cli_errors_when_explicit_client_not_running(monkeypatch, tmp_path):
+    # The operator's most likely mistake: a typo'd or stopped --client name.
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path
+    key = "2026-05-30-120000-shop"
+    _seed_engagement_dir(install_root, key)
+    monkeypatch.setattr(main_module, "list_running_oob_clients", lambda **_: ["agent-1"])
+    monkeypatch.setattr(main_module, "_build_assessment_client", lambda ir, ek: _FakeAssessmentClient())
+
+    options = main_module._oob_options(install_root)
+    with pytest.raises(SystemExit) as exc:
+        main_module._oob_mint(_mint_args(key, client="bogus"), install_root, options)
+    msg = str(exc.value).lower()
+    assert "not running" in msg and "bogus" in str(exc.value)
+
+
 def test_oob_mint_cli_errors_when_client_unregistered(monkeypatch, tmp_path):
     from vigil_cli import main as main_module
 
@@ -620,6 +637,32 @@ def test_oob_status_ok_when_registered_and_resolving(monkeypatch):
     assert payload["domain_resolves"] is True
     assert payload["client_health"][0]["registered"] is True
     assert payload["issues"] == []
+
+
+def test_oob_status_shallow_skips_probes_and_does_not_false_degrade(monkeypatch):
+    # deep=False (the `vigil status`/`vigil up` path) must NOT read per-client logs
+    # or DNS, and must NOT report degraded just because registration is unknown.
+    monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
+    calls = {"tail": 0, "dig": 0}
+    scenario_runner = _status_runner({
+        "server": True, "frpc": True, "running": ["ssrf-a", "ssrf-b"],
+        "configured": ["ssrf-a", "ssrf-b"], "logs": {}, "dig": "",
+    })
+
+    def counting_runner(argv, **kw):
+        cmd = argv[-1]
+        if cmd.startswith("tail -n") and ".log" in cmd:
+            calls["tail"] += 1
+        if cmd.startswith("dig"):
+            calls["dig"] += 1
+        return scenario_runner(argv, **kw)
+
+    payload = oob.oob_status(oob_domain="oob.example.com", runner=counting_runner, deep=False)
+    assert calls["tail"] == 0 and calls["dig"] == 0  # no per-client / DNS probes on the hot path
+    assert payload["health"] == "ok"                 # unknown registration != degraded
+    assert payload["domain_resolves"] is None
+    assert all(c["registered"] is None for c in payload["client_health"])
+    assert payload["domain"] == "oob.example.com"  # always resolved, never None
 
 
 def test_print_oob_status_exits_nonzero_and_warns_on_degraded(capsys):
