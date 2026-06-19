@@ -18,6 +18,8 @@ from .client_rosters import (
     ensure_claude_agents_link,
     ensure_claude_settings,
     ensure_codex_agents_link,
+    ensure_goose_recipes_link,
+    ensure_goose_standard_hooks,
     ensure_opencode_agents_link,
 )
 from .paths import (
@@ -405,6 +407,14 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     # plugin in place. The bench then layers its guard-only plugin beside it.
     if client_kind in {"codex", "claude", "both"}:
         _write_opencode_config(agent_root, eng_dir)
+    # Goose parity: the operator prompt (`.goosehints`), the specialist recipe roster
+    # (`.goose/recipes` link), and the standard hooks plugin (scope-check + activity-log)
+    # install for every kind that also gets start_goose.sh, so an `--client goose` run —
+    # including `vigil bench` — has them in place. The bench layers its guard-only hook
+    # beside the standard one (anticheat._patch_goose_hooks). Written AFTER
+    # _write_prompt_wrappers so AGENTS.md exists to seed .goosehints.
+    if client_kind in {"codex", "claude", "both"}:
+        _write_goose_config(agent_root, eng_dir)
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
     _emit_bootstrap_scope_summary(scope)
     _verify_backend_install_root(install_root, eng_dir)
@@ -1350,6 +1360,61 @@ def _write_opencode_config(agent_root: Path, eng_dir: Path) -> None:
     _write_opencode_json(eng_dir, _load_opencode_config(eng_dir))
 
 
+# Appended to the engagement's `.goosehints` (Goose ONLY — never touches the shared
+# operator prompt or the other clients). The live SSRF/BOLA runs showed deepseek-chat
+# (non-thinking) solving INLINE with 0 `delegate` calls and writing no backend state —
+# behaving like a lone CTF solver, not the Vigil orchestrator (a benchmark-validity issue:
+# we want to measure the ORCHESTRATED agent, the way claude/codex run it). `delegate` IS
+# available on Goose (verified), so this is a prompting gap: the shared prompt's concrete
+# "Sanctioned inline form" example out-pulls the delegate bullet for a non-thinking model.
+# This goose-scoped, imperative reinforcement counters that without re-steering any other
+# client. See docs/goose-bench.md.
+GOOSE_DISPATCH_DIRECTIVE = (
+    "\n\n---\n"
+    "## Goose runtime — dispatch, do not solo (read this first)\n\n"
+    "You are running on **Goose**, where custom specialists ARE dispatchable headless. Operate as the\n"
+    "Vigil **orchestrator**, not a lone solver:\n\n"
+    "- **Dispatch** the find/test/exploit work to specialists with the `delegate` tool:\n"
+    "  `delegate source <role>` (roster under `./.goose/recipes/`: recon-specialist, source-analyzer,\n"
+    "  surface-collector, vulnerability-analyst, exploit-developer, fuzzer, osint-analyst,\n"
+    "  report-writer; the code-* roles for code engagements). Pass the target URL + the specific\n"
+    "  objective. Your FIRST action in a phase is a `delegate`, not a probe.\n"
+    "- Run `vigil assess kali` YOURSELF only for the Operator-executed exceptions (one login test, a\n"
+    "  fingerprint/health smoke, backend-write helpers). The 'Sanctioned inline form' in AGENTS.md is\n"
+    "  for OpenCode and those exceptions — on Goose, delegate the probing rather than doing it inline.\n"
+    "- **Record** findings and surfaces to the backend (`vigil assess record-finding` /\n"
+    "  `record-surface`) as you confirm them, even on a fast solve — backend state is the deliverable.\n"
+)
+
+
+def _write_goose_config(agent_root: Path, eng_dir: Path) -> None:
+    """Install Goose's operator prompt, specialist roster, and standard hooks.
+
+    Mirrors ``_write_opencode_config`` but Goose-native (see docs/goose-bench.md):
+
+    - ``.goosehints`` — Goose auto-loads this from the cwd. We copy the engagement
+      ``AGENTS.md`` (written by ``_write_prompt_wrappers`` just before this call) into it, so
+      Goose gets the SAME engagement-local entrypoint Codex/OpenCode read natively. For a
+      red engagement that ``AGENTS.md`` is a thin POINTER to the workspace-root operator
+      prompt (a blue engagement's is the full rendered prompt); the operator resolves the
+      pointer by reading the referenced file — the bench CTF message and the human start
+      prompt both say "Read AGENTS.md", which drives that. There is no ``--agent operator``
+      step — the default ``goose run`` agent already holds the ``delegate`` tool.
+    - ``.goose/recipes`` — symlink to the generated specialist roster; the operator
+      dispatches by name (``delegate source <role>``), resolved via ``GOOSE_RECIPE_PATH``.
+    - ``.agents/plugins/vigil-standard`` — the standard hooks plugin (scope-check +
+      activity-log), running the SHARED shell scripts via the payload adapter. The bench
+      layers its guard-only hook beside it (anticheat._patch_goose_hooks).
+    """
+    agents_md = eng_dir / "AGENTS.md"
+    base = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
+    # Append the Goose-only dispatch directive so the (non-thinking) open-model operator
+    # actually orchestrates instead of soloing inline; Goose auto-loads .goosehints.
+    (eng_dir / ".goosehints").write_text(base + GOOSE_DISPATCH_DIRECTIVE, encoding="utf-8")
+    ensure_goose_recipes_link(agent_root, eng_dir / ".goose")
+    ensure_goose_standard_hooks(agent_root, eng_dir)
+
+
 # DeepSeek thinking levels → opencode per-model options. OpenCode deep-merges this
 # project config over the global provider definition (baseURL/apiKey), so only the
 # per-model options are written. The operator model deepseek-v4-pro takes the
@@ -1377,6 +1442,81 @@ def write_opencode_reasoning_config(eng_dir: Path, thinking: str) -> None:
         models["deepseek-v4-pro"] = {"options": pro_options}
         models["deepseek-v4-flash"] = {"options": dict(_DEEPSEEK_THINKING_OPTIONS["off"])}
     _write_opencode_json(eng_dir, config)
+
+
+# Goose provider env + the #9397 reasoning-content repair proxy bootstrap, injected
+# into start_goose.sh. Goose drives direct DeepSeek through its OpenAI-compatible
+# provider; OPENAI_API_KEY defaults to the sourced DEEPSEEK_API_KEY.
+#
+# THINKING-MODE STOPGAP (aaif-goose#9397): goose v1.38.0 drops DeepSeek's
+# `reasoning_content` from the 2nd..Nth assistant messages it emits when it splits a
+# multi-tool-call turn, and DeepSeek 400s ("reasoning_content ... must be passed
+# back"). DeepSeek ignores `parallel_tool_calls:false`, so we cannot stop the model
+# emitting parallel calls; instead a tiny local proxy
+# (vigil_cli/bench/goose_reasoning_proxy.py, stdlib-only) re-attaches the dropped
+# reasoning_content on the way to the API. The launcher starts it on an ephemeral
+# port, repoints OPENAI_HOST at it (real DeepSeek host becomes the proxy's UPSTREAM),
+# and trap-kills it on exit so it is auto-cleaned per attempt. The proxy is a no-op
+# for non-thinking models (no reasoning_content to repair), so it is always safe to
+# run. Disable with VIGIL_GOOSE_REASONING_PROXY=0 (then thinking-mode V4 regresses to
+# the #9397 400). See docs/goose-bench.md.
+_GOOSE_EXTRA_ENV = (
+    "# Goose: direct DeepSeek via the OpenAI-compatible provider. OPENAI_API_KEY\n"
+    "# defaults to the sourced DEEPSEEK_API_KEY; recipe roster + headless hygiene.\n"
+    "# See docs/goose-bench.md.\n"
+    'export GOOSE_PROVIDER="${{GOOSE_PROVIDER:-openai}}"\n'
+    '_VIGIL_DEEPSEEK_HOST="${{OPENAI_HOST:-https://api.deepseek.com}}"\n'
+    'export OPENAI_API_KEY="${{OPENAI_API_KEY:-${{DEEPSEEK_API_KEY:-}}}}"\n'
+    "# Default the model to a thinking V4 id so a bare `vigil engagement start\n"
+    "# --client goose` (no --model) works; the bench passes --model on the CLI,\n"
+    "# which OVERRIDES GOOSE_MODEL. Thinking mode is supported via the repair proxy below.\n"
+    'export GOOSE_MODEL="${{GOOSE_MODEL:-deepseek-v4-pro}}"\n'
+    'export GOOSE_RECIPE_PATH="${{GOOSE_RECIPE_PATH:-$ENGAGEMENT_DIR/.goose/recipes}}"\n'
+    'export GOOSE_DISABLE_KEYRING="${{GOOSE_DISABLE_KEYRING:-1}}"\n'
+    'export GOOSE_MODE="${{GOOSE_MODE:-auto}}"\n'
+    'export GOOSE_DISABLE_SESSION_NAMING="${{GOOSE_DISABLE_SESSION_NAMING:-true}}"\n'
+    "\n"
+    "# --- #9397 reasoning-content repair proxy ---------------------------------\n"
+    "# Start the stdlib-only repair proxy in front of DeepSeek, repoint OPENAI_HOST\n"
+    "# at it, and kill it when this launcher exits (auto-cleaned per attempt).\n"
+    'if [[ "${{VIGIL_GOOSE_REASONING_PROXY:-1}}" != "0" ]]; then\n'
+    '  _vigil_proxy_script="{install_dir}/src/vigil_cli/bench/goose_reasoning_proxy.py"\n'
+    '  if [[ -f "$_vigil_proxy_script" ]]; then\n'
+    "    # Prefer the install venv python (always present); any python3 works (stdlib only).\n"
+    '    _vigil_py="{install_dir}/.venv/bin/python"\n'
+    '    [[ -x "$_vigil_py" ]] || _vigil_py="$(command -v python3 || true)"\n'
+    '    if [[ -n "$_vigil_py" ]]; then\n'
+    '      _vigil_proxy_out="$(mktemp -t vigil-goose-proxy.XXXXXX)"\n'
+    "      # The launcher execs goose (its EXIT trap is then lost), so the proxy\n"
+    "      # reaps its own announce file via PROXY_ANNOUNCE_FILE on shutdown.\n"
+    '      UPSTREAM_HOST="$_VIGIL_DEEPSEEK_HOST" PROXY_PORT=0 PROXY_ANNOUNCE_FILE="$_vigil_proxy_out" \\\n'
+    '        "$_vigil_py" "$_vigil_proxy_script" >"$_vigil_proxy_out" 2>&1 &\n'
+    "      _vigil_proxy_pid=$!\n"
+    '      trap \'kill "$_vigil_proxy_pid" 2>/dev/null; rm -f "$_vigil_proxy_out" 2>/dev/null\' EXIT INT TERM\n'
+    "      # Wait (<=10s) for the proxy to announce its chosen port, then repoint.\n"
+    '      _vigil_proxy_url=""\n'
+    "      for _ in $(seq 1 50); do\n"
+    '        _vigil_proxy_url="$(sed -n \'s#^LISTENING \\(http://127.0.0.1:[0-9]*\\)$#\\1#p\' "$_vigil_proxy_out" 2>/dev/null | head -n1)"\n'
+    '        [[ -n "$_vigil_proxy_url" ]] && break\n'
+    '        kill -0 "$_vigil_proxy_pid" 2>/dev/null || break\n'
+    "        sleep 0.2\n"
+    "      done\n"
+    '      if [[ -n "$_vigil_proxy_url" ]]; then\n'
+    '        export OPENAI_HOST="$_vigil_proxy_url"\n'
+    "      else\n"
+    '        echo "vigil: goose reasoning-content proxy failed to start; falling back to direct DeepSeek (thinking-mode V4 may 400 — #9397)" >&2\n'
+    '        export OPENAI_HOST="$_VIGIL_DEEPSEEK_HOST"\n'
+    "      fi\n"
+    "    else\n"
+    '      export OPENAI_HOST="$_VIGIL_DEEPSEEK_HOST"\n'
+    "    fi\n"
+    "  else\n"
+    '    export OPENAI_HOST="$_VIGIL_DEEPSEEK_HOST"\n'
+    "  fi\n"
+    "else\n"
+    '  export OPENAI_HOST="$_VIGIL_DEEPSEEK_HOST"\n'
+    "fi\n"
+)
 
 
 def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_permissions: bool) -> None:
@@ -1407,6 +1547,23 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
             exec_cmd="opencode run --agent operator",
             provider_keys=("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"),
         )
+    # Goose: the PRIMARY open-model bench client. Like OpenCode it reads the engagement
+    # prompt natively (Goose auto-loads `.goosehints`, written by _write_goose_config),
+    # so we always emit start_goose.sh for every real client kind. It execs `goose run`
+    # (headless) with the `developer` builtin (shell+editor) and — crucially — WITHOUT
+    # `--no-profile`, so the default `summon` extension loads and the operator can
+    # `delegate source <role>` to the specialist recipes (verified: --no-profile strips
+    # the delegate tool). The operator message is passed via `-t` (Goose has no
+    # positional prompt). Provider env is the OpenAI-compatible direct-DeepSeek path.
+    if client_kind in {"codex", "claude", "both"}:
+        _write_launcher(
+            agent_root, eng_dir, "goose",
+            "",  # Goose has no skip-permissions flag; GOOSE_MODE=auto (in extra_env) handles approvals
+            exec_cmd="goose run --no-session --with-builtin developer",
+            provider_keys=("DEEPSEEK_API_KEY",),
+            message_flag="-t",
+            extra_env=_GOOSE_EXTRA_ENV.format(install_dir="$VIGIL_INSTALL_DIR"),
+        )
 
 
 def _write_launcher(
@@ -1417,12 +1574,33 @@ def _write_launcher(
     *,
     exec_cmd: str | None = None,
     provider_keys: tuple[str, ...] = (),
+    message_flag: str = "",
+    extra_env: str = "",
 ) -> None:
     extra = f" {permission_arg}" if permission_arg else ""
     # The command the launcher execs. Defaults to the bare client binary (claude,
     # codex); a client whose headless entrypoint is a subcommand (opencode → "opencode
     # run") passes it explicitly. The launcher FILE is still start_<client>.sh.
     exec_cmd = exec_cmd or client
+    # How the operator message reaches the client. Claude/Codex/OpenCode take it as a
+    # trailing POSITIONAL ("$@"); Goose takes it via a flag (`-t <TEXT>`) and has no
+    # positional. When `message_flag` is set, split the trailing message off "$@" and
+    # pass the leading flags (model/provider) through, then the message via the flag.
+    # The launcher always passes >=1 arg (the message), but guard $#==0 for safety.
+    if message_flag:
+        exec_line = (
+            f'if [[ $# -gt 0 ]]; then\n'
+            f'  exec {exec_cmd}{extra} "${{@:1:$(($#-1))}}" {message_flag} "${{@: -1}}"\n'
+            f'else\n'
+            f'  exec {exec_cmd}{extra}\n'
+            f'fi'
+        )
+    else:
+        exec_line = f'exec {exec_cmd}{extra} "$@"'
+    # Optional extra environment exports (e.g. Goose's GOOSE_*/OPENAI_* wiring),
+    # inserted after the provider-key sourcing block so it can reference the sourced
+    # keys (OPENAI_API_KEY defaults to DEEPSEEK_API_KEY for the openai-compat path).
+    extra_env_block = f"\n{extra_env.rstrip()}\n" if extra_env else ""
     # Optional provider-key export block (runner clients only). Built as a plain
     # string so its bash ${...} expansions are inserted literally into the f-string
     # template below; empty for claude/codex so their launchers stay byte-for-byte
@@ -1480,8 +1658,8 @@ if [[ -z "${{ORCHESTRATOR_BASE_URL:-}}" ]]; then
     fi
   done
 fi
-{provider_block}
-exec {exec_cmd}{extra} "$@"
+{provider_block}{extra_env_block}
+{exec_line}
 """
     path = eng_dir / f"start_{client}.sh"
     path.write_text(script, encoding="utf-8")

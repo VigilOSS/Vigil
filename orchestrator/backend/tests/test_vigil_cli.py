@@ -2266,7 +2266,11 @@ def test_oob_status_json_reports_effective_domain(
 
     monkeypatch.setattr(main_module, "docker_run_command", runner)
 
-    main_module.main(["oob", "status", "--json"])
+    # With no runtime container up the status is `down`, which now exits non-zero
+    # (so scripts/agents gate on OOB readiness). The JSON payload is still printed
+    # before the exit, which is what this test verifies.
+    with pytest.raises(SystemExit):
+        main_module.main(["oob", "status", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["state"] == "stopped"
@@ -2818,7 +2822,7 @@ def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypa
     monkeypatch.setattr(
         up_module,
         "oob_status",
-        lambda runner=None: {"state": "partial", "server": False, "frpc": True, "clients": ["demo"]},
+        lambda *a, **k: {"state": "partial", "server": False, "frpc": True, "clients": ["demo"]},
     )
     monkeypatch.setattr(up_module, "start_oob", lambda *args, **kwargs: calls.append("oob"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
@@ -2841,7 +2845,7 @@ def test_up_starts_oob_when_only_client_sessions_exist(tmp_path: Path, monkeypat
     monkeypatch.setattr(
         up_module,
         "oob_status",
-        lambda runner=None: {"state": "partial", "server": False, "frpc": False, "clients": ["demo"]},
+        lambda *a, **k: {"state": "partial", "server": False, "frpc": False, "clients": ["demo"]},
     )
     monkeypatch.setattr(
         up_module,
@@ -2869,7 +2873,7 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
     monkeypatch.setattr(
         up_module,
         "oob_status",
-        lambda runner=None: {"state": "stopped", "server": False, "frpc": False, "clients": []},
+        lambda *a, **k: {"state": "stopped", "server": False, "frpc": False, "clients": []},
     )
     monkeypatch.setattr(
         up_module,
