@@ -270,9 +270,9 @@ Only improvise after confirming the reference set is genuinely insufficient for 
 
 ## 9. Script Path Convention
 
-All assessment operations use `vigil assess <subcommand>` resolved from the agent workspace
-root after `cd agent`. JSON payloads belong in files, not inline shell arguments, because payload
-files are auditable and avoid shell escaping damage.
+All assessment operations use `vigil assess <subcommand>` from any directory. JSON payloads belong
+in files, not inline shell arguments, because payload files are auditable and avoid shell escaping
+damage.
 
 Use `ENGAGEMENT_DIR` or `--engagement-dir` for path resolution — hardcoded absolute paths break across environments.
 

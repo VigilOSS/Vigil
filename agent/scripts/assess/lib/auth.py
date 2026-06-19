@@ -27,7 +27,7 @@ def _parse_iso8601(value: Any) -> datetime | None:
 
 
 def auth_runtime_snapshot(engagement_dir: str) -> dict[str, Any]:
-    """Return the full auth runtime snapshot, matching the bash version."""
+    """Return the full auth runtime snapshot from auth.json."""
     path = Path(auth_file_path(engagement_dir))
     raw: dict[str, Any] = {}
     file_exists = path.exists()

@@ -34,7 +34,6 @@ def _is_plausible_executable(token: str) -> bool:
     # Trailing semicolons/operators (e.g. `true;`).
     if any(ch in token for ch in (";", "&", "|", "(", ")", "{", "}", "<", ">")):
         return False
-    # Pure path argument (starts with `/` but no slashes after `bin`/`sbin`/`opt` etc — heuristic: an executable path is fine).
     return True
 
 

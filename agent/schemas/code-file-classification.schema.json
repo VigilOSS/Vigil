@@ -46,7 +46,7 @@
       },
       "title": "Slot Types",
       "type": "array",
-      "description": "Types of untrusted data that flow into this file. Required for critical and high files. Allowed values are the 8 public slot types; context-specific families like auth, crypto, and error handling are derived from role/language by the backend.",
+      "description": "Untrusted data types that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The 8 values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
       "default": []
     },
     "language": {

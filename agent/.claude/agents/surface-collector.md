@@ -31,6 +31,7 @@ already listed below.
 - `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/skills/surface-collection/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
+- `agent/skills/browser-semantic-analysis/SKILL.md` — load on first use when its activation triggers apply to collection.
 
 ## Pre-Work Checkpoint
 
@@ -42,6 +43,7 @@ Before starting any target-facing work, verify:
 - [ ] You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, auth.json state
 - [ ] You have `$DIR/cases.db` path and the engagement directory set
 - [ ] You checked command history as a coverage map — `vigil assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what surface collection has already run on this target so your next pass picks angles that haven't been tried — different crawl depth, different source (Katana vs gau vs waybackurls vs hakrawler), different extension filter, different auth context. The only crawl to skip is an identical command against identical input; any variant (new auth, wider scope, deeper depth) is new coverage. If you cite a prior run instead of re-running, fetch its preview with `vigil assess get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output is complete. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] You checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies to the collection source. If it does, load it and collect the browser-vs-baseline delta before declaring coverage complete.
 
 If any item is unchecked, STOP and load it now. Working without the skill means running
 tools without a triage methodology — you will produce a flat URL dump instead of prioritized
@@ -84,7 +86,7 @@ of arbitrary type order.
 Work through targets in this order unless the operator narrows the scope:
 
 1. **Ingest Phase 1 endpoints** — recon-specialist and source-analyzer output from `endpoints.txt`
-2. **Live crawl** — `vigil assess kali katana` with auth headers if `auth.json` is active
+2. **Live crawl** — `vigil assess kali katana` with auth headers if `auth.json` is active. Use `agent/references/tools/recon/katana.md` for crawl doctrine and load `browser-semantic-analysis` when the headless/browser-semantics triggers apply.
 3. **Historical enrichment** — `vigil assess gau-endpoints` for Wayback, OTX, Common Crawl, URLScan (cache-aware; reuses `<engagement>/scans/gau-pipeline/<target>/<cache_key>/gau_output.txt` when fresh for this target + flag combination, prints `cache_reused: true|false` in JSON summary)
 4. **Spec ingestion** — OpenAPI/Swagger specs discovered in Phase 1
 5. **Dedup and ingest raw URLs** — raw URL streams through `vigil assess ingest-endpoints` with source tagging; gau uses `vigil assess gau-endpoints` unless you are intentionally reusing an existing raw artifact
@@ -150,7 +152,7 @@ clusters first.
 
 When `auth.json` has `use_for_requests` set to `true` and `state` set to `available`:
 
-1. Run Katana with auth headers: `vigil assess kali katana -u URL -H "Cookie: ..." -H "Authorization: ..." ... --technique DISCOVERY --intent "auth-aware crawl" --probe-kind fingerprint --phase collect --timeout 1800`
+1. Run Katana with auth headers through the wrapper's passthrough: `vigil assess kali katana -u URL --extra-args '-H "Cookie: ..." -H "Authorization: Bearer ..."' ... --technique DISCOVERY --intent "auth-aware crawl" --probe-kind fingerprint --phase collect --timeout 1800`
 2. Tag authenticated results with `auth_context: authenticated` during ingestion
 3. Compare authenticated vs anonymous crawl results — endpoints that appear only with auth
    are high-priority targets for IDOR and privilege escalation testing
@@ -158,6 +160,7 @@ When `auth.json` has `use_for_requests` set to `true` and `state` set to `availa
 ## Required Behavior
 
 - Keep all URL crawling and historical enrichment in `vigil assess kali katana` / `vigil assess gau-endpoints` — host-side crawling bypasses the audit pipeline that downstream specialists rely on
+- Use browser-semantic collection only for evidence-correctness triggers because API-only and high-volume work stays more accurate in the normal gau/httpx/fuzzing path.
 - Deduplicate before ingestion to avoid inflating work-buffer counts
 - Use `vigil assess ingest-endpoints` for raw URL work-buffer writes and `vigil assess ingest-candidates` for curated candidate JSONL — direct DB inserts bypass backend sync, and flattening curated records to URL lines discards the metadata Phase 3 dispatch needs
 - Use `vigil assess record-surface` for all surface writes — calling helpers directly bypasses backend sync

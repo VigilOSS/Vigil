@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vigil.local/schemas/intel-domain.schema.json",
   "$comment": "Mirrors app.api.intel_schemas.DomainRecordRequest.",
-  "title": "Intel Domain Record",
+  "title": "Intel Domain Record — host, IP, ASN, or DNS-infrastructure asset discovered in scope. Dedup key: identity + kind. Prefer intel-dns-record for raw RR data.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,7 +13,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 512,
-      "description": "The domain, subdomain, IP address, or ASN identifier."
+      "description": "The primary identifier: FQDN for subdomains/domains/MX/NS, dotted-quad or CIDR for IPs, 'AS12345' for ASNs, rDNS name for PTR."
     },
     "kind": {
       "type": "string",
@@ -26,29 +26,32 @@
         "ptr",
         "domain"
       ],
-      "default": "subdomain"
+      "default": "subdomain",
+      "description": "Asset class — drives dedup (identity + kind is unique per engagement): 'subdomain'=enumerated host under an apex; 'domain'=apex domain; 'ip'=standalone IP or CIDR; 'asn'=autonomous system; 'nameserver'=NS host; 'mx'=mail exchanger; 'ptr'=reverse-DNS entry."
     },
     "value": {
       "type": "string",
       "maxLength": 1024,
       "default": "",
-      "description": "Resolved value or supporting datum (e.g., A record IP, MX target)."
+      "description": "Resolved or supporting value (e.g., A record IP for a subdomain, ASN range for an IP, MX target hostname)."
     },
     "source_name": {
       "type": "string",
       "maxLength": 128,
-      "default": ""
+      "default": "",
+      "description": "Tool or data source that discovered this asset (e.g., 'subfinder', 'asnmap', 'shodan', 'cero', 'ct-logs')."
     },
     "live_status": {
       "type": "string",
       "maxLength": 64,
       "default": "",
-      "description": "Observed liveness (e.g., 'up', 'down', '200', 'nx')."
+      "description": "Observed HTTP/TCP liveness from httpx/nmap (e.g., 'up', 'down', '200', '403', 'nx', 'timeout')."
     },
     "notes": {
       "type": "string",
       "maxLength": 4096,
-      "default": ""
+      "default": "",
+      "description": "Context: WAF detected, CDN vs origin, interesting response headers, cloud provider, takeover candidate, etc."
     },
     "provenance": {
       "type": "object",
@@ -56,16 +59,20 @@
       "default": {},
       "properties": {
         "agent_name": {
-          "type": "string"
+          "type": "string",
+          "description": "Specialist agent role that recorded this row (e.g., 'recon-specialist')."
         },
         "artifact_ref": {
-          "type": "string"
+          "type": "string",
+          "description": "vigil artifact ID or path that contains the raw evidence."
         },
         "captured_at": {
-          "type": "string"
+          "type": "string",
+          "description": "ISO8601 timestamp when this row was written."
         },
         "evidence_quote": {
-          "type": "string"
+          "type": "string",
+          "description": "Verbatim tool output line that supports this record."
         }
       }
     }

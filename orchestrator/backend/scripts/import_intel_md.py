@@ -126,7 +126,7 @@ _COUNTER_KEY: dict[str, str] = {
 
 
 def _normalise_heading(text: str) -> str:
-    """Lower-case, collapse whitespace, strip surrounding punctuation."""
+    """Lower-case, collapse whitespace, strip surrounding colons."""
     cleaned = re.sub(r"\s+", " ", text).strip().strip(":").strip()
     return cleaned.lower()
 
@@ -180,7 +180,7 @@ def _parse_tables_and_prose(
     """Walk ``lines`` and yield a sequence of segments.
 
     Each segment is one of:
-      - ``("heading", (level, text))`` — ``##`` or ``###`` heading.
+      - ``("heading", (level, text))`` — any ATX heading (H1–H6).
       - ``("table", (headers, rows))`` — list-of-strings headers + list
         of row-cell lists.
       - ``("prose", text)`` — non-empty, non-table, non-heading paragraph
@@ -251,8 +251,8 @@ def _row_as_mapping(headers: list[str], row: list[str]) -> dict[str, str]:
 
 def _pick(mapping: dict[str, str], *candidates: str) -> str:
     """Return the first non-empty value whose normalised header key matches
-    any of ``candidates``. Candidates are matched as prefixes so ``"value"``
-    hits both ``"value"`` and ``"valuepreview"``.
+    any of ``candidates``. Exact match is tried first; if nothing matches,
+    a prefix scan is run so ``"value"`` hits ``"valuepreview"`` as a fallback.
     """
     for cand in candidates:
         key = _col_key(cand)
@@ -270,7 +270,7 @@ def _pick(mapping: dict[str, str], *candidates: str) -> str:
 def _remaining_notes(
     mapping: dict[str, str], headers: list[str], used: list[str]
 ) -> str:
-    """Build a ``k=v; k=v`` string of every header→cell pair NOT in ``used``.
+    """Build a ``key: value; key: value`` string of every header→cell pair NOT in ``used``.
 
     Uses the original header strings (not the normalised keys) so the note
     reads naturally when rendered.

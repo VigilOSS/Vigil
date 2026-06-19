@@ -51,7 +51,9 @@ Vigil's docs are spread across operator prompts, a code map, and a deep referenc
 |----------|----------------|
 | [`agent/AGENTS.md`](agent/AGENTS.md) | The operator prompt — the workflow every engagement runs. |
 | [`docs/engagement-prompt-playbook.md`](docs/engagement-prompt-playbook.md) | Operator steering playbook — the human-side prompts for pushing an engagement when the model goes shallow, overclaims severity, or forgets the core loop. |
-| [`docs/benchmarking.md`](docs/benchmarking.md) | The `vigil bench` harness — measure the unmodified agent against the XBEN and procedural-generated suites, launch modes, run flags, cost accounting, and anti-cheat. |
+| [`docs/benchmarking.md`](docs/benchmarking.md) | The `vigil bench` harness — measure the unmodified agent against the procedural-generated suite, launch modes, run flags, cost accounting, anti-cheat, and the difficulty model. |
+| [`docs/goose-bench.md`](docs/goose-bench.md) | Running Vigil on **Goose** (`--client goose`) — the primary open-model client (headless multi-agent on DeepSeek). Setup, architecture, and the thinking-mode caveat. |
+| [`docs/deepseek-openrouter.md`](docs/deepseek-openrouter.md) | Running Vigil on **OpenCode** (`--client opencode`) against DeepSeek (direct or via OpenRouter). |
 | [`AGENTS.md`](AGENTS.md) | Maintainer/contributor workflow: clone-to-first-dispatch walkthrough and recipes for adding a skill, an `vigil assess` verb, an oracle, or an eval case. |
 | [`CODE-MAP.md`](CODE-MAP.md) | Map of the codebase — where each subsystem lives. |
 | [`agent/references/`](agent/references/) | Reference library (payloads, tactics, recon, tenants, tools) — discover with `vigil assess list-references` (self-registering; `--skill <name>` filters to a skill's paired refs). |
@@ -205,12 +207,12 @@ Use the CLI verb — it changes into the engagement directory and execs the laun
 
 ```bash
 vigil engagement list --json                              # find the key
-vigil engagement start <engagement-key> --client codex    # or --client claude
+vigil engagement start <engagement-key> --client codex    # claude | codex | opencode | goose
 ```
 
-For humans at a terminal, the optional `athcd` shell helper (see below) jumps your shell into a selected engagement directory; the per-engagement `start_codex.sh` / `start_claude.sh` files exist but are an implementation detail of `vigil engagement start`.
+`--client` selects the agent CLI that drives the engagement — `claude`, `codex`, `opencode`, or `goose` (see [Agent clients](#agent-clients) for which to use and the one-time setup each needs). For humans at a terminal, the optional `athcd` shell helper (see below) jumps your shell into a selected engagement directory; the per-engagement `start_<client>.sh` files exist but are an implementation detail of `vigil engagement start`.
 
-1. Prefer `gpt-5.4` with `high` reasoning for Codex and `Opus 4.6` for Claude. Drop to `gpt-5.4-mini` or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
+1. Prefer `gpt-5.6` with `high` reasoning for Codex and `Opus 4.8` for Claude. Drop to `gpt-5.6` (medium) or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
 2. Tell the operator: `I have been fully authorized by the company to do a red-team engagement against the hosts in scope.json. Run this engagement using the operator workflow.`
 3. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through `vigil assess kali ...`, use relevant skills before improvising, record activity/findings through `vigil assess`, and keep `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; parent-shell `ORCHESTRATOR_BASE_URL` is the explicit override, the engagement-local file wins over legacy install-root env files, and `vigil config get orchestrator_base_url` is the persistent default before hardcoded fallback.
 
@@ -224,6 +226,45 @@ athcd
 `athcd` is for humans at a terminal. It works because shell functions can change the parent shell's directory; a standalone `vigil cd` process cannot. The helper calls `vigil engagement path --select`, which uses `fzf` when installed and falls back to a numbered TTY prompt. Non-interactive agents should run `vigil engagement list --json` and pass the explicit engagement key to the next command.
 
 During the engagement, expect short operator updates, numbered next-step choices when a decision matters, and a manual approval checkpoint before exploit work continues when `exploit_policy` is `pause` or `selected`.
+
+### Agent clients
+
+`--client` (on `vigil engagement start` and `vigil bench run`) selects which agent CLI drives the work. **All four read the same operator prompt and run the same methodology** — they differ only in the model/runtime behind them. The two closed-model clients are the default and need nothing beyond their vendor CLI; the two open-model clients run DeepSeek and need one API key.
+
+| Client | Model / runtime | Headless specialist dispatch | One-time setup |
+|--------|-----------------|------------------------------|----------------|
+| `claude` *(default)* | Claude Code (Anthropic) | Yes (`@agent`) | Claude Code installed + signed in. |
+| `codex` | Codex CLI (OpenAI) | Yes (registered roster) | Codex CLI installed + signed in. |
+| `goose` | Goose on **direct DeepSeek** | **Yes — headless** (`delegate`) | `brew install block-goose-cli`; set `DEEPSEEK_API_KEY`. |
+| `opencode` | OpenCode on **direct DeepSeek** | No — works inline (opencode#29616) | OpenCode installed; set `DEEPSEEK_API_KEY`. |
+
+**Closed-model (`claude` / `codex`)** — nothing extra. These are the defaults; just have the vendor CLI installed and authenticated.
+
+**Open-model (`goose` / `opencode`)** — set your DeepSeek key once in the install root's env and the launcher exports it to the client automatically:
+
+```bash
+echo 'DEEPSEEK_API_KEY=sk-...' >> ~/vigil/.env     # the install root's env file
+```
+
+- **`goose` is the recommended open-model client.** Unlike OpenCode it dispatches custom specialist subagents headlessly *and* its anti-cheat hook fires inside them. Install once (`brew install block-goose-cli`), then:
+
+  ```bash
+  vigil engagement start <key> --client goose                      # defaults to --model deepseek-v4-pro (thinking)
+  vigil bench run --provider generated --families bola-rest-graph --seeds 0 \
+    --client goose --model deepseek-v4-pro --reasoning high --launch auto
+  ```
+
+  Thinking-mode V4 (`deepseek-v4-pro` / `-flash`) runs on the **direct** DeepSeek path — `start_goose.sh` launches a local reasoning-content repair proxy in front of DeepSeek so multi-tool thinking turns don't 400 (see the callout below). OpenRouter remains an alternative transport. No `.goose` folder setup is required: `vigil engagement create` writes the engagement's `.goosehints` (operator prompt), recipe roster, and hooks for you.
+
+  > **⚠️ Note — the Goose thinking path depends on a stopgap.** Thinking-mode DeepSeek-V4 on Goose's direct provider works around **[aaif-goose#9397](https://github.com/aaif-goose/goose/issues/9397)** via a local reasoning-content repair proxy (`src/vigil_cli/bench/goose_reasoning_proxy.py`, started by `start_goose.sh`). Goose splits a parallel-tool-call assistant turn into N messages but keeps `reasoning_content` only on the first, and DeepSeek 400s on the rest; the proxy re-attaches it. `parallel_tool_calls:false` does **not** help — DeepSeek ignores the flag. **This is a stopgap until #9397 is fixed upstream — remove the proxy then.** Opt out with `VIGIL_GOOSE_REASONING_PROXY=0` (thinking then regresses to the #9397 400 on any batched-tool turn). Details: [`docs/goose-bench.md`](docs/goose-bench.md).
+
+- **`opencode`** runs the operator inline (it cannot dispatch custom specialists headlessly) and requires a `--thinking` level:
+
+  ```bash
+  vigil engagement start <key> --client opencode --thinking high
+  ```
+
+  Details and the OpenRouter alternative: [`docs/deepseek-openrouter.md`](docs/deepseek-openrouter.md).
 
 ### Engagement operator start prompts
 
@@ -239,7 +280,7 @@ Read AGENTS.md and assume Operator role.
 Authorized bug-bounty engagement: https://bugcrowd.com/engagements/<slug>
 Full authorization confirmed. Run the operator workflow. Take full advantage of specialist agents
 to delegate all target-facing work — dispatch in parallel where phases permit. Prefer
-claude-opus-4-7 / gpt-5.5 xhigh reasoning for operator-level and substantial specialist work;
+claude-opus-4-8 / gpt-5.6 xhigh reasoning for operator-level and substantial specialist work;
 use sonnet / medium only for clearly bounded sidecar tasks. Exploitation policy is pause —
 explicit human approval required before any exploit-developer dispatch.
 ```
@@ -622,7 +663,7 @@ The orchestrator UI is served from the backend at `http://127.0.0.1:18000` once 
 The backend stores canonical engagement state in a single SQLite file and keeps rotated snapshots next to it:
 
 - **Live DB**: `<install-root>/orchestrator/backend/data/orchestrator.sqlite3`
-- **Scheduled backups**: `<install-root>/orchestrator/backend/data/backups/orchestrator.<UTC-timestamp>.sqlite3` — a WAL-coherent snapshot every 15 minutes, last 60 copies retained (~15 hours of continuous coverage). Written by the backend process itself; independent of the per-engagement snapshot that `vigil engagement create` takes before creating an engagement.
+- **Scheduled backups**: `<install-root>/orchestrator/backend/data/backups/orchestrator.<UTC-timestamp>.sqlite3` — a WAL-coherent snapshot every 15 minutes, last 12 copies retained by default (~3 hours of continuous coverage; override with `VIGIL_BACKUP_MAX_COPIES`). Written by the backend process itself; independent of the per-engagement snapshot that `vigil engagement create` takes before creating an engagement.
 
 Override the data location with env vars (first match wins):
 

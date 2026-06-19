@@ -101,7 +101,8 @@
     "audit_metadata": {
       "additionalProperties": true,
       "title": "Audit Metadata",
-      "type": "object"
+      "type": "object",
+      "description": "Arbitrary key/value bag for agent-specific audit context (token counts, tool versions, analysis timestamps). Not used for security decisions; included verbatim in audit logs."
     },
     "cwe_coverage": {
       "items": {
@@ -169,20 +170,23 @@
         "type": "object",
         "properties": {
           "file_path": {
-            "type": "string"
+            "type": "string",
+            "description": "Repo-relative path to the file that should be re-analyzed (e.g., 'src/url_helpers.c')."
           },
           "reason": {
-            "type": "string"
+            "type": "string",
+            "description": "Why this file needs re-analysis — name the specific function/callee and the data flow that crosses the boundary."
           },
           "vuln_class": {
-            "type": "string"
+            "type": "string",
+            "description": "Vulnerability class to focus on in the downstream file (matches cwe_coverage family names, e.g., 'buffer-overflow')."
           }
         }
       },
       "title": "Cross File Triggers",
       "type": "array",
       "default": [],
-      "description": "Files connected via call graph that need re-analysis based on this file's findings"
+      "description": "Files reachable via call graph whose analysis should be (re)triggered based on findings in this file. Only emit when a taint flow actually crosses the file boundary."
     }
   },
   "required": [

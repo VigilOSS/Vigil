@@ -28,7 +28,7 @@ authenticated bucket instead.
 
 ```bash
 # Set once per session inside the runtime
-export GITHUB_TOKEN="<personal-access-token-with-public_repo-scope>"
+export GITHUB_TOKEN="<least-privilege-personal-access-token>"
 
 # Sanity-check the token's remaining budget before a long enumeration run
 vigil assess kali exec --technique OSINT --intent "GitHub rate-limit sanity check" \
@@ -38,6 +38,12 @@ vigil assess kali exec --technique OSINT --intent "GitHub rate-limit sanity chec
     | jq ".rate"
 '
 ```
+
+For public-code OSINT, use the least-privilege token that raises the rate
+limit without granting repository write or private-data access. A classic or
+fine-grained PAT with no extra scopes is sufficient for public resources; add
+endpoint-specific permissions only when the engagement explicitly requires
+private or organization-restricted data.
 
 The token never leaves the runtime container; it is read from the container's
 environment at probe time. Do not echo it into stdout or commit it to scans/.

@@ -138,7 +138,7 @@ def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner
 
 
 def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
-    status = oob_status(runner=runner)
+    status = oob_status(runner=runner, deep=False)  # only needs server/frpc liveness
     if status.get("server") or status.get("frpc"):
         print("oob\talready active; existing FRP/interactsh sessions left untouched")
         return

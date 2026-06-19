@@ -14,10 +14,11 @@ functions — it never re-implements their logic and never renames them:
   * ``intel_readiness``     — advisory intel-closure view (old
                               ``check-intel-readiness``)
 
-Those four function names (``coverage_readiness`` / ``report_readiness`` /
-``per_host_coverage`` / ``depth_ledger``) and the HTTP routes that serve them
-are STABLE — the phase-transition gate, ``report_export``, and the frontend bind
-to them. This module is purely ADDITIVE: it calls them behind a new front door.
+Those function names (``coverage_readiness`` / ``report_readiness`` /
+``per_host_coverage`` / ``depth_ledger`` / ``intel_readiness``) and the HTTP
+routes that serve them are STABLE — the phase-transition gate, ``report_export``,
+and the frontend bind to them. This module is purely ADDITIVE: it calls them
+behind a new front door.
 
 Phase composition (depth-gate §6 / master plan Wave 6):
 

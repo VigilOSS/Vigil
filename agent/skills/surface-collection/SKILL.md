@@ -43,8 +43,10 @@ cat "$DIR/scans/source-endpoints.txt" | vigil assess ingest-endpoints "$DB" sour
 
 ### Step 2: Live Crawl via Katana
 
-Run Katana via `vigil assess kali katana` to crawl live targets. Katana is installed in the
-runtime container; the typed verb wraps it with audit recording.
+Run Katana via `vigil assess kali katana` to crawl live targets. Katana is
+installed in the runtime container; the typed verb wraps it with audit
+recording. Use `agent/references/tools/recon/katana.md` for crawl depth,
+headless escalation, rate, exclusion, and ingestion doctrine.
 
 ```bash
 vigil assess kali katana \
@@ -54,17 +56,32 @@ vigil assess kali katana \
   --probe-kind fingerprint --phase collect --timeout 1800
 ```
 
-**TLS handling:** Katana does not provide a TLS-verification-skip flag in the runtime this
-repo builds. If a target only responds behind an invalid or self-signed certificate, use
-`vigil assess kali exec --technique RECON --intent "spot-validate invalid TLS response" --probe-kind baseline --phase collect --timeout 60 -- curl -k` for spot validation and continue with other collection
-sources instead of relying on Katana to bypass TLS checks.
+**Browser-semantic crawl trigger:** add `-headless` and load
+`agent/skills/browser-semantic-analysis/SKILL.md` when that skill's activation
+triggers apply. Browser mode is a targeted evidence-correction lane because
+API-only and high-volume work stays more accurate in the normal
+gau/httpx/fuzzing path.
+
+```bash
+vigil assess kali katana \
+  -u https://target.example -d 3 -jc -jsl -headless -c 5 -rl 10 \
+  -o /engagements/$ENGAGEMENT_KEY/scans/katana_headless_output.txt \
+  --technique DISCOVERY --intent "browser-semantic crawl of target.example" \
+  --probe-kind fingerprint --phase collect --timeout 1800
+```
+
+**TLS handling:** If the installed Katana version cannot skip invalid TLS, use
+audited `curl -k` for spot validation and continue with other collection sources
+instead of assuming Katana can crawl it. See the Katana reference before using
+version-specific `--extra-args`.
 
 **Auth-aware crawl:** If `auth.json` has `use_for_requests` set to `true` and `state` set
 to `available`, pass cookies/headers:
 
 ```bash
 vigil assess kali katana \
-  -u URL -H "Cookie: ..." -H "Authorization: ..." -d 3 -jc -jsl -c 10 -rl 20 \
+  -u URL -d 3 -jc -jsl -c 10 -rl 20 \
+  --extra-args '-H "Cookie: ..." -H "Authorization: Bearer ..."' \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_auth_output.txt \
   --technique DISCOVERY --intent "auth-aware crawl of URL" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -255,6 +272,43 @@ vigil assess record-surface ssrf-candidate "<endpoint>" surface-collector-url-sh
 
 Then dispatch `vulnerability-analyst` with `--skills ssrf-testing` against the highest-yield candidates — typically admin/settings/enterprise pages, integration list endpoints, and any connection-test handler. See `agent/skills/ssrf-testing/SKILL.md` "SaaS Integration Connector Pattern" for the full testing recipe.
 
+### Step 6.6: Hidden-parameter discovery via Arjun (collect→consume bridge)
+
+The triage above keys on parameters the corpus already shows. Arjun discovers parameters an
+endpoint silently accepts but never advertised — inputs no crawl or archive surfaced. Run it on
+the param-poor dynamic endpoints with a **bounded first pass** (focused wordlist + `--stable --rate-limit`), escalating for depth.
+
+```bash
+# Gate the target list (live + dynamic + template-deduped + param-poor).
+# This engagement has no liveness ledger? add --include-unknown.
+vigil assess arjun-select "$DB" -o "$DIR/scans/arjun/targets.txt" --param-poor-only --max-per-host 5
+
+# arjun-select also writes a per-method list (targets.txt.GET / .POST / .JSON / .XML) for each verb
+# the buffer exposes on a route. `kali arjun -i` takes ONE global -m, so scanning the union under a
+# single method would miss the others' hidden params — run one bounded pass per method-list present,
+# so POST/JSON body surfaces are scanned under their own verb (not silently as GET).
+# Bounded first pass — a focused -w list + --stable --rate-limit keep each run gentle; the default
+# list expands to ~100+ chunks/host, enough to overload a rate-sensitive or production target. Keep
+# batches small (--max-per-host above) for politeness and a small blast radius. (The runtime patches
+# Arjun so one endpoint returning 4xx/5xx is skipped, not fatal — a 429 no longer ends the batch.)
+for M in GET POST JSON XML; do
+  [ -s "$DIR/scans/arjun/targets.txt.$M" ] || continue   # only methods the buffer actually exposed
+  vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt.$M -m "$M" \
+    -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 \
+    --technique PARAM-DISCOVERY --intent "bounded hidden-param discovery over gated buffer" \
+    --probe-kind fingerprint --phase collect --timeout 1800
+done
+
+# Fold discovered params back in — they re-route the endpoint to its real bucket:
+vigil assess ingest-arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
+```
+
+For more depth on a high-value endpoint, drop `-w` (full default list) and/or add `--passive`
+(it archive-augments the wordlist — note it still actively scans, so it adds traffic, not
+politeness; see `agent/skills/parameter-fuzzing/SKILL.md` and `references/tools/recon/arjun.md`).
+Enriched rows carry `selected_by=arjun` and a `triage_rationale` (which names `kali sqlmap` for
+DB-class params), so Phase 3 dispatch picks them up like any other high-priority cluster.
+
 ### Step 7: Surface and Finding Recording
 
 Before returning to the operator:
@@ -308,6 +362,9 @@ The surface-collector agent prompt defines the full output format. Key sections:
 
 ## Extended Resources
 
+- `agent/references/tools/recon/katana.md` — live crawl doctrine, JS-aware defaults, headless escalation, and ingestion handoff
 - `references/tools/recon/gau.md` — gau CLI reference and pipeline patterns
 - `references/tools/recon/httpx.md` — HTTP probing reference for URL validation
+- `agent/skills/browser-semantic-analysis/SKILL.md` — browser execution decision tree for JS-heavy apps, soft errors, browser-originated APIs, and headless/headed deltas
+- `agent/references/runtime-guides/browser-semantic-evidence.md` — evidence contract and headed-browser escalation rules
 - `agent/skills/gau-triage/SKILL.md` — deeper follow-up pass for large historical URL corpora: cluster review on top of inline-classified buffer, httpx body capture, and trufflehog secret scan

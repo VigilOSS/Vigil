@@ -28,6 +28,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_FULL_DOCKERFILE = REPO_ROOT / "agent" / "docker" / "runtime-full" / "Dockerfile"
+RUNTIME_FULL_EXTERNAL_INSTALLER = (
+    REPO_ROOT / "agent" / "docker" / "runtime-full" / "install-external-tools.sh"
+)
 
 
 # Binaries the subdomain-enumeration SKILL preflights via
@@ -74,6 +77,7 @@ def _dockerfile_has_install_line(text: str, binary: str) -> bool:
     """
     install_patterns = (
         rf"go install .*\b{re.escape(binary)}\b",
+        rf"\bgo_install\s+{re.escape(binary)}\b",
         rf"cp /root/go/bin/{re.escape(binary)}\b",
         rf"apt-get install[^\n]*\b{re.escape(binary)}\b",
         rf"\b{re.escape(binary)}=\S+",  # apt package=version pin
@@ -108,7 +112,11 @@ def test_runtime_full_dockerfile_declares_subdomain_enum_binaries():
     line (`go install`, `apt-get install`, `pipx install`, `pip install`, or `cp /root/go/bin/<name>`)
     so a comment that mentions the binary cannot satisfy the contract.
     """
-    text = RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+    text = (
+        RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+        + "\n"
+        + RUNTIME_FULL_EXTERNAL_INSTALLER.read_text(encoding="utf-8")
+    )
     missing = [
         name for name in SUBDOMAIN_ENUM_BINARIES if not _dockerfile_has_install_line(text, name)
     ]
@@ -125,7 +133,11 @@ def test_runtime_full_dockerfile_declares_port_scan_binaries():
     XML XPath assertion. Without it, the per-host port-data presence gate falls back to text-only
     output and silently misses host-timeout failures.
     """
-    text = RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+    text = (
+        RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+        + "\n"
+        + RUNTIME_FULL_EXTERNAL_INSTALLER.read_text(encoding="utf-8")
+    )
     missing = [
         name for name in PORT_SCAN_BINARIES if not _dockerfile_has_install_line(text, name)
     ]
@@ -139,7 +151,11 @@ def test_runtime_full_dockerfile_declares_port_scan_binaries():
 def test_runtime_full_dockerfile_declares_android_apk_binaries():
     """Android APK review needs acquisition, decompilation, signing metadata,
     and optional device access tools available before dispatch starts."""
-    text = RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+    text = (
+        RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+        + "\n"
+        + RUNTIME_FULL_EXTERNAL_INSTALLER.read_text(encoding="utf-8")
+    )
     missing = [
         name for name in ANDROID_APK_BINARIES if not _dockerfile_has_install_line(text, name)
     ]
@@ -147,6 +163,27 @@ def test_runtime_full_dockerfile_declares_android_apk_binaries():
         "agent/docker/runtime-full/Dockerfile is missing install lines for Android APK tools: "
         f"{missing}. Android artifact engagements preflight these binaries before analysis."
     )
+
+
+def test_external_installer_validates_preloaded_go_tools(tmp_path):
+    """PRELOADED_TOOLS=1 is allowed only for a base image that already carries
+    the script-owned tools. Missing tools must fail loudly during build instead
+    of producing a successful image with degraded runtime coverage."""
+    bash = shutil.which("bash")
+    assert bash, "bash is required to run the runtime external installer"
+    empty_path = tmp_path / "bin"
+    empty_path.mkdir()
+
+    proc = subprocess.run(
+        [bash, str(RUNTIME_FULL_EXTERNAL_INSTALLER), "go-tools"],
+        env={"PRELOADED_TOOLS": "1", "PATH": str(empty_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "PRELOADED_TOOLS=1 but required tool is missing: nuclei" in proc.stderr
 
 
 @pytest.mark.integration

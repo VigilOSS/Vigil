@@ -299,6 +299,16 @@ def run(args) -> None:
 
 
 def _katana_urls(katana_jsonl: Path) -> list[str]:
+    # TODO(typing P1): emit {url, content_type} JSON lines (instead of a bare
+    # URL list) so ingest-endpoints can thread the crawled response's
+    # Content-Type into `classify_type` — the typer is extension/path-shape-only
+    # without it. Deferred deliberately: katana only records response headers
+    # when the crawl is invoked with response storage enabled (see the katana
+    # config in web_discovery), the `response.headers` jsonl shape is not pinned
+    # by a schema doc here, and the `katana_urls.txt` writer + `_ingest_args`
+    # text-file contract would all have to move to JSONL. Scoping that safely is
+    # a separate change; the ingest-endpoints JSON `content_type` wiring is in
+    # place, so any producer already emitting JSON rows benefits today.
     urls: list[str] = []
     with katana_jsonl.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:

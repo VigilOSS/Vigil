@@ -53,10 +53,6 @@ Always-active rules:
 "attacker outcome proof" discipline that does not map to defender work.
 `agent/rules/triage.md` supersedes it for blue.
 
-Path convention:
-- All assessment operations use `vigil assess <subcommand>` from any directory.
-- Blue-specific verbs live under `vigil blue <subcommand>`.
-
 ## Agent Roster
 
 | Agent | Role | When |
@@ -120,8 +116,8 @@ operator signals stop:
 
 ## Path Convention
 
-All assessment operations use `vigil assess <subcommand>` from any directory. Blue-specific verbs
-live under `vigil blue <subcommand>` and are thin wrappers over the generic assess infrastructure:
+CLI path convention is owned by `agent/shared-constraints-blue.md` §1a. Blue-specific verbs live
+under `vigil blue <subcommand>` and are thin wrappers over the generic assess infrastructure:
 
 | Verb | Purpose |
 |------|---------|
