@@ -26,7 +26,7 @@ full BOLA/IDOR workflow and tells you when to escalate into the specialist skill
 - `vigil assess kali exec -- curl ...` for all target-facing requests (mandatory audit pipeline)
 - `vigil assess classify-payload <value> --mutations` to type an ID and emit attack variants
 - `vigil assess anomaly-score <file.jsonl> --top N` to rank batch-sweep response outliers
-- `vigil oob mint` / `vigil oob poll` for blind / side-effect confirmation
+- `vigil oob mint` / `vigil oob poll` for blind / side-effect confirmation (mint binds the nonce under a running interactsh client's id and prints the exact callback host so poll can correlate; pass `--client <name>` when several clients run, and fire the exact host mint prints)
 - Two or more test accounts (different privilege levels + separate tenants for SaaS)
 - Burp Suite Repeater + Autorize / Auth Analyzer / AuthMatrix for differential replay
 - Burp Comparer for response diffing
@@ -261,9 +261,12 @@ cross-object impact out-of-band:
 - [ ] Wire the proof to OOB infra:
 
 ```bash
-TOKEN=$(vigil oob mint --label idor-blind-write)
-# inject the OOB callback where the victim's object would surface it (webhook URL, email, etc.)
-vigil oob poll --token "$TOKEN" --timeout 60   # a hit confirms the write reached the victim object
+vigil oob mint --client <name> --technique idor --probe-kind blind-write
+# → host  <nonce>.<client-id>.researcher.example   (= $OOB_HOST)
+# mint binds the nonce under the client's id; inject that EXACT host ($OOB_HOST) where the
+# victim's object would surface it (webhook URL, email, etc.) — never hand-build a bare
+# <nonce>.oob... host. Then correlate on the same client:
+vigil oob poll --client <name>   # a matched hit confirms the write reached the victim object
 ```
 
 ### 13. Bulk / Mass Assignment

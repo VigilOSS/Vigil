@@ -30,7 +30,7 @@ def register(subparsers) -> None:
     p.add_argument("--source-name")
     p.add_argument("--slug")
     p.add_argument("--root-cause", dest="root_cause_slug", help="Show the root finding and linked siblings")
-    p.add_argument("--search", help="Case-insensitive search over slug, title, summary, and location")
+    p.add_argument("--search", help="Case-insensitive search over slug, title, summary, location, and source_name")
     p.add_argument(
         "--holding",
         action="store_true",

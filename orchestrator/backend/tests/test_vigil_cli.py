@@ -378,6 +378,43 @@ def test_engagement_create_snapshots_backend_data_dir_env(tmp_path: Path, monkey
         assert connection.execute("SELECT value FROM marker").fetchone() == ("custom",)
 
 
+def test_engagement_create_prunes_old_backend_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from vigil_cli import engagements as engagements_module
+
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    data_dir = install_root / "orchestrator" / "backend" / "data"
+    _write_marker_database(data_dir / "orchestrator.sqlite3", "live")
+    old_snapshots = []
+    for idx in range(4):
+        path = data_dir / f"orchestrator.sqlite3.bak.20260425T01000{idx}Z.11111"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("old\n", encoding="utf-8")
+        old_snapshots.append(path)
+    _isolate_orchestrator_url(monkeypatch)
+    monkeypatch.setenv("VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES", "3")
+    monkeypatch.setattr(engagements_module, "_emit_post_create_footer", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(engagements_module, "_verify_backend_install_root", lambda *_args, **_kwargs: None)
+
+    engagements_module.create_engagement(
+        engagements_module.CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://app.example.com",
+        )
+    )
+
+    remaining = sorted(data_dir.glob("orchestrator.sqlite3.bak.*"))
+    assert len(remaining) == 3
+    assert not old_snapshots[0].exists()
+    assert not old_snapshots[1].exists()
+    assert old_snapshots[2].exists()
+    assert old_snapshots[3].exists()
+    created = next(path for path in remaining if path not in old_snapshots)
+    with sqlite3.connect(created) as connection:
+        assert connection.execute("SELECT value FROM marker").fetchone() == ("live",)
+
+
 class _TTYStdin:
     """Stdin stand-in whose isatty() is True, for wizard-path tests."""
 
@@ -2229,7 +2266,11 @@ def test_oob_status_json_reports_effective_domain(
 
     monkeypatch.setattr(main_module, "docker_run_command", runner)
 
-    main_module.main(["oob", "status", "--json"])
+    # With no runtime container up the status is `down`, which now exits non-zero
+    # (so scripts/agents gate on OOB readiness). The JSON payload is still printed
+    # before the exit, which is what this test verifies.
+    with pytest.raises(SystemExit):
+        main_module.main(["oob", "status", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["state"] == "stopped"
@@ -2781,7 +2822,7 @@ def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypa
     monkeypatch.setattr(
         up_module,
         "oob_status",
-        lambda runner=None: {"state": "partial", "server": False, "frpc": True, "clients": ["demo"]},
+        lambda *a, **k: {"state": "partial", "server": False, "frpc": True, "clients": ["demo"]},
     )
     monkeypatch.setattr(up_module, "start_oob", lambda *args, **kwargs: calls.append("oob"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
@@ -2804,7 +2845,7 @@ def test_up_starts_oob_when_only_client_sessions_exist(tmp_path: Path, monkeypat
     monkeypatch.setattr(
         up_module,
         "oob_status",
-        lambda runner=None: {"state": "partial", "server": False, "frpc": False, "clients": ["demo"]},
+        lambda *a, **k: {"state": "partial", "server": False, "frpc": False, "clients": ["demo"]},
     )
     monkeypatch.setattr(
         up_module,
@@ -2832,7 +2873,7 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
     monkeypatch.setattr(
         up_module,
         "oob_status",
-        lambda runner=None: {"state": "stopped", "server": False, "frpc": False, "clients": []},
+        lambda *a, **k: {"state": "stopped", "server": False, "frpc": False, "clients": []},
     )
     monkeypatch.setattr(
         up_module,
@@ -9399,8 +9440,11 @@ def test_runtime_image_build_state_is_content_based(tmp_path):
     from vigil_cli.docker import DockerResult
 
     (tmp_path / "agent" / "docker" / "runtime-full").mkdir(parents=True)
+    (tmp_path / "agent" / "docker" / "patches").mkdir(parents=True)
     (tmp_path / "docker").mkdir()
     (tmp_path / "agent" / "docker" / "runtime-full" / "Dockerfile").write_text("FROM kali\n")
+    (tmp_path / "agent" / "docker" / "runtime-full" / "install-external-tools.sh").write_text("#!/bin/sh\n")
+    (tmp_path / "agent" / "docker" / "patches" / "arjun-batch-resilience.py").write_text("# patch\n")
     (tmp_path / "docker" / "callback_listener.py").write_text("print(1)\n")
     (tmp_path / "docker" / "start-callback.sh").write_text("#!/bin/sh\n")
     digest = runtime.runtime_inputs_digest(tmp_path)
@@ -9428,6 +9472,12 @@ def test_runtime_image_build_state_is_content_based(tmp_path):
     # A real content change DOES flip to stale.
     (tmp_path / "docker" / "callback_listener.py").write_text("print(2)\n")
     assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(label=digest)) == "stale"
+    (tmp_path / "docker" / "callback_listener.py").write_text("print(1)\n")
+    (tmp_path / "agent" / "docker" / "runtime-full" / "install-external-tools.sh").write_text("#!/bin/sh\n# changed\n")
+    assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(label=digest)) == "stale"
+    (tmp_path / "agent" / "docker" / "runtime-full" / "install-external-tools.sh").write_text("#!/bin/sh\n")
+    (tmp_path / "agent" / "docker" / "patches" / "arjun-batch-resilience.py").write_text("# patch changed\n")
+    assert runtime.runtime_image_build_state(tmp_path, runner=make_runner(label=digest)) == "stale"
 
 
 def test_install_built_image_carries_runtime_inputs_label(tmp_path):
@@ -9443,8 +9493,11 @@ def test_install_built_image_carries_runtime_inputs_label(tmp_path):
     source_root = tmp_path / "source"
     install_root = tmp_path / "install"
     (source_root / "agent" / "docker" / "runtime-full").mkdir(parents=True)
+    (source_root / "agent" / "docker" / "patches").mkdir(parents=True)
     (source_root / "docker").mkdir(parents=True)
     (source_root / "agent" / "docker" / "runtime-full" / "Dockerfile").write_text("FROM kali\n")
+    (source_root / "agent" / "docker" / "runtime-full" / "install-external-tools.sh").write_text("#!/bin/sh\n")
+    (source_root / "agent" / "docker" / "patches" / "arjun-batch-resilience.py").write_text("# patch\n")
     (source_root / "docker" / "callback_listener.py").write_text("print(1)\n")
     (source_root / "docker" / "start-callback.sh").write_text("#!/bin/sh\n")
 

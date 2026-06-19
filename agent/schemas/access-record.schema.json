@@ -7,61 +7,71 @@
       "maxLength": 256,
       "minLength": 1,
       "title": "Access Key",
-      "type": "string"
+      "type": "string",
+      "description": "Stable dedupe key for this access entry. Use kebab-case: '<principal>-<target>-<level>' (e.g. 'admin-db01-root')."
     },
     "credential_id": {
       "type": "integer",
       "default": null,
       "title": "Credential Id",
-      "minimum": 1
+      "minimum": 1,
+      "description": "ID of the credential record used to gain this access. Omit if no credential record exists yet."
     },
     "service_id": {
       "type": "integer",
       "default": null,
       "title": "Service Id",
-      "minimum": 1
+      "minimum": 1,
+      "description": "ID of the service this access applies to. Omit if access is not tied to a specific service."
     },
     "principal": {
       "maxLength": 256,
       "minLength": 1,
       "title": "Principal",
-      "type": "string"
+      "type": "string",
+      "description": "Account or identity that holds this access (e.g. 'root', 'admin@corp.example', 'arn:aws:iam::123:role/Prod')."
     },
     "access_level": {
       "maxLength": 64,
       "minLength": 1,
       "title": "Access Level",
-      "type": "string"
+      "type": "string",
+      "description": "Privilege tier obtained (e.g. 'read', 'admin', 'root', 'domain-admin', 'rce'). Use the most specific label that fits."
     },
     "target_ref": {
       "maxLength": 1024,
       "minLength": 1,
       "title": "Target Ref",
-      "type": "string"
+      "type": "string",
+      "description": "What the principal can access: host, URL, database, cloud resource ARN, or scope (e.g. 'db01.internal', 'https://app.example/', 'arn:aws:s3:::prod-bucket')."
     },
     "status": {
       "default": "active",
       "maxLength": 64,
       "minLength": 1,
       "title": "Status",
-      "type": "string"
+      "type": "string",
+      "description": "Validity state of this access. Use 'active' when confirmed working, 'revoked' when credentials are burned or blocked."
     },
     "evidence_ref": {
       "default": "",
       "maxLength": 1024,
       "title": "Evidence Ref",
-      "type": "string"
+      "type": "string",
+      "description": "Path or ID of the artifact proving access (e.g. 'scans/ssh-session.log'). Leave empty if evidence is in notes."
     },
     "notes": {
       "default": "",
       "maxLength": 4096,
       "title": "Notes",
-      "type": "string"
+      "type": "string",
+      "description": "How access was obtained, lateral-movement path, or operational caveats."
     },
     "provenance": {
       "additionalProperties": true,
       "title": "Provenance",
-      "type": "object"
+      "type": "object",
+      "description": "Agent or tool that recorded this access (e.g. {\"agent_name\": \"post-exploitation\"})."
     }
   },
   "required": [

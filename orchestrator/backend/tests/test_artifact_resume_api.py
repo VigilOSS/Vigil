@@ -365,6 +365,111 @@ def test_resume_brief_returns_bounded_operating_picture(client, isolate_settings
     )
 
 
+def test_resume_brief_surfaces_section_rolls_up_by_status_and_type(client, isolate_settings) -> None:
+    """build_resume_brief.surfaces rolls up every surface by status and by
+    status×type, and samples the most actionable still-open surfaces with the
+    discovered/partially-covered-before-deferred priority (gap #1 root fix)."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+    surfaces = [
+        {"surface_type": "auth_entry", "target_descriptor": "https://example.com/login", "status": "discovered"},
+        {"surface_type": "object_reference", "target_descriptor": "https://example.com/api/orders/{id}", "status": "discovered"},
+        {"surface_type": "api_documentation", "target_descriptor": "https://example.com/swagger.json", "status": "covered", "rationale": "fully reviewed"},
+        {"surface_type": "file_handling", "target_descriptor": "https://example.com/upload", "status": "deferred", "rationale": "out of time-box"},
+    ]
+    for payload in surfaces:
+        resp = client.post(f"{BASE}/surfaces", json=payload)
+        assert resp.status_code == 201, resp.text
+    # `partially-covered` is not a create-time status (the POST Literal omits it);
+    # reach it the way operators do — discover, then PATCH with a followup.
+    partial = client.post(
+        f"{BASE}/surfaces",
+        json={"surface_type": "dynamic_render", "target_descriptor": "https://example.com/render", "status": "discovered"},
+    )
+    assert partial.status_code == 201, partial.text
+    patched = client.patch(
+        f"{BASE}/surfaces/{partial.json()['id']}",
+        json={"status": "partially-covered", "rationale": "SSTI ruled out; XSS sink still pending", "followup_condition": "test the XSS sink"},
+    )
+    assert patched.status_code == 200, patched.text
+
+    section = client.get(f"{BASE}/resume-brief").json()["surfaces"]
+    assert section["total"] == 5
+    assert section["open_count"] == 4  # covered is retired; discovered×2 + deferred + partially-covered stay open
+    assert section["by_status"] == {"discovered": 2, "covered": 1, "deferred": 1, "partially-covered": 1}
+
+    rollup = {(e["status"], e["surface_type"]): e["count"] for e in section["by_status_type"]}
+    assert rollup[("discovered", "auth_entry")] == 1
+    assert rollup[("covered", "api_documentation")] == 1
+    assert rollup[("partially-covered", "dynamic_render")] == 1
+
+    top = section["top_uncovered"]
+    assert len(top) == 4  # the covered surface is never sampled
+    assert all(entry["status"] != "covered" for entry in top)
+    # All three priority tiers, in order: discovered (0) < partially-covered (1) < deferred (2).
+    assert [entry["status"] for entry in top] == ["discovered", "discovered", "partially-covered", "deferred"]
+    descriptors = {entry["target_descriptor"] for entry in top}
+    assert "https://example.com/upload" in descriptors
+
+
+def test_resume_brief_work_buffer_counts_pending_by_gf_bucket(client, isolate_settings) -> None:
+    """build_resume_brief.work_buffer counts pending assessment_coverage_items by
+    attack_family (the gf-bucket key) and excludes retired (covered) items
+    (gap #2 root fix)."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+    items = [
+        {"attack_family": "idor", "input_slot": "endpoint"},
+        {"attack_family": "idor", "input_slot": "query"},
+        {"attack_family": "ssrf", "input_slot": "endpoint"},
+        {"attack_family": "sqli", "input_slot": "endpoint", "status_value": "covered", "notes": "tested, no injection"},
+    ]
+    for payload in items:
+        resp = client.post(f"{BASE}/coverage-items", json=payload)
+        assert resp.status_code == 201, resp.text
+
+    work_buffer = client.get(f"{BASE}/resume-brief").json()["work_buffer"]
+    assert work_buffer["pending_total"] == 3  # the covered sqli item is excluded
+    assert work_buffer["by_bucket"] == {"idor": 2, "ssrf": 1}
+    # most_common ordering: the heaviest bucket comes first
+    assert list(work_buffer["by_bucket"].keys())[0] == "idor"
+    assert "sqli" not in work_buffer["by_bucket"]
+
+
+def test_resume_brief_lists_coverage_and_read_first_intel_notes(client, isolate_settings) -> None:
+    """build_resume_brief.intel.read_first_notes surfaces notes tagged coverage /
+    read-first as bounded title pointers, and ignores untagged notes."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+    notes_base = f"/engagements/{ENGAGEMENT_KEY}/intel/notes"
+    posted = [
+        {"title": "Coverage map: untested admin endpoints", "tags": ["coverage"]},
+        {"title": "Read this first: known WAF bypass for /api", "tags": ["read-first", "waf"]},
+        {"title": "Plain scratch note", "tags": ["misc"]},
+    ]
+    for payload in posted:
+        resp = client.post(notes_base, json=payload)
+        assert resp.status_code == 201, resp.text
+
+    read_first = client.get(f"{BASE}/resume-brief").json()["intel"]["read_first_notes"]
+    titles = {row["title"] for row in read_first}
+    assert "Coverage map: untested admin endpoints" in titles
+    assert "Read this first: known WAF bypass for /api" in titles
+    assert "Plain scratch note" not in titles
+    # only the matching tags are projected (not the note's full tag set)
+    waf_note = next(row for row in read_first if row["title"].startswith("Read this first"))
+    assert waf_note["tags"] == ["read-first"]
+    assert "waf" not in waf_note["tags"]
+
+    # read_first_notes is a bounded list, so it is since-filtered like the other
+    # intel worklists: a future cutoff yields nothing new.
+    future = client.get(f"{BASE}/resume-brief", params={"since": "2099-01-01T00:00:00Z"}).json()
+    assert future["intel"]["read_first_notes"] == []
+
+
 def test_resume_brief_surfaces_open_high_cves(client, isolate_settings) -> None:
     """build_resume_brief.intel.open_high_cves surfaces cvss>=7 non-terminal CVEs
     only, sorted by score, with the linkage/component projection — and respects

@@ -111,8 +111,8 @@ def run(args) -> None:
     if args.threads:
         cmd.extend(["-t", str(args.threads)])
     # Per-source -timeout default (CR-7): bound per-domain wall time. Idempotent —
-    # skip the typed value when the operator already passed -timeout via --args so
-    # we never emit a duplicate flag.
+    # skip the typed value when the operator already passed -timeout via --extra-args
+    # so we never emit a duplicate flag.
     timeout_seconds = str(getattr(args, "timeout_seconds", "") or "").strip()
     passthrough_has_timeout = "-timeout" in (getattr(args, "extra_args", "") or "").split()
     if timeout_seconds and timeout_seconds != "0" and not passthrough_has_timeout:

@@ -5,12 +5,38 @@
   "required": ["action", "target", "platform", "rollback", "blast_radius"],
   "additionalProperties": false,
   "properties": {
-    "action": {"type": "string", "minLength": 1},
-    "target": {"type": "string", "minLength": 1},
-    "platform": {"type": "string", "enum": ["gws", "m365", "aws", "okta", "edr", "network", "generic"]},
-    "rollback": {"type": "string", "minLength": 1},
-    "blast_radius": {"type": "string", "enum": ["single-user", "multi-user", "multi-tenant", "cross-platform"]},
-    "note": {"type": "string"},
-    "finding_slug": {"type": "string"}
+    "action": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Imperative containment action to execute (e.g. 'Suspend user account', 'Revoke OAuth token', 'Block outbound to 1.2.3.4/32')."
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Specific entity to act on: UPN, account name, IP CIDR, resource ARN, or device ID (e.g. 'jsmith@corp.example', '10.0.0.5/32', 'arn:aws:iam::123:user/svc-deploy')."
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["gws", "m365", "aws", "okta", "edr", "network", "generic"],
+      "description": "Platform where the action is executed. 'gws': Google Workspace. 'm365': Microsoft 365. 'aws': AWS IAM/console. 'okta': Okta. 'edr': endpoint agent (CrowdStrike, Defender). 'network': firewall/ACL. 'generic': other."
+    },
+    "rollback": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Exact steps to reverse this action if it was applied in error (e.g. 'Re-enable account via Admin Console > Users > jsmith > Activate')."
+    },
+    "blast_radius": {
+      "type": "string",
+      "enum": ["single-user", "multi-user", "multi-tenant", "cross-platform"],
+      "description": "Scope of impact if applied. 'single-user': one account affected. 'multi-user': multiple accounts or a group. 'multi-tenant': spans tenants or orgs. 'cross-platform': affects multiple integrated platforms."
+    },
+    "note": {
+      "type": "string",
+      "description": "Operator rationale, urgency, or caveats for the reviewer approving this action."
+    },
+    "finding_slug": {
+      "type": "string",
+      "description": "Slug of the finding that motivates this containment action (links the proposal to its evidence)."
+    }
   }
 }

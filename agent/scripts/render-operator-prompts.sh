@@ -100,6 +100,12 @@ set_output_paths() {
   AGENTS_OUT="$OUTPUT_DIR/AGENTS.md"
   CLAUDE_AGENTS_DIR="$OUTPUT_DIR/.claude/agents"
   CODEX_AGENTS_DIR="$OUTPUT_DIR/.codex/agents"
+  OPENCODE_AGENTS_DIR="$OUTPUT_DIR/.opencode/agent"
+  # Goose specialist roster: one recipe .yaml per role. Unlike OpenCode/Claude/Codex,
+  # Goose has NO operator wrapper — the operator prompt is carried via the engagement's
+  # `.goosehints` and the default `goose run` agent dispatches specialists via the
+  # `delegate` tool by recipe name. See docs/goose-bench.md.
+  GOOSE_RECIPES_DIR="$OUTPUT_DIR/.goose/recipes"
 }
 set_output_paths
 
@@ -160,6 +166,107 @@ agent_description() {
   esac
 }
 
+# -----------------------------------------------------------------------------
+# OpenCode per-role model routing (workstream E).
+#
+# OpenCode subagents INHERIT the invoking primary's model unless they set `model`
+# explicitly, so every generated `.opencode/agent/<name>.md` pins a model. The
+# classification below splits the roster on task shape, not on red/blue:
+#
+#   deepseek-v4-pro   — the operator/primary and HARD multi-step reasoning roles:
+#       exploit chaining, auth/access-control reasoning, deep taint analysis,
+#       false-positive verification, and full-state synthesis. Pro is also the
+#       safe default for anything ambiguous (Terminal-Bench agentic: Pro 67.9%).
+#   deepseek-v4-flash — BOUNDED recon / parsing / enumeration / high-fan-out
+#       sweep roles where the work is mechanical and cheap (Flash 56.9%; only
+#       used where the task is simple and bounded).
+#
+# When adding a role, default it to Pro unless it is clearly a bounded,
+# high-fan-out, mechanical sweep.
+#
+# Fast+deep variant pairs (OpenCode ONLY): OpenCode subagents inherit the
+# invoking primary's model unless the wrapper pins `model:`, and OpenCode's
+# task/dispatch has no per-call model override — the model is strictly the
+# wrapper file's frontmatter `model:` at dispatch time. So for OpenCode we emit,
+# for every role, the canonical tier (from agent_model below) AND an
+# opposite-tier sibling so the operator can dispatch either a fast (Flash) or a
+# deep (Pro) variant of any specialist by name (`<role>` + `<role>-pro` or
+# `<role>-flash`). The sibling shares the canonical's prompt body verbatim; only
+# the `model:` frontmatter and a short description suffix differ. This is
+# OpenCode-only: `.claude`/`.codex` wrappers do NOT consume wrapper `model:`
+# frontmatter, so no variants are emitted there (pure clutter). See
+# render_opencode_wrapper / opencode_variant_suffix below.
+OPENCODE_PRO_MODEL="deepseek/deepseek-v4-pro"
+OPENCODE_FLASH_MODEL="deepseek/deepseek-v4-flash"
+
+agent_model() {
+  case "$1" in
+    # Flash — bounded recon/parsing/enumeration/high-fan-out sweeps.
+    recon-specialist|source-analyzer|surface-collector|fuzzer|code-variant-hunter|alert-triage-specialist)
+      printf '%s\n' "$OPENCODE_FLASH_MODEL" ;;
+    # Pro — operator + hard multi-step exploit/analysis/verification/synthesis.
+    # (operator, vulnerability-analyst, exploit-developer, osint-analyst,
+    #  report-writer, code-architect, code-vuln-hunter, code-vuln-verifier,
+    #  code-fuzz-engineer, investigator, incident-verifier, ir-lead, + default.)
+    *)
+      printf '%s\n' "$OPENCODE_PRO_MODEL" ;;
+  esac
+}
+
+# The OpenCode opposite-tier sibling: given a role's canonical model, return the
+# OTHER tier's model. Used to emit the fast+deep variant pair (OpenCode only).
+agent_opposite_model() {
+  if [[ "$(agent_model "$1")" == "$OPENCODE_PRO_MODEL" ]]; then
+    printf '%s\n' "$OPENCODE_FLASH_MODEL"
+  else
+    printf '%s\n' "$OPENCODE_PRO_MODEL"
+  fi
+}
+
+# The dispatchable name suffix + description suffix for a variant pinned to
+# $model. Pro siblings get `-pro`; Flash siblings get `-flash`.
+opencode_variant_name_suffix() {
+  if [[ "$1" == "$OPENCODE_PRO_MODEL" ]]; then
+    printf '%s\n' "-pro"
+  else
+    printf '%s\n' "-flash"
+  fi
+}
+
+opencode_variant_desc_suffix() {
+  if [[ "$1" == "$OPENCODE_PRO_MODEL" ]]; then
+    printf '%s\n' " — deep (Pro) variant"
+  else
+    printf '%s\n' " — fast (Flash) variant"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Goose per-role model routing.
+#
+# Goose specialists pin their model in each recipe's `settings.goose_model` (the
+# verified per-subagent override path — NOT the GOOSE_SUBAGENT_* env vars, which
+# aaif-goose#9644 lets the orchestrator confabulate/override).
+#
+# #9397 (verified live 2026-06-19): goose v1.38.0's openai-compat provider drops
+# DeepSeek-V4 thinking-mode `reasoning_content` from the 2nd..Nth assistant messages it
+# emits when it splits a parallel-tool-call turn, so DeepSeek 400s. The bench's
+# reasoning-content repair proxy (goose_reasoning_proxy.py, launched by start_goose.sh)
+# re-attaches it, so thinking-mode V4 now works on the DIRECT path — per-role pro/flash
+# routing is restored. Goose addresses DeepSeek by the BARE id (no `deepseek/` prefix).
+# See docs/goose-bench.md.
+GOOSE_PRO_MODEL="deepseek-v4-pro"
+GOOSE_FLASH_MODEL="deepseek-v4-flash"
+
+goose_model_for() {
+  # Mirror the OpenCode per-role tiering (agent_model) but with goose's BARE ids:
+  # Flash for bounded recon/parsing roles, Pro for the operator + hard reasoning roles.
+  case "$(agent_model "$1")" in
+    "$OPENCODE_FLASH_MODEL") printf '%s\n' "$GOOSE_FLASH_MODEL" ;;
+    *)                       printf '%s\n' "$GOOSE_PRO_MODEL" ;;
+  esac
+}
+
 agent_prompt_body() {
   local agent_name="$1"
   local source="$SOURCE_DIR/agents/$agent_name.md"
@@ -186,7 +293,7 @@ render_prompt_locality() {
 
 - Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
-- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md`
+- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md` / `.opencode/agent/*.md` / `.goose/recipes/*.yaml`
 - Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 - Skill discovery: `vigil assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
@@ -255,7 +362,9 @@ EOF
 - Use absolute paths: `/usr/bin/curl`, `/bin/cat`, `/usr/bin/grep`, etc.
 - Do NOT use `grep -P` (Perl regex). Use `grep -E` (extended) or `rg` instead.
 - HEREDOC: Use unquoted delimiter (`<< EOF`), NOT single-quoted (`<< 'EOF'`).
-- New files: use bash commands (mkdir, cat >, echo >). Existing files: use Edit tool.
+- Make file edits through the active coding environment's patch/edit tool. Avoid shell
+  redirection (`cat >`, `echo >`) for manual file creation or modification because it
+  bypasses reviewable patch diffs and is easy to quote incorrectly in zsh.
 
 ## Tool Promotion Workflow
 
@@ -412,6 +521,135 @@ EOF
   perl -0pi -e 's/\n+\z/\n/' "$out"
 }
 
+# Write a single OpenCode wrapper for $agent_name pinned to $model. The optional
+# $name_suffix/$desc_suffix produce an opposite-tier VARIANT sibling
+# (`<role>-pro.md` / `<role>-flash.md`); empty suffixes produce the canonical
+# `<role>.md` (kept byte-identical to legacy output). Both the canonical and the
+# variant share ONE code path here; only the filename, `model:`, and the
+# description suffix differ. The GENERATED-FILE banner still points at the
+# canonical source (`agent/agents/<role>.md`) so the variant's provenance and
+# "DO NOT EDIT / Regenerate with" guidance stay intact.
+render_one_opencode_wrapper() {
+  local agent_name="$1"
+  local model="$2"
+  local name_suffix="${3:-}"
+  local desc_suffix="${4:-}"
+  local description
+  description=$(agent_description "$agent_name")
+  local out="$OPENCODE_AGENTS_DIR/$agent_name$name_suffix.md"
+  mkdir -p "$(dirname "$out")"
+
+  # OpenCode agent frontmatter: description + mode + model. Specialists are
+  # `mode: subagent` so they are dispatchable only via the operator's
+  # `task`/@mention (never a primary entrypoint). The OPERATOR is `mode: primary`
+  # because `opencode run --agent operator` (written by engagements._write_launchers)
+  # must be able to launch it AS the top-level brain: OpenCode 1.17.5 refuses to
+  # run a `mode: subagent` agent as the entrypoint — it prints "agent X is a
+  # subagent, not a primary agent. Falling back to default agent" and silently
+  # runs the built-in `build` primary instead, which reads AGENTS.md as mere
+  # context and does the work inline (0 specialist dispatches). A primary operator
+  # still has the `task` tool and dispatches the subagent roster normally.
+  # `model` is pinned on EVERY role because OpenCode subagents otherwise inherit
+  # the invoking primary's model, defeating routing.
+  if [[ "$agent_name" == "operator" ]]; then
+    cat > "$out" <<EOF
+---
+description: Lead red team operator. Drives pentest methodology, coordinates phases, and manages state.$desc_suffix
+mode: primary
+model: $model
+---
+
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/operator.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
+You are the lead red team operator.
+
+Load and follow the complete operator instructions from \`AGENTS.md\` in the project root.
+This wrapper exists only so OpenCode can expose an \`operator\` agent entrypoint without duplicating prompt text.
+EOF
+    return
+  fi
+
+  {
+    cat <<EOF
+---
+description: $description$desc_suffix
+mode: subagent
+model: $model
+---
+
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/agents/$agent_name.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
+EOF
+    agent_prompt_body "$agent_name"
+  } > "$out"
+  perl -0pi -e 's/\n+\z/\n/' "$out"
+}
+
+# Emit the OpenCode wrappers for a role: the canonical tier AND the opposite-tier
+# sibling. OpenCode-only fast+deep pairing (see the routing block above). The
+# canonical (empty suffixes) stays byte-identical to legacy; the sibling pins the
+# opposite model with a `-pro`/`-flash` name + description suffix.
+render_opencode_wrapper() {
+  local agent_name="$1"
+  local canonical_model opposite_model variant_name_suffix variant_desc_suffix
+  canonical_model=$(agent_model "$agent_name")
+  opposite_model=$(agent_opposite_model "$agent_name")
+  variant_name_suffix=$(opencode_variant_name_suffix "$opposite_model")
+  variant_desc_suffix=$(opencode_variant_desc_suffix "$opposite_model")
+
+  # Canonical (byte-identical to legacy).
+  render_one_opencode_wrapper "$agent_name" "$canonical_model"
+  # Opposite-tier sibling (OpenCode-only fast+deep pair).
+  render_one_opencode_wrapper "$agent_name" "$opposite_model" "$variant_name_suffix" "$variant_desc_suffix"
+}
+
+# Write the Goose specialist recipe for $agent_name to .goose/recipes/<name>.yaml.
+# The operator has NO recipe (its prompt is the engagement `.goosehints`; the default
+# goose agent dispatches via `delegate source <role>`), so this is a no-op for
+# `operator`. Each specialist recipe carries: the role prompt body as a YAML literal
+# block with an EXPLICIT indent indicator (`|2`) so a body whose first line is itself
+# indented cannot mis-set the block indent; the `developer` builtin (shell + editor);
+# and a per-role `goose_model` pin. Empty body lines are emitted truly empty (no
+# trailing whitespace); content lines are indented 2 to sit inside the block.
+render_goose_recipe() {
+  local agent_name="$1"
+  [[ "$agent_name" == "operator" ]] && return 0
+  local description model out description_yaml
+  description=$(agent_description "$agent_name")
+  model=$(goose_model_for "$agent_name")
+  out="$GOOSE_RECIPES_DIR/$agent_name.yaml"
+  mkdir -p "$(dirname "$out")"
+  # Escape for a YAML double-quoted scalar so any description renders valid YAML:
+  # backslashes first (so we don't double-escape), then double quotes. All current
+  # descriptions are quote/backslash-free, so this is a no-op for today's roster.
+  description_yaml="${description//\\/\\\\}"
+  description_yaml="${description_yaml//\"/\\\"}"
+  {
+    cat <<EOF
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/$agent_name.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+version: "1.0.0"
+title: $agent_name
+description: "$description_yaml"
+instructions: |2
+EOF
+    agent_prompt_body "$agent_name" | awk '{ if ($0 == "") print ""; else print "  " $0 }'
+    cat <<'EOF'
+extensions:
+  - type: builtin
+    name: developer
+settings:
+EOF
+    printf '  goose_model: %s\n' "$model"
+  } > "$out"
+  perl -0pi -e 's/\n+\z/\n/' "$out"
+}
+
 # Render the active roster's wrappers (red or blue) selected by $TYPE.
 render_all_wrappers() {
   local agent_name
@@ -424,6 +662,8 @@ render_all_wrappers() {
   for agent_name in "${roster[@]}"; do
     render_claude_wrapper "$agent_name"
     render_codex_wrapper "$agent_name"
+    render_opencode_wrapper "$agent_name"
+    render_goose_recipe "$agent_name"
   done
 }
 
@@ -498,10 +738,12 @@ check_render_one() {
   for agent_name in "${roster[@]}"; do
     local claude_rel=".claude/agents/$agent_name.md"
     local codex_rel=".codex/agents/$agent_name.toml"
+    local opencode_rel=".opencode/agent/$agent_name.md"
     local target_claude="$source_output_dir/$claude_rel"
     local target_codex="$source_output_dir/$codex_rel"
+    local target_opencode="$source_output_dir/$opencode_rel"
     # Missing wrapper IS drift — the render produced it but the checked-in
-    # copy is absent. Operators reading from .claude/.codex hit nothing.
+    # copy is absent. Operators reading from .claude/.codex/.opencode hit nothing.
     if [[ ! -f "$target_claude" ]]; then
       printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$claude_rel" >&2
       drift=1
@@ -517,6 +759,44 @@ check_render_one() {
       printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$codex_rel" >&2
       diff -u "$target_codex" "$tmp_dir/$codex_rel" >&2 || true
       drift=1
+    fi
+    if [[ ! -f "$target_opencode" ]]; then
+      printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$opencode_rel" >&2
+      drift=1
+    elif ! diff -q "$target_opencode" "$tmp_dir/$opencode_rel" >/dev/null 2>&1; then
+      printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$opencode_rel" >&2
+      diff -u "$target_opencode" "$tmp_dir/$opencode_rel" >&2 || true
+      drift=1
+    fi
+    # OpenCode-only opposite-tier variant sibling (fast+deep pair). No
+    # corresponding .claude/.codex variant exists by design, so this is checked
+    # only for the opencode path.
+    local opp_model variant_suffix opencode_variant_rel target_opencode_variant
+    opp_model=$(agent_opposite_model "$agent_name")
+    variant_suffix=$(opencode_variant_name_suffix "$opp_model")
+    opencode_variant_rel=".opencode/agent/$agent_name$variant_suffix.md"
+    target_opencode_variant="$source_output_dir/$opencode_variant_rel"
+    if [[ ! -f "$target_opencode_variant" ]]; then
+      printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$opencode_variant_rel" >&2
+      drift=1
+    elif ! diff -q "$target_opencode_variant" "$tmp_dir/$opencode_variant_rel" >/dev/null 2>&1; then
+      printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$opencode_variant_rel" >&2
+      diff -u "$target_opencode_variant" "$tmp_dir/$opencode_variant_rel" >&2 || true
+      drift=1
+    fi
+    # Goose specialist recipe. No operator recipe exists by design (operator prompt
+    # is the engagement .goosehints), so the recipe check is skipped for operator.
+    if [[ "$agent_name" != "operator" ]]; then
+      local goose_rel=".goose/recipes/$agent_name.yaml"
+      local target_goose="$source_output_dir/$goose_rel"
+      if [[ ! -f "$target_goose" ]]; then
+        printf 'DRIFT (%s): %s missing — expected rendered recipe not present in repo\n' "$check_type" "$goose_rel" >&2
+        drift=1
+      elif ! diff -q "$target_goose" "$tmp_dir/$goose_rel" >/dev/null 2>&1; then
+        printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$goose_rel" >&2
+        diff -u "$target_goose" "$tmp_dir/$goose_rel" >&2 || true
+        drift=1
+      fi
     fi
   done
 

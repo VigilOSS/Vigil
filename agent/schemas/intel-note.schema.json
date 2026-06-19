@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vigil.local/schemas/intel-note.schema.json",
   "$comment": "Mirrors app.api.intel_schemas.NoteRecordRequest. Catch-all prose intel that doesn't fit a structured row; still FTS-indexed and engagement-scoped.",
-  "title": "Intel Note Record",
+  "title": "Intel Note Record — free-form prose intel that doesn't fit a structured row (tech, email, domain, CVE, etc.). FTS-indexed and engagement-scoped. Optionally promoted to a tracked lead via lead_status.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,19 +13,19 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 512,
-      "description": "Short descriptive title — unique per engagement."
+      "description": "Short, unique title per engagement — serves as the natural dedup key; a re-record with the same title overwrites the prior row."
     },
     "body_markdown": {
       "type": "string",
       "maxLength": 65536,
       "default": "",
-      "description": "Prose body in GitHub-flavored markdown."
+      "description": "Prose body in GitHub-flavored markdown. Include commands, output excerpts, and reasoning — this is FTS-indexed and used in report/resume context."
     },
     "source_agent": {
       "type": "string",
       "maxLength": 128,
       "default": "",
-      "description": "Agent that produced the note (e.g., 'osint-analyst')."
+      "description": "Specialist role that authored this note (e.g., 'osint-analyst', 'vulnerability-analyst')."
     },
     "tags": {
       "type": "array",
@@ -33,12 +33,14 @@
       "items": {
         "type": "string",
         "maxLength": 64
-      }
+      },
+      "description": "Short classifier labels for filtering (e.g., ['ssrf', 'aws', 'unauth', 'phase-3'])."
     },
     "source_name": {
       "type": "string",
       "maxLength": 128,
-      "default": ""
+      "default": "",
+      "description": "External source or tool the note summarizes (e.g., 'shodan', 'nuclei-template-xyz', 'github-advisory')."
     },
     "lead_status": {
       "type": [
@@ -53,7 +55,7 @@
         null
       ],
       "default": null,
-      "description": "Set to make this note a tracked *lead* (an actionable hypothesis/thread): open|in_progress are the worklist; resolved|ruled_out are closed. Omit/null for a plain reference note. Lead titles must be unique per engagement (title is the natural key) or a re-record overwrites the prior disposition."
+      "description": "Omit/null for a plain reference note. Set to promote this note to a tracked lead (actionable hypothesis): 'open'/'in_progress'=on the worklist; 'resolved'/'ruled_out'=closed. Re-recording with the same title overwrites the prior disposition."
     },
     "provenance": {
       "type": "object",
@@ -61,16 +63,20 @@
       "default": {},
       "properties": {
         "agent_name": {
-          "type": "string"
+          "type": "string",
+          "description": "Specialist agent role that recorded this row."
         },
         "artifact_ref": {
-          "type": "string"
+          "type": "string",
+          "description": "vigil artifact ID or path that contains the raw evidence."
         },
         "captured_at": {
-          "type": "string"
+          "type": "string",
+          "description": "ISO8601 timestamp when this row was written."
         },
         "evidence_quote": {
-          "type": "string"
+          "type": "string",
+          "description": "Verbatim excerpt that supports this note."
         }
       }
     }

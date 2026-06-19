@@ -88,91 +88,91 @@ def _finding_record_examples() -> list[dict[str, Any]]:
 _FINDING_DETAIL_PROPERTIES = {
     "discovered_by": {
         "type": "string",
-        "description": "Agent name that first identified this finding",
+        "description": "Agent name that first identified this finding (e.g. 'vulnerability-analyst').",
     },
     "owasp_category": {
         "type": "string",
-        "description": "OWASP Top 10 category (for example, A03:2021 Injection)",
+        "description": "OWASP Top 10 2021 category code and name (e.g. 'A03:2021 Injection').",
     },
     "cwe_id": {
         "type": "string",
-        "description": "CWE identifier (for example, CWE-89 for SQL injection)",
+        "description": "CWE identifier (e.g. 'CWE-89' for SQL injection, 'CWE-122' for heap buffer overflow).",
     },
     "parameter": {
         "type": "string",
-        "description": "Affected parameter name or input vector",
+        "description": "Exact name of the affected input: query param, header, JSON key, or form field (e.g. 'q', 'X-User-Id', 'username').",
     },
     "slot_type": {
         "type": "string",
-        "description": "Code-analysis slot type or attack input class associated with the finding",
+        "description": "Code-analysis input class for the attack (e.g. 'URL-COMPONENT', 'NETWORK-INPUT', 'PROTOCOL-FIELD').",
     },
     "request_method": {
         "type": "string",
-        "description": "HTTP method or triggering action (for example, GET, POST, PUT, DELETE)",
+        "description": "HTTP verb that triggers the finding (e.g. 'GET', 'POST', 'PUT', 'DELETE').",
     },
     "evidence": {
         "type": "string",
         "minLength": 1,
-        "description": "Exact response excerpt, artifact reference, or replayable proof",
+        "description": "Verbatim proof: exact response excerpt, artifact path, or replayable request/response. Must be sufficient to reproduce independently.",
     },
     "kill_reason": {
         "type": "string",
-        "description": "Structured verifier rationale when a finding is marked false_positive",
+        "description": "Verifier rationale for false_positive verdict: which check failed and why the issue is not exploitable.",
     },
     "kill_check": {
         "type": "integer",
         "minimum": 1,
         "maximum": 5,
-        "description": "Verification check number responsible for the false-positive verdict",
+        "description": "Verification check number (1-5) that produced the false-positive verdict.",
     },
     "entry_point": {
         "type": "string",
-        "description": "Source of attacker-controlled data (for example, function name, HTTP parameter, file read site)",
+        "description": "Where attacker-controlled data enters the program (e.g. 'curl_url_set(CURLURLPART_URL, attacker_url)', 'POST /upload body field filename').",
     },
     "sink": {
         "type": "string",
-        "description": "Dangerous operation receiving tainted data (for example, memcpy call, SQL query, exec invocation)",
+        "description": "Dangerous operation that consumes tainted data (e.g. 'memcpy(buf, scheme, schemelen) at lib/urlapi.c:342', 'sqlite3_exec(db, query)').",
     },
     "taint_path": {
         "type": "string",
-        "description": "Ordered attacker-controlled data flow from entry point to sink (narrative form)",
+        "description": "Arrow-delimited data flow from entry_point to sink (e.g. 'curl_url_set -> parseurl() -> memcpy(buf, scheme, schemelen)').",
     },
     "guards_evaluated": {
         "type": "string",
-        "description": "Guard analysis showing which checks exist and why they fail or can be bypassed",
+        "description": "List each relevant bounds/validation check and state whether it is absent, bypassable, or ineffective (e.g. 'No bounds check on schemelen before memcpy').",
     },
     "impact": {
         "type": "string",
         "minLength": 1,
-        "description": "Concrete attacker outcome and affected scope",
+        "description": "Concrete attacker outcome: what data is exposed or what action can be taken, and who is affected (e.g. 'Anonymous attacker can read all DB rows', 'Remote code execution via heap corruption').",
     },
     "cvss_vector": {
         "type": "string",
         "minLength": 1,
-        "description": "CVSS 3.1 vector string (for example, CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N)",
+        "description": "CVSS 3.1 vector string (e.g. 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N').",
     },
     "cvss_score": {
         "type": "number",
         "exclusiveMinimum": 0,
         "maximum": 10,
-        "description": "Numeric CVSS 3.1 base score",
+        "description": "CVSS 3.1 base score (0.1-10.0). Must match cvss_vector.",
     },
     "remediation": {
         "type": "string",
-        "description": "Recommended fix or the control that failed",
+        "description": "Specific fix or missing control (e.g. 'Use parameterized queries', 'Add bounds check on schemelen before memcpy').",
     },
     "steps_to_reproduce": {
         "type": "array",
         "items": {"type": "string"},
-        "description": "Ordered reproduction steps, one string per step",
+        "description": "Ordered reproduction steps, one action per string. Start from initial access state; end at impact observation.",
     },
     "poc_code": {
         "type": "string",
-        "description": "Proof-of-concept exploit code or script that demonstrates the vulnerability",
+        "description": "Minimal exploit code or script that reproduces the finding. Omit if poc_request/poc_response is sufficient.",
     },
     "poc_request": {
         "type": "object",
-        "description": "Structured HTTP request that triggers the vulnerability",
+        "description": "HTTP request that triggers the vulnerability.",
         "properties": {
             "method": {"type": "string"},
             "url": {"type": "string"},
@@ -182,7 +182,7 @@ _FINDING_DETAIL_PROPERTIES = {
     },
     "poc_response": {
         "type": "object",
-        "description": "Observed HTTP response confirming the vulnerability",
+        "description": "Observed HTTP response that confirms the vulnerability.",
         "properties": {
             "status": {"type": "integer"},
             "headers": {"type": "object", "additionalProperties": {"type": "string"}},
@@ -192,28 +192,28 @@ _FINDING_DETAIL_PROPERTIES = {
     "references": {
         "type": "array",
         "items": {"type": "string"},
-        "description": "External references such as CVE IDs, advisory URLs, or related documentation links",
+        "description": "CVE IDs, NVD/advisory URLs, or CWE links relevant to this finding.",
     },
     "chain_required": {
         "type": "boolean",
-        "description": "Whether this finding remains actionable only as part of a larger exploit chain",
+        "description": "Set true only when this finding has no standalone impact and is meaningful only as part of an exploit chain.",
     },
     "chain_rationale": {
         "type": "string",
-        "description": "Why the finding matters primarily as a chain step instead of a standalone report item",
+        "description": "Required when chain_required is true: explain which chain step this enables and why standalone impact is insufficient.",
     },
     "required_followup": {
         "type": "array",
         "items": {"type": "string"},
-        "description": "Concrete follow-up steps needed to validate or complete the chain",
+        "description": "Concrete next steps needed to validate or complete the chain (e.g. 'Confirm reachable network caller for the URL parser').",
     },
     "variant_of": {
         "type": "string",
-        "description": "Finding slug of the original finding when this record is a verified variant",
+        "description": "Slug of the root finding when this record is a verified same-class variant (e.g. 'sqli-search-q').",
     },
     "original_pattern": {
         "type": "string",
-        "description": "Abstract pattern signature copied from the original finding during variant analysis",
+        "description": "Abstract pattern signature copied verbatim from the root finding during variant analysis.",
     },
 }
 
@@ -227,8 +227,40 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             overlay={
                 "additionalProperties": False,
                 "properties": {
-                    "credential_id": {"type": "integer", "minimum": 1},
-                    "service_id": {"type": "integer", "minimum": 1},
+                    "access_key": {
+                        "description": "Stable dedupe key for this access entry. Use kebab-case: '<principal>-<target>-<level>' (e.g. 'admin-db01-root').",
+                    },
+                    "credential_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "ID of the credential record used to gain this access. Omit if no credential record exists yet.",
+                    },
+                    "service_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "ID of the service this access applies to. Omit if access is not tied to a specific service.",
+                    },
+                    "principal": {
+                        "description": "Account or identity that holds this access (e.g. 'root', 'admin@corp.example', 'arn:aws:iam::123:role/Prod').",
+                    },
+                    "access_level": {
+                        "description": "Privilege tier obtained (e.g. 'read', 'admin', 'root', 'domain-admin', 'rce'). Use the most specific label that fits.",
+                    },
+                    "target_ref": {
+                        "description": "What the principal can access: host, URL, database, cloud resource ARN, or scope (e.g. 'db01.internal', 'https://app.example/', 'arn:aws:s3:::prod-bucket').",
+                    },
+                    "status": {
+                        "description": "Validity state of this access. Use 'active' when confirmed working, 'revoked' when credentials are burned or blocked.",
+                    },
+                    "evidence_ref": {
+                        "description": "Path or ID of the artifact proving access (e.g. 'scans/ssh-session.log'). Leave empty if evidence is in notes.",
+                    },
+                    "notes": {
+                        "description": "How access was obtained, lateral-movement path, or operational caveats.",
+                    },
+                    "provenance": {
+                        "description": "Agent or tool that recorded this access (e.g. {\"agent_name\": \"post-exploitation\"}).",
+                    },
                 }
             },
         ),
@@ -239,12 +271,53 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             overlay={
                 "additionalProperties": False,
                 "properties": {
-                    "chain_key": {"type": "string", "maxLength": 256},
+                    "chain_key": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "description": "Stable kebab-case identifier for this chain (e.g. 'anon-rce-via-sqli-lfi'). Omit to auto-generate.",
+                    },
+                    "title": {
+                        "description": "One-line chain summary: initial access + pivots + terminal impact (e.g. 'Anon SQLi → LFI → RCE on app server').",
+                    },
+                    "status": {
+                        "description": "Chain lifecycle state (e.g. 'active', 'exploited', 'reported'). Mirrors finding workflow_status vocabulary.",
+                    },
+                    "severity": {
+                        "description": "Combined chain severity — set to the highest severity of constituent findings unless the chain itself escalates impact.",
+                    },
+                    "narrative": {
+                        "description": "Step-by-step attack story: initial foothold, each pivot, and terminal impact. Reference linked finding slugs inline.",
+                    },
+                    "evidence_ref": {
+                        "description": "Path or ID of the artifact documenting the chain (e.g. 'scans/chain-rce-proof.txt'). Leave empty if evidence is in linked findings.",
+                    },
+                    "provenance": {
+                        "description": "Agent that assembled this chain (e.g. {\"agent_name\": \"vulnerability-analyst\"}).",
+                    },
                     "links": {
                         "items": {
                             "additionalProperties": False,
                             "properties": {
-                                "entity_id": {"type": "integer", "minimum": 1},
+                                "relation": {
+                                    "description": "How this entity participates in the chain (e.g. 'step', 'prerequisite', 'outcome', 'credential-used').",
+                                },
+                                "entity_kind": {
+                                    "description": "Type of the linked entity (e.g. 'finding', 'credential', 'access_record').",
+                                },
+                                "entity_id": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "Database ID of the linked entity. Provide entity_id OR entity_ref, not both.",
+                                },
+                                "entity_ref": {
+                                    "description": "Slug or string reference when entity_id is unavailable (e.g. 'sqli-search-q').",
+                                },
+                                "notes": {
+                                    "description": "How this step connects to the next or why this entity is part of the chain.",
+                                },
+                                "provenance": {
+                                    "description": "Agent that created this link (e.g. {\"agent_name\": \"vulnerability-analyst\"}).",
+                                },
                             }
                         }
                     },
@@ -255,7 +328,35 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             filename="credential.schema.json",
             model=CredentialRecordRequest,
             title="Assessment Credential Record",
-            overlay={"additionalProperties": False},
+            overlay={
+                "additionalProperties": False,
+                "properties": {
+                    "credential_key": {
+                        "description": "Stable dedupe key for this credential. Use kebab-case: '<principal>-<kind>' (e.g. 'admin-ssh-key', 'svc-db-password').",
+                    },
+                    "kind": {
+                        "description": "Credential type. Common values: 'password', 'ssh-key', 'api-key', 'bearer-token', 'cookie', 'ntlm-hash', 'kerberos-ticket', 'aws-access-key', 'certificate', 'oauth-token'.",
+                    },
+                    "principal": {
+                        "description": "Account this credential authenticates (e.g. 'root', 'admin@corp.example', 'svc-deploy').",
+                    },
+                    "source_name": {
+                        "description": "Tool or agent that recovered this credential (e.g. 'mimikatz', 'post-exploitation').",
+                    },
+                    "status": {
+                        "description": "Validity state: 'discovered' (found, not yet tested), 'valid' (confirmed working), 'invalid' (tested and rejected), 'revoked'.",
+                    },
+                    "notes": {
+                        "description": "Where found, how extracted, scope of access, or any operational caveats.",
+                    },
+                    "provenance": {
+                        "description": "Agent or tool that recorded this credential (e.g. {\"agent_name\": \"post-exploitation\"}).",
+                    },
+                    "identity": {
+                        "description": "Human-readable display name or alias for the principal (e.g. 'John Smith', 'deploy-bot'). Distinct from principal login name.",
+                    },
+                },
+            },
         ),
         SchemaSpec(
             filename="probe-run.schema.json",
@@ -264,10 +365,67 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             overlay={
                 "additionalProperties": False,
                 "properties": {
-                    "request_variant_id": {"type": "integer", "minimum": 1},
-                    "service_id": {"type": "integer", "minimum": 1},
-                    "coverage_item_id": {"type": "integer", "minimum": 1},
-                    "observed_http_status": {"type": "integer"},
+                    "request_variant_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "ID of the request variant this probe targeted. Ties the probe to a specific endpoint definition.",
+                    },
+                    "service_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "ID of the service under test. Omit when request_variant_id is provided (service is inferred).",
+                    },
+                    "coverage_item_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "ID of the coverage item this probe fulfills. Links probe runs to the coverage tracking table.",
+                    },
+                    "auth_context": {
+                        "description": "Authentication state used during the probe (e.g. 'anonymous', 'user', 'admin', or a credential slug).",
+                    },
+                    "input_slot": {
+                        "description": "Attack surface class where the payload was injected (e.g. 'query-param', 'json-body', 'http-header', 'path-segment', 'cookie').",
+                    },
+                    "attack_family": {
+                        "description": "Vuln class being tested (e.g. 'sqli', 'xss', 'ssrf', 'lfi', 'rce', 'auth-bypass'). Required.",
+                    },
+                    "payload_family": {
+                        "description": "Payload sub-category or wordlist name (e.g. 'boolean-blind', 'time-based', 'polyglot-xss').",
+                    },
+                    "payload_value": {
+                        "description": "Exact payload string sent in the probe. Include URL-encoding if relevant.",
+                    },
+                    "tool_name": {
+                        "description": "Tool or script that sent the probe (e.g. 'sqlmap', 'ffuf', 'burp', 'custom-script'). Required.",
+                    },
+                    "agent_name": {
+                        "description": "Agent that dispatched this probe (e.g. 'vulnerability-analyst'). Defaults to empty when tool ran directly.",
+                    },
+                    "result_status": {
+                        "description": "Outcome: 'signal' = anomaly detected, warrants escalation to a finding. 'tested' = ran cleanly, no anomaly. 'no-signal' = explicit negative result. 'attempted' = sent but outcome unclear. 'blocked' = WAF/control stopped probe. 'error' = tool or network failure.",
+                    },
+                    "observed_http_status": {
+                        "type": "integer",
+                        "description": "HTTP response status code received (e.g. 200, 403, 500). Null for non-HTTP probes.",
+                    },
+                    "signal_type": {
+                        "description": "What anomaly was detected when result_status is 'signal' (e.g. 'time-delay', 'error-disclosure', 'different-response-length').",
+                    },
+                    "evidence_ref": {
+                        "description": "Path or ID of the artifact capturing the probe exchange (e.g. 'scans/ffuf-run1.json').",
+                    },
+                    "notes": {
+                        "description": "Freeform observations about this probe run (anomalies, tool warnings, raw output excerpts).",
+                    },
+                    "target_host": {
+                        "description": "Hostname or IP of the probed target (e.g. 'api.example.com', '10.0.1.5').",
+                    },
+                    "target_path": {
+                        "description": "URL path probed (e.g. '/api/v1/search'). Include query string only if it was fixed across all payloads.",
+                    },
+                    "target_port": {
+                        "description": "TCP port probed. Omit when port is implied by the scheme (80/443).",
+                    },
                 }
             },
         ),
@@ -275,42 +433,50 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             filename="job.schema.json",
             model=JobRecord,
             title="Assessment Job Record",
-            description="Durable payload for assessment_jobs lifecycle records emitted by `vigil assess kali job ...`.",
+            description="Read-only lifecycle record returned by `vigil assess kali job list/status`. Do not construct manually — the orchestrator writes these rows.",
             overlay={
                 "additionalProperties": False,
                 "properties": {
-                    "id": {"type": "integer", "minimum": 1},
-                    "engagement_id": {"type": "integer", "minimum": 1},
+                    "id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Database primary key for this job row.",
+                    },
+                    "engagement_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Engagement this job belongs to.",
+                    },
                     "parent_command_run_id": {
                         "type": ["integer", "null"],
                         "minimum": 1,
-                        "description": "ID of the assessment_command_runs row that initiated this dtach-supervised job.",
+                        "description": "ID of the assessment_command_runs row that spawned this dtach job.",
                     },
                     "status": {
                         "enum": ["queued", "running", "completed", "failed", "killed", "lost", "stop_failed"],
-                        "description": "Job lifecycle state. queued: row written, dtach not yet attached. running: dtach attached, worker live. completed/failed/killed/lost/stop_failed: terminal states.",
+                        "description": "Lifecycle state. 'queued': row written, dtach not yet started. 'running': worker live. Terminal: 'completed' (exit 0), 'failed' (exit !=0), 'killed' (SIGKILL), 'lost' (socket gone), 'stop_failed' (kill attempt failed).",
                     },
-                    "started_at": {"description": "ISO8601 timestamp when the dtach worker first attached."},
-                    "ended_at": {"description": "ISO8601 timestamp when the dtach worker exited or was killed."},
+                    "started_at": {"description": "ISO 8601 UTC timestamp when the dtach worker first attached. Null until 'running'."},
+                    "ended_at": {"description": "ISO 8601 UTC timestamp when the worker exited or was killed. Null until terminal."},
                     "exit_code": {
                         "type": ["integer", "null"],
-                        "description": "Worker process exit code on terminal status.",
+                        "description": "Process exit code. 0 = success; non-zero = failure. Null until terminal status.",
                     },
                     "dtach_socket_path": {
-                        "description": "Path to the dtach control socket, used by `vigil assess kali job tail` to reattach.",
+                        "description": "Filesystem path to the dtach control socket. Pass to `vigil assess kali job tail` to reattach to a running job.",
                     },
                     "stdout_path": {
-                        "description": "Path to the worker's stdout spill file under ${ENGAGEMENT_DIR}/scans/kali/.",
+                        "description": "Absolute path to the stdout spill file under ${ENGAGEMENT_DIR}/scans/kali/.",
                     },
                     "stderr_path": {
-                        "description": "Path to the worker's stderr spill file under ${ENGAGEMENT_DIR}/scans/kali/.",
+                        "description": "Absolute path to the stderr spill file under ${ENGAGEMENT_DIR}/scans/kali/.",
                     },
                     "audit_metadata": {
                         "type": ["object", "null"],
-                        "description": "Audit metadata (technique, intent, probe_kind, destructive, phase, agent_name) captured at dispatch time.",
+                        "description": "Structured fields captured at dispatch: technique, intent, probe_kind, destructive (bool), phase, agent_name.",
                     },
-                    "created_at": {"description": "ISO8601 timestamp the job row was first written."},
-                    "updated_at": {"description": "ISO8601 timestamp of the most recent PATCH."},
+                    "created_at": {"description": "ISO 8601 UTC timestamp when the job row was inserted."},
+                    "updated_at": {"description": "ISO 8601 UTC timestamp of the last status update."},
                 },
             },
         ),
@@ -336,27 +502,63 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                 ],
                 "examples": _finding_record_examples(),
                 "properties": {
-                    "slug": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "slug": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "description": "Stable kebab-case identifier for this finding (e.g. 'sqli-search-q'). Omit to auto-generate.",
+                    },
+                    "title": {
+                        "description": "One-line finding name: vuln class + location (e.g. 'Blind SQL injection in /search?q').",
+                    },
                     "severity": {
+                        "description": "CVSS-aligned impact rating. Use 'critical' only for CVSS >=9.0 or trivially exploitable RCE/auth-bypass.",
                         "enum": ["info", "low", "medium", "high", "critical"],
                     },
                     "workflow_status": {
+                        "description": "Lifecycle state. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'.",
                         "enum": ["draft", "active", "exploited", "blocked", "false_positive", "merged", "reported"],
                     },
                     "verification_state": {
+                        "description": "Human review state. Leave 'unreviewed' when first recording; set 'verified' after confirming exploitability; 'disputed' when contested.",
                         "enum": ["unreviewed", "verified", "disputed"],
                     },
                     "verification_disposition": {
+                        "description": "Verifier outcome. 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable.",
                         "enum": list(_VERIFICATION_DISPOSITION_VALUES),
                     },
-                    "defect_family": {"maxLength": 128},
-                    "root_cause_key": {"maxLength": 256},
-                    "auth_context": {"maxLength": 128},
-                    "canonical_location": {"maxLength": 1024},
-                    "summary": {"maxLength": 4096},
-                    "evidence_ref": {"maxLength": 1024},
-                    "notes": {"maxLength": 20000},
-                    "source_name": {"maxLength": 128},
+                    "defect_family": {
+                        "maxLength": 128,
+                        "description": "Short vuln-class label for grouping (e.g. 'sql-injection', 'buffer-overflow', 'ssrf'). Use kebab-case.",
+                    },
+                    "root_cause_key": {
+                        "maxLength": 256,
+                        "description": "Stable key linking variants to a shared root cause (e.g. 'missing-input-sanitization-search'). Omit if not part of a variant cluster.",
+                    },
+                    "auth_context": {
+                        "maxLength": 128,
+                        "description": "Authentication state when the finding was triggered. Use 'anonymous', a role name (e.g. 'user', 'admin'), or credential slug.",
+                    },
+                    "canonical_location": {
+                        "maxLength": 1024,
+                        "description": "Primary affected location. URL for network findings (e.g. 'https://target.example/search?q'); 'file:path:line' for code findings.",
+                    },
+                    "summary": {
+                        "maxLength": 4096,
+                        "description": "2-5 sentence description: what is vulnerable, how it is triggered, and the attacker impact.",
+                    },
+                    "evidence_ref": {
+                        "maxLength": 1024,
+                        "description": "Path or identifier for supporting artifact (e.g. 'scans/sqlmap.txt', 'artifacts/burp-export.xml'). Leave empty if evidence is inline in details.evidence.",
+                    },
+                    "notes": {
+                        "maxLength": 20000,
+                        "description": "Freeform operational notes: retesting observations, partial progress, raw tool output. Not shown in reports.",
+                    },
+                    "source_name": {
+                        "maxLength": 128,
+                        "description": "Agent or tool that produced this record (e.g. 'vulnerability-analyst', 'nuclei'). Mirrors provenance.agent_name for quick filtering.",
+                    },
                     "details": {
                         "type": "object",
                         "additionalProperties": False,
@@ -372,13 +574,16 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "properties": {
                             "agent_name": {
                                 "type": "string",
-                                "description": "Name of the agent that produced this finding",
+                                "description": "Agent that produced this finding (e.g. 'vulnerability-analyst'). Mirror of source_name.",
                             },
                             "artifact": {
                                 "type": "string",
-                                "description": "Optional artifact reference associated with the finding provenance",
+                                "description": "Path or ID of the artifact this finding was derived from.",
                             },
                         },
+                    },
+                    "evidence_type": {
+                        "description": "Strength of evidence. 'network-confirmed': live exploit or observed response. 'code-inferred': static/dataflow analysis without runtime proof. 'theoretical': logic-based hypothesis, no code or traffic evidence. 'informational': non-exploitable observation.",
                     },
                     "request_variant_id": {"type": "integer", "minimum": 1},
                     "service_id": {"type": "integer", "minimum": 1},
@@ -389,11 +594,29 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                             "additionalProperties": False,
                             "required": ["target_kind"],
                             "properties": {
-                                "link_kind": {"type": "string", "default": "related"},
-                                "target_kind": {"type": "string", "minLength": 1},
-                                "target_id": {"type": "integer", "minimum": 1},
-                                "target_ref": {"type": "string"},
-                                "notes": {"type": "string"},
+                                "link_kind": {
+                                    "type": "string",
+                                    "default": "related",
+                                    "description": "Relationship type (e.g. 'related', 'exploits', 'chained-with', 'variant-of').",
+                                },
+                                "target_kind": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Entity type of the link target (e.g. 'finding', 'credential', 'access_record', 'attack_chain').",
+                                },
+                                "target_id": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "Database ID of the target entity. Provide target_id OR target_ref, not both.",
+                                },
+                                "target_ref": {
+                                    "type": "string",
+                                    "description": "Slug or string reference for the target when target_id is unavailable.",
+                                },
+                                "notes": {
+                                    "type": "string",
+                                    "description": "Why this link exists or how the two entities are related.",
+                                },
                                 "provenance": {
                                     "type": "object",
                                     "additionalProperties": False,
@@ -439,7 +662,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Optional language correction when ingestion guessed wrong. Omit when the stored language is already correct.",
                     },
                     "slot_types": {
-                        "description": "Types of untrusted data that flow into this file. Required for critical and high files. Allowed values are the 8 public slot types; context-specific families like auth, crypto, and error handling are derived from role/language by the backend.",
+                        "description": "Untrusted data types that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The 8 values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
                         "default": [],
                     },
                     "analysis_priority": {
@@ -534,6 +757,9 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     "notes": {
                         "description": "Additional notes, context expansion requests, or follow-up recommendations.",
                     },
+                    "audit_metadata": {
+                        "description": "Arbitrary key/value bag for agent-specific audit context (token counts, tool versions, analysis timestamps). Not used for security decisions; included verbatim in audit logs.",
+                    },
                     "cwe_coverage": {
                         "items": {
                             "type": "object",
@@ -589,13 +815,22 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "file_path": {"type": "string"},
-                                "reason": {"type": "string"},
-                                "vuln_class": {"type": "string"},
+                                "file_path": {
+                                    "type": "string",
+                                    "description": "Repo-relative path to the file that should be re-analyzed (e.g., 'src/url_helpers.c').",
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "Why this file needs re-analysis — name the specific function/callee and the data flow that crosses the boundary.",
+                                },
+                                "vuln_class": {
+                                    "type": "string",
+                                    "description": "Vulnerability class to focus on in the downstream file (matches cwe_coverage family names, e.g., 'buffer-overflow').",
+                                },
                             },
                         },
                         "default": [],
-                        "description": "Files connected via call graph that need re-analysis based on this file's findings",
+                        "description": "Files reachable via call graph whose analysis should be (re)triggered based on findings in this file. Only emit when a taint flow actually crosses the file boundary.",
                     },
                 },
             },

@@ -29,9 +29,12 @@ vigil assess resume-brief --since <iso-datetime>   # what's new since the last b
 vigil assess resume-brief --max-age-hours <N>      # override the per-role stale threshold
 ```
 
-The brief includes finding queues, recent decisions, stale dispatches, handoff gaps,
-relevant command-history matches, indexed artifacts, and an **Intel** section
-(open high-severity CVEs and open leads that still need a disposition). Use the
+The brief includes finding queues, recent decisions, a **Surfaces** rollup
+(counts by status×type plus the top still-uncovered surfaces), a **Work Buffer**
+rollup (pending coverage obligations counted by gf-bucket), stale dispatches,
+handoff gaps, relevant command-history matches, indexed artifacts, and an
+**Intel** section (open high-severity CVEs, open leads that still need a
+disposition, and any notes you tagged `coverage` / `read-first`). Use the
 drill-down commands it prints for exact evidence:
 
 ```bash
@@ -52,7 +55,7 @@ finding, chain, dispatch/agent, surface, request variant, or command run.
 
 ### Keep resume bounded
 
-- Drill down by id (`get-command-run`, `artifact get`, `fetch findings/<slug>`) — the brief already names the surfaces and command runs you need. `coverage-items`, `request-variants`, and full work-buffer dumps are operational detail, not the resume picture.
+- Drill down by id (`get-command-run`, `artifact get`, `fetch findings/<slug>`) — the brief already names the surfaces and command runs you need. The brief carries only the **aggregate** Surfaces (status×type + top uncovered) and Work Buffer (pending counts by gf-bucket) rollups; the per-item `coverage-items`, `request-variants`, and full `work-buffer` dumps stay out of the resume picture as operational detail — reach for them only after the rollup flags a bucket worth opening.
 - Treat `artifact search` as the engagement memory index — `.md` files under the engagement directory that are not in the index are scratch.
 - Use `vigil assess agent render-handoff <agent-id>` for prior dispatch context — it stays bounded where raw transcripts grow linearly.
 - Read command history before re-running probes — the history is canonical, and rerunning is warranted only when the variant differs.
@@ -63,6 +66,7 @@ After hydration, summarize the resume state in one compact operator note:
 - recent operator decisions and null results
 - last dispatch owner, skills, result, and handoff gaps
 - command-run coverage already performed against the host or keyword
+- still-open attack surfaces from the brief's **Surfaces** rollup, and which gf-buckets still carry pending coverage in the **Work Buffer** rollup
 - indexed artifacts that matter to the next action
 
 Only then decide the next action.

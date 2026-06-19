@@ -40,6 +40,7 @@ already listed below.
 - `agent/skills/nuclei-scanning/SKILL.md` — load when the dispatch is about to run step 5 (nuclei reactive sweep). Holding it out of the first-load set keeps the bootstrap lighter for hypothesis-driven dispatches that never reach a URL-delta sweep.
 - `agent/skills/directory-fuzzing/SKILL.md` — load when the dispatch is about to run step 6 (ffuf / feroxbuster L1 wordlist pass). Same rationale.
 - `agent/skills/subdomain-enumeration/SKILL.md` — MANDATORY when scope.json `hosts` contains any `*.domain` wildcard entry (Phase 1a). The skill carries the tooling preflight, the resource-tier rate profiles, the staged Phase 0/1/2/3 composition, and the bound rules. Without it, brute force runs at default rates against CDN-fronted apex DNS, the wildcard ratio is never measured, and bound rules never fire — so the agent burns runtime CPU on diminishing returns and never stops. Skip when scope.json contains only bare hosts; wildcard expansion is owned by Phase 1a, not by every recon dispatch.
+- `agent/skills/browser-semantic-analysis/SKILL.md` — load when its activation triggers appear. This is an evidence-correction lane, not the default for API-only or high-volume fuzzing work.
 
 **Load-First escape hatch (hypothesis-driven half-phase recon-pivot dispatches).** When the dispatch declares `dispatch_mode=hypothesis-driven` plus a narrow objective (e.g. "fingerprint api.foo.com only — recon-pivot half-phase"), the lazy-load skills (`nuclei-scanning`, `directory-fuzzing`) typically stay unloaded and the mandatory `port-scanning` skill MAY be marked `not-applicable` with a one-line rationale in `#### Coverage Gaps`. Full Phase-1a-bootstrap dispatches keep the mandatory + relevant lazy skills loaded.
 
@@ -53,6 +54,7 @@ Before starting any target-facing work, verify:
 - [ ] You read `scope.json` and confirmed the in-scope hosts plus the active `exploit_policy` before making any target-facing decisions
 - [ ] You have the dispatch context (target URL, phase, task objective, prior findings)
 - [ ] You checked command history as a coverage map — `vigil assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Pick angles that haven't been covered — different nmap scripts, a different wordlist, different subdomain sources, different VHost probes. The only probe to skip is an identical command against identical input; any variant is new coverage. Before citing a prior run, fetch its preview with `vigil assess get-command-run <id>` — `success=true` only means `return_code=0`. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] You checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies. If it does, load it and report the non-browser-vs-browser delta instead of treating status/title alone as ground truth.
 
 If any item is unchecked, STOP and load it. Without the skills and references your recon quality drops and downstream specialists cannot test what your pass missed.
 
@@ -100,6 +102,10 @@ httpx wastes wordlist budget on dead hosts):
 3. **`httpx`** — confirm live web targets with `-tech-detect -title -tls-grab -status-code
    -server`. Capture the `Server:` header, basic-auth realm, and OPTIONS/`DAV:` indicators —
    those are the trigger inputs for the conditional nikto step.
+   After httpx, run the browser-semantic trigger check from
+   `agent/skills/browser-semantic-analysis/SKILL.md`. The right output is a
+   baseline-vs-browser delta; do not record a clean recon verdict from a status
+   code that may be an edge fallback.
 4. **`whatweb`** — second-source technology fingerprint. Cross-validate httpx; the union is
    the input to the conditional nikto trigger logic.
 5. **`nuclei`** — mandatory curated template pass: `-t http/cves/,http/exposures/,http/misconfiguration/,http/default-logins/,http/exposed-panels/,http/technologies/`.
@@ -128,6 +134,7 @@ After the tool sequence completes:
 - Treat every fingerprint as a hypothesis about the deployment shape, not a trophy
 - Prefer concrete, reproducible observations over broad speculative scan output
 - Use automation to expand recon efficiently, but do not mistake automation output for confirmed attack surface
+- Escalate browser-semantic anomalies instead of normalizing them away because the operator needs coverage deltas for the next dispatch.
 - Keep target-facing execution in `vigil assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
 - Use `vigil assess` commands for backend state — helper scripts maintain audit consistency that hand-edits break
 - Surface candidates require evidence: a real response, artifact, or protocol signal

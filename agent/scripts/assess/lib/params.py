@@ -51,23 +51,6 @@ def extract_path_params(url_path: str) -> dict[str, str]:
     return result
 
 
-def extract_cookie_params(cookie_str: str) -> dict[str, str]:
-    """Parse a Cookie header string into a dict."""
-    if not cookie_str:
-        return {}
-    result: dict[str, str] = {}
-    for part in cookie_str.split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        if "=" in part:
-            key, _, val = part.partition("=")
-            result[key.strip()] = val
-        else:
-            result[part] = ""
-    return result
-
-
 def generate_params_sig(query_params: dict | str, body_params: dict | str) -> str:
     """Generate a dedup signature: md5 hash of sorted parameter key names."""
     if isinstance(query_params, str):

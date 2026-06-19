@@ -32,6 +32,9 @@ SAML implementations fail in predictable ways. The specification is complex (~80
 - `vigil assess kali exec -- curl ...` for all probing
 - `xmllint` or `xmlstarlet` for XML manipulation (inside kali runtime)
 - Base64 encoding/decoding for SAMLResponse manipulation
+- SAML toolkit, when installed, for local SAMLResponse/metadata decoding,
+  signing, and variant construction; replay target-facing requests through
+  `vigil assess kali exec` so the evidence remains audited
 - SAML Raider (Burp extension) concepts applied manually
 
 ---

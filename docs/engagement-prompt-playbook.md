@@ -46,7 +46,7 @@ The whole playbook reduces to this table. Everything after it is detail.
 | **Calling theory a finding** | "No theory. If you can't show the attacker outcome with a real request/response, park it `chain_required`, don't report it." | hunting §2; shared-constraints §7 |
 | **Thrashing** when another agent changed state | "Another agent is working — review what changed and decide; don't reflexively revert." | (net-new — §4) |
 | **About to ship a self-graded finding** | "Dispatch a fresh, low-context specialist to review this as a skeptical triager." | operator-core Phase 4; adversarial-mindset |
-| **Padding the report** with slop/theory | "Cut filler and speculation. Write the exact action and exact method, nothing else." | hunting §21; shared-constraints §7 |
+| **Padding the report** with slop/theory | "Cut filler and speculation. Write the exact action and exact method, nothing else." | reporting §11/§15; shared-constraints §7 |
 
 ---
 
@@ -96,13 +96,14 @@ Longer prompts that advance a phase. Anonymized; swap the bracketed parts.
 ### Kickoff
 ```
 Read AGENTS.md → assume Operator role (operator-core.md). Authorized engagement: [program/scope URL].
-Read RULES.md and hold to it. In-scope: [hosts]. Out-of-scope: [hosts]. Update scope.json.
+Apply the active `agent/rules/*.md`. In-scope: [hosts]. Out-of-scope: [hosts]. Update scope.json.
 Exploitation policy: [pause | selected | full_send]. Rate budget: [N req/s].
 Delegate all target-facing work to specialists, in parallel where phases permit. Depth over speed.
 Start the engagement.
 ```
 For an unfamiliar program, prepend a research step: *"Before starting, research the program's VDP/scope
-across sources — don't rely on a single page — and summarize what's actually in scope to RULES.md."*
+across sources — don't rely on a single page — and summarize what is actually in scope before updating
+scope.json."*
 
 ### Recon & coverage
 ```
@@ -256,8 +257,8 @@ the honest split.
 | "Severity must match real impact, not CVSS band" | hunting §20; shared-constraints §4 | The model inflates; this forces honesty. |
 
 ### Drop or downgrade (noise / not best practice)
-- **Re-pasting the full program policy every message.** Put it in RULES.md once; reference it. (operator-core
-  reads it from there.)
+- **Re-pasting the full program policy every message.** Put stable scope/policy facts in `scope.json`
+  or one operator activity note; reference that state instead.
 - **Anxious status pings** ("stuck or still working?", "status?") as a *technique*. Fine occasionally; not a
   method. Prefer a concrete check: "confirm running specialists are alive and writing files."
 - **Micromanaging report formatting mid-stream.** The report rules + QA pass own this; let them run, then

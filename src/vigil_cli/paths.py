@@ -20,6 +20,8 @@ def default_runtime_container() -> str:
     no longer silently drift. Default stays ``"vigil"``.
     """
     return os.environ.get("VIGIL_RUNTIME_CONTAINER", "vigil")
+
+
 # Hardcoded fallback for ``ORCHESTRATOR_BASE_URL`` — last layer of the
 # resolution chain in ``resolve_orchestrator_base_url`` and the value the
 # engagement-creation flow compares against to decide whether
@@ -140,7 +142,7 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 
 def resolve_orchestrator_base_url(install_root: Path, engagement_dir: Path | None = None) -> str:
-    """Resolve the orchestrator base URL through a four-layer chain.
+    """Resolve the orchestrator base URL through a five-layer chain.
 
     Precedence (highest first):
 

@@ -30,9 +30,8 @@ from assess.commands.dispatch._shared import (
 # Actions that don't need a cases.db (work-buffer SQLite). When the first
 # positional arg matches one of these names, we treat it as the action and
 # leave db_path empty rather than forcing the operator to pass a useless path.
-# Round 9: internal action names register/update-status/list/get/record-decision/
-# record-handoff (plus render-handoff) hit the orchestrator backend, not the work buffer.
-# Operator CLI maps these to ``vigil assess agent start|done|list|get|handoff|decision|...``.
+# These hit the orchestrator backend (not the work buffer). The operator-facing
+# CLI maps them to ``vigil assess agent start|done|list|get|handoff|decision|...``.
 _DBLESS_ACTIONS = (
     "render-handoff",
     "register",

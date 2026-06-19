@@ -23,7 +23,7 @@ vuln_class: graphql-injection, bola
 - graphql-voyager (schema visualization — host-side analysis)
 - BatchQL (batch query testing)
 - CrackQL (brute-force via GraphQL)
-- `vigil oob mint` / `vigil oob poll` — when a resolver argument reaches a downstream SQL/NoSQL/OS/SSRF sink, mint a nonce-tagged callback host (`vigil oob mint --technique <t> --target-url <graphql-url> --param <arg>`), embed its `http` host in the string argument, then `vigil oob poll --client <name>` returns the matched probe<->callback pair (check readiness with `vigil oob status --json`; `vigil oob client logs` is raw infra debug, not correlation). Defer to the wired injection skills — `agent/skills/sqli-testing/SKILL.md`, `agent/skills/command-injection/SKILL.md`, `agent/skills/ssrf-testing/SKILL.md` — for the full mint→fire→poll loop on the matched sink.
+- `vigil oob mint` / `vigil oob poll` — when a resolver argument reaches a downstream SQL/NoSQL/OS/SSRF sink, mint a nonce-tagged callback host (`vigil oob mint --client <name> --technique <t> --target-url <graphql-url> --param <arg>` binds the nonce under a running interactsh client's id and prints the exact host so poll can correlate; pass `--client <name>` when several clients run), embed the EXACT host it prints (`$OOB_HOST` — never hand-build a bare `<nonce>.oob...` host) in the string argument, then `vigil oob poll --client <name>` returns the matched probe<->callback pair (check readiness with `vigil oob status --json`; `vigil oob client logs` is raw infra debug, not correlation). Defer to the wired injection skills — `agent/skills/sqli-testing/SKILL.md`, `agent/skills/command-injection/SKILL.md`, `agent/skills/ssrf-testing/SKILL.md` — for the full mint→fire→poll loop on the matched sink.
 
 ## Methodology
 

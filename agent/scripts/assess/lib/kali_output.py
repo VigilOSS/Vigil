@@ -238,10 +238,8 @@ def _auth_context(engagement_dir: Path) -> str:
 
 
 def _peak_rss_kilobytes_to_bytes(peak_kb: int) -> int:
-    # Linux exposes ru_maxrss in KB; macOS exposes it in bytes. Rather than
-    # branch on platform, treat the number as KB on Linux (engagement runtime)
-    # and fall back to "as reported" elsewhere. The audit field name uses
-    # bytes so legacy MCP-era data stays consistent.
+    # Linux exposes ru_maxrss in KB; macOS exposes it in bytes. Convert only
+    # on Linux (the engagement runtime); on macOS the value is already bytes.
     if sys.platform == "linux":
         return peak_kb * 1024
     return peak_kb

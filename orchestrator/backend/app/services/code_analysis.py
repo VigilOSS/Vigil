@@ -981,7 +981,7 @@ def update_code_file(
 
         for key, value in normalized_kwargs.items():
             if key not in _CODE_FILE_ALLOWED_FIELDS:
-                continue  # silently ignore disallowed fields
+                continue  # already caught by _reject_unknown_fields above; dead branch
             if key in json_list_fields:
                 set_clauses.append(f"{key} = ?")
                 params.append(_json_list_text(value))

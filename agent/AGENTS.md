@@ -11,7 +11,7 @@ When a session starts, display:
 
 - Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
-- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md`
+- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md` / `.opencode/agent/*.md` / `.goose/recipes/*.yaml`
 - Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 - Skill discovery: `vigil assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
@@ -54,8 +54,7 @@ Always-active rules:
 - `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
 
-Path convention:
-- All assessment operations use `vigil assess <subcommand>` from any directory.
+CLI path convention is owned by `agent/shared-constraints.md` §9.
 
 ## Resume Gate
 
@@ -87,7 +86,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 3. **FORMULATE PLAN**
    - Name the action, tool, target, rationale, subagent, and skill that drives the work.
    - In recon, explicitly name which skill each dispatched subagent loads before it begins.
-   - Pick `--model` and `--reasoning` for `vigil assess agent start`:
+   - Pick the model and reasoning for the dispatch (recorded on the `vigil assess agent start` audit row; the runtime wrapper pins the spawn's actual model):
      - High-stakes specialist dispatches (exploit chains, deep code review, novel vulnerability hypotheses) — Claude operator/workers: `claude-opus-4-8` at `max` reasoning. Codex operator/workers: `gpt-5.6` at `xhigh` reasoning. (`max` is Claude-only.)
      - Standard specialist work — same model, `high` reasoning.
      - Bounded sidecar work where latency or cost matters more than depth — drop to `gpt-5.6 medium` or `claude-sonnet-4-6`.
@@ -102,9 +101,9 @@ After engagement initialization completes, repeat until all attack paths exhaust
    5. The sub-agent reads and follows the skill(s); the operator's job is selection, not procedure — pulling the skill body into the operator context defeats the division of labor.
 
    Then run `vigil assess list-references` (add `--skill <name>` to see the references paired with a skill) for payload and checklist depth — references are not a fallback, they are the methodology library.
-   - **Phase 1 (Recon):** `recon-specialist` → `agent/skills/web-recon/SKILL.md`; `source-analyzer` → `agent/skills/source-analysis/SKILL.md`
-   - **Phase 2 (Collect):** `surface-collector` → `agent/skills/surface-collection/SKILL.md` for URL collection, triage, and work-buffer population
-   - **Phase 3 (Test):** `vulnerability-analyst` → pick the vuln-class skill via `vigil assess list-skills` matching the candidate (e.g., `sqli-testing`, `idor-testing`, `xss-testing`); `fuzzer` → `agent/skills/directory-fuzzing/SKILL.md` or `agent/skills/parameter-fuzzing/SKILL.md`
+   - **Phase 1 (Recon):** `recon-specialist` → `agent/skills/web-recon/SKILL.md`; `source-analyzer` → `agent/skills/source-analysis/SKILL.md`; add `agent/skills/browser-semantic-analysis/SKILL.md` when the skill's activation triggers apply.
+   - **Phase 2 (Collect):** `surface-collector` → `agent/skills/surface-collection/SKILL.md` for URL collection, triage, and work-buffer population; add `browser-semantic-analysis` when collection needs browser-semantics evidence.
+   - **Phase 3 (Test):** `vulnerability-analyst` → pick the vuln-class skill via `vigil assess list-skills` matching the candidate (e.g., `sqli-testing`, `idor-testing`, `xss-testing`); add `browser-semantic-analysis` when the verdict depends on browser-enforced behavior or a non-browser baseline is non-conclusive; `fuzzer` → `agent/skills/directory-fuzzing/SKILL.md` or `agent/skills/parameter-fuzzing/SKILL.md`
    - **Phase 4 (Verify):** `vulnerability-analyst` in review mode → load `agent/skills/finding-verification/SKILL.md` (the adversarial verify procedure) + the vuln-class skill matching the findings under review; then run the operator-owned root-cause grouping pass below
    - **Phase 5 (Exploit):** `exploit-developer` → pick the skill matching the confirmed finding class via `vigil assess list-skills` ("Use when:" criteria); `osint-analyst` → `agent/skills/osint-recon/SKILL.md`
    - **Phase 7 (Report):** `report-writer` → `agent/skills/report-generation/SKILL.md`
@@ -115,7 +114,9 @@ After engagement initialization completes, repeat until all attack paths exhaust
      - `agent/skills/kali-exec/SKILL.md` — verb menu and audit-flag mapping.
      - `vigil assess kali --help` / `vigil assess kali <verb> --help` — live flag set.
      - `vigil assess contract kali <verb>` — canonical schema, helper defaults, common mistakes, example payload.
-   - Host Bash, `docker run`, `docker exec`, and ad-hoc curl/nmap from the host are forbidden against scoped targets — they bypass the audit pipeline and break runtime network isolation.
+   - Host Bash, `docker run`, `docker exec`, and ad-hoc curl/nmap from the host are forbidden against scoped targets — they bypass the audit pipeline and break runtime network isolation. A host-side `curl`/`wget`/`nc` against a scoped target reaches nothing: the target is routable **only** from inside the runtime, so a host probe both fails to connect and is blocked — it is a wasted turn, never a fallback when dispatch is unavailable.
+   - The host OS, the Docker daemon, and the container runtime are **out of scope** — the target is reached only through the provided web/network surface, so never probe or inspect the host or Docker (no `docker exec`/`inspect`/`cp` against the target, no reading the daemon) to learn about or extract from the target.
+   - **Sanctioned inline form (the positive alternative to a host probe).** When you must run a probe yourself instead of dispatching it — an Operator-executed exception (step 7), or a runtime where specialist dispatch is unavailable or unreliable — issue it through `vigil assess kali`, which is the only path that reaches the target *and* writes the audit row. Use a typed verb when one fits (e.g. `vigil assess kali httpx -u <url> -status-code -title -tech-detect --technique DISCOVERY --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout 60`), or the raw-HTTP escape hatch otherwise: `vigil assess kali exec --technique <T> --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout 60 -- curl -sS <url>`. All five audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) are required — the CLI fails closed without them. If a host command is refused or fails, the recovery is to re-issue it through `vigil assess kali`, never to abandon the objective.
    - If `vigil assess kali --help` errors or a verb fails, pause target-facing work and debug the runtime from the host using `agent/references/runtime-guides/kali-cli.md`.
 7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and backend state management — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
 
@@ -129,6 +130,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
    - **Backend-write helpers** — `record-finding`, `link-finding`, `supersede-intel`, `resolve-surface`, and other pure-write helpers.
    - **Bulk mechanical probing on a fixed list** — DNS resolution (`dnsx`), HTTP liveness (`httpx`), and port scanning (`nmap`/`naabu`) over an already-enumerated host list, plus the matching ingestion (`ingest-endpoints`, `ingest-httpx`). This is mechanical pipeline throughput, not analysis: no hypothesis forming, no surface/finding/severity judgment, no per-host investigation. Run it synchronously through `vigil assess kali` (one blocking call at a time) when deterministic pipeline progress matters more than per-host depth. Analysis, triage, vuln testing, and OSINT judgment still go to specialists — the operator produces the liveness/coverage substrate; specialists reason over it.
      - **Prefer the composed pipeline verbs** for this substrate instead of hand-chaining tools: `vigil assess dns-discovery <apex…>` runs subfinder + CT + (optional) brute → merge/de-noise → dnsx-resolve into one `resolved_hosts.txt`; `vigil assess web-discovery <resolved_hosts.txt>` then de-noises → httpx liveness → **auto-populates the `assessment_host_liveness` ledger** → katana-crawls the live subset → (with `--db`) ingests gf-bucketed URLs. Both run synchronously and expose every tool knob as a flag (`--ports`, `--katana-depth`/`--katana-extra-args`, `--wordlist`, `--dnsx-profile`, …). They do the error-prone piping/de-noise/stdin-safety the LLM should not hand-roll. To fold a stray httpx run into the ledger, `vigil assess ingest-httpx <results.jsonl>`. Specialists then read each host's current liveness from the ledger rather than re-probing or guessing.
+     - **Escalate to browser-semantic collection when the baseline may be lying.** Dispatch the relevant specialist with `agent/skills/browser-semantic-analysis/SKILL.md` so it compares the non-browser baseline against an audited headless/browser observation and records the delta.
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `vigil assess record-finding` to write findings to the backend. The backend is the sole store.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. Record them via `vigil assess record-intel cve <cve-json-file>` (intel_cves table), NOT `record-finding`. Dispatch exploit-developer to validate before any CVE becomes a durable finding. This reconciles "record immediately" with "no theoretical findings."
    **Exception — theoretical holding area:** A strong-but-unproven finding (static/code evidence solid, runtime PoC still owed) may be held rather than dropped: record it with `evidence_type=theoretical` + `details.chain_required=true` and verify it `pending_runtime_proof`. It stays out of report-readiness and exploit-candidates until an exploit-developer runtime pass re-verifies it `confirmed`/`downgraded`. Surface the holding area with `vigil assess list-findings --holding`.
@@ -145,6 +147,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 - Continue validation when an escalation path or retest path is still open — shallow validation misses chained impacts.
 - Keep operator communication concise, but never at the expense of recording findings, surfaces, or evidence.
 - Read between the lines: infer backend frameworks, proxies, auth boundaries, and deployment shape from subtle indicators, not only explicit banners.
+- Treat browser semantics as a targeted evidence-correction lane. Use browser mode when non-browser probes may be observing an edge/challenge/soft-error page or when the security outcome depends on browser execution; do not turn every API or fuzzing task into browser automation.
 - When full exploitation fails, validate partial signals in stages: sleep, DNS/OOB, env leakage, version leakage, file read, then RCE where appropriate.
 - Prefer realistic attack paths that transfer to real environments over puzzle-box sequences that require guessing hidden steps.
 
@@ -154,10 +157,12 @@ Before initializing any engagement, ensure the shared Kali runtime container is 
 
 ```bash
 vigil runtime start
-vigil assess kali --help     # smoke-test discovery; should list 20 verbs
+vigil assess kali --help     # smoke-test discovery; lists available verbs
 ```
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install. `vigil assess kali` execs into this single container regardless of which engagement is active — the engagement context is plumbed through `${ENGAGEMENT_DIR}` and the audit-flag set on each call.
+
+**Reachability is not scope** — only `scope.json` hosts are in scope; never probe, pivot into, or build findings on reachable-but-out-of-scope infrastructure (other engagements, neighbouring subnets, the host), even when the shared runtime can route to it. (Full rule in `shared-constraints.md §1`.)
 
 **Image drift — recreate the runtime after every rebuild.** `vigil runtime start` compares the running container's image ID against the configured image tag and refuses to continue when they diverge. Whenever you rebuild the runtime image or upgrade the installed image, run `vigil runtime restart` so the container picks up the new image and current `/engagements` bind mount. No engagement data moves; only the container is replaced.
 
@@ -188,44 +193,29 @@ Phase 3a (in the CONSUME & TEST step below) is a **coverage audit**, not a secon
 
 ### Synchronous Target-Facing Dispatch (mandatory)
 
-Every target-facing dispatch runs **synchronously**: the specialist issues
-blocking `vigil assess kali <verb> ... --timeout N` calls, each awaited to
-completion in-band — no `run_in_background`, no `vigil assess kali job start`, no
-dtach, no watcher/poll loop. This is not a style preference; it is the fix for a
-concrete failure mode. A subagent that backgrounds a detached job and then halts
-"waiting for a completion notification" is auto-resumed by the harness, launches
-the next detached job, and halts again — unbounded relaunch thrash that, in past
-engagements, burned 80–210 K tokens per agent and produced duplicate httpx
-passes with near-zero net coverage. Synchronous, in-band execution eliminates it
-at the source.
-
-**Synchronous ≠ one-call-at-a-time, and ≠ no parallelism.** "Synchronous" bans
-only the backgrounding / `dtach` / fire-and-forget / poll-for-completion-later
-patterns above. It does NOT mean a single concurrent call. Blocking calls are
-fine whether issued sequentially OR several in parallel — the operator running
-4–6 specialists at once (each of which awaits its own probes in-band) is the
-encouraged shape on the Heavy tier, and a specialist may itself await several
-blocking probes concurrently. The rule is: every call is awaited to completion
-in-band by the agent that launched it; nothing is detached and reaped later. The
-prohibition is on orphaned/poll-later execution, not on concurrency.
-
-Bake this into the dispatch prompt for any target-facing role (recon,
-surface-collector, vulnerability-analyst, fuzzer, exploit-developer): **"Run
-every probe synchronously with a single blocking `vigil assess kali` call and an
-explicit `--timeout`. Do not use `run_in_background`, `kali job start`, dtach, or
-any poll/watch loop."** `kali job start` is operator-owned and reserved for a
-single authorized sweep that must outlive its dispatch (see
-`agent/shared-constraints.md §2` and `agent/skills/kali-exec/SKILL.md`). When a
-specialist proves unreliable for bulk mechanical probing, the operator's own
-bulk-probe carve-out (Core Loop step 7) — synchronous `dnsx`/`httpx`/`nmap` over
-a fixed list plus ingestion — is the deterministic fallback, not async dispatch.
+Every target-facing probe runs **synchronously** — one blocking `vigil assess
+kali <verb> … --timeout N`, awaited in-band; no `run_in_background`, `kali job
+start`, dtach, or poll-later loop (the rule, the detached-job relaunch-thrash
+rationale, and the "synchronous ≠ serial — parallel blocking calls are
+encouraged" clarification are owned by `agent/shared-constraints.md §2`, which
+every specialist loads). Operator job: **bake the enforcement sentence into every
+target-facing dispatch prompt** — *"Run every probe synchronously with one
+blocking `vigil assess kali` call and an explicit `--timeout`; no
+`run_in_background`, `kali job start`, dtach, or poll/watch loop."* `kali job
+start` stays operator-owned (one authorized sweep that must outlive its dispatch
+— `shared-constraints §2`); when a specialist is unreliable for bulk probing, the
+Core-Loop-step-7 bulk-probe carve-out is the fallback, not async dispatch.
 
 ### Runtime Dispatch Syntax
 
-Subagent invocation is runtime-specific. **Invoke the registered wrapper**, never a generic task-spawning tool — the wrapper is what points the specialist at its role file and shared constraints.
+Invoke the **registered wrapper** for the role, never a generic task-spawning tool — the wrapper loads the specialist's role context and shared constraints. On all runtimes: every target probe goes through `vigil assess kali`, never raw host Bash (see Core Loop step 6).
 
-- **Claude Code**: dispatch with `@agent-name` (e.g. `@recon-specialist`). Wrappers are registered in `.claude/agents/*.md`. The built-in `Task`/`Agent` tool spawns an unregistered subagent and skips the wrapper entirely, so the specialist would operate without its role context — do not use it for registered roles.
-- **Codex**: dispatch via the registered agent roster (`.codex/agents/*.toml`) using Codex's subagent-invocation mechanism. The TOML wrapper does the same role-bootstrap work as the Claude wrapper.
+| Harness | Invocation | Note |
+|---------|-----------|------|
+| **Claude Code** | `@<role>` (e.g. `@recon-specialist`) | Wrappers in `.claude/agents/*.md`. Do not use the built-in `Task`/`Agent` tool — it spawns an unregistered subagent and skips the role wrapper. |
+| **Codex** | Registered roster spawn (`.codex/agents/*.toml`) | Use Codex's native subagent-invocation mechanism; the TOML wrapper does the role bootstrap. |
+| **OpenCode** | **INLINE** — the operator issues `vigil assess kali` probes itself and does the find-and-exploit work directly | Custom specialist roles are not dispatchable headless on `opencode run`; the operator applies the same methodology a specialist would. The `.opencode/agent/*.md` wrappers still load (they shape the operator/primary), but there is no separate specialist child to fire. **Claude Code and Codex keep the normal dispatch model** — their custom roles are registered and dispatchable. |
+| **Goose** | `delegate source <role>` (e.g. `delegate source recon-specialist`) | Roster in `.goose/recipes/*.yaml`; `GOOSE_RECIPE_PATH` (set by `start_goose.sh`) resolves names. The operator prompt loads from the engagement `.goosehints`; no `--agent operator` step needed. |
 
 Generated specialist definitions embed the canonical prompt body from `agent/agents/<name>.md`, so registered subagents start with their role instructions already in context. The embedded role prompt's "Load First" section then bootstraps `shared-constraints.md` (web agents) or `shared-constraints-code.md` (code agents) plus the primary skill. Specialists never load the operator prompt (`CLAUDE.md`/`AGENTS.md`) — that's operator context, not theirs.
 
@@ -268,9 +258,7 @@ agent_role: <role>
 authorized_phase: <phase>
 ```
 
-The operator obtains `agent_id` by:
-- **Claude Code**: use the id printed by `vigil assess agent start` — choose or accept a unique string per dispatch (e.g. `recon-a3f9`).
-- **Codex**: use the id returned by `spawn_agent`.
+The `agent_id` is operator-chosen — a unique string per dispatch (e.g. `recon-a3f9`). Use the same value in the `vigil assess agent start` audit record and in the runtime spawn's Runtime Identity block so they reconcile. (Codex returns its own id from `spawn_agent`; use that.)
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. A 404 from render-handoff means the `agent_id` in the handoff does not match the registered dispatch.
 
@@ -353,7 +341,7 @@ omits the mode, the agent picks the safest default for its role:
 
 ### Swarm Dispatch
 
-Swarm fans a corpus workload out to N parallel workers. The helper `vigil assess agent start-swarm` writes one dispatch row per worker, encodes each worker's batch range in its `task`, and prints the agent_id table — **it does NOT spawn specialists**. The operator fires the N specialists manually using the runtime's native wrapper (`@<role>` in Claude Code, `spawn_agent` in Codex), passing each row's `agent_id` in the Runtime Identity block. Each specialist reads its own batch range from its dispatch row via `vigil assess agent get <agent_id>`.
+Swarm fans a corpus workload out to N parallel workers. The helper `vigil assess agent start-swarm` writes one dispatch row per worker, encodes each worker's batch range in its `task`, and prints the agent_id table — **it does NOT spawn specialists**. The operator fires the N specialists manually using the harness's native spawn (see Runtime Dispatch Syntax table above), passing each row's `agent_id` in the Runtime Identity block. Each specialist reads its own batch range from its dispatch row via `vigil assess agent get <agent_id>`.
 
 ```bash
 vigil assess agent start-swarm \
@@ -746,25 +734,7 @@ Access-control depth (IDOR/BOLA/BFLA) is only **real** when measured across **�
 
 ### Auth-expiry recovery loop
 
-Authenticated dispatches fail in a recognizable shape: 401/403 on routes that were 200 yesterday, redirect-to-login, session expired JSON, or a `WWW-Authenticate: Bearer error="invalid_token"` header. Specialists surface these in their handoff `runtime_issues` with auth-expiry keywords. When the operator sees that signal, do not blame the specialist or re-dispatch with the same expired material — recover the auth first, then re-dispatch.
-
-Recovery branch:
-
-1. **Detect.** Scan recent dispatch handoffs and command-run output for the failure shape:
-   ```bash
-   vigil assess agent list --limit 5 --json \
-     | jq -r '.[] | select(.handoff.runtime_issues // [] | tostring | test("401|403|expired|invalid_token|redirect.*login"; "i")) | .agent_id'
-   vigil assess list-command-runs --q "401\|403\|session\|expired" --show-matches --limit 10
-   ```
-2. **Decide refresh path.**
-   - **Bearer / API token** in `auth.json.headers.Authorization`: refresh via the documented refresh endpoint (if the program offers one) or re-run the login flow. Operator action; do NOT dispatch a specialist for a token refresh — the refresh request itself is one-shot mechanical work.
-   - **Session cookie** in `auth.json.cookies` / `host_cookies[]`: re-capture via mitmproxy-assisted login. Restart browser flow through the proxy; `proxy_addon.py` writes the refreshed cookie set into the matching engagement's `auth.json` automatically (per-engagement routing by scope).
-   - **OAuth/OIDC**: re-run the authorization code grant against the discovery endpoint; check `auth.json.tokens.refresh_token` first.
-3. **Validate the refresh.** Re-run the same login check from Credential Auto-Use step 1 via `vigil assess kali exec --technique AUTH --intent "post-refresh validation" ...`. The audit row records both the failed pre-refresh probe and the successful post-refresh probe so the timeline is unambiguous.
-4. **Re-dispatch only on success.** Re-dispatch the affected specialist (typically `vulnerability-analyst` or `exploit-developer`) with a dispatch-context note: "Auth refreshed at <iso>; the previous handoff's runtime_issues about 401/403 are stale — re-run from the same task objective with fresh credentials in `auth.json`."
-5. **Fallback to anonymous.** When the auth cannot be refreshed in-session (MFA challenge, human-in-the-loop required, credentials genuinely expired by the program), record the gap with `vigil assess agent decision --kind dispatch_blocked --reason "auth expired; awaiting human refresh" --surfaced-to-user` and let the dispatch continue against anonymous scope. Do not silently retry against expired material — every retry burns a context window and the failure is deterministic.
-
-Limit step 4 to two attempts. If the refreshed auth fails validation in step 3 twice, treat it as a genuine credential issue (not an in-session expiry) and switch to the fallback branch in step 5.
+Authenticated dispatches fail in a recognizable shape (401/403 on formerly-200 routes, redirect-to-login, `invalid_token`); specialists surface it in handoff `runtime_issues`. On that signal, **recover auth before re-dispatching** (refresh the bearer/token, re-capture the session cookie via the mitmproxy login flow, or re-run the OAuth grant), validate with one `vigil assess kali exec --technique AUTH` login check, then re-dispatch with an "auth refreshed at <iso>; prior 401/403 issues are stale" note. Cap recovery at **two** attempts, then fall back to anonymous scope and record `vigil assess agent decision --kind dispatch_blocked --surfaced-to-user`. Full procedure → `agent/references/runtime-guides/auth-recovery.md`.
 
 ## Kali Execution
 
@@ -868,7 +838,9 @@ When `check-phase-readiness --phase report` is clean AND the judgment items abov
 - Use absolute paths: `/usr/bin/curl`, `/bin/cat`, `/usr/bin/grep`, etc.
 - Do NOT use `grep -P` (Perl regex). Use `grep -E` (extended) or `rg` instead.
 - HEREDOC: Use unquoted delimiter (`<< EOF`), NOT single-quoted (`<< 'EOF'`).
-- New files: use bash commands (mkdir, cat >, echo >). Existing files: use Edit tool.
+- Make file edits through the active coding environment's patch/edit tool. Avoid shell
+  redirection (`cat >`, `echo >`) for manual file creation or modification because it
+  bypasses reviewable patch diffs and is easy to quote incorrectly in zsh.
 
 ## Tool Promotion Workflow
 
