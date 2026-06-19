@@ -101,6 +101,11 @@ set_output_paths() {
   CLAUDE_AGENTS_DIR="$OUTPUT_DIR/.claude/agents"
   CODEX_AGENTS_DIR="$OUTPUT_DIR/.codex/agents"
   OPENCODE_AGENTS_DIR="$OUTPUT_DIR/.opencode/agent"
+  # Goose specialist roster: one recipe .yaml per role. Unlike OpenCode/Claude/Codex,
+  # Goose has NO operator wrapper — the operator prompt is carried via the engagement's
+  # `.goosehints` and the default `goose run` agent dispatches specialists via the
+  # `delegate` tool by recipe name. See docs/goose-bench.md.
+  GOOSE_RECIPES_DIR="$OUTPUT_DIR/.goose/recipes"
 }
 set_output_paths
 
@@ -236,6 +241,32 @@ opencode_variant_desc_suffix() {
   fi
 }
 
+# -----------------------------------------------------------------------------
+# Goose per-role model routing.
+#
+# Goose specialists pin their model in each recipe's `settings.goose_model` (the
+# verified per-subagent override path — NOT the GOOSE_SUBAGENT_* env vars, which
+# aaif-goose#9644 lets the orchestrator confabulate/override).
+#
+# #9397 (verified live 2026-06-19): goose v1.38.0's openai-compat provider drops
+# DeepSeek-V4 thinking-mode `reasoning_content` from the 2nd..Nth assistant messages it
+# emits when it splits a parallel-tool-call turn, so DeepSeek 400s. The bench's
+# reasoning-content repair proxy (goose_reasoning_proxy.py, launched by start_goose.sh)
+# re-attaches it, so thinking-mode V4 now works on the DIRECT path — per-role pro/flash
+# routing is restored. Goose addresses DeepSeek by the BARE id (no `deepseek/` prefix).
+# See docs/goose-bench.md.
+GOOSE_PRO_MODEL="deepseek-v4-pro"
+GOOSE_FLASH_MODEL="deepseek-v4-flash"
+
+goose_model_for() {
+  # Mirror the OpenCode per-role tiering (agent_model) but with goose's BARE ids:
+  # Flash for bounded recon/parsing roles, Pro for the operator + hard reasoning roles.
+  case "$(agent_model "$1")" in
+    "$OPENCODE_FLASH_MODEL") printf '%s\n' "$GOOSE_FLASH_MODEL" ;;
+    *)                       printf '%s\n' "$GOOSE_PRO_MODEL" ;;
+  esac
+}
+
 agent_prompt_body() {
   local agent_name="$1"
   local source="$SOURCE_DIR/agents/$agent_name.md"
@@ -262,7 +293,7 @@ render_prompt_locality() {
 
 - Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
-- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md` / `.opencode/agent/*.md`
+- Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md` / `.opencode/agent/*.md` / `.goose/recipes/*.yaml`
 - Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 - Skill discovery: `vigil assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
@@ -576,6 +607,49 @@ render_opencode_wrapper() {
   render_one_opencode_wrapper "$agent_name" "$opposite_model" "$variant_name_suffix" "$variant_desc_suffix"
 }
 
+# Write the Goose specialist recipe for $agent_name to .goose/recipes/<name>.yaml.
+# The operator has NO recipe (its prompt is the engagement `.goosehints`; the default
+# goose agent dispatches via `delegate source <role>`), so this is a no-op for
+# `operator`. Each specialist recipe carries: the role prompt body as a YAML literal
+# block with an EXPLICIT indent indicator (`|2`) so a body whose first line is itself
+# indented cannot mis-set the block indent; the `developer` builtin (shell + editor);
+# and a per-role `goose_model` pin. Empty body lines are emitted truly empty (no
+# trailing whitespace); content lines are indented 2 to sit inside the block.
+render_goose_recipe() {
+  local agent_name="$1"
+  [[ "$agent_name" == "operator" ]] && return 0
+  local description model out description_yaml
+  description=$(agent_description "$agent_name")
+  model=$(goose_model_for "$agent_name")
+  out="$GOOSE_RECIPES_DIR/$agent_name.yaml"
+  mkdir -p "$(dirname "$out")"
+  # Escape for a YAML double-quoted scalar so any description renders valid YAML:
+  # backslashes first (so we don't double-escape), then double quotes. All current
+  # descriptions are quote/backslash-free, so this is a no-op for today's roster.
+  description_yaml="${description//\\/\\\\}"
+  description_yaml="${description_yaml//\"/\\\"}"
+  {
+    cat <<EOF
+# GENERATED FILE — DO NOT EDIT.
+# Source: agent/agents/$agent_name.md
+# Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+version: "1.0.0"
+title: $agent_name
+description: "$description_yaml"
+instructions: |2
+EOF
+    agent_prompt_body "$agent_name" | awk '{ if ($0 == "") print ""; else print "  " $0 }'
+    cat <<'EOF'
+extensions:
+  - type: builtin
+    name: developer
+settings:
+EOF
+    printf '  goose_model: %s\n' "$model"
+  } > "$out"
+  perl -0pi -e 's/\n+\z/\n/' "$out"
+}
+
 # Render the active roster's wrappers (red or blue) selected by $TYPE.
 render_all_wrappers() {
   local agent_name
@@ -589,6 +663,7 @@ render_all_wrappers() {
     render_claude_wrapper "$agent_name"
     render_codex_wrapper "$agent_name"
     render_opencode_wrapper "$agent_name"
+    render_goose_recipe "$agent_name"
   done
 }
 
@@ -708,6 +783,20 @@ check_render_one() {
       printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$opencode_variant_rel" >&2
       diff -u "$target_opencode_variant" "$tmp_dir/$opencode_variant_rel" >&2 || true
       drift=1
+    fi
+    # Goose specialist recipe. No operator recipe exists by design (operator prompt
+    # is the engagement .goosehints), so the recipe check is skipped for operator.
+    if [[ "$agent_name" != "operator" ]]; then
+      local goose_rel=".goose/recipes/$agent_name.yaml"
+      local target_goose="$source_output_dir/$goose_rel"
+      if [[ ! -f "$target_goose" ]]; then
+        printf 'DRIFT (%s): %s missing — expected rendered recipe not present in repo\n' "$check_type" "$goose_rel" >&2
+        drift=1
+      elif ! diff -q "$target_goose" "$tmp_dir/$goose_rel" >/dev/null 2>&1; then
+        printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$goose_rel" >&2
+        diff -u "$target_goose" "$tmp_dir/$goose_rel" >&2 || true
+        drift=1
+      fi
     fi
   done
 

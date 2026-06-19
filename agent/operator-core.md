@@ -164,11 +164,14 @@ Core-Loop-step-7 bulk-probe carve-out is the fallback, not async dispatch.
 
 ### Runtime Dispatch Syntax
 
-Subagent invocation is runtime-specific. **Invoke the registered wrapper**, never a generic task-spawning tool — the wrapper is what points the specialist at its role file and shared constraints.
+Invoke the **registered wrapper** for the role, never a generic task-spawning tool — the wrapper loads the specialist's role context and shared constraints. On all runtimes: every target probe goes through `vigil assess kali`, never raw host Bash (see Core Loop step 6).
 
-- **Claude Code**: dispatch with `@agent-name` (e.g. `@recon-specialist`). Wrappers are registered in `.claude/agents/*.md`. The built-in `Task`/`Agent` tool spawns an unregistered subagent and skips the wrapper entirely, so the specialist would operate without its role context — do not use it for registered roles.
-- **Codex**: dispatch via the registered agent roster (`.codex/agents/*.toml`) using Codex's subagent-invocation mechanism. The TOML wrapper does the same role-bootstrap work as the Claude wrapper.
-- **OpenCode**: custom-specialist `task` dispatch is NOT available on `opencode run` — the built-in `task` tool's `subagent_type` enum exposes only the server-registered built-ins (`explore`/`general`); our `.opencode/agent/*.md` roles are not dispatchable through it (opencode#29616, opencode#20059). So on OpenCode the operator works the engagement **INLINE**: it issues the sanctioned `vigil assess kali` probes itself and does the find-and-exploit work directly, applying the same methodology a specialist would. The `.opencode/agent/*.md` wrappers and pinned per-role models still load (they shape the operator/primary), but there is no separate specialist child to fire. **Claude Code and Codex keep the normal dispatch model** — their custom roles are registered and dispatchable, so probing stays delegated. **Every target probe goes through `vigil assess kali` and NEVER raw host Bash** — that absolute rule holds on all runtimes; a sanctioned `vigil assess kali` probe is recorded host-side in `command-runs` for the taint audit no matter who issues it, and per-attempt FRONT-net-only runtime isolation (ADR 0005) constrains all target traffic.
+| Harness | Invocation | Note |
+|---------|-----------|------|
+| **Claude Code** | `@<role>` (e.g. `@recon-specialist`) | Wrappers in `.claude/agents/*.md`. Do not use the built-in `Task`/`Agent` tool — it spawns an unregistered subagent and skips the role wrapper. |
+| **Codex** | Registered roster spawn (`.codex/agents/*.toml`) | Use Codex's native subagent-invocation mechanism; the TOML wrapper does the role bootstrap. |
+| **OpenCode** | **INLINE** — the operator issues `vigil assess kali` probes itself and does the find-and-exploit work directly | Custom specialist roles are not dispatchable headless on `opencode run`; the operator applies the same methodology a specialist would. The `.opencode/agent/*.md` wrappers still load (they shape the operator/primary), but there is no separate specialist child to fire. **Claude Code and Codex keep the normal dispatch model** — their custom roles are registered and dispatchable. |
+| **Goose** | `delegate source <role>` (e.g. `delegate source recon-specialist`) | Roster in `.goose/recipes/*.yaml`; `GOOSE_RECIPE_PATH` (set by `start_goose.sh`) resolves names. The operator prompt loads from the engagement `.goosehints`; no `--agent operator` step needed. |
 
 Generated specialist definitions embed the canonical prompt body from `agent/agents/<name>.md`, so registered subagents start with their role instructions already in context. The embedded role prompt's "Load First" section then bootstraps `shared-constraints.md` (web agents) or `shared-constraints-code.md` (code agents) plus the primary skill. Specialists never load the operator prompt (`CLAUDE.md`/`AGENTS.md`) — that's operator context, not theirs.
 
@@ -294,7 +297,7 @@ omits the mode, the agent picks the safest default for its role:
 
 ### Swarm Dispatch
 
-Swarm fans a corpus workload out to N parallel workers. The helper `vigil assess agent start-swarm` writes one dispatch row per worker, encodes each worker's batch range in its `task`, and prints the agent_id table — **it does NOT spawn specialists**. The operator fires the N specialists manually using the runtime's native spawn (`@<role>` in Claude Code, `task` with `subagent_type` in OpenCode, `spawn_agent` in Codex), passing each row's `agent_id` in the Runtime Identity block. Each specialist reads its own batch range from its dispatch row via `vigil assess agent get <agent_id>`.
+Swarm fans a corpus workload out to N parallel workers. The helper `vigil assess agent start-swarm` writes one dispatch row per worker, encodes each worker's batch range in its `task`, and prints the agent_id table — **it does NOT spawn specialists**. The operator fires the N specialists manually using the harness's native spawn (see Runtime Dispatch Syntax table above), passing each row's `agent_id` in the Runtime Identity block. Each specialist reads its own batch range from its dispatch row via `vigil assess agent get <agent_id>`.
 
 ```bash
 vigil assess agent start-swarm \
