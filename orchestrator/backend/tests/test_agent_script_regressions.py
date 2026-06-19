@@ -3194,39 +3194,48 @@ def test_s11_spec_parses_refs_composed_form_and_pathlevel_params(monkeypatch, tm
     assert "id" in post_path
 
 
-def test_opencode_dispatches_normally_no_inline_probe_carveout() -> None:
-    """The former OpenCode-only inline-probing carve-out (Finding #3 / Option A)
-    has been RETIRED: OpenCode now dispatches specialists exactly like
-    Claude/Codex. Reliability is restored by the project-level permission block
-    (``_OPENCODE_PERMISSION`` in ``engagements.py``) that fixed the child-session
-    ``task`` deadlock, and audit coverage holds because a sanctioned ``vigil
-    assess kali`` probe is recorded host-side in ``command-runs`` for the taint
-    audit regardless of who issues it (opencode#5894's plugin-hook gap is
-    contained by that record + ADR-0005 FRONT-net-only isolation + the
-    never-raw-host-Bash rule). This guards that operator-core.md no longer
-    mandates inline probing on OpenCode and that the retirement rendered into
-    AGENTS.md.
+def test_opencode_works_inline_claude_codex_dispatch_carveout() -> None:
+    """OpenCode works the engagement INLINE, while Claude/Codex (and Goose) keep
+    the normal dispatch model.
+
+    The 2026-06-18 switch to "OpenCode dispatches specialists exactly like
+    Claude/Codex" was REVERTED: on headless ``opencode run`` the built-in
+    ``task`` tool's ``subagent_type`` enum exposes only the server-registered
+    built-ins (``explore``/``general``), so our ``.opencode/agent/*.md`` custom
+    roles are not dispatchable (opencode#29616). Mandating dispatch on OpenCode
+    regressed a bench family 100%->60%, so the operator works OpenCode targets
+    inline (issuing the sanctioned ``vigil assess kali`` probes itself). This
+    guards that operator-core.md carries the opencode#29616-keyed INLINE
+    carve-out and that it rendered into AGENTS.md, while Claude/Codex keep
+    dispatching. Kept consistent with the passing
+    ``tests/test_bench.py::test_dispatch_doctrine_opencode_inline_carveout*``
+    tests.
     """
     repo_root = Path(__file__).resolve().parents[3]
     core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
     agents = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8")
 
     assert "### Runtime Dispatch Syntax" in core
+    assert "### Runtime Dispatch Syntax" in agents
 
-    # The retired inline-probe mandate is GONE from both the source and the render.
-    for gone in ("OpenCode-only carve-out", "issue target probes INLINE", "silently not execute"):
-        assert gone not in core, f"operator-core.md still carries retired carve-out text: {gone!r}"
-        assert gone not in agents, f"AGENTS.md still carries retired carve-out text: {gone!r}"
+    # The reverted "dispatch normally on OpenCode" framing is GONE from both the
+    # source and the render — that posture regressed the bench.
+    for gone in ("Dispatch specialists normally", "dispatches exactly like Claude"):
+        assert gone not in core, f"operator-core.md still carries reverted text: {gone!r}"
+        assert gone not in agents, f"AGENTS.md still carries reverted text: {gone!r}"
 
-    # Dispatch-normally is the rule on every runtime (incl. OpenCode) and rendered.
-    assert "Dispatch specialists normally" in core
-    assert "Dispatch specialists normally" in agents
-    # The factual opencode#5894 audit note remains (now framed as contained).
-    assert "opencode#5894" in core
+    # The OpenCode INLINE carve-out is present and rendered (Runtime Dispatch
+    # Syntax now uses a table; locate the OpenCode row by its table cell marker).
+    for src, name in ((core, "operator-core.md"), (agents, "AGENTS.md")):
+        oc_idx = src.index("| **OpenCode**")
+        oc_row = src[oc_idx:].split("\n", 1)[0]
+        assert "INLINE" in oc_row, f"{name}: OpenCode row lost INLINE posture"
+        # Claude/Codex keep the normal dispatch model.
+        assert "Claude Code and Codex keep the normal dispatch model" in src, name
 
-    # Claude/Codex bullets still carry no inline-probe override.
-    claude_idx = core.index("- **Claude Code**")
-    codex_idx = core.index("- **Codex**")
-    oc_idx = core.index("- **OpenCode**")
+    # Claude/Codex rows carry NO inline-probe override — they dispatch.
+    claude_idx = core.index("| **Claude Code**")
+    codex_idx = core.index("| **Codex**")
+    oc_idx = core.index("| **OpenCode**")
     assert claude_idx < codex_idx < oc_idx
-    assert "INLINE" not in core[claude_idx:codex_idx]
+    assert "INLINE" not in core[claude_idx:oc_idx]

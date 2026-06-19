@@ -250,7 +250,7 @@ def main(argv: list[str] | None = None) -> None:
     start_p = engagement_sub.add_parser("start")
     start_p.add_argument("key", nargs="?")
     start_p.add_argument("--select", action="store_true")
-    start_p.add_argument("--client", choices=["codex", "claude", "opencode"], required=True)
+    start_p.add_argument("--client", choices=["codex", "claude", "opencode", "goose"], required=True)
     start_p.add_argument("--thinking", choices=["off", "high", "max"], default=None,
                          help="DeepSeek thinking level for --client opencode: off=disabled, "
                               "high=on, max=maximum (default: client default — thinking on). "
@@ -1177,8 +1177,10 @@ def _print_oob_status(payload: dict[str, object], *, as_json: bool) -> None:
     instead of proceeding into blind tests with no working callback path.
     """
     health = str(payload.get("health", ""))
-    running = payload.get("running") or []
-    client_health = payload.get("client_health") or []
+    running_raw = payload.get("running")
+    running: list[object] = running_raw if isinstance(running_raw, list) else []
+    ch_raw = payload.get("client_health")
+    client_health: list[object] = ch_raw if isinstance(ch_raw, list) else []
     registered = sum(1 for c in client_health if isinstance(c, dict) and c.get("registered"))
     if as_json:
         print(json.dumps(payload, indent=2))

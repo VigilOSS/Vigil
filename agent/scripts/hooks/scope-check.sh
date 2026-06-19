@@ -12,9 +12,12 @@
 
 INPUT=$(cat)
 
-# Only check Bash tool calls
+# Only check shell tool calls. "Bash" is Claude/Codex/OpenCode; Goose's raw shell tool is
+# bare "shell" (v1.38.0) or "developer__shell" (older/doc-form builds). It is normally
+# reshaped to "Bash" by goose-hook-adapter.sh, but accepting the raw names means a reshape
+# failure cannot silently skip the scope check.
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
-[ "$TOOL_NAME" != "Bash" ] && exit 0
+case "$TOOL_NAME" in Bash|shell|developer__shell) ;; *) exit 0 ;; esac
 
 # Extract command
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
