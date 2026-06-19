@@ -507,6 +507,58 @@ def test_ingest_arjun_anchors_relative_db_to_engagement(tmp_path, capsys, monkey
     assert "debug" in json.loads(enriched[0]["query_params"])
 
 
+def test_ingest_arjun_anchors_relative_json_to_engagement(tmp_path, capsys, monkeypatch):
+    # A relative `--json-file` (e.g. `scans/arjun/out.json`) from a drifted cwd must
+    # anchor to the engagement, not the process cwd. The artifact lives under <eng>;
+    # the cwd is elsewhere and has no such file, so an UNANCHORED path would hit the
+    # missing-file branch and report a CLEAN no-op — silently dropping a real
+    # `kali arjun` discovery. Anchoring makes the drift-tolerant call find it.
+    from assess.commands import ingest_arjun
+    from assess.lib.db import db_init, db_insert_work_item, db_query
+
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    (eng / "scope.json").write_text("{}", encoding="utf-8")
+    db = eng / "cases.db"
+    db.write_bytes(b"")
+    db_init(str(db))
+    db_insert_work_item(
+        str(db), queue_key="seed:GET:/known", method="GET",
+        url="https://h.example/known", url_path="/known", case_type="unknown", source="seed",
+    )
+
+    arjun_json = {"https://h.example/known": {"params": ["debug"], "method": "GET"}}
+    rel = "scans/arjun/out.json"
+    jf = eng / rel
+    jf.parent.mkdir(parents=True, exist_ok=True)
+    jf.write_text(json.dumps(arjun_json), encoding="utf-8")
+
+    class _Cfg:
+        engagement_dir = str(eng)
+
+    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
+
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+
+    ns = argparse.Namespace(
+        db_path="cases.db", json_file=rel, source="arjun",
+        default_method="GET", engagement_dir=str(eng),
+    )
+    ingest_arjun.run(ns)  # must FIND the anchored artifact, not report the cwd no-op
+    out = json.loads(capsys.readouterr().out)
+    assert out["json_file"] == str(jf)   # anchored to the engagement, not the cwd
+    assert out["records"] == 1
+    assert out["enriched"] == 1
+
+    enriched = db_query(
+        str(db), "SELECT query_params FROM work_items WHERE url = ?", ("https://h.example/known",)
+    )
+    assert "debug" in json.loads(enriched[0]["query_params"])
+
+
 # --------------------------------------------------------------------------
 # kali_arjun.run — flag → cmd construction (monkeypatched exec)
 # --------------------------------------------------------------------------
