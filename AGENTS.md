@@ -13,6 +13,22 @@ Read alongside this file:
   file owns a contract, and which generated files must stay in sync. This guide does not restate it;
   consult it whenever a change might move a boundary.
 
+# Code quality
+
+This is production security tooling held to a top-tier bar: the standard is what a leading
+autonomous-offensive-security company (XBOW, Horizon3, Armadin) would ship and maintain for years —
+not a prototype. Every change should leave the codebase clearer than it found it.
+
+- **Correctness over speed.** Verify behavior (the right test scope, or a real run) before calling
+  something done — never hedge a passing result or bury a failure. "Probably works" is not finished.
+- **Every line earns its place.** Prefer deleting to adding; match the surrounding idiom, naming, and
+  comment density; a comment explains *why*, not what. No dead code, no speculative abstraction, no
+  second copy of a value that already has a single source of truth.
+- **Land changes whole.** Touch every registration point a change needs (see the recipes + `CODE-MAP.md`)
+  so nothing half-lands, and keep generated artifacts, schemas, and the map in sync in the same change.
+- **Durable over expedient.** Fix the root cause, not the symptom. Choose the design that still reads
+  well in a year and write it so the next maintainer needs no archaeology.
+
 # Version control: Jujutsu (jj)
 
 This repository is managed with **[Jujutsu (`jj`)](https://github.com/jj-vcs/jj)** (v0.40+),
@@ -397,6 +413,12 @@ The verification surface is **not one command**: 4 pytest scopes + a render-chec
 ## Live tests (billed — read before launching)
 
 `vigil bench run --launch auto` spawns real Claude/Codex agents against generated targets: it **costs money and runs for hours** (reference: a full K=5 × 3 seed-0 run is ~5–6h / ~$50). Validate without a model first via the free paths — `--launch scripted` (reference solver, docker) and `vigil bench selftest`. Do not launch `--launch auto` without an explicit go-ahead.
+
+## Per-family wall-clock timeouts (D-5)
+
+The benchmark harness kills a stuck run at a **per-family** wall-clock budget, defined in the editable table `FAMILY_TIMEOUTS` in `src/vigil_cli/bench/models.py`. A measured family uses a budget derived from its observed runs (≈1.5–2× the observed max wall time under `~/.vigil-bench/runs/`); an unmeasured family (no table entry) falls back to the generous `GENEROUS_UNKNOWN_FAMILY_TIMEOUT` so it is never killed before its real duration is known.
+
+- [ ] **TODO — record a new family's wall time and set its timeout.** When a new benchmark family is run for the first time, record its observed wall-clock time and set/refresh its per-family timeout in the codebase (`FAMILY_TIMEOUTS` in `src/vigil_cli/bench/models.py`) if none exists yet. Until then it runs under the generous unmeasured-family fallback; do not leave a family on the fallback once you have real timing data.
 
 # Orchestrator backend
 

@@ -567,7 +567,15 @@ def test_ingest_admits_apex_under_wildcard_scope(
 
     module.run(args)
 
-    posted_urls = [payload["url"] for endpoint, payload in fake.posts]
+    # Ingest now ALSO posts class-typed `coverage-items` (no `url` key) for
+    # gf-bucket matches, additively to the `request-observations` posts. Scope
+    # the URL assertion to the observation posts so the additive coverage POST
+    # doesn't trip a KeyError.
+    posted_urls = [
+        payload["url"]
+        for endpoint, payload in fake.posts
+        if endpoint == "request-observations"
+    ]
     assert "https://example.test/login" in posted_urls
     assert "https://corp.example.test/api" in posted_urls
 
@@ -598,7 +606,11 @@ def test_ingest_runs_without_scope_json(monkeypatch, tmp_path: Path, capsys) -> 
     )
 
     module.run(args)
-    posted_urls = [payload["url"] for _, payload in fake.posts]
+    posted_urls = [
+        payload["url"]
+        for endpoint, payload in fake.posts
+        if endpoint == "request-observations"
+    ]
     assert "https://example.test/login" in posted_urls
 
 
@@ -621,7 +633,11 @@ def test_ingest_idn_apex_a_label_url_admitted_under_u_label_wildcard(
     )
 
     module.run(args)
-    posted_urls = [payload["url"] for endpoint, payload in fake.posts]
+    posted_urls = [
+        payload["url"]
+        for endpoint, payload in fake.posts
+        if endpoint == "request-observations"
+    ]
     assert "https://xn--caf-dma.test/login" in posted_urls
     assert "https://corp.xn--caf-dma.test/api" in posted_urls
 

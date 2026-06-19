@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vigil.local/schemas/intel-breach-record.schema.json",
   "$comment": "Mirrors app.api.intel_schemas.BreachRecordRequest.",
-  "title": "Intel Breach Record",
+  "title": "Intel Breach Record — credential/PII exposure from a named leak or dump (not a vuln finding; use record-finding for confirmed exploitability).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -14,35 +14,37 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 512,
-      "description": "Email, account, domain, or other identifier exposed in the breach."
+      "description": "Exposed identifier — email address, username, domain, or account handle found in the breach data."
     },
     "breach_name": {
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
-      "description": "Named breach or leak (e.g., 'Collection1', 'LinkedIn 2021')."
+      "description": "Canonical name of the breach or dump (e.g., 'Collection1', 'LinkedIn 2021', 'RockYou2024')."
     },
     "breach_date": {
       "type": "string",
       "maxLength": 64,
       "default": "",
-      "description": "Date of breach (free-form — vendor dates vary)."
+      "description": "Approximate date of breach or public release; free-form because vendor dates vary (e.g., '2021-06', '~Q3 2019')."
     },
     "data_types": {
       "type": "string",
       "maxLength": 1024,
       "default": "",
-      "description": "Comma or newline-delimited list of exposed data classes."
+      "description": "Comma or newline list of exposed data classes (e.g., 'email,password_hash,phone,ssn')."
     },
     "source_name": {
       "type": "string",
       "maxLength": 128,
-      "default": ""
+      "default": "",
+      "description": "Tool or service that surfaced this breach (e.g., 'dehashed', 'haveibeenpwned', 'intelx')."
     },
     "notes": {
       "type": "string",
       "maxLength": 4096,
-      "default": ""
+      "default": "",
+      "description": "Free-form context: password format, plaintext vs hash, reuse signal, or operator analysis."
     },
     "provenance": {
       "type": "object",
@@ -50,16 +52,20 @@
       "default": {},
       "properties": {
         "agent_name": {
-          "type": "string"
+          "type": "string",
+          "description": "Specialist agent role that recorded this row (e.g., 'osint-analyst')."
         },
         "artifact_ref": {
-          "type": "string"
+          "type": "string",
+          "description": "vigil artifact ID or path that contains the raw evidence."
         },
         "captured_at": {
-          "type": "string"
+          "type": "string",
+          "description": "ISO8601 timestamp when this row was written."
         },
         "evidence_quote": {
-          "type": "string"
+          "type": "string",
+          "description": "Verbatim excerpt from the source that supports this record."
         }
       }
     }

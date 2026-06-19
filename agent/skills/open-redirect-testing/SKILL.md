@@ -25,7 +25,7 @@ Open redirect alone is typically Low severity. It becomes High/Critical when cha
 - `curl` (follow redirects with `-L`, inspect with `-v`)
 - `vigil assess classify-payload <value> --mutations` — type the current redirect-parameter value and pull type-aware variants: for a `url`-typed value the `boundary` bucket yields `javascript:alert(1)`/`file://` scheme probes and the `format` bucket yields scheme-downgrade/quoted variants you feed into the bypass sweep (Step 2) instead of hand-typing each.
 - `vigil assess anomaly-score` — when sweeping many redirect-parameter names across an endpoint (Parameter Discovery): record each response and let it rank the parameter that produced an odd response (a 3xx with an attacker `Location` where the rest 200) rather than eyeballing the loop.
-- `vigil oob mint` / `vigil oob poll` — only for the **SSRF-via-server-side-redirect** chain (see Chaining): mint a callback host, make the server-side fetcher follow your open redirect to it, and `poll` to confirm the backend dereferenced it. Readiness: `vigil oob status --json`.
+- `vigil oob mint` / `vigil oob poll` — only for the **SSRF-via-server-side-redirect** chain (see Chaining): `mint` binds the nonce under a running client's interactsh id and prints the exact callback host (`$OOB_HOST`, of shape `<nonce>.<client-id>.oob.example.com`) so `poll` can correlate it — pass `--client <name>` when several clients run. Make the server-side fetcher follow your open redirect to the exact host mint prints, and `poll` to confirm the backend dereferenced it. Readiness: `vigil oob status --json`.
 - Burp Suite (intercept and modify redirect parameters, observe redirect chains)
 - Browser DevTools (observe client-side redirects via JavaScript)
 
@@ -238,10 +238,11 @@ The server validates that the URL is not an internal address, fetches `https://t
 **Confirm the server-side fetch with a callback before chasing internal targets.** Point the redirect at a minted nonce host; if the backend dereferences it, `poll` correlates the hit and proves the gadget fetches server-side (which a client-side redirect never would):
 
 ```bash
-vigil oob mint --technique ssrf --target-url "https://target/api/import-url" \
+vigil oob mint --client <name> --technique ssrf --target-url "https://target/api/import-url" \
   --param url --probe-kind redirect-ssrf-gadget
-# Submit the import with the open redirect pointing the fetcher at the minted host:
-#   {"url": "https://trusted.example/redirect?url=http://<nonce>.oob.example.com/"}
+# → host  <nonce>.<client-id>.oob.example.com   (= $OOB_HOST)
+# Submit the import with the open redirect pointing the fetcher at the exact host mint printed ($OOB_HOST):
+#   {"url": "https://trusted.example/redirect?url=http://$OOB_HOST/"}
 vigil oob poll --client <name>     # matched row = the backend followed the redirect and fetched
 ```
 

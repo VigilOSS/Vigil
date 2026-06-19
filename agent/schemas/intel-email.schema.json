@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vigil.local/schemas/intel-email.schema.json",
   "$comment": "Mirrors app.api.intel_schemas.EmailRecordRequest.",
-  "title": "Intel Email Record",
+  "title": "Intel Email Record — discovered email address for a target org. Dedup key: address. Use linked_person_id to attribute to an intel-person row.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,13 +13,13 @@
       "type": "string",
       "minLength": 3,
       "maxLength": 320,
-      "description": "Fully qualified email address."
+      "description": "Fully qualified email address (e.g., 'j.smith@example.com')."
     },
     "role_hint": {
       "type": "string",
       "maxLength": 128,
       "default": "",
-      "description": "Observed role, e.g. 'admin', 'support', 'ops'."
+      "description": "Inferred or stated function (e.g., 'admin', 'support', 'security', 'cto'). Not the person's name — use linked_person_id for attribution."
     },
     "linked_person_id": {
       "type": [
@@ -28,17 +28,19 @@
       ],
       "default": null,
       "minimum": 1,
-      "description": "intel_people.id if the email has been attributed to a known person."
+      "description": "intel_people.id of the person this address belongs to. Obtain the ID from 'vigil assess list-intel person --json'."
     },
     "source_name": {
       "type": "string",
       "maxLength": 128,
-      "default": ""
+      "default": "",
+      "description": "Tool or source that surfaced this address (e.g., 'hunter.io', 'linkedin', 'emailfinder', 'github-scrape')."
     },
     "notes": {
       "type": "string",
       "maxLength": 4096,
-      "default": ""
+      "default": "",
+      "description": "Context: format pattern, breach exposure, deliverability result, MFA observed, or phishing-relevance notes."
     },
     "provenance": {
       "type": "object",
@@ -46,16 +48,20 @@
       "default": {},
       "properties": {
         "agent_name": {
-          "type": "string"
+          "type": "string",
+          "description": "Specialist agent role that recorded this row (e.g., 'osint-analyst')."
         },
         "artifact_ref": {
-          "type": "string"
+          "type": "string",
+          "description": "vigil artifact ID or path that contains the raw evidence."
         },
         "captured_at": {
-          "type": "string"
+          "type": "string",
+          "description": "ISO8601 timestamp when this row was written."
         },
         "evidence_quote": {
-          "type": "string"
+          "type": "string",
+          "description": "Verbatim source excerpt that confirms this address."
         }
       }
     }

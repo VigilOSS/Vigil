@@ -198,11 +198,16 @@ known scanners). A browser inside the runtime (Playwright, headless
 Chromium, real Firefox) presents a legitimate browser TLS fingerprint and
 defeats the JA3 block without changing the egress IP.
 
-**How to set up.** The runtime image carries Playwright and a headless
-Chromium binary. Drive it via `vigil assess kali exec --technique HEALTH --intent "browser TLS fingerprint verification" --probe-kind fingerprint --phase recon --timeout 300 -- python3 -m
-playwright_runner` (or the Katana wrapper, which forwards traffic through
-a Chromium TLS stack). Verify by re-running the egress reputation script
-through the Katana / browser path.
+**How to set up.** The runtime image carries a Chromium binary, and the
+supported first-class browser-adjacent crawl path today is the Katana wrapper's
+`-headless` mode. A dedicated Playwright runner is the preferred future shape
+for precise browser evidence, but do not call a `playwright_runner` module unless
+the engagement/runtime actually provides one. Drive the available path through
+`vigil assess kali katana -headless ...`, or ask the operator to approve a
+scoped one-off Playwright script via `vigil assess kali exec` when precise
+request/DOM/console evidence is required. See
+`agent/references/tools/recon/katana.md` and
+`agent/references/runtime-guides/browser-semantic-evidence.md`.
 
 **Audit-pipeline considerations.** Browser-driven traffic still flows
 through `vigil assess kali` so the audit row records the invocation. The

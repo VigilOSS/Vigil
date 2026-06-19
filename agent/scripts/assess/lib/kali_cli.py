@@ -90,9 +90,9 @@ class ScopedErrorParser(argparse.ArgumentParser):
 def add_required_kali_flags(parser) -> None:
     """Register the audit/lifecycle flags every kali_* subcommand needs.
 
-    Author note: every flag here is intentionally `required=True` so the LLM
-    cannot accidentally skip the audit context. Per-tool flags layer on top
-    via the calling subcommand's argparse spec.
+    Every flag here is intentionally ``required=True`` so the audit context
+    cannot be omitted. Per-tool flags layer on top via the calling
+    subcommand's argparse spec.
     """
     parser.add_argument(
         "--technique",
@@ -179,14 +179,15 @@ def add_required_kali_flags(parser) -> None:
             "/ legacy single-identity behavior."
         ),
     )
-    # default_runtime_container() is called at parse time (not bound to a
-    # frozen module constant) so VIGIL_RUNTIME_CONTAINER is read when the parser
-    # is built, not when this module was first imported.
+    # Resolve VIGIL_RUNTIME_CONTAINER once at parse time (not bound to a frozen
+    # import-time constant) and reuse it for both the default and the help text,
+    # so a single parse can never report a default that disagrees with itself.
+    container_default = default_runtime_container()
     parser.add_argument(
         "--container-name",
         dest="container_name",
-        default=default_runtime_container(),
-        help=f"Docker container to exec into (default: {default_runtime_container()}).",
+        default=container_default,
+        help=f"Docker container to exec into (default: {container_default}).",
     )
 
 

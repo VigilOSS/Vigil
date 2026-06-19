@@ -1207,10 +1207,7 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
 def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
     # assessment_command_runs is the source of truth for every Kali
     # command executed during an engagement. A shadow FTS5 virtual table
-    # plus three sync triggers provide keyword search. A later change can
-    # add assessment_command_run_chunks (cols: command_run_id, seq,
-    # chunk_text, embedding_blob, indexed_at) for embedding search without
-    # touching the source rows.
+    # plus three sync triggers provide keyword search.
     connection.execute(
         """
             CREATE TABLE IF NOT EXISTS assessment_command_runs (
@@ -1415,10 +1412,10 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_acr_status "
         "ON assessment_command_runs(engagement_id, status, created_at DESC)"
     )
-    # If the FTS schema predates tool_bin, drop it so CREATE VIRTUAL
-    # TABLE below rebuilds with the new column set. Old triggers are
-    # re-created as CREATE TRIGGER IF NOT EXISTS — but they reference
-    # the old fts table, so force a clean slate on any shape mismatch.
+    # If the FTS schema predates tool_bin, drop the table and its triggers so
+    # CREATE VIRTUAL TABLE / CREATE TRIGGER below rebuild with the current
+    # column set. CREATE TRIGGER IF NOT EXISTS would silently keep stale
+    # trigger bodies that reference a now-dropped column set.
     fts_columns = {
         row[1]
         for row in connection.execute("PRAGMA table_info(assessment_command_runs_fts)").fetchall()
@@ -2025,8 +2022,8 @@ def _create_intel_tables(connection: sqlite3.Connection) -> None:
     # Every table is engagement-scoped, carries UNIQUE(engagement_id,
     # <natural key>), created_at/updated_at, provenance_json, and CASCADE
     # on engagement delete. Naming mirrors the existing `assessment_*`
-    # convention so helpers/FTS triggers/cascade tests can reuse the
-    # pattern at db.py:668-838.
+    # convention so helpers/FTS triggers/cascade tests can reuse the same
+    # pattern.
     #
     # FTS design decision: the unified `intel_search_fts` virtual table
     # is backed by a **dedicated shadow table** `intel_search_index`
@@ -2550,8 +2547,8 @@ def _create_oob_correlation_tables(connection: sqlite3.Connection) -> None:
 
 def _create_intel_and_activity_fts(connection: sqlite3.Connection) -> None:
 
-    # FTS5 virtual tables + rebuild-on-drift guard follow the pattern
-    # at db.py:724-801 for assessment_command_runs_fts.
+    # FTS5 virtual tables + rebuild-on-drift guard follow the same pattern
+    # as assessment_command_runs_fts in _create_command_runs_table_and_fts.
     intel_fts_columns = {
         row[1]
         for row in connection.execute("PRAGMA table_info(intel_search_fts)").fetchall()

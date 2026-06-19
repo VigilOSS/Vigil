@@ -37,7 +37,7 @@
         "confirmed"
       ],
       "default": "",
-      "description": "Subjective confidence in the fingerprint."
+      "description": "Fingerprint confidence. low: inferred from indirect signals. medium: banner or header match. high: version string or response body match. confirmed: validated by PoC or authoritative source. Omit (\"\") when unknown."
     },
     "evidence_ref": {
       "type": "string",
@@ -60,7 +60,8 @@
     "notes": {
       "type": "string",
       "maxLength": 4096,
-      "default": ""
+      "default": "",
+      "description": "Analyst commentary, caveats, or context about this component observation."
     },
     "provenance": {
       "type": "object",
@@ -68,16 +69,20 @@
       "default": {},
       "properties": {
         "agent_name": {
-          "type": "string"
+          "type": "string",
+          "description": "Agent that performed the fingerprinting."
         },
         "artifact_ref": {
-          "type": "string"
+          "type": "string",
+          "description": "File or URL reference to the raw scan output (e.g., 'file:scans/whatweb.txt:12')."
         },
         "captured_at": {
-          "type": "string"
+          "type": "string",
+          "description": "ISO8601 timestamp when the observation was made."
         },
         "evidence_quote": {
-          "type": "string"
+          "type": "string",
+          "description": "Verbatim excerpt (header, banner, response body) that identifies this component."
         }
       }
     }

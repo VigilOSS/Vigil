@@ -230,6 +230,133 @@ def _counts(connection, engagement_id: int) -> dict[str, dict[str, int]]:
     }
 
 
+# A surface (and likewise a coverage item) is conclusively retired only when it
+# is ``covered`` or ruled ``not_applicable`` — mirrors the depth-ledger rule in
+# state_manager/depth_ledger.py. Everything else is still open work the operator
+# should see on resume. ``discovered`` / ``partially-covered`` / ``deferred`` all
+# want attention, ranked in that order (deferred = decided-skip, lowest).
+_RETIRED_SURFACE_STATUSES = frozenset({"covered", "not_applicable"})
+_RETIRED_COVERAGE_STATUSES = frozenset({"covered", "not_applicable", "not-applicable"})
+_UNCOVERED_SURFACE_PRIORITY = {"discovered": 0, "partially-covered": 1, "deferred": 2}
+_TOP_UNCOVERED_SURFACE_LIMIT = 6
+
+# Free-text intel-note tags that mark a note "read me on resume". The brief
+# surfaces these by title so coverage maps and read-first context are not lost
+# in the plain-note pile (they are otherwise invisible to the brief).
+_RESUME_NOTE_TAGS = frozenset({"coverage", "read-first"})
+_RESUME_NOTE_LIMIT = 8
+
+
+def _surfaces_section(connection, engagement_id: int) -> dict[str, Any]:
+    """Surface coverage rollup for the resume brief (gap #1 root fix).
+
+    Counts every recorded surface by status and by (status, surface_type), and
+    samples the most actionable still-open surfaces. Counts are an absolute
+    snapshot (like finding_counts), so they are NOT since-filtered.
+    """
+    rows = connection.execute(
+        """
+        SELECT status, surface_type, target_descriptor, source_name
+        FROM assessment_surfaces
+        WHERE engagement_id = ?
+        ORDER BY updated_at DESC, id DESC
+        """,
+        (engagement_id,),
+    ).fetchall()
+    by_status: Counter = Counter()
+    status_type: Counter = Counter()
+    # (priority, recency_index, sample) so the most actionable + most recently
+    # touched open surfaces sort to the front. Rows arrive updated_at DESC, so a
+    # smaller index is more recent.
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for index, row in enumerate(rows):
+        status_value = str(row["status"] or "discovered")
+        surface_type = str(row["surface_type"] or "unknown")
+        by_status[status_value] += 1
+        status_type[(status_value, surface_type)] += 1
+        if status_value not in _RETIRED_SURFACE_STATUSES:
+            candidates.append(
+                (
+                    _UNCOVERED_SURFACE_PRIORITY.get(status_value, 3),
+                    index,
+                    {
+                        "status": status_value,
+                        "surface_type": surface_type,
+                        "target_descriptor": str(row["target_descriptor"] or ""),
+                        "source_name": str(row["source_name"] or ""),
+                    },
+                )
+            )
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    open_count = sum(
+        count for status_value, count in by_status.items()
+        if status_value not in _RETIRED_SURFACE_STATUSES
+    )
+    return {
+        "total": sum(by_status.values()),
+        "open_count": open_count,
+        "by_status": dict(by_status),
+        "by_status_type": [
+            {"status": status_value, "surface_type": surface_type, "count": count}
+            for (status_value, surface_type), count in sorted(status_type.items())
+        ],
+        "top_uncovered": [item[2] for item in candidates[:_TOP_UNCOVERED_SURFACE_LIMIT]],
+    }
+
+
+def _work_buffer_section(connection, engagement_id: int) -> dict[str, Any]:
+    """Pending coverage-item rollup ("work buffer") keyed by gf-bucket (gap #2).
+
+    The gf-bucket → coverage bridge records one ``assessment_coverage_items``
+    row per matched bucket, storing the canonical attack-class that the bucket
+    maps to (``GF_BUCKET_TO_CLASS[bucket]``) in ``attack_family`` — so grouping
+    by ``attack_family`` rolls up the pending work by bucket-derived class. A
+    coverage item is pending until it is ``covered`` / ``not_applicable``.
+    Counts are an absolute snapshot, NOT since-filtered. ``by_bucket`` is
+    ordered by descending count.
+    """
+    rows = connection.execute(
+        "SELECT attack_family, status FROM assessment_coverage_items WHERE engagement_id = ?",
+        (engagement_id,),
+    ).fetchall()
+    by_bucket: Counter = Counter()
+    for row in rows:
+        status_value = str(row["status"] or "pending").strip().lower()
+        if status_value in _RETIRED_COVERAGE_STATUSES:
+            continue
+        by_bucket[str(row["attack_family"] or "unknown")] += 1
+    return {
+        "pending_total": sum(by_bucket.values()),
+        "by_bucket": dict(by_bucket.most_common()),
+    }
+
+
+def _resume_note_pointers(engagement_id: int, *, since: str) -> list[dict[str, Any]]:
+    """Intel notes tagged ``coverage`` / ``read-first`` — projected as bounded
+    pointers (id + title + matching tags + lead_status), not bodies, so the
+    operator opens them via list-intel/search. Bounded list, so since-filtered
+    like the other intel worklists."""
+    matches: list[dict[str, Any]] = []
+    for row in intel.list_notes(engagement_id, include_superseded=False):
+        tags = row.get("tags")
+        if not isinstance(tags, list):
+            continue
+        tag_set = {str(tag).strip().lower() for tag in tags}
+        hit = tag_set & _RESUME_NOTE_TAGS
+        if not hit:
+            continue
+        matches.append(
+            {
+                "id": row.get("id"),
+                "title": row.get("title"),
+                "tags": sorted(hit),
+                "lead_status": row.get("lead_status") or "",
+                "updated_at": row.get("updated_at"),
+            }
+        )
+    return _since_filter(matches, since=since, field="updated_at")[:_RESUME_NOTE_LIMIT]
+
+
 def build_resume_brief(
     engagement_id: int,
     *,
@@ -285,6 +412,8 @@ def build_resume_brief(
             ),
         }
         counts = _counts(connection, engagement_id)
+        surfaces_section = _surfaces_section(connection, engagement_id)
+        work_buffer_section = _work_buffer_section(connection, engagement_id)
 
     command_matches_all = (
         state_manager.list_command_runs(
@@ -328,6 +457,9 @@ def build_resume_brief(
             {"id": row.get("id"), "title": row.get("title"), "lead_status": row.get("lead_status")}
             for row in open_leads
         ],
+        # Notes the operator tagged coverage/read-first — surfaced by title so a
+        # coverage map or read-first context is not lost in the plain-note pile.
+        "read_first_notes": _resume_note_pointers(engagement_id, since=since),
     }
     dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours)
     if agent_id:
@@ -348,6 +480,8 @@ def build_resume_brief(
         },
         "query": {"q": q, "finding": canonical_finding or finding, "agent_id": agent_id, "since": since},
         "finding_counts": counts,
+        "surfaces": surfaces_section,
+        "work_buffer": work_buffer_section,
         "target_finding": target_finding,
         "findings": findings,
         "recent_decisions": _recent_decisions(engagement_id, since=since),

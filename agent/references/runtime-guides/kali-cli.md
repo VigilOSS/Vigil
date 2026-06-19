@@ -136,7 +136,7 @@ catching a sibling agent's later parallel run of the same binary.
 After install or an image rebuild, the canonical smoke test is:
 
 ```bash
-vigil assess kali --help                       # lists all 20 verbs
+vigil assess kali --help                       # lists available verbs
 vigil assess kali nmap-scan --help             # shows the typed flag set
 vigil assess contract kali nmap-scan           # canonical schema + helper defaults + example
 vigil runtime status                           # container up, image current, mount current

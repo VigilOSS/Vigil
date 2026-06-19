@@ -14,7 +14,14 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from . import docker
-from .client_rosters import ensure_claude_agents_link, ensure_claude_settings, ensure_codex_agents_link
+from .client_rosters import (
+    ensure_claude_agents_link,
+    ensure_claude_settings,
+    ensure_codex_agents_link,
+    ensure_goose_recipes_link,
+    ensure_goose_standard_hooks,
+    ensure_opencode_agents_link,
+)
 from .paths import (
     DEFAULT_ORCHESTRATOR_BASE_URL,
     engagements_root,
@@ -24,6 +31,8 @@ from .paths import (
 
 ENGAGEMENT_TYPES = {"web", "code", "both", "android", "blue"}
 ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
+ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV = "VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES"
+DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +400,21 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         _write_codex_config(agent_root, eng_dir)
     if client_kind in {"claude", "both"}:
         _write_claude_config(agent_root, eng_dir)
+    # OpenCode parity: the standard plugin (scope-check + activity-log) and the
+    # specialist roster install for every kind that also gets start_opencode.sh
+    # (codex/claude/both), so an `--client opencode` run — including `vigil bench`,
+    # whose engagement creation routes through here — has the standard logging
+    # plugin in place. The bench then layers its guard-only plugin beside it.
+    if client_kind in {"codex", "claude", "both"}:
+        _write_opencode_config(agent_root, eng_dir)
+    # Goose parity: the operator prompt (`.goosehints`), the specialist recipe roster
+    # (`.goose/recipes` link), and the standard hooks plugin (scope-check + activity-log)
+    # install for every kind that also gets start_goose.sh, so an `--client goose` run —
+    # including `vigil bench` — has them in place. The bench layers its guard-only hook
+    # beside the standard one (anticheat._patch_goose_hooks). Written AFTER
+    # _write_prompt_wrappers so AGENTS.md exists to seed .goosehints.
+    if client_kind in {"codex", "claude", "both"}:
+        _write_goose_config(agent_root, eng_dir)
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
     _emit_bootstrap_scope_summary(scope)
     _verify_backend_install_root(install_root, eng_dir)
@@ -413,7 +437,7 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
     try:
         from .oob import oob_status
 
-        oob_state = str(oob_status(runner=runner).get("state", "unknown"))
+        oob_state = str(oob_status(runner=runner, deep=False).get("state", "unknown"))
     except Exception:
         oob_state = "unknown"
 
@@ -1153,8 +1177,40 @@ def _snapshot_orchestrator_database(install_root: Path) -> None:
     try:
         with sqlite3.connect(str(db_path)) as source, sqlite3.connect(str(backup)) as dest:
             source.backup(dest)
+        _prune_orchestrator_database_snapshots(
+            data_dir,
+            max_copies=_engagement_db_snapshot_max_copies(),
+        )
     except sqlite3.Error as exc:
         print(f"[vigil] warning: orchestrator DB snapshot failed for {db_path}: {exc}", file=sys.stderr)
+    except OSError as exc:
+        print(f"[vigil] warning: orchestrator DB snapshot pruning failed for {data_dir}: {exc}", file=sys.stderr)
+
+
+def _engagement_db_snapshot_max_copies() -> int:
+    raw = os.environ.get(ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV, "").strip()
+    if not raw:
+        return DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV} must be an integer >= 1") from exc
+    if value < 1:
+        raise SystemExit(f"{ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV} must be an integer >= 1")
+    return value
+
+
+def _prune_orchestrator_database_snapshots(data_dir: Path, *, max_copies: int) -> list[Path]:
+    if max_copies < 1:
+        raise ValueError("max_copies must be >= 1")
+    snapshots = sorted(data_dir.glob("orchestrator.sqlite3.bak.*"), key=lambda path: path.name)
+    if len(snapshots) <= max_copies:
+        return []
+    removed: list[Path] = []
+    for path in snapshots[: len(snapshots) - max_copies]:
+        path.unlink()
+        removed.append(path)
+    return removed
 
 
 def _install_client_kind(agent_root: Path) -> str:
@@ -1240,15 +1296,332 @@ def _write_claude_config(agent_root: Path, eng_dir: Path) -> None:
     ensure_claude_agents_link(agent_root, claude_dir)
 
 
+# OpenCode's --dangerously-skip-permissions is honored ONLY for the PRIMARY session.
+# A task-dispatched sub-agent runs in a child session whose permission prompts the CLI
+# loop never answers, so any child tool call that resolves to "ask" — most often
+# external_directory (a specialist reading a file outside the engagement cwd, e.g. a
+# skill/reference under the agent root) — freezes the child forever, hanging the parent
+# task for the whole budget (opencode#12566/#7474/#16367, unfixed in 1.17.5). Resolving
+# every tool to "allow" at the PROJECT-config level means no prompt is ever raised, so
+# specialist (task) dispatch works. Per-agent roster frontmatter permission is NOT honored
+# for task children — it must be this project opencode.json. Engagements run isolated with
+# full authorization, so blanket-allow is the intended posture.
+_OPENCODE_PERMISSION: dict = {"*": "allow", "external_directory": "allow", "doom_loop": "allow"}
+
+
+def _load_opencode_config(eng_dir: Path) -> dict:
+    """The engagement's opencode.json as a dict, guaranteeing the permission block."""
+    path = eng_dir / "opencode.json"
+    config: dict = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                config = loaded
+        except (OSError, json.JSONDecodeError):
+            config = {}
+    config.setdefault("$schema", "https://opencode.ai/config.json")
+    config.setdefault("permission", dict(_OPENCODE_PERMISSION))
+    return config
+
+
+def _write_opencode_json(eng_dir: Path, config: dict) -> None:
+    (eng_dir / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_opencode_config(agent_root: Path, eng_dir: Path) -> None:
+    """Install the standard OpenCode plugin + specialist roster into an engagement.
+
+    Mirrors ``_write_codex_config`` / ``_write_claude_config``: OpenCode reads
+    neither Claude's ``settings.json`` nor Codex's ``config.toml``, so the standard
+    scope-check + activity-log hooks ship as an OpenCode *plugin* copied from the
+    agent-root template ``agent/.opencode/plugin/standard-hooks.js``. The plugin is
+    written to BOTH ``.opencode/plugin/`` and ``.opencode/plugins/`` so it loads
+    regardless of which directory name the installed OpenCode honours (the binary
+    documents both; the singular ``plugin/`` is predominant). The specialist roster
+    is exposed via symlink, exactly like Codex/Claude.
+
+    This is the source of the standard PostToolUse logging for OpenCode — on the
+    bench the guard-only ``bench-guard.js`` plugin is layered beside this file, so
+    blocking (bench) and logging (standard) are both present, exactly like the
+    Claude/Codex layering.
+    """
+    src = agent_root / ".opencode" / "plugin" / "standard-hooks.js"
+    if src.exists():
+        body = src.read_text(encoding="utf-8")
+        for dirname in ("plugin", "plugins"):
+            plugin_dir = eng_dir / ".opencode" / dirname
+            plugin_dir.mkdir(parents=True, exist_ok=True)
+            (plugin_dir / "standard-hooks.js").write_text(body, encoding="utf-8")
+    ensure_opencode_agents_link(agent_root, eng_dir / ".opencode")
+    # Seed opencode.json with the project-level permission block REQUIRED for task
+    # sub-agent dispatch to work headlessly (see _OPENCODE_PERMISSION); thinking options
+    # are merged on top later by write_opencode_reasoning_config.
+    _write_opencode_json(eng_dir, _load_opencode_config(eng_dir))
+
+
+# Appended to the engagement's `.goosehints` (Goose ONLY — never touches the shared
+# operator prompt or the other clients). The live SSRF/BOLA runs showed deepseek-chat
+# (non-thinking) solving INLINE with 0 `delegate` calls and writing no backend state —
+# behaving like a lone CTF solver, not the Vigil orchestrator (a benchmark-validity issue:
+# we want to measure the ORCHESTRATED agent, the way claude/codex run it). `delegate` IS
+# available on Goose (verified), so this is a prompting gap: the shared prompt's concrete
+# "Sanctioned inline form" example out-pulls the delegate bullet for a non-thinking model.
+# This goose-scoped, imperative reinforcement counters that without re-steering any other
+# client. See docs/goose-bench.md.
+GOOSE_DISPATCH_DIRECTIVE = (
+    "\n\n---\n"
+    "## Goose runtime — dispatch, do not solo (read this first)\n\n"
+    "You are running on **Goose**, where custom specialists ARE dispatchable headless. Operate as the\n"
+    "Vigil **orchestrator**, not a lone solver:\n\n"
+    "- **Dispatch** the find/test/exploit work to specialists with the `delegate` tool:\n"
+    "  `delegate source <role>` (roster under `./.goose/recipes/`: recon-specialist, source-analyzer,\n"
+    "  surface-collector, vulnerability-analyst, exploit-developer, fuzzer, osint-analyst,\n"
+    "  report-writer; the code-* roles for code engagements). Pass the target URL + the specific\n"
+    "  objective. Your FIRST action in a phase is a `delegate`, not a probe.\n"
+    "- Run `vigil assess kali` YOURSELF only for the Operator-executed exceptions (one login test, a\n"
+    "  fingerprint/health smoke, backend-write helpers). The 'Sanctioned inline form' in AGENTS.md is\n"
+    "  for OpenCode and those exceptions — on Goose, delegate the probing rather than doing it inline.\n"
+    "- **Record** findings and surfaces to the backend (`vigil assess record-finding` /\n"
+    "  `record-surface`) as you confirm them, even on a fast solve — backend state is the deliverable.\n"
+)
+
+
+def _write_goose_config(agent_root: Path, eng_dir: Path) -> None:
+    """Install Goose's operator prompt, specialist roster, and standard hooks.
+
+    Mirrors ``_write_opencode_config`` but Goose-native (see docs/goose-bench.md):
+
+    - ``.goosehints`` — Goose auto-loads this from the cwd. We copy the engagement
+      ``AGENTS.md`` (written by ``_write_prompt_wrappers`` just before this call) into it, so
+      Goose gets the SAME engagement-local entrypoint Codex/OpenCode read natively. For a
+      red engagement that ``AGENTS.md`` is a thin POINTER to the workspace-root operator
+      prompt (a blue engagement's is the full rendered prompt); the operator resolves the
+      pointer by reading the referenced file — the bench CTF message and the human start
+      prompt both say "Read AGENTS.md", which drives that. There is no ``--agent operator``
+      step — the default ``goose run`` agent already holds the ``delegate`` tool.
+    - ``.goose/recipes`` — symlink to the generated specialist roster; the operator
+      dispatches by name (``delegate source <role>``), resolved via ``GOOSE_RECIPE_PATH``.
+    - ``.agents/plugins/vigil-standard`` — the standard hooks plugin (scope-check +
+      activity-log), running the SHARED shell scripts via the payload adapter. The bench
+      layers its guard-only hook beside it (anticheat._patch_goose_hooks).
+    """
+    agents_md = eng_dir / "AGENTS.md"
+    base = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
+    # Append the Goose-only dispatch directive so the (non-thinking) open-model operator
+    # actually orchestrates instead of soloing inline; Goose auto-loads .goosehints.
+    (eng_dir / ".goosehints").write_text(base + GOOSE_DISPATCH_DIRECTIVE, encoding="utf-8")
+    ensure_goose_recipes_link(agent_root, eng_dir / ".goose")
+    ensure_goose_standard_hooks(agent_root, eng_dir)
+
+
+# DeepSeek thinking levels → opencode per-model options. OpenCode deep-merges this
+# project config over the global provider definition (baseURL/apiKey), so only the
+# per-model options are written. The operator model deepseek-v4-pro takes the
+# requested level; deepseek-v4-flash is always pinned thinking-off (bounded
+# recon/parsing — reasoning adds latency without a quality gain).
+_DEEPSEEK_THINKING_OPTIONS: dict[str, dict] = {
+    "off":  {"thinking": {"type": "disabled"}},
+    "high": {"thinking": {"type": "enabled"}, "reasoningEffort": "high"},
+    "max":  {"thinking": {"type": "enabled"}, "reasoningEffort": "max"},
+}
+
+
+def write_opencode_reasoning_config(eng_dir: Path, thinking: str) -> None:
+    """Merge the DeepSeek thinking options into ``<engagement>/opencode.json``.
+
+    Preserves the permission block (and any other keys) seeded by ``_write_opencode_config``.
+    ``thinking`` is ``off`` | ``high`` | ``max``; a blank/unknown level leaves the provider
+    options untouched but still ensures the permission block is present. deepseek-v4-pro
+    takes the level; deepseek-v4-flash is pinned thinking-off.
+    """
+    config = _load_opencode_config(eng_dir)
+    pro_options = _DEEPSEEK_THINKING_OPTIONS.get((thinking or "").strip().lower())
+    if pro_options is not None:
+        models = config.setdefault("provider", {}).setdefault("deepseek", {}).setdefault("models", {})
+        models["deepseek-v4-pro"] = {"options": pro_options}
+        models["deepseek-v4-flash"] = {"options": dict(_DEEPSEEK_THINKING_OPTIONS["off"])}
+    _write_opencode_json(eng_dir, config)
+
+
+# Goose provider env + the #9397 reasoning-content repair proxy bootstrap, injected
+# into start_goose.sh. Goose drives direct DeepSeek through its OpenAI-compatible
+# provider; OPENAI_API_KEY defaults to the sourced DEEPSEEK_API_KEY.
+#
+# THINKING-MODE STOPGAP (aaif-goose#9397): goose v1.38.0 drops DeepSeek's
+# `reasoning_content` from the 2nd..Nth assistant messages it emits when it splits a
+# multi-tool-call turn, and DeepSeek 400s ("reasoning_content ... must be passed
+# back"). DeepSeek ignores `parallel_tool_calls:false`, so we cannot stop the model
+# emitting parallel calls; instead a tiny local proxy
+# (vigil_cli/bench/goose_reasoning_proxy.py, stdlib-only) re-attaches the dropped
+# reasoning_content on the way to the API. The launcher starts it on an ephemeral
+# port, repoints OPENAI_HOST at it (real DeepSeek host becomes the proxy's UPSTREAM),
+# and trap-kills it on exit so it is auto-cleaned per attempt. The proxy is a no-op
+# for non-thinking models (no reasoning_content to repair), so it is always safe to
+# run. Disable with VIGIL_GOOSE_REASONING_PROXY=0 (then thinking-mode V4 regresses to
+# the #9397 400). See docs/goose-bench.md.
+_GOOSE_EXTRA_ENV = (
+    "# Goose: direct DeepSeek via the OpenAI-compatible provider. OPENAI_API_KEY\n"
+    "# defaults to the sourced DEEPSEEK_API_KEY; recipe roster + headless hygiene.\n"
+    "# See docs/goose-bench.md.\n"
+    'export GOOSE_PROVIDER="${{GOOSE_PROVIDER:-openai}}"\n'
+    '_VIGIL_DEEPSEEK_HOST="${{OPENAI_HOST:-https://api.deepseek.com}}"\n'
+    'export OPENAI_API_KEY="${{OPENAI_API_KEY:-${{DEEPSEEK_API_KEY:-}}}}"\n'
+    "# Default the model to a thinking V4 id so a bare `vigil engagement start\n"
+    "# --client goose` (no --model) works; the bench passes --model on the CLI,\n"
+    "# which OVERRIDES GOOSE_MODEL. Thinking mode is supported via the repair proxy below.\n"
+    'export GOOSE_MODEL="${{GOOSE_MODEL:-deepseek-v4-pro}}"\n'
+    'export GOOSE_RECIPE_PATH="${{GOOSE_RECIPE_PATH:-$ENGAGEMENT_DIR/.goose/recipes}}"\n'
+    'export GOOSE_DISABLE_KEYRING="${{GOOSE_DISABLE_KEYRING:-1}}"\n'
+    'export GOOSE_MODE="${{GOOSE_MODE:-auto}}"\n'
+    'export GOOSE_DISABLE_SESSION_NAMING="${{GOOSE_DISABLE_SESSION_NAMING:-true}}"\n'
+    "\n"
+    "# --- #9397 reasoning-content repair proxy ---------------------------------\n"
+    "# Start the stdlib-only repair proxy in front of DeepSeek, repoint OPENAI_HOST\n"
+    "# at it, and kill it when this launcher exits (auto-cleaned per attempt).\n"
+    'if [[ "${{VIGIL_GOOSE_REASONING_PROXY:-1}}" != "0" ]]; then\n'
+    '  _vigil_proxy_script="{install_dir}/src/vigil_cli/bench/goose_reasoning_proxy.py"\n'
+    '  if [[ -f "$_vigil_proxy_script" ]]; then\n'
+    "    # Prefer the install venv python (always present); any python3 works (stdlib only).\n"
+    '    _vigil_py="{install_dir}/.venv/bin/python"\n'
+    '    [[ -x "$_vigil_py" ]] || _vigil_py="$(command -v python3 || true)"\n'
+    '    if [[ -n "$_vigil_py" ]]; then\n'
+    '      _vigil_proxy_out="$(mktemp -t vigil-goose-proxy.XXXXXX)"\n'
+    "      # The launcher execs goose (its EXIT trap is then lost), so the proxy\n"
+    "      # reaps its own announce file via PROXY_ANNOUNCE_FILE on shutdown.\n"
+    '      UPSTREAM_HOST="$_VIGIL_DEEPSEEK_HOST" PROXY_PORT=0 PROXY_ANNOUNCE_FILE="$_vigil_proxy_out" \\\n'
+    '        "$_vigil_py" "$_vigil_proxy_script" >"$_vigil_proxy_out" 2>&1 &\n'
+    "      _vigil_proxy_pid=$!\n"
+    '      trap \'kill "$_vigil_proxy_pid" 2>/dev/null; rm -f "$_vigil_proxy_out" 2>/dev/null\' EXIT INT TERM\n'
+    "      # Wait (<=10s) for the proxy to announce its chosen port, then repoint.\n"
+    '      _vigil_proxy_url=""\n'
+    "      for _ in $(seq 1 50); do\n"
+    '        _vigil_proxy_url="$(sed -n \'s#^LISTENING \\(http://127.0.0.1:[0-9]*\\)$#\\1#p\' "$_vigil_proxy_out" 2>/dev/null | head -n1)"\n'
+    '        [[ -n "$_vigil_proxy_url" ]] && break\n'
+    '        kill -0 "$_vigil_proxy_pid" 2>/dev/null || break\n'
+    "        sleep 0.2\n"
+    "      done\n"
+    '      if [[ -n "$_vigil_proxy_url" ]]; then\n'
+    '        export OPENAI_HOST="$_vigil_proxy_url"\n'
+    "      else\n"
+    '        echo "vigil: goose reasoning-content proxy failed to start; falling back to direct DeepSeek (thinking-mode V4 may 400 — #9397)" >&2\n'
+    '        export OPENAI_HOST="$_VIGIL_DEEPSEEK_HOST"\n'
+    "      fi\n"
+    "    else\n"
+    '      export OPENAI_HOST="$_VIGIL_DEEPSEEK_HOST"\n'
+    "    fi\n"
+    "  else\n"
+    '    export OPENAI_HOST="$_VIGIL_DEEPSEEK_HOST"\n'
+    "  fi\n"
+    "else\n"
+    '  export OPENAI_HOST="$_VIGIL_DEEPSEEK_HOST"\n'
+    "fi\n"
+)
+
+
 def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_permissions: bool) -> None:
     if client_kind in {"codex", "both"}:
         _write_launcher(agent_root, eng_dir, "codex", "--full-auto" if skip_permissions else "")
     if client_kind in {"claude", "both"}:
         _write_launcher(agent_root, eng_dir, "claude", "--dangerously-skip-permissions" if skip_permissions else "")
+    # OpenCode reads the same engagement-local AGENTS.md as Codex (written for every
+    # real client kind), so the operator prompt drives it unchanged. We always emit
+    # start_opencode.sh so `--client opencode` (engagement start and `vigil bench`)
+    # works regardless of install kind. It execs `opencode run …` (the headless
+    # subcommand) and exports the DeepSeek/OpenRouter provider key from the same env
+    # files the launcher already sources for ORCHESTRATOR_BASE_URL.
+    #
+    # `--agent operator` is REQUIRED for specialist dispatch to happen at all. With
+    # no `--agent`, `opencode run` uses its built-in default primary "build" agent,
+    # which reads AGENTS.md as mere context and does every probe/analysis inline
+    # (the observed "0 specialist dispatches" bug — empty sessions/index.json).
+    # Our `operator` wrapper (.opencode/agent/operator.md) is rendered `mode: primary`
+    # precisely so this `--agent operator` launch is accepted; a `mode: subagent`
+    # entrypoint is silently rejected by OpenCode 1.17.5 (it falls back to "build").
+    # The operator-as-primary has the `task` tool and dispatches the subagent roster
+    # via `subagent_type: <role>` / `@<role>`, each loading its mandatory skill.
+    if client_kind in {"codex", "claude", "both"}:
+        _write_launcher(
+            agent_root, eng_dir, "opencode",
+            "--dangerously-skip-permissions" if skip_permissions else "",
+            exec_cmd="opencode run --agent operator",
+            provider_keys=("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"),
+        )
+    # Goose: the PRIMARY open-model bench client. Like OpenCode it reads the engagement
+    # prompt natively (Goose auto-loads `.goosehints`, written by _write_goose_config),
+    # so we always emit start_goose.sh for every real client kind. It execs `goose run`
+    # (headless) with the `developer` builtin (shell+editor) and — crucially — WITHOUT
+    # `--no-profile`, so the default `summon` extension loads and the operator can
+    # `delegate source <role>` to the specialist recipes (verified: --no-profile strips
+    # the delegate tool). The operator message is passed via `-t` (Goose has no
+    # positional prompt). Provider env is the OpenAI-compatible direct-DeepSeek path.
+    if client_kind in {"codex", "claude", "both"}:
+        _write_launcher(
+            agent_root, eng_dir, "goose",
+            "",  # Goose has no skip-permissions flag; GOOSE_MODE=auto (in extra_env) handles approvals
+            exec_cmd="goose run --no-session --with-builtin developer",
+            provider_keys=("DEEPSEEK_API_KEY",),
+            message_flag="-t",
+            extra_env=_GOOSE_EXTRA_ENV.format(install_dir="$VIGIL_INSTALL_DIR"),
+        )
 
 
-def _write_launcher(agent_root: Path, eng_dir: Path, client: str, permission_arg: str) -> None:
+def _write_launcher(
+    agent_root: Path,
+    eng_dir: Path,
+    client: str,
+    permission_arg: str,
+    *,
+    exec_cmd: str | None = None,
+    provider_keys: tuple[str, ...] = (),
+    message_flag: str = "",
+    extra_env: str = "",
+) -> None:
     extra = f" {permission_arg}" if permission_arg else ""
+    # The command the launcher execs. Defaults to the bare client binary (claude,
+    # codex); a client whose headless entrypoint is a subcommand (opencode → "opencode
+    # run") passes it explicitly. The launcher FILE is still start_<client>.sh.
+    exec_cmd = exec_cmd or client
+    # How the operator message reaches the client. Claude/Codex/OpenCode take it as a
+    # trailing POSITIONAL ("$@"); Goose takes it via a flag (`-t <TEXT>`) and has no
+    # positional. When `message_flag` is set, split the trailing message off "$@" and
+    # pass the leading flags (model/provider) through, then the message via the flag.
+    # The launcher always passes >=1 arg (the message), but guard $#==0 for safety.
+    if message_flag:
+        exec_line = (
+            f'if [[ $# -gt 0 ]]; then\n'
+            f'  exec {exec_cmd}{extra} "${{@:1:$(($#-1))}}" {message_flag} "${{@: -1}}"\n'
+            f'else\n'
+            f'  exec {exec_cmd}{extra}\n'
+            f'fi'
+        )
+    else:
+        exec_line = f'exec {exec_cmd}{extra} "$@"'
+    # Optional extra environment exports (e.g. Goose's GOOSE_*/OPENAI_* wiring),
+    # inserted after the provider-key sourcing block so it can reference the sourced
+    # keys (OPENAI_API_KEY defaults to DEEPSEEK_API_KEY for the openai-compat path).
+    extra_env_block = f"\n{extra_env.rstrip()}\n" if extra_env else ""
+    # Optional provider-key export block (runner clients only). Built as a plain
+    # string so its bash ${...} expansions are inserted literally into the f-string
+    # template below; empty for claude/codex so their launchers stay byte-for-byte
+    # identical to before.
+    provider_block = ""
+    if provider_keys:
+        key_list = " ".join(provider_keys)
+        provider_block = (
+            "\n# Export provider API keys for the runner client from the same env files\n"
+            "# the launcher already sources for ORCHESTRATOR_BASE_URL (first hit wins;\n"
+            "# a value already in the environment is never overwritten).\n"
+            'for env_file in "$ENGAGEMENT_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.env"; do\n'
+            '  [[ -f "$env_file" ]] || continue\n'
+            f"  for key in {key_list}; do\n"
+            '    if [[ -z "${!key:-}" ]]; then\n'
+            '      candidate="$(grep -E "^${key}=" "$env_file" | tail -n1 | cut -d= -f2- || true)"\n'
+            '      [[ -n "$candidate" ]] && export "${key}=${candidate}"\n'
+            "    fi\n"
+            "  done\n"
+            "done\n"
+        )
     # The launcher exports operator-side env from the per-engagement
     # .orchestrator.env, with install-root .orchestrator.env / .env kept as
     # legacy fallbacks. Parent-shell ORCHESTRATOR_BASE_URL remains the
@@ -1285,8 +1658,8 @@ if [[ -z "${{ORCHESTRATOR_BASE_URL:-}}" ]]; then
     fi
   done
 fi
-
-exec {client}{extra} "$@"
+{provider_block}{extra_env_block}
+{exec_line}
 """
     path = eng_dir / f"start_{client}.sh"
     path.write_text(script, encoding="utf-8")

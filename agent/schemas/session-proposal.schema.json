@@ -2,16 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vigil.local/schemas/session-proposal.schema.json",
   "title": "Exploit Session Proposal",
+  "description": "Wraps a single assessment record to propose for an exploit session. Pick the most specific type for the content being submitted.",
   "type": "object",
   "additionalProperties": false,
   "required": ["type", "payload"],
   "properties": {
     "type": {
       "type": "string",
-      "enum": ["finding_record", "probe_run", "attack_chain", "credential", "access_record"]
+      "enum": ["finding_record", "probe_run", "attack_chain", "credential", "access_record"],
+      "description": "Record type being proposed. Must match the schema of payload: 'finding_record' for a confirmed vuln, 'probe_run' for a single probe result, 'attack_chain' for a multi-step chain, 'credential' for captured credentials, 'access_record' for a gained access entry."
     },
     "payload": {
-      "type": "object"
+      "type": "object",
+      "description": "The record body conforming to the schema named by type."
     }
   }
 }

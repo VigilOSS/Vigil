@@ -22,7 +22,7 @@ Skills should point you at `vigil assess contract kali <verb>` for field tables 
 
 ## Verb menu
 
-21 verbs total: 17 typed, 2 fallback, 1 batch fan-out, and 1 host-side maintenance command. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the batch verb fans one audited command out across an operator-supplied value list; the maintenance command reconciles stuck audit rows.
+22 verbs total: 18 typed, 2 fallback, 1 batch fan-out, and 1 host-side maintenance command. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the batch verb fans one audited command out across an operator-supplied value list; the maintenance command reconciles stuck audit rows.
 
 | Verb | Use | Paired reference |
 |------|-----|------------------|
@@ -40,8 +40,9 @@ Skills should point you at `vigil assess contract kali <verb>` for field tables 
 | `kali puredns` | Active DNS brute-force with massdns + wildcard filter (Tier C). | `references/tools/recon/puredns.md` |
 | `kali dnsx` | Bulk DNS resolution and record enrichment (Tier D). | `references/tools/recon/dnsx.md` |
 | `kali nikto` (CONDITIONAL — see triggers in `references/tools/recon/nikto.md`) | Web vuln scanner; legacy/odd-stack only. CLI flag is `--host <h>` (not `-h`, which argparse reserves for help) — the underlying nikto invocation builds `nikto -h <host>` correctly. | `references/tools/recon/nikto.md` |
-| `kali katana` | Authenticated crawler with JS-aware extraction (`-jc`, `-jsl`). | `references/tools/recon/nuclei.md` (no katana.md yet) |
+| `kali katana` | Authenticated crawler with JS-aware extraction (`-jc`, `-jsl`) and `-headless` for browser-semantic crawl deltas. | `agent/references/tools/recon/katana.md` |
 | `kali gau` | Historical URL collection (Wayback / OTX / Common Crawl / URLScan). | `references/tools/recon/gau.md` |
+| `kali arjun` | Hidden HTTP-parameter discovery (GET/POST/JSON/XML), `--passive` OSINT mode, auth via `--headers`. Aim it at a GATED list (`vigil assess arjun-select`), then fold results back with `vigil assess ingest-arjun` so the classifier re-routes the now-parameterized endpoint. | `references/tools/recon/arjun.md` |
 | `kali whatweb` | Deep web technology fingerprinting. | `references/tools/recon/whatweb.md` |
 | `kali exec <cmd>` | Raw passthrough for tools not yet typed. Same audit metadata flags. | `references/runtime-guides/kali-cli.md` |
 | `kali job <start\|status\|tail\|stop\|list>` | **Operator-only** async-job lifecycle for a single authorized long sweep that must outlive its dispatch. Specialists run synchronously instead — see the sync-vs-async decision below. | `references/runtime-guides/kali-cli.md` |
@@ -302,6 +303,9 @@ vigil assess kali nikto \
 
 ### `kali katana`
 
+Use `agent/references/tools/recon/katana.md` for crawl depth, rate, exclusion,
+headless escalation, and ingestion rules.
+
 ```bash
 # JS-aware authenticated crawl with rate cap.
 vigil assess kali katana \
@@ -384,7 +388,7 @@ When you know what you want to learn, this lookup gets you to the right verb wit
 - "Find directories on a target?" → `kali ffuf -u <url>/FUZZ -w <wordlist>`.
 - "Sweep for CVEs/misconfigs/exposures?" → `kali nuclei -l <list> -t http/cves/,http/misconfiguration/,http/exposures/`.
 - "Probe a SQLi candidate?" → `kali sqlmap -u <url> --technique=<BEUSTQ subset> --batch`.
-- "Crawl a JS-heavy SPA?" → `kali katana -u <url> -jc -jsl`.
+- "Crawl a JS-heavy SPA?" → `kali katana -u <url> -jc -jsl` and apply `agent/references/tools/recon/katana.md`.
 - "Harvest historical URLs without touching the target?" → `kali gau <domain> --subs`.
 - "Enumerate subdomains?" → `kali subfinder -d <domain> -all` then `kali puredns resolve` then `kali dnsx`.
 - "Inventory runtime tools or versions?" → `kali exec --technique HEALTH --intent "tooling inventory" --probe-kind fingerprint --phase <phase> --timeout 60 -- which <tool...>`.

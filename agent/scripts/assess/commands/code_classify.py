@@ -219,7 +219,6 @@ def run(args) -> None:
 
     classified_count = result.get('updated', len(normalized_payload))
 
-    # Compute tier breakdown
     tier_counts: dict[str, int] = {}
     for item in normalized_payload:
         tier = item.get('classification', 'unknown')

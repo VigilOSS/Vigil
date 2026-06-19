@@ -162,10 +162,8 @@ def _apply_cases_truncation_migration(conn: sqlite3.Connection) -> None:
     """Add truncation flag columns to `cases` for legacy engagement DBs.
 
     Same PRAGMA-table_info pattern as the work_items migration. Without
-    this, an existing engagement that captured before the schema change
-    would still report old rows but silently drop the new columns from
-    inserts (because `db_insert_work_item` only writes to columns it
-    declares).
+    this, inserts into `cases` on a pre-schema-change DB would silently
+    drop the new truncation columns.
     """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(cases)").fetchall()}
     if not existing:
@@ -202,11 +200,9 @@ def db_exec(db_path: str, sql: str, params: tuple = ()) -> int:
 def db_exec_returning(db_path: str, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
     """Execute a write statement with a ``RETURNING`` clause and commit.
 
-    Used for ``UPDATE ... RETURNING *`` claims where the caller needs the
-    mutated rows as dicts. Opens a Row-factory connection, runs the statement,
-    and returns ``[dict(row) ...]``. The rows are read out of the cursor with
-    ``fetchall()`` first and the commit happens after, matching the prior inline
-    ``conn.execute(...).fetchall(); conn.commit()`` ordering.
+    Used for ``UPDATE ... RETURNING *`` where the caller needs the mutated rows
+    as dicts. Opens a Row-factory connection, fetchalls before commit, then
+    returns ``[dict(row) ...]``.
     """
     conn = sqlite3.connect(db_path, timeout=5.0)
     conn.row_factory = sqlite3.Row

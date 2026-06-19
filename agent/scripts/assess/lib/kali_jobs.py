@@ -1,9 +1,8 @@
 """Async-job helpers for `vigil assess kali job ...`.
 
-Backed by the orchestrator backend's `assessment_jobs` table plus a local
-transient queue in `cases.db` (kali_jobs) so the operator has an offline
-record of jobs the local CLI dispatched. dtach is the supervisor inside the
-runtime container — sessions parented by tini survive the calling shell.
+Backed by the orchestrator backend's `assessment_jobs` table via
+``AssessmentClient``. dtach is the supervisor inside the runtime container
+— sessions parented by tini survive the calling shell.
 """
 from __future__ import annotations
 
@@ -23,10 +22,9 @@ _DEFAULT_DTACH_DIR = "/tmp/vigil-jobs"
 _JOB_PID_DIR = "/tmp/vigil-jobs"
 _JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
 
-# ``_container_running`` is imported from kali_runtime_exec (canonical home for
-# the ``docker ps`` exact-name filter idiom) and re-bound here as a module
-# attribute so existing tests can ``monkeypatch.setattr(kali_jobs,
-# "_container_running", ...)`` exactly as before.
+# ``_container_running`` is imported at module level so tests can patch it via
+# ``monkeypatch.setattr(kali_jobs, "_container_running", ...)``.
+
 
 
 def _job_pid_file(job_uuid: str) -> str:

@@ -2742,6 +2742,99 @@ def test_resume_brief_dict_body_still_renders(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Resume Brief: eng" in out
     assert "phase: recon" in out
+    # A minimal body carries no surfaces/work_buffer block — those sections must
+    # stay absent rather than render empty headers.
+    assert "## Surfaces" not in out
+    assert "## Work Buffer" not in out
+
+
+def test_resume_brief_renders_surfaces_and_work_buffer(monkeypatch, tmp_path, capsys):
+    body = {
+        "engagement": {"key": "eng"},
+        "surfaces": {
+            "total": 4,
+            "open_count": 3,
+            "by_status": {"discovered": 2, "covered": 1, "deferred": 1},
+            "by_status_type": [
+                {"status": "discovered", "surface_type": "auth_entry", "count": 1},
+                {"status": "discovered", "surface_type": "object_reference", "count": 1},
+            ],
+            "top_uncovered": [
+                {"status": "discovered", "surface_type": "auth_entry", "target_descriptor": "https://x/login", "source_name": "surface-collector"},
+                {"status": "deferred", "surface_type": "file_handling", "target_descriptor": "https://x/upload", "source_name": ""},
+            ],
+        },
+        "work_buffer": {"pending_total": 3, "by_bucket": {"idor": 2, "ssrf": 1}},
+    }
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    assert "## Surfaces" in out
+    assert "total: 4 (open: 3)" in out
+    assert "discovered/auth_entry: 1" in out
+    assert "discovered auth_entry: https://x/login [surface-collector]" in out
+    assert "## Work Buffer" in out
+    assert "pending total: 3" in out
+    assert "idor: 2" in out
+    assert "ssrf: 1" in out
+
+
+def test_resume_brief_renders_zero_state_surfaces_and_work_buffer(monkeypatch, tmp_path, capsys):
+    # A real backend on an empty engagement emits the keys with zero counts, so
+    # the headers DO render (with explicit zero-state lines) — unlike a synthetic
+    # body that omits the keys entirely (which stays header-less).
+    body = {
+        "engagement": {"key": "eng"},
+        "surfaces": {"total": 0, "open_count": 0, "by_status": {}, "by_status_type": [], "top_uncovered": []},
+        "work_buffer": {"pending_total": 0, "by_bucket": {}},
+    }
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    assert "## Surfaces" in out
+    assert "total: 0 (open: 0)" in out
+    assert "top uncovered (0):" in out
+    assert "## Work Buffer" in out
+    assert "pending by gf-bucket: -" in out
+
+
+def test_resume_brief_findings_always_show_medium_plus(monkeypatch, tmp_path, capsys):
+    def _finding(slug, severity):
+        return {
+            "slug": slug,
+            "severity": severity,
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "title": f"{slug} title",
+        }
+
+    rows = [_finding(f"L{i}", "low") for i in range(1, 8)] + [_finding("CRIT-1", "critical")]
+    body = {"engagement": {"key": "eng"}, "findings": {"active": rows}}
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    # The critical is shown even though it sits behind 7 low rows; the 7th low
+    # (beyond the 6-row floor) is dropped, and the truncation note is printed.
+    assert "CRIT-1 critical" in out
+    assert "L7 low" not in out
+    assert "showing 7 of 8 (medium+ always shown)" in out
+
+
+def test_resume_brief_renders_read_first_intel_notes(monkeypatch, tmp_path, capsys):
+    body = {
+        "engagement": {"key": "eng"},
+        "intel": {
+            "summary": {"notes": 2},
+            "open_high_cves": [],
+            "open_leads": [],
+            "read_first_notes": [
+                {"id": 5, "title": "Coverage map for /api", "tags": ["coverage"], "lead_status": ""},
+                {"id": 6, "title": "Read me: WAF bypass", "tags": ["read-first"], "lead_status": "open"},
+            ],
+        },
+    }
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+    out = capsys.readouterr().out
+    assert "read-first / coverage notes (2):" in out
+    assert "id=5 (coverage) Coverage map for /api" in out
+    assert "id=6 (read-first) [open] Read me: WAF bypass" in out
 
 
 # ---------------------------------------------------------------------------
@@ -3099,3 +3192,50 @@ def test_s11_spec_parses_refs_composed_form_and_pathlevel_params(monkeypatch, tm
     post_path = json.loads(by_method["POST"][4])
     assert {"file", "a", "b"} <= set(post_body.keys())
     assert "id" in post_path
+
+
+def test_opencode_works_inline_claude_codex_dispatch_carveout() -> None:
+    """OpenCode works the engagement INLINE, while Claude/Codex (and Goose) keep
+    the normal dispatch model.
+
+    The 2026-06-18 switch to "OpenCode dispatches specialists exactly like
+    Claude/Codex" was REVERTED: on headless ``opencode run`` the built-in
+    ``task`` tool's ``subagent_type`` enum exposes only the server-registered
+    built-ins (``explore``/``general``), so our ``.opencode/agent/*.md`` custom
+    roles are not dispatchable (opencode#29616). Mandating dispatch on OpenCode
+    regressed a bench family 100%->60%, so the operator works OpenCode targets
+    inline (issuing the sanctioned ``vigil assess kali`` probes itself). This
+    guards that operator-core.md carries the opencode#29616-keyed INLINE
+    carve-out and that it rendered into AGENTS.md, while Claude/Codex keep
+    dispatching. Kept consistent with the passing
+    ``tests/test_bench.py::test_dispatch_doctrine_opencode_inline_carveout*``
+    tests.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
+    agents = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert "### Runtime Dispatch Syntax" in core
+    assert "### Runtime Dispatch Syntax" in agents
+
+    # The reverted "dispatch normally on OpenCode" framing is GONE from both the
+    # source and the render — that posture regressed the bench.
+    for gone in ("Dispatch specialists normally", "dispatches exactly like Claude"):
+        assert gone not in core, f"operator-core.md still carries reverted text: {gone!r}"
+        assert gone not in agents, f"AGENTS.md still carries reverted text: {gone!r}"
+
+    # The OpenCode INLINE carve-out is present and rendered (Runtime Dispatch
+    # Syntax now uses a table; locate the OpenCode row by its table cell marker).
+    for src, name in ((core, "operator-core.md"), (agents, "AGENTS.md")):
+        oc_idx = src.index("| **OpenCode**")
+        oc_row = src[oc_idx:].split("\n", 1)[0]
+        assert "INLINE" in oc_row, f"{name}: OpenCode row lost INLINE posture"
+        # Claude/Codex keep the normal dispatch model.
+        assert "Claude Code and Codex keep the normal dispatch model" in src, name
+
+    # Claude/Codex rows carry NO inline-probe override — they dispatch.
+    claude_idx = core.index("| **Claude Code**")
+    codex_idx = core.index("| **Codex**")
+    oc_idx = core.index("| **OpenCode**")
+    assert claude_idx < codex_idx < oc_idx
+    assert "INLINE" not in core[claude_idx:oc_idx]

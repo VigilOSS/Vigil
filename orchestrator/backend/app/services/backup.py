@@ -1,8 +1,8 @@
 """Scheduled snapshot of ``orchestrator.sqlite3`` for disaster recovery.
 
 Every 15 minutes a WAL-coherent snapshot is written to
-``<data_dir>/backups/orchestrator.YYYYMMDDTHHMMSSZ.sqlite3``. The last 60
-snapshots are retained (15 hours of continuous coverage at default cadence).
+``<data_dir>/backups/orchestrator.YYYYMMDDTHHMMSSZ.sqlite3``. The last 12
+snapshots are retained (3 hours of continuous coverage at default cadence).
 
 This complements the per-engagement snapshot taken by
 ``vigil engagement create``: that command protects against accidents during setup,
@@ -29,10 +29,11 @@ from .. import db as db_module
 
 
 SCHEDULER_DISABLED_ENV = "VIGIL_BACKUP_DISABLED"
+SCHEDULER_MAX_COPIES_ENV = "VIGIL_BACKUP_MAX_COPIES"
 
 
 DEFAULT_INTERVAL_SECONDS = 15 * 60
-DEFAULT_MAX_COPIES = 60
+DEFAULT_MAX_COPIES = 12
 BACKUP_PREFIX = "orchestrator."
 BACKUP_SUFFIX = ".sqlite3"
 
@@ -96,7 +97,7 @@ def prune_backups(backups_root: Path, max_copies: int) -> list[Path]:
 def run_backup_now(
     *,
     data_dir: Path | None = None,
-    max_copies: int = DEFAULT_MAX_COPIES,
+    max_copies: int | None = None,
     timestamp: str | None = None,
 ) -> Path | None:
     """Take one snapshot and rotate old snapshots. Returns the new path, or
@@ -104,6 +105,7 @@ def run_backup_now(
     """
     from ..config import settings
 
+    max_copies = _resolve_max_copies(max_copies, env_name=SCHEDULER_MAX_COPIES_ENV)
     live_db = (Path(data_dir) if data_dir is not None else settings.data_dir) / "orchestrator.sqlite3"
     if not live_db.exists():
         _logger.debug("Skipping scheduled backup — live DB not yet created at %s", live_db)
@@ -140,7 +142,7 @@ def run_backup_now(
 def start_scheduler(
     *,
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
-    max_copies: int = DEFAULT_MAX_COPIES,
+    max_copies: int | None = None,
 ) -> None:
     """Install a daemon timer that runs :func:`run_backup_now` every
     ``interval_seconds``. Idempotent — second calls are no-ops.
@@ -152,6 +154,7 @@ def start_scheduler(
             SCHEDULER_DISABLED_ENV,
         )
         return
+    max_copies = _resolve_max_copies(max_copies, env_name=SCHEDULER_MAX_COPIES_ENV)
     with _scheduler_lock:
         if _scheduler_enabled:
             return
@@ -190,6 +193,24 @@ def stop_scheduler() -> None:
             _scheduler_timer = None
 
 
-# Used by tests only — mypy/IDEs can resolve shutil for the copy fallback path.
+def _resolve_max_copies(value: int | None, *, env_name: str) -> int:
+    if value is not None:
+        if value < 1:
+            raise ValueError("max_copies must be >= 1")
+        return value
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return DEFAULT_MAX_COPIES
+    try:
+        parsed = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{env_name} must be an integer >= 1") from exc
+    if parsed < 1:
+        raise ValueError(f"{env_name} must be an integer >= 1")
+    return parsed
+
+
+# Not referenced at runtime in this module; bound to _ so linters don't flag
+# the imports as unused.
 _ = shutil
 _ = db_module

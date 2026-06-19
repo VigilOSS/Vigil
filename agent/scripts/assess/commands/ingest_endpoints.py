@@ -208,6 +208,7 @@ def run(args) -> None:
             url = ""
             url_path = ""
             override_type = ""
+            row_content_type = ""
             query_params: dict = {}
             body_params: dict = {}
             path_params: dict = {}
@@ -227,6 +228,7 @@ def run(args) -> None:
                 url = row.get("url") or ""
                 url_path = row.get("url_path") or ""
                 override_type = row.get("type") or ""
+                row_content_type = row.get("content_type") or ""
                 query_params = row.get("query_params") or {}
                 body_params = row.get("body_params") or {}
                 path_params = row.get("path_params") or {}
@@ -286,7 +288,11 @@ def run(args) -> None:
             if override_type:
                 case_type = override_type
             else:
-                case_type = classify_type(method, url_path, "", "")
+                # Thread a JSON-provided `content_type` (when present) into the
+                # typer instead of the historical `""`. The dominant bare-URL-list
+                # path leaves `row_content_type` empty, so the typer falls back to
+                # path-shape-only classification exactly as before — no regression.
+                case_type = classify_type(method, url_path, row_content_type, "")
 
             params_sig = generate_params_sig(query_params, body_params)
 
@@ -391,6 +397,7 @@ def run(args) -> None:
                 body_params=json.dumps(body_params) if isinstance(body_params, dict) else str(body_params),
                 path_params=json.dumps(path_params) if isinstance(path_params, dict) else str(path_params),
                 cookie_params=json.dumps(cookie_params) if isinstance(cookie_params, dict) else str(cookie_params),
+                content_type=row_content_type,
                 case_type=case_type,
                 source=source,
                 params_key_sig=params_sig,

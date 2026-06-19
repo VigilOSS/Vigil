@@ -59,6 +59,22 @@ def test_run_backup_now_rotates_to_max_copies(client, isolate_settings):
         assert not any(pruned in name for name in remaining)
 
 
+def test_run_backup_now_default_rotation_keeps_bounded_window(client, isolate_settings):
+    timestamps = [f"20260417T1210{i:02d}Z" for i in range(backup_service.DEFAULT_MAX_COPIES + 2)]
+
+    for ts in timestamps:
+        created = backup_service.run_backup_now(timestamp=ts)
+        assert created is not None
+
+    remaining = [p.name for p in backup_service.list_backups()]
+    assert len(remaining) == backup_service.DEFAULT_MAX_COPIES
+    assert len(remaining) == 12
+    for expected in timestamps[-backup_service.DEFAULT_MAX_COPIES:]:
+        assert any(expected in name for name in remaining)
+    for pruned in timestamps[:2]:
+        assert not any(pruned in name for name in remaining)
+
+
 def test_prune_backups_is_noop_when_under_limit(isolate_settings):
     root = backup_service.backups_dir()
     root.mkdir(parents=True, exist_ok=True)
