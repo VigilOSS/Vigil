@@ -165,6 +165,12 @@ against an unknown CDN-fronted target:
   our own egress IP is on a CDN reputation list (our recon collapses globally).
   Reach for it when the §A control request *also* fails; this file is for when the
   control returns `200` and only the specific probe was denied.
+- `agent/references/recon/cdn-edge-and-bff-reachability.md` — the **third** member
+  of this triad: reading the edge **error envelope** to decide whether a path is
+  architecturally not-exposed (Akamai `27368`), edge-authz-denied (`2736803`), or
+  origin-answered — plus the BFF-capture trap and the confirmed-live-token rule.
+  This file is about the edge denying *your probe*; that file is about deciding
+  whether a *clean* path is even routable.
 - `agent/references/recon/rate-calibration.md` — the per-target rate trait table
   (nmap/dir-fuzz/nuclei/DNS); use it to pick the trait row, then this file for the
   katana crawl rate + edge-behavior reads it does not carry.
