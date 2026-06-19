@@ -47,6 +47,11 @@ ARG PWNCAT_VL_VERSION=0.6.2
 ARG SECLISTS_REF=8af68f02ed621c5e0f3d7e24659f9f5bf5384c08
 ARG APKEEP_VERSION=1.0.0
 ARG BUNDLETOOL_VERSION=1.18.3
+# curl-impersonate (lexiforest fork) — TLS/JA3-JA4 + HTTP2-fingerprint impersonation
+# of real Chrome. Required to reach Akamai/Cloudflare Bot-Manager-fronted targets
+# (e.g. *.bank.acme.example) that drop or 403 plain curl's fingerprint. Ships the
+# `curl_chrome116` wrapper with full curl flag-compatibility.
+ARG CURL_IMPERSONATE_VERSION=1.1.0
 
 ENV PATH="/opt/Responder:/opt/offsec-venv/bin:/opt/mitmproxy-venv/bin:/opt/pwncat-venv/bin:${PATH}"
 
@@ -167,6 +172,25 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       mkdir -p /root/.config/amass; \
     fi
 
+# curl-impersonate (curl_chrome116) — JA3/JA4 + HTTP2 fingerprint impersonation.
+# Without this, Akamai/Cloudflare Bot-Manager-fronted hosts (e.g. *.bank.acme.example)
+# drop or 403 plain curl on TLS fingerprint alone. The release tarball drops the
+# `curl-impersonate` binary plus per-browser wrapper scripts (curl_chrome116 etc.)
+# straight into /usr/local/bin.
+RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
+      arch="$(dpkg --print-architecture)" && \
+      case "$arch" in \
+        amd64) ci_arch=x86_64 ;; \
+        arm64) ci_arch=aarch64 ;; \
+        *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
+      esac && \
+      curl -fsSL $CURL_RETRY_FLAGS \
+        "https://github.com/lexiforest/curl-impersonate/releases/download/v${CURL_IMPERSONATE_VERSION}/curl-impersonate-v${CURL_IMPERSONATE_VERSION}.${ci_arch}-linux-gnu.tar.gz" \
+        | tar xzf - -C /usr/local/bin && \
+      chmod +x /usr/local/bin/curl-impersonate /usr/local/bin/curl_chrome* && \
+      /usr/local/bin/curl_chrome116 -s -o /dev/null -w 'curl_chrome116 smoke HTTP %{http_code}\n' --max-time 20 https://www.example.com; \
+    fi
+
 RUN set -eux; \
     if [ "$PRELOADED_TOOLS" != "1" ]; then \
       curl -fsSL $CURL_RETRY_FLAGS "https://github.com/danielmiessler/SecLists/archive/${SECLISTS_REF}.zip" -o SecList.zip && \
@@ -250,7 +274,7 @@ RUN chmod +x /usr/local/bin/start-callback
 RUN printf '%s\n' 'export PATH="/opt/Responder:/opt/offsec-venv/bin:/opt/mitmproxy-venv/bin:/opt/pwncat-venv/bin:$PATH"' > /etc/profile.d/vigil-path.sh
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD command -v dtach >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && command -v jsluice >/dev/null && command -v arjun >/dev/null && command -v xmllint >/dev/null && command -v apkeep >/dev/null && command -v apktool >/dev/null && command -v jadx >/dev/null && command -v adb >/dev/null && command -v bundletool >/dev/null && command -v apksigner >/dev/null && command -v aapt >/dev/null || exit 1
+  CMD command -v dtach >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && command -v jsluice >/dev/null && command -v arjun >/dev/null && command -v xmllint >/dev/null && command -v apkeep >/dev/null && command -v apktool >/dev/null && command -v jadx >/dev/null && command -v adb >/dev/null && command -v bundletool >/dev/null && command -v apksigner >/dev/null && command -v aapt >/dev/null && command -v curl_chrome116 >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash", "-lc", "mkdir -p /data && exec sleep infinity"]
