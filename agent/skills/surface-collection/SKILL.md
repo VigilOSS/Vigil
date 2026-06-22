@@ -75,8 +75,8 @@ audited `curl -k` for spot validation and continue with other collection sources
 instead of assuming Katana can crawl it. See the Katana reference before using
 version-specific `--extra-args`.
 
-**Auth-aware crawl:** If `auth.json` has `use_for_requests` set to `true` and `state` set
-to `available`, pass cookies/headers:
+**Auth-aware crawl:** If the engagement's credential record (`vigil auth status`) has
+`use_for_requests` set to `true` and a usable credential available, pass cookies/headers:
 
 ```bash
 vigil assess kali katana \

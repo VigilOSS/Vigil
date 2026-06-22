@@ -11,6 +11,7 @@ from .api.admin import router as admin_router
 from .api.artifacts import router as artifacts_router
 from .api.assessment import router as assessment_router
 from .api.code_analysis import router as code_analysis_router
+from .api.credentials import router as credentials_router
 from .api.dashboard import router as dashboard_router
 from .api.engagements import router as engagements_router
 from .api.events import router as events_router
@@ -59,6 +60,7 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.include_router(admin_router)
 app.include_router(dashboard_router)
 app.include_router(engagements_router)
+app.include_router(credentials_router)
 app.include_router(events_router)
 app.include_router(artifacts_router)
 app.include_router(assessment_router)

@@ -228,21 +228,38 @@ def validate_specialist_dispatch_contract(
             scope_path = Path(engagement_dir) / "scope.json"
             if scope_path.is_file():
                 try:
-                    from .scope import host_in_scope, load_scope, scope_entries
+                    from .scope import (
+                        host_admitted,
+                        host_in_scope,
+                        load_scope,
+                        out_of_scope_entries,
+                        scope_entries,
+                    )
                     scope = load_scope(engagement_dir)
                     entries = scope_entries(scope)
+                    deny = out_of_scope_entries(scope)
                 except (SystemExit, ValueError, OSError) as exc:
                     warnings.append(f"scope_host gate skipped: {exc}")
                 else:
-                    if entries and not host_in_scope(scope_host.strip(), entries):
-                        errors.append(
-                            f"scope_host '{scope_host}' is not in scope.json `hosts` "
-                            f"for role '{role_name}'. Active-probing dispatches "
-                            "(vulnerability-analyst, exploit-developer) must target a "
-                            "host that is explicitly in scope. If this is intentional "
-                            "(e.g. cert-chain pivot), reframe as recon/osint, or add "
-                            "the host to scope.json first."
-                        )
+                    probed_host = scope_host.strip()
+                    if entries and not host_admitted(probed_host, entries, deny):
+                        if host_in_scope(probed_host, entries):
+                            # Host IS in the allowlist but is carved out by an
+                            # out_of_scope denylist entry — distinct, sharper error.
+                            errors.append(
+                                f"scope_host '{scope_host}' matches an out_of_scope "
+                                "carve-out in scope.json `out_of_scope` and must not "
+                                "be probed."
+                            )
+                        else:
+                            errors.append(
+                                f"scope_host '{scope_host}' is not in scope.json `hosts` "
+                                f"for role '{role_name}'. Active-probing dispatches "
+                                "(vulnerability-analyst, exploit-developer) must target a "
+                                "host that is explicitly in scope. If this is intentional "
+                                "(e.g. cert-chain pivot), reframe as recon/osint, or add "
+                                "the host to scope.json first."
+                            )
 
     return errors, warnings
 

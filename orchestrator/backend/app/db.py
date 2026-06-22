@@ -6,8 +6,9 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from .config import settings
 from .models.event import Event
@@ -632,6 +633,50 @@ def _create_core_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_credentials_table(connection: sqlite3.Connection) -> None:
+    """Centralized per-engagement credential store (replaces auth.json).
+
+    One row per (engagement, identity_name). The named-identity model is
+    preserved (cross-identity IDOR/BOLA depth needs ≥2 users), so the engagement
+    key alone is not unique — identity_name is part of the key. ``is_active``
+    marks the engagement's default identity (the one resolved when no
+    ``--identity`` is requested); the service layer keeps at most one active row
+    per engagement. Known auth material is stored in typed JSON columns; the
+    ``raw_json`` column preserves the full captured/imported payload verbatim so
+    sessions we don't fully model (custom token shapes, unusual headers) are
+    never lost — the materializer applies what it understands and round-trips
+    the rest. Rows cascade-delete with their engagement.
+    """
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS engagement_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                identity_name TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'manual',
+                state TEXT NOT NULL DEFAULT 'missing',
+                use_for_requests INTEGER NOT NULL DEFAULT 1,
+                auth_context TEXT NOT NULL DEFAULT 'authenticated',
+                is_active INTEGER NOT NULL DEFAULT 0,
+                cookies_json TEXT NOT NULL DEFAULT '{}',
+                headers_json TEXT NOT NULL DEFAULT '{}',
+                tokens_json TEXT NOT NULL DEFAULT '{}',
+                host_cookies_json TEXT NOT NULL DEFAULT '[]',
+                raw_json TEXT NOT NULL DEFAULT '{}',
+                notes TEXT NOT NULL DEFAULT '',
+                expires_at TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, identity_name),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_engagement_credentials_engagement "
+        "ON engagement_credentials(engagement_id)"
+    )
+
+
 def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -1076,8 +1121,8 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
                 -- Named identity this credential is replayable AS (depth-gate
-                -- Wave 4 / identity). Links a stored credential to the auth.json
-                -- identity (user_a/user_b/admin) so "which identity ran which
+                -- Wave 4 / identity). Links a stored credential to the
+                -- credential-store identity (user_a/user_b/admin) so "which identity ran which
                 -- probe" is recordable and cross-identity access-control depth
                 -- is real. Additive + free-text; empty when no identity is set.
                 identity TEXT NOT NULL DEFAULT '',
@@ -2759,6 +2804,7 @@ def init_db() -> None:
         connection.execute("PRAGMA journal_mode = WAL")
         _require_fts5(connection)
         _create_core_tables(connection)
+        _create_credentials_table(connection)
         _create_assessment_entity_tables(connection)
         _create_assessment_finding_tables(connection)
         _create_command_runs_table_and_fts(connection)
@@ -2984,6 +3030,184 @@ def get_engagement_by_key(key: str) -> Engagement | None:
             (key,),
         ).fetchone()
     return Engagement.from_row(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Engagement credentials (centralized auth store — replaces auth.json)
+# ---------------------------------------------------------------------------
+
+
+def _credential_row_to_material(row: sqlite3.Row) -> dict[str, Any]:
+    """Project a credentials row to the identity-material dict consumers expect.
+
+    The shape mirrors the legacy per-identity auth.json material (cookies /
+    headers / tokens / host_cookies / mode / state / auth_context / …) so the
+    runtime materializer and CLI are source-agnostic. ``raw_json`` is merged
+    UNDER the typed columns so any verbatim-preserved extras (custom fields)
+    survive, while the typed columns remain authoritative.
+    """
+    def _loads(value: str, fallback: Any) -> Any:
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    raw = _loads(row["raw_json"], {})
+    material: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    material.update(
+        {
+            "identity_name": row["identity_name"],
+            "mode": row["mode"],
+            "state": row["state"],
+            "use_for_requests": bool(row["use_for_requests"]),
+            "auth_context": row["auth_context"],
+            "is_active": bool(row["is_active"]),
+            "cookies": _loads(row["cookies_json"], {}),
+            "headers": _loads(row["headers_json"], {}),
+            "tokens": _loads(row["tokens_json"], {}),
+            "host_cookies": _loads(row["host_cookies_json"], []),
+            "notes": row["notes"],
+            "expires_at": row["expires_at"],
+            "updated_at": row["updated_at"],
+        }
+    )
+    return material
+
+
+def list_credentials(engagement_id: int) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT * FROM engagement_credentials WHERE engagement_id = ? "
+            "ORDER BY identity_name",
+            (engagement_id,),
+        ).fetchall()
+    return [_credential_row_to_material(row) for row in rows]
+
+
+def get_credential(engagement_id: int, identity_name: str) -> dict[str, Any] | None:
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM engagement_credentials "
+            "WHERE engagement_id = ? AND identity_name = ?",
+            (engagement_id, identity_name),
+        ).fetchone()
+    return _credential_row_to_material(row) if row else None
+
+
+def get_active_credential(engagement_id: int) -> dict[str, Any] | None:
+    """Return the active identity's material, or the first one if none is
+    explicitly active, or None when the engagement has no credentials."""
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM engagement_credentials WHERE engagement_id = ? "
+            "ORDER BY is_active DESC, identity_name LIMIT 1",
+            (engagement_id,),
+        ).fetchone()
+    return _credential_row_to_material(row) if row else None
+
+
+def upsert_credential(
+    engagement_id: int,
+    identity_name: str,
+    *,
+    mode: str,
+    state: str,
+    use_for_requests: bool,
+    auth_context: str,
+    cookies: dict[str, Any],
+    headers: dict[str, Any],
+    tokens: dict[str, Any],
+    host_cookies: list[Any],
+    raw: dict[str, Any],
+    notes: str,
+    expires_at: str | None,
+    make_active: bool,
+) -> dict[str, Any]:
+    """Insert or replace one identity's credential material.
+
+    UNIQUE(engagement_id, identity_name) makes this idempotent. When
+    ``make_active`` is set, all other identities for the engagement are
+    deactivated so at most one row is active.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with get_connection() as connection:
+        if make_active:
+            connection.execute(
+                "UPDATE engagement_credentials SET is_active = 0 WHERE engagement_id = ?",
+                (engagement_id,),
+            )
+        connection.execute(
+            """
+            INSERT INTO engagement_credentials (
+                engagement_id, identity_name, mode, state, use_for_requests,
+                auth_context, is_active, cookies_json, headers_json, tokens_json,
+                host_cookies_json, raw_json, notes, expires_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(engagement_id, identity_name) DO UPDATE SET
+                mode = excluded.mode,
+                state = excluded.state,
+                use_for_requests = excluded.use_for_requests,
+                auth_context = excluded.auth_context,
+                is_active = CASE WHEN ? THEN 1 ELSE engagement_credentials.is_active END,
+                cookies_json = excluded.cookies_json,
+                headers_json = excluded.headers_json,
+                tokens_json = excluded.tokens_json,
+                host_cookies_json = excluded.host_cookies_json,
+                raw_json = excluded.raw_json,
+                notes = excluded.notes,
+                expires_at = excluded.expires_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                engagement_id, identity_name, mode, state, 1 if use_for_requests else 0,
+                auth_context, 1 if make_active else 0,
+                json.dumps(cookies), json.dumps(headers), json.dumps(tokens),
+                json.dumps(host_cookies), json.dumps(raw), notes, expires_at, now,
+                1 if make_active else 0,
+            ),
+        )
+    result = get_credential(engagement_id, identity_name)
+    assert result is not None  # just written
+    return result
+
+
+def set_active_identity(engagement_id: int, identity_name: str) -> bool:
+    """Mark one identity active (others inactive). Returns False if absent."""
+    with get_connection() as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM engagement_credentials "
+            "WHERE engagement_id = ? AND identity_name = ?",
+            (engagement_id, identity_name),
+        ).fetchone()
+        if exists is None:
+            return False
+        connection.execute(
+            "UPDATE engagement_credentials SET is_active = 0 WHERE engagement_id = ?",
+            (engagement_id,),
+        )
+        connection.execute(
+            "UPDATE engagement_credentials SET is_active = 1 "
+            "WHERE engagement_id = ? AND identity_name = ?",
+            (engagement_id, identity_name),
+        )
+    return True
+
+
+def delete_credential(engagement_id: int, identity_name: str) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM engagement_credentials "
+            "WHERE engagement_id = ? AND identity_name = ?",
+            (engagement_id, identity_name),
+        )
+
+
+def delete_all_credentials(engagement_id: int) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM engagement_credentials WHERE engagement_id = ?",
+            (engagement_id,),
+        )
 
 
 def delete_engagement(engagement_id: int) -> None:

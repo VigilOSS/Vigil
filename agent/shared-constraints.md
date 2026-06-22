@@ -19,7 +19,7 @@ Read `scope.json` before making target-facing decisions. Confirm:
 
 - In-scope hosts from the `hosts` array (includes `*.domain` entries for subdomain enum)
 - `exploit_policy` value (`pause` | `selected` | `full_send`)
-- Auth state from `auth.json` — use credentials only when the file is populated and marked active
+- Auth state from the engagement's backend credential store (`vigil auth status`) — use credentials only when a record is populated and marked active
 
 All testing stays within listed scope hosts. Exploit policy escalation requires operator approval.
 
@@ -705,7 +705,7 @@ roles that do.
 | Custom scripts/exploits | tools/ |
 | Background PIDs | pids/ |
 
-Root: `scope.json`, `report.md`, `auth.json`, and the transient worker buffer only. Activity log and intel live in the orchestrator backend — query via `vigil assess fetch activity-entries` and `vigil assess list-intel`.
+Root: `scope.json`, `report.md`, and the transient worker buffer only. Credentials, activity log, and intel live in the orchestrator backend — query via `vigil auth status`, `vigil assess fetch activity-entries`, and `vigil assess list-intel`.
 
 ---
 

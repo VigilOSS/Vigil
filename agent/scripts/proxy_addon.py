@@ -1,5 +1,5 @@
 """mitmproxy addon — intercepts HTTP traffic and routes each flow to the
-matching engagement's scope, auth.json, cases.db, and orchestrator backend.
+matching engagement's scope, credential store, cases.db, and orchestrator backend.
 
 Managed launch:
     vigil mitmproxy start
@@ -88,18 +88,18 @@ class EngagementEntry:
     """Per-engagement state the addon needs to route a single flow.
 
     The addon keeps one ``EngagementEntry`` per active engagement and looks one
-    up by hostname on every captured response. ``db`` and ``auth_lock`` are
-    lazily populated by ``CaseCollector`` rather than at registry-load time so
-    we never open a SQLite handle for an engagement that never sees traffic.
+    up by hostname on every captured response. ``db`` is lazily populated by
+    ``CaseCollector`` rather than at registry-load time so we never open a
+    SQLite handle for an engagement that never sees traffic.
     """
 
     key: str
     root: Path
     scope_patterns: list[str]
+    out_of_scope_patterns: list[str] = field(default_factory=list)
     scope_priority: int = 0
     updated_at: str = ""
     db: sqlite3.Connection | None = None
-    auth_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 def _normalize_scope_entry(raw: str) -> str:
@@ -276,6 +276,7 @@ class CaseCollector:
                 if existing is not None:
                     existing.root = entry.root
                     existing.scope_patterns = entry.scope_patterns
+                    existing.out_of_scope_patterns = entry.out_of_scope_patterns
                     existing.scope_priority = entry.scope_priority
                     existing.updated_at = entry.updated_at
                     new_registry[entry.key] = existing
@@ -353,6 +354,16 @@ class CaseCollector:
                 for item in scope_hosts
                 if isinstance(item, str) and str(item).strip()
             ]
+            out_of_scope_raw = row.get("scope_out_of_scope")
+            if not isinstance(out_of_scope_raw, list):
+                out_of_scope_raw = row.get("out_of_scope")
+            if not isinstance(out_of_scope_raw, list):
+                out_of_scope_raw = []
+            out_of_scope_patterns = [
+                _normalize_scope_entry(str(item))
+                for item in out_of_scope_raw
+                if isinstance(item, str) and str(item).strip()
+            ]
             scope_priority_raw = row.get("scope_priority", 0)
             try:
                 scope_priority = int(scope_priority_raw) if scope_priority_raw is not None else 0
@@ -364,6 +375,7 @@ class CaseCollector:
                     key=key,
                     root=root,
                     scope_patterns=scope_patterns,
+                    out_of_scope_patterns=out_of_scope_patterns,
                     scope_priority=scope_priority,
                     updated_at=updated_at,
                 )
@@ -400,6 +412,7 @@ class CaseCollector:
             if status_value and status_value != "in_progress":
                 continue
             scope_patterns = self._scope_patterns_from_dict(scope_data)
+            out_of_scope_patterns = self._out_of_scope_patterns_from_dict(scope_data)
             scope_priority_raw = scope_data.get("scope_priority", 0)
             try:
                 scope_priority = int(scope_priority_raw) if scope_priority_raw is not None else 0
@@ -417,6 +430,7 @@ class CaseCollector:
                     key=engagement_dir.name,
                     root=engagement_dir,
                     scope_patterns=scope_patterns,
+                    out_of_scope_patterns=out_of_scope_patterns,
                     scope_priority=scope_priority,
                     updated_at=updated_at,
                 )
@@ -445,6 +459,23 @@ class CaseCollector:
             result.append(normalized)
         return result
 
+    @staticmethod
+    def _out_of_scope_patterns_from_dict(scope_data: dict) -> list[str]:
+        raw = scope_data.get("out_of_scope")
+        if not isinstance(raw, list):
+            return []
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            normalized = _normalize_scope_entry(item)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
+
     def _write_routes_cache(self) -> None:
         if self.engagements_root is None:
             return
@@ -454,6 +485,7 @@ class CaseCollector:
                 {
                     "key": entry.key,
                     "scope_patterns": list(entry.scope_patterns),
+                    "out_of_scope": list(entry.out_of_scope_patterns),
                     "scope_priority": entry.scope_priority,
                     "updated_at": entry.updated_at,
                 }
@@ -502,6 +534,25 @@ class CaseCollector:
         if best is None:
             return None
         chosen = best[3]
+        # Out-of-scope carve-out: a host admitted by an in-scope wildcard but
+        # matching ANY of the engagement's out_of_scope patterns must not be
+        # captured or routed. The denylist wins — drop the flow entirely.
+        # NOTE: ``_scope_match_score`` understands only literal and ``*.``
+        # wildcard patterns, so a CIDR or URL out_of_scope entry is inert HERE
+        # (same limitation the in-scope match path has — the proxy routes by
+        # hostname and never resolves an IP). CIDR/URL carve-outs are still
+        # honored on the IP-aware surfaces (filter-scope / dispatch gate /
+        # ingest-spec) via ``scope.host_admitted``.
+        for pattern in chosen.out_of_scope_patterns:
+            if _scope_match_score(pattern, hostname) is not None:
+                suppress_key = (hostname, chosen.key)
+                if suppress_key not in self._routed_log_seen:
+                    self._routed_log_seen.add(suppress_key)
+                    ctx.log.info(
+                        f"proxy_addon: suppressed {hostname} — matches out_of_scope "
+                        f"carve-out '{pattern}' for engagement {chosen.key}"
+                    )
+                return None
         log_key = (hostname, chosen.key)
         if log_key not in self._routed_log_seen:
             self._routed_log_seen.add(log_key)
@@ -729,18 +780,7 @@ class CaseCollector:
             return None
         return data
 
-    # -- auth.json read/write ------------------------------------------------
-
-    def _load_auth_state(self, entry: EngagementEntry) -> dict:
-        auth_path = entry.root / "auth.json"
-        if not auth_path.exists():
-            return {}
-        try:
-            with auth_path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            return {}
+    # -- auth context + capture (centralized credential store) --------------
 
     def _request_auth_context(
         self,
@@ -748,33 +788,75 @@ class CaseCollector:
         req_headers_dict: dict,
         params: dict,
     ) -> str:
-        auth_state = self._load_auth_state(entry)
-        configured_context = str(auth_state.get("auth_context") or "").strip()
+        """Label a captured request's auth tier from the request material.
+
+        Derived purely from the flow (presence of an Authorization header or
+        cookies) — "authenticated" vs "anonymous". Named-identity labeling
+        happens at probe time via ``vigil assess kali --identity``, so the proxy
+        does not need a per-request lookup into the credential store.
+        """
         has_authorization = bool(
             req_headers_dict.get("authorization") or req_headers_dict.get("Authorization")
         )
         cookie_values = params.get("cookie_params") or "{}"
-        has_cookies = False
         try:
             has_cookies = bool(json.loads(cookie_values))
         except (TypeError, json.JSONDecodeError):
             has_cookies = False
+        return "authenticated" if (has_authorization or has_cookies) else "anonymous"
 
-        if has_authorization or has_cookies:
-            if configured_context and configured_context != "anonymous":
-                return configured_context
-            return "authenticated"
-        return "anonymous"
-
-    # -- auth capture -------------------------------------------------------
+    def _post_credentials_capture(
+        self,
+        entry: EngagementEntry,
+        *,
+        host: str,
+        scope_host: str,
+        cookies: dict,
+        headers: dict,
+        tokens: dict,
+    ) -> None:
+        """POST a captured credential delta to the backend, which merges it into
+        the engagement's ``default`` identity (host-cookie buckets, flat cookie
+        recompute, header/token merge). Mirrors ``_post_request_observation``.
+        """
+        if not self._backend_configured():
+            self._warn_backend_unavailable()
+            return
+        payload = {
+            "identity_name": "default",
+            "host": host,
+            "scope_host": scope_host,
+            "cookies": cookies,
+            "headers": headers,
+            "tokens": tokens,
+        }
+        request = Request(
+            f"{self.orchestrator_base_url}/engagements/{entry.key}/credentials/capture",
+            data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                response.read()
+            ctx.log.info(
+                f"proxy_addon: captured credentials for {entry.key} "
+                f"({len(cookies)} cookies, {len(headers)} headers from {host})"
+            )
+        except Exception as exc:
+            ctx.log.error(
+                f"proxy_addon: credential capture failed for {entry.key} — {exc}"
+            )
 
     def _capture_auth(self, entry: EngagementEntry, flow: http.HTTPFlow):
-        """Capture auth material into the matched engagement's auth.json.
+        """Capture auth material from a flow into the centralized credential
+        store (the ``default`` identity).
 
-        Per-engagement file lock prevents torn writes when concurrent flows for
-        the same engagement race. Per-host cookies go into ``host_cookies``;
-        the flat ``cookies`` dict stays populated from the primary scope target
-        for downstream consumers.
+        The addon extracts the per-flow delta (this host's request + Set-Cookie
+        cookies, any bearer token / Authorization header from a login response)
+        and POSTs it; the backend owns the merge (host buckets, flat cookies,
+        header/token accumulation). mitmproxy hooks run single-threaded so
+        captures serialize naturally — no client-side lock needed.
         """
         req = flow.request
         resp = flow.response
@@ -786,136 +868,64 @@ class CaseCollector:
         if not hostname:
             return
 
-        auth_path = entry.root / "auth.json"
+        # -- 1. Request cookies (mitmproxy parses them correctly) ------------
+        merged: dict[str, str] = dict(req.cookies.items())
 
-        with entry.auth_lock:
-            auth_data: dict = {}
-            if auth_path.exists():
+        # -- 2. Set-Cookie response headers ----------------------------------
+        set_cookies = resp.headers.get_all("set-cookie")
+        if set_cookies:
+            for sc in set_cookies:
+                name_val = sc.split(";")[0]
+                if "=" in name_val:
+                    k, v = name_val.split("=", 1)
+                    merged[k.strip()] = v.strip()
+
+        # -- 3. Token extraction from login-like JSON responses --------------
+        tokens: dict[str, str] = {}
+        headers: dict[str, str] = {}
+        if req.method == "POST" and LOGIN_URL_RE.search(req.pretty_url):
+            resp_body = self._safe_content(resp)
+            if resp_body:
                 try:
-                    with auth_path.open("r", encoding="utf-8") as fh:
-                        auth_data = json.load(fh)
-                except (json.JSONDecodeError, OSError):
-                    auth_data = {}
+                    body_json = json.loads(resp_body)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    body_json = None
+                if isinstance(body_json, dict):
+                    for key in list(body_json.keys()):
+                        if not TOKEN_KEYS_RE.search(key):
+                            continue
+                        token_value = body_json[key]
+                        # The capture endpoint types tokens as str->str; a
+                        # non-string token-keyed field (null / number / nested)
+                        # would 422 the whole POST and silently drop the
+                        # capture, so skip non-string values.
+                        if not isinstance(token_value, str) or not token_value:
+                            continue
+                        tokens[key] = token_value
+                        if (
+                            BEARER_TOKEN_KEYS_RE.search(key)
+                            and "Authorization" not in headers
+                        ):
+                            headers["Authorization"] = (
+                                token_value
+                                if token_value.lower().startswith("bearer ")
+                                else f"Bearer {token_value}"
+                            )
 
-            auth_data.setdefault("headers", {})
-            auth_data.setdefault("cookies", {})
-            # Note: ``mode`` / ``use_for_requests`` / ``auth_context`` are
-            # deliberately NOT setdefault'd here. Stale "anonymous" defaults
-            # would otherwise survive a fresh capture and silently mark
-            # downstream requests anonymous. They are assigned below in the
-            # ``if updated:`` block only when capture actually happened.
-            host_cookies_list: list[dict] = auth_data.get("host_cookies", [])
-            if not isinstance(host_cookies_list, list):
-                host_cookies_list = []
+        if not (merged or tokens or headers):
+            return
 
-            host_index: dict[str, int] = {}
-            for idx, host_entry in enumerate(host_cookies_list):
-                if isinstance(host_entry, dict) and isinstance(host_entry.get("host"), str):
-                    host_index[host_entry["host"].lower()] = idx
-
-            updated = False
-
-            # -- 1. Request cookies (mitmproxy parses them correctly) --------
-            req_cookies: dict[str, str] = {}
-            for k, v in req.cookies.items():
-                req_cookies[k] = v
-
-            # -- 2. Set-Cookie response headers ------------------------------
-            resp_cookies: dict[str, str] = {}
-            set_cookies = resp.headers.get_all("set-cookie")
-            if set_cookies:
-                for sc in set_cookies:
-                    name_val = sc.split(";")[0]
-                    if "=" in name_val:
-                        k, v = name_val.split("=", 1)
-                        resp_cookies[k.strip()] = v.strip()
-
-            merged: dict[str, str] = {}
-            merged.update(req_cookies)
-            merged.update(resp_cookies)
-
-            if merged:
-                if hostname in host_index:
-                    existing = host_cookies_list[host_index[hostname]].get("cookies", {})
-                    if not isinstance(existing, dict):
-                        existing = {}
-                    existing.update(merged)
-                    host_cookies_list[host_index[hostname]]["cookies"] = existing
-                else:
-                    host_cookies_list.append({"host": hostname, "cookies": merged})
-                    host_index[hostname] = len(host_cookies_list) - 1
-                updated = True
-
-            # -- 3. Token extraction from login-like JSON responses ----------
-            if req.method == "POST" and LOGIN_URL_RE.search(req.pretty_url):
-                resp_body = self._safe_content(resp)
-                if resp_body:
-                    try:
-                        body_json = json.loads(resp_body)
-                        if isinstance(body_json, dict):
-                            for key in list(body_json.keys()):
-                                if TOKEN_KEYS_RE.search(key):
-                                    token_value = body_json[key]
-                                    auth_data.setdefault("tokens", {})[key] = token_value
-                                    if (
-                                        isinstance(token_value, str)
-                                        and token_value
-                                        and BEARER_TOKEN_KEYS_RE.search(key)
-                                    ):
-                                        auth_data.setdefault("headers", {})
-                                        if "Authorization" not in auth_data["headers"]:
-                                            bearer_value = (
-                                                token_value
-                                                if token_value.lower().startswith("bearer ")
-                                                else f"Bearer {token_value}"
-                                            )
-                                            auth_data["headers"]["Authorization"] = bearer_value
-                                    updated = True
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        pass
-
-            # -- 4. Write auth.json ------------------------------------------
-            if updated:
-                primary_host = (
-                    entry.scope_patterns[0].lstrip("*.") if entry.scope_patterns else ""
-                ).lower()
-                flat_cookies: dict[str, str] = {}
-                for host_entry in host_cookies_list:
-                    h = (host_entry.get("host") or "").lower()
-                    entry_cookies = host_entry.get("cookies", {})
-                    if not isinstance(entry_cookies, dict):
-                        continue
-                    if h == primary_host or (primary_host and h.endswith("." + primary_host)):
-                        flat_cookies.update(entry_cookies)
-
-                auth_data["mode"] = "proxy_capture"
-                auth_data["use_for_requests"] = True
-                existing_context = auth_data.get("auth_context")
-                if not existing_context or existing_context == "anonymous":
-                    auth_data["auth_context"] = "authenticated"
-
-                auth_data["cookies"] = flat_cookies
-                auth_data["host_cookies"] = host_cookies_list
-                auth_data["state"] = "available" if flat_cookies else auth_data.get(
-                    "state", "missing"
-                )
-                auth_data["updated_at"] = datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                )
-                try:
-                    tmp_path = auth_path.with_name(auth_path.name + ".tmp")
-                    with tmp_path.open("w", encoding="utf-8") as fh:
-                        json.dump(auth_data, fh, indent=2)
-                    tmp_path.replace(auth_path)
-                    ctx.log.info(
-                        f"proxy_addon: updated {entry.key}/auth.json — "
-                        f"{len(flat_cookies)} flat cookies, "
-                        f"{len(host_cookies_list)} hosts"
-                    )
-                except OSError as exc:
-                    ctx.log.warn(
-                        f"proxy_addon: cannot write {auth_path} — {exc}"
-                    )
+        primary_host = (
+            entry.scope_patterns[0].lstrip("*.") if entry.scope_patterns else ""
+        ).lower()
+        self._post_credentials_capture(
+            entry,
+            host=hostname,
+            scope_host=primary_host,
+            cookies=merged,
+            headers=headers,
+            tokens=tokens,
+        )
 
     # -- DB insert ----------------------------------------------------------
 
@@ -953,6 +963,59 @@ class CaseCollector:
                 )
                 return None
 
+    def _drop_db_for(self, entry: EngagementEntry) -> None:
+        """Close and forget the cached connection so the next _open_db_for
+        re-opens a fresh one.
+
+        A long-lived SQLite connection can stop persisting writes after the
+        underlying cases.db file is checkpointed, VACUUMed, or replaced (new
+        inode) out from under it — e.g. an external ``.recover`` rebuild or a
+        WAL truncate from another process. The connection keeps accepting
+        execute()/commit() without raising, but the rows land in a detached/old
+        file image that other readers never see. This was observed in
+        production: the proxy held a connection for ~2h while work_items in the
+        engagement DB silently stopped growing even though flows were arriving
+        and the backend POSTs succeeded. Dropping the connection here lets the
+        verify-and-retry path in _insert_case recover without a manual restart.
+        """
+        with self._registry_lock:
+            if entry.db is not None:
+                try:
+                    entry.db.close()
+                except sqlite3.Error:
+                    pass
+                entry.db = None
+
+    @staticmethod
+    def _row_persisted(db_path: str, queue_key: str) -> bool:
+        """Confirm a just-written row is visible to an INDEPENDENT reader.
+
+        Staleness is defined relative to what *other* processes see: the
+        backend and CLI read cases.db through fresh short-lived connections, so
+        the only probe that reliably detects a wedged writer is one that also
+        reads through a fresh connection. A read-back on the *writing*
+        connection would still see its own (un-persisted) write when the file
+        was replaced underneath it — masking exactly the failure we are trying
+        to catch. In WAL mode a fresh reader sees any committed write on the
+        current file, and sees nothing when the writer is stranded on a stale
+        inode, which is precisely the discrimination we need. The cost is one
+        file open plus one indexed lookup per capture, negligible on this path.
+        """
+        try:
+            probe = sqlite3.connect(db_path, timeout=5.0)
+        except sqlite3.Error:
+            return False
+        try:
+            row = probe.execute(
+                "SELECT 1 FROM work_items WHERE queue_key = ? LIMIT 1",
+                (queue_key,),
+            ).fetchone()
+            return row is not None
+        except sqlite3.Error:
+            return False
+        finally:
+            probe.close()
+
     def _insert_case(
         self,
         entry: EngagementEntry,
@@ -978,12 +1041,11 @@ class CaseCollector:
         case_type: str,
         params_key_sig: str,
     ):
-        connection = self._open_db_for(entry)
-        if connection is None:
-            return
-        try:
+        db_path = str(entry.root / "cases.db")
+
+        def _do_insert(conn: sqlite3.Connection) -> None:
             db_insert_work_item(
-                str(entry.root / "cases.db"),
+                db_path,
                 queue_key=queue_key,
                 request_variant_id=request_variant_id,
                 service_id=service_id,
@@ -1009,10 +1071,44 @@ class CaseCollector:
                 case_type=case_type,
                 source="proxy",
                 params_key_sig=params_key_sig,
-                connection=connection,
+                connection=conn,
             )
+
+        connection = self._open_db_for(entry)
+        if connection is None:
+            return
+        try:
+            _do_insert(connection)
         except sqlite3.OperationalError as exc:
             ctx.log.warn(f"proxy_addon: DB busy/error for {entry.key} — {exc}")
+            return
+
+        # Verify the write is visible to independent readers (see _drop_db_for
+        # / _row_persisted). If it is not, the cached connection is stale:
+        # drop it, reopen fresh, and retry once. INSERT OR IGNORE on
+        # UNIQUE(queue_key) makes the retry idempotent.
+        if self._row_persisted(db_path, queue_key):
+            return
+        ctx.log.warn(
+            f"proxy_addon: write to {entry.key} not visible to readers "
+            f"(stale connection) — reconnecting and retrying"
+        )
+        self._drop_db_for(entry)
+        connection = self._open_db_for(entry)
+        if connection is None:
+            return
+        try:
+            _do_insert(connection)
+        except sqlite3.OperationalError as exc:
+            ctx.log.warn(
+                f"proxy_addon: DB busy/error for {entry.key} on retry — {exc}"
+            )
+            return
+        if not self._row_persisted(db_path, queue_key):
+            ctx.log.error(
+                f"proxy_addon: write to {entry.key} still not visible after "
+                f"reconnect — capture lost for {url}"
+            )
 
     # -- main entry point ---------------------------------------------------
 
@@ -1040,7 +1136,7 @@ class CaseCollector:
         if self._is_noise(hostname, req.pretty_url):
             return
 
-        # Auth capture (side-effect: writes auth.json with per-host cookies)
+        # Auth capture (side-effect: POSTs captured credentials to the backend)
         self._capture_auth(entry, flow)
 
         params = self._extract_params(flow)

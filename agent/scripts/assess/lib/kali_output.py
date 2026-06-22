@@ -223,17 +223,43 @@ def _engagement_type(engagement_dir: Path) -> str:
     return str(data.get("engagement_type", "web")) or "web"
 
 
-def _auth_context(engagement_dir: Path) -> str:
-    auth = engagement_dir / "auth.json"
-    if not auth.is_file():
-        return "none"
+def _required_headers(engagement_dir: Path) -> dict[str, str]:
+    """Read ``required_headers`` from ``scope.json``.
+
+    These are program-mandated attribution headers (e.g. BugCrowd's
+    ``X-Bug-Bounty: <handle>``) that every in-scope HTTP probe must carry. An
+    absent/empty/unreadable scope returns ``{}`` so the no-header path is the
+    unchanged default. Only string→string pairs survive; anything else is
+    dropped so a malformed scope can never inject a non-header value into argv.
+    """
+    scope = engagement_dir / "scope.json"
+    if not scope.is_file():
+        return {}
     try:
-        data = json.loads(auth.read_text(encoding="utf-8"))
+        data = json.loads(scope.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return "none"
+        return {}
     if not isinstance(data, dict):
+        return {}
+    raw = data.get("required_headers")
+    if not isinstance(raw, dict):
+        return {}
+    headers: dict[str, str] = {}
+    for name, value in raw.items():
+        if isinstance(name, str) and name.strip() and isinstance(value, str):
+            headers[name.strip()] = value
+    return headers
+
+
+def _auth_context(engagement_dir: Path) -> str:
+    # Audit label for KaliResult — the active identity's mode from the
+    # centralized credential store ("none" when no credentials / unreachable).
+    from .creds_client import active_material
+
+    material = active_material(str(engagement_dir))
+    if not material:
         return "none"
-    kind = data.get("kind") or data.get("mode") or "none"
+    kind = material.get("mode") or "none"
     return str(kind) or "none"
 
 

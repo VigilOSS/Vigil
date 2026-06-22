@@ -478,7 +478,7 @@ DB="$DIR/cases.db"
 
    **Per-host outcome audit (WARN-only).** Pair the scope-entry gate with `vigil assess check-phase-readiness --phase recon --by-host` to surface a per-host outcome table: WAF tier, service inventory, directory-fuzz coverage, tech fingerprint, OSINT. The audit reads outcome tables (`intel_tech_components`, `assessment_services`, `assessment_surfaces`, `assessment_dispatch_decisions`) — never `assessment_command_runs` — so any tool that wrote the durable row satisfies the corresponding objective. Unmet objectives WARN with an actionable dispatch hint but do not block phase advance. When an objective is intentionally skipped (scope brief forbids brute-force, vendor confirms WAF tier out-of-band, OSINT carve-out), record an explicit deferral: `vigil assess agent decision --kind coverage_deferral --payload-json '{"host": "api.example.com", "deferred_objectives": ["directory_fuzz"], "reason": "scope brief forbids brute-force"}' --surfaced-to-user`. The deferral row is queryable post-engagement via `vigil assess agent list --kind coverage_deferral`, so gaming the gate is audited rather than invisible.
 2. **COLLECT** → dispatch surface-collector with `agent/skills/surface-collection/SKILL.md`.
-   Provide: targets from scope.json, Phase 1 endpoint artifacts (paths to `endpoints.txt` and any source-analyzer output in `scans/`), auth.json state, and `$DIR/cases.db` path.
+   Provide: targets from scope.json, Phase 1 endpoint artifacts (paths to `endpoints.txt` and any source-analyzer output in `scans/`), credential state (from `vigil auth status`), and `$DIR/cases.db` path.
    On return:
    - Intelligence from `#### Intelligence` sections must be recorded via `vigil assess record-intel <type> <json-file>` — one call per structured row (tech-component, person, email, domain, dns-record, org-fact, note, etc.). Run `vigil assess contract record-intel <type>` first for the canonical field list — intel schemas are strict and reject unknown fields. Verify the counts with `vigil assess list-intel` (summary view).
    - Review `#### Priority Attack Surfaces` for Phase 3 dispatch ordering — surface-collector's triage signals override the default type-based dispatch order when risk-informed prioritization is available
@@ -702,34 +702,34 @@ When ANY agent discovers credentials, the operator coordinates these steps:
      control depth needs each identity independently confirmed accepted.
    - If login **fails** → record the result via `vigil assess log operator "Login test failed" "<command>" "<response>"` (writes an activity entry to the backend), continue anonymously. Do not dispatch a specialist for a failed login.
    - If login **succeeds** → continue to step 2.
-2. **Operator writes to auth.json** — populate cookies, headers, or token fields from the successful login response. Set `state` to `available` and `use_for_requests` to `true`. This is local file work.
-3. **Operator re-dispatches surface-collector** — dispatch surface-collector with updated auth.json to re-run the collection pipeline (Katana + gau + ingestion) with authenticated context. Surface-collector handles auth-aware crawling and ingests authenticated-only endpoints into the work buffer. This is the POST-AUTH RE-COLLECTION step.
+2. **Operator stores the credential** — import the cookies, headers, or token fields from the successful login response into the engagement's backend credential store with `vigil auth import <key> --source - --identity <name>` (or `vigil auth edit <key>`). Set `use_for_requests` to `true`. This writes to the centralized credential store, not a local file.
+3. **Operator re-dispatches surface-collector** — dispatch surface-collector after the credential is stored to re-run the collection pipeline (Katana + gau + ingestion) with authenticated context. Surface-collector handles auth-aware crawling and ingests authenticated-only endpoints into the work buffer. This is the POST-AUTH RE-COLLECTION step.
 4. **Dispatch exploit-developer** — to test authenticated surfaces discovered in step 3. The agent maps what authenticated access grants and tests for privilege escalation, IDOR, and auth-boundary issues across the newly discovered endpoints. This is the analysis work that requires a specialist.
 
 Auth handling rules:
-- `auth.json` is the live auth contract, per-engagement. It may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`. The shared mitmproxy (if running) routes captures into the matching engagement's `auth.json` by scope, so concurrent engagements do not contend.
-- If `auth.json` is present and usable, surface-collector passes auth headers to Katana and tags ingestion with the authenticated context automatically.
-- If `auth.json` is missing material or marked expired, warn and continue anonymously rather than halting the engagement.
-- The human may update `auth.json` directly or use mitmproxy-assisted login capture to refresh it.
+- Engagement credentials live in the orchestrator backend credential store (one record per `(engagement, named identity)`), managed via the `vigil auth` CLI — there is no `auth.json` file. Each record may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`. The shared mitmproxy (if running) POSTs captures to the matching engagement's credential store by scope, so concurrent engagements do not contend.
+- If a usable credential is present, surface-collector reads it from the backend, passes auth headers to Katana, and tags ingestion with the authenticated context automatically.
+- If credentials are missing material or marked expired, warn and continue anonymously rather than halting the engagement.
+- The operator may update credentials with `vigil auth edit`/`vigil auth import` or use mitmproxy-assisted login capture to refresh them.
 
 ### Named identities (cross-identity access-control depth)
 
-Access-control depth (IDOR/BOLA/BFLA) is only **real** when measured across **≥2 named identities** — a cross-tenant pass needs two users. `auth.json` therefore supports a **named-identity** shape:
+Access-control depth (IDOR/BOLA/BFLA) is only **real** when measured across **≥2 named identities** — a cross-tenant pass needs two users. The credential store therefore holds **one record per named identity** per engagement, with one identity marked active. `vigil auth show <key>` dumps the identity map, e.g.:
 
 ```json
 {
   "identities": {
-    "user_a": { "mode": "auth_json", "cookies": {"session": "..."} },
-    "user_b": { "mode": "auth_json", "cookies": {"session": "..."} },
-    "admin":  { "mode": "auth_json", "headers": {"Authorization": "Bearer ..."} }
+    "user_a": { "cookies": {"session": "..."} },
+    "user_b": { "cookies": {"session": "..."} },
+    "admin":  { "headers": {"Authorization": "Bearer ..."} }
   },
   "active_identity": "user_a"
 }
 ```
 
-- A **legacy single-identity `auth.json`** (the old flat `{cookies, headers, ...}` shape) still works — it is normalized to one `default` identity at load time. You do not need to migrate existing engagements.
+- A single imported credential lands under the `default` identity and is marked active; `vigil auth set-active <key> --identity <name>` switches which identity the runtime uses by default. You do not need to migrate existing engagements.
 - Specialists select an identity per request with **`vigil assess kali <tool> --identity <name>`** (e.g. `--identity user_a` / `--identity user_b`). The flag selects that identity's auth material AND **stamps the identity name as the probe's `auth_context`**, so the depth ledger can SEE a cross-identity access-control pass. A single-identity access-control probe is "started but not cross-identity" and does **not** satisfy access-control depth.
-- When you capture multiple test accounts, record each under its own identity name in `auth.json` and (where you store the credential in the backend) associate it via the credential's `identity` field, so "which identity ran which probe" is recordable.
+- When you capture multiple test accounts, store each under its own identity name with `vigil auth import <key> --identity <name>`, so "which identity ran which probe" is recordable.
 - For two-user IDOR/BOLA replay, point specialists at `agent/skills/idor-testing/SKILL.md` and `agent/skills/split-brain-idor/SKILL.md`, which now drive the replay with `--identity` instead of hand-pasted tokens.
 
 ### Auth-expiry recovery loop
