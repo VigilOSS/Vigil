@@ -34,6 +34,88 @@ ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
 ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV = "VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES"
 DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES = 2
 
+# Engagement types that probe a live HTTP target and so can carry required
+# attribution headers / out-of-scope carve-outs. code/blue have no HTTP target.
+_HTTP_TARGET_TYPES = {"web", "both", "android"}
+
+# Bug-bounty program → the attribution header name that program mandates on all
+# traffic. `--program <name> --researcher <handle>` is sugar over `--header`.
+PROGRAM_HEADER_PRESETS = {
+    "bugcrowd": "X-Bug-Bounty",
+    "hackerone": "X-HackerOne",
+    "intigriti": "X-Intigriti",
+}
+
+
+def resolve_required_headers(
+    program: str | None,
+    researcher: str | None,
+    headers: list[str] | None,
+) -> dict[str, str]:
+    """Resolve `--program/--researcher` + repeatable `--header "Name: Value"`
+    into the `required_headers` map written to scope.json.
+
+    Returns `{}` when nothing is requested (the unchanged default). Later
+    `--header` entries win over an earlier preset of the same name so a custom
+    override is always possible. Raises SystemExit on malformed input.
+    """
+    resolved: dict[str, str] = {}
+    if program:
+        key = program.strip().lower()
+        header_name = PROGRAM_HEADER_PRESETS.get(key)
+        if header_name is None:
+            known = ", ".join(sorted(PROGRAM_HEADER_PRESETS))
+            raise SystemExit(
+                f"unknown --program '{program}'. Known presets: {known}. "
+                "Use --header \"Name: Value\" for an arbitrary header."
+            )
+        researcher_handle = (researcher or "").strip()
+        if not researcher_handle:
+            raise SystemExit(
+                f"--program {key} requires --researcher <handle> (the value sent "
+                f"as '{header_name}: <handle>')."
+            )
+        resolved[header_name] = researcher_handle
+    elif researcher:
+        raise SystemExit("--researcher is only meaningful together with --program.")
+
+    for raw in headers or []:
+        if ":" not in raw:
+            raise SystemExit(
+                f"--header '{raw}' is malformed; expected \"Name: Value\"."
+            )
+        name, value = raw.split(":", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name:
+            raise SystemExit(f"--header '{raw}' has an empty header name.")
+        resolved[name] = value
+    return resolved
+
+
+def resolve_out_of_scope(values: list[str] | None) -> list[str]:
+    """Normalize repeatable `--out-of-scope` entries into the `out_of_scope`
+    denylist written to scope.json (deduped, order-preserving).
+
+    Entry syntax mirrors `hosts` (bare host, `*.wildcard`, CIDR, URL); strict
+    classification happens at match time in `scope.out_of_scope_entries`, so
+    here we only strip/lowercase, reject whitespace-bearing tokens, and dedup.
+    """
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in values or []:
+        entry = raw.strip().lower()
+        if not entry:
+            continue
+        if any(ch.isspace() for ch in entry):
+            raise SystemExit(
+                f"--out-of-scope '{raw}' contains whitespace; pass one host/pattern per flag."
+            )
+        if entry not in seen:
+            seen.add(entry)
+            result.append(entry)
+    return result
+
 
 @dataclass(frozen=True, slots=True)
 class CreateEngagementOptions:
@@ -47,6 +129,10 @@ class CreateEngagementOptions:
     android_package: str | None = None
     dynamic_mode: str = "static_only"
     skip_permissions: bool = False
+    # Program-mandated attribution headers (e.g. {"X-Bug-Bounty": "<handle>"}) and
+    # out-of-scope carve-outs, written into scope.json for HTTP-target engagements.
+    required_headers: dict[str, str] = field(default_factory=dict)
+    out_of_scope: list[str] = field(default_factory=list)
     # Blue-only fields (ignored unless engagement_type == "blue"):
     customer: str | None = None
     platforms: list[str] = field(default_factory=list)
@@ -303,6 +389,20 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
             "created_at": created_at,
         }
 
+    # Program attribution headers + OOS carve-outs apply only to engagements
+    # that probe a live HTTP target. Written only when non-empty so existing
+    # scope.json shapes stay byte-identical when the feature is unused.
+    if options.engagement_type in _HTTP_TARGET_TYPES:
+        if options.required_headers:
+            scope["required_headers"] = dict(options.required_headers)
+        if options.out_of_scope:
+            scope["out_of_scope"] = list(options.out_of_scope)
+    elif options.required_headers or options.out_of_scope:
+        raise SystemExit(
+            "--program/--header and --out-of-scope apply only to HTTP-target "
+            f"engagements (web/both/android), not '{options.engagement_type}'."
+        )
+
     report_name = name
     report_target = target_normalized
     if options.engagement_type == "blue":
@@ -360,7 +460,9 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         repos=list(plan.repos),
         date_label=plan.date_label,
     )
-    _write_auth_scaffold(eng_dir, "none", plan.created_at)
+    # No auth.json scaffold: credentials live in the centralized store and an
+    # engagement with no credentials reads as anonymous (vigil auth import /
+    # mitmproxy capture populate it). See orchestrator credentials API.
     _write_json(eng_dir / "sessions" / "index.json", [])
     # Dispatch tracking + handoff content live in the orchestrator backend
     # (assessment_dispatches / assessment_dispatch_handoffs /
@@ -554,6 +656,88 @@ def _emit_bootstrap_scope_summary(scope: dict[str, object]) -> None:
     print(f"[vigil] scope: {len(raw_hosts)} entries", file=sys.stderr)
 
 
+def _load_engagement_scope(install_root: Path, key: str) -> tuple[Path, dict[str, Any]]:
+    """Resolve an engagement's scope.json by key for in-place mutation."""
+    eng_dir = engagements_root(install_root) / key
+    scope_path = eng_dir / "scope.json"
+    if not scope_path.is_file():
+        raise SystemExit(f"engagement '{key}' not found (no scope.json at {scope_path}).")
+    scope = _read_json(scope_path)
+    if str(scope.get("engagement_type") or "") not in _HTTP_TARGET_TYPES:
+        raise SystemExit(
+            f"engagement '{key}' is type '{scope.get('engagement_type')}'; required "
+            "headers / out-of-scope apply only to HTTP-target engagements."
+        )
+    return scope_path, scope
+
+
+def set_engagement_header(install_root: Path, key: str, header: str) -> dict[str, str]:
+    """Add/replace a `required_headers` entry on an existing engagement."""
+    if ":" not in header:
+        raise SystemExit(f"header '{header}' is malformed; expected \"Name: Value\".")
+    name, value = header.split(":", 1)
+    name, value = name.strip(), value.strip()
+    if not name:
+        raise SystemExit(f"header '{header}' has an empty header name.")
+    scope_path, scope = _load_engagement_scope(install_root, key)
+    headers = scope.get("required_headers")
+    if not isinstance(headers, dict):
+        headers = {}
+    headers[name] = value
+    scope["required_headers"] = headers
+    _write_json(scope_path, scope)
+    return headers
+
+
+def unset_engagement_header(install_root: Path, key: str, name: str) -> dict[str, str]:
+    """Remove a `required_headers` entry from an existing engagement."""
+    scope_path, scope = _load_engagement_scope(install_root, key)
+    headers = scope.get("required_headers")
+    if not isinstance(headers, dict) or name not in headers:
+        raise SystemExit(f"engagement '{key}' has no required header '{name}'.")
+    del headers[name]
+    if headers:
+        scope["required_headers"] = headers
+    else:
+        scope.pop("required_headers", None)
+    _write_json(scope_path, scope)
+    return headers if isinstance(headers, dict) else {}
+
+
+def add_out_of_scope(install_root: Path, key: str, entries: list[str]) -> list[str]:
+    """Add out-of-scope carve-out entries to an existing engagement (deduped)."""
+    new_entries = resolve_out_of_scope(entries)
+    if not new_entries:
+        raise SystemExit("no valid --out-of-scope entries given.")
+    scope_path, scope = _load_engagement_scope(install_root, key)
+    current = scope.get("out_of_scope")
+    if not isinstance(current, list):
+        current = []
+    merged = list(current)
+    for entry in new_entries:
+        if entry not in merged:
+            merged.append(entry)
+    scope["out_of_scope"] = merged
+    _write_json(scope_path, scope)
+    return merged
+
+
+def remove_out_of_scope(install_root: Path, key: str, entry: str) -> list[str]:
+    """Remove an out-of-scope carve-out from an existing engagement."""
+    target = entry.strip().lower()
+    scope_path, scope = _load_engagement_scope(install_root, key)
+    current = scope.get("out_of_scope")
+    if not isinstance(current, list) or target not in current:
+        raise SystemExit(f"engagement '{key}' has no out-of-scope entry '{entry}'.")
+    remaining = [item for item in current if item != target]
+    if remaining:
+        scope["out_of_scope"] = remaining
+    else:
+        scope.pop("out_of_scope", None)
+    _write_json(scope_path, scope)
+    return remaining
+
+
 def list_engagements(install_root: Path) -> list[EngagementRow]:
     rows: list[EngagementRow] = []
     for eng_dir in sorted(engagements_root(install_root).glob("*")):
@@ -691,34 +875,6 @@ def _read_json(path: Path) -> dict[str, object]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _write_auth_scaffold(eng_dir: Path, mode: str, timestamp: str) -> None:
-    if mode == "none":
-        payload = {
-            "mode": "none",
-            "state": "none",
-            "use_for_requests": False,
-            "auth_context": "anonymous",
-            "expires_at": None,
-            "updated_at": timestamp,
-            "cookies": {},
-            "headers": {},
-            "notes": "No authenticated context configured for this engagement.",
-        }
-    else:
-        payload = {
-            "mode": mode,
-            "state": "missing",
-            "use_for_requests": True,
-            "auth_context": "authenticated",
-            "expires_at": None,
-            "updated_at": timestamp,
-            "cookies": {},
-            "headers": {},
-            "notes": "Populate cookies and/or headers here, or refresh them through mitmproxy.",
-        }
-    _write_json(eng_dir / "auth.json", payload)
 
 
 _CHROME_PATHS = [

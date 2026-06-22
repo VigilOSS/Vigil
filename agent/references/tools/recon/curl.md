@@ -63,6 +63,10 @@ vigil assess kali exec \
 
 This is still HTTP request evidence. It can help distinguish scanner-client
 blocks from app behavior, but it does not execute JavaScript, maintain DOM
-state, or prove browser-enforced security behavior. Load
-`agent/skills/browser-semantic-analysis/SKILL.md` when runtime browser semantics
-are required.
+state, or prove browser-enforced security behavior, and it cannot *solve* an
+interactive bot-manager challenge — it can only replay a session that already
+cleared one. Load `agent/skills/browser-semantic-analysis/SKILL.md` when runtime
+browser semantics are required. To establish that session in the first place
+(headed stealth login on a bot-defended site), use
+`agent/skills/browser-automation/SKILL.md`, then feed the cookie jar here:
+`curl_chrome116 -b cookies.txt ...`.

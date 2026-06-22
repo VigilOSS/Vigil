@@ -79,6 +79,7 @@ from .kali_output import (
     _peak_rss_kilobytes_to_bytes,
     _read_proc_peak_rss,
     _read_safely,
+    _required_headers,
     _scope_version,
     _utcnow_iso,
     detect_transport_error,
@@ -240,6 +241,91 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
     return True
 
 
+# Program-mandated attribution headers (e.g. BugCrowd's ``X-Bug-Bounty: <handle>``)
+# must ride every in-scope HTTP probe. Three-way classifier:
+#   * INJECTABLE — HTTP-to-target tools that accept ``-H "Name: Val"``; inject.
+#   * SKIP       — passive / third-party-archive / DNS / L3-L4 tools that never
+#                  send HTTP to the in-scope target. Injecting here would LEAK
+#                  the researcher handle to web.archive.org/CommonCrawl/DNS APIs
+#                  or is meaningless, so silently skip (never warn).
+#   * else       — HTTP-to-target tools that can't take ``-H`` (nikto/whatweb/
+#                  wafw00f/httprobe) AND tools whose header flag is not ``-H``
+#                  (arjun uses a newline-separated ``--headers`` block, not
+#                  ``-H``): WARN (never block), since this argv can't carry the
+#                  header as ``-H`` — the operator injects it the tool's way.
+_REQUIRED_HEADER_INJECTABLE = frozenset(
+    {"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"}
+)
+_REQUIRED_HEADER_SKIP = frozenset(
+    {
+        "gau",
+        "waybackurls",
+        "subfinder",
+        "amass",
+        "dnsx",
+        "nmap",
+        "naabu",
+        "masscan",
+        "puredns",
+    }
+)
+
+
+def _apply_required_headers(
+    cmd: list[str], tool_name: str, headers: dict[str, str]
+) -> str:
+    """Inject program-mandated attribution header(s) into an HTTP command argv.
+
+    Returns one of ``"injected"``, ``"skipped"``, ``"warned"``, ``"noop"``:
+      * ``"noop"``    — no required headers to apply, or every header was
+                        already present (idempotent — an identity may have
+                        injected the same header on an injectable tool).
+      * ``"skipped"`` — passive/archive/DNS/L3-L4 tool that does not send HTTP
+                        to the in-scope target; nothing applied, no warning.
+      * ``"injected"``— at least one header was appended as ``-H "Name: Val"``.
+      * ``"warned"``  — an HTTP-capable but non-injectable/unknown tool; cmd is
+                        left untouched and the caller warns.
+
+    Idempotency: a header is skipped when an existing ``-H`` value already names
+    it (case-insensitive on the header name, tolerating ``Name:`` and
+    ``Name :``), so an identity-injected header is never duplicated.
+    """
+    if not headers:
+        return "noop"
+    name_lower = tool_name.lower()
+    if name_lower in _REQUIRED_HEADER_SKIP:
+        return "skipped"
+    if name_lower not in _REQUIRED_HEADER_INJECTABLE:
+        return "warned"
+
+    existing = _existing_header_names(cmd)
+    injected = False
+    for name, value in headers.items():
+        if name.lower() in existing:
+            continue
+        cmd.extend(["-H", f"{name}: {value}"])
+        existing.add(name.lower())
+        injected = True
+    return "injected" if injected else "noop"
+
+
+def _existing_header_names(cmd: list[str]) -> set[str]:
+    """Lower-cased header names already present as ``-H`` values in ``cmd``.
+
+    Splits each ``-H`` argument on the first colon and tolerates a space before
+    it (``Name:`` and ``Name :``) so the idempotency check matches regardless of
+    spacing.
+    """
+    names: set[str] = set()
+    for idx, token in enumerate(cmd):
+        if token == "-H" and idx + 1 < len(cmd):
+            value = cmd[idx + 1]
+            head = value.split(":", 1)[0].strip()
+            if head:
+                names.add(head.lower())
+    return names
+
+
 def kali_exec(
     cmd: list[str],
     *,
@@ -305,8 +391,8 @@ def kali_exec(
         _identity_name, _identity_material = resolve_identity(eng_dir, identity)
         if not _identity_material:
             print(
-                f"warning: --identity '{identity}' not found in auth.json "
-                f"(known: {', '.join(identity_names(eng_dir)) or 'none'}); "
+                f"warning: --identity '{identity}' not found in the credential "
+                f"store (known: {', '.join(identity_names(eng_dir)) or 'none'}); "
                 "no auth material to apply.",
                 file=sys.stderr,
             )
@@ -341,6 +427,24 @@ def kali_exec(
                 "material). Leaving auth_context derived so this run is NOT counted "
                 "as a cross-identity probe — inject the identity's auth into the "
                 "command manually if this tool needs it.",
+                file=sys.stderr,
+            )
+
+    # Program-mandated attribution headers (e.g. BugCrowd's ``X-Bug-Bounty:
+    # <handle>``) must ride every in-scope HTTP probe. Inject here — after the
+    # identity block (so an identity-set header isn't duplicated) and before the
+    # IP-pin/exec — so the injected ``-H`` args land in the recorded audit argv.
+    # WARN (never block) when an HTTP-capable tool has no known -H injection.
+    _req_headers = _required_headers(eng_dir)
+    if _req_headers:
+        status = _apply_required_headers(cmd, derived_tool_name, _req_headers)
+        if status == "warned":
+            names = ", ".join(_req_headers)
+            print(
+                f"warning: program requires header(s) {names} but tool "
+                f"'{derived_tool_name}' has no known -H injection — this run will "
+                "NOT carry the required header; inject it manually if this tool "
+                "reaches the in-scope target.",
                 file=sys.stderr,
             )
 
@@ -818,6 +922,7 @@ __all__ = [
     "_peak_rss_kilobytes_to_bytes",
     "_read_proc_peak_rss",
     "_read_safely",
+    "_required_headers",
     "_scope_version",
     "_utcnow_iso",
     # Runtime exec + kill cascade (from kali_runtime_exec)

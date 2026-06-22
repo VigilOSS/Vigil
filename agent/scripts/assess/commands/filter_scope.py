@@ -8,10 +8,11 @@ from pathlib import Path
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import Config, load_config
 from assess.lib.scope import (
+    host_admitted,
     host_from_token,
-    host_in_scope,
     host_is_vendor_saas,
     load_scope,
+    out_of_scope_entries,
     scope_entries,
 )
 
@@ -70,6 +71,7 @@ def run(args: argparse.Namespace) -> None:
     cfg = load_config(args.engagement_dir)
     scope = load_scope(cfg.engagement_dir)
     entries = scope_entries(scope)
+    deny = out_of_scope_entries(scope)
 
     warned_vendor_hosts: set[str] = set()
     decided_hosts = _vendor_saas_decided_hosts(cfg)
@@ -100,7 +102,7 @@ def run(args: argparse.Namespace) -> None:
             if not value or value.startswith("#"):
                 continue
             host = host_from_token(value)
-            if not host_in_scope(host, entries):
+            if not host_admitted(host, entries, deny):
                 continue
             # Vendor-SaaS scope checkpoint: warn the first time an admitted
             # host's CNAME / rDNS shape matches a vendor SaaS suffix and the

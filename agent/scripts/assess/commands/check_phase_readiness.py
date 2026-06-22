@@ -464,6 +464,7 @@ def _run_redispatch(
         prior_dispatches=prior_dispatches,
         dedup_degraded=dedup_degraded,
         max_recommendations=int(args.max_recommendations),
+        deny_entries=cc.out_of_scope_entries(load_scope(cfg.engagement_dir)),
     )
 
 

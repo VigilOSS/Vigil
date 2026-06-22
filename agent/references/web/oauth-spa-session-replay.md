@@ -7,7 +7,7 @@ skill: oauth-oidc-testing
 
 When you hold a **captured live SPA session** (cookies from a proxied browser login) and need to
 make **authenticated API calls** for surface mapping / BOLA / authz testing, the naive approach —
-replay the captured `access_token` from `auth.json` — fails within minutes: SPA access tokens are
+replay the captured `access_token` from the credential store — fails within minutes: SPA access tokens are
 **short-lived** (here ~599s / 3–10 min) and a human page-refresh does **not** rotate them. You burn
 the engagement re-capturing, and worse, you record "unreachable" verdicts that were really just a
 **dead token** (see the liveness rule below).
@@ -170,6 +170,9 @@ exact** — only `X-CSRF-Token` cleared it; `X-XSRF-TOKEN`, `csrf-token`, `X-Acm
 
 ## Cross-references
 
+- `agent/skills/browser-automation/SKILL.md` — the **upstream** step: how to drive a headed stealth
+  Playwright browser past a bot-defended login and dump `context.cookies()` into the cookie jar (`$JAR`)
+  this reference consumes. This file is what you do *after* you hold those cookies.
 - `agent/references/recon/cdn-edge-and-bff-reachability.md` — the consumer side: once the session is
   live, how to read `27368` (no origin map / not exposed) vs `2736803` (edge authz deny / exists) vs
   the BFF-capture trap, and the leaked-`serverIP`-is-CDN-edge caveat.

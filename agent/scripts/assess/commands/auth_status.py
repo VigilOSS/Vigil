@@ -1,6 +1,7 @@
 """vigil assess auth-status — one-shot view of the engagement's auth state.
 
-Reads ``auth.json`` in the engagement directory and surfaces:
+Reads the active identity from the centralized credential store (orchestrator
+backend) and surfaces:
 - ``auth_context`` (anonymous / authenticated / admin / specific role)
 - ``mode`` (proxy_capture / manual / auth_json / none)
 - ``use_for_requests`` flag
@@ -12,17 +13,17 @@ Reads ``auth.json`` in the engagement directory and surfaces:
 - Recommended refresh path per the C42 Auth-expiry recovery loop
 
 Pairs with the recovery loop in ``agent/operator-core.md`` Credential
-Auto-Use section. The CLI is read-only; it does not write to auth.json
+Auto-Use section. The CLI is read-only; it does not write credentials
 or trigger a refresh.
 """
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.creds_client import active_material
 
 
 def register(subparsers) -> None:
@@ -46,16 +47,6 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-def _read_auth_json(engagement_dir: Path) -> dict:
-    path = engagement_dir / "auth.json"
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError):
-        return {}
-
-
 def _parse_iso8601(value: str | None) -> datetime | None:
     if not value or not isinstance(value, str):
         return None
@@ -74,7 +65,7 @@ def _parse_iso8601(value: str | None) -> datetime | None:
 
 
 def _token_shapes(auth: dict) -> list[str]:
-    """Identify which token shapes auth.json carries today."""
+    """Identify which token shapes the active credential carries today."""
     shapes: list[str] = []
     headers = auth.get("headers") or {}
     if isinstance(headers, dict):
@@ -126,11 +117,11 @@ def _refresh_recommendation(auth: dict, token_shapes: list[str]) -> str:
         return (
             "Session cookie present — re-capture via mitmproxy-assisted login. "
             "Restart the browser flow through the proxy; proxy_addon.py writes the "
-            "refreshed cookie set into auth.json automatically."
+            "refreshed cookie set into the credential store automatically."
         )
     return (
         "No token material detected. Operator must run the login flow to populate "
-        "auth.json (manual or proxy-assisted capture)."
+        "credentials (vigil auth import, or proxy-assisted capture)."
     )
 
 
@@ -168,8 +159,7 @@ def _last_auth_probe(client: AssessmentClient | None) -> dict | None:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    engagement_dir = Path(cfg.engagement_dir)
-    auth = _read_auth_json(engagement_dir)
+    auth = active_material(cfg.engagement_dir)
     shapes = _token_shapes(auth) if auth else []
 
     expires_at_raw = auth.get("expires_at") if isinstance(auth, dict) else None
