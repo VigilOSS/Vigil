@@ -4,6 +4,14 @@
 **/node_modules/
 **/dist/
 **/data/
+# Shipped recon resolver lists are REQUIRED at runtime and asserted by
+# test_recon_foundations; un-ignore just this dir's .txt lists so a clean CI
+# checkout receives them (the broad `**/data/` rule above must keep generated
+# runtime data out — hence the narrow re-include of the `data/` path down to
+# the files; git won't descend into an ignored dir, so each level is re-included).
+!agent/scripts/assess/data/
+!agent/scripts/assess/data/resolvers/
+!agent/scripts/assess/data/resolvers/*.txt
 **/*.egg-info/
 *.sqlite3
 *.db

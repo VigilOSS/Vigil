@@ -217,6 +217,29 @@ def scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
     return entries
 
 
+def out_of_scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
+    """Return normalized out-of-scope (denylist) entries from ``scope.json``.
+
+    Mirrors ``scope_entries`` but reads ``scope.get("out_of_scope")``. A missing
+    key defaults to an empty list (no carve-outs). Entries use the same coarse
+    host semantics as the in-scope allowlist; a wildcard carve-out excludes the
+    apex AND every subdomain.
+    """
+    raw_hosts = scope.get("out_of_scope")
+    if raw_hosts is None:
+        return []
+    if not isinstance(raw_hosts, list):
+        raise SystemExit("scope.json `out_of_scope` must be a list")
+    entries: list[dict[str, str]] = []
+    for item in raw_hosts:
+        if not isinstance(item, str):
+            continue
+        entry = classify_scope_entry(item)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
 def classify_scope_entry(raw: str) -> dict[str, str] | None:
     stripped = raw.strip()
     if not stripped:
@@ -384,3 +407,17 @@ def entry_matches_host(entry: dict[str, str], host: str) -> bool:
 
 def host_in_scope(host: str, entries: list[dict[str, str]]) -> bool:
     return any(entry_matches_host(entry, host) for entry in entries)
+
+
+def host_admitted(
+    host: str,
+    allow_entries: list[dict[str, str]],
+    deny_entries: list[dict[str, str]],
+) -> bool:
+    """Return True IFF ``host`` matches the allowlist AND no denylist entry.
+
+    The denylist wins: a host covered by an in-scope wildcard but matching an
+    ``out_of_scope`` carve-out is rejected. This is the single admission
+    primitive every scope-matching surface must call.
+    """
+    return host_in_scope(host, allow_entries) and not host_in_scope(host, deny_entries)

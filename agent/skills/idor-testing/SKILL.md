@@ -9,7 +9,7 @@ vuln_class: idor
 
 > **`vigil assess kali` audit flags:** use `--technique IDOR` for object-reference probes, `--technique AUTH` for identity/tenant override. `--probe-kind payload` for ID-swap/divergence tests, `--probe-kind exploit` for confirmed cross-user access.
 >
-> **Named identities (use `--identity`, not hand-pasted tokens).** Cross-user / cross-tenant IDOR is only *real* across **≥2 named identities**. Put each test account in `auth.json` under a name (`user_a`, `user_b`, `admin`) and replay with `vigil assess kali <tool> --identity user_a` / `--identity user_b`. The identity name is stamped as the probe's `auth_context`, so the depth ledger can SEE a cross-identity access-control pass — a single-identity IDOR probe is "started but not cross-identity" and does NOT satisfy access-control depth. Prefer `--identity` over inlining `Cookie: session=...` so the harness records which identity ran which probe.
+> **Named identities (use `--identity`, not hand-pasted tokens).** Cross-user / cross-tenant IDOR is only *real* across **≥2 named identities**. Put each test account in the credential store under a name (`vigil auth import <key> --identity user_a` / `user_b` / `admin`) and replay with `vigil assess kali <tool> --identity user_a` / `--identity user_b`. The identity name is stamped as the probe's `auth_context`, so the depth ledger can SEE a cross-identity access-control pass — a single-identity IDOR probe is "started but not cross-identity" and does NOT satisfy access-control depth. Prefer `--identity` over inlining `Cookie: session=...` so the harness records which identity ran which probe.
 
 This is the **entry-point skill** for broken object-level authorization. It covers the
 full BOLA/IDOR workflow and tells you when to escalate into the specialist skills
@@ -156,7 +156,8 @@ Then replay each harvested ID through the access tests above. For the *predictio
 ### 8. Two-Session Differential Replay (Primitive)
 
 Make this a first-class setup step, not an afterthought. Register each account as a **named
-identity** in `auth.json` so you replay with `--identity` instead of pasting tokens:
+identity** in the credential store (`vigil auth import <key> --identity <name>`) so you replay
+with `--identity` instead of pasting tokens:
 
 - **`user_a`** = victim (owns objects)
 - **`user_b`** = attacker at the **same tier** (horizontal) AND, for vertical, a higher-tier

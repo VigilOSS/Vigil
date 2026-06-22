@@ -959,16 +959,14 @@ def test_proxy_insert_reuses_open_db_connection(tmp_path: Path, monkeypatch) -> 
     engagements_root = tmp_path / "engagements"
     engagements_root.mkdir()
     collector, entry = _make_collector_with_engagement(module, engagements_root)
-    # Pre-populate the cached DB handle on the entry; _insert_case must reuse it
-    # rather than re-opening cases.db per call.
-    cached_connection = object()
-    entry.db = cached_connection
-    seen: dict[str, object] = {}
+    # Open a real cached connection on the entry. A healthy insert must REUSE it
+    # (entry.db identity unchanged — not reopened per call) and the row must
+    # actually persist, so the fresh-connection verify probe passes and the
+    # stale-connection reconnect path is NOT triggered.
+    cached_connection = collector._open_db_for(entry)
+    assert cached_connection is not None
+    assert entry.db is cached_connection
 
-    def fake_insert(_db_path: str, **kwargs) -> None:
-        seen["connection"] = kwargs.get("connection")
-
-    monkeypatch.setattr(module, "db_insert_work_item", fake_insert)
     collector._insert_case(
         entry,
         queue_key="variant:1:unknown",
@@ -998,7 +996,18 @@ def test_proxy_insert_reuses_open_db_connection(tmp_path: Path, monkeypatch) -> 
         params_key_sig="",
     )
 
-    assert seen["connection"] is cached_connection
+    # Cached connection reused (same object, not dropped/reopened).
+    assert entry.db is cached_connection
+    # Row persisted where independent readers see it (verify probe passed).
+    rows = (
+        sqlite3.connect(str(entry.root / "cases.db"))
+        .execute(
+            "SELECT queue_key FROM work_items WHERE queue_key = ?",
+            ("variant:1:unknown",),
+        )
+        .fetchall()
+    )
+    assert rows == [("variant:1:unknown",)]
 
 
 def test_apply_body_policy_flags_truncation() -> None:

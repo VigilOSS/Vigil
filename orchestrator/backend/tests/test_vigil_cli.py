@@ -78,7 +78,6 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     )
 
     scope = json.loads((created.path / "scope.json").read_text(encoding="utf-8"))
-    auth = json.loads((created.path / "auth.json").read_text(encoding="utf-8"))
     manifest = json.loads((created.path / "engagement.json").read_text(encoding="utf-8"))
 
     assert created.path.parent == install_root / "agent" / "engagements"
@@ -88,9 +87,8 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     assert scope["exploit_policy"] == "pause"
     assert scope["exploit_review_state"] == "pending"
     assert scope["approved_targets"] == []
-    assert auth["mode"] == "none"
-    assert auth["state"] == "none"
-    assert auth["use_for_requests"] is False
+    # Credentials are centralized in the backend store; no auth.json scaffold.
+    assert not (created.path / "auth.json").exists()
     assert manifest["key"] == created.key
     assert (created.path / "cases.db").exists()
     assert (created.path / "start_codex.sh").exists()
@@ -614,7 +612,8 @@ def test_engagement_create_wizard_prompts_on_stderr_keep_stdout_path_only(
     _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
-    answers = iter(["app.example.com", "y"])
+    # target, attribution-header (blank = none), out-of-scope (blank = none), confirm.
+    answers = iter(["app.example.com", "", "", "y"])
     monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
 
     main_module.main(["--root", str(install_root), "engagement", "create", "--type", "web"])
@@ -638,8 +637,8 @@ def test_engagement_create_bare_invocation_runs_full_wizard_with_confirmation(
     _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
-    # type choice (1 = web), target, confirmation.
-    answers = iter(["1", "app.example.com", "y"])
+    # type choice (1 = web), target, attribution (blank=none), out-of-scope (blank), confirmation.
+    answers = iter(["1", "app.example.com", "", "", "y"])
     monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
 
     main_module.main(["--root", str(install_root), "engagement", "create"])
@@ -663,7 +662,8 @@ def test_engagement_create_wizard_confirmation_decline_aborts_without_writing(
     _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
-    answers = iter(["app.example.com", "n"])
+    # target, attribution (blank=none), out-of-scope (blank), decline confirm.
+    answers = iter(["app.example.com", "", "", "n"])
     monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
 
     with pytest.raises(SystemExit):
@@ -681,7 +681,8 @@ def test_engagement_create_wizard_reprompts_on_empty_required_answer(
     _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
-    answers = iter(["", "app.example.com", "y"])
+    # empty (reprompt), target, attribution (blank=none), out-of-scope (blank), confirm.
+    answers = iter(["", "app.example.com", "", "", "y"])
     monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
 
     main_module.main(["--root", str(install_root), "engagement", "create", "--type", "web"])
@@ -706,6 +707,9 @@ def test_engagement_create_interactive_with_complete_flags_skips_wizard(
         lambda *_args: (_ for _ in ()).throw(AssertionError("wizard must not engage when flags are complete")),
     )
 
+    # "Complete" now includes the attribution header + out-of-scope dimensions:
+    # supplying them via flags suppresses the wizard prompts entirely (the
+    # interactive header/OOS wizard otherwise fires for web engagements).
     main_module.main(
         [
             "--root",
@@ -717,11 +721,20 @@ def test_engagement_create_interactive_with_complete_flags_skips_wizard(
             "https://app.example.com",
             "--hosts",
             "app.example.com",
+            "--program",
+            "bugcrowd",
+            "--researcher",
+            "tester",
+            "--out-of-scope",
+            "blocked.example.com",
         ]
     )
 
     created_path = _created_path_from_stdout(capsys.readouterr().out)
     assert (created_path / "scope.json").is_file()
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["required_headers"] == {"X-Bug-Bounty": "tester"}
+    assert scope["out_of_scope"] == ["blocked.example.com"]
 
 
 def test_engagement_create_cli_json_output_replaces_bare_path(
@@ -763,9 +776,10 @@ def test_engagement_create_interactive_dry_run_skips_creation_confirmation(
     _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
-    # Only the target answer: a "Create engagement?" confirmation would
-    # exhaust the iterator and fail the test — dry-run must not ask it.
-    answers = iter(["app.example.com"])
+    # target + attribution (blank=none) + out-of-scope (blank). A
+    # "Create engagement?" confirmation would exhaust the iterator and fail the
+    # test — dry-run must not ask it.
+    answers = iter(["app.example.com", "", ""])
     monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
 
     main_module.main(["--root", str(install_root), "engagement", "create", "--type", "web", "--dry-run"])
@@ -2299,29 +2313,90 @@ def test_logs_routes_to_centralized_targets(tmp_path: Path, monkeypatch: pytest.
     assert ["tail", "-n", "5", str(log_file)] in calls
 
 
-def test_auth_status_and_clear_operate_on_engagement_auth(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def _install_fake_credential_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict]:
+    """Stub auth_module._api with an in-memory backend keyed by engagement name.
+
+    Credentials are centralized in the orchestrator backend now; the CLI's real
+    status/clear/import logic runs against this fake store instead of auth.json.
+    Store shape: {eng_key: {"identities": {name: material}, "active_identity": name}}.
+    """
+    from vigil_cli import auth as auth_module
+
+    store: dict[str, dict] = {}
+
+    def _state(eng_dir: Path) -> dict:
+        return store.setdefault(
+            eng_dir.expanduser().resolve().name,
+            {"identities": {}, "active_identity": auth_module.DEFAULT_IDENTITY},
+        )
+
+    def fake_api(engagement_dir, method, path="", payload=None):
+        st = _state(Path(engagement_dir))
+        if method == "GET" and path == "":
+            return st
+        if method == "GET" and path == "/resolve":
+            active = st["active_identity"]
+            return {"identity_name": active, "material": st["identities"].get(active, {})}
+        if method == "GET" and path.startswith("/"):
+            return st["identities"].get(path[1:], {})
+        if method == "PUT" and path.startswith("/"):
+            name = path[1:]
+            material = {k: v for k, v in (payload or {}).items() if k != "make_active"}
+            st["identities"][name] = material
+            if (payload or {}).get("make_active"):
+                st["active_identity"] = name
+            return {"identity_name": name, "material": material}
+        if method == "POST" and path.endswith("/activate"):
+            st["active_identity"] = path.strip("/").split("/")[0]
+            return {"active_identity": st["active_identity"]}
+        if method == "DELETE" and path == "":
+            st["identities"].clear()
+            return {}
+        if method == "DELETE" and path.startswith("/"):
+            st["identities"].pop(path[1:], None)
+            return {}
+        return {}
+
+    monkeypatch.setattr(auth_module, "_api", fake_api)
+    return store
+
+
+def test_auth_status_and_clear_operate_on_engagement_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import auth as auth_module
     from vigil_cli import main as main_module
 
     install_root = tmp_path / "install"
     engagement = install_root / "agent" / "engagements" / "eng-1"
     engagement.mkdir(parents=True)
     (engagement / "scope.json").write_text("{}", encoding="utf-8")
+
+    store = _install_fake_credential_store(monkeypatch)
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    (engagement / "auth.json").write_text(
-        json.dumps({"mode": "manual", "state": "present", "expires_at": expires_at, "cookies": {"sid": "x"}, "headers": {}}),
-        encoding="utf-8",
-    )
+    store["eng-1"] = {
+        "identities": {
+            auth_module.DEFAULT_IDENTITY: {
+                "mode": "manual",
+                "state": "present",
+                "expires_at": expires_at,
+                "cookies": {"sid": "x"},
+                "headers": {},
+            }
+        },
+        "active_identity": auth_module.DEFAULT_IDENTITY,
+    }
 
     main_module.main(["--root", str(install_root), "auth", "status", "eng-1"])
     assert "present" in capsys.readouterr().out
 
     main_module.main(["--root", str(install_root), "auth", "clear", "eng-1"])
-    auth = json.loads((engagement / "auth.json").read_text(encoding="utf-8"))
-    assert auth["state"] == "missing"
-    assert auth["cookies"] == {}
+    # Clear deletes the centralized credential; the store has no identities left.
+    assert store["eng-1"]["identities"] == {}
 
 
 def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from vigil_cli import auth as auth_module
     from vigil_cli import main as main_module
     from vigil_cli import engagements
 
@@ -2329,6 +2404,7 @@ def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monke
     root = install_root / "agent" / "engagements"
     older = root / "2026-04-24-120000-older"
     newer = root / "2026-04-24-120001-newer"
+    store = _install_fake_credential_store(monkeypatch)
     for path, created_at in (
         (older, "2026-04-24T12:00:00Z"),
         (newer, "2026-04-24T12:00:01Z"),
@@ -2336,10 +2412,17 @@ def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monke
         path.mkdir(parents=True)
         (path / "scope.json").write_text('{"status":"in_progress","current_phase":"recon"}', encoding="utf-8")
         (path / "engagement.json").write_text(json.dumps({"key": path.name, "target": path.name, "created_at": created_at}), encoding="utf-8")
-        (path / "auth.json").write_text(
-            json.dumps({"mode": "manual", "state": "present", "cookies": {"sid": path.name}, "headers": {}}),
-            encoding="utf-8",
-        )
+        store[path.name] = {
+            "identities": {
+                auth_module.DEFAULT_IDENTITY: {
+                    "mode": "manual",
+                    "state": "present",
+                    "cookies": {"sid": path.name},
+                    "headers": {},
+                }
+            },
+            "active_identity": auth_module.DEFAULT_IDENTITY,
+        }
 
     def fake_which(command: str) -> str | None:
         return "/usr/bin/fzf" if command == "fzf" else None
@@ -2353,12 +2436,9 @@ def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monke
 
     main_module.main(["--root", str(install_root), "auth", "clear", "--select"])
 
-    older_auth = json.loads((older / "auth.json").read_text(encoding="utf-8"))
-    newer_auth = json.loads((newer / "auth.json").read_text(encoding="utf-8"))
-    assert older_auth["state"] == "present"
-    assert older_auth["cookies"] == {"sid": older.name}
-    assert newer_auth["state"] == "missing"
-    assert newer_auth["cookies"] == {}
+    # --select picks `newer`; only its centralized credential is cleared.
+    assert store[older.name]["identities"][auth_module.DEFAULT_IDENTITY]["cookies"] == {"sid": older.name}
+    assert store[newer.name]["identities"] == {}
 
 
 def test_auth_without_engagement_context_requires_key_or_select(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -8657,22 +8737,22 @@ def test_auth_status_reports_bearer_token_and_recommends_refresh(
     command does NOT write to auth.json or trigger a refresh."""
     eng_dir = tmp_path / "eng"
     eng_dir.mkdir(parents=True, exist_ok=True)
-    (eng_dir / "auth.json").write_text(
-        json.dumps(
-            {
-                "auth_context": "authenticated",
-                "mode": "proxy_capture",
-                "use_for_requests": True,
-                "state": "available",
-                "expires_at": "2099-01-01T00:00:00Z",
-                "headers": {"Authorization": "Bearer aaa.bbb.ccc.ddd.eee.fff"},
-                "cookies": {"sessionid": "abc123"},
-            }
-        ),
-        encoding="utf-8",
-    )
-
     module = _load_auth_status_module()
+
+    # Active credential lives in the centralized store; stub active_material.
+    monkeypatch.setattr(
+        module,
+        "active_material",
+        lambda _eng: {
+            "auth_context": "authenticated",
+            "mode": "proxy_capture",
+            "use_for_requests": True,
+            "state": "available",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "headers": {"Authorization": "Bearer aaa.bbb.ccc.ddd.eee.fff"},
+            "cookies": {"sessionid": "abc123"},
+        },
+    )
 
     monkeypatch.setattr(
         module,
@@ -8741,20 +8821,20 @@ def test_auth_status_flags_expired_token(
     and the recommend line still names the appropriate refresh path."""
     eng_dir = tmp_path / "eng-expired"
     eng_dir.mkdir(parents=True, exist_ok=True)
-    (eng_dir / "auth.json").write_text(
-        json.dumps(
-            {
-                "auth_context": "authenticated",
-                "mode": "proxy_capture",
-                "use_for_requests": True,
-                "state": "available",
-                "expires_at": "2000-01-01T00:00:00Z",
-                "headers": {"Authorization": "Bearer expired.token"},
-            }
-        ),
-        encoding="utf-8",
-    )
     module = _load_auth_status_module()
+
+    monkeypatch.setattr(
+        module,
+        "active_material",
+        lambda _eng: {
+            "auth_context": "authenticated",
+            "mode": "proxy_capture",
+            "use_for_requests": True,
+            "state": "available",
+            "expires_at": "2000-01-01T00:00:00Z",
+            "headers": {"Authorization": "Bearer expired.token"},
+        },
+    )
 
     monkeypatch.setattr(
         module,
@@ -8807,20 +8887,20 @@ def test_auth_status_last_probe_uses_assessment_scoped_route(
     operator never sees the last AUTH probe even when one exists."""
     eng_dir = tmp_path / "eng-route"
     eng_dir.mkdir(parents=True, exist_ok=True)
-    (eng_dir / "auth.json").write_text(
-        json.dumps(
-            {
-                "auth_context": "authenticated",
-                "mode": "proxy_capture",
-                "use_for_requests": True,
-                "state": "available",
-                "expires_at": "2099-01-01T00:00:00Z",
-                "headers": {"Authorization": "Bearer route.token"},
-            }
-        ),
-        encoding="utf-8",
-    )
     module = _load_auth_status_module()
+
+    monkeypatch.setattr(
+        module,
+        "active_material",
+        lambda _eng: {
+            "auth_context": "authenticated",
+            "mode": "proxy_capture",
+            "use_for_requests": True,
+            "state": "available",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "headers": {"Authorization": "Bearer route.token"},
+        },
+    )
 
     monkeypatch.setattr(
         module,

@@ -18,6 +18,14 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.mypy]
+# Bench `skeleton/` files are container-runtime sidecars: they import runtime-only
+# siblings copied into the image at build time (e.g. `oracle_checkpoint`) that
+# mypy cannot resolve. They are not part of the `vigil_cli` type surface, so
+# exclude the skeleton dirs from type-checking. (Applies during mypy's directory
+# walk, which is how CI invokes it: `mypy src/vigil_cli`.)
+exclude = "src/vigil_cli/bench/factory/families/.*/skeleton/"
+
 [tool.pytest.ini_options]
 # Mirrors orchestrator/backend/pyproject.toml: integration tests need a live
 # runtime container (operator-controlled frp + interactsh) and are deselected

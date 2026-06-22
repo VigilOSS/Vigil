@@ -190,7 +190,7 @@ case "$TOOL_NAME" in
 
     # Only log engagement-related file writes (skip tmp, etc.)
     case "$FILE_PATH" in
-      *engagements/*|*findings.md|*scope.json|*auth.json)
+      *engagements/*|*findings.md|*scope.json)
         SHORT_PATH=$(echo "$FILE_PATH" | sed 's|.*/engagements/|engagements/|')
         post_activity_entry "hook" "$TOOL_NAME" "file=${SHORT_PATH}" ""
         ;;

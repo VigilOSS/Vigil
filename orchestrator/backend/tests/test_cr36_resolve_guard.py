@@ -325,7 +325,8 @@ def fake_engagement(tmp_path, monkeypatch):
     eng_dir = tmp_path / "engagements" / "2026-06-13-test"
     eng_dir.mkdir(parents=True, exist_ok=True)
     (eng_dir / "scope.json").write_text(json.dumps({"hostname": "example.com"}))
-    (eng_dir / "auth.json").write_text(json.dumps({"kind": "none"}))
+    # Credentials are centralized in the backend store; no auth.json file. The
+    # runtime creds_client fails closed (auth_context "none") with no backend.
     monkeypatch.setenv("ENGAGEMENT_DIR", str(eng_dir))
     monkeypatch.setenv("AGENT_NAME", "vulnerability-analyst")
     monkeypatch.delenv("VIGIL_NO_RESOLVE_PIN", raising=False)

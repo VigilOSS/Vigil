@@ -1,0 +1,32 @@
+# trusted-anycast.txt — VALIDATION-tier resolver list (`--resolvers-trusted`) — CR-12
+#
+# Provenance: the most reliable subset of premium-anycast.txt — the canonical
+# primary/secondary anycast pairs of the largest, best-behaved public-DNS
+# operators. This is the SMALL, high-trust pool puredns uses for the final
+# cross-check (`--resolvers-trusted`) that kills false positives surviving the
+# wide brute tier; it is NOT the brute tier (use premium-anycast.txt for `-r`).
+#
+# Two-tier pattern (CR-12): brute against the many (`-r premium-anycast.txt`),
+# VALIDATE against the trusted few (`--resolvers-trusted trusted-anycast.txt`).
+#
+# Format: one resolver IP per line. '#' comments and blanks ignored.
+# Last reviewed: 2026-06-13.
+
+# Cloudflare
+1.1.1.1
+1.0.0.1
+# Google Public DNS
+8.8.8.8
+8.8.4.4
+# Quad9
+9.9.9.9
+149.112.112.112
+# OpenDNS (Cisco Umbrella)
+208.67.222.222
+208.67.220.220
+# AdGuard DNS
+94.140.14.14
+94.140.15.15
+# Neustar / UltraDNS (Vercara)
+156.154.70.1
+156.154.71.1

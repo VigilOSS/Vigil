@@ -33,7 +33,9 @@ from assess.lib.scope import (
     classify_scope_entry,
     entry_matches_host,
     host_from_token,
+    host_in_scope,
     host_is_vendor_saas,
+    out_of_scope_entries,
 )
 
 
@@ -366,6 +368,7 @@ def _bucket_of_cluster_key(cluster_key: str) -> str:
 def _pending_buckets_for_host(
     db_path: Path,
     entry: dict[str, Any],
+    deny_entries: list[dict[str, Any]] = (),
 ) -> dict[str, int]:
     """Tally untested/unconsumed work-item buckets for a scope entry's host(s).
 
@@ -400,7 +403,7 @@ def _pending_buckets_for_host(
         for row in cursor.fetchall():
             url = str(row[0] or "")
             host = _endpoint_host(url)
-            if not host or not entry_matches_host(entry, host):
+            if not host or not entry_matches_host(entry, host) or host_in_scope(host, deny_entries):
                 continue
             bucket = _bucket_of_cluster_key(str(row[6] or ""))
             if not bucket:
@@ -562,13 +565,14 @@ def _build_recommendation(
     stage: str,
     db_path: Path,
     skills_root: Path | None,
+    deny_entries: list[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     """Build a single recommendation dict for a failing scope entry+stage."""
     host = entry["host"]
     dropped_skills: list[str] = []
 
     if stage == "consumption":
-        bucket_tally = _pending_buckets_for_host(db_path, entry)
+        bucket_tally = _pending_buckets_for_host(db_path, entry, deny_entries)
         selection = _consumption_skill_selection(bucket_tally)
         if selection["confidence"] == "high" and _ambiguous_dominant(bucket_tally):
             shortlist: list[str] = []
@@ -697,6 +701,7 @@ def build_redispatch_block(
     prior_dispatches: list[dict[str, Any]] | None,
     dedup_degraded: bool,
     max_recommendations: int,
+    deny_entries: list[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     """Assemble the full --auto-redispatch recommendation block."""
     prior_index = _index_prior_dispatches(prior_dispatches or [])
@@ -708,7 +713,8 @@ def build_redispatch_block(
         if stage is None:
             continue
         rec = _build_recommendation(
-            entry=entry, stage=stage, db_path=db_path, skills_root=skills_root
+            entry=entry, stage=stage, db_path=db_path, skills_root=skills_root,
+            deny_entries=deny_entries,
         )
         key = (rec["role"], rec["scope_host"])
         if key in prior_index:
@@ -847,6 +853,7 @@ def _build_entry_report(
     scope_metadata: dict[str, dict[str, Any]],
     required_stage: str | None,
     buffer_present: bool = True,
+    deny_entries: list[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     live_hosts_set: set[str] = set()
     live_host_samples: list[str] = []
@@ -854,7 +861,7 @@ def _build_entry_report(
 
     for svc in services:
         endpoint_host = _endpoint_host(str(svc.get("endpoint") or ""))
-        if not entry_matches_host(entry, endpoint_host):
+        if not entry_matches_host(entry, endpoint_host) or host_in_scope(endpoint_host, deny_entries):
             continue
         total_services += 1
         state = str(svc.get("state") or "").lower()
@@ -870,14 +877,14 @@ def _build_entry_report(
     for surface in surfaces:
         descriptor = str(surface.get("target_descriptor") or "")
         host = _endpoint_host(descriptor)
-        if not entry_matches_host(entry, host):
+        if not entry_matches_host(entry, host) or host_in_scope(host, deny_entries):
             continue
         surfaces_count += 1
         if host:
             surface_hosts.add(host)
 
     host_work = (
-        _aggregate_matching_work(entry, work_by_host)
+        _aggregate_matching_work(entry, work_by_host, deny_entries)
         if entry["entry_kind"] in ("wildcard", "cidr")
         else work_by_host.get(entry["host"], {})
     )
@@ -969,11 +976,12 @@ def _build_entry_report(
 def _aggregate_matching_work(
     entry: dict[str, Any],
     work_by_host: dict[str, dict[str, int]],
+    deny_entries: list[dict[str, Any]] = (),
 ) -> dict[str, int]:
     """Sum per-host work counts for an entry that matches many hosts."""
     aggregate: dict[str, int] = {}
     for host, counts in work_by_host.items():
-        if not entry_matches_host(entry, host):
+        if not entry_matches_host(entry, host) or host_in_scope(host, deny_entries):
             continue
         for key, val in counts.items():
             aggregate[key] = aggregate.get(key, 0) + int(val)
@@ -1160,6 +1168,10 @@ def build_scope_coverage_report(
     raw_hosts = scope_data.get("hosts") or []
     entries = [classify_scope_entry(h) for h in raw_hosts if isinstance(h, str) and h.strip()]
     entries = [e for e in entries if e is not None]
+    # OOS carve-outs must not be counted toward the in-scope wildcard that would
+    # otherwise match them — else an out-of-scope host inflates live/service/work
+    # tallies and can help satisfy a stage gate.
+    deny_entries = out_of_scope_entries(scope_data)
 
     scope_metadata = _extract_scope_metadata(scope_data)
 
@@ -1174,6 +1186,7 @@ def build_scope_coverage_report(
                 scope_metadata=scope_metadata,
                 required_stage=required_stage,
                 buffer_present=buffer_present,
+                deny_entries=deny_entries,
             )
         )
 
