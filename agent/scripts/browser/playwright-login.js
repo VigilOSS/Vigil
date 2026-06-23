@@ -47,6 +47,22 @@ const LOCALE = env.LOCALE || 'en-US';
 const TZ_ID = env.TZ_ID || 'America/Chicago';
 const HEADLESS = env.HEADLESS === '1';
 const SUCCESS_SEL = env.SUCCESS_SEL || null;
+// Program-mandated attribution headers (e.g. {"X-Bug-Bounty":"<handle>"}) for
+// engagements created with `--program`/`--header`. Attached to EVERY browser
+// request so navigations + form posts match what the Kali CLI probes send and
+// the program's traffic rules are honoured. Export REQUIRED_HEADERS as a JSON
+// object; e.g. REQUIRED_HEADERS="$(jq -c .required_headers <eng>/scope.json)".
+const REQUIRED_HEADERS = (() => {
+  const raw = env.REQUIRED_HEADERS;
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    console.error('[warn] REQUIRED_HEADERS is not valid JSON; ignoring');
+    return null;
+  }
+})();
 const UA = env.UA ||
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -186,7 +202,14 @@ function writeJar(cookies, jarPath) {
     deviceScaleFactor: 1,
     hasTouch: false,
     ignoreHTTPSErrors: !!PROXY, // Mode A: trust the mitmproxy CA the easy way
+    // Program attribution headers ride on every request in both modes (direct
+    // and through-proxy) — the proxy addon only observes traffic, it does not
+    // inject these.
+    ...(REQUIRED_HEADERS ? { extraHTTPHeaders: REQUIRED_HEADERS } : {}),
   });
+  if (REQUIRED_HEADERS) {
+    console.error(`[headers] attaching ${Object.keys(REQUIRED_HEADERS).join(', ')} to all requests`);
+  }
   await context.addInitScript(STEALTH);
   const page = await context.newPage();
 
