@@ -1838,8 +1838,12 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
     assert fake_client.patches[0][1]["stdout_path"].endswith(".out")
     assert fake_client.patches[0][1]["stderr_path"].endswith(".err")
     assert "status" not in fake_client.patches[0][1]
-    # The final PATCH only transitions the already-manageable row to running.
-    assert fake_client.patches[1] == ("jobs/14", {"status": "running"})
+    # The final PATCH transitions the row to running AND stamps started_at (so
+    # the sweep-orphans age-gate has a timestamp to work from).
+    running_patch = fake_client.patches[1]
+    assert running_patch[0] == "jobs/14"
+    assert running_patch[1]["status"] == "running"
+    assert running_patch[1].get("started_at"), "running PATCH must stamp started_at"
     # docker exec -d dtach ... was invoked.
     assert any("dtach" in arg for argv in seen_argv for arg in argv)
     dtach_argv = next(argv for argv in seen_argv if "dtach" in argv)
@@ -1852,6 +1856,12 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
     # -no-stdin).
     wrapped_shell = dtach_argv[-1]
     assert "</dev/null" in wrapped_shell
+    # The wrapper records the tool PID via $! (G1) and publishes the real exit
+    # code to a host-readable marker on completion — the finalization mechanism
+    # that lets job_status/sweep-orphans converge a detached job's status.
+    assert "__child=$!" in wrapped_shell
+    assert "__rc=$?" in wrapped_shell
+    assert ".exit" in wrapped_shell
 
 
 def test_job_start_persists_paths_and_cleans_up_when_running_patch_fails(
@@ -1939,7 +1949,9 @@ def test_job_start_persists_paths_and_cleans_up_when_running_patch_fails(
     assert first_patch[1]["stderr_path"].endswith(".err")
     assert first_patch[1].get("status") != "running"
     assert events[1][0] == "run"
-    assert events[2] == ("patch", {"status": "running"})
+    assert events[2][0] == "patch"
+    assert events[2][1]["status"] == "running"
+    assert events[2][1].get("started_at"), "running PATCH must stamp started_at"
     assert cleanup_calls[0] == ("signal", "TERM", 4242)
 
 
@@ -1983,7 +1995,9 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
 
     record = kali_jobs.job_stop(22, container_name="vigil")
     assert record["status"] == "killed"
-    assert fake_client.patches[0] == ("jobs/22", {"status": "killed"})
+    assert fake_client.patches[0][0] == "jobs/22"
+    assert fake_client.patches[0][1]["status"] == "killed"
+    assert fake_client.patches[0][1].get("ended_at"), "killed PATCH must stamp ended_at"
 
 
 def test_job_stop_rejects_already_terminal_job(monkeypatch, fake_engagement):
@@ -2109,7 +2123,11 @@ def test_job_stop_records_lost_when_container_not_running(monkeypatch, fake_enga
     record = kali_jobs.job_stop(26, container_name="vigil")
 
     assert record["status"] == "lost"
-    assert fake_client.patches == [("jobs/26", {"status": "lost"})]
+    assert len(fake_client.patches) == 1
+    endpoint, payload = fake_client.patches[0]
+    assert endpoint == "jobs/26"
+    assert payload["status"] == "lost"
+    assert payload.get("ended_at"), "lost PATCH must stamp ended_at"
 
 
 def test_job_stop_records_stop_failed_when_docker_unreachable_mid_verify(
@@ -2727,7 +2745,9 @@ def test_kali_job_stop_terminates_with_sigterm_then_sigkill(
     record = kali_jobs.job_stop(22, container_name="vigil")
     assert record["status"] == "killed"
     assert "TERM" in signals_sent
-    assert ("jobs/22", {"status": "killed"}) in fake_client.patches
+    killed = [(e, p) for e, p in fake_client.patches if p.get("status") == "killed"]
+    assert killed and killed[-1][0] == "jobs/22"
+    assert killed[-1][1].get("ended_at"), "killed PATCH must stamp ended_at"
 
 
 def test_kali_job_stop_escalates_to_sigkill_when_sigterm_ignored(

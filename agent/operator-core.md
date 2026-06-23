@@ -12,6 +12,19 @@ Always-active rules:
 
 CLI path convention is owned by `agent/shared-constraints.md` §9.
 
+## Engagement Program Brief — `ENGAGEMENT.md` (MUST READ when present)
+
+If the engagement directory contains an `ENGAGEMENT.md`, it is a **mandatory read
+before any recon/testing/dispatch** — it is the canonical, human-authored program
+contract distilled from the bounty brief (e.g. Bugcrowd/HackerOne): in-scope and
+out-of-scope targets, mandatory request headers (e.g. `X-Bug-Bounty`), rate caps,
+rewarded-severity policy, and **ban-risk rules such as "do not modify customer
+account data → instant platform ban."** These constraints override default tool
+behavior and the AUTHORIZATION note above (which describes lab targets); on a real
+program, `ENGAGEMENT.md`'s hard requirements win. Re-read it when focus shifts to a
+new target tier (Core vs Supplemental rules often differ). Bake its header/rate/
+no-modify constraints into every target-facing dispatch prompt.
+
 ## Resume Gate
 
 Before taking a new action in an existing engagement, apply `agent/rules/resume.md` when
@@ -458,6 +471,7 @@ DB="$DIR/cases.db"
 
    - **Focus 1-2 TARGETS at a time; a SURFACE can BE a target.** At any moment, concentrate the active fan-out on one or two targets — where a "target" may be a single high-value surface (an auth portal, an API root, an admin console), not necessarily a whole apex. Set `--scope-host` to the focused domain for every dispatch in the batch.
    - **Fan VA lanes at DEPTH, not a swarm.** Partition the focused target's surfaces into lanes keyed on **(surface-group × vuln-class)** — e.g. lane A = the API surface group × access-control/IDOR, lane B = upload/form surfaces × injection + file-upload, lane C = auth/session surfaces × auth-logic — one `vulnerability-analyst` per lane, each loading the matching vuln-class skill and running a real campaign at `item-iterating`/`hypothesis-driven` depth. This is **deep** fan-out: it is the opposite of the corpus `swarm` mode (which is many shallow `low`/`medium` scans over a corpus — see Dispatch-Mode Declaration). Do not use `swarm` here.
+   - **Exploit-developer fan-out for high-value targets (low-bias, chain-synthesizing).** On a rich, high-value target where slow+thorough beats breadth, fan **`exploit-developer`** (deep-manual) across the same surface lanes — but give each lane the **full surface + intel context with a deliberately OPEN objective** ("find and prove P1/P2 impact on this surface"), NOT a pre-named bug. Pre-pointing biases the hunt and hides chains; the exploit-developer self-serves the full endpoint map and is told to "start with the landscape, then narrow." The operator's job is **cross-dispatch chain synthesis**: after each batch, read the lanes' handoffs together, look for A→B primitives across them (auth-bypass + IDOR, reset-poisoning + takeover, info-leak + SSRF), and only THEN dispatch chain-directed follow-ups. Run several under-directed lanes first; let the chain context accumulate across dispatches before you start steering. This complements (does not replace) the VA fan-out — use VA for breadth-of-vuln-class discovery, exploit-developer fan-out when the target warrants concentrated deep manual hunting.
    - **Scale lane count to surface count — within the runtime-tier ceiling.** Thin surface = 1 VA lane; a broad, app-like target = 3-4 lanes. The Heavy/Comfortable concurrency floor (4-6 specialists; see "Aggregate concurrency + shared-VM ceiling") is the budget on a dedicated runtime. **But the runtime tier caps the lane count regardless of surface breadth:** the Standard tier handles ~2-3 concurrent lanes on a small target (see "Resource sizing" / "Aggregate concurrency"); do not fan 5-7 lanes into a VM that cannot absorb them. Size the fan-out to the smaller of (surface breadth, VM capacity).
    - **The "very little attack surface" exception.** Breadth-style coverage of many surfaces at once is acceptable in exactly one case: the target genuinely has very little attack surface — operationally, a handful of routes, no object references, no privileged features, no auth boundary, and no useful source intel *after a thorough pass* (not after a quick look). This is the only exception to 1-2-target focus; rotate to breadth only when the focused target is genuinely dry, per `agent/rules/hunting.md` (rules 5 and 15, "rotate only when genuinely dry").
    - **Closed-surface dead-vs-unfinished re-audit.** Before any phase exit, re-audit every surface previously resolved `covered`/`deferred`/`not_applicable` and separate genuinely **DEAD** surfaces (truly exhausted — varied probes across multiple vuln classes produced nothing) from **UNFINISHED** ones (resolved on a timer, a single quick pass, or one status-code check). Re-open the unfinished ones and fan a lane at them. The Phase-3 exit step `h` (`check-phase-readiness --phase consume`) resolves surfaces to a status but does not, by itself, distinguish dead from prematurely-closed — that judgment is this re-audit.

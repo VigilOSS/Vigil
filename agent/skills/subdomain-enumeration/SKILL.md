@@ -149,6 +149,23 @@ Both are advisory WARNs surfaced by `vigil assess dns-discovery`, consistent wit
 > verb for the mechanical pipe; the manual stages below remain the reference for
 > tuning and for steps the verb doesn't cover.
 
+> **Supervised one-shot — `vigil assess recon <apex…>`.** When a long DNS/brute
+> pass would otherwise be a multi-minute blocking call (the failure mode that
+> kills a halting subagent), the **operator** runs the whole spine as one
+> supervised, resumable, pollable job instead: `vigil assess recon <apex…>`
+> orchestrates `dns-discovery → web-discovery` as **checkpointed stages** (each
+> stage's canonical artifact is its checkpoint; `--resume` restarts from the first
+> incomplete stage, so a killed run re-runs cleanly with no redo and no orphans).
+> It writes `scans/recon/recon-status.json` after every stage. With `--background`
+> it spawns the pipeline as a **detached host job** and returns a job id
+> immediately — poll `vigil assess recon-status [--job-id N]` (a read-only digest:
+> per-stage state + counts + "% complete + what's next") instead of blocking. On
+> macOS Docker Desktop the DNS-heavy stages are **enforced** host-side (a missing
+> host binary fails the preflight rather than silently wedging the proxy, I-001);
+> `--runtime container` forces isolation and bypasses the enforcement. Flags:
+> `--brute`, `--no-crawl`, `--resume`, `--runtime {auto,host,container}`,
+> `--stage-timeout`, `--background`.
+
 Each phase compounds on the previous one. Stop at any phase when its bound rule fires (see "Bound rules" below). Cross-reference the verb invocations in `agent/skills/kali-exec/SKILL.md` "Subdomain enumeration: Phase A→D workflow" — this section describes operator-phase-flow ordering and resource shaping.
 
 ### Phase 0 — Passive enumeration (always-on)
@@ -559,3 +576,4 @@ After ingestion, the operator triggers a reactive nuclei sweep against the newly
 - `agent/references/subdomain-enumeration.md` — prioritization, sliding-window, and bound-rule companion doc.
 - `agent/references/runtime-guides/docker-desktop-network-hazards.md` — the macOS Docker Desktop per-destination-IP userspace-proxy wedge (the I-001 incident): why a DNS brute's distinct-resolver-IP count (>~50 in-container), not qps, is the crash knob, and why the DNS-heavy stages route to the host (`--runtime host`).
 - `agent/scripts/assess/data/resolvers/premium-anycast.txt` / `trusted-anycast.txt` — the shipped two-tier resolver lists (brute `-r` ~40 premium-anycast IPs / validate `--resolvers-trusted` ~12 trusted-anycast IPs); the default `vigil assess dns-discovery --brute` resolver pools.
+- `agent/scripts/assess/data/resolvers/validated-trickest.txt` — an OPTIONAL wide brute tier synced from the externally-validated `trickest/resolvers` pool by `agent/scripts/refresh_resolvers.py` (a MAINTAINER task, run occasionally and committed — never engagement-time, so a slow/dead resolver never surfaces mid-brute). Point a large brute at it with `--resolvers <path>`; the curated premium/trusted tiers stay the safe defaults. Generated, so it is absent until a maintainer runs the refresh.

@@ -6,6 +6,7 @@ Backed by the orchestrator backend's `assessment_jobs` table via
 """
 from __future__ import annotations
 
+import datetime as _dt
 import shlex
 import subprocess
 import sys
@@ -29,6 +30,74 @@ _JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"
 
 def _job_pid_file(job_uuid: str) -> str:
     return f"{_JOB_PID_DIR}/{job_uuid}.pid"
+
+
+def _utcnow_iso() -> str:
+    """UTC timestamp in the ``YYYY-MM-DDTHH:MM:SSZ`` shape the backend and the
+    sweep-orphans reconciler both parse (see
+    ``kali_sweep_orphans._parse_started_at``)."""
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _exit_marker_host_path(record: dict[str, Any]) -> Path | None:
+    """Host-side path of the job's exit-code marker, derived from the recorded
+    ``stdout_path`` (``<dir>/<uuid>.out`` → ``<dir>/<uuid>.exit``). The marker
+    lives under the ``/engagements`` bind mount, so it is the same inode the
+    in-container wrapper writes — read it with a plain filesystem read, never a
+    ``docker exec cat`` poll loop (I-012, docker-desktop-network-hazards.md)."""
+    stdout_path = record.get("stdout_path")
+    if not stdout_path:
+        return None
+    return Path(str(stdout_path)).with_suffix(".exit")
+
+
+def _read_exit_marker(record: dict[str, Any]) -> int | None:
+    """Return the integer exit code the in-container wrapper published on
+    completion, or None when the marker is absent/empty/unparseable (the job is
+    still running, or it was killed before it could publish)."""
+    marker = _exit_marker_host_path(record)
+    if marker is None:
+        return None
+    try:
+        text = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _finalize_if_marker_present(
+    client: AssessmentClient, record: dict[str, Any]
+) -> dict[str, Any]:
+    """Lazily finalize a non-terminal job row when its exit marker is present.
+
+    The dtach worker is detached (``dtach -n``) so nothing watches it exit; the
+    wrapper instead publishes the real exit code to a host-readable marker. Any
+    host-side reader (``job_status`` / ``job_list`` / the sweeper) converges the
+    backend row by reading that marker. ``accept_409`` tolerates a racing
+    finalizer; a failing PATCH falls back to the unfinalized record."""
+    status_val = str(record.get("status") or "").strip()
+    if status_val in _JOB_TERMINAL_STATUSES:
+        return record
+    rc = _read_exit_marker(record)
+    if rc is None:
+        return record
+    job_id = record.get("id")
+    if job_id is None:
+        return record
+    final_status = "completed" if rc == 0 else "failed"
+    try:
+        return client.patch(
+            f"jobs/{int(job_id)}",
+            {"status": final_status, "exit_code": rc, "ended_at": _utcnow_iso()},
+            accept_409=True,
+        )
+    except AssessError:
+        return record
 
 
 def _check_dtach_in_container(container_name: str) -> None:
@@ -63,6 +132,52 @@ def _job_paths(engagement_dir: Path, job_uuid: str) -> tuple[Path, Path]:
     out_dir = engagement_dir / "scans" / "kali" / "jobs"
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir / f"{job_uuid}.out", out_dir / f"{job_uuid}.err"
+
+
+def _build_job_wrapper(
+    joined: str,
+    *,
+    pid_file: str,
+    stdout_path: str,
+    stderr_path: str,
+    exit_path: str,
+) -> str:
+    """Build the dtach worker shell.
+
+    The tool runs as ``sh -c 'exec <joined> >redirs' &`` — the inner sh sets up
+    the redirections and then ``exec``-replaces itself with the tool, so the PID
+    captured via ``$!`` IS the tool's PID. This is load-bearing: ``job_stop`` and
+    any reaper send their signal to exactly this recorded PID, so it MUST be the
+    tool or the tool is orphaned while an idle wrapper is killed (QA finding B1).
+    Without ``exec`` the inline redirections defeat the shell's exec-in-place
+    optimization and ``$!`` is the wrapper sh, not the tool — verified on dash.
+
+    The wrapper then OUTLIVES the tool to ``wait`` for its real exit status — the
+    only place a detached (``dtach -n``) job's exit code is observable — and
+    publishes it atomically (``.tmp`` + ``mv``) to a host-readable marker on the
+    ``/engagements`` bind mount, so a host-side reader (job_status / sweep) can
+    finalize the backend row with a plain filesystem read, never a docker-exec
+    poll loop (I-012). A kill is observed as a 128+signal wait status (SIGTERM=143
+    / SIGKILL=137); job_stop treats rc>=128 as 'killed', rc<128 as a natural exit.
+
+    stdin is redirected from /dev/null — the in-container analogue of the sync
+    exec path's ``stdin=subprocess.DEVNULL``: PD tools (httpx/katana/nuclei/dnsx/
+    naabu) block on a non-EOF stdin when fd 0 is not a TTY, hanging at 0% CPU even
+    with ``-l <file>``. ``</dev/null`` is tool-agnostic and harmless to a flag-fed
+    tool.
+    """
+    inner = (
+        f"exec {joined} >>{shlex.quote(stdout_path)} "
+        f"2>>{shlex.quote(stderr_path)} </dev/null"
+    )
+    exit_tmp = f"{exit_path}.tmp"
+    return (
+        f"sh -c {shlex.quote(inner)} & "
+        f"__child=$!; echo \"$__child\" > {shlex.quote(pid_file)}; "
+        f"wait \"$__child\"; __rc=$?; "
+        f"printf '%s' \"$__rc\" > {shlex.quote(exit_tmp)} "
+        f"&& mv -f {shlex.quote(exit_tmp)} {shlex.quote(exit_path)}"
+    )
 
 
 def start_job(
@@ -120,6 +235,9 @@ def start_job(
         container_stderr = (
             f"/engagements/{cfg.engagement_key}/scans/kali/jobs/{stderr_path.name}"
         )
+        container_exit = (
+            f"/engagements/{cfg.engagement_key}/scans/kali/jobs/{job_uuid}.exit"
+        )
         client.patch(
             f"jobs/{job_id}",
             {
@@ -129,21 +247,12 @@ def start_job(
             },
         )
         joined = " ".join(shlex.quote(part) for part in cmd)
-        # Record the user-command PID before exec so `job_stop` can address
-        # the process across the container PID namespace boundary. ``exec``
-        # in POSIX shells reuses the calling shell's PID, so $$ is the PID
-        # of the user command itself once exec runs.
-        # Redirect the user command's stdin from /dev/null. This is the
-        # in-container analogue of the synchronous exec path's
-        # ``stdin=subprocess.DEVNULL`` (kali.py). ProjectDiscovery tools
-        # (httpx/katana/nuclei/dnsx/naabu) read targets from stdin whenever
-        # fd 0 is not a TTY and block on EOF that never arrives — so a
-        # backgrounded probe hangs at 0% CPU even with ``-l <file>``. The
-        # ``</dev/null`` is tool-agnostic (no katana ``-no-stdin`` arg-parse
-        # problem) and harmless to a tool that reads its targets from a flag.
-        wrapped_shell = (
-            f"echo $$ > {shlex.quote(pid_file)}; "
-            f"exec sh -c {shlex.quote(f'{joined} >>{shlex.quote(container_stdout)} 2>>{shlex.quote(container_stderr)} </dev/null')}"
+        wrapped_shell = _build_job_wrapper(
+            joined,
+            pid_file=pid_file,
+            stdout_path=container_stdout,
+            stderr_path=container_stderr,
+            exit_path=container_exit,
         )
         # ENGAGEMENT_KEY env mirrors the sync exec path in
         # ``kali_runtime_exec._build_docker_exec`` so skill commands launched as
@@ -179,7 +288,7 @@ def start_job(
 
         updated = client.patch(
             f"jobs/{job_id}",
-            {"status": "running"},
+            {"status": "running", "started_at": _utcnow_iso()},
         )
         return updated
     except Exception:
@@ -208,7 +317,8 @@ def job_status(job_id: int, *, config: Config | None = None) -> dict[str, Any]:
     cfg = config or load_config(None)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
-        return client.get(f"jobs/{int(job_id)}")
+        record = client.get(f"jobs/{int(job_id)}")
+        return _finalize_if_marker_present(client, record)
     finally:
         client.close()
 
@@ -231,11 +341,14 @@ def job_list(
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
         rows = client.get(query)
+        if not isinstance(rows, list):
+            return []
+        # Lazy-finalize any non-terminal row whose exit marker is now present
+        # (same convergence as job_status), so `job list` reflects completed
+        # jobs without requiring a separate reconcile pass.
+        return [_finalize_if_marker_present(client, row) for row in rows]
     finally:
         client.close()
-    if not isinstance(rows, list):
-        return []
-    return rows
 
 
 def job_tail(job_id: int, *, follow: bool = False, config: Config | None = None) -> None:
@@ -389,6 +502,7 @@ def job_stop(
     pid_file = _job_pid_file(job_uuid_stem)
 
     final_status = "lost"
+    final_exit_code: int | None = None
     failure_message: str | None = None
     if _container_running(container_name):
         pid = _read_job_pid(container_name, pid_file)
@@ -413,7 +527,18 @@ def job_stop(
                 _signal_job_pid(container_name, pid, "KILL")
                 wait_result = _wait_for_pid_exit(container_name, pid, timeout_seconds=5.0)
             if wait_result is True:
-                final_status = "killed"
+                # PID gone. The wrapper publishes the tool's wait()-status as the
+                # marker. A natural exit (rc < 128) means the tool finished on its
+                # own in the kill window — record its real code. A 128+signal
+                # status (rc >= 128: our SIGTERM=143 / SIGKILL=137) means WE
+                # terminated it → 'killed'. No marker yet (we won the race) → also
+                # 'killed'.
+                rc = _read_exit_marker(record)
+                if rc is not None and rc < 128:
+                    final_status = "completed" if rc == 0 else "failed"
+                    final_exit_code = rc
+                else:
+                    final_status = "killed"
             elif wait_result is None:
                 # Docker became unreachable mid-stop: we cannot confirm the PID
                 # exited, so do NOT finalize a definitive 'killed' on a transient
@@ -432,11 +557,77 @@ def job_stop(
                     "process; status=stop_failed recorded. Investigate the runtime."
                 )
 
+    patch_payload: dict[str, Any] = {"status": final_status}
+    if final_exit_code is not None:
+        patch_payload["exit_code"] = final_exit_code
+    # Stamp ended_at on any confirmed terminal outcome. stop_failed is excluded:
+    # the process may still be alive, so an ended_at would be misleading.
+    if final_status in {"completed", "failed", "killed", "lost"}:
+        patch_payload["ended_at"] = _utcnow_iso()
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     try:
-        record_out = client.patch(f"jobs/{int(job_id)}", {"status": final_status})
+        # accept_409 tolerates a concurrent finalizer (job_status/sweeper) that
+        # converged the row via the marker during the kill window — we then
+        # return the existing terminal record rather than raising a false error.
+        record_out = client.patch(f"jobs/{int(job_id)}", patch_payload, accept_409=True)
     finally:
         client.close()
     if final_status == "stop_failed":
         raise AssessError(failure_message or f"job {job_id}: stop failed")
     return record_out
+
+
+def reap_jobs(
+    *,
+    container_name: str | None = None,
+    config: Config | None = None,
+) -> dict[str, Any]:
+    """Stop every in-flight (running/queued) job for the engagement.
+
+    The operator-explicit reap after an agent dies leaving dtach jobs alive:
+    it walks the in-flight rows and runs the same PID-targeted, marker-aware
+    ``job_stop`` on each — so a job that already finished finalizes
+    ``completed`` rather than ``killed``. Per-job failures are classified, not
+    fatal, so one wedged job never aborts the whole reap. Returns an
+    outcome summary keyed by disposition."""
+    container_name = container_name or default_runtime_container()
+    cfg = config or load_config(None)
+
+    in_flight: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for state in ("running", "queued"):
+        for row in job_list(status_value=state, config=cfg):
+            jid = row.get("id")
+            if jid is None:
+                continue
+            jid = int(jid)
+            if jid in seen:
+                continue
+            seen.add(jid)
+            in_flight.append(row)
+
+    results: dict[str, list[dict[str, Any]]] = {
+        "stopped": [],
+        "already_terminal": [],
+        "failed": [],
+    }
+    for row in in_flight:
+        jid = int(row["id"])
+        # job_list lazy-finalizes via the exit marker, so a row returned here
+        # may already be terminal (it completed before the agent died). Skip the
+        # stop attempt for those — they are already reconciled.
+        if str(row.get("status") or "").strip() in _JOB_TERMINAL_STATUSES:
+            results["already_terminal"].append({"id": jid, "status": row.get("status")})
+            continue
+        try:
+            out = job_stop(jid, container_name=container_name, config=cfg)
+            results["stopped"].append({"id": jid, "status": out.get("status")})
+        except AssessError as exc:
+            msg = str(exc)
+            if "already terminal" in msg:
+                results["already_terminal"].append({"id": jid, "error": msg})
+            else:
+                results["failed"].append({"id": jid, "error": msg})
+        except Exception as exc:  # noqa: BLE001 — one wedged job must not abort the reap
+            results["failed"].append({"id": jid, "error": f"{type(exc).__name__}: {exc}"})
+    return results
