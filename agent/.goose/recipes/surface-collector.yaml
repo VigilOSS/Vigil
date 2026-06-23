@@ -38,7 +38,7 @@ instructions: |2
   - [ ] You loaded `agent/shared-constraints.md`
   - [ ] You loaded `agent/skills/surface-collection/SKILL.md` as your primary skill
   - [ ] You read the skill's `## Extended Resources` section and loaded the listed references
-  - [ ] You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, auth.json state
+  - [ ] You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, credential state (from `vigil auth status`)
   - [ ] You have `$DIR/cases.db` path and the engagement directory set
   - [ ] You checked command history as a coverage map — `vigil assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what surface collection has already run on this target so your next pass picks angles that haven't been tried — different crawl depth, different source (Katana vs gau vs waybackurls vs hakrawler), different extension filter, different auth context. The only crawl to skip is an identical command against identical input; any variant (new auth, wider scope, deeper depth) is new coverage. If you cite a prior run instead of re-running, fetch its preview with `vigil assess get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output is complete. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
   - [ ] You checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies to the collection source. If it does, load it and collect the browser-vs-baseline delta before declaring coverage complete.
@@ -84,7 +84,7 @@ instructions: |2
   Work through targets in this order unless the operator narrows the scope:
 
   1. **Ingest Phase 1 endpoints** — recon-specialist and source-analyzer output from `endpoints.txt`
-  2. **Live crawl** — `vigil assess kali katana` with auth headers if `auth.json` is active. Use `agent/references/tools/recon/katana.md` for crawl doctrine and load `browser-semantic-analysis` when the headless/browser-semantics triggers apply.
+  2. **Live crawl** — `vigil assess kali katana` with auth headers if a credential is active (`vigil auth status`). Use `agent/references/tools/recon/katana.md` for crawl doctrine and load `browser-semantic-analysis` when the headless/browser-semantics triggers apply.
   3. **Historical enrichment** — `vigil assess gau-endpoints` for Wayback, OTX, Common Crawl, URLScan (cache-aware; reuses `<engagement>/scans/gau-pipeline/<target>/<cache_key>/gau_output.txt` when fresh for this target + flag combination, prints `cache_reused: true|false` in JSON summary)
   4. **Spec ingestion** — OpenAPI/Swagger specs discovered in Phase 1
   5. **Dedup and ingest raw URLs** — raw URL streams through `vigil assess ingest-endpoints` with source tagging; gau uses `vigil assess gau-endpoints` unless you are intentionally reusing an existing raw artifact
@@ -148,7 +148,7 @@ instructions: |2
 
   ## Auth-Aware Collection
 
-  When `auth.json` has `use_for_requests` set to `true` and `state` set to `available`:
+  When the engagement's credential record (`vigil auth status`) has `use_for_requests` set to `true` and a usable credential available:
 
   1. Run Katana with auth headers through the wrapper's passthrough: `vigil assess kali katana -u URL --extra-args '-H "Cookie: ..." -H "Authorization: Bearer ..."' ... --technique DISCOVERY --intent "auth-aware crawl" --probe-kind fingerprint --phase collect --timeout 1800`
   2. Tag authenticated results with `auth_context: authenticated` during ingestion
@@ -174,7 +174,7 @@ instructions: |2
   - [ ] Katana live crawl completed for all in-scope web targets
   - [ ] gau historical enrichment completed for all in-scope domains
   - [ ] OpenAPI/Swagger specs ingested (or confirmed absent)
-  - [ ] Auth-aware re-crawl completed (if auth.json is active)
+  - [ ] Auth-aware re-crawl completed (if a credential is active)
 
   ### Triage Quality
   - [ ] Leaked secret parameters scanned across full URL corpus

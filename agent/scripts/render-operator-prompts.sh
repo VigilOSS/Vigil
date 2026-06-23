@@ -146,7 +146,7 @@ BLUE_AGENT_NAMES=(
 agent_description() {
   case "$1" in
     operator) printf '%s\n' "Lead red team operator. Drives methodology, coordinates phases, and manages state." ;;
-    recon-specialist) printf '%s\n' "Initial web and service reconnaissance specialist." ;;
+    recon-specialist) printf '%s\n' "Recon completeness assessor + bounded web fingerprinting over the supervised recon pipeline." ;;
     source-analyzer) printf '%s\n' "Frontend and client-source analysis specialist." ;;
     surface-collector) printf '%s\n' "URL collection, deduplication, and intelligent triage specialist for Phase 2." ;;
     vulnerability-analyst) printf '%s\n' "Validation-focused analyst for attackability and evidence quality." ;;

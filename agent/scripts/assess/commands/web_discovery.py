@@ -188,10 +188,24 @@ def _extract_live_urls(httpx_jsonl: Path) -> list[str]:
     return sorted(set(urls))
 
 
-# Backfill CR-added flags when a caller builds a bare args object (older callers /
-# focused tests). argparse supplies these on the real CLI path; this only fills
-# absent attributes so the new routing/clamp code never trips.
-_ARG_DEFAULTS = {"runtime": "auto", "no_thread_clamp": False}
+# Backfill every flag when a caller builds a bare args object in-process (e.g. the
+# `vigil assess recon` orchestrator, or focused tests). argparse supplies these on
+# the real CLI path; this fills absent attributes so an in-process caller that only
+# sets hosts_file/engagement_dir never trips on a missing flag. Keep this in sync
+# with `register()` defaults (mirrors dns_discovery's full _ARG_DEFAULTS).
+_ARG_DEFAULTS = {
+    "ports": "80,443",
+    "httpx_threads": "50",
+    "httpx_rate_limit": "150",
+    "tech_detect": False,
+    "no_crawl": False,
+    "katana_depth": "2",
+    "katana_extra_args": "",
+    "db_path": "",
+    "stage_timeout": 1800,
+    "runtime": "auto",
+    "no_thread_clamp": False,
+}
 
 
 def _apply_arg_defaults(args) -> None:

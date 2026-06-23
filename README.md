@@ -141,6 +141,44 @@ vigil runtime shell-exec "tmux list-sessions"
 
 > **Operational tuning** — resource sizing tiers, container rlimits/ulimits, and orchestrator data/backups are documented under [Operations](#operations).
 
+### Recon runtime: host vs. container, and the host-side tools
+
+Most target-facing tools run **inside** the shared `vigil` container. The exception is the
+**DNS-heavy and bulk-liveness** recon stages, which on **macOS/Windows Docker Desktop** must run
+on the **host**: Docker Desktop proxies every container packet through a userspace proxy
+(`com.docker.backend`) that NAT-tracks state *per distinct destination IP*, so a DNS brute over a
+large resolver set — or a bulk `httpx` liveness pass over thousands of hosts — saturates that table
+and wedges the whole VM (engagement I-001). The split:
+
+| Stage / tool | Runs | Why |
+|---|---|---|
+| `subfinder`, `dnsx`, `puredns` (+`massdns`), `shuffledns`, `alterx`, bulk `httpx` liveness | **Host** on Docker Desktop | DNS-heavy / bulk — would wedge the userspace proxy in-container |
+| `katana` crawl, `nuclei`, `ffuf`, exploit / authenticated HTTP | **Container** (always) | Isolation: auth'd/exploit traffic must not leave the sandbox |
+
+On **native Linux / remote Docker** there is no userspace proxy, so everything can run in-container
+and the host tools are optional (the split is a transparent no-op).
+
+`vigil assess recon` and `--runtime host` **enforce** this split on Docker Desktop — if a required
+host binary is missing they fail the preflight rather than silently degrade. Install the host-side
+recon binaries yourself (these are the only tools the host path needs). Most are `go install`
+targets (cross-platform — Go handles the OS); `massdns` is not, so use your package manager:
+
+```bash
+# Essentials (the --runtime host / vigil assess recon path requires these):
+go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install github.com/d3mondev/puredns/v2@latest
+brew install massdns      # macOS; Linux: build from github.com/blechschmidt/massdns
+
+# Optional (wider brute / permutations):
+go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
+go install github.com/projectdiscovery/alterx/cmd/alterx@latest
+```
+
+Ensure `$(go env GOPATH)/bin` (usually `~/go/bin`) is on your `PATH`. `vigil doctor` reports which
+host recon tools are present (the `host-recon-tools` row) so you can see what's still missing.
+
 ### Creating an engagement
 
 Create an engagement inside the chosen install:

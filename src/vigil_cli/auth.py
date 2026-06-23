@@ -153,12 +153,20 @@ def set_active(engagement_dir: Path, identity: str) -> None:
 
 def edit_auth(engagement_dir: Path, identity: str | None = None) -> None:
     """Fetch an identity's material, open it in $EDITOR, and PUT it back."""
-    target = identity or DEFAULT_IDENTITY
-    material = (
-        _active_material(engagement_dir)
-        if identity is None
-        else _api(engagement_dir, "GET", f"/{identity}")
-    )
+    if identity is None:
+        # No --identity: edit whatever is active and write BACK to that same identity.
+        # Resolve the active name from /resolve (a sibling of `material`, not inside it)
+        # rather than assuming `default` — otherwise editing a non-default active identity
+        # forks the edit into `default` and make_active flips the engagement onto it,
+        # silently corrupting `default` and leaving the intended identity unchanged.
+        resolved = _api(engagement_dir, "GET", "/resolve")
+        resolved = resolved if isinstance(resolved, dict) else {}
+        target = str(resolved.get("identity_name") or DEFAULT_IDENTITY)
+        material = resolved.get("material")
+        material = material if isinstance(material, dict) else {}
+    else:
+        target = identity
+        material = _api(engagement_dir, "GET", f"/{identity}")
     if not material:
         material = _empty_auth()
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"

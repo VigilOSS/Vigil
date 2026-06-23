@@ -1361,6 +1361,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Liveness probe: `docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file at /tmp/vigil-pid-<run_uuid>.pid. run_uuid comes from the row's run_uuid column (stdout_path parsing kept only for older rows).",
         "PID alive -> left alone (still-running). PID dead OR pid file missing -> finalized to status=lost via PATCH command-runs/{id}.",
         "Rows are skipped when Docker probing itself fails, since the command cannot distinguish a live job from an unavailable liveness check.",
+        "--scope {command-runs|jobs|all} (default command-runs): `jobs` also reconciles stuck assessment_jobs rows (the async dtach-job lifecycle). For jobs the host-readable exit marker is authoritative (marker present -> completed/failed with its real exit code); PID gone with no marker -> lost. This converges any job the agent was killed before it could poll to completion.",
         "Use --dry-run first to inspect candidates without writing — a thorough sweep is cheap, an incorrect finalize is not.",
         "Unlike target-facing verbs, sweep-orphans takes no --technique/--intent/--probe-kind/--phase/--timeout — it is maintenance, not a probe.",
     ),
@@ -1434,6 +1435,9 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
         {
             "command": "vigil assess kali sweep-orphans --max-age-seconds 1800 --container-name vigil",
         },
+        {
+            "command": "vigil assess kali sweep-orphans --scope all --dry-run",
+        },
     ),
 }
 
@@ -1490,10 +1494,12 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
                 "vigil assess kali sweep-orphans --dry-run",
                 "vigil assess kali sweep-orphans --max-age-seconds 3600",
                 "vigil assess kali sweep-orphans --container-name vigil",
+                "vigil assess kali sweep-orphans --scope jobs",
             ),
             author_supplied_fields=(
                 "--max-age-seconds <int> (default 3600)",
                 "--container-name <name> (default vigil)",
+                "--scope {command-runs|jobs|all} (default command-runs)",
                 "--dry-run (optional, list candidates without writing)",
             ),
             notes=_KALI_VERB_NOTES.get(verb, ()),

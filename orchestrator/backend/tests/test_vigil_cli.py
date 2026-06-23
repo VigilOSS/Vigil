@@ -2395,6 +2395,46 @@ def test_auth_status_and_clear_operate_on_engagement_auth(
     assert store["eng-1"]["identities"] == {}
 
 
+def test_auth_edit_without_identity_writes_back_to_the_active_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR#40 regression: `vigil auth edit` (no --identity) must write the edit BACK to the
+    active identity, not blindly to `default`. When a non-default identity is active,
+    targeting `default` forked the edit into `default` and make_active flipped the
+    engagement onto it — corrupting `default` and leaving the active identity unchanged."""
+    from vigil_cli import auth as auth_module
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+
+    store = _install_fake_credential_store(monkeypatch)
+    store["eng-1"] = {
+        "identities": {
+            "alice": {
+                "mode": "manual",
+                "state": "present",
+                "cookies": {"sid": "alice-sid"},
+                "headers": {},
+            }
+        },
+        "active_identity": "alice",
+    }
+
+    # No-op editor: leave the dumped material untouched so the edit is a pure round-trip.
+    monkeypatch.setattr(auth_module.subprocess, "call", lambda *a, **k: 0)
+
+    main_module.main(["--root", str(install_root), "auth", "edit", "eng-1"])
+
+    # The edit lands on `alice` (the active identity), not `default`.
+    assert store["eng-1"]["active_identity"] == "alice"
+    assert "default" not in store["eng-1"]["identities"]
+    assert "updated_at" in store["eng-1"]["identities"]["alice"]
+    assert store["eng-1"]["identities"]["alice"]["cookies"] == {"sid": "alice-sid"}
+
+
 def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from vigil_cli import auth as auth_module
     from vigil_cli import main as main_module

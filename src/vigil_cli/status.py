@@ -171,6 +171,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
     backup = latest_backup(install_root)
     checks.append(Check("backup-latest", "OK" if backup else "MISSING", str(backup.path) if backup else ""))
     checks.append(_failed_audit_marker_check(install_root))
+    checks.append(_host_recon_tools_check())
     checks.append(Check("oob.frp_token", "OK" if os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token") else "MISSING"))
     return checks
 
@@ -179,6 +180,26 @@ def print_doctor(checks: list[Check]) -> None:
     for check in checks:
         suffix = f"\t{check.detail}" if check.detail else ""
         print(f"{check.status}\t{check.name}{suffix}")
+
+
+def _host_recon_tools_check() -> Check:
+    """Host-side recon binaries the `--runtime host` / `vigil assess recon` path
+    needs on macOS Docker Desktop (DNS-heavy + bulk-liveness; I-001). WARN-only —
+    they are unneeded on native Linux / remote Docker, and the recon job's
+    enforce-preflight is the hard gate at run time."""
+    from .runtime import host_recon_tool_status, missing_essential_host_tools
+
+    statuses = host_recon_tool_status()
+    missing_essential = missing_essential_host_tools()
+    if missing_essential:
+        return Check(
+            "host-recon-tools", "WARN",
+            "missing " + ", ".join(missing_essential)
+            + " — see README 'Recon runtime: host vs. container' for install commands "
+            "(needed for --runtime host on Docker Desktop)",
+        )
+    present = [t.binary for t, present in statuses if present]
+    return Check("host-recon-tools", "OK", "present: " + ", ".join(present))
 
 
 def _binary_check(command: str) -> Check:
