@@ -737,6 +737,121 @@ def test_engagement_create_interactive_with_complete_flags_skips_wizard(
     assert scope["out_of_scope"] == ["blocked.example.com"]
 
 
+def test_engagement_create_persists_header_and_rate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --header (repeatable) + --rate-limit both land in scope.json for a web
+    # engagement. The cap is a PER-HOST req/s ceiling; recon stages (stage 2)
+    # read it back via assess.lib.scope.rate_limit / rate_caps_for_dir.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "--type",
+            "web",
+            "https://app.example.com",
+            "--hosts",
+            "app.example.com",
+            "--no-prompt",
+            "--header",
+            "X-Bug-Bounty: vigiloss",
+            "--header",
+            "X-Trace: deadbeef",
+            "--rate-limit",
+            "5",
+        ]
+    )
+
+    created_path = _created_path_from_stdout(capsys.readouterr().out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["required_headers"] == {"X-Bug-Bounty": "vigiloss", "X-Trace": "deadbeef"}
+    assert scope["rate_limit"] == 5.0
+
+
+def test_engagement_create_omits_rate_limit_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Unset --rate-limit must leave scope.json with NO rate_limit key, so the
+    # accessor returns None and recon stages keep their per-tool defaults.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "https://app.example.com",
+            "--no-prompt",
+        ]
+    )
+
+    created_path = _created_path_from_stdout(capsys.readouterr().out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert "rate_limit" not in scope
+
+
+def test_resolve_rate_limit_accessor() -> None:
+    # The shared resolver: None/empty -> None (unchanged default); a positive
+    # number passes through; non-positive / non-numeric raise SystemExit so a
+    # malformed cap is never persisted.
+    from vigil_cli.engagements import resolve_rate_limit
+
+    assert resolve_rate_limit(None) is None
+    assert resolve_rate_limit("") is None
+    assert resolve_rate_limit(5) == 5.0
+    assert resolve_rate_limit("3.5") == 3.5
+    with pytest.raises(SystemExit):
+        resolve_rate_limit(0)
+    with pytest.raises(SystemExit):
+        resolve_rate_limit(-1)
+    with pytest.raises(SystemExit):
+        resolve_rate_limit("bogus")
+
+
+def test_engagement_create_rate_limit_rejected_for_code_engagement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # --rate-limit is HTTP-target only; a code engagement must reject it with a
+    # clear error rather than silently writing it into a non-HTTP scope.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    with pytest.raises(SystemExit) as exc:
+        main_module.main(
+            [
+                "--root",
+                str(install_root),
+                "engagement",
+                "create",
+                "--type",
+                "code",
+                "myproj",
+                "--repo",
+                str(tmp_path / "repo"),
+                "--no-prompt",
+                "--rate-limit",
+                "5",
+            ]
+        )
+    assert "--rate-limit" in str(exc.value)
+
+
 def test_engagement_create_cli_json_output_replaces_bare_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

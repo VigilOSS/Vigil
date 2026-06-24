@@ -36,12 +36,20 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.discovery import denoise_hosts
 from assess.lib.kali import kali_exec
-from assess.lib import runtime_route
+from assess.lib.kali_output import _apply_required_headers, _required_headers
+from assess.lib import runtime_route, scope
 
 # CR-5 — bulk httpx concurrency ceiling on macOS Docker Desktop. Every distinct
 # destination IP is NAT-tracked by the host userspace proxy (com.docker.backend),
 # so a high -threads bulk liveness pass over many hosts wedges the VM (I-001).
 _DOCKER_DESKTOP_HTTPX_THREAD_CAP = 25
+
+# I-6 — non-standard HTTP ports the liveness-revalidation pass re-probes on hosts
+# that came back dead on the fast default (80,443). httpx -p covers a port list
+# natively (tool research: prefer httpx -p over a naabu pre-scan, which is
+# allowlisted but not installed), so the revalidation is a second httpx pass over
+# ONLY the dead subset — not a fan-out of every host across every port.
+_REVALIDATE_PORTS = "8080,8443,8000,8888"
 
 
 def register(subparsers) -> None:
@@ -54,6 +62,21 @@ def register(subparsers) -> None:
     p.add_argument("--httpx-threads", dest="httpx_threads", default="50",
                    help="httpx -threads (default 50; clamped to <=25 for the bulk pass on macOS Docker Desktop, CR-5)")
     p.add_argument("--httpx-rate-limit", dest="httpx_rate_limit", default="150", help="httpx -rate-limit (default 150)")
+    p.add_argument(
+        "--no-revalidate-ports",
+        dest="no_revalidate_ports",
+        action="store_true",
+        help="Skip the I-6 liveness-revalidation pass. By default, hosts that "
+             f"came back dead on the fast {{80,443}} pass are re-probed across "
+             f"{_REVALIDATE_PORTS} with a longer timeout so a service on a "
+             "non-standard port is not silently undercounted.",
+    )
+    p.add_argument(
+        "--revalidate-ports",
+        dest="revalidate_ports",
+        default=_REVALIDATE_PORTS,
+        help=f"Port list for the I-6 dead-host revalidation pass (default {_REVALIDATE_PORTS}).",
+    )
     # CR-4/CR-5 — where the BULK httpx liveness stage runs. SAFE DEFAULT: `auto`
     # stays in-container unless the operator opts into host routing via
     # `--runtime host` or VIGIL_RECON_RUNTIME. katana/exploit/auth'd HTTP always
@@ -105,7 +128,26 @@ def _host_dispatch(cmd, *, intent, tool_name, timeout, engagement_dir):
     """Run *cmd* via the audited host path (`host-exec`) — same audit fields as the
     container path (route='host_exec'). host_exec.run() ends in sys.exit(rc); we
     catch SystemExit and return a result object with the .return_code kali callers
-    expect, so audit rows + downstream ingest are IDENTICAL regardless of route."""
+    expect, so audit rows + downstream ingest are IDENTICAL regardless of route.
+
+    Program-mandated attribution headers are applied here with the SAME
+    injectable/skip classifier kali_exec uses (``_apply_required_headers``), so a
+    host-routed injectable tool (httpx) carries the engagement's required_headers
+    while a skip-set tool (gau/dnsx/subfinder) never leaks the handle to an
+    archive/DNS endpoint. The host path does NOT inject IP-pins or auth material;
+    only the attribution header is shared with the container path here."""
+    cmd = list(cmd)
+    _req_headers = _required_headers(Path(engagement_dir)) if engagement_dir else {}
+    if _req_headers:
+        status = _apply_required_headers(cmd, tool_name, _req_headers)
+        if status == "warned":
+            names = ", ".join(_req_headers)
+            _warn(
+                f"program requires header(s) {names} but host-routed tool "
+                f"'{tool_name}' has no known -H injection — this run will NOT "
+                "carry the required header; inject it manually if it reaches the "
+                "in-scope target."
+            )
     ns = SimpleNamespace(
         command=list(cmd), tool=tool_name, intent=intent, technique="DISCOVERY",
         phase="recon", target_host="", agent_name=None, scope_host="", cwd=None,
@@ -166,6 +208,27 @@ def _clamp_httpx_threads(args, *, route: str = "container") -> int:
     return requested
 
 
+def _clamp_httpx_rate_limit(requested: str, rate_cap: float | None) -> int:
+    """Resolve the httpx ``-rate-limit`` (req/s) for a bulk pass.
+
+    ``requested`` is the per-verb default (``--httpx-rate-limit``, 150). When the
+    engagement configures a PER-HOST rate cap (``scope.rate_limit`` via ``vigil
+    engagement create --rate-limit``), the bulk httpx pass is clamped DOWN to it
+    so the program-mandated ceiling is honoured; an unset cap (``None``) keeps the
+    verb default exactly as today (no hard gate, agent keeps discretion). httpx
+    ``-rate-limit`` is an integer req/s, so a fractional cap floors to ``int`` and
+    a sub-1 req/s cap floors to 1 (never 0 — a 0 would stall the pass).
+    """
+    try:
+        base = int(requested)
+    except (TypeError, ValueError):
+        base = 150
+    if rate_cap is None:
+        return base
+    capped = min(base, int(rate_cap)) if rate_cap >= 1 else 1
+    return max(1, capped)
+
+
 def _extract_live_urls(httpx_jsonl: Path) -> list[str]:
     """Live URLs (answered, not failed) from an httpx -json file, for the crawl seed."""
     urls: list[str] = []
@@ -188,6 +251,57 @@ def _extract_live_urls(httpx_jsonl: Path) -> list[str]:
     return sorted(set(urls))
 
 
+def _bare_host(token: str) -> str:
+    """Normalize an httpx ``input`` token (host or URL, maybe with :port) to a bare
+    lowercased host, so a default-pass row and a candidate line compare equal."""
+    raw = (token or "").strip().lower()
+    if not raw:
+        return ""
+    if "://" in raw:
+        raw = raw.split("://", 1)[1]
+    raw = raw.split("/", 1)[0]
+    # Strip a trailing :port (but keep an IPv6 literal's internal colons — those
+    # carry no host:port shape here since httpx inputs are de-noised hosts).
+    if raw.count(":") == 1:
+        raw = raw.split(":", 1)[0]
+    return raw.rstrip(".")
+
+
+def _live_input_hosts(httpx_jsonl: Path) -> set[str]:
+    """Bare hosts that produced at least one ANSWERED (non-failed) httpx row."""
+    live: set[str] = set()
+    if not httpx_jsonl.is_file():
+        return live
+    with httpx_jsonl.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict) or obj.get("failed"):
+                continue
+            token = obj.get("input") or obj.get("host") or obj.get("url") or obj.get("final_url")
+            host = _bare_host(str(token)) if token else ""
+            if host:
+                live.add(host)
+    return live
+
+
+def _dead_default_hosts(candidates: list[str], live_jsonl: Path) -> list[str]:
+    """Candidate hosts that did NOT answer on the fast default pass — the only
+    hosts the I-6 revalidation pass re-probes across non-standard ports."""
+    live = _live_input_hosts(live_jsonl)
+    dead: list[str] = []
+    for raw in candidates:
+        host = _bare_host(raw)
+        if host and host not in live:
+            dead.append(host)
+    return sorted(set(dead))
+
+
 # Backfill every flag when a caller builds a bare args object in-process (e.g. the
 # `vigil assess recon` orchestrator, or focused tests). argparse supplies these on
 # the real CLI path; this fills absent attributes so an in-process caller that only
@@ -197,6 +311,8 @@ _ARG_DEFAULTS = {
     "ports": "80,443",
     "httpx_threads": "50",
     "httpx_rate_limit": "150",
+    "no_revalidate_ports": False,
+    "revalidate_ports": _REVALIDATE_PORTS,
     "tech_detect": False,
     "no_crawl": False,
     "katana_depth": "2",
@@ -212,6 +328,75 @@ def _apply_arg_defaults(args) -> None:
     for name, default in _ARG_DEFAULTS.items():
         if not hasattr(args, name):
             setattr(args, name, default)
+
+
+def _run_httpx_liveness(args, *, in_arg, out_arg, ports, threads, rate_limit, route, timeout, intent):
+    """Run one lean status-only httpx liveness pass on either route.
+
+    Shared by the fast default-port pass (Stage 1) and the I-6 dead-host
+    revalidation pass (Stage 1b) so both carry identical flags + attribution
+    headers (host path injects via _host_dispatch; container path via kali_exec)
+    and the same rate cap. Returns the result object (with `.return_code`)."""
+    httpx_cmd = [
+        "httpx", "-l", str(in_arg), "-p", str(ports),
+        "-status-code", "-title", "-web-server", "-ip", "-json", "-silent",
+        "-threads", str(threads), "-rate-limit", str(rate_limit),
+        "-o", str(out_arg),
+    ]
+    if args.tech_detect:
+        httpx_cmd.append("-tech-detect")
+    if route == "host":
+        return _host_dispatch(
+            httpx_cmd, intent=intent, tool_name="httpx",
+            timeout=int(timeout), engagement_dir=args.engagement_dir,
+        )
+    return kali_exec(
+        httpx_cmd, technique="DISCOVERY", intent=intent,
+        probe_kind="fingerprint", phase="recon", timeout=int(timeout),
+        engagement_dir=args.engagement_dir, tool_name="httpx",
+    )
+
+
+def _merge_liveness(primary: Path, extra: Path) -> int:
+    """Append the answered (non-failed) rows from a revalidation httpx -json file
+    into the primary liveness file. Returns the count of recovered live rows.
+
+    De-dupes on the raw JSON line so a re-run that re-probes the same host on the
+    same port is idempotent. Skips failed rows so the merge only ever ADDS live
+    hosts (a dead-on-default host that is also dead on the non-standard ports
+    contributes nothing)."""
+    if not extra.is_file():
+        return 0
+    existing: set[str] = set()
+    if primary.is_file():
+        with primary.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                s = line.strip()
+                if s:
+                    existing.add(s)
+    recovered = 0
+    new_lines: list[str] = []
+    with extra.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                obj = json.loads(s)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict) or obj.get("failed"):
+                continue
+            if s in existing:
+                continue
+            existing.add(s)
+            new_lines.append(s)
+            recovered += 1
+    if new_lines:
+        with primary.open("a", encoding="utf-8") as fh:
+            for s in new_lines:
+                fh.write(s + "\n")
+    return recovered
 
 
 def run(args) -> None:
@@ -240,6 +425,16 @@ def run(args) -> None:
     # (avoids the per-dest-IP proxy wedge); container elsewhere / on override.
     # The katana crawl below stays in the container regardless (CR-5: exploit/
     # auth'd HTTP must not leave the isolated runtime).
+    #
+    # Rate cap (stage 1): an engagement-configured PER-HOST req/s ceiling
+    # (scope.rate_limit) clamps the bulk httpx -rate-limit DOWN; unset keeps the
+    # verb default (no hard gate). Headers ride automatically (host path injects
+    # via _host_dispatch; container path via kali_exec's central injector).
+    rate_cap, _ = scope.rate_caps_for_dir(args.engagement_dir)
+    rate_limit = _clamp_httpx_rate_limit(args.httpx_rate_limit, rate_cap)
+    if rate_cap is not None:
+        print(f"web-discovery: per-host rate cap {rate_cap} req/s configured; "
+              f"httpx -rate-limit set to {rate_limit}.", file=sys.stderr)
     httpx_route = _route_for(args, "httpx")
     threads = _clamp_httpx_threads(args, route=httpx_route)
     live_host, live_container = _paths(cfg, "httpx_live.jsonl")
@@ -247,27 +442,46 @@ def run(args) -> None:
     # mounted same inode), so Stage 2 ingest is identical regardless of route.
     in_arg = str(denoised_host) if httpx_route == "host" else denoised_container
     out_arg = str(live_host) if httpx_route == "host" else live_container
-    httpx_cmd = [
-        "httpx", "-l", in_arg, "-p", str(args.ports),
-        "-status-code", "-title", "-web-server", "-ip", "-json", "-silent",
-        "-threads", str(threads), "-rate-limit", str(args.httpx_rate_limit),
-        "-o", out_arg,
-    ]
-    if args.tech_detect:
-        httpx_cmd.append("-tech-detect")
-    if httpx_route == "host":
-        res = _host_dispatch(
-            httpx_cmd, intent="web-discovery: httpx liveness (status-only)",
-            tool_name="httpx", timeout=int(args.stage_timeout), engagement_dir=args.engagement_dir,
-        )
-    else:
-        res = kali_exec(
-            httpx_cmd, technique="DISCOVERY", intent="web-discovery: httpx liveness (status-only)",
-            probe_kind="fingerprint", phase="recon", timeout=int(args.stage_timeout),
-            engagement_dir=args.engagement_dir, tool_name="httpx",
-        )
+    res = _run_httpx_liveness(
+        args, in_arg=in_arg, out_arg=out_arg, ports=str(args.ports),
+        threads=threads, rate_limit=rate_limit, route=httpx_route,
+        timeout=int(args.stage_timeout),
+        intent="web-discovery: httpx liveness (status-only)",
+    )
     if getattr(res, "return_code", 0) not in (0, None):
         print(f"web-discovery: httpx exited {res.return_code}; continuing with whatever it wrote.", file=sys.stderr)
+
+    # --- Stage 1b: I-6 liveness revalidation on non-standard ports ---------
+    # The fast default pass only probes 80,443; a service answering on
+    # 8080/8443/8000/8888 would be silently undercounted. Re-probe ONLY the
+    # dead-on-default subset across the non-standard ports with a longer
+    # timeout, then APPEND the recovered rows into the same liveness file so
+    # Stage 2 ingest sees them as ordinary live hosts.
+    if not args.no_revalidate_ports:
+        dead = _dead_default_hosts(clean, live_host)
+        revalidate_ports = str(args.revalidate_ports or _REVALIDATE_PORTS)
+        if dead and revalidate_ports:
+            reval_in_host, reval_in_container = _paths(cfg, "revalidate_hosts.txt")
+            reval_in_host.write_text("\n".join(dead) + "\n", encoding="utf-8")
+            reval_out_host, reval_out_container = _paths(cfg, "httpx_revalidate.jsonl")
+            r_in = str(reval_in_host) if httpx_route == "host" else reval_in_container
+            r_out = str(reval_out_host) if httpx_route == "host" else reval_out_container
+            # A longer timeout for the second pass: non-standard ports are more
+            # likely to be slow/filtered, and the dead subset is small (1.5x).
+            reval_timeout = int(args.stage_timeout) + int(args.stage_timeout) // 2
+            rres = _run_httpx_liveness(
+                args, in_arg=r_in, out_arg=r_out, ports=revalidate_ports,
+                threads=threads, rate_limit=rate_limit, route=httpx_route,
+                timeout=reval_timeout,
+                intent=f"web-discovery: I-6 liveness revalidation of {len(dead)} "
+                       f"dead-on-default hosts across {revalidate_ports}",
+            )
+            if getattr(rres, "return_code", 0) not in (0, None):
+                print(f"web-discovery: revalidation httpx exited {rres.return_code}; "
+                      "merging whatever it wrote.", file=sys.stderr)
+            recovered = _merge_liveness(live_host, reval_out_host)
+            print(f"web-discovery: revalidation re-probed {len(dead)} dead hosts on "
+                  f"{revalidate_ports}; recovered {recovered} live.", file=sys.stderr)
 
     # --- Stage 2: ingest the liveness verdicts into the backend ledger -----
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -282,10 +496,22 @@ def run(args) -> None:
         if live_urls:
             seed_host, seed_container = _paths(cfg, "live_urls.txt")
             seed_host.write_text("\n".join(live_urls) + "\n", encoding="utf-8")
+            # I-4 — `-or -ob` omit the stored response + body so a deep crawl does
+            # not blow up the engagement disk with every fetched page (the crawl
+            # only needs the discovered URL graph here; bodies are fetched
+            # selectively downstream by gau-secrets / js-mining).
             katana_cmd = [
                 "katana", "-list", seed_container, "-jc", "-d", str(args.katana_depth),
+                "-or", "-ob",
                 "-jsonl", "-silent", "-o", katana_container,
             ]
+            # Rate cap (stage 3): clamp katana's per-second / per-minute request
+            # rate to the configured PER-HOST ceiling. katana -rl is req/s and
+            # -rlm is req/min; set both so neither dimension exceeds the cap. An
+            # unset cap leaves katana's own default pacing (no hard gate).
+            if rate_cap is not None:
+                katana_rl = max(1, int(rate_cap))
+                katana_cmd.extend(["-rl", str(katana_rl), "-rlm", str(katana_rl * 60)])
             if args.katana_extra_args:
                 katana_cmd.extend(shlex.split(args.katana_extra_args))
             kres = kali_exec(

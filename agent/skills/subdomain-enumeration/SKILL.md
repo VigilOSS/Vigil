@@ -15,6 +15,8 @@ origin: Vigil
 - **Phase 1a (first-class) when scope.json `hosts` contains `*.domain` entries** — dispatched BEFORE the parallel recon+source pass so live subdomains land in the endpoint inventory before downstream steps depend on them.
 - After finding references to subdomains in JS/HTML source code.
 
+> **Register out-of-scope carve-outs in `scope.json` `out_of_scope` before enumerating.** Wildcard expansion surfaces hosts the program excluded (telecom-PTR space, vendor apexes, carved-out subdomains). The `vigil assess recon` pipeline scope-filters the resolved set between the dns and web stages, so authoring the deny-list up front keeps bulk liveness/crawl off out-of-scope hosts. A carve-out added mid-run only applies on the next `--resume`.
+
 ## Tooling preflight
 
 Before any active step, confirm every binary in the chain is reachable inside the runtime — puredns silently fails when massdns is missing (zero output, no error, exit code 0), and a dnsx fallback against a typical bruteforce wordlist will spike container CPU before stabilizing. Run the preflight once at the top of Phase 1a:

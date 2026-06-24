@@ -41,8 +41,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
-from assess.commands import dns_discovery, gau_endpoints, web_discovery
-from assess.lib import runtime_route
+from assess.commands import dns_discovery, gau_endpoints, js_mining, web_discovery
+from assess.lib import runtime_route, scope
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 
@@ -61,14 +61,19 @@ class _Stage:
 
 _DNS_STAGE = _Stage("dns", "dns-discovery", "scans/dns-discovery/resolved_hosts.txt")
 _WEB_STAGE = _Stage("web", "web-discovery", "scans/web-discovery/httpx_live.jsonl")
+# js-mining runs AFTER the web crawl; its sentinel records the mining summary.
+_JS_STAGE = _Stage("js", "js-mining", "scans/web-discovery/js-mining/js-mining.done")
 # gau is per-apex + in-container; its sentinel artifact records the apexes mined.
 _GAU_STAGE = _Stage("gau", "gau-endpoints", "scans/recon/gau.done")
 
 
 def _build_stages(args) -> tuple[_Stage, ...]:
-    """The active stage list. gau is ON by default (historical-URL enrichment);
-    --no-gau drops it (e.g. a brand-new site with no archive history)."""
+    """The active stage list. gau + js-mining are ON by default; --no-gau drops
+    the historical-URL stage (e.g. a brand-new site with no archive history) and
+    --no-js-mining drops the JS endpoint/secret mining stage."""
     stages = [_DNS_STAGE, _WEB_STAGE]
+    if not getattr(args, "no_js_mining", False):
+        stages.append(_JS_STAGE)
     if not getattr(args, "no_gau", False):
         stages.append(_GAU_STAGE)
     return tuple(stages)
@@ -92,6 +97,9 @@ def register(subparsers) -> None:
     p.add_argument("--no-gau", dest="no_gau", action="store_true",
                    help="Skip the gau historical-URL stage (ON by default). Drop it for a "
                         "brand-new site with no archive/wayback history.")
+    p.add_argument("--no-js-mining", dest="no_js_mining", action="store_true",
+                   help="Skip the JS endpoint/secret mining stage (ON by default). It mines "
+                        "the crawled .js assets for hidden routes + leaked secrets; best-effort.")
     p.add_argument("--resume", action="store_true",
                    help="Skip stages whose checkpoint is fresh+valid; restart from the first "
                         "incomplete stage.")
@@ -145,6 +153,7 @@ def _fingerprint(apexes: list[str], args) -> str:
             "runtime": str(args.runtime),
             "no_crawl": bool(args.no_crawl),
             "no_gau": bool(getattr(args, "no_gau", False)),
+            "no_js_mining": bool(getattr(args, "no_js_mining", False)),
         },
         sort_keys=True,
         ensure_ascii=True,
@@ -193,6 +202,8 @@ def _stage_counts(cfg, stage: _Stage) -> dict:
         return {"resolved_hosts": _count_lines(p)}
     if stage.key == "web":
         return {"live_probes": _count_lines(p)}
+    if stage.key == "js":
+        return {"js_mined": _count_lines(p)}
     if stage.key == "gau":
         return {"apexes_mined": _count_lines(p)}
     return {}
@@ -264,10 +275,64 @@ def _run_dns(args, cfg) -> int:
         return _exit_code(exc)
 
 
+def _apply_scope_filter(cfg, resolved: Path) -> Path:
+    """Filter the resolved host set to in-scope hosts BETWEEN the dns and web
+    stages, returning the path the web stage should consume.
+
+    Subdomain enumeration + wildcard expansion routinely surface hosts that the
+    program carved OUT of scope (e.g. telecom-PTR space, a vendor apex, an
+    explicit ``out_of_scope`` entry). denoise_hosts only strips structural noise;
+    it does NOT know the engagement's scope. Filtering here, before web-discovery
+    probes anything, keeps the bulk httpx/katana passes off out-of-scope hosts —
+    the same admission primitive (``host_admitted``: allowlist AND not denylist)
+    that ``filter-scope`` uses.
+
+    Degrades gracefully: a missing/malformed scope, or no in-scope allow entries
+    (an internal engagement that does not author a host allowlist), returns the
+    ORIGINAL resolved file unchanged so the stage never drops every host on a
+    scope-read hiccup. Writes the filtered set to ``scans/recon/in_scope_hosts.txt``
+    and returns that path only when filtering actually applied."""
+    if not resolved.is_file():
+        return resolved
+    try:
+        scope_doc = scope.load_scope(str(cfg.engagement_dir))
+        allow = scope.scope_entries(scope_doc)
+        deny = scope.out_of_scope_entries(scope_doc)
+    except SystemExit:
+        # load_scope/scope_entries raise SystemExit on a missing/malformed scope;
+        # in the recon job that must not abort the stage — fall through unfiltered.
+        return resolved
+    if not allow:
+        # No host allowlist authored (e.g. internal engagement) — admitting on an
+        # empty allowlist would drop everything; leave the set unfiltered.
+        return resolved
+    kept: list[str] = []
+    dropped = 0
+    raw_lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
+    for line in raw_lines:
+        token = line.strip()
+        if not token:
+            continue
+        host = scope.host_from_token(token)
+        if host and scope.host_admitted(host, allow, deny):
+            kept.append(token)
+        else:
+            dropped += 1
+    if dropped == 0:
+        # Everything already in scope — no need to fork a separate file.
+        return resolved
+    out = _recon_dir(cfg) / "in_scope_hosts.txt"
+    out.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    print(f"recon: scope filter kept {len(kept)} / {len(kept) + dropped} resolved hosts "
+          f"({dropped} out-of-scope/unscoped dropped before web-discovery).", file=sys.stderr)
+    return out
+
+
 def _run_web(args, cfg) -> int:
     resolved = Path(cfg.engagement_dir) / "scans" / "dns-discovery" / "resolved_hosts.txt"
+    hosts_file = _apply_scope_filter(cfg, resolved)
     ns = SimpleNamespace(
-        hosts_file=str(resolved),
+        hosts_file=str(hosts_file),
         engagement_dir=args.engagement_dir,
         runtime=args.runtime,
         no_crawl=bool(args.no_crawl),
@@ -279,6 +344,47 @@ def _run_web(args, cfg) -> int:
         return 0
     except SystemExit as exc:
         return _exit_code(exc)
+
+
+def _run_js(args, cfg) -> int:
+    """JS endpoint + secret mining over the web-discovery crawl output. Best-effort:
+    a failure is logged but never fails the pipeline; the sentinel is always written
+    so the checkpoint marks the stage done. Carries the engagement's attribution
+    header + rate cap via js_mining's kali_exec body fetch."""
+    katana = Path(cfg.engagement_dir) / "scans" / "web-discovery" / "katana.jsonl"
+    sentinel = Path(cfg.engagement_dir) / "scans" / "web-discovery" / "js-mining" / "js-mining.done"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    db_path = str(Path(cfg.engagement_dir) / "cases.db")
+    ns = SimpleNamespace(
+        urls_file=str(katana) if katana.is_file() else "",
+        target="",
+        max_js=js_mining._DEFAULT_MAX_JS,
+        httpx_rate_limit="30",
+        httpx_threads="20",
+        cap_body_bytes=2097152,
+        verify=False,
+        no_secrets=False,
+        db_path=db_path,
+        stage_timeout=int(args.stage_timeout),
+        engagement_dir=args.engagement_dir,
+    )
+    mined = 0
+    try:
+        js_mining.run(ns)
+        endpoints = (Path(cfg.engagement_dir) / "scans" / "web-discovery"
+                     / "js-mining" / "js_endpoints.txt")
+        if endpoints.is_file():
+            mined = sum(1 for line in endpoints.read_text(
+                encoding="utf-8", errors="replace").splitlines() if line.strip())
+    except SystemExit as exc:
+        if _exit_code(exc) != 0:
+            print(f"recon: js-mining exited {_exit_code(exc)} (non-fatal; continuing).",
+                  file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — js-mining is best-effort; never fail the pipeline
+        print(f"recon: js-mining errored ({type(exc).__name__}: {exc}); continuing.",
+              file=sys.stderr)
+    sentinel.write_text("".join(f"{i}\n" for i in range(mined)), encoding="utf-8")
+    return 0
 
 
 def _run_gau(args, cfg) -> int:
@@ -312,7 +418,7 @@ def _run_gau(args, cfg) -> int:
     return 0
 
 
-_STAGE_RUNNERS = {"dns": _run_dns, "web": _run_web, "gau": _run_gau}
+_STAGE_RUNNERS = {"dns": _run_dns, "web": _run_web, "js": _run_js, "gau": _run_gau}
 
 
 # --------------------------------------------------------------------------- #
@@ -376,6 +482,8 @@ def _child_argv(args, job_id: int, runtime_value: str) -> list[str]:
         argv.append("--no-crawl")
     if getattr(args, "no_gau", False):
         argv.append("--no-gau")
+    if getattr(args, "no_js_mining", False):
+        argv.append("--no-js-mining")
     if args.resume:
         argv.append("--resume")
     # Pass the CONCRETE resolved runtime so the detached child does not re-decide.
@@ -395,7 +503,8 @@ def _launch_background(args) -> None:
         "brute": bool(args.brute),
         "runtime": effective,
         "no_gau": bool(getattr(args, "no_gau", False)),
-        "intent": "supervised recon pipeline (dns-discovery -> web-discovery -> gau)",
+        "no_js_mining": bool(getattr(args, "no_js_mining", False)),
+        "intent": "supervised recon pipeline (dns-discovery -> web-discovery -> js-mining -> gau)",
     }
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         created = client.post("jobs", {"status": "queued", "audit_metadata": audit_meta})
@@ -460,8 +569,8 @@ def _finalize_job(cfg, job_id: int, exit_code: int, log_path: Path) -> None:
 def _apply_arg_defaults(args) -> None:
     for name, default in {
         "brute": False, "runtime": "auto", "no_crawl": False, "no_gau": False,
-        "resume": False, "stage_timeout": 1800, "background": False,
-        "foreground": False, "job_id": None,
+        "no_js_mining": False, "resume": False, "stage_timeout": 1800,
+        "background": False, "foreground": False, "job_id": None,
     }.items():
         if not hasattr(args, name):
             setattr(args, name, default)

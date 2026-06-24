@@ -240,6 +240,74 @@ def out_of_scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
     return entries
 
 
+def rate_limit(scope: dict[str, Any]) -> float | None:
+    """Return the engagement's configured PER-HOST request-rate ceiling (req/s),
+    or ``None`` when unset.
+
+    The cap is the optional ``rate_limit`` field written by ``vigil engagement
+    create --rate-limit`` (req/s, summed across all tools and threads against a
+    single target host). ``None`` is the unchanged default: target-facing recon
+    stages fall through to their per-tool rate defaults and the agent keeps
+    discretion — there is NO hard gate. A non-positive or non-numeric value is
+    treated as unset (returns ``None``) so a malformed scope can never produce a
+    zero/negative throttle.
+    """
+    raw = scope.get("rate_limit")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def required_headers(scope: dict[str, Any]) -> dict[str, str]:
+    """Return the engagement's program-mandated attribution headers
+    (e.g. ``{"X-Bug-Bounty": "<handle>"}``) from ``scope.json``, or ``{}``.
+
+    Mirrors ``assess.lib.kali_output._required_headers`` (the kali_exec reader)
+    so recon stages that resolve a loaded scope dict, rather than a directory,
+    share the same string→string filtering: only ``str`` name → ``str`` value
+    pairs survive, with the name stripped, so a malformed scope can never inject
+    a non-header value into argv.
+    """
+    raw = scope.get("required_headers")
+    if not isinstance(raw, dict):
+        return {}
+    headers: dict[str, str] = {}
+    for name, value in raw.items():
+        if isinstance(name, str) and name.strip() and isinstance(value, str):
+            headers[name.strip()] = value
+    return headers
+
+
+def rate_caps_for_dir(engagement_dir: str) -> tuple[float | None, dict[str, str]]:
+    """Read both target-facing knobs for a recon stage from an engagement dir:
+    ``(rate_limit, required_headers)``.
+
+    A convenience over ``load_scope`` + ``rate_limit`` + ``required_headers`` for
+    stage callers that hold an ``engagement_dir`` (e.g. ``cfg.engagement_dir``)
+    rather than a loaded scope dict. ``rate_limit`` is the PER-HOST req/s ceiling
+    or ``None`` (unset = today's per-tool defaults, no hard gate);
+    ``required_headers`` is the program attribution header map (``{}`` when none).
+    A missing/unreadable scope degrades to ``(None, {})`` so a stage never aborts
+    on scope I/O.
+    """
+    scope_path = Path(engagement_dir) / "scope.json"
+    if not scope_path.is_file():
+        return None, {}
+    try:
+        scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, {}
+    if not isinstance(scope, dict):
+        return None, {}
+    return rate_limit(scope), required_headers(scope)
+
+
 def classify_scope_entry(raw: str) -> dict[str, str] | None:
     stripped = raw.strip()
     if not stripped:

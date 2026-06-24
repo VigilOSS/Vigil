@@ -251,6 +251,96 @@ def _required_headers(engagement_dir: Path) -> dict[str, str]:
     return headers
 
 
+# Program-mandated attribution headers (e.g. BugCrowd's ``X-Bug-Bounty: <handle>``)
+# must ride every in-scope HTTP probe. Three-way classifier:
+#   * INJECTABLE — HTTP-to-target tools that accept ``-H "Name: Val"``; inject.
+#   * SKIP       — passive / third-party-archive / DNS / L3-L4 tools that never
+#                  send HTTP to the in-scope target. Injecting here would LEAK
+#                  the researcher handle to web.archive.org/CommonCrawl/DNS APIs
+#                  or is meaningless, so silently skip (never warn).
+#   * else       — HTTP-to-target tools that can't take ``-H`` (nikto/whatweb/
+#                  wafw00f/httprobe) AND tools whose header flag is not ``-H``
+#                  (arjun uses a newline-separated ``--headers`` block, not
+#                  ``-H``): WARN (never block), since this argv can't carry the
+#                  header as ``-H`` — the operator injects it the tool's way.
+#
+# This classifier + injector lives here (rather than in kali.py) so BOTH the
+# container path (kali.kali_exec) AND the audited host path (the recon
+# host-dispatch wrappers in commands/web_discovery.py / dns_discovery.py) apply
+# the SAME injectable/skip rules. kali.py re-exports these names for back-compat.
+_REQUIRED_HEADER_INJECTABLE = frozenset(
+    {"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"}
+)
+_REQUIRED_HEADER_SKIP = frozenset(
+    {
+        "gau",
+        "waybackurls",
+        "subfinder",
+        "amass",
+        "dnsx",
+        "nmap",
+        "naabu",
+        "masscan",
+        "puredns",
+    }
+)
+
+
+def _existing_header_names(cmd: list[str]) -> set[str]:
+    """Lower-cased header names already present as ``-H`` values in ``cmd``.
+
+    Splits each ``-H`` argument on the first colon and tolerates a space before
+    it (``Name:`` and ``Name :``) so the idempotency check matches regardless of
+    spacing.
+    """
+    names: set[str] = set()
+    for idx, token in enumerate(cmd):
+        if token == "-H" and idx + 1 < len(cmd):
+            value = cmd[idx + 1]
+            head = value.split(":", 1)[0].strip()
+            if head:
+                names.add(head.lower())
+    return names
+
+
+def _apply_required_headers(
+    cmd: list[str], tool_name: str, headers: dict[str, str]
+) -> str:
+    """Inject program-mandated attribution header(s) into an HTTP command argv.
+
+    Returns one of ``"injected"``, ``"skipped"``, ``"warned"``, ``"noop"``:
+      * ``"noop"``    — no required headers to apply, or every header was
+                        already present (idempotent — an identity may have
+                        injected the same header on an injectable tool).
+      * ``"skipped"`` — passive/archive/DNS/L3-L4 tool that does not send HTTP
+                        to the in-scope target; nothing applied, no warning.
+      * ``"injected"``— at least one header was appended as ``-H "Name: Val"``.
+      * ``"warned"``  — an HTTP-capable but non-injectable/unknown tool; cmd is
+                        left untouched and the caller warns.
+
+    Idempotency: a header is skipped when an existing ``-H`` value already names
+    it (case-insensitive on the header name, tolerating ``Name:`` and
+    ``Name :``), so an identity-injected header is never duplicated.
+    """
+    if not headers:
+        return "noop"
+    name_lower = tool_name.lower()
+    if name_lower in _REQUIRED_HEADER_SKIP:
+        return "skipped"
+    if name_lower not in _REQUIRED_HEADER_INJECTABLE:
+        return "warned"
+
+    existing = _existing_header_names(cmd)
+    injected = False
+    for name, value in headers.items():
+        if name.lower() in existing:
+            continue
+        cmd.extend(["-H", f"{name}: {value}"])
+        existing.add(name.lower())
+        injected = True
+    return "injected" if injected else "noop"
+
+
 def _auth_context(engagement_dir: Path) -> str:
     # Audit label for KaliResult — the active identity's mode from the
     # centralized credential store ("none" when no credentials / unreachable).

@@ -117,6 +117,39 @@ def resolve_out_of_scope(values: list[str] | None) -> list[str]:
     return result
 
 
+def resolve_rate_limit(value: float | str | None) -> float | None:
+    """Normalize a ``--rate-limit`` flag into the ``rate_limit`` (req/s) value
+    written to scope.json, or ``None`` when unset.
+
+    ``None``/empty preserves today's behavior (per-tool defaults; agent
+    discretion — no hard gate). A supplied value must be a positive number;
+    anything else raises SystemExit so a malformed cap can never be persisted.
+    The value is a PER-HOST request-rate ceiling (req/s, summed across all
+    tools and threads against any single target host), per the rate-norms
+    research recommendation (programs frame caps per-host/per-service, and a
+    conservative per-host cap is what keeps any single origin under its WAF
+    threshold).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError as exc:
+            raise SystemExit(
+                f"--rate-limit '{text}' is not a number (req/s)."
+            ) from exc
+    rate = float(value)
+    if rate <= 0:
+        raise SystemExit(
+            f"--rate-limit must be a positive number of req/s, got {rate}."
+        )
+    return rate
+
+
 @dataclass(frozen=True, slots=True)
 class CreateEngagementOptions:
     install_root: Path
@@ -133,6 +166,12 @@ class CreateEngagementOptions:
     # out-of-scope carve-outs, written into scope.json for HTTP-target engagements.
     required_headers: dict[str, str] = field(default_factory=dict)
     out_of_scope: list[str] = field(default_factory=list)
+    # Optional PER-HOST request-rate ceiling (req/s, summed across all tools and
+    # threads against any single host) for target-facing recon stages. None
+    # preserves today's behavior (per-tool defaults; agent discretion — no hard
+    # gate). Written into scope.json's ``rate_limit`` only when set, for
+    # HTTP-target engagements.
+    rate_limit: float | None = None
     # Blue-only fields (ignored unless engagement_type == "blue"):
     customer: str | None = None
     platforms: list[str] = field(default_factory=list)
@@ -397,10 +436,14 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
             scope["required_headers"] = dict(options.required_headers)
         if options.out_of_scope:
             scope["out_of_scope"] = list(options.out_of_scope)
-    elif options.required_headers or options.out_of_scope:
+        # Written only when set so an unconfigured cap leaves scope.json
+        # byte-identical and recon stages fall through to their tool defaults.
+        if options.rate_limit is not None:
+            scope["rate_limit"] = options.rate_limit
+    elif options.required_headers or options.out_of_scope or options.rate_limit is not None:
         raise SystemExit(
-            "--program/--header and --out-of-scope apply only to HTTP-target "
-            f"engagements (web/both/android), not '{options.engagement_type}'."
+            "--program/--header, --out-of-scope, and --rate-limit apply only to "
+            f"HTTP-target engagements (web/both/android), not '{options.engagement_type}'."
         )
 
     report_name = name

@@ -32,6 +32,7 @@ from .engagements import (
     remove_out_of_scope,
     resolve_engagement_path,
     resolve_out_of_scope,
+    resolve_rate_limit,
     resolve_required_headers,
     set_engagement_header,
     start_engagement,
@@ -262,6 +263,17 @@ def main(argv: list[str] | None = None) -> None:
         metavar="HOST|*.WILDCARD|CIDR",
         help="Out-of-scope carve-out excluded even when an in-scope wildcard "
              "would match it; repeatable. web/both/android only.",
+    )
+    create_p.add_argument(
+        "--rate-limit",
+        dest="rate_limit",
+        type=float,
+        default=None,
+        metavar="REQ_PER_SEC",
+        help="Per-host request-rate ceiling (req/s, summed across all tools and "
+             "threads against any single host) for target-facing recon stages. "
+             "Unset = today's behavior (per-tool defaults, agent discretion, no "
+             "hard gate). web/both/android only. e.g. --rate-limit 5",
     )
     create_p.add_argument(
         "--no-prompt",
@@ -942,6 +954,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
                     asked = True
     required_headers = resolve_required_headers(args.program, args.researcher, args.header)
     out_of_scope = resolve_out_of_scope(args.out_of_scope)
+    rate_limit = resolve_rate_limit(args.rate_limit)
 
     # Dry runs skip the summary + confirmation: nothing will be created either
     # way, and the dry-run path prints its own plan summary.
@@ -956,6 +969,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             android_package=android_package,
             required_headers=required_headers,
             out_of_scope=out_of_scope,
+            rate_limit=rate_limit,
         )
         if not _confirm("Create engagement? [Y/n]"):
             raise SystemExit("aborted: engagement not created")
@@ -973,6 +987,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         skip_permissions=args.skip_permissions,
         required_headers=required_headers,
         out_of_scope=out_of_scope,
+        rate_limit=rate_limit,
     )
 
     if args.dry_run:
@@ -1003,6 +1018,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
                 android_package=android_package,
                 required_headers=required_headers,
                 out_of_scope=out_of_scope,
+                rate_limit=rate_limit,
             )
         return
 
@@ -1120,6 +1136,7 @@ def _print_create_summary(
     android_package: str | None,
     required_headers: dict[str, str] | None = None,
     out_of_scope: list[str] | None = None,
+    rate_limit: float | None = None,
 ) -> None:
     print("[vigil] engagement summary:", file=sys.stderr)
     print(f"[vigil]   type:      {engagement_type}", file=sys.stderr)
@@ -1140,6 +1157,8 @@ def _print_create_summary(
         print(f"[vigil]   headers:   {rendered}", file=sys.stderr)
     if out_of_scope:
         print(f"[vigil]   out-of-scope: {', '.join(out_of_scope)}", file=sys.stderr)
+    if rate_limit is not None:
+        print(f"[vigil]   rate-limit: {rate_limit:g} req/s (per host)", file=sys.stderr)
 
 
 def _looks_like_web_target(value: str) -> bool:

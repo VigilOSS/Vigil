@@ -48,6 +48,7 @@ from assess.lib.discovery import (
     wordlist_head,
 )
 from assess.lib.kali import kali_exec
+from assess.lib.kali_output import _apply_required_headers, _required_headers
 from assess.lib.locking import network_heavy_lock
 from assess.lib import runtime_route
 
@@ -171,7 +172,26 @@ def _host_dispatch(cmd, *, intent, tool_name, technique, phase, timeout, engagem
     route='host_exec'; host_exec.run() ends in sys.exit(rc), so we catch
     SystemExit and synthesize a result object with the same .return_code shape
     callers expect from kali_exec.
+
+    Program-mandated attribution headers are applied here with the SAME
+    injectable/skip classifier kali_exec uses (``_apply_required_headers``).
+    Every dns-discovery host tool (dnsx/subfinder/puredns/...) is in the
+    skip-set, so this is a silent no-op that correctly keeps the researcher
+    handle off DNS/passive endpoints; the call is kept for parity with the
+    web-discovery host path and to future-proof an HTTP tool ever routed here.
     """
+    cmd = list(cmd)
+    _req_headers = _required_headers(Path(engagement_dir)) if engagement_dir else {}
+    if _req_headers:
+        status = _apply_required_headers(cmd, tool_name, _req_headers)
+        if status == "warned":
+            names = ", ".join(_req_headers)
+            _warn(
+                f"program requires header(s) {names} but host-routed tool "
+                f"'{tool_name}' has no known -H injection — this run will NOT "
+                "carry the required header; inject it manually if it reaches the "
+                "in-scope target."
+            )
     ns = SimpleNamespace(
         command=list(cmd),
         tool=tool_name,
