@@ -28,10 +28,14 @@ def _cfg(tmp_path: Path) -> SimpleNamespace:
 
 
 def _args(tmp_path: Path, **over) -> SimpleNamespace:
+    # js-mining is default-ON in production; the dns/web/gau-ordering tests below
+    # opt OUT (no_js_mining=True) so they stay focused on the original three
+    # stages. The js stage gets its own dedicated tests further down.
     base = dict(
         apexes=["example.com"], engagement_dir=str(tmp_path), brute=False,
-        runtime="container", no_crawl=False, no_gau=False, resume=False,
-        stage_timeout=1800, background=False, foreground=False, job_id=None,
+        runtime="container", no_crawl=False, no_gau=False, no_js_mining=True,
+        resume=False, stage_timeout=1800, background=False, foreground=False,
+        job_id=None,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -338,7 +342,158 @@ def test_recon_background_records_job_and_spawns_detached(monkeypatch, tmp_path)
     assert "recon" in argv and "--foreground" in argv
     assert argv[argv.index("--job-id") + 1] == "9"
     assert "--brute" in argv
+    assert "--no-js-mining" in argv  # base _args opts out; the flag must propagate
     assert captured["kwargs"].get("start_new_session") is True
     # Caller gets the job id immediately (non-blocking).
     payload = json.loads(out.getvalue())
     assert payload["job_id"] == 9
+
+
+# --------------------------------------------------------------------------- #
+# 7. js-mining stage (default-on) + OOS scope filtering between dns and web
+# --------------------------------------------------------------------------- #
+
+
+def _stub_runners_with_js(tmp_path: Path, ran: list, *, dns_hosts=2):
+    base = _stub_runners(tmp_path, ran, dns_hosts=dns_hosts)
+
+    def js(args, cfg):
+        ran.append("js")
+        d = Path(cfg.engagement_dir) / "scans" / "web-discovery" / "js-mining"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "js-mining.done").write_text("0\n1\n", encoding="utf-8")
+        return 0
+
+    base["js"] = js
+    return base
+
+
+def test_recon_runs_js_stage_by_default(monkeypatch, tmp_path):
+    monkeypatch.setattr(recon, "load_config", lambda d: _cfg(tmp_path))
+    monkeypatch.setattr(recon, "_enforce_host_routing", lambda *a, **k: None)
+    ran: list[str] = []
+    monkeypatch.setattr(recon, "_STAGE_RUNNERS", _stub_runners_with_js(tmp_path, ran))
+
+    # Do NOT opt out of js-mining → it runs AFTER web, BEFORE gau.
+    recon.run(_args(tmp_path, no_js_mining=False))
+
+    assert ran == ["dns", "web", "js", "gau"]
+    status = json.loads(recon.status_path(_cfg(tmp_path)).read_text(encoding="utf-8"))
+    assert [s["label"] for s in status["stages"]] == [
+        "dns-discovery", "web-discovery", "js-mining", "gau-endpoints"
+    ]
+    js_stage = next(s for s in status["stages"] if s["key"] == "js")
+    assert js_stage["counts"]["js_mined"] == 2
+
+
+def test_recon_no_js_mining_drops_the_js_stage(monkeypatch, tmp_path):
+    monkeypatch.setattr(recon, "load_config", lambda d: _cfg(tmp_path))
+    monkeypatch.setattr(recon, "_enforce_host_routing", lambda *a, **k: None)
+    ran: list[str] = []
+    monkeypatch.setattr(recon, "_STAGE_RUNNERS", _stub_runners_with_js(tmp_path, ran))
+
+    recon.run(_args(tmp_path, no_js_mining=True))
+    assert ran == ["dns", "web", "gau"]  # js dropped
+
+
+def _write_scope(tmp_path: Path, hosts, out_of_scope=None):
+    payload = {"engagement_type": "web", "hosts": hosts}
+    if out_of_scope is not None:
+        payload["out_of_scope"] = out_of_scope
+    (tmp_path / "scope.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_scope_filter_drops_out_of_scope_hosts_between_stages(tmp_path):
+    # resolved_hosts.txt carries an in-scope host, an out_of_scope carve-out, and
+    # a host outside the allowlist; only the in-scope one survives the filter.
+    _write_scope(tmp_path, ["*.example.com"], out_of_scope=["bad.example.com"])
+    dns = tmp_path / "scans" / "dns-discovery"
+    dns.mkdir(parents=True, exist_ok=True)
+    resolved = dns / "resolved_hosts.txt"
+    resolved.write_text(
+        "good.example.com\nbad.example.com\nunrelated.othercorp.com\n", encoding="utf-8"
+    )
+
+    cfg = _cfg(tmp_path)
+    out = recon._apply_scope_filter(cfg, resolved)
+
+    # A separate filtered file is produced (drops occurred).
+    assert out != resolved
+    kept = out.read_text(encoding="utf-8").split()
+    assert kept == ["good.example.com"]
+
+
+def test_scope_filter_passes_through_when_all_in_scope(tmp_path):
+    _write_scope(tmp_path, ["*.example.com"])
+    dns = tmp_path / "scans" / "dns-discovery"
+    dns.mkdir(parents=True, exist_ok=True)
+    resolved = dns / "resolved_hosts.txt"
+    resolved.write_text("a.example.com\nb.example.com\n", encoding="utf-8")
+
+    out = recon._apply_scope_filter(_cfg(tmp_path), resolved)
+    assert out == resolved  # nothing dropped → original path returned
+
+
+def test_scope_filter_degrades_on_missing_scope(tmp_path):
+    # No scope.json → load_scope SystemExits; the filter must NOT abort the stage,
+    # it returns the unfiltered resolved file.
+    dns = tmp_path / "scans" / "dns-discovery"
+    dns.mkdir(parents=True, exist_ok=True)
+    resolved = dns / "resolved_hosts.txt"
+    resolved.write_text("a.example.com\n", encoding="utf-8")
+
+    out = recon._apply_scope_filter(_cfg(tmp_path), resolved)
+    assert out == resolved
+
+
+def test_scope_filter_degrades_when_no_allowlist(tmp_path):
+    # An empty host allowlist must NOT drop everything (admitting on an empty
+    # allowlist would reject every host) — pass through unfiltered.
+    _write_scope(tmp_path, [])
+    dns = tmp_path / "scans" / "dns-discovery"
+    dns.mkdir(parents=True, exist_ok=True)
+    resolved = dns / "resolved_hosts.txt"
+    resolved.write_text("a.example.com\n", encoding="utf-8")
+
+    out = recon._apply_scope_filter(_cfg(tmp_path), resolved)
+    assert out == resolved
+
+
+def test_run_web_feeds_scope_filtered_hosts(monkeypatch, tmp_path):
+    # Drive the REAL _run_web: it must scope-filter resolved_hosts.txt and hand
+    # web_discovery the filtered file (the out-of-scope host must not reach it).
+    from assess.commands import web_discovery
+
+    _write_scope(tmp_path, ["*.example.com"], out_of_scope=["bad.example.com"])
+    dns = tmp_path / "scans" / "dns-discovery"
+    dns.mkdir(parents=True, exist_ok=True)
+    (dns / "resolved_hosts.txt").write_text(
+        "good.example.com\nbad.example.com\n", encoding="utf-8"
+    )
+
+    seen_hosts_file: dict = {}
+
+    def fake_web_run(ns):
+        seen_hosts_file["path"] = ns.hosts_file
+
+    monkeypatch.setattr(web_discovery, "run", fake_web_run)
+
+    rc = recon._run_web(_args(tmp_path, runtime="container"), _cfg(tmp_path))
+    assert rc == 0
+    fed = Path(seen_hosts_file["path"]).read_text(encoding="utf-8").split()
+    assert fed == ["good.example.com"]  # bad.example.com filtered out before web
+
+
+def test_run_js_is_best_effort_and_writes_sentinel(monkeypatch, tmp_path):
+    # _run_js must never fail the pipeline even when js_mining.run raises, and it
+    # always writes the checkpoint sentinel.
+    from assess.commands import js_mining
+
+    def boom(ns):
+        raise RuntimeError("jsluice exploded")
+
+    monkeypatch.setattr(js_mining, "run", boom)
+    rc = recon._run_js(_args(tmp_path), _cfg(tmp_path))
+    assert rc == 0
+    sentinel = tmp_path / "scans" / "web-discovery" / "js-mining" / "js-mining.done"
+    assert sentinel.is_file()
