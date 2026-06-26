@@ -1550,6 +1550,51 @@ def _active_coverage_deferrals(engagement_id: int) -> list[dict[str, Any]]:
         )
         return [_serialize_decision(row) for row in cursor.fetchall()]
 
+def _active_coverage_completeness_deferrals(engagement_id: int) -> list[dict[str, Any]]:
+    """Active (``resolved=0``) ``coverage_completeness_deferral`` decision rows,
+    newest-first.
+
+    W3 override reader — mirrors :func:`_active_coverage_deferrals` (same direct
+    ``get_connection`` read to dodge the ``list_decisions`` ``limit`` cap) but
+    for the report-time completeness escape. The decision is recorded free-form
+    via ``vigil assess agent decision --kind coverage_completeness_deferral``;
+    its payload is ``{host, reason}`` (or aliases ``hosts``/``target``/
+    ``hostname``) for a per-host carve-out, or ``{engagement_wide: true}`` to
+    accept residual uncovered hosts program-wide at the report boundary.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        cursor = connection.execute(
+            "SELECT * FROM assessment_dispatch_decisions "
+            "WHERE engagement_id = ? AND kind = ? AND resolved = 0 "
+            "ORDER BY created_at DESC, id DESC",
+            (engagement.id, "coverage_completeness_deferral"),
+        )
+        return [_serialize_decision(row) for row in cursor.fetchall()]
+
+def _completeness_deferral_index(
+    rows: list[dict[str, Any]],
+) -> tuple[set[str], bool]:
+    """Split completeness-deferral rows into ``(deferred_hosts, engagement_wide)``.
+
+    A row tagged ``engagement_wide=true`` clears EVERY uncovered host; otherwise
+    the payload's host fields (normalized through ``_coverage_deferral_payload_hosts``
+    so URL / host:port shapes collapse to the bare-host key) name the hosts it
+    clears.
+    """
+    deferred_hosts: set[str] = set()
+    engagement_wide = False
+    for row in rows:
+        payload = row.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("engagement_wide") is True:
+            engagement_wide = True
+            continue
+        for host in _coverage_deferral_payload_hosts(payload):
+            deferred_hosts.add(host)
+    return deferred_hosts, engagement_wide
+
 def _coverage_engagement_wide_deferrals(
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1953,6 +1998,132 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
             "osint_intel_total": len(live_tech_components) + int(people_count) + int(breach_count),
         },
     }
+
+# W3 — backend web coverage-completeness gate (report_readiness).
+#
+# A host is a "real app" worth a recorded verdict at the report boundary when it
+# has >= this many distinct recorded request-variant routes, OR it exposes an
+# API/auth/GraphQL surface even under that count. This mirrors the CLI ledger's
+# ``compute_real_app`` OR-inclusion (agent/scripts/assess/lib/coverage_checks.py)
+# — kept duplicated here because the CLI module cannot be imported into the
+# backend. The route signal is the durable backend equivalent of the CLI's
+# cases.db live-route count: a recorded ``assessment_request_variants`` row IS an
+# observed route.
+WEB_ROUTE_REAL_APP_THRESHOLD = 6
+
+# Path fragments that flag a high-value API / auth / GraphQL surface so a small
+# crown-jewel host UNDER the route threshold is still treated as a real app.
+# Mirrors the CLI ledger's token lists; keep the two in sync.
+_WEB_API_PATH_TOKENS: tuple[str, ...] = (
+    "/api/", "/api.", "/rest/", "/v1/", "/v2/", "/v3/", "/graphql", "/gql",
+    "/swagger", "/openapi", "/oauth", "/jsonrpc", "/.well-known/",
+)
+_WEB_API_PATH_SUFFIXES: tuple[str, ...] = (".json", "/api", "/graphql", "/v1", "/v2", "/v3")
+_WEB_AUTH_PATH_TOKENS: tuple[str, ...] = (
+    "/login", "/signin", "/sign-in", "/auth", "/oauth", "/sso", "/saml",
+    "/oidc", "/session", "/logout", "/register", "/signup", "/password",
+    "/mfa", "/2fa", "/token", "/authorize",
+)
+_WEB_GRAPHQL_PATH_TOKENS: tuple[str, ...] = ("/graphql", "/gql", "/graphiql")
+
+
+def _web_path_is_high_value(path: str) -> bool:
+    """True when a request-variant ``normalized_path`` is an API/auth/GraphQL
+    surface (mirrors the CLI ``_path_matches`` over the same token lists)."""
+    low = (path or "").lower()
+    if not low:
+        return False
+    if any(tok in low for tok in _WEB_API_PATH_TOKENS):
+        return True
+    if any(low.endswith(suf) for suf in _WEB_API_PATH_SUFFIXES):
+        return True
+    if any(tok in low for tok in _WEB_AUTH_PATH_TOKENS):
+        return True
+    if any(tok in low for tok in _WEB_GRAPHQL_PATH_TOKENS):
+        return True
+    return False
+
+
+def web_uncovered_high_route_hosts(
+    engagement_id: int,
+    *,
+    threshold: int = WEB_ROUTE_REAL_APP_THRESHOLD,
+) -> list[dict[str, Any]]:
+    """In-scope REAL-APP hosts with recorded routes but NO recorded verdict and
+    no active ``coverage_completeness_deferral`` override.
+
+    W3 backend gate input (consumed by ``report_readiness`` for web/both
+    engagements). For every host that has recorded request-variant routes:
+
+      * ``route_count`` = distinct ``normalized_path`` for the host.
+      * ``real_app`` = ``route_count >= threshold`` OR an API/auth/GraphQL path
+        — mirrors the CLI ledger's ``compute_real_app`` (a host with a finding
+        is real_app there too, but a finding IS a recorded verdict, so such a
+        host is COVERED and never appears here).
+      * a recorded VERDICT is any non-merged finding on the host (a
+        ``false_positive`` finding is the canonical evidence-backed negative) —
+        read off the shared :func:`_build_finding_verdicts_by_host` projection.
+
+    A host is dropped (covered) when it carries a verdict, and dropped
+    (deferred) when a matching active completeness deferral names it — or an
+    engagement-wide one is present. The remaining hosts are the uncovered gaps.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        variant_rows = _fetch_all(
+            connection,
+            "SELECT host, normalized_path FROM assessment_request_variants "
+            "WHERE engagement_id = ?",
+            (engagement.id,),
+        )
+        finding_rows = _fetch_all(
+            connection,
+            "SELECT slug, canonical_location, status, verification_state, "
+            "verification_disposition, severity, auth_context, merged_into_finding_id "
+            "FROM assessment_findings WHERE engagement_id = ?",
+            (engagement.id,),
+        )
+
+    route_paths: dict[str, set[str]] = {}
+    high_value_hosts: set[str] = set()
+    for row in variant_rows:
+        host = _coverage_endpoint_host(str(row.get("host") or ""))
+        path = str(row.get("normalized_path") or "").strip()
+        if not host or not path:
+            continue
+        route_paths.setdefault(host, set()).add(path)
+        if _web_path_is_high_value(path):
+            high_value_hosts.add(host)
+
+    finding_verdicts = _build_finding_verdicts_by_host(finding_rows)
+    deferred_hosts, engagement_wide = _completeness_deferral_index(
+        _active_coverage_completeness_deferrals(engagement.id)
+    )
+
+    out: list[dict[str, Any]] = []
+    for host in sorted(route_paths):
+        route_count = len(route_paths[host])
+        has_high_value = host in high_value_hosts
+        if route_count < threshold and not has_high_value:
+            continue  # not a real_app — excluded from the gate
+        verdict = finding_verdicts.get(host)
+        if verdict and verdict.get("has_finding"):
+            continue  # a recorded verdict closes the host
+        if engagement_wide or host in deferred_hosts:
+            continue  # operator override
+        if route_count >= threshold:
+            reason = f">={threshold} recorded routes ({route_count})"
+        else:
+            reason = "exposes API/auth/GraphQL surface (under route threshold)"
+        out.append(
+            {
+                "host": host,
+                "route_count": route_count,
+                "api_auth_graphql": has_high_value,
+                "real_app_reason": reason,
+            }
+        )
+    return out
 
 def update_coverage_item_status(
     engagement_id: int,
