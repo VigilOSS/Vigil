@@ -54,6 +54,22 @@ from assess.lib import runtime_route
 
 _DEFAULT_WORDLIST = "/usr/share/wordlists/SecLists/Discovery/DNS/subdomains-top1million-110000.txt"
 
+# The runtime image also bakes a HEAD-capped (500k) n0kovo_subdomains list
+# (CT-derived, frequency-ordered) at this path. It is NOT the default — the
+# SecLists top-1M list above stays the default — but it is the recommended brute
+# list (CR-19): pass `--wordlist /usr/share/wordlists/n0kovo_subdomains_500k.txt`.
+# Already pre-capped to 500k, so the --wordlist-head cap is a no-op on it.
+_N0KOVO_WORDLIST = "/usr/share/wordlists/n0kovo_subdomains_500k.txt"
+
+# I-3: dnsx resolve profiles. The default resolve profile is the patient,
+# CDN-safe 'polite-cdn'. When --brute is active the merged candidate set is
+# dominated by mostly-dead permutation labels, so the resolve pass auto-swaps to
+# the fail-fast 'brute-resolve' profile (retry=1, timeout=2) to avoid paying
+# polite-cdn's 3×/5s retry budget on every dead name — UNLESS the operator
+# explicitly chose a non-default --dnsx-profile (their choice is always honored).
+_DEFAULT_DNSX_PROFILE = "polite-cdn"
+_BRUTE_RESOLVE_PROFILE = "brute-resolve"
+
 # CR-19: default HEAD cap for the brute wordlist. CT-derived / frequency-ordered
 # huge lists (n0kovo, 3M) keep real labels in the head and CT-hash/one-off junk
 # in the tail; brute the head by default, opt into the tail with --deep-tail.
@@ -93,14 +109,20 @@ def register(subparsers) -> None:
                         "(default 20; bounds one slow/unkeyed source stalling the -all batch, CR-7). "
                         "Pass '' / 0 to use subfinder's own default.")
     p.add_argument("--brute", action="store_true", help="Run a puredns bruteforce pass (OFF by default; skip on wildcard-sink apexes).")
-    p.add_argument("--wordlist", default=_DEFAULT_WORDLIST, help="puredns bruteforce wordlist (when --brute).")
+    p.add_argument("--wordlist", default=_DEFAULT_WORDLIST,
+                   help=("puredns bruteforce wordlist (when --brute). Defaults to the SecLists "
+                         "top-1M list; the runtime image also bakes a HEAD-capped n0kovo list at "
+                         f"{_N0KOVO_WORDLIST} (CT-derived, frequency-ordered) — pass that path here "
+                         "for the recommended brute (CR-19)."))
     # CR-19 — wordlist HEAD cap (default ON) + deep-tail opt-out.
     p.add_argument("--wordlist-head", dest="wordlist_head", type=int, default=_DEFAULT_WORDLIST_HEAD,
                    help=f"Brute only the first N labels of a frequency-ordered list (default {_DEFAULT_WORDLIST_HEAD}; 0 disables).")
     p.add_argument("--deep-tail", dest="deep_tail", action="store_true",
                    help="Brute the FULL wordlist, ignoring --wordlist-head (CT/frequency-ordered tails are mostly junk).")
     p.add_argument("--dns-rate", dest="dns_rate", default="1500", help="puredns --rate-limit, TOTAL qps across the resolver pool (default 1500)")
-    p.add_argument("--dnsx-profile", dest="dnsx_profile", default="polite-cdn", help="dnsx resolve profile (default polite-cdn)")
+    p.add_argument("--dnsx-profile", dest="dnsx_profile", default=_DEFAULT_DNSX_PROFILE,
+                   help=f"dnsx resolve profile (default {_DEFAULT_DNSX_PROFILE}; a --brute pass "
+                        f"auto-uses the fail-fast '{_BRUTE_RESOLVE_PROFILE}' profile unless overridden here).")
     p.add_argument("--resolver-profile", dest="resolver_profile", default="public-tcp", help="dnsx resolver profile (default public-tcp)")
     p.add_argument("--dnsx-extra-args", dest="dnsx_extra_args", default="", help="Extra dnsx args (shlex-split).")
     p.add_argument("--stage-timeout", dest="stage_timeout", type=int, default=1800, help="Per-tool --timeout seconds (default 1800)")
@@ -740,8 +762,35 @@ def _puredns_brute(args, cfg, targets: list[str], *, route: str, brute_r: str,
 # --------------------------------------------------------------------------- #
 
 
+def _resolve_profile_name(args) -> str:
+    """Profile to resolve the merged candidate set with (I-3).
+
+    Auto-selects the fail-fast 'brute-resolve' profile for the big permutation
+    pass — only when --brute is active AND the operator left --dnsx-profile at
+    its default. An explicit --dnsx-profile is always honored, and the swap is a
+    no-op if 'brute-resolve' is somehow absent from DNSX_PROFILES.
+    """
+    if (
+        getattr(args, "brute", False)
+        and getattr(args, "dnsx_profile", _DEFAULT_DNSX_PROFILE) == _DEFAULT_DNSX_PROFILE
+        and _BRUTE_RESOLVE_PROFILE in DNSX_PROFILES
+    ):
+        return _BRUTE_RESOLVE_PROFILE
+    return args.dnsx_profile
+
+
 def _resolve_stage(args, cfg, merged_container: str, resolved_container: str, route: str) -> None:
-    profile = DNSX_PROFILES.get(args.dnsx_profile, DNSX_PROFILES["polite-cdn"])
+    profile_name = _resolve_profile_name(args)
+    profile = DNSX_PROFILES.get(profile_name, DNSX_PROFILES["polite-cdn"])
+    if profile_name == _BRUTE_RESOLVE_PROFILE and args.dnsx_profile != _BRUTE_RESOLVE_PROFILE:
+        print(
+            "dns-discovery: brute pass — resolving the permutation set with the "
+            f"fail-fast '{_BRUTE_RESOLVE_PROFILE}' dnsx profile "
+            f"(-retry {profile.retry} -timeout {profile.timeout}) instead of "
+            f"'{_DEFAULT_DNSX_PROFILE}' so dead names fail fast; override with "
+            "--dnsx-profile (I-3).",
+            file=sys.stderr,
+        )
     resolvers = RESOLVER_PROFILES.get(args.resolver_profile, RESOLVER_PROFILES["public-tcp"])
     dnsx_cmd = [
         "dnsx", "-l", merged_container, "-silent", "-o", resolved_container,
@@ -947,7 +996,7 @@ _ARG_DEFAULTS = {
     "subfinder_threads": "20", "subfinder_timeout": "20",
     "brute": False, "wordlist": _DEFAULT_WORDLIST,
     "wordlist_head": _DEFAULT_WORDLIST_HEAD, "deep_tail": False,
-    "dns_rate": "1500", "dnsx_profile": "polite-cdn", "resolver_profile": "public-tcp",
+    "dns_rate": "1500", "dnsx_profile": _DEFAULT_DNSX_PROFILE, "resolver_profile": "public-tcp",
     "dnsx_extra_args": "", "stage_timeout": 1800, "runtime": "auto",
     "resolvers": "", "resolvers_trusted": "", "no_default_resolvers": False,
     "max_passes": 3, "no_converge": False, "no_parent_recursion": False,

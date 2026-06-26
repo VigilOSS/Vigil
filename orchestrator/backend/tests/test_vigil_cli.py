@@ -1227,6 +1227,236 @@ def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path
     assert not legacy_installer.exists()
 
 
+# --------------------------------------------------------------------------- #
+# W0 — install-staleness guard. `vigil install` stamps the source git sha into
+# .vigil-install-meta.json so `vigil status` can warn (non-fatally) when the
+# working root (~/vigil/agent tree) has fallen behind the source it was
+# installed from (the I-5 root cause: a lagging install silently disables the
+# whole feature set). Two-layer model: `vigil install`/`update` upgrades the
+# WORKING ROOT; `uv tool upgrade vigil` upgrades only the CLI BINARY.
+# --------------------------------------------------------------------------- #
+
+
+def _git_env() -> dict[str, str]:
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+    }
+
+
+def _git(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        text=True,
+        capture_output=True,
+        check=True,
+        env=_git_env(),
+    )
+    return result.stdout.strip()
+
+
+def _init_git_repo(root: Path, files: dict[str, str] | None = None) -> str:
+    """Init a minimal git repo at `root` with one commit; return HEAD sha."""
+    files = files or {"README.md": "seed\n"}
+    root.mkdir(parents=True, exist_ok=True)
+    for rel, content in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+    return _git(root, "rev-parse", "HEAD")
+
+
+def _git_commit(root: Path, rel: str, content: str) -> str:
+    (root / rel).write_text(content, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "more")
+    return _git(root, "rev-parse", "HEAD")
+
+
+def _minimal_status(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "install_root": "/x",
+        "install_exists": True,
+        "engagement_count": 0,
+        "orchestrator": {"state": "stopped", "healthy": False, "readiness": {}},
+        "runtime": {"state": "stopped", "mounts_ok": None, "resources": None},
+        "mitmproxy": {"state": "stopped", "ca_volume": False},
+        "oob": {"state": "stopped", "clients": [], "domain": "-"},
+        "backup": {"latest": None, "modified_at": None},
+        "legacy_both_missing_code_phase": [],
+        "install_staleness": {"state": "current"},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_install_meta_records_and_reads_back_source_sha(tmp_path: Path) -> None:
+    from vigil_cli.status import read_install_meta, write_install_meta
+
+    source = tmp_path / "source"
+    sha = _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+
+    meta = write_install_meta(install, source)
+    assert meta["source_sha"] == sha
+    assert (install / ".vigil-install-meta.json").is_file()
+
+    read = read_install_meta(install)
+    assert read is not None
+    assert read["source_sha"] == sha
+    assert "installed_at" in read
+
+
+def test_install_staleness_current_when_sha_matches(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness, write_install_meta
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    write_install_meta(install, source)
+
+    result = install_staleness(install, source_root=source)
+    assert result["state"] == "current"
+
+
+def test_install_staleness_stale_when_source_advances(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness, write_install_meta
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    write_install_meta(install, source)  # stamps the old sha
+
+    new_sha = _git_commit(source, "CHANGELOG.md", "v2\n")
+    result = install_staleness(install, source_root=source)
+    assert result["state"] == "stale"
+    assert result["current_source_sha"] == new_sha
+    assert result["behind_count"] == 1
+
+
+def test_install_staleness_unknown_without_resolvable_source(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness, write_install_meta
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    write_install_meta(install, source)
+
+    # A path that is not a git checkout yields no current sha -> unknown, not stale.
+    result = install_staleness(install, source_root=tmp_path / "not-a-repo")
+    assert result["state"] == "unknown"
+
+
+def test_install_staleness_no_stamp_when_meta_missing(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+
+    result = install_staleness(install, source_root=source)
+    assert result["state"] == "no-stamp"
+
+
+def test_print_status_warns_when_working_root_behind_source(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.status import print_status
+
+    status = _minimal_status(
+        install_staleness={
+            "state": "stale",
+            "installed_sha": "a" * 40,
+            "current_source_sha": "b" * 40,
+            "behind_count": 3,
+        }
+    )
+    print_status(status)
+    out = capsys.readouterr().out
+    assert "warn" in out
+    assert "vigil install" in out
+    assert "uv tool upgrade vigil" in out
+    assert "3" in out
+
+
+def test_print_status_warns_on_missing_install_stamp(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.status import print_status
+
+    status = _minimal_status(install_staleness={"state": "no-stamp"})
+    print_status(status)
+    out = capsys.readouterr().out
+    assert "warn" in out
+    assert "vigil install" in out
+
+
+def test_print_status_silent_when_install_current(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.status import print_status
+
+    print_status(_minimal_status(install_staleness={"state": "current"}))
+    out = capsys.readouterr().out
+    assert "behind source" not in out
+    assert "install stamp" not in out
+
+
+def test_collect_status_includes_install_staleness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.status import collect_status
+
+    install = tmp_path / "install"
+    (install / "agent" / "engagements").mkdir(parents=True)
+    monkeypatch.setenv("VIGIL_SOURCE_DIR", str(tmp_path / "none"))
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        return DockerResult(0, "", "")
+
+    payload = collect_status(install, runner=runner)
+    assert "install_staleness" in payload
+    assert isinstance(payload["install_staleness"], dict)
+    assert "state" in payload["install_staleness"]  # type: ignore[operator]
+
+
+def test_install_cli_stamps_install_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+    from vigil_cli.status import read_install_meta
+
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
+    sha = _init_git_repo(source, {"README.md": "seed\n"})
+    install = tmp_path / "install"
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+
+    main_module.main(
+        ["--root", str(install), "--source", str(source), "install", "--skip-image-check"]
+    )
+    capsys.readouterr()
+
+    meta = read_install_meta(install)
+    assert meta is not None
+    assert meta["source_sha"] == sha
+
+
 def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime

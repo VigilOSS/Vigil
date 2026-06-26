@@ -78,7 +78,7 @@ from .orchestrator import (
 )
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_image_build_state, runtime_status, start_runtime, stop_runtime
-from .status import collect_doctor_checks, collect_status, print_doctor, print_status
+from .status import collect_doctor_checks, collect_status, print_doctor, print_status, write_install_meta
 from .up import UpOptions, run_up
 
 
@@ -109,6 +109,12 @@ def _print_post_install(result: InstallResult) -> None:
         print("  3. vigil up                      # build/start runtime, orchestrator, and OOB")
         print("  4. vigil engagement create <target>  # create your first engagement")
         print("  5. vigil assess kali --help      # discover target-facing CLI verbs")
+    print()
+    print(
+        "Two-layer model: `vigil install`/`update` upgraded the WORKING ROOT "
+        "(code/prompts/skills/scripts). `uv tool upgrade vigil` upgrades only the CLI "
+        "binary. `vigil status` warns when the working root falls behind its source."
+    )
     print()
 
 
@@ -636,6 +642,9 @@ def main(argv: list[str] | None = None) -> None:
         )
         if not args.dry_run:
             config_module.set_config_value("install.root", str(result.install_root))
+            # Stamp the source commit synced into the working root so `vigil
+            # status` can later warn when the install lags its source (I-5).
+            write_install_meta(result.install_root, source_root)
         print(result.install_root)
         if not args.dry_run:
             _print_post_install(result)

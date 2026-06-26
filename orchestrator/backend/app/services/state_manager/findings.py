@@ -1171,6 +1171,7 @@ def list_findings(
     workflow_status: str | None = None,
     verification_state: str | None = None,
     verification_disposition: str | None = None,
+    auth_context: str | None = None,
     source_name: str | None = None,
     slug: str | None = None,
     search: str | None = None,
@@ -1193,6 +1194,12 @@ def list_findings(
     if verification_disposition:
         where.append("LOWER(findings.verification_disposition) = LOWER(?)")
         params.append(verification_disposition)
+    if auth_context:
+        # Server-side drill-down for the coverage ledger: an operator pivots
+        # from a host's verdict into "the authenticated findings on this host"
+        # without pulling every finding to the client.
+        where.append("LOWER(findings.auth_context) = LOWER(?)")
+        params.append(auth_context)
     if source_name:
         where.append("LOWER(findings.source_name) = LOWER(?)")
         params.append(source_name)
