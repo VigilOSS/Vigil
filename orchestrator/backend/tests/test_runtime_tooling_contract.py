@@ -34,19 +34,35 @@ RUNTIME_FULL_EXTERNAL_INSTALLER = (
 
 
 # Binaries the subdomain-enumeration SKILL preflights via
-# `vigil assess kali exec -- which alterx asnmap bbot cero dnsx massdns puredns shuffledns subfinder`.
+# `vigil assess kali exec -- which alterx asnmap bbot cero dnsx github-subdomains
+#  massdns puredns shuffledns subfinder tlsx`.
 # Order is alphabetical (F22 — keep aligned with operator-core.md and
-# subdomain-enumeration/SKILL.md).
+# subdomain-enumeration/SKILL.md). github-subdomains is a Phase-0 passive source
+# (needs GITHUB_TOKEN at runtime, installed at build); tlsx is the Phase-3
+# TLS-SAN harvester. Both ship via go_install in install-external-tools.sh.
 SUBDOMAIN_ENUM_BINARIES = (
     "alterx",
     "asnmap",
     "bbot",
     "cero",
     "dnsx",
+    "github-subdomains",
     "massdns",
     "puredns",
     "shuffledns",
     "subfinder",
+    "tlsx",
+)
+
+# Cloud-exposure specialist tools (agent/skills/cloud-exposure/SKILL.md): s3scanner
+# is a Go bucket scanner built from a pinned clone (its v3 go.mod path is unversioned,
+# so `go install ...@v3.x` is rejected — see install-external-tools.sh); cloud_enum is
+# a Python multi-cloud OSINT
+# enumerator cloned at a pinned tag with a /usr/local/bin/cloud_enum wrapper (its
+# pyproject does not package the fuzz wordlist as data, so it is NOT pip-installed).
+CLOUD_EXPOSURE_TOOLS = (
+    "cloud_enum",
+    "s3scanner",
 )
 
 # port-scanning/SKILL.md "Per-host port-data presence assertion" depends on
@@ -98,6 +114,14 @@ def _dockerfile_has_install_line(text: str, binary: str) -> bool:
     if binary == "apkeep" and "apkeep-${apkeep_arch}-unknown-linux-gnu" in text:
         return True
     if binary == "bundletool" and "bundletool-all-${BUNDLETOOL_VERSION}.jar" in text:
+        return True
+    # cloud_enum is cloned (not go/pip/pipx-installed) and exposed via a wrapper —
+    # accept the pinned-tag git clone of its repo as the install line.
+    if binary == "cloud_enum" and "cloud_enum.git" in text:
+        return True
+    # s3scanner's v3 go.mod path is unversioned (no /v3), so it is built from a pinned
+    # clone via `go build`, not `go install` — accept the clone of its repo.
+    if binary == "s3scanner" and "sa7mon/S3Scanner" in text:
         return True
     return False
 
@@ -165,6 +189,26 @@ def test_runtime_full_dockerfile_declares_android_apk_binaries():
     )
 
 
+def test_runtime_full_dockerfile_declares_cloud_exposure_tools():
+    """The cloud-exposure specialist (agent/skills/cloud-exposure/SKILL.md) drives
+    bucket/blob enumeration and S3-claimability screening with cloud_enum + s3scanner.
+    If either is dropped from the runtime image, that skill's Step 0 discovery pass
+    and Step 2 takeover-screening invocations die on first use."""
+    text = (
+        RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+        + "\n"
+        + RUNTIME_FULL_EXTERNAL_INSTALLER.read_text(encoding="utf-8")
+    )
+    missing = [
+        name for name in CLOUD_EXPOSURE_TOOLS if not _dockerfile_has_install_line(text, name)
+    ]
+    assert not missing, (
+        "agent/docker/runtime-full/Dockerfile is missing install lines for cloud-exposure tools: "
+        f"{missing}. The cloud-exposure SKILL preflights these for bucket enumeration and "
+        "S3-takeover claimability screening."
+    )
+
+
 def test_external_installer_validates_preloaded_go_tools(tmp_path):
     """PRELOADED_TOOLS=1 is allowed only for a base image that already carries
     the script-owned tools. Missing tools must fail loudly during build instead
@@ -212,7 +256,12 @@ def test_runtime_full_container_has_subdomain_enum_binaries():
             "`vigil runtime start` before running the integration tooling contract test"
         )
 
-    expected = (*SUBDOMAIN_ENUM_BINARIES, *PORT_SCAN_BINARIES, *ANDROID_APK_BINARIES)
+    expected = (
+        *SUBDOMAIN_ENUM_BINARIES,
+        *PORT_SCAN_BINARIES,
+        *ANDROID_APK_BINARIES,
+        *CLOUD_EXPOSURE_TOOLS,
+    )
     proc = subprocess.run(
         ["docker", "exec", container, "which", *expected],
         capture_output=True,

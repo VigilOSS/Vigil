@@ -62,6 +62,7 @@ already listed below.
 
 - `agent/skills/port-scanning/SKILL.md` — when you run the per-host nmap step (carries the per-host port-data presence assertion).
 - `agent/skills/nuclei-scanning/SKILL.md` — when you run the reactive nuclei sweep (step 5).
+- `agent/skills/cloud-exposure/SKILL.md` — on a dangling-CNAME observation or a nuclei `http/takeovers/` template hit, BEFORE recording any subdomain-takeover finding. That skill owns the per-provider claimability rules and the prove-or-kill benign own-account claim; the bare dangling/takeover signature is the #1 false-positive class for this bug type (it proves a name is unserved, not that you can re-bind it), so route every takeover candidate through it before recording.
 - `agent/skills/directory-fuzzing/SKILL.md` — when you run the L1 ffuf pass (step 6).
 - `agent/skills/browser-semantic-analysis/SKILL.md` — when its activation triggers appear.
 

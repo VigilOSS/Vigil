@@ -119,6 +119,17 @@ vigil install
 
 `vigil install` (and its alias `vigil update`) upgrades in place — engagements, the orchestrator database, and `.env` are never moved or deleted. Code, prompts, skills, and scripts are replaced with the latest versions from the repo.
 
+#### Two layers: the CLI binary vs. the working root
+
+Vigil has two layers that upgrade independently:
+
+- **The CLI binary** (`vigil` itself) — installed and upgraded with `uv tool install` / `uv tool upgrade vigil`. This is only the operator command-line tool.
+- **The working root** (`~/vigil` — the `agent/` tree of code, prompts, skills, and scripts, plus the orchestrator) — installed and upgraded with `vigil install` / `vigil update` (or `vigil up`, which syncs first).
+
+Upgrading one does **not** upgrade the other. The common failure mode (issue I-5) is upgrading the CLI binary while leaving the working root behind: the newer CLI expects prompts/skills/scripts that the stale working root does not yet have, so the affected features are silently inert.
+
+To guard against this, `vigil install` stamps the source git commit it synced into `~/vigil/.vigil-install-meta.json`, and `vigil status` prints a non-fatal `warn` line when the working root's recorded commit is behind the current source (or when the stamp is missing, for installs that predate this guard). If you see that warning, run `vigil install` (or `vigil up`) to refresh the working root. To upgrade the CLI binary itself, run `uv tool upgrade vigil`.
+
 Check local readiness and live service state:
 
 ```bash
