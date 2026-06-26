@@ -270,10 +270,19 @@ def main(argv: list[str] | None = None) -> None:
         type=float,
         default=None,
         metavar="REQ_PER_SEC",
-        help="Per-host request-rate ceiling (req/s, summed across all tools and "
-             "threads against any single host) for target-facing recon stages. "
-             "Unset = today's behavior (per-tool defaults, agent discretion, no "
-             "hard gate). web/both/android only. e.g. --rate-limit 5",
+        help="Per-invocation / global request-rate ceiling (req/s) for the recon "
+             "pipeline's bulk web stages (httpx liveness, katana crawl, js-mining "
+             "body-fetch). httpx -rate-limit / katana -rl are single GLOBAL token "
+             "buckets, so this caps each stage's AGGREGATE rate over the whole "
+             "in-scope host set probed in one invocation and bounds per-host only "
+             "as a side effect (a cap of 5 over 100 hosts is ~0.05 req/s/host). "
+             "Does NOT cover the recon-specialist's nuclei/ffuf/nmap/whatweb/nikto "
+             "probes or gau body-fetches. Must be >= 1 (sub-1 is rejected — the "
+             "tools take an integer req/s); a value >= 1 is accepted but truncates "
+             "DOWN at use (5.9 -> 5), and a cap above a stage's verb default is a "
+             "no-op (the ceiling only clamps DOWN). Unset = today's behavior (per-tool "
+             "defaults, agent discretion, no hard gate). web/both/android only. "
+             "e.g. --rate-limit 5",
     )
     create_p.add_argument(
         "--no-prompt",
@@ -1158,7 +1167,11 @@ def _print_create_summary(
     if out_of_scope:
         print(f"[vigil]   out-of-scope: {', '.join(out_of_scope)}", file=sys.stderr)
     if rate_limit is not None:
-        print(f"[vigil]   rate-limit: {rate_limit:g} req/s (per host)", file=sys.stderr)
+        print(
+            f"[vigil]   rate-limit: {rate_limit:g} req/s "
+            "(global per-invocation; bounds per-host as a side effect)",
+            file=sys.stderr,
+        )
 
 
 def _looks_like_web_target(value: str) -> bool:

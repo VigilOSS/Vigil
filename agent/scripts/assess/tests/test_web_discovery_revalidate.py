@@ -171,7 +171,7 @@ def test_katana_carries_omit_response_and_body_flags(monkeypatch, tmp_path):
 
 def test_rate_cap_clamps_httpx_and_katana(monkeypatch, tmp_path):
     # scope.rate_limit=5 must clamp httpx -rate-limit DOWN from the default 150
-    # and set katana -rl/-rlm to the per-host ceiling.
+    # and set katana -rl/-rlm to the global (per-invocation) ceiling.
     _scope(tmp_path, rate_limit=5)
     hosts_file = _hosts_file(tmp_path, ["live.example.com"])
     captured: list[list[str]] = []
@@ -182,7 +182,7 @@ def test_rate_cap_clamps_httpx_and_katana(monkeypatch, tmp_path):
 
     httpx_runs = [c for c in captured if c and c[0] == "httpx"]
     rate = httpx_runs[0][httpx_runs[0].index("-rate-limit") + 1]
-    assert rate == "5"  # clamped down to the per-host cap
+    assert rate == "5"  # clamped down to the global (per-invocation) cap
 
     katana_runs = [c for c in captured if c and c[0] == "katana"]
     assert "-rl" in katana_runs[0]
@@ -210,8 +210,9 @@ def test_rate_cap_unset_keeps_verb_default(monkeypatch, tmp_path):
     [
         ("150", None, 150),   # unset cap → verb default unchanged
         ("150", 5.0, 5),      # cap below default → clamp down
-        ("3", 50.0, 3),       # default already below cap → keep default
-        ("150", 0.5, 1),      # sub-1 req/s cap → floor to 1, never 0
+        ("3", 50.0, 3),       # cap above default → no-op (ceiling only clamps DOWN)
+        ("150", 5.9, 5),      # fractional cap truncates DOWN, never exceeds
+        ("150", 0.5, 1),      # sub-1 cap (rejected at create; hand-edit only) → floor to 1, never 0
         ("bad", 10.0, 10),    # non-numeric default → fall back then clamp
     ],
 )

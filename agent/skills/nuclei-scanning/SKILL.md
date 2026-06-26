@@ -474,6 +474,7 @@ cat /tmp/nuclei.jsonl | jq '.info.name, .info.severity, .matched-at'
 ## Triage Rules
 
 - **Critical/High nuclei hits**: Validate manually before recording as findings. Nuclei templates can have false positives.
+- **`http/takeovers/` hits are a signature, not a verdict.** A takeover template firing confirms the dangling-DNS *signature*, not that the resource is *claimable by you* — claimability depends on the provider's current re-binding controls (CloudFront cert gate, Azure reserved labels, owned parent zones, S3 region pinning / global-namespace already-taken). Treat the hit as a screening lead: confirm claimability and prove it with a benign own-account claim per `agent/references/subdomain-takeover.md` before recording a takeover finding. The bare signature is the #1 false-positive class for this bug type (one engagement saw 7 perfect-signature CloudFront candidates, all non-claimable).
 - **Medium/Low hits**: Log as intelligence or surface candidates. Only promote to findings after manual confirmation.
 - **Info-level detections**: Use for tech stack enrichment and hypothesis generation, not findings.
 
@@ -487,3 +488,4 @@ cat /tmp/nuclei.jsonl | jq '.info.name, .info.severity, .matched-at'
 
 - `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; `--rate-limit / -bs / -c` defaults pulled from the trait row.
 - `agent/references/tools/recon/nuclei.md` — nuclei flags, template management, output formats
+- `agent/references/subdomain-takeover.md` — why an `http/takeovers/` hit is a screening signature, not a verdict: the per-provider claimability rules and the benign own-account claim that proves or kills a takeover candidate before a finding is recorded.

@@ -212,12 +212,18 @@ def _clamp_httpx_rate_limit(requested: str, rate_cap: float | None) -> int:
     """Resolve the httpx ``-rate-limit`` (req/s) for a bulk pass.
 
     ``requested`` is the per-verb default (``--httpx-rate-limit``, 150). When the
-    engagement configures a PER-HOST rate cap (``scope.rate_limit`` via ``vigil
-    engagement create --rate-limit``), the bulk httpx pass is clamped DOWN to it
-    so the program-mandated ceiling is honoured; an unset cap (``None``) keeps the
-    verb default exactly as today (no hard gate, agent keeps discretion). httpx
-    ``-rate-limit`` is an integer req/s, so a fractional cap floors to ``int`` and
-    a sub-1 req/s cap floors to 1 (never 0 — a 0 would stall the pass).
+    engagement configures a global req/s ceiling (``scope.rate_limit`` via ``vigil
+    engagement create --rate-limit``), the bulk httpx pass is clamped DOWN to it.
+    httpx ``-rate-limit`` is a SINGLE GLOBAL token bucket, so this caps the
+    AGGREGATE rate of THIS one bulk pass over the whole in-scope host set probed in
+    the invocation (it bounds per-host only as a side effect); an unset cap
+    (``None``) keeps the verb default exactly as today (no hard gate, agent keeps
+    discretion).
+
+    httpx ``-rate-limit`` is an integer req/s, so a fractional cap truncates DOWN
+    (5.9 -> 5) and the emitted rate never exceeds the ceiling. Sub-1 caps are
+    rejected up front by ``vigil engagement create``; the ``max(1, …)`` floor only
+    guards a hand-edited scope.json so a 0 never stalls the pass.
     """
     try:
         base = int(requested)
@@ -225,8 +231,7 @@ def _clamp_httpx_rate_limit(requested: str, rate_cap: float | None) -> int:
         base = 150
     if rate_cap is None:
         return base
-    capped = min(base, int(rate_cap)) if rate_cap >= 1 else 1
-    return max(1, capped)
+    return max(1, min(base, int(rate_cap)))
 
 
 def _extract_live_urls(httpx_jsonl: Path) -> list[str]:
@@ -426,14 +431,18 @@ def run(args) -> None:
     # The katana crawl below stays in the container regardless (CR-5: exploit/
     # auth'd HTTP must not leave the isolated runtime).
     #
-    # Rate cap (stage 1): an engagement-configured PER-HOST req/s ceiling
-    # (scope.rate_limit) clamps the bulk httpx -rate-limit DOWN; unset keeps the
-    # verb default (no hard gate). Headers ride automatically (host path injects
-    # via _host_dispatch; container path via kali_exec's central injector).
+    # Rate cap (stage 1): an engagement-configured GLOBAL req/s ceiling
+    # (scope.rate_limit) clamps the bulk httpx -rate-limit DOWN. httpx
+    # -rate-limit is a single global token bucket, so this bounds the AGGREGATE
+    # rate of the whole liveness pass over every in-scope host (per-host only as
+    # a side effect); unset keeps the verb default (no hard gate). Headers ride
+    # automatically (host path injects via _host_dispatch; container path via
+    # kali_exec's central injector).
     rate_cap, _ = scope.rate_caps_for_dir(args.engagement_dir)
     rate_limit = _clamp_httpx_rate_limit(args.httpx_rate_limit, rate_cap)
     if rate_cap is not None:
-        print(f"web-discovery: per-host rate cap {rate_cap} req/s configured; "
+        print(f"web-discovery: global req/s ceiling {rate_cap} configured "
+              f"(per-invocation; bounds per-host as a side effect); "
               f"httpx -rate-limit set to {rate_limit}.", file=sys.stderr)
     httpx_route = _route_for(args, "httpx")
     threads = _clamp_httpx_threads(args, route=httpx_route)
@@ -506,9 +515,12 @@ def run(args) -> None:
                 "-jsonl", "-silent", "-o", katana_container,
             ]
             # Rate cap (stage 3): clamp katana's per-second / per-minute request
-            # rate to the configured PER-HOST ceiling. katana -rl is req/s and
-            # -rlm is req/min; set both so neither dimension exceeds the cap. An
-            # unset cap leaves katana's own default pacing (no hard gate).
+            # rate to the configured GLOBAL ceiling. katana -rl is req/s and
+            # -rlm is req/min (both single global token buckets); set both so
+            # neither dimension exceeds the cap. The cap bounds per-host only as a
+            # side effect. An unset cap leaves katana's own default pacing (no
+            # hard gate). int() truncates a fractional cap DOWN; the max(1, …)
+            # floor only guards a hand-edited sub-1 scope (rejected at create).
             if rate_cap is not None:
                 katana_rl = max(1, int(rate_cap))
                 katana_cmd.extend(["-rl", str(katana_rl), "-rlm", str(katana_rl * 60)])

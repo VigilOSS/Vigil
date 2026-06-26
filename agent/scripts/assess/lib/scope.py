@@ -241,16 +241,23 @@ def out_of_scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def rate_limit(scope: dict[str, Any]) -> float | None:
-    """Return the engagement's configured PER-HOST request-rate ceiling (req/s),
-    or ``None`` when unset.
+    """Return the engagement's configured PER-INVOCATION / GLOBAL request-rate
+    ceiling (req/s), or ``None`` when unset.
 
     The cap is the optional ``rate_limit`` field written by ``vigil engagement
-    create --rate-limit`` (req/s, summed across all tools and threads against a
-    single target host). ``None`` is the unchanged default: target-facing recon
-    stages fall through to their per-tool rate defaults and the agent keeps
-    discretion — there is NO hard gate. A non-positive or non-numeric value is
-    treated as unset (returns ``None``) so a malformed scope can never produce a
-    zero/negative throttle.
+    create --rate-limit`` (req/s). httpx ``-rate-limit`` and katana ``-rl`` are
+    SINGLE GLOBAL token buckets, so this value caps the *aggregate* request rate
+    of the stage it is applied to over the WHOLE in-scope host set probed in that
+    one invocation — it bounds per-host only as a side effect (a global cap of N
+    spread over M hosts is at most N/M req/s per host). Coverage is honest and
+    narrow: only the recon pipeline's bulk web stages consume it today — httpx
+    liveness, katana crawl, and js-mining body-fetch. It does NOT throttle the
+    recon-specialist's nuclei/ffuf/nmap/whatweb/nikto probes or gau body-fetches.
+
+    ``None`` is the unchanged default: those bulk web stages fall through to their
+    per-tool rate defaults and the agent keeps discretion — there is NO hard gate.
+    A non-positive or non-numeric value is treated as unset (returns ``None``) so
+    a malformed scope can never produce a zero/negative throttle.
     """
     raw = scope.get("rate_limit")
     if raw is None or isinstance(raw, bool):
@@ -290,22 +297,56 @@ def rate_caps_for_dir(engagement_dir: str) -> tuple[float | None, dict[str, str]
 
     A convenience over ``load_scope`` + ``rate_limit`` + ``required_headers`` for
     stage callers that hold an ``engagement_dir`` (e.g. ``cfg.engagement_dir``)
-    rather than a loaded scope dict. ``rate_limit`` is the PER-HOST req/s ceiling
-    or ``None`` (unset = today's per-tool defaults, no hard gate);
-    ``required_headers`` is the program attribution header map (``{}`` when none).
-    A missing/unreadable scope degrades to ``(None, {})`` so a stage never aborts
-    on scope I/O.
+    rather than a loaded scope dict. ``rate_limit`` is the per-invocation / global
+    req/s ceiling or ``None`` (unset = today's per-tool defaults, no hard gate);
+    it bounds per-host only as a side effect, and only the bulk web stages (httpx
+    liveness, katana crawl, js-mining body-fetch) consume it. ``required_headers``
+    is the program attribution header map (``{}`` when none).
+
+    A MISSING scope degrades quietly to ``(None, {})`` (an unconfigured
+    engagement). But a scope.json that EXISTS yet cannot be read/parsed for the
+    cap emits a loud stderr WARNING before degrading: silently dropping a
+    politeness/legal rate ceiling would let a malformed scope un-throttle the
+    pass back to the verb default (fail-open), so the operator is told the cap is
+    not being enforced rather than failing open in silence.
     """
     scope_path = Path(engagement_dir) / "scope.json"
     if not scope_path.is_file():
         return None, {}
     try:
         scope = json.loads(scope_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        _warn_scope(
+            f"rate_caps_for_dir:{scope_path}",
+            f"scope: WARNING: scope.json exists at {scope_path} but could not be "
+            f"read for the rate cap ({type(exc).__name__}: {exc}); the configured "
+            "per-invocation req/s ceiling is NOT being enforced and this stage "
+            "will probe at the verb default rate. Fix the scope file to re-apply "
+            "the cap.",
+        )
         return None, {}
     if not isinstance(scope, dict):
+        _warn_scope(
+            f"rate_caps_for_dir:{scope_path}",
+            f"scope: WARNING: scope.json at {scope_path} is not a JSON object; the "
+            "configured per-invocation req/s ceiling is NOT being enforced and "
+            "this stage will probe at the verb default rate.",
+        )
         return None, {}
-    return rate_limit(scope), required_headers(scope)
+    rl = rate_limit(scope)
+    if rl is None and scope.get("rate_limit") is not None:
+        # Present-but-invalid value (non-numeric / non-positive / bool) — same
+        # silent-un-throttle hazard as a malformed file, so warn rather than fail
+        # open: the operator set a rate_limit that does not parse and the cap is
+        # NOT being enforced.
+        _warn_scope(
+            f"rate_caps_for_dir:rate_limit:{scope_path}",
+            f"scope: WARNING: scope.json at {scope_path} has a rate_limit value "
+            f"({scope.get('rate_limit')!r}) that is not a positive number; the "
+            "per-invocation req/s ceiling is NOT being enforced and this stage "
+            "will probe at the verb default rate.",
+        )
+    return rl, required_headers(scope)
 
 
 def classify_scope_entry(raw: str) -> dict[str, str] | None:
