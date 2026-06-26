@@ -37,7 +37,8 @@ require_command() {
 validate_go_tools() {
   local binary
   for binary in \
-    nuclei katana httpx dnsx gau dalfox puredns shuffledns alterx asnmap cero gf jsluice
+    nuclei katana httpx dnsx gau dalfox puredns shuffledns alterx asnmap cero gf jsluice \
+    tlsx github-subdomains s3scanner
   do
     require_command "${binary}"
   done
@@ -82,6 +83,21 @@ install_go_tools() {
   go_install cero github.com/glebarez/cero "${CERO_VERSION}"
   go_install gf github.com/tomnomnom/gf "${GF_VERSION}"
   go_install jsluice github.com/BishopFox/jsluice/cmd/jsluice "${JSLUICE_VERSION}"
+  # Recon expansion tools (owner-approved set). tlsx = TLS-SAN/cert harvester;
+  # github-subdomains = passive GitHub-code subdomain mining (needs a GITHUB_TOKEN
+  # at RUNTIME, not build); s3scanner = cloud-bucket scanner. s3scanner v3's go.mod
+  # declares an UNVERSIONED module path (github.com/sa7mon/s3scanner, no /v3), so
+  # `go install …@v3.x` is rejected by Go's major-version rule — build it from a
+  # shallow clone of the tag instead (the main module at the repo root builds fine
+  # locally; binary `s3scanner`).
+  go_install tlsx github.com/projectdiscovery/tlsx/cmd/tlsx "${TLSX_VERSION}"
+  go_install github-subdomains github.com/gwen001/github-subdomains "${GITHUB_SUBDOMAINS_VERSION}"
+  log "go build s3scanner ${S3SCANNER_VERSION}"
+  rm -rf /tmp/s3scanner-src
+  retry git clone --depth 1 --branch "${S3SCANNER_VERSION}" https://github.com/sa7mon/S3Scanner /tmp/s3scanner-src
+  ( cd /tmp/s3scanner-src && GOPATH=/root/go GO111MODULE=on go build -o /usr/local/bin/s3scanner . )
+  command -v s3scanner >/dev/null
+  rm -rf /tmp/s3scanner-src
   rm -rf /root/go
 }
 

@@ -32,6 +32,7 @@ from .engagements import (
     remove_out_of_scope,
     resolve_engagement_path,
     resolve_out_of_scope,
+    resolve_rate_limit,
     resolve_required_headers,
     set_engagement_header,
     start_engagement,
@@ -77,7 +78,7 @@ from .orchestrator import (
 )
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_image_build_state, runtime_status, start_runtime, stop_runtime
-from .status import collect_doctor_checks, collect_status, print_doctor, print_status
+from .status import collect_doctor_checks, collect_status, print_doctor, print_status, write_install_meta
 from .up import UpOptions, run_up
 
 
@@ -108,6 +109,12 @@ def _print_post_install(result: InstallResult) -> None:
         print("  3. vigil up                      # build/start runtime, orchestrator, and OOB")
         print("  4. vigil engagement create <target>  # create your first engagement")
         print("  5. vigil assess kali --help      # discover target-facing CLI verbs")
+    print()
+    print(
+        "Two-layer model: `vigil install`/`update` upgraded the WORKING ROOT "
+        "(code/prompts/skills/scripts). `uv tool upgrade vigil` upgrades only the CLI "
+        "binary. `vigil status` warns when the working root falls behind its source."
+    )
     print()
 
 
@@ -262,6 +269,26 @@ def main(argv: list[str] | None = None) -> None:
         metavar="HOST|*.WILDCARD|CIDR",
         help="Out-of-scope carve-out excluded even when an in-scope wildcard "
              "would match it; repeatable. web/both/android only.",
+    )
+    create_p.add_argument(
+        "--rate-limit",
+        dest="rate_limit",
+        type=float,
+        default=None,
+        metavar="REQ_PER_SEC",
+        help="Per-invocation / global request-rate ceiling (req/s) for the recon "
+             "pipeline's bulk web stages (httpx liveness, katana crawl, js-mining "
+             "body-fetch). httpx -rate-limit / katana -rl are single GLOBAL token "
+             "buckets, so this caps each stage's AGGREGATE rate over the whole "
+             "in-scope host set probed in one invocation and bounds per-host only "
+             "as a side effect (a cap of 5 over 100 hosts is ~0.05 req/s/host). "
+             "Does NOT cover the recon-specialist's nuclei/ffuf/nmap/whatweb/nikto "
+             "probes or gau body-fetches. Must be >= 1 (sub-1 is rejected — the "
+             "tools take an integer req/s); a value >= 1 is accepted but truncates "
+             "DOWN at use (5.9 -> 5), and a cap above a stage's verb default is a "
+             "no-op (the ceiling only clamps DOWN). Unset = today's behavior (per-tool "
+             "defaults, agent discretion, no hard gate). web/both/android only. "
+             "e.g. --rate-limit 5",
     )
     create_p.add_argument(
         "--no-prompt",
@@ -615,6 +642,9 @@ def main(argv: list[str] | None = None) -> None:
         )
         if not args.dry_run:
             config_module.set_config_value("install.root", str(result.install_root))
+            # Stamp the source commit synced into the working root so `vigil
+            # status` can later warn when the install lags its source (I-5).
+            write_install_meta(result.install_root, source_root)
         print(result.install_root)
         if not args.dry_run:
             _print_post_install(result)
@@ -942,6 +972,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
                     asked = True
     required_headers = resolve_required_headers(args.program, args.researcher, args.header)
     out_of_scope = resolve_out_of_scope(args.out_of_scope)
+    rate_limit = resolve_rate_limit(args.rate_limit)
 
     # Dry runs skip the summary + confirmation: nothing will be created either
     # way, and the dry-run path prints its own plan summary.
@@ -956,6 +987,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             android_package=android_package,
             required_headers=required_headers,
             out_of_scope=out_of_scope,
+            rate_limit=rate_limit,
         )
         if not _confirm("Create engagement? [Y/n]"):
             raise SystemExit("aborted: engagement not created")
@@ -973,6 +1005,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         skip_permissions=args.skip_permissions,
         required_headers=required_headers,
         out_of_scope=out_of_scope,
+        rate_limit=rate_limit,
     )
 
     if args.dry_run:
@@ -1003,6 +1036,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
                 android_package=android_package,
                 required_headers=required_headers,
                 out_of_scope=out_of_scope,
+                rate_limit=rate_limit,
             )
         return
 
@@ -1120,6 +1154,7 @@ def _print_create_summary(
     android_package: str | None,
     required_headers: dict[str, str] | None = None,
     out_of_scope: list[str] | None = None,
+    rate_limit: float | None = None,
 ) -> None:
     print("[vigil] engagement summary:", file=sys.stderr)
     print(f"[vigil]   type:      {engagement_type}", file=sys.stderr)
@@ -1140,6 +1175,12 @@ def _print_create_summary(
         print(f"[vigil]   headers:   {rendered}", file=sys.stderr)
     if out_of_scope:
         print(f"[vigil]   out-of-scope: {', '.join(out_of_scope)}", file=sys.stderr)
+    if rate_limit is not None:
+        print(
+            f"[vigil]   rate-limit: {rate_limit:g} req/s "
+            "(global per-invocation; bounds per-host as a side effect)",
+            file=sys.stderr,
+        )
 
 
 def _looks_like_web_target(value: str) -> bool:

@@ -10,15 +10,15 @@ Activate when scope.json `hosts` contains `*.domain` entries (e.g., `*.example.c
 
 ## Phase 0: Enumerate Subdomains
 
-Run the staged composition end-to-end via `vigil assess kali ...`. Methodology and exact invocations live in `agent/skills/subdomain-enumeration/SKILL.md`; this doc is the prioritization/sliding-window companion.
+The **operator** runs the staged composition end-to-end as the `vigil assess recon` job (not a specialist dispatch); a specialist uses this doc + `agent/skills/subdomain-enumeration/SKILL.md` to **assess** the job's output and prioritize what to re-run. This doc is the prioritization/sliding-window companion.
 
 1. Identify which domains have `*.domain` entries in the `hosts` array.
-2. **Tooling preflight** — `vigil assess kali exec --technique HEALTH --intent "subdomain-enum tooling preflight" --probe-kind fingerprint --phase recon --timeout 60 -- which massdns puredns dnsx subfinder shuffledns alterx cero asnmap bbot`. Missing binaries → fix the runtime, do not silently degrade.
+2. **Tooling preflight** — `vigil assess kali exec --technique HEALTH --intent "subdomain-enum tooling preflight" --probe-kind fingerprint --phase recon --timeout 60 -- which massdns puredns dnsx subfinder shuffledns alterx cero asnmap bbot github-subdomains tlsx`. Missing binaries → fix the runtime, do not silently degrade.
 3. Run the staged pipeline:
    - **Phase 0** — passive (`subfinder -all -recursive` + chaos + github-subdomains; optional bbot `subdomain-enum -rf passive` for deep coverage).
    - **Phase 1** — active brute (`puredns @ tier rate-limit, --wildcard-batch 100000, --wildcard-tests 30` for wildcard-heavy targets). Skip when Phase 0 returned >5000 subs or target is top-tier.
    - **Phase 2** — permutation (`alterx -enrich -estimate` first, then `-limit 100000`, then `puredns resolve`).
-   - **Phase 3** — TLS SAN feedback (`httpx -tls-grab` against the merged set; `asnmap → cero` against owned CIDRs); final `dnsx` resolution drives live-host confirmation.
+   - **Phase 3** — TLS SAN feedback (`tlsx -san -cn` against the merged set is the primary SAN harvester; `httpx -tls-grab` when the HTTP status/title is wanted in the same pass; `asnmap → cero` against owned CIDRs); final `dnsx` resolution drives live-host confirmation.
 4. Apply the `subdomain-enumeration` skill's 3-stage filter:
    - DNS resolution
    - web-port reachability

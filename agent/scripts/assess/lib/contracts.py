@@ -297,6 +297,7 @@ KALI_TARGET_VERBS: tuple[str, ...] = (
     "alterx",
     "asnmap",
     "bbot",
+    "browser",
     "exec",
     "job",
 )
@@ -1349,6 +1350,12 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Rate/thread values above polite-residential require --dnsx-profile bursty-ok; above bursty-ok requires --allow-unsafe-rate.",
         "Common record/filter flags are typed (-aaaa, -mx, -txt, -ns, -soa, -ptr, -asn, -cdn, -rcode, -wd). Use --extra-args only for unmodeled dnsx flags that are not guarded load/transport knobs.",
     ),
+    "browser": (
+        "Headless chromium (selenium) render of one URL inside the runtime. Returns the ORIGIN HTTP status + final rendered DOM (scans/browser/<host>-<id>.html) + a screenshot (scans/browser/<host>-<id>.png) as one JSON object on stdout.",
+        "This is the trustworthy-signal recovery for a curl/httpx run that came back status='waf_challenge': a real browser executes the page JS and clears most JS bot-challenges (Cloudflare 'Just a moment', Akamai, Imperva), so you see the real origin response instead of the interstitial.",
+        "Use --wait-selector '<css>' to wait for a specific element (explicit wait, bounded by --page-timeout); otherwise it falls back to --settle seconds after load. --page-timeout defaults to 30s, --settle to 2s.",
+        "Read-only navigation — leave --destructive off unless you point it at a state-changing URL.",
+    ),
     "exec": (
         "Use only when no typed verb fits. Tool-name attribution falls back to argv[0] for audit recording.",
     ),
@@ -1361,6 +1368,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Liveness probe: `docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file at /tmp/vigil-pid-<run_uuid>.pid. run_uuid comes from the row's run_uuid column (stdout_path parsing kept only for older rows).",
         "PID alive -> left alone (still-running). PID dead OR pid file missing -> finalized to status=lost via PATCH command-runs/{id}.",
         "Rows are skipped when Docker probing itself fails, since the command cannot distinguish a live job from an unavailable liveness check.",
+        "--scope {command-runs|jobs|all} (default command-runs): `jobs` also reconciles stuck assessment_jobs rows (the async dtach-job lifecycle). For jobs the host-readable exit marker is authoritative (marker present -> completed/failed with its real exit code); PID gone with no marker -> lost. This converges any job the agent was killed before it could poll to completion.",
         "Use --dry-run first to inspect candidates without writing — a thorough sweep is cheap, an incorrect finalize is not.",
         "Unlike target-facing verbs, sweep-orphans takes no --technique/--intent/--probe-kind/--phase/--timeout — it is maintenance, not a probe.",
     ),
@@ -1419,6 +1427,14 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
             "command": "vigil assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates.txt --dnsx-profile polite-cdn --resolver-profile public-tcp -silent -o /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt --technique RECON --intent 'lean dnsx resolution without bulk JSON' --probe-kind baseline --phase recon --timeout 1200",
         },
     ),
+    "browser": (
+        {
+            "command": "vigil assess kali browser https://app.target.example/login --technique RECON --intent 'headless render of WAF-flagged login surface' --probe-kind baseline --phase recon --timeout 120",
+        },
+        {
+            "command": "vigil assess kali browser https://app.target.example/dashboard --wait-selector '#root' --page-timeout 45 --screenshot scans/browser/dash.png --technique RECON --intent 'render SPA dashboard after auth' --probe-kind baseline --phase consume-test --timeout 180",
+        },
+    ),
     "job": (
         {
             "command": "vigil assess kali job start --technique CVE-VALIDATION --intent 'long nuclei sweep' --probe-kind fingerprint --phase recon --timeout 21600 -- nuclei -l targets.txt -t http/cves/",
@@ -1433,6 +1449,9 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
         },
         {
             "command": "vigil assess kali sweep-orphans --max-age-seconds 1800 --container-name vigil",
+        },
+        {
+            "command": "vigil assess kali sweep-orphans --scope all --dry-run",
         },
     ),
 }
@@ -1490,10 +1509,12 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
                 "vigil assess kali sweep-orphans --dry-run",
                 "vigil assess kali sweep-orphans --max-age-seconds 3600",
                 "vigil assess kali sweep-orphans --container-name vigil",
+                "vigil assess kali sweep-orphans --scope jobs",
             ),
             author_supplied_fields=(
                 "--max-age-seconds <int> (default 3600)",
                 "--container-name <name> (default vigil)",
+                "--scope {command-runs|jobs|all} (default command-runs)",
                 "--dry-run (optional, list candidates without writing)",
             ),
             notes=_KALI_VERB_NOTES.get(verb, ()),
@@ -1518,8 +1539,10 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
     )
     # `exec` and `job` are raw-passthrough wrappers; they do not expose the
     # typed-verb `--extra-args` flag because every argument after the audit
-    # metadata is already raw passthrough.
-    if verb not in ("exec", "job"):
+    # metadata is already raw passthrough. `browser` drives a self-contained
+    # selenium script (its argv is a fixed `python3 -c <driver> ...` shape), so
+    # appending raw tool flags is meaningless — it has its own typed render flags.
+    if verb not in ("exec", "job", "browser"):
         author_fields = author_fields + (
             "--extra-args \"<raw flags>\" (optional, shlex-split passthrough for long-tail flags)",
         )

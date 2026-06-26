@@ -117,6 +117,50 @@ def resolve_out_of_scope(values: list[str] | None) -> list[str]:
     return result
 
 
+def resolve_rate_limit(value: float | str | None) -> float | None:
+    """Normalize a ``--rate-limit`` flag into the ``rate_limit`` (req/s) value
+    written to scope.json, or ``None`` when unset.
+
+    ``None``/empty preserves today's behavior (per-tool defaults; agent
+    discretion — no hard gate). A supplied value must be a number of at least
+    1 req/s; anything else raises SystemExit so a malformed cap can never be
+    persisted.
+
+    The value is a PER-INVOCATION / GLOBAL request-rate ceiling (req/s): httpx
+    ``-rate-limit`` and katana ``-rl`` are single global token buckets, so the
+    cap bounds the AGGREGATE rate of the bulk web stage it is applied to over the
+    whole in-scope host set probed in one invocation, and bounds per-host only as
+    a side effect. It must be at least 1 because httpx ``-rate-limit`` /
+    katana ``-rl`` take an INTEGER req/s and cannot express a fractional rate — a
+    sub-1 cap (e.g. 0.5) would otherwise floor UP to 1 (2x the intended ceiling),
+    so it is rejected here rather than silently doubled. Only the recon
+    pipeline's bulk web stages (httpx liveness, katana crawl, js-mining
+    body-fetch) consume this cap today; it does NOT cover the recon-specialist's
+    nuclei/ffuf/nmap/whatweb/nikto probes or gau body-fetches.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError as exc:
+            raise SystemExit(
+                f"--rate-limit '{text}' is not a number (req/s)."
+            ) from exc
+    rate = float(value)
+    if rate < 1:
+        raise SystemExit(
+            f"--rate-limit must be at least 1 req/s, got {rate:g}. httpx "
+            "-rate-limit and katana -rl take an integer req/s and cannot express "
+            "a fractional rate; a sub-1 cap would floor up to 1 (2x the intended "
+            "ceiling)."
+        )
+    return rate
+
+
 @dataclass(frozen=True, slots=True)
 class CreateEngagementOptions:
     install_root: Path
@@ -133,6 +177,16 @@ class CreateEngagementOptions:
     # out-of-scope carve-outs, written into scope.json for HTTP-target engagements.
     required_headers: dict[str, str] = field(default_factory=dict)
     out_of_scope: list[str] = field(default_factory=list)
+    # Optional PER-INVOCATION / GLOBAL request-rate ceiling (req/s) for the recon
+    # pipeline's bulk web stages (httpx liveness, katana crawl, js-mining body-
+    # fetch). httpx -rate-limit / katana -rl are single global token buckets, so
+    # the cap bounds the aggregate stage rate over the whole in-scope host set and
+    # bounds per-host only as a side effect; it does NOT cover the recon-
+    # specialist's nuclei/ffuf/nmap/whatweb/nikto probes or gau body-fetches. None
+    # preserves today's behavior (per-tool defaults; agent discretion — no hard
+    # gate). Written into scope.json's ``rate_limit`` only when set, for
+    # HTTP-target engagements.
+    rate_limit: float | None = None
     # Blue-only fields (ignored unless engagement_type == "blue"):
     customer: str | None = None
     platforms: list[str] = field(default_factory=list)
@@ -397,10 +451,14 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
             scope["required_headers"] = dict(options.required_headers)
         if options.out_of_scope:
             scope["out_of_scope"] = list(options.out_of_scope)
-    elif options.required_headers or options.out_of_scope:
+        # Written only when set so an unconfigured cap leaves scope.json
+        # byte-identical and recon stages fall through to their tool defaults.
+        if options.rate_limit is not None:
+            scope["rate_limit"] = options.rate_limit
+    elif options.required_headers or options.out_of_scope or options.rate_limit is not None:
         raise SystemExit(
-            "--program/--header and --out-of-scope apply only to HTTP-target "
-            f"engagements (web/both/android), not '{options.engagement_type}'."
+            "--program/--header, --out-of-scope, and --rate-limit apply only to "
+            f"HTTP-target engagements (web/both/android), not '{options.engagement_type}'."
         )
 
     report_name = name

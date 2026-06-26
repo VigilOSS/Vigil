@@ -486,12 +486,15 @@ Recover the whole fan-out afterward with
 `vigil assess list-command-runs --intent-q "sweep"`; add `--json` to the sweep
 to get cluster objects that carry each value's `run_id` for audit linkage.
 
-### Wrap a long-running custom command as a job
+### Wrap a long-running custom command as a job (operator-only)
 
-Anything that may exceed the synchronous timeout window or that should
-survive the calling shell goes through `kali job start`. The dtach session is
-parented by tini so it survives the calling agent's exit; recover with
-`kali job status <id>` and `kali job tail <id>`.
+This path belongs to the **operator** — `kali job start` backgrounds a probe past the
+synchronous window, and only the operator owns long supervised jobs, because a
+dispatched specialist that backgrounds-and-polls is SIGUSR1-killed mid-wait (see
+`agent/shared-constraints.md` §2). As a specialist, when a probe won't fit the
+synchronous `--timeout`, hand it to the operator in your `next_steps` rather than
+starting a job yourself. The dtach session is parented by tini so it survives the
+calling agent's exit; recover with `kali job status <id>` and `kali job tail <id>`.
 
 ```bash
 vigil assess kali job start \

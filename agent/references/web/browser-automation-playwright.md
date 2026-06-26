@@ -189,7 +189,11 @@ fresh API tokens on demand.
 A parameterized, copy-pasteable login + cookie-dump script lives at
 `agent/scripts/browser/playwright-login.js`. Creds and target come from env
 (`TARGET_URL`, `USERNAME`, `PASSWORD`, optional `PROXY`, `OTP`, `JAR`,
-`SHOTS_DIR`) — **no hardcoded secrets**. It implements headed stealth, both
+`SHOTS_DIR`, `REQUIRED_HEADERS`) — **no hardcoded secrets**. For engagements
+created with a program attribution header (`--program`/`--header`), export
+`REQUIRED_HEADERS` as a JSON object so it rides on every browser request (the
+proxy only observes traffic, it does not inject these):
+`REQUIRED_HEADERS="$(jq -c .required_headers "$ENGAGEMENT_DIR/scope.json")"`. It implements headed stealth, both
 capture modes (set `PROXY` for Mode A, leave it unset for Mode B), multi-selector
 two-step login, akredirect/bot-block detection, screenshot-every-step, and the
 Netscape jar dump. Run it:

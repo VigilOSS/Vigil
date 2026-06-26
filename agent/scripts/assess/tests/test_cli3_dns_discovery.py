@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from assess.commands import dns_discovery as dd
+from assess.commands.kali_dnsx import DNSX_PROFILES
 from assess.lib.config import Config
 
 
@@ -176,3 +177,63 @@ def test_container_kill_uses_docker_exec_pkill(monkeypatch):
 
     assert ["docker", "exec", "vigil", "pkill", "-9", "-f", "massdns"] in calls
     assert ["docker", "exec", "vigil", "pkill", "-9", "-f", "puredns"] in calls
+
+
+# --------------------------------------------------------------------------- #
+# I-3 — fail-fast ``brute-resolve`` dnsx profile for the big permutation pass.
+#
+# Resolving a huge, mostly-dead permutation/brute candidate set under the
+# polite-cdn profile (retry=3, timeout=5) pays 3 retries × 5s on every dead
+# name. A dedicated low-retry/short-timeout/high-rate ``brute-resolve`` profile
+# (retry=1, timeout~2) makes the permutation resolve pass fail fast. It is
+# auto-selected when --brute is active AND the operator left --dnsx-profile at
+# its default; an explicit --dnsx-profile is always honored.
+# --------------------------------------------------------------------------- #
+
+
+def _flag_value(cmd: list[str], flag: str) -> str:
+    idx = cmd.index(flag)
+    return cmd[idx + 1]
+
+
+def test_brute_resolve_profile_is_defined_low_retry_short_timeout_high_rate():
+    assert "brute-resolve" in DNSX_PROFILES
+    prof = DNSX_PROFILES["brute-resolve"]
+    assert prof.retry == 1, "brute-resolve must fail fast: a single retry"
+    assert prof.timeout <= 2, "brute-resolve must use a short (~2s) per-query timeout"
+    # High rate: at least the bursty-ok ceiling (the documented Docker-safe max).
+    assert prof.rate_limit >= DNSX_PROFILES["bursty-ok"].rate_limit
+
+
+def _capture_resolve_cmd(monkeypatch, **arg_overrides) -> list[str]:
+    captured: list[list[str]] = []
+
+    def fake_exec(args, cmd, intent, tool_name, *, route="container"):
+        captured.append(list(cmd))
+        return SimpleNamespace(return_code=0)
+
+    monkeypatch.setattr(dd, "_exec", fake_exec)
+    args = _run_args("/tmp/eng", **arg_overrides)
+    dd._resolve_stage(args, None, "merged.txt", "resolved.txt", "container")
+    assert captured, "expected a dnsx resolve command to be issued"
+    return captured[-1]
+
+
+def test_resolve_stage_uses_brute_resolve_when_bruting_with_default_profile(monkeypatch):
+    cmd = _capture_resolve_cmd(monkeypatch, brute=True, dnsx_profile="polite-cdn")
+    prof = DNSX_PROFILES["brute-resolve"]
+    assert _flag_value(cmd, "-retry") == str(prof.retry) == "1"
+    assert _flag_value(cmd, "-timeout") == str(prof.timeout)
+    assert _flag_value(cmd, "-rl") == str(prof.rate_limit)
+
+
+def test_resolve_stage_keeps_polite_cdn_when_not_bruting(monkeypatch):
+    cmd = _capture_resolve_cmd(monkeypatch, brute=False, dnsx_profile="polite-cdn")
+    # polite-cdn keeps the patient retry budget for the real passive/CT name set.
+    assert _flag_value(cmd, "-retry") == str(DNSX_PROFILES["polite-cdn"].retry) == "3"
+
+
+def test_resolve_stage_respects_explicit_profile_override_even_when_bruting(monkeypatch):
+    cmd = _capture_resolve_cmd(monkeypatch, brute=True, dnsx_profile="bursty-ok")
+    # Operator explicitly chose bursty-ok: do NOT silently swap to brute-resolve.
+    assert _flag_value(cmd, "-retry") == str(DNSX_PROFILES["bursty-ok"].retry) == "2"

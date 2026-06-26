@@ -737,6 +737,161 @@ def test_engagement_create_interactive_with_complete_flags_skips_wizard(
     assert scope["out_of_scope"] == ["blocked.example.com"]
 
 
+def test_engagement_create_persists_header_and_rate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --header (repeatable) + --rate-limit both land in scope.json for a web
+    # engagement. The cap is a per-invocation / GLOBAL req/s ceiling (bounds
+    # per-host as a side effect); the recon pipeline's bulk web stages read it
+    # back via assess.lib.scope.rate_limit / rate_caps_for_dir.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "--type",
+            "web",
+            "https://app.example.com",
+            "--hosts",
+            "app.example.com",
+            "--no-prompt",
+            "--header",
+            "X-Bug-Bounty: vigiloss",
+            "--header",
+            "X-Trace: deadbeef",
+            "--rate-limit",
+            "5",
+        ]
+    )
+
+    created_path = _created_path_from_stdout(capsys.readouterr().out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["required_headers"] == {"X-Bug-Bounty": "vigiloss", "X-Trace": "deadbeef"}
+    assert scope["rate_limit"] == 5.0
+
+
+def test_engagement_create_omits_rate_limit_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Unset --rate-limit must leave scope.json with NO rate_limit key, so the
+    # accessor returns None and recon stages keep their per-tool defaults.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "https://app.example.com",
+            "--no-prompt",
+        ]
+    )
+
+    created_path = _created_path_from_stdout(capsys.readouterr().out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert "rate_limit" not in scope
+
+
+def test_resolve_rate_limit_accessor() -> None:
+    # The shared resolver: None/empty -> None (unchanged default); a number >= 1
+    # passes through; non-numeric AND sub-1 values (0, negative, fractional <1)
+    # raise SystemExit so a malformed/unexpressible cap is never persisted. httpx
+    # -rate-limit / katana -rl take an integer req/s, so a sub-1 cap (e.g. 0.5)
+    # would floor UP to 1 (2x the intended ceiling) — reject it at the boundary.
+    from vigil_cli.engagements import resolve_rate_limit
+
+    assert resolve_rate_limit(None) is None
+    assert resolve_rate_limit("") is None
+    assert resolve_rate_limit(5) == 5.0
+    assert resolve_rate_limit("3.5") == 3.5
+    assert resolve_rate_limit(1) == 1.0          # boundary: exactly 1 req/s is allowed
+    with pytest.raises(SystemExit):
+        resolve_rate_limit(0)
+    with pytest.raises(SystemExit):
+        resolve_rate_limit(-1)
+    with pytest.raises(SystemExit):
+        resolve_rate_limit(0.5)                  # sub-1 fractional cap now rejected
+    with pytest.raises(SystemExit):
+        resolve_rate_limit("0.5")                # ...including the string form
+    with pytest.raises(SystemExit):
+        resolve_rate_limit("bogus")
+
+
+def test_engagement_create_rejects_sub1_rate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A sub-1 --rate-limit must be rejected at create: httpx -rate-limit /
+    # katana -rl take an integer req/s, so a 0.5 cap would floor UP to 1 (2x the
+    # intended ceiling). Reject it rather than silently doubling the cap.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    with pytest.raises(SystemExit) as exc:
+        main_module.main(
+            [
+                "--root",
+                str(install_root),
+                "engagement",
+                "create",
+                "--type",
+                "web",
+                "https://app.example.com",
+                "--hosts",
+                "app.example.com",
+                "--no-prompt",
+                "--rate-limit",
+                "0.5",
+            ]
+        )
+    assert "at least 1 req/s" in str(exc.value)
+
+
+def test_engagement_create_rate_limit_rejected_for_code_engagement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # --rate-limit is HTTP-target only; a code engagement must reject it with a
+    # clear error rather than silently writing it into a non-HTTP scope.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    with pytest.raises(SystemExit) as exc:
+        main_module.main(
+            [
+                "--root",
+                str(install_root),
+                "engagement",
+                "create",
+                "--type",
+                "code",
+                "myproj",
+                "--repo",
+                str(tmp_path / "repo"),
+                "--no-prompt",
+                "--rate-limit",
+                "5",
+            ]
+        )
+    assert "--rate-limit" in str(exc.value)
+
+
 def test_engagement_create_cli_json_output_replaces_bare_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1070,6 +1225,236 @@ def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path
     assert database.read_text(encoding="utf-8") == "db"
     assert not (install_root / "agent" / "old-managed.txt").exists()
     assert not legacy_installer.exists()
+
+
+# --------------------------------------------------------------------------- #
+# W0 — install-staleness guard. `vigil install` stamps the source git sha into
+# .vigil-install-meta.json so `vigil status` can warn (non-fatally) when the
+# working root (~/vigil/agent tree) has fallen behind the source it was
+# installed from (the I-5 root cause: a lagging install silently disables the
+# whole feature set). Two-layer model: `vigil install`/`update` upgrades the
+# WORKING ROOT; `uv tool upgrade vigil` upgrades only the CLI BINARY.
+# --------------------------------------------------------------------------- #
+
+
+def _git_env() -> dict[str, str]:
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+    }
+
+
+def _git(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        text=True,
+        capture_output=True,
+        check=True,
+        env=_git_env(),
+    )
+    return result.stdout.strip()
+
+
+def _init_git_repo(root: Path, files: dict[str, str] | None = None) -> str:
+    """Init a minimal git repo at `root` with one commit; return HEAD sha."""
+    files = files or {"README.md": "seed\n"}
+    root.mkdir(parents=True, exist_ok=True)
+    for rel, content in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+    return _git(root, "rev-parse", "HEAD")
+
+
+def _git_commit(root: Path, rel: str, content: str) -> str:
+    (root / rel).write_text(content, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "more")
+    return _git(root, "rev-parse", "HEAD")
+
+
+def _minimal_status(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "install_root": "/x",
+        "install_exists": True,
+        "engagement_count": 0,
+        "orchestrator": {"state": "stopped", "healthy": False, "readiness": {}},
+        "runtime": {"state": "stopped", "mounts_ok": None, "resources": None},
+        "mitmproxy": {"state": "stopped", "ca_volume": False},
+        "oob": {"state": "stopped", "clients": [], "domain": "-"},
+        "backup": {"latest": None, "modified_at": None},
+        "legacy_both_missing_code_phase": [],
+        "install_staleness": {"state": "current"},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_install_meta_records_and_reads_back_source_sha(tmp_path: Path) -> None:
+    from vigil_cli.status import read_install_meta, write_install_meta
+
+    source = tmp_path / "source"
+    sha = _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+
+    meta = write_install_meta(install, source)
+    assert meta["source_sha"] == sha
+    assert (install / ".vigil-install-meta.json").is_file()
+
+    read = read_install_meta(install)
+    assert read is not None
+    assert read["source_sha"] == sha
+    assert "installed_at" in read
+
+
+def test_install_staleness_current_when_sha_matches(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness, write_install_meta
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    write_install_meta(install, source)
+
+    result = install_staleness(install, source_root=source)
+    assert result["state"] == "current"
+
+
+def test_install_staleness_stale_when_source_advances(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness, write_install_meta
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    write_install_meta(install, source)  # stamps the old sha
+
+    new_sha = _git_commit(source, "CHANGELOG.md", "v2\n")
+    result = install_staleness(install, source_root=source)
+    assert result["state"] == "stale"
+    assert result["current_source_sha"] == new_sha
+    assert result["behind_count"] == 1
+
+
+def test_install_staleness_unknown_without_resolvable_source(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness, write_install_meta
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    write_install_meta(install, source)
+
+    # A path that is not a git checkout yields no current sha -> unknown, not stale.
+    result = install_staleness(install, source_root=tmp_path / "not-a-repo")
+    assert result["state"] == "unknown"
+
+
+def test_install_staleness_no_stamp_when_meta_missing(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+
+    result = install_staleness(install, source_root=source)
+    assert result["state"] == "no-stamp"
+
+
+def test_print_status_warns_when_working_root_behind_source(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.status import print_status
+
+    status = _minimal_status(
+        install_staleness={
+            "state": "stale",
+            "installed_sha": "a" * 40,
+            "current_source_sha": "b" * 40,
+            "behind_count": 3,
+        }
+    )
+    print_status(status)
+    out = capsys.readouterr().out
+    assert "warn" in out
+    assert "vigil install" in out
+    assert "uv tool upgrade vigil" in out
+    assert "3" in out
+
+
+def test_print_status_warns_on_missing_install_stamp(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.status import print_status
+
+    status = _minimal_status(install_staleness={"state": "no-stamp"})
+    print_status(status)
+    out = capsys.readouterr().out
+    assert "warn" in out
+    assert "vigil install" in out
+
+
+def test_print_status_silent_when_install_current(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.status import print_status
+
+    print_status(_minimal_status(install_staleness={"state": "current"}))
+    out = capsys.readouterr().out
+    assert "behind source" not in out
+    assert "install stamp" not in out
+
+
+def test_collect_status_includes_install_staleness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.status import collect_status
+
+    install = tmp_path / "install"
+    (install / "agent" / "engagements").mkdir(parents=True)
+    monkeypatch.setenv("VIGIL_SOURCE_DIR", str(tmp_path / "none"))
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        return DockerResult(0, "", "")
+
+    payload = collect_status(install, runner=runner)
+    assert "install_staleness" in payload
+    assert isinstance(payload["install_staleness"], dict)
+    assert "state" in payload["install_staleness"]  # type: ignore[operator]
+
+
+def test_install_cli_stamps_install_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+    from vigil_cli.status import read_install_meta
+
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
+    sha = _init_git_repo(source, {"README.md": "seed\n"})
+    install = tmp_path / "install"
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+
+    main_module.main(
+        ["--root", str(install), "--source", str(source), "install", "--skip-image-check"]
+    )
+    capsys.readouterr()
+
+    meta = read_install_meta(install)
+    assert meta is not None
+    assert meta["source_sha"] == sha
 
 
 def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
@@ -2393,6 +2778,46 @@ def test_auth_status_and_clear_operate_on_engagement_auth(
     main_module.main(["--root", str(install_root), "auth", "clear", "eng-1"])
     # Clear deletes the centralized credential; the store has no identities left.
     assert store["eng-1"]["identities"] == {}
+
+
+def test_auth_edit_without_identity_writes_back_to_the_active_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR#40 regression: `vigil auth edit` (no --identity) must write the edit BACK to the
+    active identity, not blindly to `default`. When a non-default identity is active,
+    targeting `default` forked the edit into `default` and make_active flipped the
+    engagement onto it — corrupting `default` and leaving the active identity unchanged."""
+    from vigil_cli import auth as auth_module
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+
+    store = _install_fake_credential_store(monkeypatch)
+    store["eng-1"] = {
+        "identities": {
+            "alice": {
+                "mode": "manual",
+                "state": "present",
+                "cookies": {"sid": "alice-sid"},
+                "headers": {},
+            }
+        },
+        "active_identity": "alice",
+    }
+
+    # No-op editor: leave the dumped material untouched so the edit is a pure round-trip.
+    monkeypatch.setattr(auth_module.subprocess, "call", lambda *a, **k: 0)
+
+    main_module.main(["--root", str(install_root), "auth", "edit", "eng-1"])
+
+    # The edit lands on `alice` (the active identity), not `default`.
+    assert store["eng-1"]["active_identity"] == "alice"
+    assert "default" not in store["eng-1"]["identities"]
+    assert "updated_at" in store["eng-1"]["identities"]["alice"]
+    assert store["eng-1"]["identities"]["alice"]["cookies"] == {"sid": "alice-sid"}
 
 
 def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

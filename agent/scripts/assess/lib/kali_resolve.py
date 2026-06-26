@@ -14,8 +14,9 @@ The durable fix has two halves, both implemented here and wired from
    Docker Desktop, resolve the target host on the HOST (``socket.getaddrinfo``) and
    inject ``--resolve <host>:<port>:<ip>`` into the tool argv so the in-container
    HTTP request bypasses the broken container resolver entirely. curl, httpx,
-   nuclei, ffuf and katana all accept ``--resolve`` with identical
-   ``host:port:ip`` syntax.
+   nuclei and katana all accept ``--resolve`` with identical ``host:port:ip``
+   syntax. ffuf is deliberately NOT pinned (I-10): its flag parser has no
+   ``--resolve`` and would abort the run; see ``RESOLVE_PIN_TOOLS``.
 
 2. **Post-run host-resolved retry input** (:func:`resolve_host_ips`): when the
    false-negative guard in ``kali_exec`` detects the ``http=000`` /
@@ -50,10 +51,22 @@ from . import runtime_route
 from .kali_audit import _extract_target_anchor
 
 # Tools whose HTTP request honors a ``--resolve host:port:ip`` pin with curl's
-# syntax. sqlmap is excluded — it has no equivalent host-pin flag, so injecting
-# ``--resolve`` would cause it to reject the argument. curl/httpx/nuclei/ffuf/
-# katana all accept the identical ``host:port:ip`` form.
-RESOLVE_PIN_TOOLS: frozenset[str] = frozenset({"curl", "httpx", "nuclei", "ffuf", "katana"})
+# syntax. curl/httpx/nuclei/katana all accept the identical ``host:port:ip``
+# form. sqlmap and ffuf are EXCLUDED — they have no equivalent host-pin flag, so
+# injecting ``--resolve`` makes them reject the argument and abort the run.
+#
+# ffuf in particular (I-10): the image's ffuf (v2.x) has no ``--resolve`` flag —
+# its Go flag parser errors with "flag provided but not defined: -resolve" and
+# exits 2 WITHOUT firing the probe, so a pin would turn a recoverable
+# Docker-Desktop resolver flap into a hard, silent total failure of every pinned
+# ffuf run. ffuf also supports the ``FUZZ`` keyword in the host position (vhost
+# fuzzing), where there is no single fixed host to pin, so a URL-rewrite +
+# ``Host:``/``-sni`` translation would silently corrupt those runs. ffuf stays
+# an http-prober (``is_http_prober``), so the post-run http=000 false-negative
+# guard still arms for it and records a TRANSPORT ERROR (not a target verdict),
+# directing the operator to re-run via the host path — the safety property holds
+# without the broken pin.
+RESOLVE_PIN_TOOLS: frozenset[str] = frozenset({"curl", "httpx", "nuclei", "katana"})
 
 # Operator escape hatch. Truthy disables host-resolve + --resolve pinning even on
 # Docker Desktop (mirrors the --no-resolve-pin flag; threaded via env because the
@@ -129,31 +142,47 @@ def _resolve_target(tool_name: str, cmd: list[str]) -> tuple[str, int]:
 
 
 def resolve_host_ips(host: str) -> list[str]:
-    """Resolve ``host`` to its IPv4/IPv6 addresses ON THE HOST, in stable order.
+    """Resolve ``host`` to its IPv4/IPv6 addresses ON THE HOST, IPv4 before IPv6.
 
-    Order-preserving de-dup of ``socket.getaddrinfo`` results (IPv4 first because
-    ``getaddrinfo`` returns the system-ordered list and ``--resolve`` pins one
-    address). Returns ``[]`` on any resolution failure — the caller treats an empty
-    result as "could not pin" and proceeds without the pin (never hard-fails on the
+    Order-preserving de-dup of ``socket.getaddrinfo`` results, but with ALL IPv4
+    (A) addresses returned BEFORE any IPv6 (AAAA), preserving the original
+    relative order within each family (I-11). ``--resolve`` pins ``ips[0]``, and
+    ``getaddrinfo`` may legitimately return the AAAA first (RFC 6724 / a
+    v6-preferring resolver); pinning an AAAA on an IPv4-only container runtime
+    makes the in-container HTTP request fail with http=000, which the
+    false-negative guard then surfaces as a SUPPRESSED real surface. Putting the
+    IPv4 first keeps the pin probe-able in the common (v4-reachable) case.
+
+    Returns ``[]`` on any resolution failure — the caller treats an empty result
+    as "could not pin" and proceeds without the pin (never hard-fails on the
     pre-flight path; the post-run guard surfaces a transport error instead).
     """
     if not host or _is_ip_literal(host):
         return []
-    ips: list[str] = []
+    ipv4: list[str] = []
+    ipv6: list[str] = []
     seen: set[str] = set()
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except (socket.gaierror, OSError, UnicodeError):
         return []
     for info in infos:
+        family = info[0]
         sockaddr = info[4]
         if not sockaddr:
             continue
         ip = sockaddr[0]
-        if ip and ip not in seen:
-            seen.add(ip)
-            ips.append(ip)
-    return ips
+        if not ip or ip in seen:
+            continue
+        seen.add(ip)
+        # Classify by the returned address itself (robust to AI_V4MAPPED forms),
+        # falling back to the addrinfo family if the literal won't parse.
+        try:
+            is_v4 = ipaddress.ip_address(ip).version == 4
+        except ValueError:
+            is_v4 = family == socket.AF_INET
+        (ipv4 if is_v4 else ipv6).append(ip)
+    return ipv4 + ipv6
 
 
 def _already_pinned(cmd: list[str], host: str, port: int) -> bool:

@@ -11,7 +11,18 @@ from fastapi import HTTPException, status
 from ..events import _engagement_or_404
 
 from . import _common
-from ._common import _fetch_all, _hash_json, _json_text, _parse_url, _scalar_row
+from ._common import (
+    SEVERITY_RANK,
+    WORKFLOW_STATUS_RANK,
+    _fetch_all,
+    _hash_json,
+    _json_text,
+    _normalize_severity,
+    _normalize_workflow_status,
+    _normalize_verification_state,
+    _parse_url,
+    _scalar_row,
+)
 from .dispatches import _serialize_decision
 
 
@@ -1556,6 +1567,109 @@ def _coverage_engagement_wide_deferrals(
             out.append(row)
     return out
 
+def _empty_finding_verdict() -> dict[str, Any]:
+    """The "no verdict on this host" cell. Stable shape so the CLI ledger never
+    has to special-case a missing key."""
+    return {
+        "has_finding": False,
+        "finding_count": 0,
+        "verified_count": 0,
+        "strongest_status": None,
+        "max_severity": None,
+        "auth_contexts": [],
+        "verification_states": [],
+        "slugs": [],
+    }
+
+
+def _build_finding_verdicts_by_host(
+    finding_rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Project finding rows into ``{host: verdict}``.
+
+    A ``merged`` finding (or one with a ``merged_into_finding_id``) is excluded —
+    it is no longer the canonical record. Every other finding counts as a
+    RECORDED VERDICT for its host (a ``false_positive`` finding is the canonical
+    evidence-backed negative: "we tested it, here is why it is not a bug").
+    Host is taken from ``canonical_location`` via the same normalizer used for
+    services/surfaces so the ledger join lands on one key. The ``slugs`` list is
+    capped to keep the payload bounded on noisy hosts.
+    """
+    by_host: dict[str, dict[str, Any]] = {}
+    for row in finding_rows:
+        if row.get("merged_into_finding_id") is not None:
+            continue
+        try:
+            status_value = _normalize_workflow_status(str(row.get("status") or "draft"))
+        except HTTPException:
+            status_value = "draft"  # tolerate a legacy/invalid status on read
+        if status_value == "merged":
+            continue
+        host = _coverage_endpoint_host(str(row.get("canonical_location") or ""))
+        if not host:
+            continue
+        verdict = by_host.setdefault(host, _empty_finding_verdict())
+        verdict["has_finding"] = True
+        verdict["finding_count"] += 1
+
+        try:
+            verification_state = str(
+                _normalize_verification_state(str(row.get("verification_state") or "unreviewed"))
+            )
+        except HTTPException:
+            verification_state = "unreviewed"
+        if verification_state == "verified":
+            verdict["verified_count"] += 1
+        if verification_state not in verdict["verification_states"]:
+            verdict["verification_states"].append(verification_state)
+
+        severity = _normalize_severity(str(row.get("severity") or "info"))
+        if verdict["max_severity"] is None or (
+            SEVERITY_RANK[severity] > SEVERITY_RANK[verdict["max_severity"]]
+        ):
+            verdict["max_severity"] = severity
+
+        current_strongest = verdict["strongest_status"]
+        if current_strongest is None or (
+            WORKFLOW_STATUS_RANK[status_value] > WORKFLOW_STATUS_RANK[current_strongest]
+        ):
+            verdict["strongest_status"] = str(status_value)
+
+        auth_context = str(row.get("auth_context") or "").strip()
+        if auth_context and auth_context not in verdict["auth_contexts"]:
+            verdict["auth_contexts"].append(auth_context)
+
+        slug = str(row.get("slug") or "").strip()
+        if slug and len(verdict["slugs"]) < 25 and slug not in verdict["slugs"]:
+            verdict["slugs"].append(slug)
+
+    for verdict in by_host.values():
+        verdict["auth_contexts"].sort()
+        verdict["verification_states"].sort()
+        verdict["slugs"].sort()
+    return by_host
+
+
+def per_host_finding_verdicts(engagement_id: int) -> dict[str, dict[str, Any]]:
+    """Standalone per-host finding-VERDICT projection (sibling of
+    :func:`per_host_coverage`).
+
+    Exposed for callers that only need the verdict join (and for direct test
+    coverage). ``per_host_coverage`` reuses the same builder so the inline
+    ``finding_verdict`` and this map never drift.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        finding_rows = _fetch_all(
+            connection,
+            "SELECT slug, canonical_location, status, verification_state, "
+            "verification_disposition, severity, auth_context, merged_into_finding_id "
+            "FROM assessment_findings WHERE engagement_id = ?",
+            (engagement.id,),
+        )
+    return _build_finding_verdicts_by_host(finding_rows)
+
+
 def per_host_coverage(engagement_id: int) -> dict[str, Any]:
     """Outcome-based per-host coverage projection (C40).
 
@@ -1629,6 +1743,21 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
             "AND superseded_by_id IS NULL",
             (eng_id,),
         )
+        finding_rows = _fetch_all(
+            connection,
+            "SELECT slug, canonical_location, status, verification_state, "
+            "verification_disposition, severity, auth_context, merged_into_finding_id "
+            "FROM assessment_findings WHERE engagement_id = ?",
+            (eng_id,),
+        )
+
+    # W2 — per-host finding VERDICT join. A host is only "covered" with a
+    # RECORDED VERDICT; this map is what the coverage ledger reads to tell a
+    # real_app gap (routes but no verdict) from a closed one. Keyed by the same
+    # ``_coverage_endpoint_host`` normalization as services/surfaces so the join
+    # lands on one host key. Includes finding-only hosts (a host with a finding
+    # but no recon service/surface) so a crown-jewel verdict is never dropped.
+    finding_verdicts_by_host = _build_finding_verdicts_by_host(finding_rows)
 
     # Filter out superseded tech-component rows from outcome consideration —
     # the current row is the canonical answer.
@@ -1806,12 +1935,18 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
                     }
                     for row in deferral_rows
                 ],
+                "finding_verdict": finding_verdicts_by_host.get(
+                    host, _empty_finding_verdict()
+                ),
             }
         )
 
     return {
         "objectives": list(PER_HOST_OBJECTIVES),
         "hosts": host_outcomes,
+        # Superset of the per-host inline verdict: also carries finding-only
+        # hosts (no recon service/surface) so the ledger never loses a verdict.
+        "finding_verdicts": finding_verdicts_by_host,
         "engagement_signals": {
             "waf_intel_count": len(waf_rows),
             "tech_scan_intel_count": len(tech_fingerprint_rows),

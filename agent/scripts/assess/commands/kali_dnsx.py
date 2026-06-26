@@ -29,6 +29,14 @@ DNSX_PROFILES: dict[str, DnsxProfile] = {
     "polite-cdn": DnsxProfile(rate_limit=100, threads=20, retry=3, timeout=5),
     "polite-residential": DnsxProfile(rate_limit=300, threads=50, retry=2, timeout=5),
     "bursty-ok": DnsxProfile(rate_limit=500, threads=100, retry=2, timeout=5),
+    # Fail-fast profile for the big permutation/brute resolve pass (I-3): a huge
+    # candidate set is dominated by dead names, so a single retry + short timeout
+    # avoids paying polite-cdn's 3×/5s budget on every miss. Rate/threads match
+    # the bursty-ok (documented Docker-safe) ceiling. In the typed `kali dnsx`
+    # wrapper this trips the rate guard (it is not named bursty-ok), so a manual
+    # high-rate run still requires --allow-unsafe-rate; dns-discovery's resolve
+    # stage uses the profile directly for its automated permutation pass.
+    "brute-resolve": DnsxProfile(rate_limit=500, threads=100, retry=1, timeout=2),
 }
 
 RESOLVER_PROFILES: dict[str, str] = {
@@ -79,6 +87,10 @@ DNSX_EPILOG = """Profiles:
   --dnsx-profile polite-residential
                                -> -rl 300 -t 50 -retry 2 -timeout 5
   --dnsx-profile bursty-ok    -> -rl 500 -t 100 -retry 2 -timeout 5
+  --dnsx-profile brute-resolve
+                               -> -rl 500 -t 100 -retry 1 -timeout 2
+                                  (fail-fast for huge permutation/brute sets;
+                                   requires --allow-unsafe-rate in this wrapper)
 
 Opt-in flags:
   --allow-bruteforce          required for -w wordlist active enumeration

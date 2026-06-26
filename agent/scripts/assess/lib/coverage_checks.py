@@ -32,10 +32,12 @@ from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.scope import (
     classify_scope_entry,
     entry_matches_host,
+    host_admitted,
     host_from_token,
     host_in_scope,
     host_is_vendor_saas,
     out_of_scope_entries,
+    scope_entries,
 )
 
 
@@ -1106,6 +1108,123 @@ def _load_work_items_by_host(db_path: Path) -> dict[str, dict[str, int]]:
 
 
 # ---------------------------------------------------------------------------
+# W2 — per-host route stats for the coverage ledger
+# ---------------------------------------------------------------------------
+# A "route" is a distinct LIVE ``url_path`` for the host. "Live" is a BLUNT
+# heuristic: a row whose ``live_status`` ledger stamp begins with ``live`` (the
+# dispatch-time liveness stamp, e.g. ``live@9m``), OR whose ``response_status``
+# is in a live HTTP band (2xx/3xx, or an auth/method-gated 401/403/405 — the
+# route still EXISTS and answers). ``host_root`` crawl seeds are not routes.
+_LIVE_RESPONSE_EXTRA: frozenset[int] = frozenset({401, 403, 405})
+
+# url_path fragments that flag a high-value API / auth / GraphQL surface. The
+# ledger's real_app OR-inclusion uses these so a few-path crown-jewel
+# microservice (UNDER the route threshold) is still treated as a real app.
+_API_PATH_TOKENS: tuple[str, ...] = (
+    "/api/", "/api.", "/rest/", "/v1/", "/v2/", "/v3/", "/graphql", "/gql",
+    "/swagger", "/openapi", "/oauth", "/jsonrpc", "/.well-known/",
+)
+_API_PATH_SUFFIXES: tuple[str, ...] = (".json", "/api", "/graphql", "/v1", "/v2", "/v3")
+_AUTH_PATH_TOKENS: tuple[str, ...] = (
+    "/login", "/signin", "/sign-in", "/auth", "/oauth", "/sso", "/saml",
+    "/oidc", "/session", "/logout", "/register", "/signup", "/password",
+    "/mfa", "/2fa", "/token", "/authorize",
+)
+_GRAPHQL_PATH_TOKENS: tuple[str, ...] = ("/graphql", "/gql", "/graphiql")
+
+
+def _path_matches(path: str, tokens: tuple[str, ...], suffixes: tuple[str, ...] = ()) -> bool:
+    low = (path or "").lower()
+    if not low:
+        return False
+    if any(tok in low for tok in tokens):
+        return True
+    return any(low.endswith(suf) for suf in suffixes)
+
+
+def _response_is_live(response_status: Any) -> bool:
+    if not isinstance(response_status, int):
+        return False
+    if 200 <= response_status < 400:
+        return True
+    return response_status in _LIVE_RESPONSE_EXTRA
+
+
+def load_route_stats_by_host(db_path: Path) -> dict[str, dict[str, Any]]:
+    """Return ``{host: {live_routes, total_routes, api_like, auth_like,
+    graphql_like}}`` from the local cases.db work buffer.
+
+    Mirrors :func:`_load_work_items_by_host` (same connection discipline + the
+    shared :func:`_endpoint_host` extractor) but counts DISTINCT ``url_path`` per
+    host instead of status rows, and flags API/auth/GraphQL surfaces for the
+    ledger's real_app OR-inclusion. A missing DB yields an empty map.
+    """
+    if not db_path.is_file():
+        return {}
+
+    raw: list[tuple[str, str, str, Any, str]] = []
+    conn = sqlite3.connect(str(db_path), timeout=5.0)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        cursor = conn.execute(
+            "SELECT url, url_path, type, response_status, live_status FROM work_items"
+        )
+        raw = [
+            (
+                str(r[0] or ""),
+                str(r[1] or ""),
+                str(r[2] or ""),
+                r[3],
+                str(r[4] or ""),
+            )
+            for r in cursor.fetchall()
+        ]
+    finally:
+        conn.close()
+
+    acc: dict[str, dict[str, Any]] = {}
+    for url, url_path, wtype, response_status, live_status in raw:
+        if wtype.lower() == "host_root":
+            continue
+        path = url_path.strip()
+        if not path:
+            continue
+        host = _endpoint_host(url)
+        if not host:
+            continue
+        bucket = acc.setdefault(
+            host,
+            {
+                "_live_paths": set(),
+                "_all_paths": set(),
+                "api_like": False,
+                "auth_like": False,
+                "graphql_like": False,
+            },
+        )
+        bucket["_all_paths"].add(path)
+        if live_status.strip().lower().startswith("live") or _response_is_live(response_status):
+            bucket["_live_paths"].add(path)
+        if _path_matches(path, _API_PATH_TOKENS, _API_PATH_SUFFIXES):
+            bucket["api_like"] = True
+        if _path_matches(path, _AUTH_PATH_TOKENS):
+            bucket["auth_like"] = True
+        if _path_matches(path, _GRAPHQL_PATH_TOKENS):
+            bucket["graphql_like"] = True
+
+    return {
+        host: {
+            "live_routes": len(bucket["_live_paths"]),
+            "total_routes": len(bucket["_all_paths"]),
+            "api_like": bucket["api_like"],
+            "auth_like": bucket["auth_like"],
+            "graphql_like": bucket["graphql_like"],
+        }
+        for host, bucket in acc.items()
+    }
+
+
+# ---------------------------------------------------------------------------
 # Overall gate and rendering
 # ---------------------------------------------------------------------------
 def _vendor_saas_hosts_pending_decision(
@@ -1506,6 +1625,315 @@ def render_redispatch_section(block: dict[str, Any]) -> list[str]:
     return lines
 
 
+# ---------------------------------------------------------------------------
+# W2 — the coverage ledger (measured + VISIBLE per-host coverage state)
+# ---------------------------------------------------------------------------
+# The ledger answers, per in-scope host: how many live routes, is it a real app,
+# was a dedicated lane run, is there a RECORDED VERDICT, and therefore — at a
+# glance — is it COVERED or an UNCOVERED gap. A host is "covered" ONLY with a
+# recorded verdict (a finding); a mere completed dispatch (a shallow lane) does
+# NOT clear it. Parking / pure-redirect / all-dead hosts are excluded; a
+# WAF-fronted host with a low curl route count is surfaced for browser reprobe
+# rather than silently dropped.
+
+# Ledger coverage-state vocabulary (string constants, stable for consumers).
+COVERAGE_STATE_COVERED = "covered"
+COVERAGE_STATE_UNCOVERED = "uncovered"
+COVERAGE_STATE_NEEDS_BROWSER_REPROBE = "needs_browser_reprobe"
+COVERAGE_STATE_EXCLUDED = "excluded"
+
+
+def _empty_route_stats() -> dict[str, Any]:
+    return {
+        "live_routes": 0,
+        "total_routes": 0,
+        "api_like": False,
+        "auth_like": False,
+        "graphql_like": False,
+    }
+
+
+def compute_real_app(
+    *,
+    route_count: int,
+    api_auth_graphql: bool,
+    has_finding: bool,
+    threshold: int,
+) -> tuple[bool, str]:
+    """Decide whether a host is a real_app worth covering, with a reason.
+
+    real_app = (>= threshold live routes) OR (exposes an API/auth/GraphQL
+    surface) OR (already carries a finding). The OR-inclusion catches small
+    high-value APIs under the blunt route threshold; the finding clause keeps a
+    crown-jewel host that recon under-enumerated from being mislabeled parking.
+    """
+    if has_finding:
+        return True, "finding recorded on host"
+    if route_count >= threshold:
+        return True, f">={threshold} live routes ({route_count})"
+    if api_auth_graphql:
+        return True, "exposes API/auth/GraphQL surface (under route threshold)"
+    return False, f"<{threshold} live routes and no API/auth/GraphQL surface"
+
+
+def compute_coverage_state(
+    *,
+    waf: bool,
+    route_count: int,
+    threshold: int,
+    real_app: bool,
+    has_recorded_verdict: bool,
+) -> str:
+    """The ledger state machine. ``covered`` wins (a verdict closes the host);
+    a WAF host whose curl route count is below the threshold is surfaced for a
+    browser reprobe (curl undercounts behind a WAF); a non-real_app host is
+    excluded; everything else is an UNCOVERED gap."""
+    if real_app and has_recorded_verdict:
+        return COVERAGE_STATE_COVERED
+    if waf and route_count < threshold:
+        return COVERAGE_STATE_NEEDS_BROWSER_REPROBE
+    if not real_app:
+        return COVERAGE_STATE_EXCLUDED
+    return COVERAGE_STATE_UNCOVERED
+
+
+def dispatched_hosts_from_rows(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Map dispatch rows to ``{host: [roles]}`` (a "dedicated lane" per host)."""
+    out: dict[str, list[str]] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        host = host_from_token(str(row.get("scope_host") or ""))
+        if not host:
+            continue
+        role = str(row.get("agent_role") or row.get("role") or "").strip()
+        roles = out.setdefault(host, [])
+        if role and role not in roles:
+            roles.append(role)
+    return out
+
+
+def _host_waf_flag(per_host_row: dict[str, Any] | None) -> bool:
+    if not per_host_row:
+        return False
+    cell = (per_host_row.get("outcomes") or {}).get("waf_tier") or {}
+    return bool(cell.get("met")) or bool(cell.get("evidence"))
+
+
+def build_coverage_ledger(
+    *,
+    scope_data: dict[str, Any],
+    route_stats_by_host: dict[str, dict[str, Any]],
+    per_host_payload: dict[str, Any],
+    dispatched_hosts: dict[str, list[str]],
+    route_threshold: int = 6,
+) -> dict[str, Any]:
+    """Assemble the per-host coverage ledger.
+
+    Joins the local route stats (cases.db) with the backend per-host C40
+    outcomes and the finding-VERDICT projection, scoped to in-scope hosts
+    (out-of-scope carve-outs win). Hosts with at least one signal (routes,
+    backend outcome row, verdict, or lane) become ledger rows; in-scope scope
+    LITERALS that have no signal at all are surfaced separately as
+    ``unprobed_hosts`` (recon never reached them) rather than silently dropped.
+    """
+    allow_entries = scope_entries(scope_data)
+    deny_entries = out_of_scope_entries(scope_data)
+    literal_hosts = _explicit_literal_scope_hosts(allow_entries)
+
+    per_host_rows = {
+        str(row.get("host")): row
+        for row in (per_host_payload.get("hosts") or [])
+        if isinstance(row, dict) and row.get("host")
+    }
+    finding_verdicts = per_host_payload.get("finding_verdicts")
+    if not isinstance(finding_verdicts, dict):
+        finding_verdicts = {}
+
+    signal_hosts = (
+        set(route_stats_by_host)
+        | set(per_host_rows)
+        | set(finding_verdicts)
+        | set(dispatched_hosts)
+    )
+
+    rows: list[dict[str, Any]] = []
+    summary = {
+        "total": 0,
+        "covered": 0,
+        "uncovered": 0,
+        "needs_browser_reprobe": 0,
+        "excluded": 0,
+        "real_app": 0,
+        "unprobed": 0,
+    }
+
+    for host in sorted(signal_hosts):
+        if not host_admitted(host, allow_entries, deny_entries):
+            continue
+        stats = route_stats_by_host.get(host) or _empty_route_stats()
+        route_count = int(stats.get("live_routes", 0))
+        total_routes = int(stats.get("total_routes", 0))
+        api_auth_graphql = bool(
+            stats.get("api_like") or stats.get("auth_like") or stats.get("graphql_like")
+        )
+        verdict = finding_verdicts.get(host) if isinstance(finding_verdicts.get(host), dict) else None
+        has_recorded_verdict = bool(verdict and verdict.get("has_finding"))
+        per_host_row = per_host_rows.get(host)
+        waf = _host_waf_flag(per_host_row)
+        lane_roles = sorted(dispatched_hosts.get(host, []))
+        dedicated_lane = bool(lane_roles)
+
+        real_app, real_app_reason = compute_real_app(
+            route_count=route_count,
+            api_auth_graphql=api_auth_graphql,
+            has_finding=has_recorded_verdict,
+            threshold=route_threshold,
+        )
+        state = compute_coverage_state(
+            waf=waf,
+            route_count=route_count,
+            threshold=route_threshold,
+            real_app=real_app,
+            has_recorded_verdict=has_recorded_verdict,
+        )
+
+        rows.append(
+            {
+                "host": host,
+                "scope_kind": "literal" if host in literal_hosts else "wildcard-discovered",
+                "route_count": route_count,
+                "total_routes": total_routes,
+                "real_app": real_app,
+                "real_app_reason": real_app_reason,
+                "api_auth_graphql": api_auth_graphql,
+                "waf": waf,
+                "needs_browser_reprobe": state == COVERAGE_STATE_NEEDS_BROWSER_REPROBE,
+                "dedicated_lane": dedicated_lane,
+                "lane_roles": lane_roles,
+                "has_recorded_verdict": has_recorded_verdict,
+                "finding_verdict": verdict if has_recorded_verdict else None,
+                "coverage_objectives": (per_host_row.get("outcomes") if per_host_row else None),
+                "unmet_objectives": (per_host_row.get("unmet_objectives") if per_host_row else []),
+                "coverage_state": state,
+            }
+        )
+        summary["total"] += 1
+        summary[state] += 1
+        if real_app:
+            summary["real_app"] += 1
+
+    unprobed = sorted(
+        host
+        for host in literal_hosts
+        if host not in signal_hosts and host_admitted(host, allow_entries, deny_entries)
+    )
+    summary["unprobed"] = len(unprobed)
+
+    return {
+        "route_threshold": route_threshold,
+        "hosts": rows,
+        "unprobed_hosts": unprobed,
+        "summary": summary,
+    }
+
+
+_LEDGER_STATE_LABEL: dict[str, str] = {
+    COVERAGE_STATE_COVERED: "COVERED",
+    COVERAGE_STATE_UNCOVERED: "UNCOVERED",
+    COVERAGE_STATE_NEEDS_BROWSER_REPROBE: "NEEDS-BROWSER-REPROBE",
+    COVERAGE_STATE_EXCLUDED: "excluded",
+}
+
+
+def render_coverage_ledger_text(ledger: dict[str, Any]) -> list[str]:
+    """Render the ledger as text. The uncovered gap is made obvious at a glance:
+    a dedicated UNCOVERED block follows the table, then the WAF reprobe list and
+    any unprobed scope literals."""
+    lines: list[str] = []
+    threshold = ledger.get("route_threshold", 6)
+    summary = ledger.get("summary", {})
+    rows = ledger.get("hosts", [])
+
+    lines.append(
+        f"coverage ledger (route-threshold={threshold} — BLUNT heuristic; "
+        f"real_app = >={threshold} live routes OR API/auth/GraphQL surface OR a finding)"
+    )
+    lines.append(
+        "  summary: "
+        f"{summary.get('total', 0)} host(s) | "
+        f"{summary.get('covered', 0)} covered | "
+        f"{summary.get('uncovered', 0)} UNCOVERED | "
+        f"{summary.get('needs_browser_reprobe', 0)} needs-browser-reprobe | "
+        f"{summary.get('excluded', 0)} excluded | "
+        f"{summary.get('unprobed', 0)} unprobed"
+    )
+    if not rows and not ledger.get("unprobed_hosts"):
+        lines.append("  (no in-scope hosts with signal yet — run recon first)")
+        return lines
+
+    for row in rows:
+        label = _LEDGER_STATE_LABEL.get(row["coverage_state"], row["coverage_state"])
+        verdict = row.get("finding_verdict") or {}
+        vshort = (
+            f"finding({verdict.get('finding_count', 0)})"
+            if row.get("has_recorded_verdict")
+            else "-"
+        )
+        flags = []
+        if row.get("waf"):
+            flags.append("waf")
+        if row.get("api_auth_graphql"):
+            flags.append("api/auth")
+        if row.get("dedicated_lane"):
+            flags.append("lane")
+        flag_str = f" [{','.join(flags)}]" if flags else ""
+        lines.append(
+            f"  - {row['host']}{flag_str}  routes={row['route_count']}"
+            f"  real_app={'y' if row['real_app'] else 'n'}"
+            f"  verdict={vshort}  => {label}"
+        )
+
+    uncovered = [r for r in rows if r["coverage_state"] == COVERAGE_STATE_UNCOVERED]
+    if uncovered:
+        lines.append("")
+        lines.append(
+            "UNCOVERED real_app host(s) — a recorded verdict is missing "
+            "(a finding or an evidence-backed-negative decision; a completed "
+            "dispatch does NOT count):"
+        )
+        for row in uncovered:
+            lane = (
+                f"lane={','.join(row['lane_roles'])}" if row.get("lane_roles") else "no lane"
+            )
+            lines.append(
+                f"  ! {row['host']} ({row['route_count']} live routes, {lane}) "
+                f"— {row['real_app_reason']}"
+            )
+
+    reprobe = [r for r in rows if r["coverage_state"] == COVERAGE_STATE_NEEDS_BROWSER_REPROBE]
+    if reprobe:
+        lines.append("")
+        lines.append(
+            "WAF-fronted host(s) with low curl route count — NEEDS BROWSER REPROBE "
+            "(curl undercounts behind a WAF; not 'covered'):"
+        )
+        for row in reprobe:
+            lines.append(f"  ! {row['host']} ({row['route_count']} curl routes)")
+
+    unprobed = ledger.get("unprobed_hosts") or []
+    if unprobed:
+        lines.append("")
+        lines.append(
+            "unprobed in-scope literal(s) — recon recorded no signal at all "
+            "(enumerate before judging coverage):"
+        )
+        for host in unprobed:
+            lines.append(f"  ? {host}")
+
+    return lines
+
+
 # Re-exports the consolidated CLI command and tests expect from this module.
 __all__ = [
     "BUCKET_SKILLS",
@@ -1521,4 +1949,14 @@ __all__ = [
     "render_scope_coverage_text",
     "render_per_host_section",
     "render_redispatch_section",
+    "load_route_stats_by_host",
+    "build_coverage_ledger",
+    "compute_real_app",
+    "compute_coverage_state",
+    "dispatched_hosts_from_rows",
+    "render_coverage_ledger_text",
+    "COVERAGE_STATE_COVERED",
+    "COVERAGE_STATE_UNCOVERED",
+    "COVERAGE_STATE_NEEDS_BROWSER_REPROBE",
+    "COVERAGE_STATE_EXCLUDED",
 ]
