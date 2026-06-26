@@ -833,6 +833,7 @@ def _check_code_preconditions(
                     })
         except Exception as exc:
             blockers.append(_precondition_check_failed("verify-variant findings", exc))
+        blockers.extend(_code_coverage_blockers(client))
 
     elif target_phase == "complete":
         try:
@@ -857,6 +858,100 @@ def _check_code_preconditions(
                     })
         except Exception as exc:
             blockers.append(_precondition_check_failed("complete code findings", exc))
+        blockers.extend(_code_coverage_blockers(client))
+
+    return blockers
+
+
+def _code_coverage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
+    """CODE-track coverage gate (W3b): the structural completeness checks that
+    must pass before hunt -> verify-variant and before report/complete.
+
+    Wires the existing backend ``code/coverage`` sub-gates into the phase gate at
+    ``severity="block"`` (overridable by ``--force --reason`` with an audited
+    override-decision row, and satisfiable by recording the analysis or an
+    accepted-gap resolution):
+
+      (a) ``code_coverage_incomplete``    — every critical/high file fully
+          analyzed (``by_classification``);
+      (b) ``pending_cross_file_triggers`` — zero still-pending cross-file
+          triggers (``trigger_summary.pending``);
+      (c) ``uncovered_high_risk_file``    — no critical/high file closed with NO
+          function-level analysis, the backend ``gate.uncovered_high_risk_files``
+          structural-verification list (the broad-18 near-miss where high files
+          were closed with ``functions_analyzed=0``).
+
+    The per-family effort thresholds (70/50/30) intentionally stay a WARN: they
+    live in ``gate.effort_warnings`` and are NOT read here, so a shallow-but-
+    nonzero effort score never blocks the transition. Best-effort on read
+    failure: a backend error degrades to a single ``precondition_check_failed``
+    blocker rather than wedging the transition.
+    """
+    blockers: list[dict[str, str]] = []
+    try:
+        coverage = client.get("code/coverage")
+    except Exception as exc:
+        blockers.append(_precondition_check_failed("code coverage gate", exc))
+        return blockers
+    if not isinstance(coverage, dict):
+        return blockers
+
+    # (a) critical/high file coverage.
+    by_class = coverage.get("by_classification", {})
+    if isinstance(by_class, dict):
+        for tier in ("critical", "high"):
+            tier_data = by_class.get(tier, {})
+            if not isinstance(tier_data, dict):
+                continue
+            count = int(tier_data.get("count", 0) or 0)
+            analyzed = int(tier_data.get("analyzed", 0) or 0)
+            if count > 0 and analyzed < count:
+                blockers.append({
+                    "kind": "code_coverage_incomplete",
+                    "severity": "block",
+                    "detail": (
+                        f"{tier.capitalize()} files not fully analyzed: "
+                        f"{analyzed}/{count} — analyze (or skip with a reason) the "
+                        "remaining files before advancing. Pass --force --reason "
+                        "\"...\" to override with an audited decision."
+                    ),
+                })
+
+    # (b) pending cross-file triggers.
+    triggers = coverage.get("trigger_summary", {})
+    pending = int(triggers.get("pending", 0) or 0) if isinstance(triggers, dict) else 0
+    if pending > 0:
+        blockers.append({
+            "kind": "pending_cross_file_triggers",
+            "severity": "block",
+            "detail": (
+                f"{pending} cross-file trigger(s) still pending — resolve each "
+                "(requeue the target file, or mark external_context_unavailable / "
+                "source_equivalent_analyzed / not_applicable with a note) before "
+                "advancing. Pass --force --reason \"...\" to override with an "
+                "audited decision."
+            ),
+        })
+
+    # (c) uncovered high-risk files (function-count structural verification).
+    gate = coverage.get("gate", {})
+    uncovered = gate.get("uncovered_high_risk_files", []) if isinstance(gate, dict) else []
+    if isinstance(uncovered, list) and uncovered:
+        names = [str(u.get("file_path", "?")) for u in uncovered if isinstance(u, dict)]
+        sample = ", ".join(names[:5]) + (" ..." if len(names) > 5 else "")
+        blockers.append({
+            "kind": "uncovered_high_risk_file",
+            "severity": "block",
+            "detail": (
+                f"{len(uncovered)} critical/high file(s) closed with NO "
+                f"function-level analysis (functions_analyzed=0, no linked finding, "
+                f"no accepted-gap): {sample} — the structural index found functions "
+                "but none were analyzed. Record the analysis (functions_analyzed>0 "
+                "or an analysis-result function row), OR mark the applicable "
+                "families not_applicable with a note (accepted gap). Pass --force "
+                "--reason \"...\" to override with an audited decision."
+            ),
+        })
 
     return blockers
 
