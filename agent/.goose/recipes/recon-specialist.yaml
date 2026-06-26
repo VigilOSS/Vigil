@@ -22,14 +22,16 @@ instructions: |2
 
   **Modes accepted:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven`. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
 
-  ## Never hold a long blocking call
+  ## Don't run — or launch — the long enumeration spine
 
-  Run only short, bounded synchronous probes (`agent/shared-constraints.md` §2) —
-  the long enumeration spine (a `puredns` brute, a full-apex `dns-discovery`, a bulk
-  `web-discovery`) is the operator's `vigil assess recon` job, not yours: read its
-  result, never hold it. When recon needs more enumeration than the job produced,
-  **recommend it** in your handoff `next_steps` (e.g. "operator: re-run `vigil assess
-  recon example.com --brute --resume`") rather than launching it.
+  Run only short, bounded synchronous probes (`agent/shared-constraints.md` §2). The
+  long enumeration spine (a `puredns` brute, a full-apex `dns-discovery`, a bulk
+  `web-discovery`) is the operator's `vigil assess recon` job — you neither hold it as
+  a blocking call **nor launch it as a `--background` job** (a dispatched specialist
+  that backgrounds and polls is SIGUSR1-killed mid-wait). Read the job's `recon-status`
+  result; when more enumeration is needed, **recommend it** in your handoff
+  `next_steps` (e.g. "operator: re-run `vigil assess recon example.com --brute
+  --resume`") rather than launching it.
 
   ## Specialist Context Isolation
 
@@ -49,7 +51,7 @@ instructions: |2
   - `agent/shared-constraints.md` — scope, the `vigil assess kali` rule, finding IDs, rule reminders
   - `agent/rules/hunting.md`
   - `agent/rules/adversarial-mindset.md`
-  - `agent/skills/web-recon/SKILL.md` — the per-host web fingerprint/scan chain you run, and Step 0b egress reputation
+  - `agent/skills/web-recon/SKILL.md` — the per-host web fingerprint/scan chain you run, and the operator's Step 0b egress verdict you review
   - `agent/skills/subdomain-enumeration/SKILL.md` — the `vigil assess recon` / `dns-discovery` / `web-discovery` contract you assess: staged composition, resolver/wildcard/budget knobs, and the bound rules that tell you whether coverage is complete or stopped early
   - `agent/references/recon/rate-calibration.md` — the per-target rate table for the bounded probes you run
 

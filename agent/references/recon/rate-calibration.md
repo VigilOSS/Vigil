@@ -12,7 +12,8 @@ not the brand.
 This file was extracted from `agent/shared-constraints.md` §14 to keep the
 first-load specialist constraints lighter — the rate-calibration table is only
 load-bearing for recon-class roles (recon-specialist, surface-collector,
-osint-analyst when running active enumeration). Other specialists do not need
+osint-analyst) when running bounded per-host probes (nmap, directory-fuzz, nuclei).
+Other specialists do not need
 this table loaded on every dispatch.
 
 ## Trait-row table
