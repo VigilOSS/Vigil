@@ -345,17 +345,23 @@ def run(args) -> None:
         return
 
     # Rate cap: clamp the body-fetch httpx -rate-limit DOWN to the configured
-    # per-host ceiling; unset keeps the conservative default (30). Attribution
-    # header rides automatically via kali_exec's central injector (httpx is in
-    # the injectable set), so no manual header paste is needed.
+    # global req/s ceiling (httpx -rate-limit is one global token bucket, so it
+    # caps the aggregate fetch rate and bounds per-host only as a side effect);
+    # unset keeps the conservative default (30). int() truncates a fractional cap
+    # DOWN so the emitted rate never exceeds the ceiling; sub-1 caps are rejected
+    # at `vigil engagement create`, and the max(1, …) floor only guards a
+    # hand-edited scope so a 0 never stalls the fetch. Attribution header rides
+    # automatically via kali_exec's central injector (httpx is in the injectable
+    # set), so no manual header paste is needed.
     rate_cap, _ = scope.rate_caps_for_dir(args.engagement_dir)
     try:
         base_rate = int(args.httpx_rate_limit)
     except (TypeError, ValueError):
         base_rate = 30
     if rate_cap is not None:
-        rate_limit = max(1, min(base_rate, int(rate_cap)) if rate_cap >= 1 else 1)
-        print(f"js-mining: per-host rate cap {rate_cap} req/s configured; httpx "
+        rate_limit = max(1, min(base_rate, int(rate_cap)))
+        print(f"js-mining: global req/s ceiling {rate_cap} configured "
+              f"(per-invocation; bounds per-host as a side effect); httpx "
               f"-rate-limit set to {rate_limit}.", file=sys.stderr)
     else:
         rate_limit = base_rate

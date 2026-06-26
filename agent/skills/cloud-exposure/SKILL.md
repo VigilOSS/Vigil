@@ -15,7 +15,7 @@ A public bucket is not automatically critical. Severity rides on **what is in th
 - A bucket listing is publicly accessible (S3 `?list-type=2`, GCS XML listing, Azure `?comp=list`).
 - A domain or subdomain CNAMEs to a bucket endpoint and the bucket is browseable.
 - Recon discovered references to bucket names in HTML / JS source / DNS history that resolve to live buckets.
-- A subdomain takeover candidate sits on bucket infrastructure (dangling CNAME → unclaimed bucket).
+- A subdomain takeover candidate sits on bucket infrastructure (dangling CNAME → a bucket that returns `NoSuchBucket`) — treat this as a *screening* signal to work claimability through Step 2, not as a finding on its own (see `agent/references/subdomain-takeover.md`).
 - During code analysis, hard-coded bucket names point to buckets you can reach unauthenticated.
 
 ## Tools
@@ -49,7 +49,7 @@ A bucket sitting in isolation is less interesting than a bucket that backs a kno
 - **DNS**: `dig +short <bucket>.s3.amazonaws.com` and `dig +short <consumer-host>` — does any in-scope host CNAME to this bucket?
 - **JS source references**: `grep -r "<bucket-name>" agent/engagements/$ENGAGEMENT_KEY/scans/` — which scraped JS or HTML references this bucket?
 - **Cloudfront/CDN distribution**: `curl -sI https://<bucket>.s3.amazonaws.com/` looking for `x-amz-bucket-region` and any CDN headers.
-- **Subdomain takeover signal**: if a scope subdomain CNAMEs to a bucket that returns `NoSuchBucket`, the bucket is unclaimed and is a takeover finding.
+- **Subdomain takeover SCREENING signal (not a verdict)**: a scope subdomain CNAME'ing to a bucket that returns `NoSuchBucket` is the *screening* signal that the name is unserved — it proves the bucket is absent, **not** that *you* can re-bind the name, so it is necessary but not sufficient to record a takeover. S3 names are one global namespace pinned to a region; confirm the name is genuinely claimable (the right region, and not already taken in the global namespace) and **prove it with a benign own-account claim** before recording anything, because a signature-only takeover is the #1 false-positive class for this bug type (it gets closed Not-Reproducible). `agent/references/subdomain-takeover.md` is the single source of truth for the per-provider claimability rules and the own-account-claim proof — defer to it rather than recording on the `NoSuchBucket` result alone.
 
 Record the bucket-to-consumer mapping as intel before dispatching downstream specialists. This is what turns "a public bucket" into "the static-asset backing for the customer admin portal at admin.example.com."
 
@@ -137,3 +137,4 @@ Cleanup obligation: any object downloaded to the runtime container or the host s
 - `agent/skills/source-analysis/SKILL.md` — for any source files the swarm workers want to manually trace before recording
 - `agent/skills/case-dispatching/SKILL.md` — operator-side coordination of the swarm + consolidating dispatches
 - `agent/operator-core.md` Swarm Dispatch section — the `start-swarm` helper this skill depends on
+- `agent/references/subdomain-takeover.md` — subdomain-takeover claimability: why a `NoSuchBucket` / dangling-CNAME signature is necessary-but-not-sufficient, the per-provider claimability rules (region pinning, global-namespace already-taken, cert gates, reserved labels, owned parent zones), and the benign own-account claim that proves or kills a candidate before you record it

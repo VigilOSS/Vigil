@@ -122,13 +122,21 @@ def resolve_rate_limit(value: float | str | None) -> float | None:
     written to scope.json, or ``None`` when unset.
 
     ``None``/empty preserves today's behavior (per-tool defaults; agent
-    discretion — no hard gate). A supplied value must be a positive number;
-    anything else raises SystemExit so a malformed cap can never be persisted.
-    The value is a PER-HOST request-rate ceiling (req/s, summed across all
-    tools and threads against any single target host), per the rate-norms
-    research recommendation (programs frame caps per-host/per-service, and a
-    conservative per-host cap is what keeps any single origin under its WAF
-    threshold).
+    discretion — no hard gate). A supplied value must be a number of at least
+    1 req/s; anything else raises SystemExit so a malformed cap can never be
+    persisted.
+
+    The value is a PER-INVOCATION / GLOBAL request-rate ceiling (req/s): httpx
+    ``-rate-limit`` and katana ``-rl`` are single global token buckets, so the
+    cap bounds the AGGREGATE rate of the bulk web stage it is applied to over the
+    whole in-scope host set probed in one invocation, and bounds per-host only as
+    a side effect. It must be at least 1 because httpx ``-rate-limit`` /
+    katana ``-rl`` take an INTEGER req/s and cannot express a fractional rate — a
+    sub-1 cap (e.g. 0.5) would otherwise floor UP to 1 (2x the intended ceiling),
+    so it is rejected here rather than silently doubled. Only the recon
+    pipeline's bulk web stages (httpx liveness, katana crawl, js-mining
+    body-fetch) consume this cap today; it does NOT cover the recon-specialist's
+    nuclei/ffuf/nmap/whatweb/nikto probes or gau body-fetches.
     """
     if value is None:
         return None
@@ -143,9 +151,12 @@ def resolve_rate_limit(value: float | str | None) -> float | None:
                 f"--rate-limit '{text}' is not a number (req/s)."
             ) from exc
     rate = float(value)
-    if rate <= 0:
+    if rate < 1:
         raise SystemExit(
-            f"--rate-limit must be a positive number of req/s, got {rate}."
+            f"--rate-limit must be at least 1 req/s, got {rate:g}. httpx "
+            "-rate-limit and katana -rl take an integer req/s and cannot express "
+            "a fractional rate; a sub-1 cap would floor up to 1 (2x the intended "
+            "ceiling)."
         )
     return rate
 
@@ -166,8 +177,12 @@ class CreateEngagementOptions:
     # out-of-scope carve-outs, written into scope.json for HTTP-target engagements.
     required_headers: dict[str, str] = field(default_factory=dict)
     out_of_scope: list[str] = field(default_factory=list)
-    # Optional PER-HOST request-rate ceiling (req/s, summed across all tools and
-    # threads against any single host) for target-facing recon stages. None
+    # Optional PER-INVOCATION / GLOBAL request-rate ceiling (req/s) for the recon
+    # pipeline's bulk web stages (httpx liveness, katana crawl, js-mining body-
+    # fetch). httpx -rate-limit / katana -rl are single global token buckets, so
+    # the cap bounds the aggregate stage rate over the whole in-scope host set and
+    # bounds per-host only as a side effect; it does NOT cover the recon-
+    # specialist's nuclei/ffuf/nmap/whatweb/nikto probes or gau body-fetches. None
     # preserves today's behavior (per-tool defaults; agent discretion — no hard
     # gate). Written into scope.json's ``rate_limit`` only when set, for
     # HTTP-target engagements.

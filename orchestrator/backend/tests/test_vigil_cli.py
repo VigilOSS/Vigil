@@ -741,8 +741,9 @@ def test_engagement_create_persists_header_and_rate_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # --header (repeatable) + --rate-limit both land in scope.json for a web
-    # engagement. The cap is a PER-HOST req/s ceiling; recon stages (stage 2)
-    # read it back via assess.lib.scope.rate_limit / rate_caps_for_dir.
+    # engagement. The cap is a per-invocation / GLOBAL req/s ceiling (bounds
+    # per-host as a side effect); the recon pipeline's bulk web stages read it
+    # back via assess.lib.scope.rate_limit / rate_caps_for_dir.
     from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
@@ -804,21 +805,60 @@ def test_engagement_create_omits_rate_limit_when_unset(
 
 
 def test_resolve_rate_limit_accessor() -> None:
-    # The shared resolver: None/empty -> None (unchanged default); a positive
-    # number passes through; non-positive / non-numeric raise SystemExit so a
-    # malformed cap is never persisted.
+    # The shared resolver: None/empty -> None (unchanged default); a number >= 1
+    # passes through; non-numeric AND sub-1 values (0, negative, fractional <1)
+    # raise SystemExit so a malformed/unexpressible cap is never persisted. httpx
+    # -rate-limit / katana -rl take an integer req/s, so a sub-1 cap (e.g. 0.5)
+    # would floor UP to 1 (2x the intended ceiling) — reject it at the boundary.
     from vigil_cli.engagements import resolve_rate_limit
 
     assert resolve_rate_limit(None) is None
     assert resolve_rate_limit("") is None
     assert resolve_rate_limit(5) == 5.0
     assert resolve_rate_limit("3.5") == 3.5
+    assert resolve_rate_limit(1) == 1.0          # boundary: exactly 1 req/s is allowed
     with pytest.raises(SystemExit):
         resolve_rate_limit(0)
     with pytest.raises(SystemExit):
         resolve_rate_limit(-1)
     with pytest.raises(SystemExit):
+        resolve_rate_limit(0.5)                  # sub-1 fractional cap now rejected
+    with pytest.raises(SystemExit):
+        resolve_rate_limit("0.5")                # ...including the string form
+    with pytest.raises(SystemExit):
         resolve_rate_limit("bogus")
+
+
+def test_engagement_create_rejects_sub1_rate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A sub-1 --rate-limit must be rejected at create: httpx -rate-limit /
+    # katana -rl take an integer req/s, so a 0.5 cap would floor UP to 1 (2x the
+    # intended ceiling). Reject it rather than silently doubling the cap.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    with pytest.raises(SystemExit) as exc:
+        main_module.main(
+            [
+                "--root",
+                str(install_root),
+                "engagement",
+                "create",
+                "--type",
+                "web",
+                "https://app.example.com",
+                "--hosts",
+                "app.example.com",
+                "--no-prompt",
+                "--rate-limit",
+                "0.5",
+            ]
+        )
+    assert "at least 1 req/s" in str(exc.value)
 
 
 def test_engagement_create_rate_limit_rejected_for_code_engagement(

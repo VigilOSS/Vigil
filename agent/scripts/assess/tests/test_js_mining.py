@@ -151,7 +151,7 @@ def test_rate_cap_clamps_body_fetch(monkeypatch, tmp_path):
     )
     httpx_runs = [c for c in captured if c and c[0] == "httpx"]
     rate = httpx_runs[0][httpx_runs[0].index("-rate-limit") + 1]
-    assert rate == "3"  # clamped to per-host cap (below the default 30)
+    assert rate == "3"  # clamped to the global (per-invocation) cap (below the default 30)
 
 
 def test_jsluice_endpoints_merged_when_present(monkeypatch, tmp_path):
