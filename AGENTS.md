@@ -44,6 +44,10 @@ desyncs the colocation. If you only know Git, internalize these differences firs
   message; `jj new` opens a fresh empty change on top (so the described one becomes its parent).
   `jj log` shows the graph: the short *change-id* on the left, the Git commit hash on the right, and
   any bookmarks inline.
+- **Write commit messages for the next developer, not yourself.** An imperative summary of *what*
+  changed plus a body explaining *why* — no internal codenames, workstream labels, or "Phase N"
+  jargon that means nothing outside this session; end with the `Co-Authored-By` trailer. Someone
+  reading `jj log`/`git log` cold should understand the change without asking.
 - **Bookmarks are branches.** `jj` uses *bookmarks* instead of Git branches. PRs here are created with
   `jj git push --change @` (alias `-c`), which mints an auto-named `push-<random>` bookmark and pushes
   it — that is why the PR head branches are named e.g. `push-ommwlslwsorl`. To update an open PR,
