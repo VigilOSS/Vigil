@@ -10,7 +10,7 @@ Activate when scope.json `hosts` contains `*.domain` entries (e.g., `*.example.c
 
 ## Phase 0: Enumerate Subdomains
 
-Run the staged composition end-to-end via `vigil assess kali ...`. Methodology and exact invocations live in `agent/skills/subdomain-enumeration/SKILL.md`; this doc is the prioritization/sliding-window companion.
+The **operator** runs the staged composition end-to-end as the `vigil assess recon` job (not a specialist dispatch); a specialist uses this doc + `agent/skills/subdomain-enumeration/SKILL.md` to **assess** the job's output and prioritize what to re-run. This doc is the prioritization/sliding-window companion.
 
 1. Identify which domains have `*.domain` entries in the `hosts` array.
 2. **Tooling preflight** — `vigil assess kali exec --technique HEALTH --intent "subdomain-enum tooling preflight" --probe-kind fingerprint --phase recon --timeout 60 -- which massdns puredns dnsx subfinder shuffledns alterx cero asnmap bbot`. Missing binaries → fix the runtime, do not silently degrade.

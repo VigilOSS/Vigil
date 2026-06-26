@@ -12,7 +12,7 @@ origin: Vigil
 
 - Beginning of engagement when the `hosts` array in scope.json includes `*.domain` entries (e.g., `*.target.example`).
 - Need to discover additional attack surface beyond the primary domain.
-- **Phase 1a (first-class) when scope.json `hosts` contains `*.domain` entries** — dispatched BEFORE the parallel recon+source pass so live subdomains land in the endpoint inventory before downstream steps depend on them.
+- **Phase 1a (first-class) when scope.json `hosts` contains `*.domain` entries** — the **operator** runs the spine as the `vigil assess recon` job before the 1b recon+source pass; a specialist loads this skill to **assess** that job's output (bound rules, stop reasons, completeness) and recommend re-runs, not to execute the phases itself.
 - After finding references to subdomains in JS/HTML source code.
 
 > **Register out-of-scope carve-outs in `scope.json` `out_of_scope` before enumerating.** Wildcard expansion surfaces hosts the program excluded (telecom-PTR space, vendor apexes, carved-out subdomains). The `vigil assess recon` pipeline scope-filters the resolved set between the dns and web stages, so authoring the deny-list up front keeps bulk liveness/crawl off out-of-scope hosts. A carve-out added mid-run only applies on the next `--resume`.
