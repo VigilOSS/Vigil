@@ -407,6 +407,11 @@ def _merge_liveness(primary: Path, extra: Path) -> int:
 def run(args) -> None:
     _apply_arg_defaults(args)
     cfg = load_config(args.engagement_dir)
+    # `--engagement-dir` defaults to None; load_config resolves the real dir (cwd
+    # scope.json or $ENGAGEMENT_DIR). Write it back so post-config reads/stages —
+    # rate caps, host-route required-header injection, scope filtering — see the
+    # resolved path instead of None (which would raise in rate_caps_for_dir).
+    args.engagement_dir = cfg.engagement_dir
     hosts_path = Path(anchor_engagement_relative(args.hosts_file, args.engagement_dir))
     if not hosts_path.is_file():
         print(f"web-discovery: hosts file not found: {hosts_path}", file=sys.stderr)

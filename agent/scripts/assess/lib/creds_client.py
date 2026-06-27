@@ -81,6 +81,24 @@ def load_identities(
         data = _empty_identities()
     if not isinstance(data, dict) or not isinstance(data.get("identities"), dict):
         data = _empty_identities()
+    if not data["identities"]:
+        # Credentials are backend-owned now; there is no auto-import of a
+        # pre-existing on-disk auth.json. Surface the gap loudly instead of
+        # silently running anonymous, so an engagement upgraded with a populated
+        # auth.json is recovered via `vigil auth import` rather than losing its
+        # identities. Auto-migration is intentionally left as a maintainer choice.
+        try:
+            legacy = Path(engagement_dir) / "auth.json"
+            if legacy.is_file() and legacy.stat().st_size > 2:
+                _warn_once(
+                    f"{key}:legacy-auth",
+                    f"{key} has no backend credentials but a legacy auth.json is "
+                    f"present ({legacy}) — it is NOT auto-imported; run "
+                    f"`vigil auth import {legacy}` to restore those identities, "
+                    f"otherwise this engagement runs anonymous.",
+                )
+        except OSError:
+            pass
     _cache[key] = data
     return data
 

@@ -177,6 +177,32 @@ def test_detect_akamai_access_denied_is_flagged():
     assert "akamai" in reason.lower()
 
 
+def test_access_denied_without_akamai_marker_is_not_flagged():
+    # "Access Denied" is also the default IIS/nginx/app 403 title. A real origin
+    # 403 carrying the phrase with NO Akamai cookie/header (and a non-JS-shell
+    # body) must be recorded as the app's response, not suppressed as a challenge.
+    body = (
+        "<html><head><title>Access Denied</title></head><body>"
+        "<h1>Access Denied</h1><p>You do not have permission to access this "
+        "resource on this server.</p></body></html>"
+    )
+    is_waf, _ = ko.detect_waf_challenge(body, "", {"Server": "nginx", "status_code": "403"})
+    assert is_waf is False
+
+
+def test_access_denied_corroborated_by_akamai_edge_header_is_flagged():
+    # The same phrase WITH an Akamai edge marker present IS a challenge. Uses
+    # x-akamai (an edge marker, not itself a standalone signature) so the
+    # corroboration path — not the named pass — is what flags it.
+    is_waf, reason = ko.detect_waf_challenge(
+        "<html><body>Access Denied</body></html>",
+        "",
+        {"X-Akamai-Request-ID": "abc123", "status_code": "403"},
+    )
+    assert is_waf is True
+    assert "access denied" in reason.lower()
+
+
 def test_detect_akamai_marker_in_headers_only_is_flagged():
     # _abck / AkamaiGHost ride the headers; the body alone is generic. The
     # header haystack must still surface the named signature.

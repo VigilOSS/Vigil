@@ -242,7 +242,6 @@ _WAF_NAMED_SIGNATURES: tuple[tuple[str, str], ...] = (
     ("ak_bmsc", "akamai"),
     ("bm_sz", "akamai"),
     ("akamaighost", "akamai"),
-    ("access denied", "akamai"),
     ("reference&#32;&#35;", "akamai"),
     # Cloudflare
     ("cf-chl", "cloudflare"),
@@ -261,6 +260,20 @@ _WAF_NAMED_SIGNATURES: tuple[tuple[str, str], ...] = (
     ("_px", "perimeterx"),
     ("x-sucuri-id", "sucuri"),
     ("sucuri website firewall", "sucuri"),
+)
+
+# Generic block phrases that ALSO appear on legitimate origin 401/403 pages, so
+# they flag ONLY when corroborated by a vendor marker in the SAME response.
+# "Access Denied" is the Akamai Ghost body title, but it is equally the default
+# IIS / nginx / app-level 403 page — so the bare phrase must never flag on its own
+# (a real Akamai block still trips _abck/AkamaiGHost, or the 403 generic-shape
+# pass). Each entry: (phrase, vendor, corroborating markers — any one suffices).
+_WAF_CORROBORATION_PHRASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "access denied",
+        "akamai",
+        ("_abck", "ak_bmsc", "bm_sz", "akamaighost", "x-akamai", "reference&#32;&#35;"),
+    ),
 )
 
 # CDN / edge / bot-defense fingerprints used by the generic-shape pass. Presence
@@ -485,6 +498,18 @@ def detect_waf_challenge(
     for needle, vendor in _WAF_NAMED_SIGNATURES:
         if needle in haystack:
             return True, f"{vendor} WAF/bot-challenge signature: '{needle}'"
+
+    # Generic block phrases (e.g. "Access Denied") flag ONLY when a vendor marker
+    # is also present, so a legitimate origin 401/403 carrying the phrase is
+    # recorded as the app's response rather than suppressed as a challenge.
+    for phrase, vendor, markers in _WAF_CORROBORATION_PHRASES:
+        if phrase in haystack:
+            hit = next((m for m in markers if m in haystack), "")
+            if hit:
+                return True, (
+                    f"{vendor} WAF/bot-challenge signature: '{phrase}' "
+                    f"(corroborated by '{hit}')"
+                )
 
     # The shape pass measures the real BODY (curl ``-i`` header block stripped) and
     # uses the best-effort status from the threaded headers or a leading HTTP line.
@@ -769,18 +794,25 @@ _SHELL_SUBCMD_HEAD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A shell command-string flag: a bare ``-c`` OR a combined short-option bundle
+# ending in ``c`` (``bash -lc`` / ``sh -ec`` / ``-xc``). ``c`` must be LAST so the
+# script is still the next argument; ``-cl`` etc. are not command-string forms.
+_SHELL_C_FLAG_RE = re.compile(r"-[A-Za-z]*c")
+
 
 def _shell_script_index(cmd: list[str]) -> Optional[int]:
-    """Index of the ``-c`` script argument when ``cmd`` is a sh/bash ``-c``
-    wrapper, else ``None``. Matches both the bare (``sh``) and absolute
-    (``/bin/bash``) forms via the shared ``_SHELL_BINARIES`` set."""
+    """Index of the ``-c`` script argument when ``cmd`` is a sh/bash command-string
+    wrapper, else ``None``. Recognizes a bare ``-c`` and combined short-option
+    bundles ending in ``c`` (``bash -lc 'curl ...'``, ``sh -ec '...'``), and matches
+    both the bare (``sh``) and absolute (``/bin/bash``) head forms via the shared
+    ``_SHELL_BINARIES`` set."""
     if not cmd:
         return None
     head = cmd[0]
     if head not in _SHELL_BINARIES and os.path.basename(head) not in _SHELL_BINARIES:
         return None
     for idx in range(1, len(cmd) - 1):
-        if cmd[idx] == "-c":
+        if _SHELL_C_FLAG_RE.fullmatch(cmd[idx]):
             return idx + 1
     return None
 

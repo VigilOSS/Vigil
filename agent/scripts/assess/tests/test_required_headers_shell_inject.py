@@ -143,6 +143,23 @@ def test_bash_c_and_abs_path_variants() -> None:
         assert _has_header(_subcommands(cmd[2])[0], "X-Bug-Bounty", "vigiloss")
 
 
+def test_shell_combined_c_flag_bundles_inject_header() -> None:
+    # `bash -lc` / `sh -ec` / `-xc` bundle -c with other short flags; the wrapper
+    # is still a command-string script, so the inner curl must get the header.
+    # Previously only a STANDALONE -c was recognized, so `-lc` was treated as a
+    # non-injectable invocation and the mandatory header was dropped.
+    for head, flag in (("bash", "-lc"), ("sh", "-ec"), ("/bin/bash", "-xc")):
+        cmd = [head, flag, "curl http://a.example.com ; curl http://b.example.com"]
+        status = kali_output._apply_required_headers(cmd, "curl", dict(HDR))
+        assert status == "injected", (head, flag, status)
+        assert cmd[:2] == [head, flag]
+        subs = _subcommands(cmd[2])
+        assert len(subs) == 2
+        for tokens in subs:
+            assert tokens[0] == "curl"
+            assert _has_header(tokens, "X-Bug-Bounty", "vigiloss"), (head, flag, tokens)
+
+
 # --------------------------------------------------------------------------- #
 # Idempotency edge: name present with a DIFFERENT value still counts as present
 # --------------------------------------------------------------------------- #
