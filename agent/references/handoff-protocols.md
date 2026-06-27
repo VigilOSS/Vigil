@@ -66,7 +66,7 @@ Output: new API endpoints, routes, secrets/tokens, config objects, coverage gaps
 
 After both recon-specialist and source-analyzer return:
 1. Verify coverage gaps are resolved or accepted
-2. Dispatch surface-collector with Phase 1 endpoint artifacts, targets from scope.json, auth.json state, and `$DIR/cases.db` path — **bring `agent/skills/surface-collection/SKILL.md`**
+2. Dispatch surface-collector with Phase 1 endpoint artifacts, targets from scope.json, credential state (from `vigil auth status`), and `$DIR/cases.db` path — **bring `agent/skills/surface-collection/SKILL.md`**
 
 ## Phase 2 Returns
 

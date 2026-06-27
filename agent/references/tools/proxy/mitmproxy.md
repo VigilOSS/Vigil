@@ -4,7 +4,7 @@ description: "Mitmproxy session capture: setup, CA cert install, FoxyProxy confi
 
 # Mitmproxy Session Capture
 
-Intercept browser traffic to capture authenticated sessions (cookies, tokens, headers) into `auth.json` for use by engagement agents.
+Intercept browser traffic to capture authenticated sessions (cookies, tokens, headers) into the engagement's backend credential store for use by engagement agents.
 
 ## Quick Start
 
@@ -67,7 +67,7 @@ vigil mitmproxy start <engagement-key>
 2. Configure browser proxy (see above)
 3. Navigate to the target login page and authenticate
 4. Browse a few authenticated pages (admin, settings, API endpoints)
-5. The proxy addon auto-detects login flows and writes cookies/tokens to `auth.json`
+5. The proxy addon auto-detects login flows and POSTs the captured cookies/tokens to the engagement's backend credential store (the `default` identity)
 6. Disable the proxy in FoxyProxy when done
 
 If auto-capture misses the session (addon error, non-standard login flow):
@@ -81,7 +81,7 @@ If auto-capture misses the session (addon error, non-standard login flow):
 | `http://mitm.it` says "traffic not passing through mitmproxy" | FoxyProxy is set to HTTPS mode -- change to HTTP |
 | Certificate errors after proxy restart | Check if the `mitmproxy-ca` volume exists: `docker volume ls \| grep mitmproxy`. If missing, the CA was regenerated -- re-install the cert |
 | Proxy container exits immediately | Check logs: `vigil logs mitmproxy --lines 20`. Common: port 8080 already in use |
-| `auth.json` not updated after login | Check for addon errors in logs. The `_detect_login` function looks for `set-cookie` headers and token fields in response bodies |
+| Credentials not updated after login (`vigil auth status` still anonymous) | Check for addon errors in logs. The `_detect_login` function looks for `set-cookie` headers and token fields in response bodies |
 | Browser still shows cert errors after trusting | Quit browser fully and reopen. macOS may also need: System Settings > Network > clear DNS cache |
 
 ## Container Management
@@ -108,6 +108,6 @@ vigil mitmproxy start <engagement-key> --port 9090
 The proxy runs `mitmdump` with `proxy_addon.py`, which:
 - Filters noise (analytics, CDNs, tracking pixels)
 - Classifies requests by type (API, form, page, JS, GraphQL, WebSocket, etc.)
-- Detects login flows and captures session material to `auth.json`
+- Detects login flows and POSTs captured session material to the backend credential store
 - Records intercepted traffic to `cases.db` for work-buffer ingestion
 - Posts request observations to the orchestrator backend (when available)

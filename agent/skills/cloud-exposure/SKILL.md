@@ -15,11 +15,13 @@ A public bucket is not automatically critical. Severity rides on **what is in th
 - A bucket listing is publicly accessible (S3 `?list-type=2`, GCS XML listing, Azure `?comp=list`).
 - A domain or subdomain CNAMEs to a bucket endpoint and the bucket is browseable.
 - Recon discovered references to bucket names in HTML / JS source / DNS history that resolve to live buckets.
-- A subdomain takeover candidate sits on bucket infrastructure (dangling CNAME → unclaimed bucket).
+- A subdomain takeover candidate sits on bucket infrastructure (dangling CNAME → a bucket that returns `NoSuchBucket`) — treat this as a *screening* signal to work claimability through Step 2, not as a finding on its own (see `agent/references/subdomain-takeover.md`).
 - During code analysis, hard-coded bucket names point to buckets you can reach unauthenticated.
 
 ## Tools
 
+- `vigil assess kali exec -- cloud_enum -k <keyword>` to **discover** unknown bucket/blob/host names across AWS, Azure, and GCP from an org/brand/product keyword — reach for it when recon has a company name but no concrete bucket yet, because it mutates the keyword against its built-in fuzz list and probes all three clouds in one pass instead of you hand-guessing one name at a time (use `--technique OSINT --probe-kind fingerprint --phase recon`)
+- `vigil assess kali exec -- s3scanner -bucket <name>` (or `-bucket-file <list>`) to **scan a known/candidate S3 bucket** for existence, region, and per-grant permissions (READ / WRITE / READ_ACP / WRITE_ACP) without AWS creds — it deterministically reports the open/closed and `bucket_not_found` state, which is the screening input the takeover-claimability check in Step 2 needs (a `bucket_not_found` is a *screening* signal, not a takeover verdict — see `agent/references/subdomain-takeover.md`)
 - `vigil assess kali exec -- curl ...` for the bucket listing and sample object pulls (use `--technique INFO-DISCLOSURE --probe-kind fingerprint --phase recon --timeout 60`)
 - `vigil assess kali exec -- aws s3 ls s3://<bucket> --no-sign-request` and `aws s3 cp` for AWS listings (or `gsutil ls` / `az storage blob list` for GCS/Azure)
 - `vigil assess kali exec -- trufflehog filesystem <dir>` for offline secret scanning over a downloaded sample (host-side tool, not target-facing)
@@ -29,7 +31,20 @@ A public bucket is not automatically critical. Severity rides on **what is in th
 
 ## Investigation Procedure
 
-Do these five steps in order. Skipping ahead (e.g. recording severity from the listing alone) is exactly the failure mode this skill prevents.
+Do these steps in order. Skipping ahead (e.g. recording severity from the listing alone) is exactly the failure mode this skill prevents. Step 0 is the discovery pass; start there only when you have a keyword but no concrete bucket — when recon already handed you a specific bucket name, begin at Step 1.
+
+### Step 0 — Enumerate candidate buckets you don't have a name for yet
+
+When recon gives you a company / product / brand keyword but no concrete bucket, enumerate the namespace before sampling — hand-guessing single names misses the bulk of the surface, and a single keyword routinely expands to dozens of live storage endpoints across the three clouds. `cloud_enum` mutates the keyword against its built-in fuzz list and probes AWS S3, Azure blob/host/container, and GCP buckets in one pass:
+
+```bash
+vigil assess kali exec --technique OSINT --intent "multi-cloud bucket enumeration for <keyword>" \
+  --probe-kind fingerprint --phase recon --timeout 1800 -- \
+  cloud_enum -k <keyword> -k <keyword>.com -k <product-name> \
+    -l /engagements/$ENGAGEMENT_KEY/scans/cloud-exposure/cloud_enum.log
+```
+
+Route each result by its state: an OPEN S3 bucket goes into Step 1 (sample) and Step 2 (consumer mapping); a bucket cloud_enum reports as **absent / not-found** is a *takeover screening* candidate — run it through the s3scanner + claimability check in Step 2, never record it as a takeover on the not-found result alone (`agent/references/subdomain-takeover.md`).
 
 ### Step 1 — Sample, don't slurp
 
@@ -49,7 +64,21 @@ A bucket sitting in isolation is less interesting than a bucket that backs a kno
 - **DNS**: `dig +short <bucket>.s3.amazonaws.com` and `dig +short <consumer-host>` — does any in-scope host CNAME to this bucket?
 - **JS source references**: `grep -r "<bucket-name>" agent/engagements/$ENGAGEMENT_KEY/scans/` — which scraped JS or HTML references this bucket?
 - **Cloudfront/CDN distribution**: `curl -sI https://<bucket>.s3.amazonaws.com/` looking for `x-amz-bucket-region` and any CDN headers.
-- **Subdomain takeover signal**: if a scope subdomain CNAMEs to a bucket that returns `NoSuchBucket`, the bucket is unclaimed and is a takeover finding.
+- **Subdomain takeover SCREENING signal (not a verdict)**: a scope subdomain CNAME'ing to a bucket that returns `NoSuchBucket` is the *screening* signal that the name is unserved — it proves the bucket is absent, **not** that *you* can re-bind the name, so it is necessary but not sufficient to record a takeover. S3 names are one global namespace pinned to a region; confirm the name is genuinely claimable (the right region, and not already taken in the global namespace) and **prove it with a benign own-account claim** before recording anything, because a signature-only takeover is the #1 false-positive class for this bug type (it gets closed Not-Reproducible). `agent/references/subdomain-takeover.md` is the single source of truth for the per-provider claimability rules and the own-account-claim proof — defer to it rather than recording on the `NoSuchBucket` result alone.
+
+Use `s3scanner` to turn the bucket name into a deterministic existence + permission + region report before mapping it — it checks the bucket creds-free and is the screening input for the takeover path, so you are reading a tool's verdict rather than inferring from a curl status:
+
+```bash
+# Scan one bucket (or -bucket-file <list> from Step 0) for existence, region, and
+# the per-grant ACL (READ / WRITE / READ_ACP / WRITE_ACP). `bucket_not_found` is a
+# takeover SCREENING signal, not a verdict — feed it to the claimability check.
+vigil assess kali exec --technique INFO-DISCLOSURE --intent "s3scanner permission + existence scan of <bucket>" \
+  --probe-kind fingerprint --phase recon --timeout 120 -- \
+  s3scanner -bucket <bucket> -json \
+    > /engagements/$ENGAGEMENT_KEY/scans/cloud-exposure/<bucket>-s3scanner.json
+```
+
+When s3scanner reports `bucket_not_found` (or `NoSuchBucket`) for a name a scope subdomain still CNAMEs to, that is the *screening* signal that the name is unserved — it proves the bucket is absent, **not** that you can re-bind it. S3 names are one global namespace pinned to a region; confirm the name is genuinely claimable (right region, not already taken globally) and **prove it with a benign own-account claim** before recording anything, because a signature-only takeover is the #1 false-positive class for this bug type. Defer to `agent/references/subdomain-takeover.md` for the per-provider claimability rules and the own-account-claim proof rather than recording on the s3scanner result alone.
 
 Record the bucket-to-consumer mapping as intel before dispatching downstream specialists. This is what turns "a public bucket" into "the static-asset backing for the customer admin portal at admin.example.com."
 
@@ -137,3 +166,4 @@ Cleanup obligation: any object downloaded to the runtime container or the host s
 - `agent/skills/source-analysis/SKILL.md` — for any source files the swarm workers want to manually trace before recording
 - `agent/skills/case-dispatching/SKILL.md` — operator-side coordination of the swarm + consolidating dispatches
 - `agent/operator-core.md` Swarm Dispatch section — the `start-swarm` helper this skill depends on
+- `agent/references/subdomain-takeover.md` — subdomain-takeover claimability: why a `NoSuchBucket` / dangling-CNAME signature is necessary-but-not-sufficient, the per-provider claimability rules (region pinning, global-namespace already-taken, cert gates, reserved labels, owned parent zones), and the benign own-account claim that proves or kills a candidate before you record it

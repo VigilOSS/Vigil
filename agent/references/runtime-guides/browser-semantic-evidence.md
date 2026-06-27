@@ -152,9 +152,11 @@ than an interactive browser because it can emit deterministic, bounded JSON:
 - screenshot path and optional trace/HAR path;
 - service-worker/cache/storage metadata with secrets redacted.
 
-Until that verb exists, do not claim it ran. Use Katana headless for crawl
-coverage, or ask the operator for a scoped one-off audited Playwright script
-through `vigil assess kali exec`.
+Until that typed verb exists, do not claim it ran. Use Katana headless for crawl
+coverage. For an authenticated/defended-login flow where you must drive a real
+browser to hold a session, use the headed stealth Playwright skeleton in
+`agent/skills/browser-automation/SKILL.md` (host node) or ask the operator for a
+scoped one-off audited Playwright script through `vigil assess kali exec`.
 
 ### Adjacent tools
 

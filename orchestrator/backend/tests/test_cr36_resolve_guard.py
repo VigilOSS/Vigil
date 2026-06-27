@@ -169,9 +169,15 @@ def test_resolve_host_ips_ip_literal_is_empty():
     assert kr.resolve_host_ips("") == []
 
 
-def test_pin_tools_excludes_sqlmap_includes_http_set():
+def test_pin_tools_excludes_sqlmap_and_ffuf_includes_http_set():
     kr = _import("assess.lib.kali_resolve")
-    assert kr.RESOLVE_PIN_TOOLS == frozenset({"curl", "httpx", "nuclei", "ffuf", "katana"})
+    # ffuf is excluded (I-10): the image ffuf (v2.x) has no --resolve flag — its
+    # Go flag parser rejects it and aborts with exit 2, so a pin would turn a
+    # recoverable resolver flap into a hard failure. sqlmap likewise has no
+    # host-pin flag. Both stay OUT of the pin set; the http=000 guard handles them.
+    assert kr.RESOLVE_PIN_TOOLS == frozenset({"curl", "httpx", "nuclei", "katana"})
+    assert "ffuf" not in kr.RESOLVE_PIN_TOOLS
+    assert "sqlmap" not in kr.RESOLVE_PIN_TOOLS
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -325,7 +331,8 @@ def fake_engagement(tmp_path, monkeypatch):
     eng_dir = tmp_path / "engagements" / "2026-06-13-test"
     eng_dir.mkdir(parents=True, exist_ok=True)
     (eng_dir / "scope.json").write_text(json.dumps({"hostname": "example.com"}))
-    (eng_dir / "auth.json").write_text(json.dumps({"kind": "none"}))
+    # Credentials are centralized in the backend store; no auth.json file. The
+    # runtime creds_client fails closed (auth_context "none") with no backend.
     monkeypatch.setenv("ENGAGEMENT_DIR", str(eng_dir))
     monkeypatch.setenv("AGENT_NAME", "vulnerability-analyst")
     monkeypatch.delenv("VIGIL_NO_RESOLVE_PIN", raising=False)

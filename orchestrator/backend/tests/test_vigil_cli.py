@@ -78,7 +78,6 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     )
 
     scope = json.loads((created.path / "scope.json").read_text(encoding="utf-8"))
-    auth = json.loads((created.path / "auth.json").read_text(encoding="utf-8"))
     manifest = json.loads((created.path / "engagement.json").read_text(encoding="utf-8"))
 
     assert created.path.parent == install_root / "agent" / "engagements"
@@ -88,9 +87,8 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     assert scope["exploit_policy"] == "pause"
     assert scope["exploit_review_state"] == "pending"
     assert scope["approved_targets"] == []
-    assert auth["mode"] == "none"
-    assert auth["state"] == "none"
-    assert auth["use_for_requests"] is False
+    # Credentials are centralized in the backend store; no auth.json scaffold.
+    assert not (created.path / "auth.json").exists()
     assert manifest["key"] == created.key
     assert (created.path / "cases.db").exists()
     assert (created.path / "start_codex.sh").exists()
@@ -614,7 +612,8 @@ def test_engagement_create_wizard_prompts_on_stderr_keep_stdout_path_only(
     _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
-    answers = iter(["app.example.com", "y"])
+    # target, attribution-header (blank = none), out-of-scope (blank = none), confirm.
+    answers = iter(["app.example.com", "", "", "y"])
     monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
 
     main_module.main(["--root", str(install_root), "engagement", "create", "--type", "web"])
@@ -638,8 +637,8 @@ def test_engagement_create_bare_invocation_runs_full_wizard_with_confirmation(
     _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
-    # type choice (1 = web), target, confirmation.
-    answers = iter(["1", "app.example.com", "y"])
+    # type choice (1 = web), target, attribution (blank=none), out-of-scope (blank), confirmation.
+    answers = iter(["1", "app.example.com", "", "", "y"])
     monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
 
     main_module.main(["--root", str(install_root), "engagement", "create"])
@@ -663,7 +662,8 @@ def test_engagement_create_wizard_confirmation_decline_aborts_without_writing(
     _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
-    answers = iter(["app.example.com", "n"])
+    # target, attribution (blank=none), out-of-scope (blank), decline confirm.
+    answers = iter(["app.example.com", "", "", "n"])
     monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
 
     with pytest.raises(SystemExit):
@@ -681,7 +681,8 @@ def test_engagement_create_wizard_reprompts_on_empty_required_answer(
     _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
-    answers = iter(["", "app.example.com", "y"])
+    # empty (reprompt), target, attribution (blank=none), out-of-scope (blank), confirm.
+    answers = iter(["", "app.example.com", "", "", "y"])
     monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
 
     main_module.main(["--root", str(install_root), "engagement", "create", "--type", "web"])
@@ -706,6 +707,9 @@ def test_engagement_create_interactive_with_complete_flags_skips_wizard(
         lambda *_args: (_ for _ in ()).throw(AssertionError("wizard must not engage when flags are complete")),
     )
 
+    # "Complete" now includes the attribution header + out-of-scope dimensions:
+    # supplying them via flags suppresses the wizard prompts entirely (the
+    # interactive header/OOS wizard otherwise fires for web engagements).
     main_module.main(
         [
             "--root",
@@ -717,11 +721,175 @@ def test_engagement_create_interactive_with_complete_flags_skips_wizard(
             "https://app.example.com",
             "--hosts",
             "app.example.com",
+            "--program",
+            "bugcrowd",
+            "--researcher",
+            "tester",
+            "--out-of-scope",
+            "blocked.example.com",
         ]
     )
 
     created_path = _created_path_from_stdout(capsys.readouterr().out)
     assert (created_path / "scope.json").is_file()
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["required_headers"] == {"X-Bug-Bounty": "tester"}
+    assert scope["out_of_scope"] == ["blocked.example.com"]
+
+
+def test_engagement_create_persists_header_and_rate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --header (repeatable) + --rate-limit both land in scope.json for a web
+    # engagement. The cap is a per-invocation / GLOBAL req/s ceiling (bounds
+    # per-host as a side effect); the recon pipeline's bulk web stages read it
+    # back via assess.lib.scope.rate_limit / rate_caps_for_dir.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "--type",
+            "web",
+            "https://app.example.com",
+            "--hosts",
+            "app.example.com",
+            "--no-prompt",
+            "--header",
+            "X-Bug-Bounty: vigiloss",
+            "--header",
+            "X-Trace: deadbeef",
+            "--rate-limit",
+            "5",
+        ]
+    )
+
+    created_path = _created_path_from_stdout(capsys.readouterr().out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["required_headers"] == {"X-Bug-Bounty": "vigiloss", "X-Trace": "deadbeef"}
+    assert scope["rate_limit"] == 5.0
+
+
+def test_engagement_create_omits_rate_limit_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Unset --rate-limit must leave scope.json with NO rate_limit key, so the
+    # accessor returns None and recon stages keep their per-tool defaults.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "https://app.example.com",
+            "--no-prompt",
+        ]
+    )
+
+    created_path = _created_path_from_stdout(capsys.readouterr().out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert "rate_limit" not in scope
+
+
+def test_resolve_rate_limit_accessor() -> None:
+    # The shared resolver: None/empty -> None (unchanged default); a number >= 1
+    # passes through; non-numeric AND sub-1 values (0, negative, fractional <1)
+    # raise SystemExit so a malformed/unexpressible cap is never persisted. httpx
+    # -rate-limit / katana -rl take an integer req/s, so a sub-1 cap (e.g. 0.5)
+    # would floor UP to 1 (2x the intended ceiling) — reject it at the boundary.
+    from vigil_cli.engagements import resolve_rate_limit
+
+    assert resolve_rate_limit(None) is None
+    assert resolve_rate_limit("") is None
+    assert resolve_rate_limit(5) == 5.0
+    assert resolve_rate_limit("3.5") == 3.5
+    assert resolve_rate_limit(1) == 1.0          # boundary: exactly 1 req/s is allowed
+    with pytest.raises(SystemExit):
+        resolve_rate_limit(0)
+    with pytest.raises(SystemExit):
+        resolve_rate_limit(-1)
+    with pytest.raises(SystemExit):
+        resolve_rate_limit(0.5)                  # sub-1 fractional cap now rejected
+    with pytest.raises(SystemExit):
+        resolve_rate_limit("0.5")                # ...including the string form
+    with pytest.raises(SystemExit):
+        resolve_rate_limit("bogus")
+
+
+def test_engagement_create_rejects_sub1_rate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A sub-1 --rate-limit must be rejected at create: httpx -rate-limit /
+    # katana -rl take an integer req/s, so a 0.5 cap would floor UP to 1 (2x the
+    # intended ceiling). Reject it rather than silently doubling the cap.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    with pytest.raises(SystemExit) as exc:
+        main_module.main(
+            [
+                "--root",
+                str(install_root),
+                "engagement",
+                "create",
+                "--type",
+                "web",
+                "https://app.example.com",
+                "--hosts",
+                "app.example.com",
+                "--no-prompt",
+                "--rate-limit",
+                "0.5",
+            ]
+        )
+    assert "at least 1 req/s" in str(exc.value)
+
+
+def test_engagement_create_rate_limit_rejected_for_code_engagement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # --rate-limit is HTTP-target only; a code engagement must reject it with a
+    # clear error rather than silently writing it into a non-HTTP scope.
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    with pytest.raises(SystemExit) as exc:
+        main_module.main(
+            [
+                "--root",
+                str(install_root),
+                "engagement",
+                "create",
+                "--type",
+                "code",
+                "myproj",
+                "--repo",
+                str(tmp_path / "repo"),
+                "--no-prompt",
+                "--rate-limit",
+                "5",
+            ]
+        )
+    assert "--rate-limit" in str(exc.value)
 
 
 def test_engagement_create_cli_json_output_replaces_bare_path(
@@ -763,9 +931,10 @@ def test_engagement_create_interactive_dry_run_skips_creation_confirmation(
     _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
-    # Only the target answer: a "Create engagement?" confirmation would
-    # exhaust the iterator and fail the test — dry-run must not ask it.
-    answers = iter(["app.example.com"])
+    # target + attribution (blank=none) + out-of-scope (blank). A
+    # "Create engagement?" confirmation would exhaust the iterator and fail the
+    # test — dry-run must not ask it.
+    answers = iter(["app.example.com", "", ""])
     monkeypatch.setattr("builtins.input", lambda *_args: next(answers))
 
     main_module.main(["--root", str(install_root), "engagement", "create", "--type", "web", "--dry-run"])
@@ -1056,6 +1225,236 @@ def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path
     assert database.read_text(encoding="utf-8") == "db"
     assert not (install_root / "agent" / "old-managed.txt").exists()
     assert not legacy_installer.exists()
+
+
+# --------------------------------------------------------------------------- #
+# W0 — install-staleness guard. `vigil install` stamps the source git sha into
+# .vigil-install-meta.json so `vigil status` can warn (non-fatally) when the
+# working root (~/vigil/agent tree) has fallen behind the source it was
+# installed from (the I-5 root cause: a lagging install silently disables the
+# whole feature set). Two-layer model: `vigil install`/`update` upgrades the
+# WORKING ROOT; `uv tool upgrade vigil` upgrades only the CLI BINARY.
+# --------------------------------------------------------------------------- #
+
+
+def _git_env() -> dict[str, str]:
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+    }
+
+
+def _git(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        text=True,
+        capture_output=True,
+        check=True,
+        env=_git_env(),
+    )
+    return result.stdout.strip()
+
+
+def _init_git_repo(root: Path, files: dict[str, str] | None = None) -> str:
+    """Init a minimal git repo at `root` with one commit; return HEAD sha."""
+    files = files or {"README.md": "seed\n"}
+    root.mkdir(parents=True, exist_ok=True)
+    for rel, content in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+    return _git(root, "rev-parse", "HEAD")
+
+
+def _git_commit(root: Path, rel: str, content: str) -> str:
+    (root / rel).write_text(content, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "more")
+    return _git(root, "rev-parse", "HEAD")
+
+
+def _minimal_status(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "install_root": "/x",
+        "install_exists": True,
+        "engagement_count": 0,
+        "orchestrator": {"state": "stopped", "healthy": False, "readiness": {}},
+        "runtime": {"state": "stopped", "mounts_ok": None, "resources": None},
+        "mitmproxy": {"state": "stopped", "ca_volume": False},
+        "oob": {"state": "stopped", "clients": [], "domain": "-"},
+        "backup": {"latest": None, "modified_at": None},
+        "legacy_both_missing_code_phase": [],
+        "install_staleness": {"state": "current"},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_install_meta_records_and_reads_back_source_sha(tmp_path: Path) -> None:
+    from vigil_cli.status import read_install_meta, write_install_meta
+
+    source = tmp_path / "source"
+    sha = _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+
+    meta = write_install_meta(install, source)
+    assert meta["source_sha"] == sha
+    assert (install / ".vigil-install-meta.json").is_file()
+
+    read = read_install_meta(install)
+    assert read is not None
+    assert read["source_sha"] == sha
+    assert "installed_at" in read
+
+
+def test_install_staleness_current_when_sha_matches(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness, write_install_meta
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    write_install_meta(install, source)
+
+    result = install_staleness(install, source_root=source)
+    assert result["state"] == "current"
+
+
+def test_install_staleness_stale_when_source_advances(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness, write_install_meta
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    write_install_meta(install, source)  # stamps the old sha
+
+    new_sha = _git_commit(source, "CHANGELOG.md", "v2\n")
+    result = install_staleness(install, source_root=source)
+    assert result["state"] == "stale"
+    assert result["current_source_sha"] == new_sha
+    assert result["behind_count"] == 1
+
+
+def test_install_staleness_unknown_without_resolvable_source(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness, write_install_meta
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    write_install_meta(install, source)
+
+    # A path that is not a git checkout yields no current sha -> unknown, not stale.
+    result = install_staleness(install, source_root=tmp_path / "not-a-repo")
+    assert result["state"] == "unknown"
+
+
+def test_install_staleness_no_stamp_when_meta_missing(tmp_path: Path) -> None:
+    from vigil_cli.status import install_staleness
+
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    install = tmp_path / "install"
+    install.mkdir()
+
+    result = install_staleness(install, source_root=source)
+    assert result["state"] == "no-stamp"
+
+
+def test_print_status_warns_when_working_root_behind_source(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.status import print_status
+
+    status = _minimal_status(
+        install_staleness={
+            "state": "stale",
+            "installed_sha": "a" * 40,
+            "current_source_sha": "b" * 40,
+            "behind_count": 3,
+        }
+    )
+    print_status(status)
+    out = capsys.readouterr().out
+    assert "warn" in out
+    assert "vigil install" in out
+    assert "uv tool upgrade vigil" in out
+    assert "3" in out
+
+
+def test_print_status_warns_on_missing_install_stamp(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.status import print_status
+
+    status = _minimal_status(install_staleness={"state": "no-stamp"})
+    print_status(status)
+    out = capsys.readouterr().out
+    assert "warn" in out
+    assert "vigil install" in out
+
+
+def test_print_status_silent_when_install_current(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.status import print_status
+
+    print_status(_minimal_status(install_staleness={"state": "current"}))
+    out = capsys.readouterr().out
+    assert "behind source" not in out
+    assert "install stamp" not in out
+
+
+def test_collect_status_includes_install_staleness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.status import collect_status
+
+    install = tmp_path / "install"
+    (install / "agent" / "engagements").mkdir(parents=True)
+    monkeypatch.setenv("VIGIL_SOURCE_DIR", str(tmp_path / "none"))
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        return DockerResult(0, "", "")
+
+    payload = collect_status(install, runner=runner)
+    assert "install_staleness" in payload
+    assert isinstance(payload["install_staleness"], dict)
+    assert "state" in payload["install_staleness"]  # type: ignore[operator]
+
+
+def test_install_cli_stamps_install_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+    from vigil_cli.status import read_install_meta
+
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
+    sha = _init_git_repo(source, {"README.md": "seed\n"})
+    install = tmp_path / "install"
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+
+    main_module.main(
+        ["--root", str(install), "--source", str(source), "install", "--skip-image-check"]
+    )
+    capsys.readouterr()
+
+    meta = read_install_meta(install)
+    assert meta is not None
+    assert meta["source_sha"] == sha
 
 
 def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
@@ -2299,29 +2698,197 @@ def test_logs_routes_to_centralized_targets(tmp_path: Path, monkeypatch: pytest.
     assert ["tail", "-n", "5", str(log_file)] in calls
 
 
-def test_auth_status_and_clear_operate_on_engagement_auth(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def _install_fake_credential_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict]:
+    """Stub auth_module._api with an in-memory backend keyed by engagement name.
+
+    Credentials are centralized in the orchestrator backend now; the CLI's real
+    status/clear/import logic runs against this fake store instead of auth.json.
+    Store shape: {eng_key: {"identities": {name: material}, "active_identity": name}}.
+    """
+    from vigil_cli import auth as auth_module
+
+    store: dict[str, dict] = {}
+
+    def _state(eng_dir: Path) -> dict:
+        return store.setdefault(
+            eng_dir.expanduser().resolve().name,
+            {"identities": {}, "active_identity": auth_module.DEFAULT_IDENTITY},
+        )
+
+    def fake_api(engagement_dir, method, path="", payload=None):
+        st = _state(Path(engagement_dir))
+        if method == "GET" and path == "":
+            return st
+        if method == "GET" and path == "/resolve":
+            active = st["active_identity"]
+            return {"identity_name": active, "material": st["identities"].get(active, {})}
+        if method == "GET" and path.startswith("/"):
+            return st["identities"].get(path[1:], {})
+        if method == "PUT" and path.startswith("/"):
+            name = path[1:]
+            material = {k: v for k, v in (payload or {}).items() if k != "make_active"}
+            st["identities"][name] = material
+            if (payload or {}).get("make_active"):
+                st["active_identity"] = name
+            return {"identity_name": name, "material": material}
+        if method == "POST" and path.endswith("/activate"):
+            st["active_identity"] = path.strip("/").split("/")[0]
+            return {"active_identity": st["active_identity"]}
+        if method == "DELETE" and path == "":
+            st["identities"].clear()
+            return {}
+        if method == "DELETE" and path.startswith("/"):
+            st["identities"].pop(path[1:], None)
+            return {}
+        return {}
+
+    monkeypatch.setattr(auth_module, "_api", fake_api)
+    return store
+
+
+def test_auth_status_and_clear_operate_on_engagement_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import auth as auth_module
     from vigil_cli import main as main_module
 
     install_root = tmp_path / "install"
     engagement = install_root / "agent" / "engagements" / "eng-1"
     engagement.mkdir(parents=True)
     (engagement / "scope.json").write_text("{}", encoding="utf-8")
+
+    store = _install_fake_credential_store(monkeypatch)
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    (engagement / "auth.json").write_text(
-        json.dumps({"mode": "manual", "state": "present", "expires_at": expires_at, "cookies": {"sid": "x"}, "headers": {}}),
-        encoding="utf-8",
-    )
+    store["eng-1"] = {
+        "identities": {
+            auth_module.DEFAULT_IDENTITY: {
+                "mode": "manual",
+                "state": "present",
+                "expires_at": expires_at,
+                "cookies": {"sid": "x"},
+                "headers": {},
+            }
+        },
+        "active_identity": auth_module.DEFAULT_IDENTITY,
+    }
 
     main_module.main(["--root", str(install_root), "auth", "status", "eng-1"])
     assert "present" in capsys.readouterr().out
 
     main_module.main(["--root", str(install_root), "auth", "clear", "eng-1"])
-    auth = json.loads((engagement / "auth.json").read_text(encoding="utf-8"))
-    assert auth["state"] == "missing"
-    assert auth["cookies"] == {}
+    # Clear with no --identity removes the ACTIVE identity; here it was the only
+    # one, so the store ends empty.
+    assert store["eng-1"]["identities"] == {}
+
+
+def test_auth_clear_without_identity_deletes_only_active_not_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR #40: `vigil auth clear` (no --identity) must delete ONLY the active
+    # identity, never the whole collection — a routine clear of an expired session
+    # must not wipe user_a/user_b/admin. `--all` is the explicit wipe-everything.
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    store = _install_fake_credential_store(monkeypatch)
+    store["eng-1"] = {
+        "identities": {
+            "user_a": {"cookies": {"s": "a"}},
+            "user_b": {"cookies": {"s": "b"}},
+            "admin": {"cookies": {"s": "x"}},
+        },
+        "active_identity": "user_b",
+    }
+
+    main_module.main(["--root", str(install_root), "auth", "clear", "eng-1"])
+    assert set(store["eng-1"]["identities"]) == {"user_a", "admin"}  # only active gone
+
+    main_module.main(["--root", str(install_root), "auth", "clear", "eng-1", "--all"])
+    assert store["eng-1"]["identities"] == {}  # --all wipes everything
+
+
+def test_auth_import_expands_multi_identity_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR #40: importing the legacy multi-identity shape must upsert EACH identity
+    # into its own slot (not dump the wrapper into `default`), so the documented
+    # `vigil auth import` recovery actually restores usable credentials.
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    store = _install_fake_credential_store(monkeypatch)
+    src = tmp_path / "auth.json"
+    src.write_text(
+        json.dumps(
+            {
+                "identities": {
+                    "user_a": {"cookies": {"s": "a"}},
+                    "user_b": {"cookies": {"s": "b"}},
+                },
+                "active_identity": "user_b",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    main_module.main(
+        ["--root", str(install_root), "auth", "import", "eng-1", "--source", str(src)]
+    )
+    ids = store["eng-1"]["identities"]
+    assert set(ids) == {"user_a", "user_b"}
+    assert ids["user_a"]["cookies"] == {"s": "a"}
+    assert ids["user_b"]["cookies"] == {"s": "b"}
+    assert store["eng-1"]["active_identity"] == "user_b"  # active flag honored
+
+
+def test_auth_edit_without_identity_writes_back_to_the_active_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR#40 regression: `vigil auth edit` (no --identity) must write the edit BACK to the
+    active identity, not blindly to `default`. When a non-default identity is active,
+    targeting `default` forked the edit into `default` and make_active flipped the
+    engagement onto it — corrupting `default` and leaving the active identity unchanged."""
+    from vigil_cli import auth as auth_module
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+
+    store = _install_fake_credential_store(monkeypatch)
+    store["eng-1"] = {
+        "identities": {
+            "alice": {
+                "mode": "manual",
+                "state": "present",
+                "cookies": {"sid": "alice-sid"},
+                "headers": {},
+            }
+        },
+        "active_identity": "alice",
+    }
+
+    # No-op editor: leave the dumped material untouched so the edit is a pure round-trip.
+    monkeypatch.setattr(auth_module.subprocess, "call", lambda *a, **k: 0)
+
+    main_module.main(["--root", str(install_root), "auth", "edit", "eng-1"])
+
+    # The edit lands on `alice` (the active identity), not `default`.
+    assert store["eng-1"]["active_identity"] == "alice"
+    assert "default" not in store["eng-1"]["identities"]
+    assert "updated_at" in store["eng-1"]["identities"]["alice"]
+    assert store["eng-1"]["identities"]["alice"]["cookies"] == {"sid": "alice-sid"}
 
 
 def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from vigil_cli import auth as auth_module
     from vigil_cli import main as main_module
     from vigil_cli import engagements
 
@@ -2329,6 +2896,7 @@ def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monke
     root = install_root / "agent" / "engagements"
     older = root / "2026-04-24-120000-older"
     newer = root / "2026-04-24-120001-newer"
+    store = _install_fake_credential_store(monkeypatch)
     for path, created_at in (
         (older, "2026-04-24T12:00:00Z"),
         (newer, "2026-04-24T12:00:01Z"),
@@ -2336,10 +2904,17 @@ def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monke
         path.mkdir(parents=True)
         (path / "scope.json").write_text('{"status":"in_progress","current_phase":"recon"}', encoding="utf-8")
         (path / "engagement.json").write_text(json.dumps({"key": path.name, "target": path.name, "created_at": created_at}), encoding="utf-8")
-        (path / "auth.json").write_text(
-            json.dumps({"mode": "manual", "state": "present", "cookies": {"sid": path.name}, "headers": {}}),
-            encoding="utf-8",
-        )
+        store[path.name] = {
+            "identities": {
+                auth_module.DEFAULT_IDENTITY: {
+                    "mode": "manual",
+                    "state": "present",
+                    "cookies": {"sid": path.name},
+                    "headers": {},
+                }
+            },
+            "active_identity": auth_module.DEFAULT_IDENTITY,
+        }
 
     def fake_which(command: str) -> str | None:
         return "/usr/bin/fzf" if command == "fzf" else None
@@ -2353,12 +2928,9 @@ def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monke
 
     main_module.main(["--root", str(install_root), "auth", "clear", "--select"])
 
-    older_auth = json.loads((older / "auth.json").read_text(encoding="utf-8"))
-    newer_auth = json.loads((newer / "auth.json").read_text(encoding="utf-8"))
-    assert older_auth["state"] == "present"
-    assert older_auth["cookies"] == {"sid": older.name}
-    assert newer_auth["state"] == "missing"
-    assert newer_auth["cookies"] == {}
+    # --select picks `newer`; only its centralized credential is cleared.
+    assert store[older.name]["identities"][auth_module.DEFAULT_IDENTITY]["cookies"] == {"sid": older.name}
+    assert store[newer.name]["identities"] == {}
 
 
 def test_auth_without_engagement_context_requires_key_or_select(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -8657,22 +9229,22 @@ def test_auth_status_reports_bearer_token_and_recommends_refresh(
     command does NOT write to auth.json or trigger a refresh."""
     eng_dir = tmp_path / "eng"
     eng_dir.mkdir(parents=True, exist_ok=True)
-    (eng_dir / "auth.json").write_text(
-        json.dumps(
-            {
-                "auth_context": "authenticated",
-                "mode": "proxy_capture",
-                "use_for_requests": True,
-                "state": "available",
-                "expires_at": "2099-01-01T00:00:00Z",
-                "headers": {"Authorization": "Bearer aaa.bbb.ccc.ddd.eee.fff"},
-                "cookies": {"sessionid": "abc123"},
-            }
-        ),
-        encoding="utf-8",
-    )
-
     module = _load_auth_status_module()
+
+    # Active credential lives in the centralized store; stub active_material.
+    monkeypatch.setattr(
+        module,
+        "active_material",
+        lambda _eng: {
+            "auth_context": "authenticated",
+            "mode": "proxy_capture",
+            "use_for_requests": True,
+            "state": "available",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "headers": {"Authorization": "Bearer aaa.bbb.ccc.ddd.eee.fff"},
+            "cookies": {"sessionid": "abc123"},
+        },
+    )
 
     monkeypatch.setattr(
         module,
@@ -8741,20 +9313,20 @@ def test_auth_status_flags_expired_token(
     and the recommend line still names the appropriate refresh path."""
     eng_dir = tmp_path / "eng-expired"
     eng_dir.mkdir(parents=True, exist_ok=True)
-    (eng_dir / "auth.json").write_text(
-        json.dumps(
-            {
-                "auth_context": "authenticated",
-                "mode": "proxy_capture",
-                "use_for_requests": True,
-                "state": "available",
-                "expires_at": "2000-01-01T00:00:00Z",
-                "headers": {"Authorization": "Bearer expired.token"},
-            }
-        ),
-        encoding="utf-8",
-    )
     module = _load_auth_status_module()
+
+    monkeypatch.setattr(
+        module,
+        "active_material",
+        lambda _eng: {
+            "auth_context": "authenticated",
+            "mode": "proxy_capture",
+            "use_for_requests": True,
+            "state": "available",
+            "expires_at": "2000-01-01T00:00:00Z",
+            "headers": {"Authorization": "Bearer expired.token"},
+        },
+    )
 
     monkeypatch.setattr(
         module,
@@ -8807,20 +9379,20 @@ def test_auth_status_last_probe_uses_assessment_scoped_route(
     operator never sees the last AUTH probe even when one exists."""
     eng_dir = tmp_path / "eng-route"
     eng_dir.mkdir(parents=True, exist_ok=True)
-    (eng_dir / "auth.json").write_text(
-        json.dumps(
-            {
-                "auth_context": "authenticated",
-                "mode": "proxy_capture",
-                "use_for_requests": True,
-                "state": "available",
-                "expires_at": "2099-01-01T00:00:00Z",
-                "headers": {"Authorization": "Bearer route.token"},
-            }
-        ),
-        encoding="utf-8",
-    )
     module = _load_auth_status_module()
+
+    monkeypatch.setattr(
+        module,
+        "active_material",
+        lambda _eng: {
+            "auth_context": "authenticated",
+            "mode": "proxy_capture",
+            "use_for_requests": True,
+            "state": "available",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "headers": {"Authorization": "Bearer route.token"},
+        },
+    )
 
     monkeypatch.setattr(
         module,

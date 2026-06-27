@@ -31,6 +31,10 @@ When you capture credentials, tokens, or keys — **use them**. Extract the toke
 
 A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_disposition=pending_runtime_proof` (see `agent/operator-core.md`), and review the holding area with `vigil assess list-findings --holding`. It stays out of the report until a runtime pass proves it.
 
+**Recording a finding is not grading it.** A finding at `verification_state=unreviewed` is an **open question**, not a graded N/A — the lifecycle default means "not yet judged," not "judged harmless." Do not assert "no P2 here" / "this surface is clean" while any unauth or medium-plus finding is still `unreviewed`: an unreviewed finding is exactly what a clean-bill-of-health claim is supposed to have already resolved. Drive it to a verifier disposition before you grade the surface.
+
+**ROE-blocked proof is a CANDIDATE, not a severity downgrade.** This rule demands the attacker outcome — but when you cannot safely complete the final proof step because the program's rules of engagement forbid it (touching real customer data, pivoting into production, exfiltrating a record you have already shown you can reach), that is a constraint on *you*, not a weakness in the finding. Do not lower the severity to match what you were permitted to demonstrate. Grade the **candidate at impact-if-true** — the severity it carries if the blocked step succeeds, which the surrounding evidence already makes likely — and record the single unblocking test that would convert it: set `details.roe_blocked=true` and put the exact next action in `details.required_followup`. This is distinct from the theoretical/`chain_required` park above (which needs another *bug* to land): here the primitive is proved and only the demonstration is walled off by policy. An ROE wall must never masquerade as a low-severity verdict.
+
 ## 3. Precondition equivalence check
 
 Before rating severity, identify the precondition required to trigger the vulnerability. If that precondition already grants the attacker equivalent or greater access than the vulnerability itself provides, the finding is defense-in-depth (Low), not an independent exploit. Score on incremental impact over the precondition, not total impact of the chain.
@@ -127,6 +131,37 @@ of that shape and go to rule 17. Re-issuing the same response class is the dry
 signal. This does NOT apply to a probe you are repeating on purpose to detect
 state divergence (rule 4's push-harder signals) — that is new information, not
 a stall.
+
+## 16c. Phase-exhausted means every flagged host has a recorded verdict — not a feeling of completion
+
+Rule 16 measures the *job* by confidence; this rule operationalizes when a
+*phase* is actually done. A phase is **exhausted** only when every real-app
+host above the route threshold carries a **recorded verdict** — a finding, or
+an evidence-backed negative (the coverage ledger's `recorded-verdict?`). A
+*feeling* of completion after working the highest-route hosts is not a verdict:
+the sense that "I have seen what this surface is" is exactly the head-sampling
+bias that buries findings on the hosts you never opened.
+
+**Never generalize a surface-wide conclusion from a non-representative
+sample.** "Everything funnels to one account system," "every subdomain is the
+same SPA," "the whole estate is one vendor platform" — a conclusion that
+retires *untested* hosts has to be earned host-by-host, not extrapolated from
+the few you happened to test first. A hypothesis whose payoff is that it ends
+the hunt is the one to distrust most.
+
+**Ledger-green is a FLOOR, not proof of exhaustion.** A passing coverage
+ledger means every *flagged* host has a verdict — it does **not** mean the
+surface is fully explored. A high-value API that sits below the route
+threshold may never have been flagged at all, so a green ledger can co-exist
+with an entire untested application (the "a URL can be a whole application"
+rule below is the companion check). Treat ledger-green as the minimum bar you
+cleared, then keep looking for the surface the ledger could not see.
+
+**Pull the next uncovered host; do not sample.** The default loop is
+structural, not intuitive: take the next `uncovered` real-app host straight off
+`vigil assess coverage` and give it a lane, rather than choosing what to test
+next by feel. Pulling from the ledger is what prevents head-sampling
+mechanically — you cannot quietly skip a host the ledger keeps handing you.
 
 ## 17. Stuck-state recovery
 
@@ -303,6 +338,18 @@ Never record "404 / patched / gated / not-present" from a transport failure: re-
 response — or a clean, fast connection-refused — be the verdict. See
 `agent/references/runtime-guides/docker-desktop-network-hazards.md`.
 
+**(d) A WAF / bot-challenge interstitial is PENDING — never a verdict in either direction —
+until a browser proves the origin.** When the bytes are the edge's challenge page rather than
+the origin app's — Imperva (`reese84` cookie / *"Pardon Our Interruption"*), Akamai (`_abck`
+cookie / `AkamaiGHost` / *"Access Denied"*), or Cloudflare (`cf-chl` / *"Just a moment"*) —
+the response belongs to the WAF, not the application behind it. A `200`/`403` (or any
+status/body) that `curl`/`httpx` returns from a WAF-fronted host is a **challenge artifact**:
+it proves neither presence nor absence of a finding and decides nothing about the surface.
+Re-render with `vigil assess kali browser <url>` — headless Chromium executes the challenge JS
+and returns the **real origin** status + DOM; only that rendered origin response is a verdict.
+The kali path surfaces this as `status=waf_challenge` precisely so it cannot close a surface as
+`404`/`patched`/`gated`/`not-present`; do not override it with the challenge's status code.
+
 **Re-derive un-pushed signals from RAW evidence.** A prior agent's stopping point — a
 "tested / clean / disproven" note, a `notes/PHASE-3-REMAINING-WORK.md` line, an inherited
 disposition — is a **view to re-verify, not ground truth**. Before accepting any negative
@@ -311,7 +358,8 @@ disposition on a protected op, re-open the raw `get-command-run` rows behind tha
 and re-derive the disposition from the actual request/response bytes. A `403` recorded by a
 prior pass may have been a downstream validation error mistaken for an auth gate (b); a "patched"
 may have been an `http=000` transport error (c); a "clean" may have been a status-only probe that
-never read the body (a).
+never read the body (a); a "gated"/"not-present" may have been a WAF challenge page never
+re-rendered in a browser (d).
 
 ## A URL can be a whole application — go deep on app units
 

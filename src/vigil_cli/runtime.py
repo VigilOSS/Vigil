@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -276,6 +277,54 @@ def runtime_image_build_state(
     if not baked or baked == "<no value>":
         return "unknown"
     return "current" if baked == runtime_inputs_digest(install_root) else "stale"
+
+
+# --------------------------------------------------------------------------- #
+# Host-side recon tools (the `--runtime host` / `vigil assess recon` split).
+#
+# On macOS/Windows Docker Desktop the DNS-heavy + bulk-liveness stages must run
+# on the HOST: every distinct destination IP is NAT-tracked by the userspace
+# proxy (com.docker.backend), so a brute over a large resolver set or a bulk
+# httpx liveness pass wedges the whole VM (engagement I-001). These binaries are
+# therefore expected on the HOST PATH. Everything else (katana crawl, nuclei,
+# ffuf, exploit/auth'd HTTP) stays in the isolated container and needs nothing
+# host-side. This tuple is the single source of truth for the `vigil doctor`
+# host-tool check and the host-tool install list in the README.
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class HostTool:
+    binary: str
+    go_install: str | None  # `go install <spec>`, or None when not go-installable
+    essential: bool = True
+    note: str = ""
+
+
+HOST_RECON_TOOLS: tuple[HostTool, ...] = (
+    HostTool("subfinder", "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"),
+    HostTool("dnsx", "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"),
+    HostTool("httpx", "github.com/projectdiscovery/httpx/cmd/httpx@latest"),
+    HostTool("puredns", "github.com/d3mondev/puredns/v2@latest", note="brute engine; needs massdns"),
+    HostTool(
+        "massdns", None,
+        note="not go-installable: `brew install massdns` (macOS) or build from "
+             "github.com/blechschmidt/massdns (Linux)",
+    ),
+    HostTool("shuffledns", "github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest",
+             essential=False, note="optional brute alternative"),
+    HostTool("alterx", "github.com/projectdiscovery/alterx/cmd/alterx@latest",
+             essential=False, note="optional permutation generator"),
+)
+
+
+def host_recon_tool_status() -> list[tuple[HostTool, bool]]:
+    """(tool, present_on_host_PATH) for every host-side recon binary."""
+    return [(t, shutil.which(t.binary) is not None) for t in HOST_RECON_TOOLS]
+
+
+def missing_essential_host_tools() -> list[str]:
+    return [t.binary for t, present in host_recon_tool_status() if t.essential and not present]
 
 
 def build_runtime(install_root: Path, *, variant: str = "full", dev: bool = False, runner: docker.Runner = docker.run_command_streaming) -> None:

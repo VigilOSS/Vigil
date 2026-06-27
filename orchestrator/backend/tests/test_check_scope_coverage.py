@@ -131,6 +131,7 @@ def _write_scope(
     hosts: list[str],
     host_metadata: dict[str, dict[str, Any]] | None = None,
     deferred_hosts: list[str] | None = None,
+    out_of_scope: list[str] | None = None,
 ) -> None:
     scope_path = engagement_dir / "scope.json"
     data: dict[str, Any] = {"hosts": hosts, "current_phase": "recon"}
@@ -138,6 +139,8 @@ def _write_scope(
         data["host_metadata"] = host_metadata
     if deferred_hosts:
         data["deferred_hosts"] = deferred_hosts
+    if out_of_scope:
+        data["out_of_scope"] = out_of_scope
     scope_path.write_text(json.dumps(data), encoding="utf-8")
 
 
@@ -604,6 +607,48 @@ def test_out_of_scope_host_excluded(monkeypatch, tmp_path: Path, capsys) -> None
     # Work counts: one done for target.example, nothing for evil.example/target.co.uk.
     assert entry["work_queued"]["done"] == 1
     assert entry["work_queued"]["pending"] == 0
+
+
+def test_out_of_scope_carveout_not_counted_under_in_scope_wildcard(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A host that matches an in-scope wildcard but is listed in ``out_of_scope``
+    must NOT count toward that wildcard's coverage — otherwise an OOS host
+    inflates live/service/surface/work tallies and can help satisfy a stage gate.
+
+    Regression for the QA-found gap: the coverage gate consulted only the
+    in-scope allowlist (``entry_matches_host``), never the denylist.
+    """
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(
+        eng,
+        hosts=["*.mobile.acme.example"],
+        out_of_scope=["mobile.acme.example", "*.mobile.acme.example"],
+    )
+    db = _make_cases_db(eng)
+    # Work items under one in-scope subdomain and one OOS carve-out.
+    _insert_work_item(db, queue_key="w:1", url="https://mobile.acme.example/v1", url_path="/v1", status="pending")
+    _insert_work_item(db, queue_key="w:2", url="https://mobile.acme.example/book", url_path="/book", status="pending")
+
+    services = [
+        {"endpoint": "mobile.acme.example", "state": "up"},          # in scope
+        {"endpoint": "mobile.acme.example", "state": "up"}, # OOS exact carve-out
+        {"endpoint": "mobile.acme.example", "state": "up"},     # OOS wildcard carve-out
+    ]
+    surfaces = [
+        {"target_descriptor": "https://mobile.acme.example/v1"},
+        {"target_descriptor": "https://mobile.acme.example/book"},
+    ]
+
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum")
+    report = json.loads(capsys.readouterr().out)
+    entry = report["entries"][0]
+    # Only mobile.acme.example counts; both carve-outs are excluded.
+    assert entry["total_services"] == 1
+    assert entry["live_hosts"] == 1
+    assert entry["live_host_samples"] == ["mobile.acme.example"]
+    assert entry["surfaces_count"] == 1
+    # Work queue: only the in-scope subdomain's pending item is aggregated.
+    assert entry["work_queued"]["pending"] == 1
 
 
 def test_require_stage_enum_fails_when_missing(monkeypatch, tmp_path: Path, capsys) -> None:
