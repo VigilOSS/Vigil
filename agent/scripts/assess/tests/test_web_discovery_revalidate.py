@@ -218,3 +218,28 @@ def test_rate_cap_unset_keeps_verb_default(monkeypatch, tmp_path):
 )
 def test_clamp_httpx_rate_limit_unit(requested, cap, expected):
     assert web_discovery._clamp_httpx_rate_limit(requested, cap) == expected
+
+
+def test_resolved_engagement_dir_used_when_flag_is_none(monkeypatch, tmp_path):
+    # PR #40 regression: the default CLI path leaves args.engagement_dir=None (run
+    # from the engagement dir, or with only $ENGAGEMENT_DIR set); load_config
+    # resolves it into cfg.engagement_dir. Post-config reads must use the resolved
+    # dir — previously the rate-cap lookup called scope.rate_caps_for_dir(None),
+    # which raised TypeError and crashed the whole web-discovery stage before any
+    # probe ran. Assert no crash AND the cap is consumed from the resolved
+    # scope.json (proving args.engagement_dir was rewritten to the real dir, which
+    # is also what carries required_headers into the host route).
+    _scope(tmp_path, rate_limit=5)
+    hosts_file = _hosts_file(tmp_path, ["live.example.com"])
+    captured: list[list[str]] = []
+    live_rows = {"80,443": ['{"url":"https://live.example.com","input":"live.example.com"}']}
+    _install_seams(monkeypatch, tmp_path, captured=captured, live_rows=live_rows)
+
+    # engagement_dir=None mirrors the normal invocation; must not raise.
+    web_discovery.run(
+        _args(tmp_path, hosts_file, engagement_dir=None, runtime="container", no_crawl=False)
+    )
+
+    httpx_runs = [c for c in captured if c and c[0] == "httpx"]
+    assert httpx_runs, "httpx stage never ran (stage crashed on None engagement_dir)"
+    assert httpx_runs[0][httpx_runs[0].index("-rate-limit") + 1] == "5"

@@ -154,6 +154,24 @@ def test_rate_cap_clamps_body_fetch(monkeypatch, tmp_path):
     assert rate == "3"  # clamped to the global (per-invocation) cap (below the default 30)
 
 
+def test_resolved_engagement_dir_used_when_flag_is_none(monkeypatch, tmp_path):
+    # PR #40 regression: the default `vigil assess js-mining` (and the recon JS
+    # stage) leaves args.engagement_dir=None; load_config resolves it. The rate-cap
+    # read must use the resolved dir — previously rate_caps_for_dir(None) raised a
+    # TypeError that the recon orchestrator swallowed, silently no-op'ing the
+    # default-on JS enrichment. Assert no crash AND the cap is consumed.
+    _scope(tmp_path, rate_limit=3)
+    src = _katana_source(tmp_path)
+    captured, _, _ = _run(
+        monkeypatch, tmp_path,
+        _args(tmp_path, engagement_dir=None, urls_file=str(src), db_path=""),
+        body_text="HTTP/1.1 200 OK\r\n\r\n", jsluice_lines=[], th_lines=[],
+    )
+    httpx_runs = [c for c in captured if c and c[0] == "httpx"]
+    assert httpx_runs, "js-mining httpx fetch never ran (stage crashed on None engagement_dir)"
+    assert httpx_runs[0][httpx_runs[0].index("-rate-limit") + 1] == "3"
+
+
 def test_jsluice_endpoints_merged_when_present(monkeypatch, tmp_path):
     _scope(tmp_path)
     src = _katana_source(tmp_path)
