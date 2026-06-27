@@ -49,7 +49,7 @@ from assess.lib.config import load_config
 # DNS-heavy / bulk tools the pipeline uses that MUST be host-routed on macOS
 # Docker Desktop (I-001). The preflight enforces host availability for these.
 _ENFORCED_TOOLS = ("subfinder", "dnsx", "httpx")
-_BRUTE_TOOL = "puredns"
+_BRUTE_TOOL = ("puredns", "massdns")  # massdns is puredns's required resolver binary
 
 
 @dataclass(frozen=True)
@@ -449,7 +449,7 @@ def _enforce_host_routing(args, effective: str) -> None:
         return
     tools = list(_ENFORCED_TOOLS)
     if args.brute:
-        tools.append(_BRUTE_TOOL)
+        tools.extend(_BRUTE_TOOL)
     for tool in tools:
         try:
             runtime_route.resolve_runtime("host", tool=tool, enforce=True)

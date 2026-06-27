@@ -2044,6 +2044,69 @@ def _web_path_is_high_value(path: str) -> bool:
     return False
 
 
+def _scope_pattern_apex(pattern: str) -> str:
+    """Apex of a scope.json host pattern: strips a leading ``*.`` wildcard.
+
+    Both a literal (``example.com``) and a wildcard (``*.example.com``) entry
+    cover the apex AND every subdomain (the HackerOne/Bugcrowd convention the
+    CLI ``scope.entry_matches_host`` encodes), so they reduce to the same apex.
+    """
+    p = (pattern or "").strip().lower()
+    if p.startswith("*."):
+        p = p[2:]
+    return p
+
+
+def _host_matches_scope_pattern(host: str, pattern: str) -> bool:
+    """True when ``host`` is the apex of ``pattern`` or a subdomain of it."""
+    apex = _scope_pattern_apex(pattern)
+    if not apex or not host:
+        return False
+    return host == apex or host.endswith("." + apex)
+
+
+def _host_admitted_by_scope(
+    host: str, allow_patterns: list[str], deny_patterns: list[str]
+) -> bool:
+    """Scope admission primitive: in the allowlist AND not in the denylist.
+
+    Mirrors the CLI ``scope.host_admitted`` contract (the denylist always wins)
+    so the W3 gate filters route hosts through the same allow/deny semantics the
+    rest of the engagement trusts.
+    """
+    if not host:
+        return False
+    if not any(_host_matches_scope_pattern(host, p) for p in allow_patterns):
+        return False
+    if any(_host_matches_scope_pattern(host, p) for p in deny_patterns):
+        return False
+    return True
+
+
+def _engagement_scope_admission(engagement: Any) -> tuple[list[str], list[str]] | None:
+    """Best-effort ``(allow, deny)`` scope-host pattern lists for ``engagement``.
+
+    Reuses the backend's canonical scope reader — the same scope.json
+    ``hosts``/``scope_hosts`` allowlist and ``out_of_scope`` denylist that
+    :class:`~app.services.engagements.EngagementView` already exposes — so the
+    gate scopes route hosts through the exact admission inputs the rest of the
+    backend uses. Returns ``None`` (caller fails OPEN, keeping the gate firing)
+    when scope cannot be determined or no allowlist is present, rather than
+    silently dropping every host and disabling the gate.
+    """
+    from .. import engagements as _engagements  # local import avoids any cycle
+
+    try:
+        view = _engagements._view_for(engagement)
+    except Exception:  # pragma: no cover — defensive; never break the gate
+        return None
+    allow = [p for p in (view.scope_hosts or []) if p]
+    if not allow:
+        return None
+    deny = [p for p in (view.out_of_scope or []) if p]
+    return allow, deny
+
+
 def web_uncovered_high_route_hosts(
     engagement_id: int,
     *,
@@ -2064,11 +2127,16 @@ def web_uncovered_high_route_hosts(
         ``false_positive`` finding is the canonical evidence-backed negative) —
         read off the shared :func:`_build_finding_verdicts_by_host` projection.
 
-    A host is dropped (covered) when it carries a verdict, and dropped
-    (deferred) when a matching active completeness deferral names it — or an
-    engagement-wide one is present. The remaining hosts are the uncovered gaps.
+    A host is dropped (out-of-scope) when it is not admitted by the
+    engagement's scope (not in the scope.json allowlist, or carved out by
+    ``out_of_scope``) — an SSO/CDN/third-party host recorded via archive/proxy/
+    manual ingestion must never be forced through the completeness gate. A host
+    is dropped (covered) when it carries a verdict, and dropped (deferred) when
+    a matching active completeness deferral names it — or an engagement-wide one
+    is present. The remaining hosts are the uncovered gaps.
     """
     engagement = _engagement_or_404(engagement_id)
+    scope_admission = _engagement_scope_admission(engagement)
     with _common.get_connection() as connection:
         variant_rows = _fetch_all(
             connection,
@@ -2102,6 +2170,10 @@ def web_uncovered_high_route_hosts(
 
     out: list[dict[str, Any]] = []
     for host in sorted(route_paths):
+        if scope_admission is not None and not _host_admitted_by_scope(
+            host, scope_admission[0], scope_admission[1]
+        ):
+            continue  # out-of-scope host — never a completeness blocker
         route_count = len(route_paths[host])
         has_high_value = host in high_value_hosts
         if route_count < threshold and not has_high_value:
