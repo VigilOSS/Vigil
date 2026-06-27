@@ -103,9 +103,21 @@ def status_line(engagement_dir: Path) -> str:
     )
 
 
-def clear_auth(engagement_dir: Path, identity: str | None = None) -> None:
-    path = "" if identity is None else f"/{identity}"
-    _api(engagement_dir, "DELETE", path)
+def clear_auth(
+    engagement_dir: Path, identity: str | None = None, *, all_identities: bool = False
+) -> None:
+    if all_identities:
+        # Explicit, opt-in wipe of EVERY identity (the collection DELETE).
+        _api(engagement_dir, "DELETE", "")
+        return
+    if identity is None:
+        # Default = the ACTIVE identity (the documented contract), NOT the whole
+        # collection. Clearing an expired session must never erase the other named
+        # identities (user_a/user_b/admin). Resolve the active name like edit_auth.
+        resolved = _api(engagement_dir, "GET", "/resolve")
+        resolved = resolved if isinstance(resolved, dict) else {}
+        identity = str(resolved.get("identity_name") or DEFAULT_IDENTITY)
+    _api(engagement_dir, "DELETE", f"/{identity}")
 
 
 def import_auth(
@@ -121,9 +133,28 @@ def import_auth(
         raise SystemExit(f"invalid JSON: {exc}") from exc
     if not isinstance(incoming, dict):
         raise SystemExit("Auth import expects a JSON object")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Legacy multi-identity shape ({"identities": {name: material}, "active_identity"}):
+    # PUT each contained identity into its OWN slot. Otherwise the whole wrapper
+    # lands in one identity and the backend — which extracts only top-level
+    # cookies/headers/tokens — restores nothing usable, defeating the documented
+    # `vigil auth import auth.json` recovery for upgraded multi-identity engagements.
+    identities = incoming.get("identities")
+    if isinstance(identities, dict) and identities:
+        active = str(incoming.get("active_identity") or DEFAULT_IDENTITY)
+        for name, material in identities.items():
+            if not isinstance(material, dict):
+                continue
+            payload = dict(material)
+            payload.setdefault("mode", "manual")
+            payload.setdefault("use_for_requests", True)
+            payload["updated_at"] = now
+            payload["make_active"] = str(name) == active
+            _api(engagement_dir, "PUT", f"/{name}", payload)
+        return
     incoming.setdefault("mode", "manual")
     incoming.setdefault("use_for_requests", True)
-    incoming["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    incoming["updated_at"] = now
     incoming["make_active"] = True
     _api(engagement_dir, "PUT", f"/{identity}", incoming)
 
