@@ -44,6 +44,10 @@ desyncs the colocation. If you only know Git, internalize these differences firs
   message; `jj new` opens a fresh empty change on top (so the described one becomes its parent).
   `jj log` shows the graph: the short *change-id* on the left, the Git commit hash on the right, and
   any bookmarks inline.
+- **Write commit messages for the next developer, not yourself.** An imperative summary of *what*
+  changed plus a body explaining *why* — no internal codenames, workstream labels, or "Phase N"
+  jargon that means nothing outside this session; end with the `Co-Authored-By` trailer. Someone
+  reading `jj log`/`git log` cold should understand the change without asking.
 - **Bookmarks are branches.** `jj` uses *bookmarks* instead of Git branches. PRs here are created with
   `jj git push --change @` (alias `-c`), which mints an auto-named `push-<random>` bookmark and pushes
   it — that is why the PR head branches are named e.g. `push-ommwlslwsorl`. To update an open PR,
@@ -408,7 +412,10 @@ The verification surface is **not one command**: 4 pytest scopes + a render-chec
 | Bench run (live agent) | `vigil bench run --launch auto …` | **BILLED** — see Live tests |
 
 - **Integration tests are deselected by default** (`-m 'not integration'` in both pyprojects); opt in with `pytest -m integration` only after rebuilding the runtime image (`test_oob_correlate.py`, backend `test_runtime_tooling_contract.py`, `test_kali_cli.py`).
+- **Pre-push: mirror the blocking CI gates locally.** Before pushing a branch, run the gates CI blocks on — backend pytest, the sync-lint and deterministic eval (covered by the backend pytest + eval rows above), `uvx ruff check .`, and `uvx --with-editable . mypy src/vigil_cli`. CI runs on a clean checkout, so it catches drift a warm local venv hides.
 - **CI gap:** CI does not gate the root `tests/` (bench harness) or the assess CLI suite — run those two locally before handing off harness/recon changes.
+- **The `**/data/` ignore trap.** Shipped data a test or feature depends on — resolver lists, fixtures, golden files — often lives under a `data/` dir, which `.gitignore`'s broad `**/data/` rule silently drops: it passes locally (file on disk) but fails in CI (clean checkout never received it). When you add *required* shipped data, add a targeted `!` negation in `.gitignore` (re-include each path level down to the files, since git won't descend into an ignored dir) **and** `git add -f` it, then confirm `git ls-files <path>` tracks it. This is exactly what bit `test_shipped_resolver_lists_exist_and_are_within_cap`.
+- **`skeleton/` sidecars vs mypy.** Bench `skeleton/` `.py` files are container-runtime sidecars that import runtime-only siblings (e.g. `oracle_checkpoint`) mypy can't resolve. They are excluded from mypy via `[tool.mypy] exclude` in `pyproject.toml` (or keep sidecars as `.tmpl`, which mypy ignores). Do **not** "fix" such an `import-not-found` by adding the runtime module to the type path.
 
 ## Live tests (billed — read before launching)
 

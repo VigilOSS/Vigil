@@ -11,7 +11,7 @@ from ..artifact_index import _normalize_relative_path
 from . import _common
 from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _json_object, _serialize_finding_record
 from .links import _root_cause_link_metadata
-from .coverage import coverage_readiness
+from .coverage import coverage_readiness, web_uncovered_high_route_hosts
 
 
 
@@ -38,7 +38,14 @@ def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
 
 def report_readiness(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    is_blue = str(getattr(engagement, "engagement_type", "") or "").lower() == "blue"
+    engagement_type = str(getattr(engagement, "engagement_type", "") or "").lower()
+    is_blue = engagement_type == "blue"
+    # WEB-ONLY guard for the W3 coverage/grading blockers below. Mirrors the
+    # ``_is_web_engagement`` convention used by app-unit scoring / the depth
+    # ledger: anything that is NOT a code or blue track is web-eligible
+    # (``web`` / ``both`` / legacy ``red`` / unset). Code and blue engagements
+    # never get the route-coverage or finding-grading blockers.
+    is_web = engagement_type not in ("code", "blue")
     engagement_root = Path(engagement.engagement_root).expanduser().resolve()
     coverage = coverage_readiness(engagement_id)
     blockers: list[dict[str, Any]] = []
@@ -440,6 +447,70 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         f"Close with `vigil assess agent close {row['agent_id']}` "
                         "or bulk-close ready/blocked stales with "
                         "`vigil assess agent reconcile-stale`."
+                    ),
+                }
+            )
+
+    # W3 — WEB coverage/grading gate (BLOCK-WITH-OVERRIDE, web/both only). These
+    # do NOT fire on code or blue engagements. Both are non-bypassable at the
+    # POST /report-export mode=final edge (report_export inherits this readiness)
+    # and at the transition report/complete precondition; --force is the global
+    # escape.
+    if is_web:
+        # (1) uncovered_high_route_hosts — an in-scope real-app host (recorded
+        # routes, or an API/auth/GraphQL surface) with NO recorded verdict and
+        # no active coverage_completeness_deferral naming it.
+        for row in web_uncovered_high_route_hosts(engagement_id):
+            host = str(row.get("host", ""))
+            blockers.append(
+                {
+                    "kind": "uncovered_high_route_hosts",
+                    "host": host,
+                    "route_count": int(row.get("route_count", 0)),
+                    "detail": (
+                        f"in-scope real-app host {host} ({row.get('real_app_reason', '')}) "
+                        f"has no recorded VERDICT — a finding (or an evidence-backed-negative "
+                        f"false_positive finding) on the host. Record a verdict, or accept the "
+                        f"gap with `vigil assess agent decision --kind coverage_completeness_deferral "
+                        f"--payload-json '{{\"host\": \"{host}\", \"reason\": \"...\"}}' "
+                        f"--surfaced-to-user`."
+                    ),
+                }
+            )
+
+        # (2) unreviewed_findings — any critical/high/medium finding still
+        # verification_state='unreviewed' (ANY auth_context), status not in
+        # (merged, false_positive). The existing finding_verification_state
+        # blocker only catches reportable-status candidates; this also catches
+        # draft / non-reportable findings that have never been graded.
+        with _common.get_connection() as connection:
+            unreviewed_rows = connection.execute(
+                """
+                SELECT slug, title, severity, auth_context
+                FROM assessment_findings
+                WHERE engagement_id = ?
+                  AND lower(severity) IN ('critical', 'high', 'medium')
+                  AND verification_state = 'unreviewed'
+                  AND status NOT IN ('merged', 'false_positive')
+                  AND merged_into_finding_id IS NULL
+                ORDER BY id DESC
+                """,
+                (engagement_id,),
+            ).fetchall()
+        for row in unreviewed_rows:
+            slug = str(row["slug"] or "")
+            blockers.append(
+                {
+                    "kind": "unreviewed_findings",
+                    "slug": slug,
+                    "title": str(row["title"] or ""),
+                    "severity": str(row["severity"] or ""),
+                    "auth_context": str(row["auth_context"] or ""),
+                    "detail": (
+                        f"finding {slug} (severity={row['severity']}) is verification_state="
+                        f"'unreviewed' and must be graded before the final report. Grade it with "
+                        f"`vigil assess verify-finding {slug} --disposition confirmed|downgraded|disputed "
+                        f"--reason-text ...` (records a verification verdict)."
                     ),
                 }
             )

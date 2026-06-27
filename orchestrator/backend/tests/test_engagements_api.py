@@ -36,7 +36,7 @@ def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-exampl
                 "scope_mode": "host_only",
                 "scope_hosts": ["example.com"],
                 "scope": ["example.com"],
-                "out_of_scope_hosts": [],
+                "out_of_scope": [],
                 "exploit_policy": "selected",
                 "exploit_review_state": "approved",
                 "approved_targets": ["VA-001"],
@@ -114,6 +114,46 @@ def test_list_engagements_surfaces_scope_hosts_for_proxy_router(client, isolate_
     row = next(item for item in response.json() if item["key"] == "2026-04-01-100000-multi")
     assert row["scope_hosts"] == ["multi.example", "*.multi.example", "legacy.multi.example"]
     assert row["scope_priority"] == 5
+
+
+def test_list_engagements_surfaces_out_of_scope_for_proxy_router(client, isolate_settings):
+    """The proxy router's PREFERRED registry source is this backend endpoint
+    (filesystem scan is only a fallback), so the ``out_of_scope`` denylist must
+    be serialized here — otherwise carve-outs are silently unenforced whenever
+    the orchestrator is up. Deduped + lowercased, mirroring ``scope_hosts``.
+    """
+    engagements_dir = isolate_settings["engagements_dir"]
+    engagement_dir = engagements_dir / "2026-04-01-110000-oos"
+    (engagement_dir / "sessions").mkdir(parents=True)
+    (engagement_dir / "engagement.json").write_text(
+        json.dumps(
+            {
+                "key": "2026-04-01-110000-oos",
+                "target": "https://acme-regional.example",
+                "created_at": "2026-04-01T11:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (engagement_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "hostname": "acme-regional.example",
+                "hosts": ["*.acme-regional.example"],
+                "out_of_scope": ["Appointments.acme-regional.example", "*.mobile.acme-net.example", "appointments.acme-regional.example"],
+                "status": "in_progress",
+                "current_phase": "recon",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (engagement_dir / "sessions" / "index.json").write_text("[]", encoding="utf-8")
+
+    response = client.get("/engagements")
+    assert response.status_code == 200
+    row = next(item for item in response.json() if item["key"] == "2026-04-01-110000-oos")
+    # Lowercased + deduped, order-preserving.
+    assert row["out_of_scope"] == ["appointments.acme-regional.example", "*.mobile.acme-net.example"]
 
 
 def test_list_engagements_filters_by_status(client, isolate_settings):
@@ -526,7 +566,7 @@ def test_engagement_sync_migrates_legacy_target_keys_on_disk(client, isolate_set
                 "scope_mode": "host_only",
                 "scope_hosts": ["example.com"],
                 "scope": ["example.com"],
-                "out_of_scope_hosts": [],
+                "out_of_scope": [],
                 "exploit_policy": "selected",
                 "exploit_review_state": "approved",
                 "approved_findings": [legacy],

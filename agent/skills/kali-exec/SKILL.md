@@ -106,6 +106,20 @@ The CLI fails closed when these are missing. Pass them explicitly — there is n
 
 `--engagement-key` is derived from `${ENGAGEMENT_DIR}/engagement.json`. `--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$VIGIL_AGENT_NAME`, then `operator`. Specialists should normally inherit `AGENT_NAME=<role>` from their dispatch wrapper; if that context is absent or suspicious, pass `--agent-name <role>` explicitly so the audit row is not misattributed to `operator`.
 
+## Required attribution headers (program-mandated, e.g. BugCrowd)
+
+When `scope.json` carries a `required_headers` map (set at create time with `vigil engagement create … --program bugcrowd --researcher <handle>` or `--header "Name: Value"`, or after the fact with `vigil engagement set-header <key> "Name: Value"`), `kali_exec` injects those headers into every in-scope HTTP probe automatically. You do **not** add them by hand. The injection is three-way by tool:
+
+- **Injected** (`curl`, `httpx`, `nuclei`, `ffuf`, `sqlmap`, `katana`, `arjun`): the `-H "Name: Value"` is appended and lands in the recorded audit argv, so `list-command-runs` proves the program got tagged traffic.
+- **Silently skipped** (`gau`, `waybackurls`, `subfinder`, `amass`, `dnsx`, `nmap`, `naabu`, `masscan`, …): these query third-party archives / DNS / L3-L4, not the in-scope target — injecting would leak the researcher handle to web.archive.org/CommonCrawl, so it is intentionally NOT added.
+- **Warned, runs untagged** (`nikto`, `whatweb`, `wafw00f`, any tool with no known `-H` flag): a stderr warning fires; if that tool reaches the in-scope target you must carry the header another way.
+
+A non-HTTP raw tool that the program still requires tagging on is the operator's responsibility to handle out-of-band — the warning is the cue.
+
+## Out-of-scope carve-outs (`out_of_scope` denylist)
+
+`scope.json` `hosts` wildcards (`*.example.com`) match the apex and **every** subdomain, which over-includes a program's specific OOS carve-outs. The `out_of_scope` list expresses exceptions: a host is admitted IFF it matches an in-scope entry AND matches **no** `out_of_scope` entry (the denylist wins). It is enforced at `filter-scope`, the dispatch scope_host gate, spec ingestion, and proxy routing/capture. Add carve-outs at create (`--out-of-scope appointments.acme-regional.example --out-of-scope "*.mobile.acme-net.example"`) or later (`vigil engagement add-oos <key> <host…>` / `remove-oos`). A dispatch whose `scope_host` matches a carve-out is rejected with a distinct "out_of_scope carve-out" error — reframe as recon or remove the carve-out, never probe it.
+
 ## Phase tags (including half-phase tags)
 
 `--phase` accepts the canonical phases plus two half-phase tags. Pass the phase the dispatch was authorized for — `scope.json.current_phase` is operator state and updates only on phase transitions, but engagements regularly operate **between phases**.
@@ -366,12 +380,16 @@ vigil assess kali job start \
          -rate-limit 100 -c 25 -bs 25 -jsonl \
          -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_full.jsonl
 
-# Poll status and tail output.
+# Poll status and tail output. NOTE: <id> is the INTEGER job id from the
+# `start`/`list` JSON (`"id": 42`), NOT the dtach socket-hash filename — `status`,
+# `tail`, and `stop` reject the hash with "invalid int value".
 vigil assess kali job status 42
 vigil assess kali job tail 42
 vigil assess kali job tail 42 --follow
 
-# Stop a runaway job.
+# Stop a runaway job (after `stop`, confirm the binary is actually gone with
+# `pgrep -x <tool>` in-container — if you unlinked the open -o file, the disk is
+# reclaimed only once the process exits).
 vigil assess kali job stop 42 --container-name vigil
 
 # List recent jobs (filter by status).
@@ -468,12 +486,15 @@ Recover the whole fan-out afterward with
 `vigil assess list-command-runs --intent-q "sweep"`; add `--json` to the sweep
 to get cluster objects that carry each value's `run_id` for audit linkage.
 
-### Wrap a long-running custom command as a job
+### Wrap a long-running custom command as a job (operator-only)
 
-Anything that may exceed the synchronous timeout window or that should
-survive the calling shell goes through `kali job start`. The dtach session is
-parented by tini so it survives the calling agent's exit; recover with
-`kali job status <id>` and `kali job tail <id>`.
+This path belongs to the **operator** — `kali job start` backgrounds a probe past the
+synchronous window, and only the operator owns long supervised jobs, because a
+dispatched specialist that backgrounds-and-polls is SIGUSR1-killed mid-wait (see
+`agent/shared-constraints.md` §2). As a specialist, when a probe won't fit the
+synchronous `--timeout`, hand it to the operator in your `next_steps` rather than
+starting a job yourself. The dtach session is parented by tini so it survives the
+calling agent's exit; recover with `kali job status <id>` and `kali job tail <id>`.
 
 ```bash
 vigil assess kali job start \

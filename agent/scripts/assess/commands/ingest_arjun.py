@@ -301,7 +301,18 @@ def run(args: argparse.Namespace) -> None:
             f"ingest-arjun: anchored relative db path '{args.db_path}' -> '{db_path}'",
             file=sys.stderr,
         )
-    json_file = args.json_file
+    # Anchor the Arjun artifact the SAME way as the DB. A relative `--json-file`
+    # (e.g. `scans/arjun/foo.json`) resolved against a drifted subagent cwd would
+    # miss the real file, and the missing-file branch below reports a CLEAN
+    # zero-parameter no-op — silently dropping genuine `kali arjun` discoveries.
+    # Anchoring to the engagement keeps the no-op meaning "arjun wrote nothing"
+    # (its real empty-output behavior) instead of "I looked in the wrong dir".
+    json_file = anchor_engagement_relative(args.json_file, getattr(args, "engagement_dir", None))
+    if json_file != args.json_file:
+        print(
+            f"ingest-arjun: anchored relative json path '{args.json_file}' -> '{json_file}'",
+            file=sys.stderr,
+        )
 
     if not Path(db_path).is_file():
         print(f"ERROR: database not found: {db_path}", file=sys.stderr)

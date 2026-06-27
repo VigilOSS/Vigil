@@ -419,6 +419,62 @@ def test_filter_scope_keeps_in_scope_hosts(monkeypatch, tmp_path: Path, capsys) 
     ]
 
 
+def test_filter_scope_excludes_out_of_scope_carve_out(monkeypatch, tmp_path: Path, capsys) -> None:
+    """An out_of_scope carve-out is dropped even when an in-scope wildcard
+    would otherwise admit it. The denylist wins.
+    """
+    module = _load_script_module(
+        "test_filter_scope_oos_module",
+        "agent/scripts/assess/commands/filter_scope.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(
+        json.dumps(
+            {
+                "hosts": ["*.acme-regional.example"],
+                "out_of_scope": ["appointments.acme-regional.example"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    input_file = tmp_path / "urls.txt"
+    input_file.write_text(
+        "\n".join(
+            [
+                "https://app.acme-regional.example/a",
+                "https://appointments.acme-regional.example/booking",
+                "https://acme-regional.example/apex",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir=None: SimpleNamespace(
+            engagement_dir=str(engagement_dir),
+            engagement_key="eng",
+            base_url="http://example.test",
+        ),
+    )
+    module.run(
+        SimpleNamespace(
+            engagement_dir=engagement_dir,
+            input_file=str(input_file),
+            output=None,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [
+        "https://app.acme-regional.example/a",
+        "https://acme-regional.example/apex",
+    ]
+
+
 def test_ingest_candidates_preserve_metadata_and_route(
     monkeypatch,
     tmp_path: Path,

@@ -97,6 +97,75 @@ Keep crawls scoped and bounded:
   installed Katana version supports it and the dispatch needs robots/sitemap or
   well-known route expansion.
 
+### Field-scope: `-fs fqdn` is the scope-safe default for mixed-scope seed lists
+
+Katana is an **active** crawler — every link it follows is a live request to the
+target. Its default field-scope is `-fs rdn` (root-domain): from a seed of
+`blis.com` it will follow links to **any** `*.blis.com` subdomain it discovers.
+That is exactly wrong when the program grants only *specific* subdomains of a
+root (the common Bugcrowd/H1 shape: `media.acme.example` and
+`media.acme.example` are in scope, but `*.media.acme.example` is not). With the
+default `rdn`, Katana will actively probe out-of-scope sibling subdomains it
+finds in links — a scope violation, not just noise.
+
+Rule for a multi-host seed list that mixes wildcard-scoped roots and
+specific-host entries: pass **`-fs fqdn`** so Katana only crawls the exact hosts
+you seeded. Wildcard-subdomain breadth (`*.acme-telco.example`) is then recovered
+separately via a scoped subdomain-enum pass and passive `gau --subs` collection —
+**not** by letting an active crawler wander the root domain. Use `-fs rdn` only
+when every seed root is itself a wildcard-scoped in-scope entry.
+
+The typed wrapper does not model `-fs`/`-cos`; pass them via `--extra-args`
+(`--extra-args "-fs fqdn -cos self-service-"`), or use the raw `katana` binary
+directly under `kali job start` for an all-day operator sweep.
+
+### Exclude out-of-scope path patterns with `-cos`
+
+When the program carves out specific path patterns (e.g. "any endpoint ending in
+`/self-service-*` is out of scope"), exclude them at the crawler with
+`-cos <regex>` (`-crawl-out-scope`) so Katana never issues the request — e.g.
+`-cos self-service-`. scope.json matches at host granularity and cannot express a
+path carve-out, so `-cos` is the enforcement point for path-level OOS rules.
+
+### Mandatory program-attribution headers (Bugcrowd `X-Bug-Bounty`, etc.)
+
+Many bounty programs require a researcher-attribution header on **every** request
+to in-scope targets (e.g. Bugcrowd's `X-Bug-Bounty: BugCrowd-<username>`); a
+missing/incorrect value commonly incurs a bounty penalty. Inject it on every
+active probe via `-H`:
+
+```bash
+# raw binary (under kali job start) — exact program format, no space after colon:
+katana -list seeds.txt -H X-Bug-Bounty:BugCrowd-<username> ...
+# typed wrapper:
+vigil assess kali katana -u https://target.example \
+  --extra-args '-H "X-Bug-Bounty: BugCrowd-<username>"' ...
+```
+
+This applies to **all active tools** (katana, httpx, nuclei, ffuf, curl). It does
+**not** apply to passive archive tools (`gau`, `subfinder`, CT-log enumeration)
+that never touch the target — see `agent/references/tools/recon/gau.md`.
+
+### JSONL output bloat — omit body/raw on long crawls (`-or -ob`)
+
+Katana `-jsonl`/`-j` stores the full `response.body` **and** the entire `raw`
+request/response per record by default. On a deep, long-running crawl of
+content-heavy pages this explodes the artifact: an observed all-day-style run hit
+**~1.9 GB in ~35 minutes** (≈210 KB/line) and was on track to fill the runtime
+disk. The request rate was correctly throttled — the blowup is output volume per
+record, decoupled from request count (jsluice also emits many endpoint lines per
+JS file). For any deep/long crawl where you only need the discovered routes plus
+metadata, add **`-or`** (omit-raw) and **`-ob`** (omit-body):
+
+```bash
+katana -list seeds.txt -d 5 -jc -jsl -kf all -fs fqdn -j -or -ob -o out.jsonl ...
+```
+
+This keeps `url`, `status_code`, `headers`, `content_length`, and tech detection
+while dropping the page bodies (≈726 bytes/line in the same run). If you genuinely
+need bodies for source-analysis, capture them in a separate, bounded pass rather
+than the broad crawl.
+
 Example with version-dependent extras:
 
 ```bash
@@ -114,8 +183,9 @@ other collection sources instead of assuming Katana can crawl it.
 
 ## Auth-Aware Crawl
 
-When `auth.json` marks credentials as available and the dispatch authorizes
-authenticated collection, pass only the needed headers:
+When the engagement's credential store marks credentials as available
+(`vigil auth status`) and the dispatch authorizes authenticated collection,
+pass only the needed headers:
 
 ```bash
 vigil assess kali katana \

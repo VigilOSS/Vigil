@@ -73,15 +73,22 @@ from .kali_cli import (
     kali_args_to_kwargs,
 )
 from .kali_output import (
+    _REQUIRED_HEADER_INJECTABLE,
+    _REQUIRED_HEADER_SKIP,
     KaliResult,
+    _apply_required_headers,
     _auth_context,
     _engagement_type,
+    _existing_header_names,
     _peak_rss_kilobytes_to_bytes,
     _read_proc_peak_rss,
     _read_safely,
+    _required_headers,
     _scope_version,
     _utcnow_iso,
     detect_transport_error,
+    detect_waf_challenge,
+    extract_probe_response_headers,
     is_http_prober,
 )
 from . import kali_resolve
@@ -240,6 +247,15 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
     return True
 
 
+# Program-mandated attribution-header classifier + injector
+# (``_REQUIRED_HEADER_INJECTABLE`` / ``_REQUIRED_HEADER_SKIP`` /
+# ``_apply_required_headers`` / ``_existing_header_names``) now live in
+# ``kali_output`` and are imported above, so BOTH this container path
+# (``kali_exec``) and the audited host path (the recon host-dispatch wrappers in
+# commands/web_discovery.py / dns_discovery.py) apply the SAME rules. The names
+# are re-exported from this module for back-compat with existing importers.
+
+
 def kali_exec(
     cmd: list[str],
     *,
@@ -305,8 +321,8 @@ def kali_exec(
         _identity_name, _identity_material = resolve_identity(eng_dir, identity)
         if not _identity_material:
             print(
-                f"warning: --identity '{identity}' not found in auth.json "
-                f"(known: {', '.join(identity_names(eng_dir)) or 'none'}); "
+                f"warning: --identity '{identity}' not found in the credential "
+                f"store (known: {', '.join(identity_names(eng_dir)) or 'none'}); "
                 "no auth material to apply.",
                 file=sys.stderr,
             )
@@ -341,6 +357,29 @@ def kali_exec(
                 "material). Leaving auth_context derived so this run is NOT counted "
                 "as a cross-identity probe — inject the identity's auth into the "
                 "command manually if this tool needs it.",
+                file=sys.stderr,
+            )
+
+    # Program-mandated attribution headers (e.g. BugCrowd's ``X-Bug-Bounty:
+    # <handle>``) must ride every in-scope HTTP probe. Inject here — after the
+    # identity block (so an identity-set header isn't duplicated) and before the
+    # IP-pin/exec — so the injected ``-H`` args land in the recorded audit argv.
+    # For a ``sh -c``/``bash -c`` wrapper the header is BEST-EFFORT injected into
+    # the curl/wget sub-commands inside the script TEXT (W5); a plain argv append
+    # would land on the shell, not the inner tool. WARN (never block) only when
+    # no safe -H injection is possible — a missing attribution header is a
+    # reduced reward, not a ban-risk, so a hard block (which would stall a
+    # legitimate multi-curl probe mid-hunt) is never the right call.
+    _req_headers = _required_headers(eng_dir)
+    if _req_headers:
+        status = _apply_required_headers(cmd, derived_tool_name, _req_headers)
+        if status == "warned":
+            names = ", ".join(_req_headers)
+            print(
+                f"warning: program requires header(s) {names} but tool "
+                f"'{derived_tool_name}' has no known -H injection — this run will "
+                "NOT carry the required header; inject it manually if this tool "
+                "reaches the in-scope target.",
                 file=sys.stderr,
             )
 
@@ -681,6 +720,45 @@ def kali_exec(
                         file=sys.stderr,
                     )
 
+        # W1 — WAF / bot-challenge guard. A real HTTP exchange (rc usually 0,
+        # status 200/403) can come back with the WAF's interstitial/bot-challenge
+        # body instead of the origin app's response (Cloudflare "Just a moment",
+        # Akamai "Access Denied", Imperva "Pardon Our Interruption", or a renamed
+        # marker whose SHAPE is a JS-only shell behind a CDN/edge). That body is
+        # NOT a target verdict (404/patched/gated). Surfaced exactly like the
+        # http=000 guard: out-of-band on the KaliResult + a loud stderr line +
+        # an agent-facing status='waf_challenge'. Runs for every HTTP prober
+        # regardless of runtime (a WAF challenge is not Docker-Desktop-specific),
+        # but never on a transport error (no real body to inspect) and never on
+        # non-HTTP-prober tools — in particular NOT on the ``browser`` recovery
+        # verb, so re-rendering a flagged surface can never self-flag into a loop.
+        waf_challenge = False
+        waf_challenge_detail = ""
+        if is_http_prober(derived_tool_name) and not transport_error:
+            # Thread the REAL response headers when the probe surfaced them
+            # (httpx -json carries them in its stdout JSON; curl -i/-D prepends a
+            # header block) so header-only vendor markers (Akamai _abck /
+            # AkamaiGHost, Imperva x-iinfo) and the status-shape heuristic are not
+            # blind. A bare ``curl -sS`` probe emits no headers, so this is None
+            # and the body-only fail-safe stands.
+            probe_headers = extract_probe_response_headers(
+                derived_tool_name, cmd, snap.stdout_preview
+            )
+            is_waf, waf_detail = detect_waf_challenge(
+                snap.stdout_preview, snap.stderr_preview, probe_headers
+            )
+            if is_waf:
+                waf_challenge = True
+                waf_challenge_detail = waf_detail
+                print(
+                    "RUNTIME ERROR: WAF/bot-challenge interstitial detected "
+                    f"({waf_detail}) — this is NOT a target verdict (the body is "
+                    "the WAF's, not the origin app's). Re-render with `vigil assess "
+                    "kali browser <url>` (headless chromium clears the JS challenge) "
+                    "before any negative disposition.",
+                    file=sys.stderr,
+                )
+
         # Bind the (possibly retried) attempt's telemetry into the names the
         # finalize/return path below already uses.
         return_code = snap.return_code
@@ -707,16 +785,19 @@ def kali_exec(
             terminal_status = "completed"
 
         # The backend command-run status enum is {completed,failed,timed_out,
-        # killed,lost,running} — it has NO 'transport_error' member, so the audit
-        # row stays 'failed' (a connection failure already exits non-zero). The
-        # CR-36 distinction is carried OUT-of-band on the KaliResult flag + the
-        # loud stderr line + the depth ledger's error mapping (a 'failed' run
-        # never counts as 'tested'/covered). The KaliResult.status the AGENT
-        # reads is surfaced as 'transport_error' so it can never be confused with
-        # a real terminal verdict.
+        # killed,lost,running} — it has NO 'transport_error' / 'waf_challenge'
+        # member, so backend_status keeps the real terminal value (a WAF
+        # challenge is a completed exchange; a connection failure already exits
+        # non-zero, and 'failed' never counts as 'tested'/covered in the depth
+        # ledger). The CR-36 / W1 distinctions are carried OUT-of-band on the
+        # KaliResult flags + the loud stderr lines. The agent-facing
+        # KaliResult.status is overridden so it can never be confused with a real
+        # terminal verdict.
         backend_status = terminal_status
         if transport_error and backend_status == "failed":
             terminal_status = "transport_error"
+        elif waf_challenge and backend_status in ("completed", "failed"):
+            terminal_status = "waf_challenge"
 
         if run_id is not None and not audit_failed:
             try:
@@ -781,6 +862,8 @@ def kali_exec(
             partial_results=partial_results,
             transport_error=transport_error,
             transport_error_detail=transport_error_detail,
+            waf_challenge=waf_challenge,
+            waf_challenge_detail=waf_challenge_detail,
         )
     finally:
         client.close()
@@ -813,13 +896,22 @@ __all__ = [
     "emit_result",
     # Output + RSS (from kali_output)
     "KaliResult",
+    "_REQUIRED_HEADER_INJECTABLE",
+    "_REQUIRED_HEADER_SKIP",
+    "_apply_required_headers",
     "_auth_context",
     "_engagement_type",
+    "_existing_header_names",
     "_peak_rss_kilobytes_to_bytes",
     "_read_proc_peak_rss",
     "_read_safely",
+    "_required_headers",
     "_scope_version",
     "_utcnow_iso",
+    "detect_transport_error",
+    "detect_waf_challenge",
+    "extract_probe_response_headers",
+    "is_http_prober",
     # Runtime exec + kill cascade (from kali_runtime_exec)
     "_build_docker_exec",
     "_check_container_running",

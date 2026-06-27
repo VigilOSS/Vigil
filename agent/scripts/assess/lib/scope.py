@@ -217,6 +217,138 @@ def scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
     return entries
 
 
+def out_of_scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
+    """Return normalized out-of-scope (denylist) entries from ``scope.json``.
+
+    Mirrors ``scope_entries`` but reads ``scope.get("out_of_scope")``. A missing
+    key defaults to an empty list (no carve-outs). Entries use the same coarse
+    host semantics as the in-scope allowlist; a wildcard carve-out excludes the
+    apex AND every subdomain.
+    """
+    raw_hosts = scope.get("out_of_scope")
+    if raw_hosts is None:
+        return []
+    if not isinstance(raw_hosts, list):
+        raise SystemExit("scope.json `out_of_scope` must be a list")
+    entries: list[dict[str, str]] = []
+    for item in raw_hosts:
+        if not isinstance(item, str):
+            continue
+        entry = classify_scope_entry(item)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def rate_limit(scope: dict[str, Any]) -> float | None:
+    """Return the engagement's configured PER-INVOCATION / GLOBAL request-rate
+    ceiling (req/s), or ``None`` when unset.
+
+    The cap is the optional ``rate_limit`` field written by ``vigil engagement
+    create --rate-limit`` (req/s). httpx ``-rate-limit`` and katana ``-rl`` are
+    SINGLE GLOBAL token buckets, so this value caps the *aggregate* request rate
+    of the stage it is applied to over the WHOLE in-scope host set probed in that
+    one invocation — it bounds per-host only as a side effect (a global cap of N
+    spread over M hosts is at most N/M req/s per host). Coverage is honest and
+    narrow: only the recon pipeline's bulk web stages consume it today — httpx
+    liveness, katana crawl, and js-mining body-fetch. It does NOT throttle the
+    recon-specialist's nuclei/ffuf/nmap/whatweb/nikto probes or gau body-fetches.
+
+    ``None`` is the unchanged default: those bulk web stages fall through to their
+    per-tool rate defaults and the agent keeps discretion — there is NO hard gate.
+    A non-positive or non-numeric value is treated as unset (returns ``None``) so
+    a malformed scope can never produce a zero/negative throttle.
+    """
+    raw = scope.get("rate_limit")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def required_headers(scope: dict[str, Any]) -> dict[str, str]:
+    """Return the engagement's program-mandated attribution headers
+    (e.g. ``{"X-Bug-Bounty": "<handle>"}``) from ``scope.json``, or ``{}``.
+
+    Mirrors ``assess.lib.kali_output._required_headers`` (the kali_exec reader)
+    so recon stages that resolve a loaded scope dict, rather than a directory,
+    share the same string→string filtering: only ``str`` name → ``str`` value
+    pairs survive, with the name stripped, so a malformed scope can never inject
+    a non-header value into argv.
+    """
+    raw = scope.get("required_headers")
+    if not isinstance(raw, dict):
+        return {}
+    headers: dict[str, str] = {}
+    for name, value in raw.items():
+        if isinstance(name, str) and name.strip() and isinstance(value, str):
+            headers[name.strip()] = value
+    return headers
+
+
+def rate_caps_for_dir(engagement_dir: str) -> tuple[float | None, dict[str, str]]:
+    """Read both target-facing knobs for a recon stage from an engagement dir:
+    ``(rate_limit, required_headers)``.
+
+    A convenience over ``load_scope`` + ``rate_limit`` + ``required_headers`` for
+    stage callers that hold an ``engagement_dir`` (e.g. ``cfg.engagement_dir``)
+    rather than a loaded scope dict. ``rate_limit`` is the per-invocation / global
+    req/s ceiling or ``None`` (unset = today's per-tool defaults, no hard gate);
+    it bounds per-host only as a side effect, and only the bulk web stages (httpx
+    liveness, katana crawl, js-mining body-fetch) consume it. ``required_headers``
+    is the program attribution header map (``{}`` when none).
+
+    A MISSING scope degrades quietly to ``(None, {})`` (an unconfigured
+    engagement). But a scope.json that EXISTS yet cannot be read/parsed for the
+    cap emits a loud stderr WARNING before degrading: silently dropping a
+    politeness/legal rate ceiling would let a malformed scope un-throttle the
+    pass back to the verb default (fail-open), so the operator is told the cap is
+    not being enforced rather than failing open in silence.
+    """
+    scope_path = Path(engagement_dir) / "scope.json"
+    if not scope_path.is_file():
+        return None, {}
+    try:
+        scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _warn_scope(
+            f"rate_caps_for_dir:{scope_path}",
+            f"scope: WARNING: scope.json exists at {scope_path} but could not be "
+            f"read for the rate cap ({type(exc).__name__}: {exc}); the configured "
+            "per-invocation req/s ceiling is NOT being enforced and this stage "
+            "will probe at the verb default rate. Fix the scope file to re-apply "
+            "the cap.",
+        )
+        return None, {}
+    if not isinstance(scope, dict):
+        _warn_scope(
+            f"rate_caps_for_dir:{scope_path}",
+            f"scope: WARNING: scope.json at {scope_path} is not a JSON object; the "
+            "configured per-invocation req/s ceiling is NOT being enforced and "
+            "this stage will probe at the verb default rate.",
+        )
+        return None, {}
+    rl = rate_limit(scope)
+    if rl is None and scope.get("rate_limit") is not None:
+        # Present-but-invalid value (non-numeric / non-positive / bool) — same
+        # silent-un-throttle hazard as a malformed file, so warn rather than fail
+        # open: the operator set a rate_limit that does not parse and the cap is
+        # NOT being enforced.
+        _warn_scope(
+            f"rate_caps_for_dir:rate_limit:{scope_path}",
+            f"scope: WARNING: scope.json at {scope_path} has a rate_limit value "
+            f"({scope.get('rate_limit')!r}) that is not a positive number; the "
+            "per-invocation req/s ceiling is NOT being enforced and this stage "
+            "will probe at the verb default rate.",
+        )
+    return rl, required_headers(scope)
+
+
 def classify_scope_entry(raw: str) -> dict[str, str] | None:
     stripped = raw.strip()
     if not stripped:
@@ -384,3 +516,17 @@ def entry_matches_host(entry: dict[str, str], host: str) -> bool:
 
 def host_in_scope(host: str, entries: list[dict[str, str]]) -> bool:
     return any(entry_matches_host(entry, host) for entry in entries)
+
+
+def host_admitted(
+    host: str,
+    allow_entries: list[dict[str, str]],
+    deny_entries: list[dict[str, str]],
+) -> bool:
+    """Return True IFF ``host`` matches the allowlist AND no denylist entry.
+
+    The denylist wins: a host covered by an in-scope wildcard but matching an
+    ``out_of_scope`` carve-out is rejected. This is the single admission
+    primitive every scope-matching surface must call.
+    """
+    return host_in_scope(host, allow_entries) and not host_in_scope(host, deny_entries)

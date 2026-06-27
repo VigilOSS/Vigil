@@ -1,0 +1,77 @@
+# premium-anycast.txt — BRUTE-tier resolver list (puredns `-r`, shuffledns) — CR-12 / CR-18
+#
+# Provenance: hand-curated anycast resolver IPs operated by major providers that
+# behave under BULK / concurrent load (high names/sec, ~0% REFUSED). Engagement
+# evidence (CR-18): ~40 premium anycast IPs sustained ~250-500 names/s at 0%
+# REFUSED, whereas ~1,349 single-query-"alive" public resolvers managed ~4 names/s
+# at 38% REFUSED. Resolver QUALITY-under-load — not raw count — governs brute
+# throughput; single-query "alive" validation does NOT predict bulk behavior.
+#
+# Tier: BRUTE (`puredns bruteforce ... -r <this file>`). For the final-validation
+# cross-check pass use trusted-anycast.txt (`--resolvers-trusted`).
+#
+# Docker Desktop (macOS/Windows) hazard (CR-3): this list stays well UNDER the
+# ~50 distinct-destination-IP in-container cap (~40 IPs), so it is safe in the
+# container; a LARGE public list is host-path only. See
+# agent/references/runtime-guides/docker-desktop-network-hazards.md.
+#
+# Format: one resolver IP per line. '#' comments and blanks ignored.
+# Last reviewed: 2026-06-13.
+
+# Cloudflare
+1.1.1.1
+1.0.0.1
+# Cloudflare malware/family filtering anycast (still public, behaves under load)
+1.1.1.2
+1.0.0.2
+# Google Public DNS
+8.8.8.8
+8.8.4.4
+# Quad9 (Malware-blocking + ECS-stripped primary; secondary)
+9.9.9.9
+149.112.112.112
+# Quad9 unsecured / ECS variants
+9.9.9.10
+149.112.112.10
+9.9.9.11
+149.112.112.11
+# OpenDNS (Cisco Umbrella)
+208.67.222.222
+208.67.220.220
+# OpenDNS FamilyShield
+208.67.222.123
+208.67.220.123
+# AdGuard DNS (default filtering)
+94.140.14.14
+94.140.15.15
+# AdGuard DNS (non-filtering)
+94.140.14.140
+94.140.14.141
+# Level3 / CenturyLink (Verizon legacy anycast)
+4.2.2.1
+4.2.2.2
+4.2.2.3
+4.2.2.4
+# Neustar / UltraDNS (now Vercara) Public DNS
+156.154.70.1
+156.154.71.1
+# Neustar/UltraDNS threat-protection + family anycast pairs
+156.154.70.2
+156.154.71.2
+156.154.70.3
+156.154.71.3
+# Verisign Public DNS
+64.6.64.6
+64.6.65.6
+# ControlD (unfiltered anycast)
+76.76.2.0
+76.76.10.0
+# DNS.WATCH
+84.200.69.80
+84.200.70.40
+# Comodo Secure DNS
+8.26.56.26
+8.20.247.20
+# Dyn (Oracle) legacy public anycast
+216.146.35.35
+216.146.36.36

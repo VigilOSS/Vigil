@@ -23,6 +23,42 @@ Flag reference (used inside `vigil assess kali gau`):
 **Specific providers:** `--providers wayback,otx,commoncrawl`
 **Date range:** `--from 202301 --to 202412`
 
+## Passive: no attribution header, no program rate cap, no per-host scoping
+
+gau makes **zero requests to the target** — it queries third-party archives
+(Wayback, Common Crawl, OTX, URLScan). Two consequences:
+
+- **Mandatory program-attribution headers do not apply.** A Bugcrowd
+  `X-Bug-Bounty: BugCrowd-<username>` header (required on active traffic — see
+  `agent/references/tools/recon/katana.md`) is irrelevant to gau because gau never
+  contacts the in-scope host. The same is true of the program's request-rate cap
+  (e.g. "max 5 req/s on automated tooling"): that governs traffic *to the target*,
+  which gau does not generate. Only the archive providers' own quotas apply.
+- **Scope filtering happens downstream, not at collection.** Feeding a
+  wildcard-scoped root with `--subs` (`gau acme-telco.example --subs`) over-collects
+  archived URLs for *every* subdomain of the root, including ones not explicitly
+  in scope. That is acceptable for passive collection precisely because gau issues
+  no target traffic — the collected corpus is filtered to scope at ingestion/triage
+  (`vigil assess filter-scope`, work-buffer classification) **before** any active
+  tool probes it. Do **not** relax active-crawler scoping (katana `-fs fqdn`) on
+  the strength of this — the passive/active distinction is the whole point.
+  - For roots where the program carves out specific OOS subdomains (e.g.
+    `*.acme-regional.example` in scope but `appointments.acme-regional.example` out), still feed
+    the root to gau for breadth; the carve-out is enforced when the active phase
+    consumes the corpus, not here.
+
+## Provider quotas — be deliberate on large multi-domain sweeps
+
+URLScan and OTX are quota-sensitive (URLScan especially without an API key);
+Wayback and Common Crawl tolerate the most volume. For a large `--list` sweep
+across many roots with `--subs`, prefer `--providers wayback,commoncrawl,otx`
+(drop `urlscan`) and keep `--threads` low (3–5). gau is resilient — if one
+provider rate-limits, it continues with the others — but a giant sweep with all
+four providers at high threads is the fastest way to burn a quota. gau reads
+domains from stdin or `--list`; the raw binary (under `kali job start`) takes
+domains on **stdin** (`cat roots.txt | gau --subs ...`), while the typed
+`vigil assess kali gau` verb exposes `--list`.
+
 ## Config
 
 gau supports `~/.gau.toml` for persistent settings (API keys for OTX, custom providers).

@@ -17,17 +17,26 @@ from . import backup as backup_module
 from . import bench as bench_module
 from . import blue as blue_module
 from . import config as config_module
+from . import email as email_module
 from .docker import run_command as docker_run_command
 from .engagements import (
+    PROGRAM_HEADER_PRESETS,
     CreateEngagementOptions,
+    add_out_of_scope,
     create_engagement,
     current_engagement_path,
     export_pdf,
     list_engagements,
     plan_engagement,
     print_shell_cd_init,
+    remove_out_of_scope,
     resolve_engagement_path,
+    resolve_out_of_scope,
+    resolve_rate_limit,
+    resolve_required_headers,
+    set_engagement_header,
     start_engagement,
+    unset_engagement_header,
 )
 from .install import InstallOptions, InstallResult, install_from_source
 from .mitmproxy import (
@@ -69,7 +78,7 @@ from .orchestrator import (
 )
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_image_build_state, runtime_status, start_runtime, stop_runtime
-from .status import collect_doctor_checks, collect_status, print_doctor, print_status
+from .status import collect_doctor_checks, collect_status, print_doctor, print_status, write_install_meta
 from .up import UpOptions, run_up
 
 
@@ -100,6 +109,12 @@ def _print_post_install(result: InstallResult) -> None:
         print("  3. vigil up                      # build/start runtime, orchestrator, and OOB")
         print("  4. vigil engagement create <target>  # create your first engagement")
         print("  5. vigil assess kali --help      # discover target-facing CLI verbs")
+    print()
+    print(
+        "Two-layer model: `vigil install`/`update` upgraded the WORKING ROOT "
+        "(code/prompts/skills/scripts). `uv tool upgrade vigil` upgrades only the CLI "
+        "binary. `vigil status` warns when the working root falls behind its source."
+    )
     print()
 
 
@@ -228,6 +243,54 @@ def main(argv: list[str] | None = None) -> None:
         help="Generate launchers that skip client permission prompts",
     )
     create_p.add_argument(
+        "--program",
+        choices=sorted(PROGRAM_HEADER_PRESETS),
+        default=None,
+        help="Bug-bounty program preset; sets the program's mandated attribution "
+             "header (requires --researcher). web/both/android only.",
+    )
+    create_p.add_argument(
+        "--researcher",
+        default=None,
+        help="Researcher handle sent as the --program attribution header value",
+    )
+    create_p.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        metavar="NAME: VALUE",
+        help="Required request header injected into every in-scope HTTP probe; "
+             "repeatable. e.g. --header \"X-Bug-Bounty: vigiloss\"",
+    )
+    create_p.add_argument(
+        "--out-of-scope",
+        action="append",
+        default=[],
+        metavar="HOST|*.WILDCARD|CIDR",
+        help="Out-of-scope carve-out excluded even when an in-scope wildcard "
+             "would match it; repeatable. web/both/android only.",
+    )
+    create_p.add_argument(
+        "--rate-limit",
+        dest="rate_limit",
+        type=float,
+        default=None,
+        metavar="REQ_PER_SEC",
+        help="Per-invocation / global request-rate ceiling (req/s) for the recon "
+             "pipeline's bulk web stages (httpx liveness, katana crawl, js-mining "
+             "body-fetch). httpx -rate-limit / katana -rl are single GLOBAL token "
+             "buckets, so this caps each stage's AGGREGATE rate over the whole "
+             "in-scope host set probed in one invocation and bounds per-host only "
+             "as a side effect (a cap of 5 over 100 hosts is ~0.05 req/s/host). "
+             "Does NOT cover the recon-specialist's nuclei/ffuf/nmap/whatweb/nikto "
+             "probes or gau body-fetches. Must be >= 1 (sub-1 is rejected — the "
+             "tools take an integer req/s); a value >= 1 is accepted but truncates "
+             "DOWN at use (5.9 -> 5), and a cap above a stage's verb default is a "
+             "no-op (the ceiling only clamps DOWN). Unset = today's behavior (per-tool "
+             "defaults, agent discretion, no hard gate). web/both/android only. "
+             "e.g. --rate-limit 5",
+    )
+    create_p.add_argument(
         "--no-prompt",
         action="store_true",
         help="Never prompt interactively; fail when required fields are missing",
@@ -242,6 +305,26 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Validate inputs and show what would be created without writing anything",
     )
+    set_header_p = engagement_sub.add_parser(
+        "set-header", help="Add/replace a required attribution header on an engagement"
+    )
+    set_header_p.add_argument("key")
+    set_header_p.add_argument("header", metavar="NAME: VALUE")
+    unset_header_p = engagement_sub.add_parser(
+        "unset-header", help="Remove a required attribution header from an engagement"
+    )
+    unset_header_p.add_argument("key")
+    unset_header_p.add_argument("name")
+    add_oos_p = engagement_sub.add_parser(
+        "add-oos", help="Add out-of-scope carve-out(s) to an engagement"
+    )
+    add_oos_p.add_argument("key")
+    add_oos_p.add_argument("entries", nargs="+", metavar="HOST|*.WILDCARD|CIDR")
+    remove_oos_p = engagement_sub.add_parser(
+        "remove-oos", help="Remove an out-of-scope carve-out from an engagement"
+    )
+    remove_oos_p.add_argument("key")
+    remove_oos_p.add_argument("entry")
     path_p = engagement_sub.add_parser("path")
     path_p.add_argument("key", nargs="?")
     path_p.add_argument("--select", action="store_true")
@@ -390,19 +473,95 @@ def main(argv: list[str] | None = None) -> None:
 
     # `vigil mcp` retired in the typed-CLI cutover. Keep the parser so calls fail with a clear message
     # instead of argparse's generic "unknown command" error; downstream handler prints the deprecation note.
+    email_p = sub.add_parser(
+        "email",
+        help="Read recent messages from a local Mail.app mailbox (e.g. fetch a verification code)",
+        description=(
+            "Read recent messages addressed to a test mailbox via local Mail.app automation "
+            "(same mechanism as email-utility; no SMTP/IMAP/API, no stored "
+            "credentials). The mailbox must be a configured Mail.app account on this host. "
+            "Primary use: retrieving short-lived email-verification codes sent to a test "
+            "mailbox during authenticated security testing."
+        ),
+    )
+    email_p.add_argument(
+        "mailbox",
+        help="recipient mailbox address to read (e.g. researcher@example.com)",
+    )
+    email_p.add_argument(
+        "--from",
+        dest="from_filter",
+        default=None,
+        help="only messages FROM this address or domain (e.g. security@acme-bank.example or @acme-bank.example)",
+    )
+    email_p.add_argument(
+        "--within",
+        type=int,
+        default=3,
+        help="only messages received in the last N minutes (default: 3)",
+    )
+    email_p.add_argument(
+        "--match",
+        default=None,
+        help=(
+            "regex to extract a token from each message body; the first capture group "
+            "(or whole match) is printed. Implies extraction."
+        ),
+    )
+    email_p.add_argument(
+        "--extract",
+        action="store_true",
+        help=(
+            "extract a verification token even without --match, using the default "
+            f"6-8 digit code pattern ({email_module.DEFAULT_CODE_PATTERN})"
+        ),
+    )
+    email_p.add_argument(
+        "--limit",
+        type=int,
+        default=200,
+        help="maximum Mail.app messages to scan (default: 200)",
+    )
+    email_p.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=30.0,
+        help="timeout for the Mail.app read (default: 30)",
+    )
+    email_p.add_argument(
+        "--json",
+        action="store_true",
+        help="emit results as JSON for programmatic parsing",
+    )
+
     mcp_p = sub.add_parser("mcp", help="(removed) Kali MCP support retired; use `vigil assess kali ...`")
     mcp_p.add_argument("mcp_args", nargs=argparse.REMAINDER)
 
     auth_p = sub.add_parser("auth")
     auth_sub = auth_p.add_subparsers(dest="auth_command", required=True)
-    for auth_name in ("status", "show", "edit", "clear"):
+    for auth_name in ("status", "show", "edit", "clear", "export"):
         auth_cmd = auth_sub.add_parser(auth_name)
         auth_cmd.add_argument("engagement", nargs="?")
         auth_cmd.add_argument("--select", action="store_true")
+        auth_cmd.add_argument(
+            "--identity", help="Named identity (default: the active identity)"
+        )
+        if auth_name == "clear":
+            auth_cmd.add_argument(
+                "--all", action="store_true",
+                help="Clear ALL identities (default: only the active identity)",
+            )
     auth_import = auth_sub.add_parser("import")
     auth_import.add_argument("engagement", nargs="?")
     auth_import.add_argument("--source")
     auth_import.add_argument("--select", action="store_true")
+    auth_import.add_argument(
+        "--identity", default="default", help="Identity to import into (default: default)"
+    )
+    auth_activate = auth_sub.add_parser("set-active")
+    auth_activate.add_argument("engagement", nargs="?")
+    auth_activate.add_argument("--select", action="store_true")
+    auth_activate.add_argument("--identity", required=True, help="Identity to activate")
 
     backup_p = sub.add_parser("backup")
     backup_sub = backup_p.add_subparsers(dest="backup_command", required=True)
@@ -488,6 +647,9 @@ def main(argv: list[str] | None = None) -> None:
         )
         if not args.dry_run:
             config_module.set_config_value("install.root", str(result.install_root))
+            # Stamp the source commit synced into the working root so `vigil
+            # status` can later warn when the install lags its source (I-5).
+            write_install_meta(result.install_root, source_root)
         print(result.install_root)
         if not args.dry_run:
             _print_post_install(result)
@@ -529,6 +691,8 @@ def main(argv: list[str] | None = None) -> None:
         _runtime(args, install_root)
     elif args.command == "mitmproxy":
         _mitmproxy(args, install_root)
+    elif args.command == "email":
+        _email(args)
     elif args.command == "mcp":
         _mcp(args)
     elif args.command == "auth":
@@ -649,6 +813,18 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
                 print(f"{row.key}\t{row.status}\t{row.current_phase}\t{row.target}\t{row.path}")
     elif command == "create":
         _engagement_create(args, install_root)
+    elif command == "set-header":
+        headers = set_engagement_header(install_root, args.key, args.header)
+        print(f"[vigil] {args.key} required_headers: {json.dumps(headers)}", file=sys.stderr)
+    elif command == "unset-header":
+        headers = unset_engagement_header(install_root, args.key, args.name)
+        print(f"[vigil] {args.key} required_headers: {json.dumps(headers)}", file=sys.stderr)
+    elif command == "add-oos":
+        entries = add_out_of_scope(install_root, args.key, args.entries)
+        print(f"[vigil] {args.key} out_of_scope: {json.dumps(entries)}", file=sys.stderr)
+    elif command == "remove-oos":
+        entries = remove_out_of_scope(install_root, args.key, args.entry)
+        print(f"[vigil] {args.key} out_of_scope: {json.dumps(entries)}", file=sys.stderr)
     elif command == "path":
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
     elif command == "cd-init":
@@ -769,20 +945,57 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         if engagement_type == "android" and not name and not android_package and not artifacts:
             name = _ask_required("Engagement name")
             asked = True
-        # Dry runs skip the summary + confirmation: nothing will be created
-        # either way, and the dry-run path prints its own plan summary.
-        if asked and not args.dry_run:
-            _print_create_summary(
-                engagement_type,
-                target=target,
-                name=name,
-                hosts=hosts,
-                repos=args.repo,
-                artifacts=artifacts,
-                android_package=android_package,
-            )
-            if not _confirm("Create engagement? [Y/n]"):
-                raise SystemExit("aborted: engagement not created")
+        # Required attribution header + out-of-scope carve-outs apply to HTTP
+        # (web/both) engagements. A program-mandated header is security-relevant
+        # and easy to forget, so the interactive wizard always offers it unless
+        # the operator already passed the flag (or --no-prompt / a non-TTY).
+        # android (APK) engagements are excluded — pass --program/--header
+        # explicitly for those. Mutating `args` here lets the normal
+        # resolve_required_headers/resolve_out_of_scope path pick them up.
+        if engagement_type in {"web", "both"}:
+            if not args.program and not args.header:
+                header_choice = _prompt_choice(
+                    "Required attribution header (some programs, e.g. BugCrowd, mandate one on all traffic)",
+                    "none",
+                    [*PROGRAM_HEADER_PRESETS, "custom", "none"],
+                )
+                if header_choice in PROGRAM_HEADER_PRESETS:
+                    args.program = header_choice
+                    args.researcher = _ask_required(
+                        f"Researcher handle (sent as {PROGRAM_HEADER_PRESETS[header_choice]}: <handle>)"
+                    )
+                    asked = True
+                elif header_choice == "custom":
+                    args.header.append(_ask_required('Header (e.g. "X-Bug-Bounty: vigiloss")'))
+                    asked = True
+            if not args.out_of_scope:
+                oos_raw = _ask_optional(
+                    "Out-of-scope carve-outs (space-separated host / *.wildcard, blank for none)"
+                )
+                if oos_raw:
+                    args.out_of_scope.extend(oos_raw.split())
+                    asked = True
+    required_headers = resolve_required_headers(args.program, args.researcher, args.header)
+    out_of_scope = resolve_out_of_scope(args.out_of_scope)
+    rate_limit = resolve_rate_limit(args.rate_limit)
+
+    # Dry runs skip the summary + confirmation: nothing will be created either
+    # way, and the dry-run path prints its own plan summary.
+    if interactive and asked and not args.dry_run:
+        _print_create_summary(
+            engagement_type,
+            target=target,
+            name=name,
+            hosts=hosts,
+            repos=args.repo,
+            artifacts=artifacts,
+            android_package=android_package,
+            required_headers=required_headers,
+            out_of_scope=out_of_scope,
+            rate_limit=rate_limit,
+        )
+        if not _confirm("Create engagement? [Y/n]"):
+            raise SystemExit("aborted: engagement not created")
 
     options = CreateEngagementOptions(
         install_root=install_root,
@@ -795,6 +1008,9 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         android_package=android_package,
         dynamic_mode=args.dynamic_mode,
         skip_permissions=args.skip_permissions,
+        required_headers=required_headers,
+        out_of_scope=out_of_scope,
+        rate_limit=rate_limit,
     )
 
     if args.dry_run:
@@ -823,6 +1039,9 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
                 repos=[repo["path"] for repo in plan.repos],
                 artifacts=artifacts,
                 android_package=android_package,
+                required_headers=required_headers,
+                out_of_scope=out_of_scope,
+                rate_limit=rate_limit,
             )
         return
 
@@ -914,6 +1133,16 @@ def _ask_required(label: str, *, attempts: int = 3) -> str:
     raise SystemExit(f"{label} is required")
 
 
+def _ask_optional(label: str) -> str:
+    """Prompt on stderr for an optional value; empty input returns "".
+
+    Like `_ask_required` but never re-asks and never raises — a blank answer is
+    a valid "skip". Prompts stay on stderr so command substitution still works.
+    """
+    print(f"{label}: ", end="", file=sys.stderr, flush=True)
+    return _read_line().strip()
+
+
 def _confirm(prompt: str) -> bool:
     print(f"{prompt} ", end="", file=sys.stderr, flush=True)
     return _read_line().strip().lower() in {"", "y", "yes"}
@@ -928,6 +1157,9 @@ def _print_create_summary(
     repos: list[str],
     artifacts: list[str],
     android_package: str | None,
+    required_headers: dict[str, str] | None = None,
+    out_of_scope: list[str] | None = None,
+    rate_limit: float | None = None,
 ) -> None:
     print("[vigil] engagement summary:", file=sys.stderr)
     print(f"[vigil]   type:      {engagement_type}", file=sys.stderr)
@@ -943,6 +1175,17 @@ def _print_create_summary(
         print(f"[vigil]   artifacts: {', '.join(artifacts)}", file=sys.stderr)
     if android_package:
         print(f"[vigil]   package:   {android_package}", file=sys.stderr)
+    if required_headers:
+        rendered = ", ".join(f"{k}: {v}" for k, v in required_headers.items())
+        print(f"[vigil]   headers:   {rendered}", file=sys.stderr)
+    if out_of_scope:
+        print(f"[vigil]   out-of-scope: {', '.join(out_of_scope)}", file=sys.stderr)
+    if rate_limit is not None:
+        print(
+            f"[vigil]   rate-limit: {rate_limit:g} req/s "
+            "(global per-invocation; bounds per-host as a side effect)",
+            file=sys.stderr,
+        )
 
 
 def _looks_like_web_target(value: str) -> bool:
@@ -1115,6 +1358,72 @@ def _print_mitmproxy_status(payload: dict) -> None:
             print(f"  {line}")
 
 
+def _email(args: argparse.Namespace) -> None:
+    """Read recent Mail.app messages for a mailbox and optionally extract a code."""
+    if args.within <= 0:
+        raise SystemExit("--within must be a positive number of minutes")
+    if args.limit <= 0:
+        raise SystemExit("--limit must be a positive integer")
+    if args.timeout_seconds <= 0:
+        raise SystemExit("--timeout-seconds must be > 0")
+
+    cutoff = email_module.cutoff_for_window(args.within)
+    try:
+        messages = email_module.read_messages(
+            since=cutoff,
+            limit=args.limit,
+            timeout_seconds=args.timeout_seconds,
+        )
+        matched = email_module.filter_messages(
+            messages,
+            mailbox_address=args.mailbox,
+            from_filter=args.from_filter,
+            since=cutoff,
+        )
+        # Extract when a regex is given, when --extract is set, or always in
+        # JSON mode (the automation wants a candidate `extracted` field).
+        do_extract = bool(args.match) or args.extract or args.json
+        pattern = args.match or email_module.DEFAULT_CODE_PATTERN
+        extracted_by_id = {}
+        if do_extract:
+            for index, message in enumerate(matched):
+                extracted_by_id[index] = email_module.extract_token(
+                    message.body, pattern=pattern
+                )
+    except email_module.EmailReadError as exc:
+        raise SystemExit(f"error: {exc}") from exc
+
+    if args.json:
+        payload = {
+            "mailbox": args.mailbox,
+            "from": args.from_filter,
+            "within_minutes": args.within,
+            "cutoff": cutoff.isoformat(),
+            "count": len(matched),
+            "messages": [
+                email_module.message_to_dict(message, extracted=extracted_by_id.get(index))
+                for index, message in enumerate(matched)
+            ],
+        }
+        print(json.dumps(payload, indent=2))
+        return
+
+    if not matched:
+        print(
+            f"no messages to {args.mailbox} in the last {args.within} minute(s)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    for index, message in enumerate(matched):
+        timestamp = message.received_at.isoformat()
+        extracted = extracted_by_id.get(index) if do_extract else None
+        line = f"{timestamp}\t{message.sender}\t{message.subject}"
+        if do_extract:
+            line += f"\t{extracted if extracted is not None else '-'}"
+        print(line)
+
+
 def _mcp(args: argparse.Namespace) -> None:
     """Stub: Kali MCP support was removed in the typed-CLI cutover."""
     print(
@@ -1131,18 +1440,30 @@ def _mcp(args: argparse.Namespace) -> None:
 
 def _auth(args: argparse.Namespace, install_root: Path) -> None:
     engagement = _resolve_command_engagement(install_root, args)
+    identity = getattr(args, "identity", None)
     if args.auth_command == "status":
         print(auth_module.status_line(engagement))
     elif args.auth_command == "show":
         print(json.dumps(auth_module.read_auth(engagement), indent=2, sort_keys=True))
+    elif args.auth_command == "export":
+        print(auth_module.export_curl_args(engagement, identity))
     elif args.auth_command == "edit":
-        auth_module.edit_auth(engagement)
+        auth_module.edit_auth(engagement, identity)
     elif args.auth_command == "clear":
-        auth_module.clear_auth(engagement)
-        print(engagement / "auth.json")
+        clear_all = bool(getattr(args, "all", False))
+        auth_module.clear_auth(engagement, identity, all_identities=clear_all)
+        if clear_all:
+            print(f"cleared ALL credentials for {engagement.name}")
+        else:
+            scope = f" (identity={identity})" if identity else " (active identity)"
+            print(f"cleared credentials for {engagement.name}{scope}")
+    elif args.auth_command == "set-active":
+        assert identity is not None  # argparse marks --identity required here
+        auth_module.set_active(engagement, identity)
+        print(f"active identity for {engagement.name}: {identity}")
     elif args.auth_command == "import":
-        auth_module.import_auth(engagement, args.source)
-        print(engagement / "auth.json")
+        auth_module.import_auth(engagement, args.source, identity or auth_module.DEFAULT_IDENTITY)
+        print(f"imported credentials into {engagement.name} (identity={identity or auth_module.DEFAULT_IDENTITY})")
 
 
 def _backup(args: argparse.Namespace, install_root: Path) -> None:

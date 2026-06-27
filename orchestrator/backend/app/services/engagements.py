@@ -36,6 +36,7 @@ class EngagementView:
     customer: str | None = None
     platforms: list[str] | None = None
     tenant_reference_paths: list[str] | None = None
+    out_of_scope: list[str] | None = None
 
 
 _sync_lock = Lock()
@@ -342,12 +343,12 @@ def maybe_sync_engagements(force: bool = False) -> None:
 
 def _scope_details(
     engagement_root: Path,
-) -> tuple[str, str, str, list[str], list[str], int, str | None, list[str], list[str]]:
+) -> tuple[str, str, str, list[str], list[str], int, str | None, list[str], list[str], list[str]]:
     try:
         scope = _migrate_scope_file(engagement_root / "scope.json")
     except RuntimeError as exc:
         _logger.warning("Using persisted engagement identity for invalid scope at %s: %s", engagement_root, exc)
-        return "unknown", "pause", "pending", [], [], 0, None, [], []
+        return "unknown", "pause", "pending", [], [], 0, None, [], [], []
     current_phase = str(scope.get("current_phase") or "unknown")
     exploit_policy = str(scope.get("exploit_policy") or "pause")
     exploit_review_state = str(scope.get("exploit_review_state") or "pending")
@@ -366,6 +367,7 @@ def _scope_details(
     platforms = [str(item) for item in raw_platforms] if isinstance(raw_platforms, list) else []
     raw_tenant_refs = scope.get("tenant_reference_paths")
     tenant_reference_paths = [str(item) for item in raw_tenant_refs] if isinstance(raw_tenant_refs, list) else []
+    out_of_scope = _collect_out_of_scope(scope)
     return (
         current_phase,
         exploit_policy,
@@ -376,6 +378,7 @@ def _scope_details(
         customer,
         platforms,
         tenant_reference_paths,
+        out_of_scope,
     )
 
 
@@ -408,6 +411,29 @@ def _collect_scope_hosts(scope: dict[str, Any]) -> list[str]:
     return result
 
 
+def _collect_out_of_scope(scope: dict[str, Any]) -> list[str]:
+    """Return the deduped, lowercased out-of-scope carve-out patterns.
+
+    Mirrors ``_collect_scope_hosts`` so the backend is a faithful registry for
+    the multi-engagement mitmproxy router's denylist. Reads only the dedicated
+    ``out_of_scope`` list (a carve-out is never inferred from ``hosts``).
+    """
+    raw = scope.get("out_of_scope")
+    if not isinstance(raw, list):
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
 def _view_for(engagement: Engagement) -> EngagementView:
     (
         current_phase,
@@ -419,6 +445,7 @@ def _view_for(engagement: Engagement) -> EngagementView:
         customer,
         platforms,
         tenant_reference_paths,
+        out_of_scope,
     ) = _scope_details(Path(engagement.engagement_root))
     return EngagementView(
         id=engagement.id,
@@ -439,6 +466,7 @@ def _view_for(engagement: Engagement) -> EngagementView:
         customer=customer,
         platforms=platforms,
         tenant_reference_paths=tenant_reference_paths,
+        out_of_scope=out_of_scope,
     )
 
 

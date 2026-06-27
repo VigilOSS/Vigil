@@ -5,6 +5,8 @@ Subcommands:
 - status — fetch a job row by id.
 - tail   — tail the spilled stdout file.
 - stop   — terminate the recorded PID and PATCH killed/stop_failed/lost.
+           With --all, reap every in-flight (running/queued) job for the
+           engagement (the operator-explicit cleanup after an agent dies).
 - list   — list jobs, optionally filtered by status / parent_command_run_id.
 """
 from __future__ import annotations
@@ -26,7 +28,7 @@ from assess.lib.kali import (
     _resolve_agent_name,
 )
 from assess.lib.kali_audit import _enum_reject_message
-from assess.lib.kali_jobs import job_list, job_status, job_stop, job_tail, start_job
+from assess.lib.kali_jobs import job_list, job_status, job_stop, job_tail, reap_jobs, start_job
 
 
 _DEFAULT_JOB_TIMEOUT_SECONDS = 24 * 60 * 60  # 24h hard cap parity with `kali exec` budgets
@@ -107,9 +109,18 @@ def register(subparsers) -> None:
 
     stop_p = job_sub.add_parser(
         "stop",
-        help="Terminate the recorded PID and PATCH killed/stop_failed/lost.",
+        help="Terminate the recorded PID and PATCH killed/stop_failed/lost (or --all to reap every in-flight job).",
     )
-    stop_p.add_argument("job_id", type=int)
+    stop_p.add_argument("job_id", type=int, nargs="?", default=None)
+    stop_p.add_argument(
+        "--all",
+        dest="stop_all",
+        action="store_true",
+        help=(
+            "Reap ALL in-flight (running/queued) jobs for this engagement — the "
+            "operator-explicit cleanup after an agent dies leaving dtach jobs alive."
+        ),
+    )
     stop_p.add_argument("--container-name", dest="container_name", default=default_runtime_container())
     stop_p.set_defaults(func=_run_stop)
 
@@ -200,6 +211,13 @@ def _run_tail(args) -> None:
 
 def _run_stop(args) -> None:
     cfg = _load_job_config(args)
+    if getattr(args, "stop_all", False):
+        if args.job_id is not None:
+            raise AssessError("pass either a job_id or --all to `kali job stop`, not both")
+        print(json.dumps(reap_jobs(container_name=args.container_name, config=cfg), indent=2, ensure_ascii=False))
+        return
+    if args.job_id is None:
+        raise AssessError("`kali job stop` requires a job_id (or --all to reap every in-flight job)")
     print(json.dumps(job_stop(args.job_id, container_name=args.container_name, config=cfg), indent=2, ensure_ascii=False))
 
 

@@ -186,12 +186,18 @@ def _engagement_fallback_base(engagement_dir: str) -> str:
     paths with relative URLs rather than dropping the spec).
     """
     try:
-        from assess.lib.scope import load_scope, scope_entries
+        from assess.lib.scope import (
+            host_admitted,
+            load_scope,
+            out_of_scope_entries,
+            scope_entries,
+        )
     except Exception:  # pragma: no cover - defensive
         return ""
     try:
         scope = load_scope(engagement_dir)
         entries = scope_entries(scope)
+        deny = out_of_scope_entries(scope)
     except SystemExit:
         return ""
     except Exception:  # pragma: no cover - defensive
@@ -200,7 +206,11 @@ def _engagement_fallback_base(engagement_dir: str) -> str:
         for entry in entries:
             if entry.get("entry_kind") in kind_filter:
                 host = (entry.get("host") or "").strip()
-                if host and "/" not in host:
+                # Skip a host carved out by an out_of_scope denylist entry so the
+                # fallback base never resolves to an OOS host. CIDR/wildcard
+                # apexes that aren't concrete admittable hosts fall through the
+                # allowlist check the same as before.
+                if host and "/" not in host and host_admitted(host, entries, deny):
                     return f"https://{host}"
     return ""
 
