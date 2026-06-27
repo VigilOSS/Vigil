@@ -546,6 +546,11 @@ def main(argv: list[str] | None = None) -> None:
         auth_cmd.add_argument(
             "--identity", help="Named identity (default: the active identity)"
         )
+        if auth_name == "clear":
+            auth_cmd.add_argument(
+                "--all", action="store_true",
+                help="Clear ALL identities (default: only the active identity)",
+            )
     auth_import = auth_sub.add_parser("import")
     auth_import.add_argument("engagement", nargs="?")
     auth_import.add_argument("--source")
@@ -1445,8 +1450,13 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
     elif args.auth_command == "edit":
         auth_module.edit_auth(engagement, identity)
     elif args.auth_command == "clear":
-        auth_module.clear_auth(engagement, identity)
-        print(f"cleared credentials for {engagement.name}" + (f" (identity={identity})" if identity else ""))
+        clear_all = bool(getattr(args, "all", False))
+        auth_module.clear_auth(engagement, identity, all_identities=clear_all)
+        if clear_all:
+            print(f"cleared ALL credentials for {engagement.name}")
+        else:
+            scope = f" (identity={identity})" if identity else " (active identity)"
+            print(f"cleared credentials for {engagement.name}{scope}")
     elif args.auth_command == "set-active":
         assert identity is not None  # argparse marks --identity required here
         auth_module.set_active(engagement, identity)

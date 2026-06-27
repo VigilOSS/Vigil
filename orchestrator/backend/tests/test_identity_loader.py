@@ -120,3 +120,57 @@ def test_resolve_identity_empty_store_returns_none(stub_store):
     name, material = identity.resolve_identity("eng", None)
     assert (name, material) == (None, {})
     assert identity.identity_names("eng") == []
+
+
+# -- creds_client legacy auth.json warning (PR #40, real load path) ----------
+
+
+class _Backend:
+    def __init__(self, data):
+        self._data = data
+
+    def get_engagement(self, _kind):
+        return self._data
+
+
+def test_creds_client_warns_on_unimported_legacy_auth_json(tmp_path, monkeypatch, capsys):
+    # After centralizing credentials to the backend, a pre-existing on-disk
+    # auth.json is NOT auto-imported. An upgraded engagement that has auth.json but
+    # zero backend rows must WARN (pointing at `vigil auth import`) instead of
+    # silently resolving to anonymous and losing its identities.
+    eng = tmp_path / "eng"
+    eng.mkdir()
+    (eng / "auth.json").write_text('{"cookies": {"session": "abc"}}', encoding="utf-8")
+    monkeypatch.setattr(
+        creds_client, "_client",
+        lambda _eng: _Backend({"identities": {}, "active_identity": DEFAULT_IDENTITY}),
+    )
+    creds_client._cache.clear()
+    creds_client._warned.clear()
+
+    data = creds_client.load_identities(str(eng), use_cache=False)
+    assert data["identities"] == {}  # still fail-closed to anonymous
+    err = capsys.readouterr().err
+    assert "auth.json" in err and "vigil auth import" in err
+
+    # Once-only: a second load does not re-warn.
+    creds_client.load_identities(str(eng), use_cache=False)
+    assert "auth.json" not in capsys.readouterr().err
+
+
+def test_creds_client_no_warn_when_backend_has_identities(tmp_path, monkeypatch, capsys):
+    # Backend already has identities -> the legacy file is irrelevant, no WARN.
+    eng = tmp_path / "eng"
+    eng.mkdir()
+    (eng / "auth.json").write_text('{"cookies": {"session": "abc"}}', encoding="utf-8")
+    monkeypatch.setattr(
+        creds_client, "_client",
+        lambda _eng: _Backend(
+            {"identities": {"default": {"cookies": {"s": "x"}}}, "active_identity": DEFAULT_IDENTITY}
+        ),
+    )
+    creds_client._cache.clear()
+    creds_client._warned.clear()
+
+    creds_client.load_identities(str(eng), use_cache=False)
+    assert "auth.json" not in capsys.readouterr().err

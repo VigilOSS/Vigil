@@ -156,7 +156,12 @@ def capture_material(
         headers=merged_headers,
         tokens=merged_tokens,
         host_cookies=host_cookies,
-        raw={},
+        # Carry the existing raw_json extras forward — a capture only changes the
+        # cookie/header/token deltas, so unmodeled custom fields (custom token /
+        # session shapes) must survive. A bare `raw={}` here silently dropped them
+        # on every proxy refresh. `existing` is the merged material (raw_json base +
+        # typed overlay), so the non-modeled keys ARE the preserved extras.
+        raw={k: v for k, v in existing.items() if k not in _MODELED_KEYS},
         notes=str(existing.get("notes") or ""),
         expires_at=existing.get("expires_at"),
         make_active=not db.list_credentials(engagement_id),

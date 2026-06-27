@@ -335,6 +335,11 @@ def _run_trufflehog(args, cfg, *, bodies_host: Path) -> dict:
 def run(args) -> None:
     _apply_arg_defaults(args)
     cfg = load_config(args.engagement_dir)
+    # `--engagement-dir` defaults to None; load_config resolves the real dir (cwd
+    # scope.json or $ENGAGEMENT_DIR). Write it back so post-config reads — rate caps
+    # and scope filtering — see the resolved path instead of None (which would raise
+    # in rate_caps_for_dir and silently no-op the default-on recon JS stage).
+    args.engagement_dir = cfg.engagement_dir
     work_host, _ = _paths(cfg, "")
     work_host.parent.mkdir(parents=True, exist_ok=True)
 

@@ -8,34 +8,49 @@ DOM + a screenshot path. The run is audited like every other kali verb (pre-exec
 command-runs POST + finalize PATCH) because it reaches the target.
 
 Implementation: the command builds a ``python3 -c <driver> <url> <screenshot>
-<dom> <page_timeout> <settle> <wait_selector>`` argv and hands it to
-``kali_exec`` (so audit, output spilling, the timeout kill-cascade, and required-
-header injection are all reused verbatim). The driver itself is a self-contained
-selenium script that runs inside the container. Reliability is LOAD-BEARING — an
-unreliable browser plus the over-eager detector would strand real surfaces in
-reprobe limbo — so the driver uses ``--no-sandbox``, explicit waits, a bounded
-page-load timeout, and degrades to a best-effort JSON result (DOM/screenshot
-still captured) rather than crashing when one capture step fails.
+<dom> <page_timeout> <settle> <wait_selector> <required_headers_json>`` argv and
+hands it to ``kali_exec`` (so audit, output spilling, and the timeout kill-cascade
+are all reused verbatim). The driver itself is a self-contained selenium script
+that runs inside the container. Reliability is LOAD-BEARING — an unreliable browser
+plus the over-eager detector would strand real surfaces in reprobe limbo — so the
+driver uses ``--no-sandbox``, explicit waits, a bounded page-load timeout, and
+degrades to a best-effort JSON result (DOM/screenshot still captured) rather than
+crashing when one capture step fails.
+
+Program-mandated attribution headers (e.g. BugCrowd's ``X-Bug-Bounty: <handle>``)
+must ride EVERY in-scope HTTP request, including this WAF-recovery navigation.
+``kali_exec``'s central ``-H`` injector can't reach a Selenium-driven Chrome (a
+``tool_name='browser'`` argv has no ``-H`` flag — the injector just WARNs and sets
+nothing), so the verb resolves the engagement's ``required_headers`` itself and
+threads them (JSON-encoded) into the driver, which sets them on the chromium
+session via the Chrome DevTools Protocol (``Network.setExtraHTTPHeaders``) BEFORE
+``driver.get()`` — so the rendered navigation carries the same attribution header
+the curl/httpx probes inject.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import uuid
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from assess.lib.client import AssessError
+from assess.lib.config import resolve_engagement_dir
 from assess.lib.kali import (
     add_required_kali_flags,
     emit_result,
     kali_args_to_kwargs,
     kali_exec,
 )
+from assess.lib.kali_output import _required_headers
 
 
 # Self-contained selenium driver run as ``python3 -c <this> <argv...>`` INSIDE
 # the runtime container. Positional argv (after the ``-c`` body):
 #   1 url  2 screenshot_path  3 dom_path  4 page_timeout  5 settle  6 wait_selector
+#   7 required_headers_json (JSON object of attribution headers; "{}" when none)
 # Paths are engagement-relative; the container working dir is the engagement
 # root, so they land in the bind-mounted engagement tree on the host. The driver
 # prints ONE JSON object to stdout (origin http_status, final_url, title,
@@ -56,6 +71,23 @@ dom_path = sys.argv[3] if len(sys.argv) > 3 else "scans/browser/render.html"
 page_timeout = float(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else 30.0
 settle = float(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else 2.0
 wait_selector = sys.argv[6] if len(sys.argv) > 6 else ""
+
+# Program-mandated attribution headers (e.g. ``X-Bug-Bounty: <handle>``) passed
+# JSON-encoded by the host CLI. They are set on the chromium session via CDP
+# before navigation so this WAF-recovery render carries the same attribution
+# header the curl/httpx probes inject. A missing/blank/malformed value degrades
+# to no extra headers (never crashes the render).
+extra_headers = {}
+raw_headers = sys.argv[7] if len(sys.argv) > 7 else ""
+if raw_headers:
+    try:
+        _parsed = json.loads(raw_headers)
+        if isinstance(_parsed, dict):
+            extra_headers = {
+                str(k): str(v) for k, v in _parsed.items() if str(k).strip()
+            }
+    except Exception:
+        extra_headers = {}
 
 if not url:
     _emit({"error": "no url supplied to browser driver"}, 2)
@@ -110,6 +142,21 @@ try:
         driver.set_page_load_timeout(page_timeout)
     except Exception:
         pass
+    # Set the program attribution header(s) on the chromium session over CDP
+    # BEFORE navigating, so the main-document request (and every sub-request)
+    # carries them — matching the -H the curl/httpx probes inject. Enable the
+    # Network domain first (required for setExtraHTTPHeaders to take effect).
+    if extra_headers:
+        try:
+            driver.execute_cdp_cmd("Network.enable", {})
+            driver.execute_cdp_cmd(
+                "Network.setExtraHTTPHeaders", {"headers": extra_headers}
+            )
+        except Exception as exc:
+            result["header_warning"] = (
+                "could not set required attribution header(s) %r: %r"
+                % (sorted(extra_headers), exc)
+            )
     try:
         driver.get(url)
     except Exception as exc:
@@ -242,6 +289,32 @@ def _safe_slug(url: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", host)
 
 
+def _resolve_required_headers(args) -> dict[str, str]:
+    """Program-mandated attribution headers (e.g. ``{"X-Bug-Bounty": "<handle>"}``)
+    for this engagement, or ``{}`` when none are configured / the engagement dir
+    cannot be resolved.
+
+    ``kali_exec`` injects ``required_headers`` only into ``-H``-capable CLI tools;
+    for the browser verb (``tool_name='browser'``) it just WARNs and sets nothing,
+    so the Selenium-driven Chrome would otherwise omit the attribution header every
+    curl/httpx probe carries — an in-scope request that violates program
+    attribution rules and may observe a different response. We resolve the headers
+    here and the driver sets them on the chromium session via CDP before
+    navigation.
+
+    Resolution honours the same precedence as every other verb (``--engagement-dir``
+    > ``$ENGAGEMENT_DIR`` > cwd ``scope.json``); ``_required_headers`` then applies
+    the SAME string→string filtering as the kali_exec / host-route injectors (only
+    ``str`` name → ``str`` value pairs survive). An unresolvable engagement degrades
+    quietly to ``{}`` rather than failing the render.
+    """
+    try:
+        eng_dir = resolve_engagement_dir(getattr(args, "engagement_dir", None))
+    except SystemExit:
+        return {}
+    return _required_headers(Path(eng_dir))
+
+
 def run(args) -> None:
     url = (args.url or "").strip()
     if not url:
@@ -261,6 +334,19 @@ def run(args) -> None:
         file=sys.stderr,
     )
 
+    # Program attribution headers (e.g. X-Bug-Bounty) — set on the chromium
+    # session via CDP inside the driver, since kali_exec's -H injector can't
+    # reach a Selenium navigation. JSON-encoded so they thread safely through
+    # argv ("{}" when none).
+    req_headers = _resolve_required_headers(args)
+    headers_json = json.dumps(req_headers, sort_keys=True)
+    if req_headers:
+        print(
+            "browser: applying program attribution header(s) "
+            f"{', '.join(sorted(req_headers))} to the chromium session via CDP.",
+            file=sys.stderr,
+        )
+
     cmd: list[str] = [
         "python3",
         "-c",
@@ -271,6 +357,7 @@ def run(args) -> None:
         str(page_timeout),
         str(settle),
         wait_selector,
+        headers_json,
     ]
 
     result = kali_exec(cmd, tool_name="browser", **kali_args_to_kwargs(args))
