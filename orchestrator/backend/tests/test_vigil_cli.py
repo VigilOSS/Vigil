@@ -2776,8 +2776,75 @@ def test_auth_status_and_clear_operate_on_engagement_auth(
     assert "present" in capsys.readouterr().out
 
     main_module.main(["--root", str(install_root), "auth", "clear", "eng-1"])
-    # Clear deletes the centralized credential; the store has no identities left.
+    # Clear with no --identity removes the ACTIVE identity; here it was the only
+    # one, so the store ends empty.
     assert store["eng-1"]["identities"] == {}
+
+
+def test_auth_clear_without_identity_deletes_only_active_not_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR #40: `vigil auth clear` (no --identity) must delete ONLY the active
+    # identity, never the whole collection — a routine clear of an expired session
+    # must not wipe user_a/user_b/admin. `--all` is the explicit wipe-everything.
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    store = _install_fake_credential_store(monkeypatch)
+    store["eng-1"] = {
+        "identities": {
+            "user_a": {"cookies": {"s": "a"}},
+            "user_b": {"cookies": {"s": "b"}},
+            "admin": {"cookies": {"s": "x"}},
+        },
+        "active_identity": "user_b",
+    }
+
+    main_module.main(["--root", str(install_root), "auth", "clear", "eng-1"])
+    assert set(store["eng-1"]["identities"]) == {"user_a", "admin"}  # only active gone
+
+    main_module.main(["--root", str(install_root), "auth", "clear", "eng-1", "--all"])
+    assert store["eng-1"]["identities"] == {}  # --all wipes everything
+
+
+def test_auth_import_expands_multi_identity_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR #40: importing the legacy multi-identity shape must upsert EACH identity
+    # into its own slot (not dump the wrapper into `default`), so the documented
+    # `vigil auth import` recovery actually restores usable credentials.
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    store = _install_fake_credential_store(monkeypatch)
+    src = tmp_path / "auth.json"
+    src.write_text(
+        json.dumps(
+            {
+                "identities": {
+                    "user_a": {"cookies": {"s": "a"}},
+                    "user_b": {"cookies": {"s": "b"}},
+                },
+                "active_identity": "user_b",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    main_module.main(
+        ["--root", str(install_root), "auth", "import", "eng-1", "--source", str(src)]
+    )
+    ids = store["eng-1"]["identities"]
+    assert set(ids) == {"user_a", "user_b"}
+    assert ids["user_a"]["cookies"] == {"s": "a"}
+    assert ids["user_b"]["cookies"] == {"s": "b"}
+    assert store["eng-1"]["active_identity"] == "user_b"  # active flag honored
 
 
 def test_auth_edit_without_identity_writes_back_to_the_active_identity(

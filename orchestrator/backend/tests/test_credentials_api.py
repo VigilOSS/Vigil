@@ -126,6 +126,29 @@ def test_raw_json_preserves_unmodeled_fields(client, isolate_settings):
     assert mat["notes"] == "n"
 
 
+def test_capture_preserves_existing_raw_json_extras(client, isolate_settings):
+    # PR #40: a proxy capture (cookies/headers only) must NOT wipe previously
+    # imported/edited raw_json extras — a benign cookie refresh used to reset the
+    # raw column to {} and silently drop custom token/session shapes.
+    _seed(client, isolate_settings)
+    client.put(
+        f"/engagements/{KEY}/credentials/default",
+        json={"cookies": {"sid": "a"}, "custom_weird_field": {"x": 1}},
+    )
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.com",
+            "scope_host": "example.com",
+            "cookies": {"csrf": "2"},
+        },
+    )
+    got = client.get(f"/engagements/{KEY}/credentials/default").json()
+    assert got.get("custom_weird_field") == {"x": 1}  # raw extras preserved
+    assert got["cookies"].get("csrf") == "2"           # capture delta still applied
+
+
 def test_delete_one_and_all(client, isolate_settings):
     _seed(client, isolate_settings)
     client.put(f"/engagements/{KEY}/credentials/user_a", json={"cookies": {"s": "a"}})

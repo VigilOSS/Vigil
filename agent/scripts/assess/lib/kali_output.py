@@ -782,10 +782,12 @@ _SHELL_SUBCMD_INJECTABLE = frozenset({"wget"} | set(_REQUIRED_HEADER_INJECTABLE)
 # A sub-command head = one of the injectable tool names at the START of a
 # sub-command: at script start, right after a shell separator/opener
 # (newline ; & | backtick ( ) { } or the ``&&``/``||`` operators) or a
-# ``do``/``then``/``else`` keyword. The trailing lookahead pins it to a whole
+# ``do``/``then``/``else``/``if``/``elif``/``while``/``until`` keyword (so a
+# command head inside a control-flow wrapper is still found). The trailing
+# lookahead pins it to a whole
 # word so ``mycurl`` / ``curls`` / ``echo curl`` are never taken as heads.
 _SHELL_SUBCMD_HEAD_RE = re.compile(
-    r"(?P<pre>(?:\A|[\n;&|`(){}]|&&|\|\||\b(?:do|then|else)\b)\s*)"
+    r"(?P<pre>(?:\A|[\n;&|`(){}]|&&|\|\||\b(?:do|then|else|if|elif|while|until)\b)\s*)"
     r"(?P<cmd>"
     + "|".join(
         sorted((re.escape(t) for t in _SHELL_SUBCMD_INJECTABLE), key=len, reverse=True)

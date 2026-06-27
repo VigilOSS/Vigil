@@ -160,6 +160,24 @@ def test_shell_combined_c_flag_bundles_inject_header() -> None:
             assert _has_header(tokens, "X-Bug-Bounty", "vigiloss"), (head, flag, tokens)
 
 
+def test_shell_control_flow_heads_inject_header() -> None:
+    # A curl/wget head inside a control-flow construct (`if curl …; then …`,
+    # `while curl …; do …`, `until curl …; do …`) must still be recognized and
+    # injected. Previously only separators and do/then/else anchored a head, so the
+    # curl right after `if`/`while`/`until` was missed and the script went out
+    # header-less.
+    for script in (
+        "if curl http://a.example.com ; then echo ok ; fi",
+        "while curl http://a.example.com ; do sleep 1 ; done",
+        "until curl http://a.example.com ; do break ; done",
+    ):
+        cmd = ["bash", "-lc", script]
+        status = kali_output._apply_required_headers(cmd, "curl", dict(HDR))
+        assert status == "injected", (script, status)
+        seg = next(s for s in _subcommands(cmd[2]) if "curl" in s)
+        assert _has_header(seg, "X-Bug-Bounty", "vigiloss"), (script, seg)
+
+
 # --------------------------------------------------------------------------- #
 # Idempotency edge: name present with a DIFFERENT value still counts as present
 # --------------------------------------------------------------------------- #
