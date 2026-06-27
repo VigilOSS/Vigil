@@ -282,6 +282,25 @@ def test_recon_auto_routes_host_on_docker_desktop_and_enforces(monkeypatch, tmp_
     assert seen_runtime and all(r == "host" for r in seen_runtime)
 
 
+def test_brute_preflight_requires_massdns_even_when_puredns_present(monkeypatch):
+    # puredns is present but massdns is absent → the brute preflight must refuse.
+    # puredns delegates its bulk DNS resolution to massdns; a host that has puredns
+    # installed but NOT massdns passes the old single-tool check and then produces
+    # empty/partial brute output silently.  The fix widens _BRUTE_TOOL to include
+    # massdns so the preflight catches the missing dependency before any work runs.
+    #
+    # All _ENFORCED_TOOLS (subfinder/dnsx/httpx) AND puredns are present so the
+    # check only fails if massdns is specifically enforced — not as a side-effect
+    # of the base-tool checks failing first.
+    _PRESENT = frozenset(recon._ENFORCED_TOOLS) | {"puredns"}  # massdns absent
+    monkeypatch.setattr(
+        runtime_route, "_host_binary_available",
+        lambda tool: tool in _PRESENT,
+    )
+    with pytest.raises(AssessError):
+        recon._enforce_host_routing(SimpleNamespace(runtime="host", brute=True), "host")
+
+
 # --------------------------------------------------------------------------- #
 # 6. --background detached launch
 # --------------------------------------------------------------------------- #

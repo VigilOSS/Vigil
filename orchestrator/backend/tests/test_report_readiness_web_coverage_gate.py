@@ -57,7 +57,13 @@ def fake_template(tmp_path):
         object.__setattr__(settings, "report_template_path", original)
 
 
-def _write_engagement(engagements_dir: Path, *, key: str, engagement_type: str) -> Path:
+def _write_engagement(
+    engagements_dir: Path,
+    *,
+    key: str,
+    engagement_type: str,
+    out_of_scope: list[str] | None = None,
+) -> Path:
     eng = engagements_dir / key
     (eng / "sessions").mkdir(parents=True, exist_ok=True)
     (eng / "engagement.json").write_text(
@@ -72,19 +78,17 @@ def _write_engagement(engagements_dir: Path, *, key: str, engagement_type: str) 
         ),
         encoding="utf-8",
     )
-    (eng / "scope.json").write_text(
-        json.dumps(
-            {
-                "hostname": "example.com",
-                "hosts": ["example.com"],
-                "scope_hosts": ["example.com"],
-                "engagement_type": engagement_type,
-                "status": "in_progress",
-                "current_phase": "consume-test",
-            }
-        ),
-        encoding="utf-8",
-    )
+    scope: dict = {
+        "hostname": "example.com",
+        "hosts": ["example.com"],
+        "scope_hosts": ["example.com"],
+        "engagement_type": engagement_type,
+        "status": "in_progress",
+        "current_phase": "consume-test",
+    }
+    if out_of_scope is not None:
+        scope["out_of_scope"] = list(out_of_scope)
+    (eng / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
     (eng / "findings.md").write_text("# Findings\n", encoding="utf-8")
     return eng
 
@@ -281,6 +285,72 @@ def test_resolved_completeness_deferral_no_longer_clears(client, isolate_setting
 
     body = _readiness(client, base)
     assert "uncovered_high_route_hosts" in _kinds(body), body
+
+
+# ---------------------------------------------------------------------------
+# Scope admission: out-of-scope hosts must never become uncovered blockers
+# ---------------------------------------------------------------------------
+def test_out_of_scope_host_does_not_block_but_in_scope_does(client, isolate_settings):
+    """A third-party host (SSO/CDN/vendor API) recorded via archive/proxy/manual
+    ingestion is NOT a scope literal nor a subdomain of one, so it must never be
+    forced through the completeness gate — while an in-scope app host with the
+    same route shape still blocks. Scope: example.com."""
+    eng_key = "2026-06-20-090000-w3-oos"
+    _write_engagement(isolate_settings["engagements_dir"], key=eng_key, engagement_type="web")
+    base = _register(client, eng_key)
+    # In scope (subdomain of the example.com apex) — must block.
+    _ingest_routes(client, base, host="app.example.com", paths=SIX_PATHS)
+    # Out of scope (unrelated third-party host) — must NOT block.
+    _ingest_routes(client, base, host="sso.thirdparty.io", paths=SIX_PATHS)
+
+    body = _readiness(client, base)
+    blocked_hosts = {
+        b["host"]
+        for b in body["blockers"]
+        if b["kind"] == "uncovered_high_route_hosts"
+    }
+    assert "app.example.com" in blocked_hosts, body
+    assert "sso.thirdparty.io" not in blocked_hosts, body
+
+
+def test_explicit_out_of_scope_carveout_host_does_not_block(client, isolate_settings):
+    """A host that IS under the in-scope apex but is named in scope.json's
+    ``out_of_scope`` carve-out is denied (the denylist wins) and must not become
+    an uncovered blocker, while a sibling in-scope host still does."""
+    eng_key = "2026-06-20-090000-w3-carveout"
+    _write_engagement(
+        isolate_settings["engagements_dir"],
+        key=eng_key,
+        engagement_type="web",
+        out_of_scope=["legacy.example.com"],
+    )
+    base = _register(client, eng_key)
+    _ingest_routes(client, base, host="app.example.com", paths=SIX_PATHS)
+    _ingest_routes(client, base, host="legacy.example.com", paths=SIX_PATHS)
+
+    body = _readiness(client, base)
+    blocked_hosts = {
+        b["host"]
+        for b in body["blockers"]
+        if b["kind"] == "uncovered_high_route_hosts"
+    }
+    assert "app.example.com" in blocked_hosts, body
+    assert "legacy.example.com" not in blocked_hosts, body
+
+
+def test_web_uncovered_high_route_hosts_helper_drops_out_of_scope(client, isolate_settings):
+    """Direct projection coverage: the helper itself filters out-of-scope hosts."""
+    eng_key = "2026-06-20-090000-w3-oos-unit"
+    _write_engagement(isolate_settings["engagements_dir"], key=eng_key, engagement_type="web")
+    base = _register(client, eng_key)
+    engagement_id = int(client.get(f"/engagements/{eng_key}").json()["id"])
+    _ingest_routes(client, base, host="app.example.com", paths=SIX_PATHS)
+    _ingest_routes(client, base, host="cdn.fastly.net", paths=SIX_PATHS)
+
+    rows = state_manager.web_uncovered_high_route_hosts(engagement_id)
+    hosts = {r["host"] for r in rows}
+    assert "app.example.com" in hosts
+    assert "cdn.fastly.net" not in hosts
 
 
 # ---------------------------------------------------------------------------

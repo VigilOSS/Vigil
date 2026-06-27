@@ -18,6 +18,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -184,6 +186,68 @@ def test_run_missing_url_raises(monkeypatch):
     monkeypatch.setattr(kb, "kali_exec", lambda *a, **k: _mk_result())
     with pytest.raises(AssessError):
         kb.run(_browser_args(url=""))
+
+
+# --------------------------------------------------------------------------- #
+# run() — program attribution headers (required_headers) reach chromium via CDP
+# --------------------------------------------------------------------------- #
+
+
+def _write_scope(eng_dir: Path, **fields) -> None:
+    """Write a minimal scope.json (an engagement root) under ``eng_dir``."""
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"engagement_type": "web", "hosts": ["api.example.com"]}
+    payload.update(fields)
+    (eng_dir / "scope.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_run_threads_required_headers_into_driver_argv(tmp_path, monkeypatch):
+    # An engagement with required_headers must have those headers reach the
+    # headless-chromium navigation. kali_exec's -H injector cannot reach a
+    # Selenium driver (tool_name='browser' has no -H flag), so the browser verb
+    # threads them in as a JSON positional that the driver wires onto chromium
+    # via CDP (Network.setExtraHTTPHeaders) before driver.get().
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    cap = _capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))
+    cmd = cap["cmd"]
+    # JSON-encoded header map rides as the positional after the wait-selector.
+    assert json.loads(cmd[9]) == {"X-Bug-Bounty": "vigiloss"}
+    # The generated driver actually sets the headers on chromium over CDP.
+    assert "execute_cdp_cmd" in kb._BROWSER_DRIVER
+    assert "Network.setExtraHTTPHeaders" in kb._BROWSER_DRIVER
+
+
+def test_run_no_headers_when_scope_has_none(tmp_path, monkeypatch):
+    # No required_headers configured → an empty header map (no header is set).
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir)
+    cap = _capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))
+    cmd = cap["cmd"]
+    assert json.loads(cmd[9]) == {}
+
+
+def test_run_no_headers_when_engagement_unresolvable(monkeypatch, tmp_path):
+    # An unresolvable engagement (no --engagement-dir, no scope.json reachable)
+    # degrades quietly to an empty header map rather than failing the render.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ENGAGEMENT_DIR", raising=False)
+    cap = _capture_run(monkeypatch, _browser_args(engagement_dir=None))
+    cmd = cap["cmd"]
+    assert json.loads(cmd[9]) == {}
+
+
+def test_run_required_headers_drop_malformed_pairs(tmp_path, monkeypatch):
+    # Only str->str pairs survive (mirrors the shared _required_headers reader),
+    # so a malformed scope can never inject a non-header value into the driver.
+    eng_dir = tmp_path / "eng"
+    _write_scope(
+        eng_dir,
+        required_headers={"X-Bug-Bounty": "vigiloss", "X-Bad": 5, "": "blank"},
+    )
+    cap = _capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))
+    cmd = cap["cmd"]
+    assert json.loads(cmd[9]) == {"X-Bug-Bounty": "vigiloss"}
 
 
 # --------------------------------------------------------------------------- #
