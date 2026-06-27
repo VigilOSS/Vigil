@@ -13,9 +13,13 @@ import datetime as _dt
 import hashlib
 import json
 import os
+import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Optional
+
+from .kali_tool_naming import _SHELL_BINARIES
 
 
 @dataclasses.dataclass
@@ -39,6 +43,19 @@ class KaliResult:
     # tools. ``transport_error_detail`` carries a one-line human reason.
     transport_error: bool = False
     transport_error_detail: str = ""
+    # W1 WAF/bot-challenge guard. True when the run came back with a real HTTP
+    # exchange whose BODY is a vendor interstitial / bot-challenge (Cloudflare
+    # "Just a moment", Akamai "Access Denied", Imperva "Pardon Our Interruption")
+    # or a renamed-marker page whose SHAPE is a JS-only challenge shell behind a
+    # CDN/edge. That body is the WAF's, NOT the origin app's, so the run MUST NOT
+    # be recorded as a target verdict (404/patched/gated). Surfaced exactly like
+    # ``transport_error`` (out-of-band on the KaliResult, loud stderr, agent-
+    # facing status='waf_challenge') so the agent re-renders the URL with
+    # ``vigil assess kali browser`` to obtain the real origin response. Stays
+    # False for a genuine app body and for non-HTTP-prober tools (incl. the
+    # browser verb itself, so the recovery path never self-flags into a loop).
+    waf_challenge: bool = False
+    waf_challenge_detail: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -187,6 +204,443 @@ def detect_transport_error(
     return True, detail
 
 
+# --------------------------------------------------------------------------- #
+# W1 — WAF / bot-challenge interstitial detection
+# --------------------------------------------------------------------------- #
+#
+# A real HTTP exchange can come back 200/403 with a body that is the WAF's
+# challenge page, NOT the origin app's response. Reading that body (or its
+# status) as a target verdict (404/patched/gated) is a false negative as
+# dangerous as the http=000 one. Two complementary detectors run:
+#
+#   1. NAMED VENDOR SIGNATURES — high-confidence per-vendor markers in the body,
+#      headers, or stderr. Cheap and precise.
+#   2. GENERIC challenge-SHAPE — a small, JS-only body with no real app content
+#      sitting behind a CDN/edge fingerprint at a challenge-ish status. This is
+#      the safety net so a RENAMED vendor marker does not silently revert to
+#      "challenge read as a verdict".
+#
+# FAIL-SAFE direction: a MISSED detection just trusts the tool as before (no new
+# harm); a false "this is real" is the dangerous direction. So on ambiguity we
+# lean to flagging — an over-flag routes the surface to the headless-browser
+# recovery (``vigil assess kali browser``), it does not strand it.
+
+# (needle_lowercased, vendor) — substring match against the body+headers+stderr
+# haystack. Each is on its own a strong WAF/bot-challenge signal. Mix of
+# interstitial-page strings, challenge-form field names, and bot-manager
+# cookie/header names per vendor.
+_WAF_NAMED_SIGNATURES: tuple[tuple[str, str], ...] = (
+    # Imperva / Incapsula
+    ("reese84", "imperva"),
+    ("incap_ses", "imperva"),
+    ("visid_incap", "imperva"),
+    ("_incapsula_resource", "imperva"),
+    ("pardon our interruption", "imperva"),
+    ("x-iinfo", "imperva"),
+    # Akamai (Bot Manager / Ghost edge)
+    ("_abck", "akamai"),
+    ("ak_bmsc", "akamai"),
+    ("bm_sz", "akamai"),
+    ("akamaighost", "akamai"),
+    ("reference&#32;&#35;", "akamai"),
+    # Cloudflare
+    ("cf-chl", "cloudflare"),
+    ("__cf_chl", "cloudflare"),
+    ("cf_chl_opt", "cloudflare"),
+    ("jschl_vc", "cloudflare"),
+    ("just a moment", "cloudflare"),
+    ("checking your browser", "cloudflare"),
+    ("cf-mitigated", "cloudflare"),
+    ("attention required! | cloudflare", "cloudflare"),
+    ("challenge-platform", "cloudflare"),
+    # Other common bot-defense vendors (renamed-marker safety still applies via
+    # the generic-shape pass, but naming the common ones keeps reasons sharp).
+    ("datadome", "datadome"),
+    ("perimeterx", "perimeterx"),
+    ("_px", "perimeterx"),
+    ("x-sucuri-id", "sucuri"),
+    ("sucuri website firewall", "sucuri"),
+)
+
+# Generic block phrases that ALSO appear on legitimate origin 401/403 pages, so
+# they flag ONLY when corroborated by a vendor marker in the SAME response.
+# "Access Denied" is the Akamai Ghost body title, but it is equally the default
+# IIS / nginx / app-level 403 page — so the bare phrase must never flag on its own
+# (a real Akamai block still trips _abck/AkamaiGHost, or the 403 generic-shape
+# pass). Each entry: (phrase, vendor, corroborating markers — any one suffices).
+_WAF_CORROBORATION_PHRASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "access denied",
+        "akamai",
+        ("_abck", "ak_bmsc", "bm_sz", "akamaighost", "x-akamai", "reference&#32;&#35;"),
+    ),
+)
+
+# CDN / edge / bot-defense fingerprints used by the generic-shape pass. Presence
+# of one of these (in a header dump or the body) is necessary — but NOT
+# sufficient — to call a JS-only shell a challenge.
+_CDN_EDGE_MARKERS: tuple[str, ...] = (
+    "cf-ray",
+    "cloudflare",
+    "akamaighost",
+    "x-akamai",
+    "akamai",
+    "x-iinfo",
+    "incapsula",
+    "imperva",
+    "x-cdn",
+    "x-sucuri",
+    "sucuri",
+    "x-amz-cf-id",
+    "x-amzn-waf",
+    "awselb",
+    "barracuda",
+    "x-datadome",
+    "datadome",
+    "perimeterx",
+    "x-px",
+)
+
+# Statuses a challenge/interstitial is served with. A determinable status outside
+# this set (e.g. a 301 redirect, a 500 origin error) means it is NOT a challenge
+# shell. An UNDETERMINABLE status does not veto the shape match (lean to flag).
+_CHALLENGE_STATUSES: frozenset[int] = frozenset({200, 403, 429, 503})
+
+# The subset of challenge statuses that, ON THEIR OWN, signal a block/throttle
+# strongly enough to corroborate a JS-only shell as a challenge WITHOUT any
+# CDN/edge header present — the fail-safe path for a header-less curl ``-sS``
+# probe. 200 is deliberately EXCLUDED: a 200 + tiny JS-only body is the single
+# most common shape of a legitimate SPA bootstrap, so a 200 needs an actual
+# edge/vendor signal (header or named body marker), never shape alone.
+_HARD_CHALLENGE_STATUSES: frozenset[int] = frozenset({403, 429, 503})
+
+# A challenge shell is SMALL. A large body with an inlined app bundle is far more
+# likely a real (if JS-heavy) app page; keep the generic-shape pass off it so a
+# heavy SPA shell is not perpetually flagged. The unambiguous large vendor pages
+# (Cloudflare's ~15KB "Just a moment") are already caught by the named pass.
+_CHALLENGE_BODY_MAX = 15_000
+
+# A challenge shell carries almost no human-visible text — a one-liner like
+# "Checking your browser" or nothing at all. A real app page carries far more.
+_CHALLENGE_VISIBLE_TEXT_MAX = 240
+
+
+def _visible_text(body: str) -> str:
+    """Strip script/style/noscript blocks and all tags; collapse whitespace.
+
+    The remaining text approximates what a human would SEE on the page. A
+    challenge shell de-tags to a one-liner (or empty); a real app page de-tags to
+    substantial copy.
+    """
+    text = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", body)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _strip_leading_header_block(text: str) -> str:
+    """Return the response BODY when ``text`` begins with an HTTP header block.
+
+    A curl probe run with ``-i``/``-D -`` prepends ``HTTP/x.y NNN`` + ``Name:
+    Value`` lines + a blank line to stdout. Those header lines are NOT inside any
+    tag, so the visible-text / JS-only-shell heuristics would wrongly count them
+    as page content. Strip everything up to the first blank line so the shape
+    pass measures the real body. Returns ``text`` unchanged when there is no
+    leading header block (curl ``-sS``, httpx JSON, a raw body).
+    """
+    stripped = text.lstrip()
+    if not re.match(r"^HTTP/\d", stripped):
+        return text
+    match = re.search(r"\r?\n[ \t]*\r?\n", stripped)
+    return stripped[match.end():] if match else text
+
+
+def _extract_http_status(body: str, headers: Optional[dict]) -> int | None:
+    """Best-effort HTTP status for the generic-shape pass.
+
+    Reads an explicit status off a ``headers`` mapping (``status`` /
+    ``http_status`` / ``:status`` / ``status_code``) first, then falls back to a
+    leading ``HTTP/x.y NNN`` status line in a header dump (curl ``-i`` / ``-D``).
+    Returns ``None`` when no status is recoverable — the caller treats that as
+    "do not veto" rather than "definitely not a challenge".
+    """
+    if isinstance(headers, dict):
+        for key in ("status", "http_status", ":status", "status_code"):
+            value = headers.get(key)
+            if value is None:
+                continue
+            try:
+                return int(str(value).strip().split()[0])
+            except (ValueError, IndexError):
+                continue
+    match = re.search(r"^HTTP/\d(?:\.\d)?\s+(\d{3})", body or "", re.MULTILINE)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _has_challenge_redirect(low: str) -> bool:
+    """True when the body BOUNCES the client — a meta-refresh or a scripted
+    navigation/reload. A challenge interstitial reloads/redirects to clear the
+    JS check; a plain ``<script src=bundle>`` SPA shell does NOT. This is what
+    separates a challenge SHAPE from a normal single-page-app bootstrap, so a
+    body that merely mentions a CDN in a comment is not mistaken for one.
+    """
+    if re.search(r"http-equiv\s*=\s*['\"]?refresh", low):
+        return True
+    return bool(
+        re.search(r"(?:window|document|top|self)\.location", low)
+        or re.search(r"location\.(?:href|replace|reload|assign)", low)
+    )
+
+
+def _looks_like_generic_challenge(
+    body: str, header_text: str, status: int | None
+) -> tuple[bool, str]:
+    """Generic challenge-SHAPE heuristic (renamed-marker safety net).
+
+    ``body`` is the response body (header block already stripped); ``header_text``
+    is the lowercased REAL response headers the caller threaded in; ``status`` is
+    the best-effort HTTP status (or ``None``).
+
+    A small, JS-only body with no real app content is treated as a challenge
+    when corroborated by ONE of (in descending confidence):
+
+      * the HTTP status is a hard block/throttle (403/429/503) — even with no
+        edge signal at all, a blocked JS-only shell with no app content leans to
+        a challenge (the header-less ``curl -sS`` fail-safe direction); or
+      * a CDN/edge fingerprint is present (a REAL threaded header, OR named in the
+        body) AND the shell actually BOUNCES the client (meta-refresh / scripted
+        navigation) — i.e. it behaves like an interstitial, not a static app shell.
+
+    Two deliberate NON-triggers keep the false-positive rate down:
+      * a bare CDN substring in the body alone (e.g. ``cloudflare`` in a comment
+        on a normal SPA that ships a bundle ``<script>``) — that was the false
+        positive when the body was the only haystack; and
+      * a CDN/edge HEADER + a JS-only shell at a NON-block status (e.g. 200) with
+        no client redirect — that is the single most common shape of a legitimate
+        client-rendered SPA served behind Cloudflare/Akamai, so an edge header on
+        its own is NOT taken as a challenge.
+
+    A determinable HTTP status outside ``_CHALLENGE_STATUSES`` (a 301 redirect, a
+    500 origin error) vetoes the match; an UNDETERMINABLE status does not.
+    """
+    if not body:
+        return False, ""
+    if len(body) > _CHALLENGE_BODY_MAX:
+        return False, ""
+
+    low = body.lower()
+    has_script = "<script" in low or "window.location" in low or "document.location" in low
+    has_redirect = _has_challenge_redirect(low)
+    if not (has_script or has_redirect):
+        return False, ""
+    if len(_visible_text(body)) >= _CHALLENGE_VISIBLE_TEXT_MAX:
+        return False, ""
+
+    if status is not None and status not in _CHALLENGE_STATUSES:
+        return False, ""
+
+    # A hard block/throttle status on a JS-only no-content shell is the strongest,
+    # edge-agnostic signal (and the only one available to a header-less curl -sS
+    # probe that nonetheless surfaced a status).
+    if status is not None and status in _HARD_CHALLENGE_STATUSES:
+        return (
+            True,
+            f"status={status} block, js-only shell with no app content",
+        )
+
+    # Otherwise a CDN/edge fingerprint is necessary but NOT sufficient: it must
+    # be paired with interstitial behaviour (the shell redirects/refreshes the
+    # client). A header edge is higher confidence than a body mention, but both
+    # demand the redirect so a static SPA behind a CDN at 200 is never flagged.
+    header_edge = next((m for m in _CDN_EDGE_MARKERS if m in header_text), "")
+    body_edge = next((m for m in _CDN_EDGE_MARKERS if m in low), "")
+    edge = header_edge or body_edge
+    if edge and has_redirect:
+        source = "header" if header_edge else "body"
+        detail = f"edge='{edge}' ({source}) + client redirect, no app content"
+        if status is not None:
+            detail += f", status={status}"
+        return True, detail
+
+    return False, ""
+
+
+def detect_waf_challenge(
+    stdout_preview: str,
+    stderr_preview: str = "",
+    headers: Optional[dict] = None,
+) -> tuple[bool, str]:
+    """Detect a WAF / bot-challenge interstitial in a finished HTTP run.
+
+    Returns ``(is_waf_challenge, reason)``. When True, the run produced a real
+    HTTP exchange whose BODY is the WAF's challenge page (not the origin app's
+    response), so its terminal status MUST NOT be read as a target verdict.
+
+    Composes the named-vendor-signature pass with the generic challenge-SHAPE
+    heuristic. ``headers`` (when a caller has parsed them) is folded into the
+    match haystack alongside the body and stderr; when ``None`` the body alone
+    must carry the signal (e.g. curl with no ``-i`` only emits the body), which
+    is the fail-safe degraded mode — a missed detection just trusts the tool.
+    """
+    raw = stdout_preview or ""
+    header_text = ""
+    if isinstance(headers, dict):
+        try:
+            header_text = "\n".join(f"{name}: {value}" for name, value in headers.items())
+        except (AttributeError, TypeError):
+            header_text = ""
+    # The named pass scans the FULL stdout (so a curl ``-i`` dump's inline header
+    # markers still substring-match even if the caller did not thread a dict) plus
+    # the threaded header text and stderr.
+    haystack = f"{raw}\n{header_text}\n{stderr_preview or ''}".lower()
+
+    for needle, vendor in _WAF_NAMED_SIGNATURES:
+        if needle in haystack:
+            return True, f"{vendor} WAF/bot-challenge signature: '{needle}'"
+
+    # Generic block phrases (e.g. "Access Denied") flag ONLY when a vendor marker
+    # is also present, so a legitimate origin 401/403 carrying the phrase is
+    # recorded as the app's response rather than suppressed as a challenge.
+    for phrase, vendor, markers in _WAF_CORROBORATION_PHRASES:
+        if phrase in haystack:
+            hit = next((m for m in markers if m in haystack), "")
+            if hit:
+                return True, (
+                    f"{vendor} WAF/bot-challenge signature: '{phrase}' "
+                    f"(corroborated by '{hit}')"
+                )
+
+    # The shape pass measures the real BODY (curl ``-i`` header block stripped) and
+    # uses the best-effort status from the threaded headers or a leading HTTP line.
+    body = _strip_leading_header_block(raw)
+    status = _extract_http_status(raw, headers)
+    is_shape, shape_detail = _looks_like_generic_challenge(
+        body, header_text.lower(), status
+    )
+    if is_shape:
+        return True, f"generic challenge-shape ({shape_detail})"
+
+    return False, ""
+
+
+def _flatten_header_value(value: object) -> str:
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value)
+    return str(value)
+
+
+def _headers_from_httpx_json(stdout_preview: str) -> Optional[dict]:
+    """Response headers recovered from an httpx ``-json`` stdout stream.
+
+    httpx emits one JSON object per probed target. The default lean liveness
+    flags (``-web-server -status-code``, optionally ``-cdn``) already carry the
+    ``webserver``/``status_code``/``cdn_name`` fields, and ``-irh`` /
+    ``-include-response`` add the full ``header`` map / ``raw_header`` blob — none
+    of which appear in a bare response BODY, so they are invisible to a
+    body-only haystack. We flatten whatever is present into a header dict so the
+    named-vendor pass (Akamai ``AkamaiGHost``/``_abck``, Imperva ``x-iinfo``) and
+    the generic-shape status check can see it.
+    """
+    merged: dict[str, str] = {}
+    for raw_line in (stdout_preview or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict) or obj.get("failed"):
+            continue
+        # Full response-header map (httpx -irh / -include-response-header) or the
+        # raw header blob (httpx -irr / -include-response).
+        for key in ("header", "response_header", "headers"):
+            hmap = obj.get(key)
+            if isinstance(hmap, dict):
+                for hk, hv in hmap.items():
+                    if isinstance(hk, str) and hk.strip():
+                        merged.setdefault(hk.strip(), _flatten_header_value(hv))
+        raw_header = obj.get("raw_header")
+        if isinstance(raw_header, str) and raw_header.strip():
+            merged.setdefault("raw_header", raw_header)
+        # Synthesize from the lean default fields so a header-only Akamai/
+        # Cloudflare edge is visible even without -irh.
+        webserver = obj.get("webserver") or obj.get("web_server")
+        if isinstance(webserver, str) and webserver.strip():
+            merged.setdefault("Server", webserver.strip())
+        cdn = obj.get("cdn_name") or obj.get("cdn")
+        if isinstance(cdn, str) and cdn.strip():
+            merged.setdefault("cdn", cdn.strip())
+        status = obj.get("status_code")
+        if isinstance(status, int):
+            merged.setdefault("status_code", str(status))
+    return merged or None
+
+
+def _headers_from_curl_dump(stdout_preview: str) -> Optional[dict]:
+    """Response headers parsed from a curl header dump prepended to stdout.
+
+    A curl probe run with ``-i``/``--include`` or ``-D -``/``--dump-header -``
+    writes the response header block (``HTTP/x.y NNN`` status line + ``Name:
+    Value`` lines + blank line) ahead of the body. We parse the FIRST such block.
+    Returns ``None`` when stdout carries no leading header block (the bare
+    ``curl -sS`` liveness probe), so the caller falls back to body-only.
+    """
+    lines = (stdout_preview or "").splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines[:64]) if re.match(r"^HTTP/\d", ln.strip())),
+        None,
+    )
+    if start is None:
+        return None
+    headers: dict[str, str] = {}
+    for ln in lines[start + 1:]:
+        if not ln.strip():
+            break
+        if ":" not in ln:
+            continue
+        name, value = ln.split(":", 1)
+        name = name.strip()
+        if not name:
+            continue
+        value = value.strip()
+        # Preserve repeated headers (e.g. multiple Set-Cookie) by joining.
+        headers[name] = f"{headers[name]}\n{value}" if name in headers else value
+    return headers or None
+
+
+def extract_probe_response_headers(
+    tool_name: str, cmd: list[str], stdout_preview: str
+) -> Optional[dict]:
+    """Best-effort response headers from a finished probe's stdout (W1 guard).
+
+    The production ``kali_exec`` curl liveness probe runs ``-sS`` (no ``-i``/
+    ``-D``), so its stdout is the BODY only — header-only WAF markers (Akamai
+    ``_abck``, Imperva ``x-iinfo``) are simply not in those bytes and cannot be
+    recovered. They ARE recoverable when the probe itself surfaced headers, and
+    those are the cases this threads into :func:`detect_waf_challenge`:
+
+      * ``httpx`` with ``-json``/``-j``: the per-target JSON carries response
+        metadata (``header`` map / ``raw_header`` / ``webserver`` / ``cdn_name``
+        / ``status_code``); parse and flatten it.
+      * ``curl`` with ``-i``/``-D -``: the header block is prepended to stdout;
+        parse it (this also covers combined short flags like ``-sSi`` since we
+        key off the leading ``HTTP/`` status line, not the argv).
+
+    Returns ``None`` when no headers are recoverable — the documented fail-safe
+    degraded mode where the body-only / status-shape heuristic stands alone.
+    """
+    if not stdout_preview:
+        return None
+    name = (tool_name or "").strip().lower()
+    if name == "httpx" and any(t in ("-json", "-j", "--json") for t in (cmd or [])):
+        return _headers_from_httpx_json(stdout_preview)
+    if name == "curl":
+        return _headers_from_curl_dump(stdout_preview)
+    return None
+
+
 def _utcnow_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -223,17 +677,320 @@ def _engagement_type(engagement_dir: Path) -> str:
     return str(data.get("engagement_type", "web")) or "web"
 
 
-def _auth_context(engagement_dir: Path) -> str:
-    auth = engagement_dir / "auth.json"
-    if not auth.is_file():
-        return "none"
+def _required_headers(engagement_dir: Path) -> dict[str, str]:
+    """Read ``required_headers`` from ``scope.json``.
+
+    These are program-mandated attribution headers (e.g. BugCrowd's
+    ``X-Bug-Bounty: <handle>``) that every in-scope HTTP probe must carry. An
+    absent/empty/unreadable scope returns ``{}`` so the no-header path is the
+    unchanged default. Only string→string pairs survive; anything else is
+    dropped so a malformed scope can never inject a non-header value into argv.
+    """
+    scope = engagement_dir / "scope.json"
+    if not scope.is_file():
+        return {}
     try:
-        data = json.loads(auth.read_text(encoding="utf-8"))
+        data = json.loads(scope.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return "none"
+        return {}
     if not isinstance(data, dict):
+        return {}
+    raw = data.get("required_headers")
+    if not isinstance(raw, dict):
+        return {}
+    headers: dict[str, str] = {}
+    for name, value in raw.items():
+        if isinstance(name, str) and name.strip() and isinstance(value, str):
+            headers[name.strip()] = value
+    return headers
+
+
+# Program-mandated attribution headers (e.g. BugCrowd's ``X-Bug-Bounty: <handle>``)
+# must ride every in-scope HTTP probe. Three-way classifier:
+#   * INJECTABLE — HTTP-to-target tools that accept ``-H "Name: Val"``; inject.
+#   * SKIP       — passive / third-party-archive / DNS / L3-L4 tools that never
+#                  send HTTP to the in-scope target. Injecting here would LEAK
+#                  the researcher handle to web.archive.org/CommonCrawl/DNS APIs
+#                  or is meaningless, so silently skip (never warn).
+#   * else       — HTTP-to-target tools that can't take ``-H`` (nikto/whatweb/
+#                  wafw00f/httprobe) AND tools whose header flag is not ``-H``
+#                  (arjun uses a newline-separated ``--headers`` block, not
+#                  ``-H``): WARN (never block), since this argv can't carry the
+#                  header as ``-H`` — the operator injects it the tool's way.
+#
+# This classifier + injector lives here (rather than in kali.py) so BOTH the
+# container path (kali.kali_exec) AND the audited host path (the recon
+# host-dispatch wrappers in commands/web_discovery.py / dns_discovery.py) apply
+# the SAME injectable/skip rules. kali.py re-exports these names for back-compat.
+_REQUIRED_HEADER_INJECTABLE = frozenset(
+    {"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"}
+)
+_REQUIRED_HEADER_SKIP = frozenset(
+    {
+        "gau",
+        "waybackurls",
+        "subfinder",
+        "amass",
+        "dnsx",
+        "nmap",
+        "naabu",
+        "masscan",
+        "puredns",
+    }
+)
+
+
+def _existing_header_names(cmd: list[str]) -> set[str]:
+    """Lower-cased header names already present as ``-H`` values in ``cmd``.
+
+    Splits each ``-H`` argument on the first colon and tolerates a space before
+    it (``Name:`` and ``Name :``) so the idempotency check matches regardless of
+    spacing.
+    """
+    names: set[str] = set()
+    for idx, token in enumerate(cmd):
+        if token == "-H" and idx + 1 < len(cmd):
+            value = cmd[idx + 1]
+            head = value.split(":", 1)[0].strip()
+            if head:
+                names.add(head.lower())
+    return names
+
+
+# --------------------------------------------------------------------------- #
+# W5 — BEST-EFFORT required-header injection into `sh -c` / `bash -c` scripts
+# --------------------------------------------------------------------------- #
+#
+# A required_headers engagement may run a shell wrapper whose ``-c`` script
+# carries curl/wget (or other -H-capable) sub-commands. A plain ``-H`` append on
+# the argv would land on the SHELL as a positional parameter ($1/$2) and never
+# reach the inner tool, so we parse the script TEXT and inject ``-H 'Name: Val'``
+# (``--header`` for wget) right after each recognized sub-command head that lacks
+# it.
+#
+# BEST-EFFORT, NEVER fail-closed: a missing attribution header is a REDUCED
+# REWARD, not a ban-risk, and a hard block would stall a legitimate multi-curl
+# probe mid-hunt and hurt performance. When the script can't be safely lexed, or
+# carries no -H-capable sub-command, we leave it untouched and let the caller
+# WARN (or silently skip a purely-passive wrapper). We never raise, never block.
+
+# curl/wget plus the other -H-capable injectable tools that may appear as a
+# sub-command head inside a shell script. wget's header flag is ``--header``;
+# every other entry uses ``-H``. (curl is already in _REQUIRED_HEADER_INJECTABLE.)
+_SHELL_SUBCMD_INJECTABLE = frozenset({"wget"} | set(_REQUIRED_HEADER_INJECTABLE))
+
+# A sub-command head = one of the injectable tool names at the START of a
+# sub-command: at script start, right after a shell separator/opener
+# (newline ; & | backtick ( ) { } or the ``&&``/``||`` operators) or a
+# ``do``/``then``/``else``/``if``/``elif``/``while``/``until`` keyword (so a
+# command head inside a control-flow wrapper is still found). The trailing
+# lookahead pins it to a whole
+# word so ``mycurl`` / ``curls`` / ``echo curl`` are never taken as heads.
+_SHELL_SUBCMD_HEAD_RE = re.compile(
+    r"(?P<pre>(?:\A|[\n;&|`(){}]|&&|\|\||\b(?:do|then|else|if|elif|while|until)\b)\s*)"
+    r"(?P<cmd>"
+    + "|".join(
+        sorted((re.escape(t) for t in _SHELL_SUBCMD_INJECTABLE), key=len, reverse=True)
+    )
+    + r")(?=\s|\Z|[;&|)<>])",
+    re.IGNORECASE,
+)
+
+# A shell command-string flag: a bare ``-c`` OR a combined short-option bundle
+# ending in ``c`` (``bash -lc`` / ``sh -ec`` / ``-xc``). ``c`` must be LAST so the
+# script is still the next argument; ``-cl`` etc. are not command-string forms.
+_SHELL_C_FLAG_RE = re.compile(r"-[A-Za-z]*c")
+
+
+def _shell_script_index(cmd: list[str]) -> Optional[int]:
+    """Index of the ``-c`` script argument when ``cmd`` is a sh/bash command-string
+    wrapper, else ``None``. Recognizes a bare ``-c`` and combined short-option
+    bundles ending in ``c`` (``bash -lc 'curl ...'``, ``sh -ec '...'``), and matches
+    both the bare (``sh``) and absolute (``/bin/bash``) head forms via the shared
+    ``_SHELL_BINARIES`` set."""
+    if not cmd:
+        return None
+    head = cmd[0]
+    if head not in _SHELL_BINARIES and os.path.basename(head) not in _SHELL_BINARIES:
+        return None
+    for idx in range(1, len(cmd) - 1):
+        if _SHELL_C_FLAG_RE.fullmatch(cmd[idx]):
+            return idx + 1
+    return None
+
+
+def _shell_segment_end(script: str, start: int) -> int:
+    """First index at/after ``start`` that ends the current sub-command — the
+    next unquoted top-level separator (``;`` ``|`` ``&`` newline ``)``) or
+    end-of-string. Tracks single/double quotes and backslash escapes so a
+    separator inside a quoted argument is not mistaken for a real boundary."""
+    i, n = start, len(script)
+    in_single = in_double = False
+    while i < n:
+        c = script[i]
+        if in_single:
+            if c == "'":
+                in_single = False
+        elif in_double:
+            if c == "\\" and i + 1 < n:
+                i += 1
+            elif c == '"':
+                in_double = False
+        else:
+            if c == "'":
+                in_single = True
+            elif c == '"':
+                in_double = True
+            elif c == "\\" and i + 1 < n:
+                i += 1
+            elif c in ";\n|&)":
+                break
+        i += 1
+    return i
+
+
+def _segment_has_header(segment: str, name: str) -> bool:
+    """True when ``segment`` (one sub-command's text) already carries a ``-H`` /
+    ``--header`` naming ``name`` (case-insensitive). Tolerates ``-H Name: v``,
+    ``-HName: v``, ``--header Name: v`` and ``--header=Name: v``. An unparseable
+    segment is treated as already-present so we never risk a double-inject."""
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return True
+    name_l = name.strip().lower()
+    for i, tok in enumerate(tokens):
+        candidate = ""
+        if tok in ("-H", "--header") and i + 1 < len(tokens):
+            candidate = tokens[i + 1]
+        elif tok.startswith("-H") and len(tok) > 2:
+            candidate = tok[2:]
+        elif tok.startswith("--header="):
+            candidate = tok[len("--header="):]
+        if candidate and candidate.split(":", 1)[0].strip().lower() == name_l:
+            return True
+    return False
+
+
+def _inject_headers_into_script(
+    script: str, headers: dict[str, str]
+) -> tuple[str, str]:
+    """Best-effort inject required header(s) into a shell ``-c`` script's
+    curl/wget/-H-capable sub-commands.
+
+    Returns ``(status, new_script)`` where status is:
+      * ``"injected"`` — at least one header was inserted into a sub-command;
+      * ``"noop"``     — injectable sub-command(s) found, every required header
+                         already present (idempotent);
+      * ``"none"``     — no -H-capable sub-command found, OR the script could not
+                         be safely lexed (unbalanced quote). The caller decides
+                         warn-vs-skip; we never edit the script in this case.
+    """
+    # Whole-script sanity lex: an unbalanced quote means we cannot reason about
+    # token boundaries safely, so we decline to edit (best-effort, never block).
+    try:
+        shlex.split(script)
+    except ValueError:
+        return "none", script
+
+    matches = list(_SHELL_SUBCMD_HEAD_RE.finditer(script))
+    if not matches:
+        return "none", script
+
+    insertions: list[tuple[int, str]] = []
+    for m in matches:
+        cmd_word = m.group("cmd").lower()
+        seg_end = _shell_segment_end(script, m.end("cmd"))
+        segment = script[m.start("cmd") : seg_end]
+        flag = "--header" if cmd_word == "wget" else "-H"
+        addition = ""
+        for name, value in headers.items():
+            if _segment_has_header(segment, name):
+                continue
+            addition += f" {flag} {shlex.quote(f'{name}: {value}')}"
+        if addition:
+            insertions.append((m.end("cmd"), addition))
+
+    if not insertions:
+        return "noop", script
+
+    new_script = script
+    for pos, text in sorted(insertions, key=lambda pair: pair[0], reverse=True):
+        new_script = new_script[:pos] + text + new_script[pos:]
+    return "injected", new_script
+
+
+def _apply_required_headers(
+    cmd: list[str], tool_name: str, headers: dict[str, str]
+) -> str:
+    """Inject program-mandated attribution header(s) into an HTTP command argv.
+
+    Returns one of ``"injected"``, ``"skipped"``, ``"warned"``, ``"noop"``:
+      * ``"noop"``    — no required headers to apply, or every header was
+                        already present (idempotent — an identity may have
+                        injected the same header on an injectable tool).
+      * ``"skipped"`` — passive/archive/DNS/L3-L4 tool that does not send HTTP
+                        to the in-scope target; nothing applied, no warning.
+      * ``"injected"``— at least one header was appended as ``-H "Name: Val"``.
+      * ``"warned"``  — an HTTP-capable but non-injectable/unknown tool; cmd is
+                        left untouched and the caller warns.
+
+    Idempotency: a header is skipped when an existing ``-H`` value already names
+    it (case-insensitive on the header name, tolerating ``Name:`` and
+    ``Name :``), so an identity-injected header is never duplicated.
+
+    Shell-wrapper best-effort (W5): when ``cmd`` is a ``sh -c``/``bash -c``
+    wrapper, the header is injected into the recognized curl/wget sub-commands
+    inside the SCRIPT TEXT (a plain argv append would never reach the inner
+    tool). If no -H-capable sub-command is present or the script can't be lexed,
+    we fall back to classifying by ``tool_name`` (silent ``skipped`` for a
+    passive wrapper, else ``warned``) and NEVER append ``-H`` to the shell argv.
+    """
+    if not headers:
+        return "noop"
+
+    script_idx = _shell_script_index(cmd)
+    if script_idx is not None:
+        status, new_script = _inject_headers_into_script(cmd[script_idx], headers)
+        if status == "injected":
+            cmd[script_idx] = new_script
+            return "injected"
+        if status == "noop":
+            return "noop"
+        # No -H-capable sub-command was edited (none present, or unsafe to lex).
+        # Classify by the derived tool name so a passive/archive wrapper stays
+        # silent and any other wrapper WARNs — but never append -H to the shell
+        # argv, where it would become a positional param and miss the tool.
+        if tool_name.lower() in _REQUIRED_HEADER_SKIP:
+            return "skipped"
+        return "warned"
+
+    name_lower = tool_name.lower()
+    if name_lower in _REQUIRED_HEADER_SKIP:
+        return "skipped"
+    if name_lower not in _REQUIRED_HEADER_INJECTABLE:
+        return "warned"
+
+    existing = _existing_header_names(cmd)
+    injected = False
+    for name, value in headers.items():
+        if name.lower() in existing:
+            continue
+        cmd.extend(["-H", f"{name}: {value}"])
+        existing.add(name.lower())
+        injected = True
+    return "injected" if injected else "noop"
+
+
+def _auth_context(engagement_dir: Path) -> str:
+    # Audit label for KaliResult — the active identity's mode from the
+    # centralized credential store ("none" when no credentials / unreachable).
+    from .creds_client import active_material
+
+    material = active_material(str(engagement_dir))
+    if not material:
         return "none"
-    kind = data.get("kind") or data.get("mode") or "none"
+    kind = material.get("mode") or "none"
     return str(kind) or "none"
 
 

@@ -19,7 +19,7 @@ Read `scope.json` before making target-facing decisions. Confirm:
 
 - In-scope hosts from the `hosts` array (includes `*.domain` entries for subdomain enum)
 - `exploit_policy` value (`pause` | `selected` | `full_send`)
-- Auth state from `auth.json` — use credentials only when the file is populated and marked active
+- Auth state from the engagement's backend credential store (`vigil auth status`) — use credentials only when a record is populated and marked active
 
 All testing stays within listed scope hosts. Exploit policy escalation requires operator approval.
 
@@ -66,6 +66,19 @@ A generous `--timeout` is the correct tool for a single long probe
 wordlists): when it expires the audit pipeline cascades SIGTERM→SIGKILL into
 the in-container PID, so a synchronous call is killed cleanly and is never
 orphaned.
+
+That cascade governs the Vigil CLI's *own* `--timeout`. Above it sits a separate
+**agent-harness ceiling you do not control**: if a single blocking tool call runs
+longer than the harness allows, the harness auto-backgrounds the call and kills the
+agent (**exit 144 / SIGUSR1**) at a timeout you cannot set — orphaning the in-flight
+probe and any detached children, and writing no handoff. A larger `--timeout` does
+not defeat this; it only widens the window in which the harness fires. So a single
+synchronous probe must fit well under that ceiling (minutes, not tens of minutes),
+and genuinely long enumeration — a full-apex `puredns` brute, bulk HTTP liveness
+over thousands of hosts, a deep crawl — belongs in the operator-owned, supervised,
+resumable `vigil assess recon` job that the operator polls, never a specialist's
+blocking call. (This SIGUSR1/exit-144 kill is the failure mode that produced the
+recon-dispatch thrash above.)
 
 **"Synchronous" means awaited-in-band, NOT one-call-at-a-time and NOT
 no-parallelism.** The ban is on the backgrounding / `dtach` / fire-and-forget /
@@ -705,7 +718,7 @@ roles that do.
 | Custom scripts/exploits | tools/ |
 | Background PIDs | pids/ |
 
-Root: `scope.json`, `report.md`, `auth.json`, and the transient worker buffer only. Activity log and intel live in the orchestrator backend — query via `vigil assess fetch activity-entries` and `vigil assess list-intel`.
+Root: `scope.json`, `report.md`, and the transient worker buffer only. Credentials, activity log, and intel live in the orchestrator backend — query via `vigil auth status`, `vigil assess fetch activity-entries`, and `vigil assess list-intel`.
 
 ---
 

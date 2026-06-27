@@ -119,6 +119,17 @@ vigil install
 
 `vigil install` (and its alias `vigil update`) upgrades in place — engagements, the orchestrator database, and `.env` are never moved or deleted. Code, prompts, skills, and scripts are replaced with the latest versions from the repo.
 
+#### Two layers: the CLI binary vs. the working root
+
+Vigil has two layers that upgrade independently:
+
+- **The CLI binary** (`vigil` itself) — installed and upgraded with `uv tool install` / `uv tool upgrade vigil`. This is only the operator command-line tool.
+- **The working root** (`~/vigil` — the `agent/` tree of code, prompts, skills, and scripts, plus the orchestrator) — installed and upgraded with `vigil install` / `vigil update` (or `vigil up`, which syncs first).
+
+Upgrading one does **not** upgrade the other. The common failure mode (issue I-5) is upgrading the CLI binary while leaving the working root behind: the newer CLI expects prompts/skills/scripts that the stale working root does not yet have, so the affected features are silently inert.
+
+To guard against this, `vigil install` stamps the source git commit it synced into `~/vigil/.vigil-install-meta.json`, and `vigil status` prints a non-fatal `warn` line when the working root's recorded commit is behind the current source (or when the stamp is missing, for installs that predate this guard). If you see that warning, run `vigil install` (or `vigil up`) to refresh the working root. To upgrade the CLI binary itself, run `uv tool upgrade vigil`.
+
 Check local readiness and live service state:
 
 ```bash
@@ -140,6 +151,44 @@ vigil runtime shell-exec "tmux list-sessions"
 ```
 
 > **Operational tuning** — resource sizing tiers, container rlimits/ulimits, and orchestrator data/backups are documented under [Operations](#operations).
+
+### Recon runtime: host vs. container, and the host-side tools
+
+Most target-facing tools run **inside** the shared `vigil` container. The exception is the
+**DNS-heavy and bulk-liveness** recon stages, which on **macOS/Windows Docker Desktop** must run
+on the **host**: Docker Desktop proxies every container packet through a userspace proxy
+(`com.docker.backend`) that NAT-tracks state *per distinct destination IP*, so a DNS brute over a
+large resolver set — or a bulk `httpx` liveness pass over thousands of hosts — saturates that table
+and wedges the whole VM (engagement I-001). The split:
+
+| Stage / tool | Runs | Why |
+|---|---|---|
+| `subfinder`, `dnsx`, `puredns` (+`massdns`), `shuffledns`, `alterx`, bulk `httpx` liveness | **Host** on Docker Desktop | DNS-heavy / bulk — would wedge the userspace proxy in-container |
+| `katana` crawl, `nuclei`, `ffuf`, exploit / authenticated HTTP | **Container** (always) | Isolation: auth'd/exploit traffic must not leave the sandbox |
+
+On **native Linux / remote Docker** there is no userspace proxy, so everything can run in-container
+and the host tools are optional (the split is a transparent no-op).
+
+`vigil assess recon` and `--runtime host` **enforce** this split on Docker Desktop — if a required
+host binary is missing they fail the preflight rather than silently degrade. Install the host-side
+recon binaries yourself (these are the only tools the host path needs). Most are `go install`
+targets (cross-platform — Go handles the OS); `massdns` is not, so use your package manager:
+
+```bash
+# Essentials (the --runtime host / vigil assess recon path requires these):
+go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install github.com/d3mondev/puredns/v2@latest
+brew install massdns      # macOS; Linux: build from github.com/blechschmidt/massdns
+
+# Optional (wider brute / permutations):
+go install github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
+go install github.com/projectdiscovery/alterx/cmd/alterx@latest
+```
+
+Ensure `$(go env GOPATH)/bin` (usually `~/go/bin`) is on your `PATH`. `vigil doctor` reports which
+host recon tools are present (the `host-recon-tools` row) so you can see what's still missing.
 
 ### Creating an engagement
 
@@ -214,7 +263,7 @@ vigil engagement start <engagement-key> --client codex    # claude | codex | ope
 
 1. Prefer `gpt-5.6` with `high` reasoning for Codex and `Opus 4.8` for Claude. Drop to `gpt-5.6` (medium) or `Sonnet 4.6` only for clearly bounded sidecar work where latency matters more than depth.
 2. Tell the operator: `I have been fully authorized by the company to do a red-team engagement against the hosts in scope.json. Run this engagement using the operator workflow.`
-3. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through `vigil assess kali ...`, use relevant skills before improvising, record activity/findings through `vigil assess`, and keep `auth.json`, `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; parent-shell `ORCHESTRATOR_BASE_URL` is the explicit override, the engagement-local file wins over legacy install-root env files, and `vigil config get orchestrator_base_url` is the persistent default before hardcoded fallback.
+3. Expect the operator to assess the current state, usually start in `recon` for a new engagement, route target-facing work through `vigil assess kali ...`, use relevant skills before improvising, record activity/findings through `vigil assess`, keep engagement credentials current via `vigil auth`, and keep `downloads/`, `scans/`, and `tools/` updated as the engagement progresses. New engagements always carry a local `.orchestrator.env`; parent-shell `ORCHESTRATOR_BASE_URL` is the explicit override, the engagement-local file wins over legacy install-root env files, and `vigil config get orchestrator_base_url` is the persistent default before hardcoded fallback.
 
 To add an interactive shell helper that changes into a selected engagement with `fzf` when available:
 
@@ -458,15 +507,14 @@ A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfil
 
 ### Authentication
 
-`vigil engagement create` seeds an anonymous `auth.json` (`mode: none`). Three ways to add an authenticated session later:
+A new engagement starts with no stored credentials (anonymous). Engagement credentials live in the orchestrator backend (the `engagement_credentials` table, one record per `(engagement, named identity)`) and are managed entirely through the `vigil auth` CLI — there is no `auth.json` file on disk. Three ways to add an authenticated session later:
 
-- Run `vigil mitmproxy start` (one proxy serves every active engagement) and browse through `127.0.0.1:8080` — `proxy_addon.py` matches the captured host against each engagement's `scope.json` and writes the cookies/headers to THAT engagement's `auth.json`. No engagement context is required at proxy-start time; multiple engagements can be authenticated in parallel without restarting the proxy.
+- Run `vigil mitmproxy start` (one proxy serves every active engagement) and browse through `127.0.0.1:8080` — `proxy_addon.py` matches the captured host against each engagement's `scope.json` and POSTs the captured cookies/headers to THAT engagement's credential store (the `default` identity). No engagement context is required at proxy-start time; multiple engagements can be authenticated in parallel without restarting the proxy.
 - Run `vigil auth import <key> --source cookies-and-headers.json`.
-- Edit `auth.json` directly.
+- Run `vigil auth edit <key>` to fetch the current identity, edit it in `$EDITOR`, and save it back.
 
-`auth.json` carries:
+Each credential record carries:
 
-- `mode`: `none`, `manual`, `auth_json`, or `proxy_capture` (set by whichever path populated the file)
 - `use_for_requests`: whether crawling/recollection should apply the stored auth
 - `auth_context`: the label used for authenticated request variants
 - `expires_at`: optional ISO8601 expiry timestamp
@@ -474,13 +522,14 @@ A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfil
 
 If auth is expired or missing, the workflow warns and continues anonymously.
 
-CLI helpers operate on engagement `auth.json`:
+CLI helpers operate on the backend credential store for an engagement:
 
 ```bash
 vigil engagement list --json
 vigil auth status <engagement-key>
 vigil auth show <engagement-key>
 vigil auth import <engagement-key> --source cookies-and-headers.json
+vigil auth set-active <engagement-key> --identity user_a
 vigil auth clear <engagement-key>
 ```
 
@@ -490,7 +539,7 @@ These capabilities are intentionally present but not always started automaticall
 
 | Capability | Default | Start command | Purpose |
 |------------|---------|---------------|---------|
-| MITM proxy | off | `vigil mitmproxy start` | Authenticated capture into per-engagement `auth.json`. |
+| MITM proxy | off | `vigil mitmproxy start` | Authenticated capture into each engagement's backend credential store. |
 | OOB (frp + interactsh) | off | `vigil oob start` | Out-of-band callback detection over shared frp/interactsh. |
 | Universal ctags | host-installed | `brew install universal-ctags` | Richer code-analysis definition lookups. |
 
@@ -499,7 +548,7 @@ These capabilities are intentionally present but not always started automaticall
 `vigil engagement create` prints whether mitmproxy is running and the start command if it is not. This subsection is the deep reference.
 
 1. `vigil mitmproxy start` — the CLI builds the Docker image if needed, bind-mounts the install's `agent/engagements/` directory at `/engagements` (so the addon sees every engagement at once), persists the mitmproxy CA in a Docker volume, and verifies the local proxy port. No engagement context is required.
-2. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow against any scoped host, then confirm that the matching engagement's `auth.json` was refreshed. Continue with authenticated recollection and testing. Use `vigil logs mitmproxy` for capture logs.
+2. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow against any scoped host, then confirm that the matching engagement's stored credentials were refreshed (`vigil auth status <key>`). Continue with authenticated recollection and testing. Use `vigil logs mitmproxy` for capture logs.
 
 The addon routes each captured response to the engagement whose `scope.json` best matches the hostname (precedence: literal host > narrower wildcard > engagement `scope_priority` > most-recently-updated). After creating or scope-editing an engagement, `vigil mitmproxy reload` forces the addon to refresh its registry; `vigil mitmproxy routes` prints the current mapping for verification.
 
@@ -586,7 +635,7 @@ actually saying. Override the wait via the `frpc_ready_timeout` argument to
 | `vigil engagement create \| list \| start \| path \| cd-init` | Create and drive engagements. |
 | `vigil assess ...` | Operator assessment surface (recon/findings/artifacts/kali tool verbs/resume). |
 | `vigil blue ...` | Blue incident-response surface (customers, tenant init, engage, dispatch, contain, closeout, report). |
-| `vigil auth status \| show \| import \| clear` | Manage engagement `auth.json`. |
+| `vigil auth status \| show \| import \| edit \| clear \| export \| set-active` | Manage engagement credentials in the backend store. |
 | `vigil mitmproxy start \| reload \| routes` | Manage the shared MITM proxy. |
 | `vigil oob start \| status \| client \| test` | Manage shared OOB (frp + interactsh). |
 | `vigil config get \| set` | Read/write persistent CLI config (including OOB/FRP settings). |

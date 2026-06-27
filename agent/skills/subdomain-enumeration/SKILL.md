@@ -12,8 +12,10 @@ origin: Vigil
 
 - Beginning of engagement when the `hosts` array in scope.json includes `*.domain` entries (e.g., `*.target.example`).
 - Need to discover additional attack surface beyond the primary domain.
-- **Phase 1a (first-class) when scope.json `hosts` contains `*.domain` entries** — dispatched BEFORE the parallel recon+source pass so live subdomains land in the endpoint inventory before downstream steps depend on them.
+- **Phase 1a (first-class) when scope.json `hosts` contains `*.domain` entries** — the **operator** runs the spine as the `vigil assess recon` job before the 1b recon+source pass; a specialist loads this skill to **assess** that job's output (bound rules, stop reasons, completeness) and recommend re-runs, not to execute the phases itself.
 - After finding references to subdomains in JS/HTML source code.
+
+> **Register out-of-scope carve-outs in `scope.json` `out_of_scope` before enumerating.** Wildcard expansion surfaces hosts the program excluded (telecom-PTR space, vendor apexes, carved-out subdomains). The `vigil assess recon` pipeline scope-filters the resolved set between the dns and web stages, so authoring the deny-list up front keeps bulk liveness/crawl off out-of-scope hosts. A carve-out added mid-run only applies on the next `--resume`.
 
 ## Tooling preflight
 
@@ -22,8 +24,10 @@ Before any active step, confirm every binary in the chain is reachable inside th
 ```bash
 vigil assess kali exec --technique HEALTH --intent "subdomain-enum tooling preflight" \
   --probe-kind fingerprint --phase recon --timeout 60 -- \
-  which alterx asnmap bbot cero dnsx massdns puredns shuffledns subfinder
+  which alterx asnmap bbot cero dnsx github-subdomains massdns puredns shuffledns subfinder tlsx
 ```
+
+`github-subdomains` (passive Phase 0 source) and `tlsx` (Phase 3 TLS-SAN harvester) are in the preflight set because they are part of the same enumeration chain — a missing one is image drift to fix, not a gap to route around. `github-subdomains` additionally reads a `GITHUB_TOKEN` from the runtime env at probe time (it mines GitHub code search); a missing token degrades that one source to a no-op, which is a configuration gap, not a tooling gap.
 
 If any binary is missing, do NOT silently fall back — pause active enumeration and dispatch a runtime fix:
 
@@ -149,6 +153,23 @@ Both are advisory WARNs surfaced by `vigil assess dns-discovery`, consistent wit
 > verb for the mechanical pipe; the manual stages below remain the reference for
 > tuning and for steps the verb doesn't cover.
 
+> **Supervised one-shot — `vigil assess recon <apex…>`.** When a long DNS/brute
+> pass would otherwise be a multi-minute blocking call (the failure mode that
+> kills a halting subagent), the **operator** runs the whole spine as one
+> supervised, resumable, pollable job instead: `vigil assess recon <apex…>`
+> orchestrates `dns-discovery → web-discovery` as **checkpointed stages** (each
+> stage's canonical artifact is its checkpoint; `--resume` restarts from the first
+> incomplete stage, so a killed run re-runs cleanly with no redo and no orphans).
+> It writes `scans/recon/recon-status.json` after every stage. With `--background`
+> it spawns the pipeline as a **detached host job** and returns a job id
+> immediately — poll `vigil assess recon-status [--job-id N]` (a read-only digest:
+> per-stage state + counts + "% complete + what's next") instead of blocking. On
+> macOS Docker Desktop the DNS-heavy stages are **enforced** host-side (a missing
+> host binary fails the preflight rather than silently wedging the proxy, I-001);
+> `--runtime container` forces isolation and bypasses the enforcement. Flags:
+> `--brute`, `--no-crawl`, `--resume`, `--runtime {auto,host,container}`,
+> `--stage-timeout`, `--background`.
+
 Each phase compounds on the previous one. Stop at any phase when its bound rule fires (see "Bound rules" below). Cross-reference the verb invocations in `agent/skills/kali-exec/SKILL.md` "Subdomain enumeration: Phase A→D workflow" — this section describes operator-phase-flow ordering and resource shaping.
 
 ### Phase 0 — Passive enumeration (always-on)
@@ -248,13 +269,13 @@ Run each probe as a single audited `vigil assess kali` call so it cannot loop or
 
 **Resolver QUALITY-under-load, not raw count, governs brute throughput — and single-query "alive" validation does NOT predict bulk behavior.** Engagement evidence (CR-18): ~40 premium anycast IPs sustained ~250-500 names/s at ~0% REFUSED, whereas ~1,349 single-query-"alive" public resolvers managed ~4 names/s at 38% REFUSED. A resolver that answers one probe can still collapse under a brute's concurrency, so default to the shipped premium-anycast tier and step up to a larger pool only after validating it under bulk load (not a single liveness ping). `vigil assess dns-discovery --brute` injects both shipped lists by default; override with `--resolvers <file>` / `--resolvers-trusted <file>`, or pass `--no-default-resolvers` to manage the pool yourself (which leaves puredns's own self-discovered resolver set — and its uncapped dest-IP fan-out — in play; see the CR-3 dest-IP ceiling).
 
-**Wordlist: brute the HEAD, opt into the deep tail (CR-19).** Recommend a cert-derived brute list — **n0kovo_subdomains** — as the primary wordlist (CT-derived, frequency-ordered), with an assetnote best-dns-wordlist final pass. CT-derived / frequency-ordered huge lists (n0kovo, ~3M) keep the real labels in the **head** and CT-hash / one-off junk in the **tail**, so bruting only the head recovers nearly all real hosts at a fraction of the DNS spend. The composed verb brutes the first `--wordlist-head N` labels (default 500000) and opts into the full list with `--deep-tail`; it WARNs when it truncates so the drop is auditable. Don't `sort` an arbitrary `--wordlist` — sorting destroys the frequency order the HEAD cap depends on.
+**Wordlist: brute the HEAD, opt into the deep tail (CR-19).** Recommend a cert-derived brute list — **n0kovo_subdomains** — as the primary wordlist (CT-derived, frequency-ordered), with an assetnote best-dns-wordlist final pass. CT-derived / frequency-ordered huge lists (n0kovo, ~3M) keep the real labels in the **head** and CT-hash / one-off junk in the **tail**, so bruting only the head recovers nearly all real hosts at a fraction of the DNS spend. The composed verb brutes the first `--wordlist-head N` labels (default 500000) and opts into the full list with `--deep-tail`; it WARNs when it truncates so the drop is auditable. Don't `sort` an arbitrary `--wordlist` — sorting destroys the frequency order the HEAD cap depends on. The runtime image bakes this list **pre-capped to its first 500k labels** at `/usr/share/wordlists/n0kovo_subdomains_500k.txt` (the `huge` 3M list HEAD-capped at build time), so select it with `--wordlist /usr/share/wordlists/n0kovo_subdomains_500k.txt` and the `--wordlist-head` cap is already satisfied (a no-op on the baked file).
 
 ```bash
 # polite-residential default (Standard runtime, no specific CDN signal),
 # two-tier resolvers (shipped premium-anycast brute / trusted-anycast validate).
 vigil assess kali puredns bruteforce \
-  /usr/share/wordlists/n0kovo/n0kovo_subdomains.txt target.example \
+  /usr/share/wordlists/n0kovo_subdomains_500k.txt target.example \
   -r agent/scripts/assess/data/resolvers/premium-anycast.txt \
   --resolvers-trusted agent/scripts/assess/data/resolvers/trusted-anycast.txt \
   --rate-limit 2500 --wildcard-batch 100000 --wildcard-tests 30 \
@@ -265,7 +286,7 @@ vigil assess kali puredns bruteforce \
 # OR the composed verb — wildcard pre-strip + two-tier resolvers + HEAD cap +
 # convergence + budget WARN baked in. On macOS Docker Desktop add --runtime host.
 vigil assess dns-discovery target.example --brute \
-  --wordlist /usr/share/wordlists/n0kovo/n0kovo_subdomains.txt \
+  --wordlist /usr/share/wordlists/n0kovo_subdomains_500k.txt \
   --wordlist-head 500000 --runtime host
 ```
 
@@ -352,12 +373,23 @@ When a phase did not run (Phase 1 skipped, Phase 2 aborted), the missing file is
 
 ### Phase 3 — TLS SAN feedback loop (always-on after 2)
 
-`httpx -tls-grab` and `cero` extract Subject Alternative Names from TLS handshakes. Two complementary patterns:
+Three complementary TLS-SAN harvesters extract Subject Alternative Names from the handshake — use `tlsx` as the **primary** SAN harvester over a host list because it is purpose-built for cert/SAN extraction (SAN + CN + issuer + JARM/JA3/JA4 at scale, lighter than `httpx -tls-grab`, which carries the full HTTP-probe weight). Keep `httpx -tls-grab` for the case where you already need the HTTP status/title in the same pass, and `cero` for the IP/CIDR-range sweep where there is no hostname list yet:
 
-1. **httpx with `-tls-grab` against the merged sub list** — emits SAN, issuer, validity, and JARM hash in the JSON output. Catches wildcards (`*.foo.target.example`) and shared-cert tenants.
-2. **cero against asnmap-derived CIDR ranges** — TCP/TLS handshake on 443/8443/9443 across the target's owned CIDR. Catches subdomains that never appear in CT logs (private CAs, internal stages on internet-exposed IPs).
+1. **tlsx against the merged sub list (primary SAN harvester)** — `tlsx -san -cn -silent` pulls every cert's SAN/CN set; `-resp-only` emits just the discovered names so the output feeds straight back into the resolve loop. Catches wildcards (`*.foo.target.example`) and shared-cert tenants that never appear in passive sources.
+2. **httpx with `-tls-grab` against the merged sub list** — emits SAN, issuer, validity, and JARM hash *alongside* HTTP status/title in one JSON pass. Reach for it when you want the HTTP signal and the SAN grab together; otherwise `tlsx` is the cheaper SAN-only path.
+3. **cero against asnmap-derived CIDR ranges** — TCP/TLS handshake on 443/8443/9443 across the target's owned CIDR. Catches subdomains that never appear in CT logs (private CAs, internal stages on internet-exposed IPs), where there is no hostname list to feed `tlsx`.
 
 ```bash
+# tlsx SAN harvest — the primary, cheapest SAN-only feedback pass. -resp-only
+# emits just the discovered SAN/CN names so they feed straight back into the
+# resolve loop alongside the brute/permutation output.
+vigil assess kali exec --technique DISCOVERY \
+  --intent "Phase 3 TLS SAN harvest via tlsx (-san -cn, names-only)" \
+  --probe-kind fingerprint --phase recon --timeout 1200 -- \
+  tlsx -l /engagements/$ENGAGEMENT_KEY/scans/subs_merged.txt \
+  -san -cn -resp-only -silent \
+  -o /engagements/$ENGAGEMENT_KEY/scans/tlsx_sans.txt
+
 # httpx feedback loop — NO -tech-detect on this bulk pass. tech-detect amplifies
 # httpx memory under cgroup pressure and was a SIGKILL (RC137) trigger on large
 # merged lists. This pass only needs the SAN/TLS grab; tech-detect the confirmed-
@@ -535,6 +567,7 @@ After ingestion, the operator triggers a reactive nuclei sweep against the newly
 - **Services** running on non-standard ports.
 - **Source** of each subdomain (subfinder source, brute-force, alterx permutation, productive-parent re-brute, cero SAN, asnmap CIDR, JS/archive host mining, bbot mop-up).
 - Any subdomain pointing to **different infrastructure** (cloud, CDN, third-party).
+- **Dangling CNAMEs are a takeover SCREENING signal, not a finding.** When a subdomain CNAMEs to a third-party resource that no longer serves it (S3 `NoSuchBucket`, a `d*.cloudfront.net` target with no A, `*.azurewebsites.net` / `*.trafficmanager.net` NXDOMAIN), record the dangling state as intel and hand the candidate on — but the signature alone is necessary-but-not-sufficient, so load `agent/skills/cloud-exposure/SKILL.md` (which owns the per-provider claimability rules and the prove-or-kill benign own-account claim, citing `agent/references/subdomain-takeover.md`) and confirm claimability there BEFORE anyone records a takeover finding. The bare signature is the #1 false-positive class for this bug type (one engagement saw 7 perfect-signature CloudFront candidates, all non-claimable false positives).
 - The hypothesis each interesting subdomain suggests: auth bypass, stale deployment, separate trust zone, or chain opportunity.
 - **Wildcard parents** detected (the Phase-2 Host/SNI-fuzz surface from `scans/dns-discovery/wildcard_parents.txt`) and the candidates stripped under them.
 - **Productive parents** re-bruted (>= `--parent-min-children`) and the convergence outcome: how many passes ran, net-new per pass, and whether it stopped on the two-zero-pass criterion or `--max-passes`.
@@ -557,5 +590,7 @@ After ingestion, the operator triggers a reactive nuclei sweep against the newly
 - `agent/references/tools/recon/shuffledns.md` — lighter alternative to puredns.
 - `agent/references/tools/recon/httpx.md` — HTTP probing and TLS-grab.
 - `agent/references/subdomain-enumeration.md` — prioritization, sliding-window, and bound-rule companion doc.
+- `agent/references/subdomain-takeover.md` — subdomain-takeover claimability: why a dangling-CNAME signature is necessary-but-not-sufficient, the per-provider claimability rules, and the benign own-account claim that proves (or kills) a takeover candidate before a finding is recorded.
 - `agent/references/runtime-guides/docker-desktop-network-hazards.md` — the macOS Docker Desktop per-destination-IP userspace-proxy wedge (the I-001 incident): why a DNS brute's distinct-resolver-IP count (>~50 in-container), not qps, is the crash knob, and why the DNS-heavy stages route to the host (`--runtime host`).
 - `agent/scripts/assess/data/resolvers/premium-anycast.txt` / `trusted-anycast.txt` — the shipped two-tier resolver lists (brute `-r` ~40 premium-anycast IPs / validate `--resolvers-trusted` ~12 trusted-anycast IPs); the default `vigil assess dns-discovery --brute` resolver pools.
+- `agent/scripts/assess/data/resolvers/validated-trickest.txt` — an OPTIONAL wide brute tier synced from the externally-validated `trickest/resolvers` pool by `agent/scripts/refresh_resolvers.py` (a MAINTAINER task, run occasionally and committed — never engagement-time, so a slow/dead resolver never surfaces mid-brute). Point a large brute at it with `--resolvers <path>`; the curated premium/trusted tiers stay the safe defaults. Generated, so it is absent until a maintainer runs the refresh.

@@ -122,18 +122,17 @@ Map the WAF identity to a rate-limit tier before starting nmap/httpx/ffuf/nuclei
 
 Full table and detection commands: `agent/references/tools/recon/wafw00f.md`. The canonical per-target rate calibration table is in `agent/references/recon/rate-calibration.md` — the values above pull from that table.
 
-### Step 0b — Egress reputation check (run after subdomain-enum + httpx populate live_hosts.txt, before nmap)
+### Step 0b — Egress reputation (operator-run; you review the verdict)
 
-The egress reputation check requires `live_hosts.txt` as input, so it runs
-after Phase 1a subdomain enumeration and the httpx live-host pass have
-populated that file — not after wafw00f alone. Sample up to 10
-representative hosts through `curl` to confirm the runtime's egress IP is
-not on the CDN edge's reputation list. A pattern of 403 across alive hosts
-is the signature of an IP-reputation block (or a JA3/JA4 TLS fingerprint
-block); 000 from curl signals a dead host (DNS failure, no listener,
-TCP-reset on connect) and is excluded from the sample. Running nmap, ffuf,
-and nuclei against a blocked egress burns a full dispatch with no signal.
-Catch the block once:
+The **operator** runs `vigil assess egress-check` after the recon job's web stage
+populates the live-host set, producing an `egress_decision` and a blocked-hosts
+deferral file. **Review that verdict** as part of your completeness assessment: a
+pattern of 403 across alive hosts (or `egress_block_pct > 50`) is the signature of
+an IP-reputation block (or a JA3/JA4 TLS fingerprint block) — flag the blocked
+cluster as a coverage gap and confirm the deferral, never a target verdict (a `000`
+from curl is a dead host, excluded). Running nmap, ffuf, and nuclei against a
+blocked egress burns a full dispatch with no signal. If you must sample manually as
+a fallback, this bounded one-shot catches the block once:
 
 ```bash
 vigil assess kali exec --technique RECON \
@@ -456,6 +455,14 @@ vigil assess kali exec --technique RECON --intent "JS extraction for source-anal
 
 Surface-level extraction only. Hand JS bundles to source-analyzer for deep route /
 secret extraction — the source-analysis skill has the methodology depth for that pass.
+
+The supervised `vigil assess recon` pipeline runs a bounded automated pass over the
+crawled `.js` assets after the crawl: `vigil assess js-mining` fetches the bundles
+(carrying the program attribution header + per-host rate cap), extracts endpoints
+with jsluice (AST) + the LinkFinder regex, runs a trufflehog secret scan, and
+ingests the recovered routes as `js-extract`. Assess its output (endpoint count,
+any leaked secrets) as part of the recon-completeness verdict; it complements — does
+not replace — the source-analyzer deep pass.
 
 Only queue endpoints that are directly requestable and evidenced by a real response or
 real HTML/form/link extraction. Directory stems, SPA routes, and guessed names should

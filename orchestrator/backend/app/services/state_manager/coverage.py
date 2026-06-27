@@ -11,7 +11,18 @@ from fastapi import HTTPException, status
 from ..events import _engagement_or_404
 
 from . import _common
-from ._common import _fetch_all, _hash_json, _json_text, _parse_url, _scalar_row
+from ._common import (
+    SEVERITY_RANK,
+    WORKFLOW_STATUS_RANK,
+    _fetch_all,
+    _hash_json,
+    _json_text,
+    _normalize_severity,
+    _normalize_workflow_status,
+    _normalize_verification_state,
+    _parse_url,
+    _scalar_row,
+)
 from .dispatches import _serialize_decision
 
 
@@ -1539,6 +1550,51 @@ def _active_coverage_deferrals(engagement_id: int) -> list[dict[str, Any]]:
         )
         return [_serialize_decision(row) for row in cursor.fetchall()]
 
+def _active_coverage_completeness_deferrals(engagement_id: int) -> list[dict[str, Any]]:
+    """Active (``resolved=0``) ``coverage_completeness_deferral`` decision rows,
+    newest-first.
+
+    W3 override reader — mirrors :func:`_active_coverage_deferrals` (same direct
+    ``get_connection`` read to dodge the ``list_decisions`` ``limit`` cap) but
+    for the report-time completeness escape. The decision is recorded free-form
+    via ``vigil assess agent decision --kind coverage_completeness_deferral``;
+    its payload is ``{host, reason}`` (or aliases ``hosts``/``target``/
+    ``hostname``) for a per-host carve-out, or ``{engagement_wide: true}`` to
+    accept residual uncovered hosts program-wide at the report boundary.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        cursor = connection.execute(
+            "SELECT * FROM assessment_dispatch_decisions "
+            "WHERE engagement_id = ? AND kind = ? AND resolved = 0 "
+            "ORDER BY created_at DESC, id DESC",
+            (engagement.id, "coverage_completeness_deferral"),
+        )
+        return [_serialize_decision(row) for row in cursor.fetchall()]
+
+def _completeness_deferral_index(
+    rows: list[dict[str, Any]],
+) -> tuple[set[str], bool]:
+    """Split completeness-deferral rows into ``(deferred_hosts, engagement_wide)``.
+
+    A row tagged ``engagement_wide=true`` clears EVERY uncovered host; otherwise
+    the payload's host fields (normalized through ``_coverage_deferral_payload_hosts``
+    so URL / host:port shapes collapse to the bare-host key) name the hosts it
+    clears.
+    """
+    deferred_hosts: set[str] = set()
+    engagement_wide = False
+    for row in rows:
+        payload = row.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("engagement_wide") is True:
+            engagement_wide = True
+            continue
+        for host in _coverage_deferral_payload_hosts(payload):
+            deferred_hosts.add(host)
+    return deferred_hosts, engagement_wide
+
 def _coverage_engagement_wide_deferrals(
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1555,6 +1611,109 @@ def _coverage_engagement_wide_deferrals(
         if isinstance(payload, dict) and payload.get("engagement_wide") is True:
             out.append(row)
     return out
+
+def _empty_finding_verdict() -> dict[str, Any]:
+    """The "no verdict on this host" cell. Stable shape so the CLI ledger never
+    has to special-case a missing key."""
+    return {
+        "has_finding": False,
+        "finding_count": 0,
+        "verified_count": 0,
+        "strongest_status": None,
+        "max_severity": None,
+        "auth_contexts": [],
+        "verification_states": [],
+        "slugs": [],
+    }
+
+
+def _build_finding_verdicts_by_host(
+    finding_rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Project finding rows into ``{host: verdict}``.
+
+    A ``merged`` finding (or one with a ``merged_into_finding_id``) is excluded —
+    it is no longer the canonical record. Every other finding counts as a
+    RECORDED VERDICT for its host (a ``false_positive`` finding is the canonical
+    evidence-backed negative: "we tested it, here is why it is not a bug").
+    Host is taken from ``canonical_location`` via the same normalizer used for
+    services/surfaces so the ledger join lands on one key. The ``slugs`` list is
+    capped to keep the payload bounded on noisy hosts.
+    """
+    by_host: dict[str, dict[str, Any]] = {}
+    for row in finding_rows:
+        if row.get("merged_into_finding_id") is not None:
+            continue
+        try:
+            status_value = _normalize_workflow_status(str(row.get("status") or "draft"))
+        except HTTPException:
+            status_value = "draft"  # tolerate a legacy/invalid status on read
+        if status_value == "merged":
+            continue
+        host = _coverage_endpoint_host(str(row.get("canonical_location") or ""))
+        if not host:
+            continue
+        verdict = by_host.setdefault(host, _empty_finding_verdict())
+        verdict["has_finding"] = True
+        verdict["finding_count"] += 1
+
+        try:
+            verification_state = str(
+                _normalize_verification_state(str(row.get("verification_state") or "unreviewed"))
+            )
+        except HTTPException:
+            verification_state = "unreviewed"
+        if verification_state == "verified":
+            verdict["verified_count"] += 1
+        if verification_state not in verdict["verification_states"]:
+            verdict["verification_states"].append(verification_state)
+
+        severity = _normalize_severity(str(row.get("severity") or "info"))
+        if verdict["max_severity"] is None or (
+            SEVERITY_RANK[severity] > SEVERITY_RANK[verdict["max_severity"]]
+        ):
+            verdict["max_severity"] = severity
+
+        current_strongest = verdict["strongest_status"]
+        if current_strongest is None or (
+            WORKFLOW_STATUS_RANK[status_value] > WORKFLOW_STATUS_RANK[current_strongest]
+        ):
+            verdict["strongest_status"] = str(status_value)
+
+        auth_context = str(row.get("auth_context") or "").strip()
+        if auth_context and auth_context not in verdict["auth_contexts"]:
+            verdict["auth_contexts"].append(auth_context)
+
+        slug = str(row.get("slug") or "").strip()
+        if slug and len(verdict["slugs"]) < 25 and slug not in verdict["slugs"]:
+            verdict["slugs"].append(slug)
+
+    for verdict in by_host.values():
+        verdict["auth_contexts"].sort()
+        verdict["verification_states"].sort()
+        verdict["slugs"].sort()
+    return by_host
+
+
+def per_host_finding_verdicts(engagement_id: int) -> dict[str, dict[str, Any]]:
+    """Standalone per-host finding-VERDICT projection (sibling of
+    :func:`per_host_coverage`).
+
+    Exposed for callers that only need the verdict join (and for direct test
+    coverage). ``per_host_coverage`` reuses the same builder so the inline
+    ``finding_verdict`` and this map never drift.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        finding_rows = _fetch_all(
+            connection,
+            "SELECT slug, canonical_location, status, verification_state, "
+            "verification_disposition, severity, auth_context, merged_into_finding_id "
+            "FROM assessment_findings WHERE engagement_id = ?",
+            (engagement.id,),
+        )
+    return _build_finding_verdicts_by_host(finding_rows)
+
 
 def per_host_coverage(engagement_id: int) -> dict[str, Any]:
     """Outcome-based per-host coverage projection (C40).
@@ -1629,6 +1788,21 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
             "AND superseded_by_id IS NULL",
             (eng_id,),
         )
+        finding_rows = _fetch_all(
+            connection,
+            "SELECT slug, canonical_location, status, verification_state, "
+            "verification_disposition, severity, auth_context, merged_into_finding_id "
+            "FROM assessment_findings WHERE engagement_id = ?",
+            (eng_id,),
+        )
+
+    # W2 — per-host finding VERDICT join. A host is only "covered" with a
+    # RECORDED VERDICT; this map is what the coverage ledger reads to tell a
+    # real_app gap (routes but no verdict) from a closed one. Keyed by the same
+    # ``_coverage_endpoint_host`` normalization as services/surfaces so the join
+    # lands on one host key. Includes finding-only hosts (a host with a finding
+    # but no recon service/surface) so a crown-jewel verdict is never dropped.
+    finding_verdicts_by_host = _build_finding_verdicts_by_host(finding_rows)
 
     # Filter out superseded tech-component rows from outcome consideration —
     # the current row is the canonical answer.
@@ -1806,18 +1980,222 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
                     }
                     for row in deferral_rows
                 ],
+                "finding_verdict": finding_verdicts_by_host.get(
+                    host, _empty_finding_verdict()
+                ),
             }
         )
 
     return {
         "objectives": list(PER_HOST_OBJECTIVES),
         "hosts": host_outcomes,
+        # Superset of the per-host inline verdict: also carries finding-only
+        # hosts (no recon service/surface) so the ledger never loses a verdict.
+        "finding_verdicts": finding_verdicts_by_host,
         "engagement_signals": {
             "waf_intel_count": len(waf_rows),
             "tech_scan_intel_count": len(tech_fingerprint_rows),
             "osint_intel_total": len(live_tech_components) + int(people_count) + int(breach_count),
         },
     }
+
+# W3 — backend web coverage-completeness gate (report_readiness).
+#
+# A host is a "real app" worth a recorded verdict at the report boundary when it
+# has >= this many distinct recorded request-variant routes, OR it exposes an
+# API/auth/GraphQL surface even under that count. This mirrors the CLI ledger's
+# ``compute_real_app`` OR-inclusion (agent/scripts/assess/lib/coverage_checks.py)
+# — kept duplicated here because the CLI module cannot be imported into the
+# backend. The route signal is the durable backend equivalent of the CLI's
+# cases.db live-route count: a recorded ``assessment_request_variants`` row IS an
+# observed route.
+WEB_ROUTE_REAL_APP_THRESHOLD = 6
+
+# Path fragments that flag a high-value API / auth / GraphQL surface so a small
+# crown-jewel host UNDER the route threshold is still treated as a real app.
+# Mirrors the CLI ledger's token lists; keep the two in sync.
+_WEB_API_PATH_TOKENS: tuple[str, ...] = (
+    "/api/", "/api.", "/rest/", "/v1/", "/v2/", "/v3/", "/graphql", "/gql",
+    "/swagger", "/openapi", "/oauth", "/jsonrpc", "/.well-known/",
+)
+_WEB_API_PATH_SUFFIXES: tuple[str, ...] = (".json", "/api", "/graphql", "/v1", "/v2", "/v3")
+_WEB_AUTH_PATH_TOKENS: tuple[str, ...] = (
+    "/login", "/signin", "/sign-in", "/auth", "/oauth", "/sso", "/saml",
+    "/oidc", "/session", "/logout", "/register", "/signup", "/password",
+    "/mfa", "/2fa", "/token", "/authorize",
+)
+_WEB_GRAPHQL_PATH_TOKENS: tuple[str, ...] = ("/graphql", "/gql", "/graphiql")
+
+
+def _web_path_is_high_value(path: str) -> bool:
+    """True when a request-variant ``normalized_path`` is an API/auth/GraphQL
+    surface (mirrors the CLI ``_path_matches`` over the same token lists)."""
+    low = (path or "").lower()
+    if not low:
+        return False
+    if any(tok in low for tok in _WEB_API_PATH_TOKENS):
+        return True
+    if any(low.endswith(suf) for suf in _WEB_API_PATH_SUFFIXES):
+        return True
+    if any(tok in low for tok in _WEB_AUTH_PATH_TOKENS):
+        return True
+    if any(tok in low for tok in _WEB_GRAPHQL_PATH_TOKENS):
+        return True
+    return False
+
+
+def _scope_pattern_apex(pattern: str) -> str:
+    """Apex of a scope.json host pattern: strips a leading ``*.`` wildcard.
+
+    Both a literal (``example.com``) and a wildcard (``*.example.com``) entry
+    cover the apex AND every subdomain (the HackerOne/Bugcrowd convention the
+    CLI ``scope.entry_matches_host`` encodes), so they reduce to the same apex.
+    """
+    p = (pattern or "").strip().lower()
+    if p.startswith("*."):
+        p = p[2:]
+    return p
+
+
+def _host_matches_scope_pattern(host: str, pattern: str) -> bool:
+    """True when ``host`` is the apex of ``pattern`` or a subdomain of it."""
+    apex = _scope_pattern_apex(pattern)
+    if not apex or not host:
+        return False
+    return host == apex or host.endswith("." + apex)
+
+
+def _host_admitted_by_scope(
+    host: str, allow_patterns: list[str], deny_patterns: list[str]
+) -> bool:
+    """Scope admission primitive: in the allowlist AND not in the denylist.
+
+    Mirrors the CLI ``scope.host_admitted`` contract (the denylist always wins)
+    so the W3 gate filters route hosts through the same allow/deny semantics the
+    rest of the engagement trusts.
+    """
+    if not host:
+        return False
+    if not any(_host_matches_scope_pattern(host, p) for p in allow_patterns):
+        return False
+    if any(_host_matches_scope_pattern(host, p) for p in deny_patterns):
+        return False
+    return True
+
+
+def _engagement_scope_admission(engagement: Any) -> tuple[list[str], list[str]] | None:
+    """Best-effort ``(allow, deny)`` scope-host pattern lists for ``engagement``.
+
+    Reuses the backend's canonical scope reader — the same scope.json
+    ``hosts``/``scope_hosts`` allowlist and ``out_of_scope`` denylist that
+    :class:`~app.services.engagements.EngagementView` already exposes — so the
+    gate scopes route hosts through the exact admission inputs the rest of the
+    backend uses. Returns ``None`` (caller fails OPEN, keeping the gate firing)
+    when scope cannot be determined or no allowlist is present, rather than
+    silently dropping every host and disabling the gate.
+    """
+    from .. import engagements as _engagements  # local import avoids any cycle
+
+    try:
+        view = _engagements._view_for(engagement)
+    except Exception:  # pragma: no cover — defensive; never break the gate
+        return None
+    allow = [p for p in (view.scope_hosts or []) if p]
+    if not allow:
+        return None
+    deny = [p for p in (view.out_of_scope or []) if p]
+    return allow, deny
+
+
+def web_uncovered_high_route_hosts(
+    engagement_id: int,
+    *,
+    threshold: int = WEB_ROUTE_REAL_APP_THRESHOLD,
+) -> list[dict[str, Any]]:
+    """In-scope REAL-APP hosts with recorded routes but NO recorded verdict and
+    no active ``coverage_completeness_deferral`` override.
+
+    W3 backend gate input (consumed by ``report_readiness`` for web/both
+    engagements). For every host that has recorded request-variant routes:
+
+      * ``route_count`` = distinct ``normalized_path`` for the host.
+      * ``real_app`` = ``route_count >= threshold`` OR an API/auth/GraphQL path
+        — mirrors the CLI ledger's ``compute_real_app`` (a host with a finding
+        is real_app there too, but a finding IS a recorded verdict, so such a
+        host is COVERED and never appears here).
+      * a recorded VERDICT is any non-merged finding on the host (a
+        ``false_positive`` finding is the canonical evidence-backed negative) —
+        read off the shared :func:`_build_finding_verdicts_by_host` projection.
+
+    A host is dropped (out-of-scope) when it is not admitted by the
+    engagement's scope (not in the scope.json allowlist, or carved out by
+    ``out_of_scope``) — an SSO/CDN/third-party host recorded via archive/proxy/
+    manual ingestion must never be forced through the completeness gate. A host
+    is dropped (covered) when it carries a verdict, and dropped (deferred) when
+    a matching active completeness deferral names it — or an engagement-wide one
+    is present. The remaining hosts are the uncovered gaps.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    scope_admission = _engagement_scope_admission(engagement)
+    with _common.get_connection() as connection:
+        variant_rows = _fetch_all(
+            connection,
+            "SELECT host, normalized_path FROM assessment_request_variants "
+            "WHERE engagement_id = ?",
+            (engagement.id,),
+        )
+        finding_rows = _fetch_all(
+            connection,
+            "SELECT slug, canonical_location, status, verification_state, "
+            "verification_disposition, severity, auth_context, merged_into_finding_id "
+            "FROM assessment_findings WHERE engagement_id = ?",
+            (engagement.id,),
+        )
+
+    route_paths: dict[str, set[str]] = {}
+    high_value_hosts: set[str] = set()
+    for row in variant_rows:
+        host = _coverage_endpoint_host(str(row.get("host") or ""))
+        path = str(row.get("normalized_path") or "").strip()
+        if not host or not path:
+            continue
+        route_paths.setdefault(host, set()).add(path)
+        if _web_path_is_high_value(path):
+            high_value_hosts.add(host)
+
+    finding_verdicts = _build_finding_verdicts_by_host(finding_rows)
+    deferred_hosts, engagement_wide = _completeness_deferral_index(
+        _active_coverage_completeness_deferrals(engagement.id)
+    )
+
+    out: list[dict[str, Any]] = []
+    for host in sorted(route_paths):
+        if scope_admission is not None and not _host_admitted_by_scope(
+            host, scope_admission[0], scope_admission[1]
+        ):
+            continue  # out-of-scope host — never a completeness blocker
+        route_count = len(route_paths[host])
+        has_high_value = host in high_value_hosts
+        if route_count < threshold and not has_high_value:
+            continue  # not a real_app — excluded from the gate
+        verdict = finding_verdicts.get(host)
+        if verdict and verdict.get("has_finding"):
+            continue  # a recorded verdict closes the host
+        if engagement_wide or host in deferred_hosts:
+            continue  # operator override
+        if route_count >= threshold:
+            reason = f">={threshold} recorded routes ({route_count})"
+        else:
+            reason = "exposes API/auth/GraphQL surface (under route threshold)"
+        out.append(
+            {
+                "host": host,
+                "route_count": route_count,
+                "api_auth_graphql": has_high_value,
+                "real_app_reason": reason,
+            }
+        )
+    return out
 
 def update_coverage_item_status(
     engagement_id: int,

@@ -200,12 +200,14 @@ defeats the JA3 block without changing the egress IP.
 
 **How to set up.** The runtime image carries a Chromium binary, and the
 supported first-class browser-adjacent crawl path today is the Katana wrapper's
-`-headless` mode. A dedicated Playwright runner is the preferred future shape
-for precise browser evidence, but do not call a `playwright_runner` module unless
-the engagement/runtime actually provides one. Drive the available path through
-`vigil assess kali katana -headless ...`, or ask the operator to approve a
-scoped one-off Playwright script via `vigil assess kali exec` when precise
-request/DOM/console evidence is required. See
+`-headless` mode. Note that **headless** Chromium is itself fingerprinted and
+blocked by Akamai/Cloudflare bot-manager tiers — for a defended *login* you need
+a **headed stealth** browser, not headless: see
+`agent/skills/browser-automation/SKILL.md` and its runnable skeleton
+`agent/scripts/browser/playwright-login.js` (host node). For crawl-only JA3
+defeat, drive `vigil assess kali katana -headless ...`, or ask the operator to
+approve a scoped one-off Playwright script via `vigil assess kali exec` when
+precise request/DOM/console evidence is required. See
 `agent/references/tools/recon/katana.md` and
 `agent/references/runtime-guides/browser-semantic-evidence.md`.
 

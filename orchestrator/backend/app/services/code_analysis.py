@@ -157,6 +157,23 @@ def _merge_file_effort_entry(
         file_efforts[file_id][family] = effort
 
 
+def _merge_file_funcs_analyzed(
+    file_funcs_analyzed: dict[int, int],
+    file_id: int,
+    entry: dict[str, Any],
+) -> None:
+    """Track the max claimed functions_analyzed per file across ANALYZED (non
+    not-applicable) CWE entries — the numerator the W3b uncovered-high-risk-file
+    structural-verification sub-gate compares against the structural function
+    count. A not-applicable entry is an accepted gap, never analysis, so it is
+    skipped here just like in the effort accumulator."""
+    if _is_cwe_entry_not_applicable(entry):
+        return
+    analyzed = _safe_int(entry.get("functions_analyzed", 0))
+    if analyzed > file_funcs_analyzed.get(file_id, 0):
+        file_funcs_analyzed[file_id] = analyzed
+
+
 def _merge_cwe_coverage_entries(
     cwe_by_file: dict[int, dict[str, dict[str, Any]]],
     file_id: int,
@@ -2301,6 +2318,11 @@ def code_coverage_summary(
 
     # -- Effort-threshold gate (blocking for critical/high files) --
     effort_warnings: list[str] = []
+    # W3b structural-verification accumulators (populated alongside the effort
+    # gate so the uncovered-high-risk-file sub-gate reuses the same merge pass).
+    file_funcs_analyzed: dict[int, int] = {}
+    file_applicable: dict[int, list[str]] = {}
+    uncovered_high_risk_files: list[dict[str, Any]] = []
     with get_connection() as connection:
         effort_file_rows = connection.execute(
             f"""
@@ -2337,6 +2359,7 @@ def code_coverage_summary(
                 file_not_applicable[fid] = set()
             for entry in cwe_cov:
                 _merge_file_effort_entry(file_efforts, file_not_applicable, fid, entry)
+                _merge_file_funcs_analyzed(file_funcs_analyzed, fid, entry)
 
         if file_meta:
             placeholders = ",".join("?" for _ in file_meta)
@@ -2358,6 +2381,7 @@ def code_coverage_summary(
                     file_not_applicable[fid] = set()
                 for entry in cwe_cov:
                     _merge_file_effort_entry(file_efforts, file_not_applicable, fid, entry)
+                    _merge_file_funcs_analyzed(file_funcs_analyzed, fid, entry)
 
         for fid, meta in file_meta.items():
             threshold = 70 if meta["classification"] == "critical" else 50
@@ -2384,6 +2408,10 @@ def code_coverage_summary(
                 gate_reasons.append(msg)
                 effort_warnings.append(msg)
                 continue
+
+            # Remember the applicable family set for the W3b structural sub-gate
+            # (only files with a real applicable surface are candidates).
+            file_applicable[fid] = applicable
 
             efforts = file_efforts.get(fid, {})
             not_applicable = file_not_applicable.get(fid, set())
@@ -2472,6 +2500,62 @@ def code_coverage_summary(
                         "warnings": file_warnings,
                     })
 
+            # -- W3b: uncovered high-risk files (function-count structural
+            # verification). A critical/high file that is terminal
+            # (analyzed/done) and whose structural index found functions, but
+            # which shows ZERO function-level analysis (no claimed
+            # functions_analyzed in any CWE family AND no distinct
+            # analysis-result function rows), has no linked finding, and no
+            # accepted-gap resolution (all applicable families marked
+            # not_applicable), is a coverage hole the effort gate alone misses
+            # — the broad-18 near-miss where high files were closed with
+            # functions_analyzed=0. Surfaced separately from gate.passed so the
+            # phase gate can block on it while the effort dimension stays WARN.
+            finding_loc_rows = connection.execute(
+                """
+                SELECT canonical_location
+                FROM assessment_findings
+                WHERE engagement_id = ?
+                  AND canonical_location LIKE 'file:%'
+                  AND status NOT IN ('merged', 'false_positive')
+                """,
+                (engagement.id,),
+            ).fetchall()
+            finding_locations = [str(r["canonical_location"] or "") for r in finding_loc_rows]
+            for fid, meta in file_meta.items():
+                if meta["classification"] not in ("critical", "high"):
+                    continue
+                # Only terminal files: unfinished files are the (a) critical/high
+                # coverage sub-gate's job, not this structural one.
+                if str(meta.get("analysis_status") or "") not in ("analyzed", "done"):
+                    continue
+                total_funcs = file_total_functions.get(fid, 0)
+                if total_funcs <= 0:
+                    continue  # no structural index to verify against
+                applicable = file_applicable.get(fid, [])
+                if not applicable:
+                    continue
+                not_applicable = file_not_applicable.get(fid, set())
+                if all(family in not_applicable for family in applicable):
+                    continue  # accepted gap: every applicable family is not_applicable
+                actual = result_counts.get(fid, {"distinct_functions": 0})
+                funcs_analyzed = max(
+                    file_funcs_analyzed.get(fid, 0),
+                    int(actual.get("distinct_functions", 0)),
+                )
+                if funcs_analyzed > 0:
+                    continue  # real function-level analysis was recorded
+                file_path = str(meta["file_path"])
+                prefix = f"file:{file_path}"
+                if any(loc == prefix or loc.startswith(prefix + ":") for loc in finding_locations):
+                    continue  # a finding is linked to this file
+                uncovered_high_risk_files.append({
+                    "file_id": fid,
+                    "file_path": file_path,
+                    "classification": meta["classification"],
+                    "total_functions": total_funcs,
+                })
+
     return {
         "total_files": total_files,
         "by_classification": by_classification,
@@ -2503,6 +2587,7 @@ def code_coverage_summary(
             "reasons": gate_reasons,
             "effort_warnings": effort_warnings,
             "coverage_integrity": integrity_warnings,
+            "uncovered_high_risk_files": uncovered_high_risk_files,
         },
     }
 

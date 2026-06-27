@@ -37,6 +37,7 @@ class EngagementResponse(BaseModel):
     customer: str | None = None
     platforms: list[str] = Field(default_factory=list)
     tenant_reference_paths: list[str] = Field(default_factory=list)
+    out_of_scope: list[str] = Field(default_factory=list)
 
 
 class SessionResponse(BaseModel):
@@ -71,6 +72,7 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
         customer=engagement.customer,
         platforms=list(engagement.platforms or []),
         tenant_reference_paths=list(engagement.tenant_reference_paths or []),
+        out_of_scope=list(engagement.out_of_scope or []),
     )
 
 

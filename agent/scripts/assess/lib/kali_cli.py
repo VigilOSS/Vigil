@@ -172,7 +172,7 @@ def add_required_kali_flags(parser) -> None:
         dest="identity",
         default=None,
         help=(
-            "Named identity from auth.json to run AND stamp as (e.g. user_a, "
+            "Named identity from the credential store to run AND stamp as (e.g. user_a, "
             "user_b, admin). Selects that identity's auth material and records "
             "it as the probe's auth_context so cross-identity access-control "
             "(IDOR/BOLA/BFLA) depth is measurable. Omit for the active identity "

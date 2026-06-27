@@ -23,13 +23,21 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessError, AssessmentClient, default_runtime_container
 from assess.lib.config import load_config
+from assess.lib.kali_jobs import _job_pid_file as _job_pid_file_in_container
+from assess.lib.kali_jobs import _read_exit_marker as _read_job_exit_marker
 from assess.lib.kali_runtime_exec import _cat_container_pid_file, _container_pid_file
 
 _DEFAULT_MAX_AGE_SECONDS = 3600
+
+# What `run()` reconciles. ``command-runs`` (default) preserves the original
+# behavior byte-for-byte; ``jobs`` reconciles stuck assessment_jobs rows (the
+# dtach-supervised async-job lifecycle); ``all`` does both.
+_VALID_SCOPES = ("command-runs", "jobs", "all")
 
 # Statuses that are still in-flight (worth probing for liveness). Anything else
 # is terminal and the row should be skipped silently — its outcome is already
@@ -54,8 +62,9 @@ def register(subparsers) -> None:
     p = subparsers.add_parser(
         "sweep-orphans",
         help=(
-            "Find assessment_command_runs rows stuck in status=running past a "
-            "threshold age and reconcile them by probing the in-container PID."
+            "Reconcile rows stuck in status=running/queued past a threshold age "
+            "by probing the in-container PID. Default scope is command-runs; "
+            "--scope jobs|all also reconciles assessment_jobs (async dtach jobs)."
         ),
     )
     p.add_argument(
@@ -85,6 +94,16 @@ def register(subparsers) -> None:
         dest="dry_run",
         action="store_true",
         help="List candidates and the planned action without writing.",
+    )
+    p.add_argument(
+        "--scope",
+        dest="scope",
+        choices=list(_VALID_SCOPES),
+        default="command-runs",
+        help=(
+            "What to reconcile: command-runs (default, stuck audit rows), jobs "
+            "(stuck async dtach-job rows), or all (both)."
+        ),
     )
     p.set_defaults(func=run)
 
@@ -232,91 +251,293 @@ def _finalize_lost(client: AssessmentClient, *, run_id: int, now_iso: str) -> di
     return client.patch(f"command-runs/{int(run_id)}", payload, accept_409=True)
 
 
-def run(args) -> None:
-    cfg = load_config(args.engagement_dir)
-    max_age = int(args.max_age_seconds)
-    if max_age < 0:
-        raise AssessError("--max-age-seconds must be >= 0")
+def _sweep_command_runs(
+    client: AssessmentClient,
+    args,
+    now: _dt.datetime,
+    now_iso: str,
+    max_age: int,
+) -> dict:
+    """Reconcile stuck ``assessment_command_runs`` rows (the original behavior).
 
+    Extracted verbatim from the pre-scope ``run`` so the default code path —
+    output shape and per-row print lines included — is byte-for-byte unchanged.
+    """
     summary = {"checked": 0, "still_running": 0, "finalized": 0, "skipped": 0}
-    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        rows = _list_running_rows(client)
-        now = _dt.datetime.now(_dt.timezone.utc)
-        now_iso = _utcnow_iso()
+    rows = _list_running_rows(client)
 
-        for row in rows:
-            row_id = row.get("id")
-            if row_id is None:
-                continue
-            age_seconds = _row_age_seconds(row, now)
-            if age_seconds is None or age_seconds < max_age:
-                continue
-            summary["checked"] += 1
+    for row in rows:
+        row_id = row.get("id")
+        if row_id is None:
+            continue
+        age_seconds = _row_age_seconds(row, now)
+        if age_seconds is None or age_seconds < max_age:
+            continue
+        summary["checked"] += 1
 
-            # Client-side status filter as a fallback for the unfiltered GET
-            # response (see ``_list_running_rows``). Rows already in a terminal
-            # state are not candidates for finalize; print a ``would-skip``
-            # line so the dry-run output never claims it would finalize a row
-            # whose outcome is already recorded.
-            existing_status = str(row.get("status") or "").strip().lower()
-            if existing_status not in _RUNNING_STATUSES:
-                summary["skipped"] += 1
-                if args.dry_run:
-                    print(
-                        f"would-skip id={row_id} reason=already-terminal "
-                        f"status={existing_status or 'unknown'}"
-                    )
-                continue
-
-            run_uuid = _resolve_run_uuid(row)
-            pid_read = _PidReadResult(None, "pid-file-unknown")
-            if run_uuid:
-                pid_read = _read_container_pid_result(args.container_name, run_uuid)
-            container_pid = pid_read.pid
-
-            alive: bool | None = False
-            if container_pid is not None:
-                alive = _pid_alive_in_container(args.container_name, container_pid)
-
-            if alive:
-                summary["still_running"] += 1
+        # Client-side status filter as a fallback for the unfiltered GET
+        # response (see ``_list_running_rows``). Rows already in a terminal
+        # state are not candidates for finalize; print a ``would-skip``
+        # line so the dry-run output never claims it would finalize a row
+        # whose outcome is already recorded.
+        existing_status = str(row.get("status") or "").strip().lower()
+        if existing_status not in _RUNNING_STATUSES:
+            summary["skipped"] += 1
+            if args.dry_run:
                 print(
-                    f"still-running id={row_id} age={int(age_seconds)} "
-                    f"pid={container_pid} run_uuid={run_uuid}"
+                    f"would-skip id={row_id} reason=already-terminal "
+                    f"status={existing_status or 'unknown'}"
                 )
-                continue
-            if alive is None or pid_read.reason.startswith("pid-probe-failed"):
-                summary["skipped"] += 1
-                print(
-                    f"skipped id={row_id} age={int(age_seconds)} "
-                    f"reason={pid_read.reason if container_pid is None else 'liveness-probe-failed'} "
-                    f"run_uuid={run_uuid or 'unknown'}"
-                )
-                continue
+            continue
 
-            # PID file missing OR pid is gone — treat the row as lost.
+        run_uuid = _resolve_run_uuid(row)
+        pid_read = _PidReadResult(None, "pid-file-unknown")
+        if run_uuid:
+            pid_read = _read_container_pid_result(args.container_name, run_uuid)
+        container_pid = pid_read.pid
+
+        alive: bool | None = False
+        if container_pid is not None:
+            alive = _pid_alive_in_container(args.container_name, container_pid)
+
+        if alive:
+            summary["still_running"] += 1
+            print(
+                f"still-running id={row_id} age={int(age_seconds)} "
+                f"pid={container_pid} run_uuid={run_uuid}"
+            )
+            continue
+        if alive is None or pid_read.reason.startswith("pid-probe-failed"):
+            summary["skipped"] += 1
+            print(
+                f"skipped id={row_id} age={int(age_seconds)} "
+                f"reason={pid_read.reason if container_pid is None else 'liveness-probe-failed'} "
+                f"run_uuid={run_uuid or 'unknown'}"
+            )
+            continue
+
+        # PID file missing OR pid is gone — treat the row as lost.
+        if args.dry_run:
+            summary["finalized"] += 1
+            reason = pid_read.reason if container_pid is None else "pid-dead"
+            print(
+                f"would-finalize id={row_id} age={int(age_seconds)} "
+                f"reason={reason} new_status=lost"
+            )
+            continue
+
+        try:
+            _finalize_lost(client, run_id=int(row_id), now_iso=now_iso)
+        except AssessError as exc:
+            summary["skipped"] += 1
+            print(
+                f"warning: finalize PATCH failed for id={row_id}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        summary["finalized"] += 1
+        print(
+            f"finalized id={row_id} previous_status=running new_status=lost "
+            f"age={int(age_seconds)}"
+        )
+    return summary
+
+
+def _list_running_jobs(client: AssessmentClient) -> list[dict]:
+    """Fetch in-flight ``assessment_jobs`` rows.
+
+    Unlike command-runs, the backend filters jobs server-side
+    (``list_jobs`` honours ``?status=``), so we ask per pre-terminal status.
+    Jobs are few per engagement; a single 1000-row page per status suffices.
+    """
+    rows: list[dict] = []
+    for state in ("running", "queued"):
+        page = client.get(f"jobs?status={state}&limit=1000")
+        if isinstance(page, list):
+            rows.extend(page)
+    return rows
+
+
+def _finalize_job(
+    client: AssessmentClient,
+    *,
+    job_id: int,
+    status_value: str,
+    now_iso: str,
+    exit_code: int | None = None,
+) -> dict:
+    payload: dict = {"status": status_value, "ended_at": now_iso}
+    if exit_code is not None:
+        payload["exit_code"] = int(exit_code)
+    return client.patch(f"jobs/{int(job_id)}", payload, accept_409=True)
+
+
+def _sweep_jobs(
+    client: AssessmentClient,
+    args,
+    now: _dt.datetime,
+    now_iso: str,
+    max_age: int,
+) -> dict:
+    """Reconcile stuck ``assessment_jobs`` rows.
+
+    The dtach worker is detached (``dtach -n``) and publishes its real exit code
+    to a host-readable marker on completion. This sweep converges any row the
+    in-band ``job_status``/``job_stop`` finalizers missed (agent killed before
+    polling): marker present -> completed/failed; PID gone with no marker ->
+    lost; PID alive -> left running; docker unreachable -> skipped.
+    """
+    summary = {"checked": 0, "still_running": 0, "finalized": 0, "skipped": 0}
+    rows = _list_running_jobs(client)
+
+    for row in rows:
+        row_id = row.get("id")
+        if row_id is None:
+            continue
+        # queued rows never spawned a process, so they carry no started_at and
+        # _row_age_seconds returns None -> skipped (correct: nothing to reap).
+        age_seconds = _row_age_seconds(row, now)
+        if age_seconds is None or age_seconds < max_age:
+            continue
+        summary["checked"] += 1
+
+        existing_status = str(row.get("status") or "").strip().lower()
+        if existing_status not in _RUNNING_STATUSES:
+            summary["skipped"] += 1
+            if args.dry_run:
+                print(
+                    f"would-skip job id={row_id} reason=already-terminal "
+                    f"status={existing_status or 'unknown'}"
+                )
+            continue
+
+        # Marker first: read the host-side exit marker with a plain filesystem
+        # read (it lives on the /engagements bind mount) — never a docker-exec
+        # poll loop (I-012). A present marker is authoritative over PID probing.
+        rc = _read_job_exit_marker(row)
+        if rc is not None:
+            final_status = "completed" if rc == 0 else "failed"
             if args.dry_run:
                 summary["finalized"] += 1
-                reason = pid_read.reason if container_pid is None else "pid-dead"
                 print(
-                    f"would-finalize id={row_id} age={int(age_seconds)} "
-                    f"reason={reason} new_status=lost"
+                    f"would-finalize job id={row_id} age={int(age_seconds)} "
+                    f"reason=exit-marker exit_code={rc} new_status={final_status}"
                 )
                 continue
-
             try:
-                _finalize_lost(client, run_id=int(row_id), now_iso=now_iso)
+                _finalize_job(
+                    client,
+                    job_id=int(row_id),
+                    status_value=final_status,
+                    now_iso=now_iso,
+                    exit_code=rc,
+                )
             except AssessError as exc:
                 summary["skipped"] += 1
                 print(
-                    f"warning: finalize PATCH failed for id={row_id}: {exc}",
+                    f"warning: finalize PATCH failed for job id={row_id}: {exc}",
                     file=sys.stderr,
                 )
                 continue
             summary["finalized"] += 1
             print(
-                f"finalized id={row_id} previous_status=running new_status=lost "
-                f"age={int(age_seconds)}"
+                f"finalized job id={row_id} previous_status={existing_status} "
+                f"new_status={final_status} exit_code={rc} age={int(age_seconds)}"
             )
+            continue
 
-    print(json.dumps({"summary": summary, "dry_run": bool(args.dry_run)}, ensure_ascii=False))
+        # No marker -> probe the in-container PID. The job pid file lives at
+        # /tmp/vigil-jobs/<uuid>.pid; the uuid is the dtach socket stem.
+        socket_path = row.get("dtach_socket_path") or ""
+        container_pid: int | None = None
+        if socket_path:
+            uuid_stem = Path(socket_path).stem
+            container_pid = _cat_container_pid_file(
+                args.container_name, _job_pid_file_in_container(uuid_stem)
+            )[0]
+
+        alive: bool | None = False
+        if container_pid is not None:
+            alive = _pid_alive_in_container(args.container_name, container_pid)
+
+        if alive:
+            summary["still_running"] += 1
+            print(
+                f"still-running job id={row_id} age={int(age_seconds)} "
+                f"pid={container_pid}"
+            )
+            continue
+        if alive is None:
+            summary["skipped"] += 1
+            print(
+                f"skipped job id={row_id} age={int(age_seconds)} "
+                f"reason=liveness-probe-failed"
+            )
+            continue
+
+        # PID gone (or pid file unknown) AND no marker -> the worker died
+        # without publishing an exit code. Reconcile to lost (unrecoverable).
+        reason = "pid-dead" if container_pid is not None else "pid-file-unknown"
+        if args.dry_run:
+            summary["finalized"] += 1
+            print(
+                f"would-finalize job id={row_id} age={int(age_seconds)} "
+                f"reason={reason} new_status=lost"
+            )
+            continue
+        try:
+            _finalize_job(client, job_id=int(row_id), status_value="lost", now_iso=now_iso)
+        except AssessError as exc:
+            summary["skipped"] += 1
+            print(
+                f"warning: finalize PATCH failed for job id={row_id}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        summary["finalized"] += 1
+        print(
+            f"finalized job id={row_id} previous_status={existing_status} "
+            f"new_status=lost reason={reason} age={int(age_seconds)}"
+        )
+    return summary
+
+
+def run(args) -> None:
+    # getattr keeps pre-scope callers (and existing tests that build args
+    # without a scope attr) on the default command-runs path.
+    scope = getattr(args, "scope", "command-runs")
+    if scope not in _VALID_SCOPES:
+        raise AssessError(f"--scope must be one of {', '.join(_VALID_SCOPES)}")
+    cfg = load_config(args.engagement_dir)
+    max_age = int(args.max_age_seconds)
+    if max_age < 0:
+        raise AssessError("--max-age-seconds must be >= 0")
+
+    cr_summary: dict | None = None
+    job_summary: dict | None = None
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        now = _dt.datetime.now(_dt.timezone.utc)
+        now_iso = _utcnow_iso()
+        if scope in ("command-runs", "all"):
+            cr_summary = _sweep_command_runs(client, args, now, now_iso, max_age)
+        if scope in ("jobs", "all"):
+            job_summary = _sweep_jobs(client, args, now, now_iso, max_age)
+
+    dry = bool(args.dry_run)
+    if scope == "command-runs":
+        # Unchanged output shape for the default path.
+        print(json.dumps({"summary": cr_summary, "dry_run": dry}, ensure_ascii=False))
+    elif scope == "jobs":
+        print(json.dumps({"summary": job_summary, "dry_run": dry, "scope": "jobs"}, ensure_ascii=False))
+    else:
+        print(
+            json.dumps(
+                {
+                    "summary": cr_summary,
+                    "jobs_summary": job_summary,
+                    "dry_run": dry,
+                    "scope": "all",
+                },
+                ensure_ascii=False,
+            )
+        )

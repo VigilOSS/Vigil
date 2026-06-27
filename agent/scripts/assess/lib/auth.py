@@ -1,14 +1,18 @@
-"""Auth.json parsing — replaces lib/auth.sh for Python callers."""
+"""Auth runtime snapshot — sourced from the centralized credential store.
+
+Replaces the old per-engagement ``auth.json`` reader. The active identity's
+material is fetched from the orchestrator backend via :mod:`creds_client`
+(fail-closed to anonymous when the backend is unreachable). The derived
+snapshot shape is unchanged so downstream consumers (kali ``-H`` injection,
+``auth-status``) are storage-agnostic.
+"""
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-def auth_file_path(engagement_dir: str) -> str:
-    return str(Path(engagement_dir) / "auth.json")
+from . import creds_client
 
 
 def _parse_iso8601(value: Any) -> datetime | None:
@@ -27,18 +31,13 @@ def _parse_iso8601(value: Any) -> datetime | None:
 
 
 def auth_runtime_snapshot(engagement_dir: str) -> dict[str, Any]:
-    """Return the full auth runtime snapshot from auth.json."""
-    path = Path(auth_file_path(engagement_dir))
-    raw: dict[str, Any] = {}
-    file_exists = path.exists()
-    file_error = ""
+    """Return the full auth runtime snapshot for the engagement's active identity.
 
-    if file_exists:
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raw = {}
-            file_error = str(exc)
+    The material comes from the centralized credential store; an engagement with
+    no credentials (or an unreachable backend) yields the anonymous snapshot.
+    """
+    raw = creds_client.active_material(engagement_dir)
+    material_present = bool(raw)
 
     mode = str(raw.get("mode") or "none").strip() or "none"
     if mode not in {"none", "manual", "auth_json", "proxy_capture"}:
@@ -63,33 +62,33 @@ def auth_runtime_snapshot(engagement_dir: str) -> dict[str, Any]:
         expired = True
 
     warning = ""
-    state = "none"
-    if file_error:
-        state = "invalid"
-        warning = "auth.json is not valid JSON; continuing without auth."
-        use_for_requests = False
-        auth_context = "anonymous"
-    elif mode == "none":
+    if mode == "none":
         state = "none"
         use_for_requests = False
         auth_context = "anonymous"
     elif expired:
         state = "expired"
-        warning = "Auth material is expired; continuing without auth until auth.json is refreshed."
+        warning = (
+            "Auth material is expired; continuing without auth until "
+            "credentials are refreshed (vigil auth import / mitmproxy capture)."
+        )
     elif cookies or headers:
         state = "available"
     else:
         state = "missing"
         if use_for_requests:
-            warning = "Auth mode is enabled but auth.json has no cookies or headers; continuing without auth."
+            warning = (
+                "Auth mode is enabled but the stored credential has no cookies "
+                "or headers; continuing without auth."
+            )
 
     active_use = bool(use_for_requests and state == "available")
     if not active_use:
         auth_context = "anonymous"
 
     return {
-        "path": str(path),
-        "exists": file_exists,
+        "path": f"backend:engagements/{Path(engagement_dir).name}/credentials",
+        "exists": material_present,
         "mode": mode,
         "state": state,
         "use_for_requests": use_for_requests,

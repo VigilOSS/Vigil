@@ -9,7 +9,7 @@ vuln_class: idor
 
 > **`vigil assess kali` audit flags:** use `--technique IDOR` for all split-brain identity probes. Use `--probe-kind payload` for divergence testing, `--probe-kind exploit` for confirmed unauthorized access demonstrations.
 >
-> **Named identities (use `--identity`, not hand-pasted tokens).** Split-brain IDOR is inherently a **two-user** test: User A's URL (passes auth) + User B's body (hits B's object). Register each account in `auth.json` as a named identity (`user_a`, `user_b`) and run every probe through `vigil assess kali exec --identity user_a -- curl ...` instead of inlining `Cookie: session=USER_A_TOKEN`. The identity name is stamped as the probe's `auth_context`, so the depth ledger registers a real **cross-identity** access-control pass — replaying the divergence test under ≥2 distinct identities is exactly what makes access-control depth count.
+> **Named identities (use `--identity`, not hand-pasted tokens).** Split-brain IDOR is inherently a **two-user** test: User A's URL (passes auth) + User B's body (hits B's object). Register each account in the credential store as a named identity (`vigil auth import <key> --identity user_a` / `--identity user_b`) and run every probe through `vigil assess kali exec --identity user_a -- curl ...` instead of inlining `Cookie: session=USER_A_TOKEN`. The identity name is stamped as the probe's `auth_context`, so the depth ledger registers a real **cross-identity** access-control pass — replaying the divergence test under ≥2 distinct identities is exactly what makes access-control depth count.
 
 ## When to Activate
 
@@ -33,7 +33,7 @@ This is distinct from standard IDOR because the application may correctly enforc
 ## Tools
 
 - `vigil assess kali exec --identity <name> -- curl ...` for all probing (mandatory audit pipeline; `--identity` selects + stamps the named identity)
-- Two test accounts with distinct object IDs, registered as named identities (`user_a`, `user_b`) in `auth.json`
+- Two test accounts with distinct object IDs, registered as named identities (`user_a`, `user_b`) in the credential store
 - Mitmproxy or browser DevTools for observing request/response shapes
 
 ---

@@ -210,6 +210,14 @@ def reset_runtime_cache() -> None:
 # --------------------------------------------------------------------------- #
 
 
+class HostRoutingRequired(RuntimeError):
+    """Raised by :func:`resolve_runtime` when ``enforce=True`` and a stage that
+    MUST run host-side (a DNS-heavy/bulk tool on Docker Desktop) cannot, because
+    the host binary is missing. Kept a stdlib ``RuntimeError`` subclass so this
+    module stays import-light; callers translate it to their own error type
+    (e.g. the recon orchestrator re-raises it as ``AssessError``)."""
+
+
 def _host_binary_available(tool: str) -> bool:
     """True when ``tool`` is on the host PATH (so a host route is runnable)."""
     return shutil.which(tool) is not None
@@ -222,6 +230,7 @@ def resolve_runtime(
     host_eligible: set[str] | frozenset[str] = DNS_HEAVY_TOOLS,
     runtime: RuntimeInfo | None = None,
     check_host_binary: bool = True,
+    enforce: bool = False,
 ) -> str:
     """Resolve ``auto|host|container`` → concrete ``'host'`` | ``'container'``.
 
@@ -244,6 +253,14 @@ def resolve_runtime(
             :func:`detect_runtime`.
         check_host_binary: when True, verify the host binary exists before routing
             host (set False in unit tests that don't have the tool installed).
+        enforce: when True, a DNS-heavy/bulk tool that WOULD route host on this
+            platform but cannot (host binary missing) raises
+            :class:`HostRoutingRequired` instead of silently degrading to the
+            I-001-prone container path. An explicit ``'container'`` request is
+            always honoured (caller forced isolation) and never enforced. On
+            native Linux / remote Docker the container path is safe, so enforce
+            is a no-op there. The recon job sets ``enforce=True`` for its
+            DNS-heavy stages.
     """
     req = (requested or "auto").strip().lower()
     if req not in ("auto", "host", "container"):
@@ -255,6 +272,14 @@ def resolve_runtime(
 
     if req == "host":
         if check_host_binary and not _host_binary_available(tool):
+            if enforce:
+                raise HostRoutingRequired(
+                    f"host routing is REQUIRED for {tool} (DNS-heavy/bulk stage) but "
+                    f"'{tool}' is not on the host PATH. On macOS Docker Desktop the "
+                    "container path wedges the userspace proxy (I-001), so the recon "
+                    "job refuses to silently degrade. Install the host binary (see "
+                    "agent setup / CR-11) or run on native Linux / remote Docker."
+                )
             _warn(
                 f"--runtime host requested for {tool} but '{tool}' is not on the "
                 "host PATH — falling back to the container path. Install the host "
@@ -269,6 +294,13 @@ def resolve_runtime(
     if tool not in host_eligible:
         return "container"
     if check_host_binary and not _host_binary_available(tool):
+        if enforce:
+            raise HostRoutingRequired(
+                f"host routing is REQUIRED for {tool} (DNS-heavy/bulk stage) on macOS "
+                f"Docker Desktop but '{tool}' is not on the host PATH — the container "
+                "path would wedge the userspace proxy (I-001). Install the host binary "
+                "(see agent setup / CR-11) or run on native Linux / remote Docker."
+            )
         # No nag on auto: host binary absent simply means we can't take the fast
         # path — stay in the container silently (the CR-3 guard still warns if the
         # resolver set is too large for the container path).

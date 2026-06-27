@@ -266,6 +266,21 @@ class AssessmentClient:
         except json.JSONDecodeError:
             return {"raw": resp_body}
 
+    def put_engagement(self, endpoint: str, payload: dict) -> dict:
+        """PUT /engagements/{key}/{endpoint} — non-assessment scoped (credentials)."""
+        path = f"{self._engagement_prefix}/{endpoint}"
+        body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+        _, resp_body = self._request("PUT", path, body=body)
+        try:
+            return json.loads(resp_body)
+        except json.JSONDecodeError:
+            return {"raw": resp_body}
+
+    def delete_engagement(self, endpoint: str) -> None:
+        """DELETE /engagements/{key}/{endpoint} — non-assessment scoped (credentials)."""
+        path = f"{self._engagement_prefix}/{endpoint}"
+        self._request("DELETE", path)
+
     def record_dispatch(self, payload: dict) -> dict:
         return self.post("dispatches", payload)
 

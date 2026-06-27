@@ -319,7 +319,6 @@ def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path, monkey
     )
 
     scope = json.loads((created.path / "scope.json").read_text(encoding="utf-8"))
-    auth = json.loads((created.path / "auth.json").read_text(encoding="utf-8"))
     manifest = json.loads((created.path / "engagement.json").read_text(encoding="utf-8"))
 
     assert scope["hostname"] == "app.example.com"
@@ -327,9 +326,8 @@ def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path, monkey
     assert scope["exploit_policy"] == "pause"
     assert scope["exploit_review_state"] == "pending"
     assert scope["approved_targets"] == []
-    assert auth["mode"] == "none"
-    assert auth["state"] == "none"
-    assert auth["use_for_requests"] is False
+    # Credentials are centralized in the backend store; no auth.json scaffold.
+    assert not (created.path / "auth.json").exists()
     assert manifest["key"] == created.key
     assert manifest["target"] == "https://app.example.com"
     assert (created.path / "sessions" / "index.json").exists()
@@ -405,7 +403,6 @@ def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkey
     )
 
     scope = json.loads((created.path / "scope.json").read_text(encoding="utf-8"))
-    auth = json.loads((created.path / "auth.json").read_text(encoding="utf-8"))
     manifest = json.loads((created.path / "engagement.json").read_text(encoding="utf-8"))
 
     assert scope["engagement_type"] == "code"
@@ -414,8 +411,8 @@ def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkey
     assert scope["hosts"] == []
     assert scope["current_phase"] == "ingest"
     assert scope["source_repos"] == []
-    assert auth["mode"] == "none"
-    assert auth["state"] == "none"
+    # Credentials are centralized in the backend store; no auth.json scaffold.
+    assert not (created.path / "auth.json").exists()
     assert manifest["name"] == "my-cool-project"
     assert manifest["target"] == "my-cool-project"
     assert (created.path / "source").is_dir()

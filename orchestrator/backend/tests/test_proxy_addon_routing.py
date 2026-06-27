@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import sys
-import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -59,12 +58,15 @@ def _seed_engagement(
     *,
     hosts: list[str],
     scope_priority: int = 0,
+    out_of_scope: list[str] | None = None,
 ) -> Path:
     engagement_dir = engagements_root / key
     engagement_dir.mkdir(parents=True, exist_ok=True)
-    scope = {"hosts": hosts}
+    scope: dict = {"hosts": hosts}
     if scope_priority:
         scope["scope_priority"] = scope_priority
+    if out_of_scope:
+        scope["out_of_scope"] = out_of_scope
     (engagement_dir / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
     return engagement_dir
 
@@ -105,6 +107,36 @@ def test_match_routes_to_disjoint_engagement_scopes(tmp_path: Path) -> None:
     assert a is not None and a.key == "eng-a"
     assert b is not None and b.key == "eng-b"
     assert collector._match_engagement("c.example") is None
+
+
+def test_match_drops_out_of_scope_carve_out_under_wildcard(tmp_path: Path) -> None:
+    """An OOS host under an in-scope wildcard must not be captured/routed.
+
+    ``*.mobile.acme.example`` is in scope but ``mobile.acme.example`` is an
+    explicit out_of_scope carve-out — the denylist wins and the flow is dropped.
+    """
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root,
+        "eng-acme-mobile",
+        hosts=["*.mobile.acme.example"],
+        out_of_scope=["mobile.acme.example"],
+    )
+
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    assert collector.registry["eng-acme-mobile"].out_of_scope_patterns == [
+        "mobile.acme.example"
+    ]
+
+    chosen = collector._match_engagement("mobile.acme.example")
+    assert chosen is not None and chosen.key == "eng-acme-mobile"
+    # The carve-out is dropped even though the in-scope wildcard would match it.
+    assert collector._match_engagement("mobile.acme.example") is None
 
 
 def test_match_prefers_literal_over_wildcard(tmp_path: Path) -> None:
@@ -290,8 +322,21 @@ class _FakeFlow:
         self.response = response
 
 
-def test_capture_auth_writes_to_matched_engagement_only(tmp_path: Path) -> None:
-    """Capture for engagement A must not touch engagement B's auth.json."""
+def _record_captures(collector):
+    """Patch _post_credentials_capture to record (engagement_key, kwargs) calls.
+
+    The cookie/header merge now lives server-side (see test_credentials_api.py);
+    these addon tests verify the captured delta and engagement targeting only.
+    """
+    calls: list[tuple[str, dict]] = []
+    collector._post_credentials_capture = (
+        lambda entry, **kw: calls.append((entry.key, kw))
+    )
+    return calls
+
+
+def test_capture_auth_posts_to_matched_engagement_only(tmp_path: Path) -> None:
+    """Capture for engagement A must post only for A, with the right delta."""
     module = _load_proxy_addon_module()
     root = tmp_path / "engagements"
     root.mkdir()
@@ -301,6 +346,7 @@ def test_capture_auth_writes_to_matched_engagement_only(tmp_path: Path) -> None:
     collector = module.CaseCollector()
     collector.engagements_root = root
     collector._reload_registry(force=True)
+    calls = _record_captures(collector)
 
     entry_a = collector._match_engagement("a.example.com")
     assert entry_a is not None
@@ -317,15 +363,18 @@ def test_capture_auth_writes_to_matched_engagement_only(tmp_path: Path) -> None:
     )
     collector._capture_auth(entry_a, _FakeFlow(request, response))
 
-    auth_a = json.loads((root / "eng-a" / "auth.json").read_text(encoding="utf-8"))
-    assert auth_a["cookies"] == {"session": "abc123", "csrf": "xyz"}
-    assert auth_a["state"] == "available"
-    # auth.json for eng-b never written.
-    assert not (root / "eng-b" / "auth.json").exists()
+    assert len(calls) == 1
+    key, kw = calls[0]
+    assert key == "eng-a"
+    assert kw["host"] == "a.example.com"
+    assert kw["scope_host"] == "a.example.com"
+    # Request cookies + Set-Cookie merged into the posted delta.
+    assert kw["cookies"] == {"session": "abc123", "csrf": "xyz"}
 
 
-def test_capture_auth_lock_serializes_same_engagement_writes(tmp_path: Path) -> None:
-    """Concurrent flows on the same engagement must not tear the file."""
+def test_capture_auth_extracts_bearer_token_from_login_response(tmp_path: Path) -> None:
+    """A login JSON response with a token yields an Authorization header + token
+    in the posted capture delta."""
     module = _load_proxy_addon_module()
     root = tmp_path / "engagements"
     root.mkdir()
@@ -334,27 +383,43 @@ def test_capture_auth_lock_serializes_same_engagement_writes(tmp_path: Path) -> 
     collector = module.CaseCollector()
     collector.engagements_root = root
     collector._reload_registry(force=True)
+    calls = _record_captures(collector)
     entry = collector._match_engagement("a.example.com")
     assert entry is not None
 
-    def capture(idx: int) -> None:
-        req = _FakeRequest(
-            url="https://a.example.com/path",
-            method="GET",
-            cookies={f"k{idx}": f"v{idx}"},
-        )
-        resp = _FakeHttpResponse(status_code=200, headers={}, body=b"")
-        collector._capture_auth(entry, _FakeFlow(req, resp))
+    request = _FakeRequest(url="https://a.example.com/login", method="POST")
+    response = _FakeHttpResponse(
+        status_code=200,
+        headers={},
+        body=b'{"access_token": "tok123"}',
+    )
+    collector._capture_auth(entry, _FakeFlow(request, response))
 
-    threads = [threading.Thread(target=capture, args=(i,)) for i in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    assert len(calls) == 1
+    _, kw = calls[0]
+    assert kw["tokens"] == {"access_token": "tok123"}
+    assert kw["headers"]["Authorization"] == "Bearer tok123"
 
-    auth = json.loads((root / "eng-a" / "auth.json").read_text(encoding="utf-8"))
-    # All eight cookies must have landed in the merged set — proves no torn writes.
-    assert {f"k{i}" for i in range(8)} <= set(auth["cookies"])
+
+def test_capture_auth_skips_post_when_nothing_captured(tmp_path: Path) -> None:
+    """No cookies, no token -> no backend call."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    calls = _record_captures(collector)
+    entry = collector._match_engagement("a.example.com")
+    assert entry is not None
+
+    request = _FakeRequest(url="https://a.example.com/page", method="GET")
+    response = _FakeHttpResponse(status_code=200, headers={}, body=b"")
+    collector._capture_auth(entry, _FakeFlow(request, response))
+
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -510,3 +575,144 @@ def test_backend_registry_skips_rows_whose_root_is_missing(
 
     assert "eng-present" in collector.registry
     assert "eng-ghost" not in collector.registry
+
+
+# ---------------------------------------------------------------------------
+# DB insert: stale-connection detection and recovery
+# ---------------------------------------------------------------------------
+
+
+def _make_entry(module, engagements_root: Path, key: str):
+    """Build a registry EngagementEntry with an initialized cases.db."""
+    engagement_dir = engagements_root / key
+    engagement_dir.mkdir(parents=True, exist_ok=True)
+    return module.EngagementEntry(
+        key=key,
+        root=engagement_dir,
+        scope_patterns=["x.example"],
+        scope_priority=0,
+    )
+
+
+def _insert_one(module, collector, entry, *, queue_key: str) -> None:
+    collector._insert_case(
+        entry,
+        queue_key=queue_key,
+        request_variant_id=1,
+        service_id=1,
+        auth_context="unauthenticated",
+        method="GET",
+        url=f"https://x.example/{queue_key}",
+        url_path=f"/{queue_key}",
+        params={
+            "query_params": "{}",
+            "body_params": "{}",
+            "path_params": "{}",
+            "cookie_params": "{}",
+        },
+        headers="{}",
+        body=None,
+        content_type="text/html",
+        content_length=0,
+        request_body_truncated=False,
+        response_status=200,
+        response_headers="{}",
+        response_size=0,
+        response_snippet=None,
+        response_truncated=False,
+        case_type="page",
+        params_key_sig="sig",
+    )
+
+
+def test_insert_case_persists_through_healthy_connection(tmp_path: Path) -> None:
+    import sqlite3
+
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir(parents=True, exist_ok=True)
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    entry = _make_entry(module, root, "eng-a")
+
+    _insert_one(module, collector, entry, queue_key="variant:1:page")
+    healthy_conn = entry.db
+
+    db_path = entry.root / "cases.db"
+    rows = (
+        sqlite3.connect(str(db_path))
+        .execute("SELECT queue_key FROM work_items")
+        .fetchall()
+    )
+    assert ("variant:1:page",) in rows
+    # No spurious reconnect: the original cached connection is reused as-is.
+    assert entry.db is healthy_conn
+    assert entry.db is not None
+
+
+def test_insert_case_recovers_from_connection_invisible_to_readers(
+    tmp_path: Path,
+) -> None:
+    """Reproduce the production failure mode without mocking the probe.
+
+    The cached connection is a *real* sqlite3.Connection whose commits succeed
+    and whose own SELECTs see the row — but it is bound to a detached database
+    file, so its writes never reach the canonical cases.db that independent
+    readers (backend, CLI) open. This is the inode-replacement / external
+    rebuild scenario from the incident.
+
+    A read-back on the writing connection would see the detached row and wrongly
+    report success; only the fresh-connection probe in _row_persisted detects
+    that the write is invisible to other readers and triggers recovery.
+    """
+    import sqlite3
+
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir(parents=True, exist_ok=True)
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    entry = _make_entry(module, root, "eng-a")
+
+    # Establish the canonical cases.db (schema initialized) that readers see.
+    _insert_one(module, collector, entry, queue_key="variant:1:page")
+    canonical = entry.root / "cases.db"
+    assert canonical.exists()
+
+    # Swap in a real connection bound to a detached DB with the same schema.
+    detached = entry.root / "detached.db"
+    detached.touch()
+    module.db_init(str(detached))
+    stale = sqlite3.connect(str(detached), check_same_thread=False)
+    entry.db.close()
+    entry.db = stale
+
+    _insert_one(module, collector, entry, queue_key="variant:2:page")
+
+    # Recovery happened: the stale connection was dropped and replaced.
+    assert entry.db is not stale
+    assert isinstance(entry.db, sqlite3.Connection)
+
+    # The row landed in the canonical file where independent readers see it.
+    canonical_rows = (
+        sqlite3.connect(str(canonical))
+        .execute(
+            "SELECT queue_key FROM work_items WHERE queue_key = ?",
+            ("variant:2:page",),
+        )
+        .fetchall()
+    )
+    assert canonical_rows == [("variant:2:page",)]
+
+    # The stale connection genuinely committed (no error) — it just wrote to the
+    # wrong file. This proves the failure was invisibility, not a write error,
+    # so the same-connection read-back probe would have been fooled.
+    orphan_rows = (
+        sqlite3.connect(str(detached))
+        .execute(
+            "SELECT queue_key FROM work_items WHERE queue_key = ?",
+            ("variant:2:page",),
+        )
+        .fetchall()
+    )
+    assert orphan_rows == [("variant:2:page",)]

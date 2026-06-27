@@ -8,6 +8,7 @@ import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import docker
@@ -19,12 +20,182 @@ from .orchestrator import orchestrator_status
 from .paths import default_runtime_container, engagements_root, resolve_orchestrator_base_url
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
 
+INSTALL_META_FILENAME = ".vigil-install-meta.json"
+
 
 @dataclass(frozen=True, slots=True)
 class Check:
     name: str
     status: str
     detail: str = ""
+
+
+def git_head_sha(repo: Path | None) -> str | None:
+    """Resolved HEAD commit sha of a git checkout, or None.
+
+    Used both to stamp the install (the source the working root was built from)
+    and to read the live source HEAD in ``vigil status``. Never raises: a missing
+    ``git`` binary, a non-repo path, or an empty/unborn repo all yield None so the
+    staleness check degrades to ``unknown`` instead of failing the command.
+    """
+    if repo is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    sha = (result.stdout or "").strip()
+    return sha if result.returncode == 0 and sha else None
+
+
+def read_install_meta(install_root: Path) -> dict[str, object] | None:
+    """Read ``.vigil-install-meta.json`` from the working root, or None.
+
+    The stamp records which source commit ``vigil install`` last synced into the
+    working root. Missing / unreadable / malformed files all return None.
+    """
+    path = install_root.expanduser() / INSTALL_META_FILENAME
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def write_install_meta(install_root: Path, source_root: Path) -> dict[str, object]:
+    """Stamp ``.vigil-install-meta.json`` at install time.
+
+    Records the source git sha (None when the source is not a git checkout) plus
+    an install timestamp so ``vigil status`` can later detect a working root that
+    has fallen behind the source it was installed from — the I-5 root cause, where
+    a lagging install silently disables the whole feature set. Best-effort: a
+    write failure never aborts the install.
+    """
+    meta: dict[str, object] = {
+        "source_sha": git_head_sha(source_root),
+        "source_root": str(source_root),
+        "installed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    try:
+        (install_root.expanduser() / INSTALL_META_FILENAME).write_text(
+            json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
+    return meta
+
+
+def _resolve_source_root_offline(install_root: Path) -> Path | None:
+    """Best-effort, NETWORK-FREE discovery of the live source checkout.
+
+    Mirrors ``paths.resolve_source_root``'s *local* candidate order but never
+    triggers the git clone/pull fallback — ``vigil status`` must stay cheap and
+    offline. Returns None when no local checkout is found (staleness then reads as
+    ``unknown``, never falsely ``stale``).
+    """
+    from .paths import CONFIG_DIR, find_repo_root, looks_like_repo_root
+
+    candidates: list[Path] = []
+    env_value = os.environ.get("VIGIL_SOURCE_DIR")
+    if env_value:
+        candidates.append(Path(env_value).expanduser())
+    config_value = get_config_value("source.dir")
+    if config_value:
+        candidates.append(Path(config_value).expanduser())
+    discovered = find_repo_root()
+    if discovered is not None:
+        candidates.append(discovered)
+    cwd_discovered = find_repo_root(Path.cwd())
+    if cwd_discovered is not None:
+        candidates.append(cwd_discovered)
+    # An already-present cached clone (uv-tool install path) — never fetched here.
+    candidates.append(CONFIG_DIR / "source")
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if looks_like_repo_root(resolved):
+            return resolved
+    return None
+
+
+def _commits_behind(source_root: Path | None, installed_sha: str, current_sha: str) -> int | None:
+    """How many commits the working root's stamped sha is behind the live source.
+
+    Best-effort: returns None when the two shas are not comparable in this
+    checkout (e.g. the installed sha is on a branch the local repo lacks).
+    """
+    if source_root is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source_root), "rev-list", "--count", f"{installed_sha}..{current_sha}"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    text = (result.stdout or "").strip()
+    return int(text) if text.isdigit() else None
+
+
+def install_staleness(
+    install_root: Path, *, source_root: Path | None = None
+) -> dict[str, object]:
+    """Compare the working root's recorded install sha to the live source sha.
+
+    Two-layer model: ``vigil install``/``update`` upgrades the WORKING ROOT (the
+    ``~/vigil/agent`` code/prompts/skills/scripts), while ``uv tool upgrade vigil``
+    upgrades only the CLI BINARY. When the binary (or the source checkout) moves
+    ahead but ``vigil install`` is not re-run, the working root silently lags and
+    the new feature set is inert (I-5). This surfaces that drift.
+
+    ``state`` is one of:
+      - ``current``  installed sha == live source sha
+      - ``stale``    installed sha != live source sha (definite drift)
+      - ``no-stamp`` install predates stamping (or the meta is unreadable) but a
+                     live source is resolvable — likely stale; recommend reinstall
+      - ``unknown``  no live source sha is resolvable to compare against
+    """
+    meta = read_install_meta(install_root)
+    installed_sha: str | None = None
+    if isinstance(meta, dict):
+        raw = meta.get("source_sha")
+        installed_sha = raw if isinstance(raw, str) and raw else None
+    if source_root is None:
+        source_root = _resolve_source_root_offline(install_root)
+    current_sha = git_head_sha(source_root)
+
+    result: dict[str, object] = {
+        "installed_sha": installed_sha,
+        "current_source_sha": current_sha,
+        "source_root": str(source_root) if source_root is not None else None,
+        "meta_present": meta is not None,
+    }
+    if current_sha is None:
+        result["state"] = "unknown"
+        return result
+    if installed_sha is None:
+        result["state"] = "no-stamp"
+        return result
+    if installed_sha == current_sha:
+        result["state"] = "current"
+        return result
+    result["state"] = "stale"
+    behind = _commits_behind(source_root, installed_sha, current_sha)
+    if behind is not None:
+        result["behind_count"] = behind
+    return result
 
 
 def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
@@ -75,6 +246,9 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
             "modified_at": backup.modified_at if backup else None,
         },
         "legacy_both_missing_code_phase": legacy_both_missing_code_phase,
+        # Install-staleness guard (I-5): warn when the working root has fallen
+        # behind the source it was installed from. Resolution is offline/cheap.
+        "install_staleness": install_staleness(install_root),
     }
 
 
@@ -128,6 +302,40 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
             f"warn\t{len(legacy_keys)} legacy `engagement_type=both` engagement(s) "
             f"missing `code_phase` ({preview}); run `vigil engagement migrate-scope`"
         )
+    _print_install_staleness_warning(status.get("install_staleness"))
+
+
+def _print_install_staleness_warning(staleness: object) -> None:
+    """Non-fatal WARN when the working root lags the source it was installed from.
+
+    Two-layer model (I-5): `vigil install`/`update` refreshes the WORKING ROOT
+    (code/prompts/skills/scripts); `uv tool upgrade vigil` only refreshes the CLI
+    BINARY. A lagging working root makes the new feature set inert, so nudge the
+    operator to re-run `vigil install`.
+    """
+    if not isinstance(staleness, dict):
+        return
+    state = staleness.get("state")
+    if state == "stale":
+        installed = _short_sha(staleness.get("installed_sha"))
+        current = _short_sha(staleness.get("current_source_sha"))
+        behind = staleness.get("behind_count")
+        behind_str = f" ({behind} commit(s) behind)" if isinstance(behind, int) else ""
+        print(
+            f"warn\tworking root is behind source{behind_str}: installed {installed} "
+            f"vs source {current}; run `vigil install` to refresh the working root "
+            "(code/prompts/skills/scripts) — `uv tool upgrade vigil` updates only the CLI binary"
+        )
+    elif state == "no-stamp":
+        print(
+            "warn\tworking root has no install stamp (predates staleness tracking); "
+            "run `vigil install` to refresh it and record the source version "
+            "(`uv tool upgrade vigil` updates only the CLI binary)"
+        )
+
+
+def _short_sha(value: object) -> str:
+    return value[:12] if isinstance(value, str) and value else "?"
 
 
 def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.run_command) -> list[Check]:
@@ -171,6 +379,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
     backup = latest_backup(install_root)
     checks.append(Check("backup-latest", "OK" if backup else "MISSING", str(backup.path) if backup else ""))
     checks.append(_failed_audit_marker_check(install_root))
+    checks.append(_host_recon_tools_check())
     checks.append(Check("oob.frp_token", "OK" if os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token") else "MISSING"))
     return checks
 
@@ -179,6 +388,26 @@ def print_doctor(checks: list[Check]) -> None:
     for check in checks:
         suffix = f"\t{check.detail}" if check.detail else ""
         print(f"{check.status}\t{check.name}{suffix}")
+
+
+def _host_recon_tools_check() -> Check:
+    """Host-side recon binaries the `--runtime host` / `vigil assess recon` path
+    needs on macOS Docker Desktop (DNS-heavy + bulk-liveness; I-001). WARN-only —
+    they are unneeded on native Linux / remote Docker, and the recon job's
+    enforce-preflight is the hard gate at run time."""
+    from .runtime import host_recon_tool_status, missing_essential_host_tools
+
+    statuses = host_recon_tool_status()
+    missing_essential = missing_essential_host_tools()
+    if missing_essential:
+        return Check(
+            "host-recon-tools", "WARN",
+            "missing " + ", ".join(missing_essential)
+            + " — see README 'Recon runtime: host vs. container' for install commands "
+            "(needed for --runtime host on Docker Desktop)",
+        )
+    present = [t.binary for t, present in statuses if present]
+    return Check("host-recon-tools", "OK", "present: " + ", ".join(present))
 
 
 def _binary_check(command: str) -> Check:
