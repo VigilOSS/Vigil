@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import shlex
 
-import pytest
-
 from assess.lib import kali, kali_output
 
 

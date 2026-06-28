@@ -83,6 +83,18 @@ def stub_store(monkeypatch):
     monkeypatch.setattr(
         creds_client, "load_identities", lambda _eng, **_kw: state["data"]
     )
+
+    def resolve_identity(_eng, requested):
+        identities = state["data"]["identities"]
+        if requested is None:
+            if not identities:
+                return (None, {})
+            active = state["data"]["active_identity"]
+            return (active, identities.get(active, {}))
+        requested = requested.strip()
+        return (requested, identities.get(requested, {}))
+
+    monkeypatch.setattr(creds_client, "resolve_identity", resolve_identity)
     return state
 
 
@@ -129,8 +141,100 @@ class _Backend:
     def __init__(self, data):
         self._data = data
 
-    def get_engagement(self, _kind):
+    def get_engagement(self, _kind, query=""):
         return self._data
+
+
+def test_creds_client_resolve_uses_resolve_endpoint(tmp_path, monkeypatch):
+    eng = tmp_path / "eng"
+    eng.mkdir()
+    calls = []
+
+    class Backend:
+        def get_engagement(self, endpoint, query=""):
+            calls.append((endpoint, query))
+            if endpoint == "credentials":
+                raise AssertionError("resolve should not load every identity")
+            assert endpoint == "credentials/resolve"
+            return {"identity_name": "user_b", "material": {"cookies": {"s": "b"}}}
+
+    monkeypatch.setattr(creds_client, "_client", lambda _eng: Backend())
+    creds_client.invalidate_cache()
+
+    name, material = creds_client.resolve_identity(str(eng), None)
+
+    assert name == "user_b"
+    assert material["cookies"] == {"s": "b"}
+    assert calls == [("credentials/resolve", "")]
+
+
+def test_creds_client_resolve_cache_is_short_lived(tmp_path, monkeypatch):
+    eng = tmp_path / "eng"
+    eng.mkdir()
+    clock = {"now": 10.0}
+    calls = 0
+
+    class Backend:
+        def get_engagement(self, endpoint, query=""):
+            nonlocal calls
+            calls += 1
+            assert endpoint == "credentials/resolve"
+            return {"identity_name": "user", "material": {"cookies": {"s": str(calls)}}}
+
+    monkeypatch.setattr(creds_client, "_client", lambda _eng: Backend())
+    monkeypatch.setattr(creds_client.time, "monotonic", lambda: clock["now"])
+    creds_client.invalidate_cache()
+
+    assert creds_client.resolve_identity(str(eng), None)[1]["cookies"] == {"s": "1"}
+    clock["now"] = 10.5
+    assert creds_client.resolve_identity(str(eng), None)[1]["cookies"] == {"s": "1"}
+    clock["now"] = 11.1
+    assert creds_client.resolve_identity(str(eng), None)[1]["cookies"] == {"s": "2"}
+    assert calls == 2
+
+
+def test_creds_client_resolve_does_not_cache_backend_failure(tmp_path, monkeypatch):
+    eng = tmp_path / "eng"
+    eng.mkdir()
+    calls = 0
+
+    class Backend:
+        def get_engagement(self, endpoint, query=""):
+            nonlocal calls
+            if endpoint == "credentials/resolve":
+                calls += 1
+                if calls == 1:
+                    raise creds_client.AssessError("temporary outage")
+                return {"identity_name": "user", "material": {"cookies": {"s": "fresh"}}}
+            assert endpoint == "credentials"
+            raise creds_client.AssessError("temporary outage")
+
+    monkeypatch.setattr(creds_client, "_client", lambda _eng: Backend())
+    creds_client.invalidate_cache()
+
+    assert creds_client.resolve_identity(str(eng), None) == (None, {})
+    assert creds_client.resolve_identity(str(eng), None) == ("user", {"cookies": {"s": "fresh"}})
+    assert calls == 2
+
+
+def test_creds_client_resolve_failure_does_not_load_full_credentials(tmp_path, monkeypatch):
+    eng = tmp_path / "eng"
+    eng.mkdir()
+    calls = []
+
+    class Backend:
+        def get_engagement(self, endpoint, query=""):
+            calls.append((endpoint, query))
+            if endpoint == "credentials/resolve":
+                raise creds_client.AssessError("temporary outage")
+            raise AssertionError("resolve fallback must not load full credentials")
+
+    monkeypatch.setattr(creds_client, "_client", lambda _eng: Backend())
+    creds_client.invalidate_cache()
+    creds_client._warned.clear()
+
+    assert creds_client.resolve_identity(str(eng), None) == (None, {})
+    assert calls == [("credentials/resolve", "")]
 
 
 def test_creds_client_warns_on_unimported_legacy_auth_json(tmp_path, monkeypatch, capsys):

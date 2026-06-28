@@ -16,10 +16,22 @@ from ..services import activity as activity_service
 from ..services import assessment_memory
 from ..services import artifact_index
 from ..services import state_manager
+from ..services.state_manager.coverage import (
+    DEFAULT_PROBE_RUN_LIMIT,
+    DEFAULT_COVERAGE_ITEM_LIMIT,
+    DEFAULT_REQUEST_OBSERVATION_LIMIT,
+    DEFAULT_REQUEST_VARIANT_LIMIT,
+    DEFAULT_SURFACE_LIMIT,
+    MAX_ASSESSMENT_LIST_LIMIT,
+    MAX_PROBE_RUN_LIST_LIMIT,
+    MAX_REQUEST_LIST_LIMIT,
+)
 from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
 
 router = APIRouter(prefix="/engagements/{engagement_key}/assessment", tags=["assessment"])
+
+COMMAND_FINALIZE_PREVIEW_MAX_CHARS = 65_536
 
 _ALLOWED_PHASES: frozenset[str] = frozenset(
     {
@@ -207,8 +219,8 @@ class CommandRunFinalize(BaseModel):
     return_code: int | None = None
     ended_at: datetime
     duration_ms: int | None = Field(default=None, ge=0)
-    stdout_preview: str | None = None
-    stderr_preview: str | None = None
+    stdout_preview: str | None = Field(default=None, max_length=COMMAND_FINALIZE_PREVIEW_MAX_CHARS)
+    stderr_preview: str | None = Field(default=None, max_length=COMMAND_FINALIZE_PREVIEW_MAX_CHARS)
     timed_out: bool = False
     partial_results: bool = False
     peak_rss_bytes: int | None = Field(default=None, ge=0)
@@ -572,7 +584,42 @@ class FindingVerifyRequest(BaseModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
+_SUMMARY_AFFECTING_RECORD_TYPES = frozenset(
+    {
+        "access_record",
+        "artifact",
+        "artifact_refresh",
+        "artifact_scratch",
+        "artifact_scratch_bulk",
+        "attack_chain",
+        "blocked_technique",
+        "coverage_item",
+        "credential",
+        "credential_test",
+        "dispatch",
+        "dispatch_decision",
+        "dispatch_handoff",
+        "finding",
+        "finding_link",
+        "finding_merge",
+        "finding_patch",
+        "finding_root_cause",
+        "finding_verify",
+        "host_liveness",
+        "probe_run",
+        "request_observation",
+        "surface",
+    }
+)
+
+
 async def _broadcast(engagement_key: str, record_type: str, payload: dict[str, Any]) -> None:
+    if record_type in _SUMMARY_AFFECTING_RECORD_TYPES:
+        raw_engagement_id = payload.get("engagement_id")
+        if isinstance(raw_engagement_id, int):
+            state_manager.clear_assessment_summary_cache(raw_engagement_id)
+        else:
+            state_manager.clear_assessment_summary_cache()
     await broadcaster.publish(
         engagement_key,
         {
@@ -771,33 +818,51 @@ def post_host_liveness(
     request: HostLivenessUpsertRequest,
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.upsert_host_liveness(
+    result = state_manager.upsert_host_liveness(
         engagement.id, [row.model_dump() for row in request.rows]
     )
+    state_manager.clear_assessment_summary_cache(engagement.id)
+    return result
 
 
 @router.get("/request-variants")
-def get_request_variants(engagement_key: str) -> list[dict[str, Any]]:
+def get_request_variants(
+    engagement_key: str,
+    limit: int = Query(default=DEFAULT_REQUEST_VARIANT_LIMIT, ge=1, le=MAX_REQUEST_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_request_variants(engagement.id)
+    return state_manager.list_request_variants(engagement.id, limit=limit, offset=offset)
 
 
 @router.get("/request-observations")
-def get_request_observations(engagement_key: str) -> list[dict[str, Any]]:
+def get_request_observations(
+    engagement_key: str,
+    limit: int = Query(default=DEFAULT_REQUEST_OBSERVATION_LIMIT, ge=1, le=MAX_REQUEST_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_request_observations(engagement.id)
+    return state_manager.list_request_observations(engagement.id, limit=limit, offset=offset)
 
 
 @router.get("/coverage-items")
-def get_coverage_items(engagement_key: str) -> list[dict[str, Any]]:
+def get_coverage_items(
+    engagement_key: str,
+    limit: int = Query(default=DEFAULT_COVERAGE_ITEM_LIMIT, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_coverage_items(engagement.id)
+    return state_manager.list_coverage_items(engagement.id, limit=limit, offset=offset)
 
 
 @router.get("/probe-runs")
-def get_probe_runs(engagement_key: str) -> list[dict[str, Any]]:
+def get_probe_runs(
+    engagement_key: str,
+    limit: int = Query(default=DEFAULT_PROBE_RUN_LIMIT, ge=1, le=MAX_PROBE_RUN_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_probe_runs(engagement.id)
+    return state_manager.list_probe_runs(engagement.id, limit=limit, offset=offset)
 
 
 @router.get("/command-runs")
@@ -1074,9 +1139,13 @@ async def mark_artifacts_scratch_under(
 
 
 @router.get("/surfaces")
-def get_surfaces(engagement_key: str) -> list[dict[str, Any]]:
+def get_surfaces(
+    engagement_key: str,
+    limit: int = Query(default=DEFAULT_SURFACE_LIMIT, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_surfaces(engagement.id)
+    return state_manager.list_surfaces(engagement.id, limit=limit, offset=offset)
 
 
 @router.get("/oob-probes")

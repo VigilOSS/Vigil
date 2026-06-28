@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,8 +40,26 @@ class EngagementView:
     out_of_scope: list[str] | None = None
 
 
+AssignmentSignature = tuple[tuple[str, int | None], ...]
+EngagementSignatureRow = tuple[
+    str,
+    int | None,
+    int | None,
+    int | None,
+    AssignmentSignature,
+    int | None,
+]
+EngagementsSignature = tuple[str, tuple[EngagementSignatureRow, ...]]
+ListCacheKey = tuple[str, str | None, str | None, EngagementsSignature | None]
+
+
 _sync_lock = Lock()
-_last_sync_signature: tuple[tuple[str, int | None, int | None, int | None, int | None], ...] | None = None
+_list_cache_lock = Lock()
+_last_sync_signature: EngagementsSignature | None = None
+_last_sync_checked_at = 0.0
+_SYNC_SIGNATURE_TTL_SECONDS = 1.0
+_LIST_CACHE_TTL_SECONDS = 1.0
+_list_cache: dict[ListCacheKey, tuple[float, tuple[EngagementView, ...]]] = {}
 _logger = logging.getLogger(__name__)
 _DELETED_ENGAGEMENTS_DIR = ".deleted-engagements"
 _LEGACY_FINDING_PREFIX = "FINDING" + "-"
@@ -66,6 +85,7 @@ def mark_engagement_deleted(engagement: Engagement) -> None:
             "deleted_at": datetime.now(timezone.utc).isoformat(),
         },
     )
+    clear_list_engagements_cache()
 
 
 def _json_file(path: Path) -> dict[str, Any]:
@@ -208,16 +228,11 @@ def _safe_mtime_ns(path: Path) -> int | None:
         return None
 
 
-def _engagements_signature() -> tuple[
-    tuple[str, int | None, int | None, int | None, tuple[tuple[str, int | None], ...], int | None],
-    ...
-]:
+def _engagements_signature() -> EngagementsSignature:
     root = engagements_root()
     root.mkdir(parents=True, exist_ok=True)
 
-    signature: list[
-        tuple[str, int | None, int | None, int | None, tuple[tuple[str, int | None], ...], int | None]
-    ] = []
+    signature: list[EngagementSignatureRow] = []
     for engagement_dir in sorted(path for path in root.iterdir() if path.is_dir()):
         if engagement_dir.name == _DELETED_ENGAGEMENTS_DIR:
             continue
@@ -244,7 +259,7 @@ def _engagements_signature() -> tuple[
                 marker_mtime_ns,
             )
         )
-    return tuple(signature)
+    return (str(root), tuple(signature))
 
 
 def sync_engagements() -> None:
@@ -327,18 +342,37 @@ def sync_engagements() -> None:
 
 
 def maybe_sync_engagements(force: bool = False) -> None:
-    global _last_sync_signature
+    global _last_sync_checked_at, _last_sync_signature
 
-    signature = _engagements_signature()
-    if not force and signature == _last_sync_signature:
+    now = time.monotonic()
+    current_root = str(engagements_root())
+    last_root = _last_sync_signature[0] if _last_sync_signature is not None else None
+    if (
+        not force
+        and _last_sync_signature is not None
+        and current_root == last_root
+        and now - _last_sync_checked_at < _SYNC_SIGNATURE_TTL_SECONDS
+    ):
         return
 
     with _sync_lock:
+        now = time.monotonic()
+        current_root = str(engagements_root())
+        last_root = _last_sync_signature[0] if _last_sync_signature is not None else None
+        if (
+            not force
+            and _last_sync_signature is not None
+            and current_root == last_root
+            and now - _last_sync_checked_at < _SYNC_SIGNATURE_TTL_SECONDS
+        ):
+            return
         signature = _engagements_signature()
+        _last_sync_checked_at = now
         if not force and signature == _last_sync_signature:
             return
         sync_engagements()
         _last_sync_signature = signature
+        clear_list_engagements_cache()
 
 
 def _scope_details(
@@ -434,7 +468,7 @@ def _collect_out_of_scope(scope: dict[str, Any]) -> list[str]:
     return result
 
 
-def _view_for(engagement: Engagement) -> EngagementView:
+def _view_for(engagement: Engagement, *, session_count: int | None = None) -> EngagementView:
     (
         current_phase,
         exploit_policy,
@@ -461,7 +495,11 @@ def _view_for(engagement: Engagement) -> EngagementView:
         scope_priority=scope_priority,
         created_at=engagement.created_at,
         updated_at=engagement.updated_at,
-        session_count=len(db.list_engagement_sessions_for_engagement(engagement.id)),
+        session_count=(
+            session_count
+            if session_count is not None
+            else len(db.list_engagement_sessions_for_engagement(engagement.id))
+        ),
         engagement_type=engagement.engagement_type,
         customer=customer,
         platforms=platforms,
@@ -470,14 +508,84 @@ def _view_for(engagement: Engagement) -> EngagementView:
     )
 
 
-def list_engagements() -> list[EngagementView]:
-    maybe_sync_engagements()
-    return [_view_for(engagement) for engagement in db.list_engagements()]
+def _list_cache_key(
+    status_filter: str | None,
+    engagement_type: str | None,
+) -> ListCacheKey:
+    return (str(settings.install_dir), status_filter, engagement_type, _last_sync_signature)
+
+
+def _should_skip_registry_row(engagement: Engagement, *, status_filter: str | None) -> bool:
+    if _deleted_engagement_marker_path(engagement.key).exists():
+        return True
+    if status_filter != "in_progress":
+        return False
+    return not (Path(engagement.engagement_root) / "scope.json").exists()
+
+
+def _build_list_views(
+    *,
+    status_filter: str | None,
+    engagement_type: str | None,
+) -> tuple[EngagementView, ...]:
+    return tuple(
+        _view_for(engagement, session_count=session_count)
+        for engagement, session_count in db.list_engagements_with_session_counts(
+            status_filter=status_filter,
+            engagement_type=engagement_type,
+        )
+        if not _should_skip_registry_row(engagement, status_filter=status_filter)
+    )
+
+
+def list_engagements(
+    *,
+    status_filter: str | None = None,
+    engagement_type: str | None = None,
+) -> list[EngagementView]:
+    cache_key = _list_cache_key(status_filter, engagement_type)
+    now = time.monotonic()
+    cache_before_sync = status_filter == "in_progress"
+    if cache_before_sync:
+        with _list_cache_lock:
+            cached = _list_cache.get(cache_key)
+            if cached is not None and cached[0] > now:
+                return list(cached[1])
+
+    maybe_sync_engagements(force=not cache_before_sync)
+    cache_key = _list_cache_key(status_filter, engagement_type)
+    now = time.monotonic()
+    with _list_cache_lock:
+        cached = _list_cache.get(cache_key)
+        if cached is not None and cached[0] > now:
+            return list(cached[1])
+
+    views = _build_list_views(status_filter=status_filter, engagement_type=engagement_type)
+    if not views:
+        maybe_sync_engagements(force=True)
+        cache_key = _list_cache_key(status_filter, engagement_type)
+        views = _build_list_views(status_filter=status_filter, engagement_type=engagement_type)
+
+    with _list_cache_lock:
+        cached = _list_cache.get(cache_key)
+        if cached is not None and cached[0] > now:
+            return list(cached[1])
+        _list_cache.clear()
+        _list_cache[cache_key] = (now + _LIST_CACHE_TTL_SECONDS, views)
+        return list(views)
+
+
+def clear_list_engagements_cache() -> None:
+    with _list_cache_lock:
+        _list_cache.clear()
 
 
 def get_engagement_or_404(engagement_key: str) -> Engagement:
     maybe_sync_engagements()
     engagement = db.get_engagement_by_key(engagement_key)
+    if engagement is None:
+        maybe_sync_engagements(force=True)
+        engagement = db.get_engagement_by_key(engagement_key)
     if engagement is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Engagement not found")
     return engagement
@@ -489,5 +597,6 @@ def get_engagement_view_or_404(engagement_key: str) -> EngagementView:
 
 
 def list_sessions_for_engagement(engagement_key: str) -> list[EngagementSession]:
+    maybe_sync_engagements(force=True)
     engagement = get_engagement_or_404(engagement_key)
     return db.list_engagement_sessions_for_engagement(engagement.id)

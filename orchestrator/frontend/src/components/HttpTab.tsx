@@ -119,8 +119,10 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
       if (showSpinner) setLoading(true);
       try {
         const [vs, obs] = await Promise.all([
-          listRequestVariants(engagementKey),
-          listRequestObservations(engagementKey).catch(() => [] as RequestObservation[]),
+          listRequestVariants(engagementKey, { limit: INITIAL_FETCH_LIMIT }),
+          listRequestObservations(engagementKey, { limit: INITIAL_FETCH_LIMIT }).catch(
+            () => [] as RequestObservation[],
+          ),
         ]);
         setVariants(vs);
         setObservations(obs);

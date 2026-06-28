@@ -19,24 +19,35 @@ Design (per the centralization decision):
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode, quote
 
 from .client import AssessError, AssessmentClient
 from .config import resolve_base_url
 
 DEFAULT_IDENTITY = "default"
+_RESOLVE_CACHE_TTL_SECONDS = 1.0
 
 # Per-process cache of load_identities() results, keyed by engagement key.
 _cache: dict[str, dict[str, Any]] = {}
+_resolve_cache: dict[
+    tuple[str, str | None],
+    tuple[float, tuple[str | None, dict[str, Any]]],
+] = {}
 _warned: set[str] = set()
 
 
 def invalidate_cache(engagement_dir: str | Path | None = None) -> None:
     if engagement_dir is None:
         _cache.clear()
+        _resolve_cache.clear()
     else:
-        _cache.pop(_key_for(engagement_dir), None)
+        key = _key_for(engagement_dir)
+        _cache.pop(key, None)
+        for cache_key in [item for item in _resolve_cache if item[0] == key]:
+            _resolve_cache.pop(cache_key, None)
 
 
 def _key_for(engagement_dir: str | Path) -> str:
@@ -61,6 +72,22 @@ def _empty_identities() -> dict[str, Any]:
     return {"identities": {}, "active_identity": DEFAULT_IDENTITY}
 
 
+def _resolve_from_loaded(
+    loaded: dict[str, Any], requested: str | None
+) -> tuple[str | None, dict[str, Any]]:
+    identities = loaded.get("identities")
+    if not isinstance(identities, dict):
+        identities = {}
+    if requested is None:
+        if not identities:
+            return (None, {})
+        active = str(loaded.get("active_identity") or DEFAULT_IDENTITY)
+        material = identities.get(active)
+        return (active, material if isinstance(material, dict) else {})
+    material = identities.get(requested)
+    return (requested, material if isinstance(material, dict) else {})
+
+
 def load_identities(
     engagement_dir: str | Path, *, use_cache: bool = True
 ) -> dict[str, Any]:
@@ -79,6 +106,9 @@ def load_identities(
             key, f"backend unreachable for {key} — treating as anonymous ({exc})"
         )
         data = _empty_identities()
+        cacheable = False
+    else:
+        cacheable = True
     if not isinstance(data, dict) or not isinstance(data.get("identities"), dict):
         data = _empty_identities()
     if not data["identities"]:
@@ -99,24 +129,47 @@ def load_identities(
                 )
         except OSError:
             pass
-    _cache[key] = data
+    if cacheable:
+        _cache[key] = data
     return data
 
 
 def resolve_identity(
     engagement_dir: str | Path, requested: str | None
 ) -> tuple[str | None, dict[str, Any]]:
-    """Resolve a ``--identity`` request (legacy ``identity.resolve_identity``
-    semantics), served from the cached identity map."""
-    loaded = load_identities(engagement_dir)
-    identities: dict[str, dict[str, Any]] = loaded["identities"]
-    if requested is None:
-        if not identities:
-            return (None, {})
-        active = loaded["active_identity"]
-        return (active, identities.get(active, {}))
-    requested = requested.strip()
-    return (requested, identities.get(requested, {}))
+    """Resolve a ``--identity`` request without loading every stored identity."""
+    requested = requested.strip() if requested is not None else None
+    key = _key_for(engagement_dir)
+    cache_key = (key, requested)
+    now = time.monotonic()
+    cached = _resolve_cache.get(cache_key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    _resolve_cache.pop(cache_key, None)
+    try:
+        query = urlencode({"identity": requested}, quote_via=quote) if requested else ""
+        data = _client(engagement_dir).get_engagement("credentials/resolve", query=query)
+    except (AssessError, OSError) as exc:
+        loaded = _cache.get(key)
+        if loaded is not None:
+            return _resolve_from_loaded(loaded, requested)
+        _warn_once(
+            key, f"backend unreachable for {key} — treating as anonymous ({exc})"
+        )
+        result = (None if requested is None else requested, {})
+        return result
+
+    if not isinstance(data, dict):
+        result = (None if requested is None else requested, {})
+    else:
+        identity_name = data.get("identity_name")
+        material = data.get("material")
+        result = (
+            str(identity_name) if identity_name is not None else None,
+            material if isinstance(material, dict) else {},
+        )
+    _resolve_cache[cache_key] = (time.monotonic() + _RESOLVE_CACHE_TTL_SECONDS, result)
+    return result
 
 
 def identity_names(engagement_dir: str | Path) -> list[str]:

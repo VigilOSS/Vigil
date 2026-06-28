@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import anyio
 from fastapi.testclient import TestClient
 
 
@@ -32,7 +33,7 @@ def test_orchestrator_backend_import_and_healthz():
         sys.path.remove(str(backend_root))
 
     assert app.title == "Vigil Orchestrator"
-    assert healthz() == {"status": "ok", "app": "Vigil Orchestrator"}
+    assert anyio.run(healthz) == {"status": "ok", "app": "Vigil Orchestrator"}
 
 
 def test_backend_serves_frontend_build_when_present(isolate_settings):

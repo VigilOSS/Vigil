@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -43,6 +44,8 @@ def _resolve_busy_timeout_ms() -> int:
 
 
 _BUSY_TIMEOUT_MS = _resolve_busy_timeout_ms()
+_thread_connections = threading.local()
+_connection_generation = 0
 
 
 _startup_database_fingerprint: DatabaseFingerprint | None = None
@@ -552,6 +555,16 @@ def _verify_database_fingerprint() -> Path:
     return db_path
 
 
+def database_cache_token() -> tuple[str, int, int, int]:
+    fingerprint = _require_startup_database_fingerprint()
+    return (
+        str(fingerprint.path),
+        fingerprint.device,
+        fingerprint.inode,
+        _connection_generation,
+    )
+
+
 def _require_fts5(connection: sqlite3.Connection) -> None:
     row = connection.execute("SELECT sqlite_compileoption_used('ENABLE_FTS5')").fetchone()
     if not row or not row[0]:
@@ -631,6 +644,14 @@ def _create_core_tables(connection: sqlite3.Connection) -> None:
             )
             """
     )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_engagement_id "
+        "ON events(engagement_id, id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_engagement_created "
+        "ON events(engagement_id, created_at DESC, id DESC)"
+    )
 
 
 def _create_credentials_table(connection: sqlite3.Connection) -> None:
@@ -674,6 +695,10 @@ def _create_credentials_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_engagement_credentials_engagement "
         "ON engagement_credentials(engagement_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_engagement_credentials_active "
+        "ON engagement_credentials(engagement_id, is_active DESC, identity_name)"
     )
 
 
@@ -826,6 +851,14 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
             """
     )
     connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_request_variants_seen "
+        "ON assessment_request_variants(engagement_id, last_seen_at DESC, id DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_request_observations_created "
+        "ON assessment_request_observations(engagement_id, created_at DESC, id DESC)"
+    )
+    connection.execute(
         """
             CREATE TABLE IF NOT EXISTS assessment_coverage_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -920,6 +953,18 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
                 attack_family
             )
             """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_coverage_items_updated "
+        "ON assessment_coverage_items(engagement_id, updated_at DESC, id DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_coverage_items_status_updated "
+        "ON assessment_coverage_items(engagement_id, status, updated_at DESC, id DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_probe_runs_created "
+        "ON assessment_probe_runs(engagement_id, created_at DESC, id DESC)"
     )
     connection.execute(
         """
@@ -1023,6 +1068,22 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(merged_into_finding_id) REFERENCES assessment_findings(id) ON DELETE SET NULL
             )
             """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_surfaces_status_updated "
+        "ON assessment_surfaces(engagement_id, status, updated_at DESC, id DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_surfaces_updated "
+        "ON assessment_surfaces(engagement_id, updated_at DESC, id DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_findings_status_updated "
+        "ON assessment_findings(engagement_id, status, updated_at DESC, id DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_findings_verification "
+        "ON assessment_findings(engagement_id, verification_state, verification_disposition)"
     )
     connection.execute(
         """
@@ -2790,7 +2851,7 @@ def _run_data_migrations(connection: sqlite3.Connection) -> None:
 
 
 def init_db() -> None:
-    global _startup_database_fingerprint
+    global _connection_generation, _startup_database_fingerprint
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db_path = database_path()
@@ -2822,6 +2883,7 @@ def init_db() -> None:
         connection.commit()
 
     _startup_database_fingerprint = _database_fingerprint(db_path)
+    _connection_generation += 1
 
 
 _READINESS_SUBSYSTEM_TABLES: tuple[tuple[str, frozenset[str]], ...] = (
@@ -2851,22 +2913,64 @@ def database_readiness_flags(connection: sqlite3.Connection) -> dict[str, bool]:
 @contextmanager
 def get_connection() -> Iterator[sqlite3.Connection]:
     db_path = _verify_database_fingerprint()
-    connection = sqlite3.connect(str(db_path))
+    connection = _connection_for_thread(db_path)
+    depth = getattr(_thread_connections, "depth", 0)
+    _thread_connections.depth = depth + 1
+    try:
+        yield connection
+        if depth == 0:
+            connection.commit()
+    except BaseException:
+        if depth == 0:
+            connection.rollback()
+        raise
+    finally:
+        _thread_connections.depth = depth
+
+
+def _connection_for_thread(db_path: Path) -> sqlite3.Connection:
+    cached = getattr(_thread_connections, "connection", None)
+    cached_path = getattr(_thread_connections, "path", None)
+    cached_generation = getattr(_thread_connections, "generation", None)
+    if (
+        cached is not None
+        and cached_path == db_path
+        and cached_generation == _connection_generation
+    ):
+        return cached
+    if cached is not None:
+        try:
+            cached.close()
+        except sqlite3.Error:
+            pass
+    connection = sqlite3.connect(str(db_path), cached_statements=512)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
-    # E1: connections are short-lived (opened + closed per request/operation) and
-    # the DB is WAL (single writer, concurrent readers). Set the busy-timeout
+    # E1: the DB is WAL (single writer, concurrent readers). Set the busy-timeout
     # explicitly rather than relying on Python's implicit 5 s default so the wait
     # a concurrent writer takes on the BEGIN IMMEDIATE lock is documented and
     # tunable. Under multi-worker uvicorn (E1) several processes contend for the
     # single write lock; this gives the loser room to wait instead of an immediate
     # SQLITE_BUSY. Value matches the prior implicit default.
     connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-    try:
-        yield connection
-        connection.commit()
-    finally:
-        connection.close()
+    _thread_connections.connection = connection
+    _thread_connections.path = db_path
+    _thread_connections.generation = _connection_generation
+    _thread_connections.depth = 0
+    return connection
+
+
+def close_thread_connection() -> None:
+    connection = getattr(_thread_connections, "connection", None)
+    if connection is not None:
+        try:
+            connection.close()
+        except sqlite3.Error:
+            pass
+    _thread_connections.connection = None
+    _thread_connections.path = None
+    _thread_connections.generation = None
+    _thread_connections.depth = 0
 
 
 def create_engagement(
@@ -3004,6 +3108,54 @@ def list_engagements() -> list[Engagement]:
             """,
         ).fetchall()
     return [Engagement.from_row(row) for row in rows]
+
+
+def list_engagements_with_session_counts(
+    *,
+    status_filter: str | None = None,
+    engagement_type: str | None = None,
+) -> list[tuple[Engagement, int]]:
+    where: list[str] = []
+    params: list[Any] = []
+    if status_filter:
+        where.append("e.status = ?")
+        params.append(status_filter)
+    if engagement_type:
+        where.append("e.engagement_type = ?")
+        params.append(engagement_type)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT
+                e.id,
+                e.key,
+                e.target,
+                e.status,
+                e.engagement_root,
+                e.engagement_type,
+                e.created_at,
+                e.updated_at,
+                COUNT(s.id) AS session_count
+            FROM engagements e
+            LEFT JOIN engagement_sessions s
+              ON s.engagement_id = e.id
+            {where_sql}
+            GROUP BY
+                e.id,
+                e.key,
+                e.target,
+                e.status,
+                e.engagement_root,
+                e.engagement_type,
+                e.created_at,
+                e.updated_at
+            ORDER BY e.id ASC
+            """,
+            params,
+        ).fetchall()
+    return [(Engagement.from_row(row), int(row["session_count"] or 0)) for row in rows]
 
 
 def get_engagement_by_id(engagement_id: int) -> Engagement | None:
@@ -3303,7 +3455,7 @@ def get_latest_event_for_engagement(engagement_id: int, prefix: str) -> Event | 
             SELECT id, engagement_id, event_type, phase, task_name, agent_name, summary, created_at
             FROM events
             WHERE engagement_id = ? AND event_type LIKE ?
-            ORDER BY id DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT 1
             """,
             (engagement_id, f"{prefix}%"),

@@ -8,7 +8,7 @@ import socket
 import sys
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 
 def default_runtime_container() -> str:
@@ -405,6 +405,40 @@ class AssessmentClient:
                 break
             offset += page_size
         return all_rows
+
+    def get_all_pages(self, endpoint: str, *, page_size: int = 5000) -> list[Any]:
+        """Paginate an assessment list endpoint to completion.
+
+        Use this for correctness-sensitive CLI/export paths where the backend's
+        default bounded list responses are intentionally tuned for UI safety.
+        Caller-supplied ``limit`` or ``offset`` is respected as an explicit
+        request for one page.
+        """
+        path, _sep, raw_query = endpoint.partition("?")
+        normalized_path = path.strip("/")
+        query_items = parse_qsl(raw_query, keep_blank_values=True)
+        if any(key in {"limit", "offset"} for key, _value in query_items):
+            rows = self.get(endpoint)
+            if not isinstance(rows, list):
+                raise AssessError(f"Expected list response from {endpoint!r}")
+            return rows
+
+        rows: list[Any] = []
+        offset = 0
+        while True:
+            paged_query_items = [
+                item for item in query_items if item[0] not in {"limit", "offset"}
+            ]
+            paged_query_items.extend(
+                [("limit", str(page_size)), ("offset", str(offset))]
+            )
+            page = self.get(f"{normalized_path}?{urlencode(paged_query_items)}")
+            if not isinstance(page, list):
+                raise AssessError(f"Expected list response from {endpoint!r}")
+            rows.extend(page)
+            if len(page) < page_size:
+                return rows
+            offset += page_size
 
     def post_event(self, payload: dict) -> dict | None:
         """POST /events. Fire-and-forget: warn on failure, never raise."""

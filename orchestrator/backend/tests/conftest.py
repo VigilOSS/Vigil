@@ -69,6 +69,7 @@ def isolate_settings(test_root):
             "engagements_dir": engagements_dir,
         }
     finally:
+        db_module.close_thread_connection()
         db_module._startup_database_fingerprint = original_db_fingerprint
         engagement_service._last_sync_signature = original_sync_signature
         object.__setattr__(settings, "data_dir", original_data_dir)
