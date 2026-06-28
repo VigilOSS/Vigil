@@ -175,8 +175,8 @@ def add_required_kali_flags(parser) -> None:
             "Named identity from the credential store to run AND stamp as (e.g. user_a, "
             "user_b, admin). Selects that identity's auth material and records "
             "it as the probe's auth_context so cross-identity access-control "
-            "(IDOR/BOLA/BFLA) depth is measurable. Omit for the active identity "
-            "/ legacy single-identity behavior."
+            "(IDOR/BOLA/BFLA) depth is measurable. Omit for anonymous/no "
+            "credential injection."
         ),
     )
     # Resolve VIGIL_RUNTIME_CONTAINER once at parse time (not bound to a frozen

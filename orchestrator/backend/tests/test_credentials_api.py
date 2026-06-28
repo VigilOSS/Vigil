@@ -82,6 +82,35 @@ def test_multi_identity_and_activation(client, isolate_settings):
     assert ghost["material"] == {}
 
 
+def test_resolve_identity_uses_single_row_lookup(client, isolate_settings, monkeypatch):
+    _seed(client, isolate_settings)
+    client.put(
+        f"/engagements/{KEY}/credentials/user_a",
+        json={"cookies": {"sid": "a"}, "make_active": True},
+    )
+    client.put(
+        f"/engagements/{KEY}/credentials/user_b",
+        json={"cookies": {"sid": "b"}},
+    )
+
+    from app.services import credentials as creds_service
+
+    def fail_list_credentials(_engagement_id):
+        raise AssertionError("resolve should not list every credential row")
+
+    monkeypatch.setattr(creds_service.db, "list_credentials", fail_list_credentials)
+
+    resolved = client.get(f"/engagements/{KEY}/credentials/resolve")
+    assert resolved.status_code == 200
+    assert resolved.json()["identity_name"] == "user_a"
+
+    explicit = client.get(
+        f"/engagements/{KEY}/credentials/resolve", params={"identity": "user_b"}
+    )
+    assert explicit.status_code == 200
+    assert explicit.json()["material"]["cookies"] == {"sid": "b"}
+
+
 def test_capture_merges_cookies_across_calls(client, isolate_settings):
     _seed(client, isolate_settings)
     # First capture on the scope host.

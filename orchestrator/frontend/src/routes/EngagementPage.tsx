@@ -81,6 +81,8 @@ type EngagementPageProps = {
   initialDrawerTab?: string;
 };
 
+const ASSESSMENT_WIDE_FETCH_LIMIT = 5000;
+
 function formatStatusLabel(value: string | undefined) {
   return (value ?? "unknown").replace(/_/g, " ");
 }
@@ -270,7 +272,7 @@ export function EngagementPage({ engagementKey, onBack, initialTab, initialFindi
           promises.push(
             listAssessmentTargets(engagementKey).then(setAssessmentTargets),
             listAssessmentServices(engagementKey).then(setAssessmentServices),
-            listAssessmentCoverageItems(engagementKey).then(setAssessmentCoverageItems),
+            listAssessmentCoverageItems(engagementKey, { limit: ASSESSMENT_WIDE_FETCH_LIMIT }).then(setAssessmentCoverageItems),
           );
           break;
         case "code":
@@ -281,7 +283,7 @@ export function EngagementPage({ engagementKey, onBack, initialTab, initialFindi
           break;
         case "surfaces":
           promises.push(
-            listSurfaces(engagementKey).then(setAssessmentSurfaces).catch(() => setAssessmentSurfaces([])),
+            listSurfaces(engagementKey, { limit: ASSESSMENT_WIDE_FETCH_LIMIT }).then(setAssessmentSurfaces).catch(() => setAssessmentSurfaces([])),
           );
           break;
         case "intel":

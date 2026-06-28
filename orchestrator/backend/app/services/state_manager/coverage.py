@@ -710,22 +710,77 @@ def record_request_variant(
         )
         return variant
 
-def list_request_variants(engagement_id: int) -> list[dict[str, Any]]:
+DEFAULT_REQUEST_VARIANT_LIMIT = 250
+DEFAULT_REQUEST_OBSERVATION_LIMIT = 250
+DEFAULT_PROBE_RUN_LIMIT = 250
+DEFAULT_COVERAGE_ITEM_LIMIT = 1000
+DEFAULT_SURFACE_LIMIT = 1000
+MAX_REQUEST_LIST_LIMIT = 5000
+MAX_PROBE_RUN_LIST_LIMIT = 5000
+MAX_ASSESSMENT_LIST_LIMIT = 5000
+
+
+def _bounded_request_list_window(limit: int, offset: int) -> tuple[int, int]:
+    return (
+        max(1, min(int(limit), MAX_REQUEST_LIST_LIMIT)),
+        max(0, int(offset)),
+    )
+
+
+def _bounded_probe_run_window(limit: int, offset: int) -> tuple[int, int]:
+    return (
+        max(1, min(int(limit), MAX_PROBE_RUN_LIST_LIMIT)),
+        max(0, int(offset)),
+    )
+
+
+def _bounded_assessment_list_window(limit: int, offset: int) -> tuple[int, int]:
+    return (
+        max(1, min(int(limit), MAX_ASSESSMENT_LIST_LIMIT)),
+        max(0, int(offset)),
+    )
+
+
+def list_request_variants(
+    engagement_id: int,
+    *,
+    limit: int = DEFAULT_REQUEST_VARIANT_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_request_list_window(limit, offset)
     with _common.get_connection() as connection:
         return _fetch_all(
             connection,
-            "SELECT * FROM assessment_request_variants WHERE engagement_id = ? ORDER BY last_seen_at DESC, id DESC",
-            (engagement.id,),
+            """
+            SELECT *
+            FROM assessment_request_variants
+            WHERE engagement_id = ?
+            ORDER BY last_seen_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, limit, offset),
         )
 
-def list_request_observations(engagement_id: int) -> list[dict[str, Any]]:
+def list_request_observations(
+    engagement_id: int,
+    *,
+    limit: int = DEFAULT_REQUEST_OBSERVATION_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_request_list_window(limit, offset)
     with _common.get_connection() as connection:
         return _fetch_all(
             connection,
-            "SELECT * FROM assessment_request_observations WHERE engagement_id = ? ORDER BY created_at DESC, id DESC",
-            (engagement.id,),
+            """
+            SELECT *
+            FROM assessment_request_observations
+            WHERE engagement_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, limit, offset),
         )
 
 def ingest_request_observation(
@@ -892,8 +947,14 @@ def record_coverage_item(
             preserve_existing_status=preserve_existing_status,
         )
 
-def list_coverage_items(engagement_id: int) -> list[dict[str, Any]]:
+def list_coverage_items(
+    engagement_id: int,
+    *,
+    limit: int = DEFAULT_COVERAGE_ITEM_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_assessment_list_window(limit, offset)
     with _common.get_connection() as connection:
         rows = connection.execute(
             """
@@ -910,8 +971,9 @@ def list_coverage_items(engagement_id: int) -> list[dict[str, Any]]:
             LEFT JOIN assessment_services AS services ON services.id = coverage.service_id
             WHERE coverage.engagement_id = ?
             ORDER BY coverage.updated_at DESC, coverage.id DESC
+            LIMIT ? OFFSET ?
             """,
-            (engagement.id,),
+            (engagement.id, limit, offset),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -962,10 +1024,26 @@ def record_probe_run(
             target_port=target_port,
         )
 
-def list_probe_runs(engagement_id: int) -> list[dict[str, Any]]:
+def list_probe_runs(
+    engagement_id: int,
+    *,
+    limit: int = DEFAULT_PROBE_RUN_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_probe_run_window(limit, offset)
     with _common.get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_probe_runs WHERE engagement_id = ? ORDER BY created_at DESC, id DESC", (engagement.id,))
+        return _fetch_all(
+            connection,
+            """
+            SELECT *
+            FROM assessment_probe_runs
+            WHERE engagement_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, limit, offset),
+        )
 
 def record_surface(
     engagement_id: int,
@@ -990,10 +1068,37 @@ def record_surface(
             status_value=status_value,
         )
 
-def list_surfaces(engagement_id: int) -> list[dict[str, Any]]:
+def list_surfaces(
+    engagement_id: int,
+    *,
+    limit: int | None = DEFAULT_SURFACE_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_surfaces WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+        if limit is None:
+            return _fetch_all(
+                connection,
+                """
+                SELECT *
+                FROM assessment_surfaces
+                WHERE engagement_id = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (engagement.id,),
+            )
+        limit, offset = _bounded_assessment_list_window(limit, offset)
+        return _fetch_all(
+            connection,
+            """
+            SELECT *
+            FROM assessment_surfaces
+            WHERE engagement_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, limit, offset),
+        )
 
 def update_surface(
     engagement_id: int,
@@ -1258,7 +1363,7 @@ def coverage_readiness(engagement_id: int) -> dict[str, Any]:
     softening (L1-2/L1-9/L1-10) only changes WHICH surfaces count toward
     ``blocker_count`` and adds advisory buckets — it never changes the shape.
     """
-    surfaces = list_surfaces(engagement_id)
+    surfaces = list_surfaces(engagement_id, limit=None)
 
     if not surfaces:
         return {

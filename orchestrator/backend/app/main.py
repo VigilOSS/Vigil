@@ -39,11 +39,12 @@ _FRONTEND_MISSING_HELP = (
 async def lifespan(app: FastAPI):
     # E1: async write handlers off-load their synchronous SQLite work to the
     # anyio worker threadpool (the same pool FastAPI uses for plain-`def`
-    # reads), so concurrent agents no longer stall the event loop on a write.
-    # The default cap is 40 tokens; raise it so a burst of concurrent writes
-    # doesn't queue behind it. Env-tunable to match the E1 knob style.
+    # reads). SQLite has a single writer and short CPU-heavy row materialization
+    # bursts; allowing dozens of workers to pile into it makes the process hit
+    # multi-core saturation and starves health checks. Keep the default
+    # conservative and env-tunable for larger machines.
     to_thread.current_default_thread_limiter().total_tokens = int(
-        os.environ.get("VIGIL_BACKEND_THREADPOOL", "64")
+        os.environ.get("VIGIL_BACKEND_THREADPOOL", "16")
     )
     init_db()
     maybe_sync_engagements(force=True)
@@ -71,7 +72,7 @@ app.include_router(activity_router)
 
 
 @app.get("/healthz")
-def healthz() -> dict[str, str]:
+async def healthz() -> dict[str, str]:
     return {"status": "ok", "app": settings.app_name}
 
 

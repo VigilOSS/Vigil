@@ -346,6 +346,36 @@ def test_large_stdout_spills_to_artifact_file(client, isolate_settings):
     assert len(created["stdout_preview"].encode("utf-8")) <= 65_536 + 8
 
 
+def test_oversized_inline_command_output_still_reaches_retention(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    big = "A" * (1_048_576 + 1)
+
+    response = _post(
+        client,
+        _base_payload(stdout=big),
+    )
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["output_retention_status"] == "artifact"
+    assert Path(created["stdout_artifact_ref"]).read_text(encoding="utf-8") == big
+
+
+def test_finalize_preview_has_api_ceiling(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/1",
+        json={
+            "status": "completed",
+            "ended_at": "2026-04-17T12:00:02Z",
+            "stdout_preview": "A" * (65_536 + 1),
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_duplicate_run_uuid_does_not_overwrite_existing_artifact(client, isolate_settings):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     artifact_dir = engagement_dir / "custom-artifacts"

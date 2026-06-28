@@ -556,8 +556,17 @@ export function getReportReadiness(engagementKey: string) {
   return request<ReportReadiness>(`/engagements/${engagementKey}/assessment/report-readiness`);
 }
 
-export function listAssessmentSurfaces(engagementKey: string) {
-  return request<AssessmentSurface[]>(`/engagements/${engagementKey}/assessment/surfaces`);
+export function listAssessmentSurfaces(
+  engagementKey: string,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<AssessmentSurface[]>(
+    `/engagements/${engagementKey}/assessment/surfaces${qs ? `?${qs}` : ""}`,
+  );
 }
 
 export function listAssessmentFindings(engagementKey: string) {
@@ -578,8 +587,17 @@ export function listAssessmentFindingGroups(engagementKey: string) {
   return request<AssessmentFindingGroup[]>(`/engagements/${engagementKey}/assessment/finding-groups`);
 }
 
-export function listAssessmentProbes(engagementKey: string) {
-  return request<AssessmentProbeDetail[]>(`/engagements/${engagementKey}/assessment/probe-runs`);
+export function listAssessmentProbes(
+  engagementKey: string,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<AssessmentProbeDetail[]>(
+    `/engagements/${engagementKey}/assessment/probe-runs${qs ? `?${qs}` : ""}`,
+  );
 }
 
 export function listAssessmentAttackChains(engagementKey: string) {
@@ -686,8 +704,17 @@ export function listAssessmentServices(engagementKey: string) {
   return request<AssessmentService[]>(`/engagements/${engagementKey}/assessment/services`);
 }
 
-export function listAssessmentCoverageItems(engagementKey: string) {
-  return request<AssessmentCoverageItem[]>(`/engagements/${engagementKey}/assessment/coverage-items`);
+export function listAssessmentCoverageItems(
+  engagementKey: string,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<AssessmentCoverageItem[]>(
+    `/engagements/${engagementKey}/assessment/coverage-items${qs ? `?${qs}` : ""}`,
+  );
 }
 
 // ── Assessment command runs ─────────────────────────────
@@ -843,15 +870,29 @@ export type RequestObservation = {
   created_at: string;
 };
 
-export function listRequestVariants(engagementKey: string) {
+export function listRequestVariants(
+  engagementKey: string,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
   return request<RequestVariant[]>(
-    `/engagements/${engagementKey}/assessment/request-variants`,
+    `/engagements/${engagementKey}/assessment/request-variants${qs ? `?${qs}` : ""}`,
   );
 }
 
-export function listRequestObservations(engagementKey: string) {
+export function listRequestObservations(
+  engagementKey: string,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
   return request<RequestObservation[]>(
-    `/engagements/${engagementKey}/assessment/request-observations`,
+    `/engagements/${engagementKey}/assessment/request-observations${qs ? `?${qs}` : ""}`,
   );
 }
 
@@ -1414,4 +1455,3 @@ function intelEntityPath(entityType: IntelEntityType): string {
       return "notes";
   }
 }
-

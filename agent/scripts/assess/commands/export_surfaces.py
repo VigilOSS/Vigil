@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
@@ -18,7 +19,7 @@ def run(args) -> None:
     cfg = load_config(args.engagement_dir)
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        surfaces = client.get("surfaces")
+        surfaces = _get_all_pages(client, "surfaces")
 
     if not isinstance(surfaces, list):
         print("export-surfaces: unexpected response from backend", file=sys.stderr)
@@ -30,3 +31,10 @@ def run(args) -> None:
             f.write(json.dumps(surface, ensure_ascii=True) + "\n")
 
     print(f"Exported {len(surfaces)} surfaces to {out_path}")
+
+
+def _get_all_pages(client: AssessmentClient, endpoint: str) -> Any:
+    pager = getattr(client, "get_all_pages", None)
+    if callable(pager):
+        return pager(endpoint)
+    return client.get(endpoint)

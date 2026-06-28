@@ -701,8 +701,8 @@ Access-control depth (IDOR/BOLA/BFLA) is only **real** when measured across **â‰
 }
 ```
 
-- A single imported credential lands under the `default` identity and is marked active; `vigil auth set-active <key> --identity <name>` switches which identity the runtime uses by default. You do not need to migrate existing engagements.
-- Specialists select an identity per request with **`vigil assess kali <tool> --identity <name>`** (e.g. `--identity user_a` / `--identity user_b`). The flag selects that identity's auth material AND **stamps the identity name as the probe's `auth_context`**, so the depth ledger can SEE a cross-identity access-control pass. A single-identity access-control probe is "started but not cross-identity" and does **not** satisfy access-control depth.
+- A single imported credential lands under the `default` identity and is marked active for credential-store management, but ordinary `vigil assess kali ...` commands run as anonymous unless a dispatch explicitly passes `--identity`. This keeps audit labels honest and avoids a backend credential lookup on every unauthenticated recon probe.
+- Specialists select an identity per request with **`vigil assess kali <tool> --identity <name>`** (e.g. `--identity user_a` / `--identity user_b`). The flag selects that identity's auth material and stamps the identity name as the probe's `auth_context` only when Vigil can inject that material into the tool invocation. For cross-identity depth, prefer direct injectable tools (`curl`, `httpx`, `nuclei`, `ffuf`, etc.) over shell wrappers or hand-pasted tokens; shell/manual-auth probes may be useful evidence, but they do not satisfy cross-identity depth unless the recorded `auth_context` reflects the identity that actually ran.
 - When you capture multiple test accounts, store each under its own identity name with `vigil auth import <key> --identity <name>`, so "which identity ran which probe" is recordable.
 - For two-user IDOR/BOLA replay, point specialists at `agent/skills/idor-testing/SKILL.md` and `agent/skills/split-brain-idor/SKILL.md`, which now drive the replay with `--identity` instead of hand-pasted tokens.
 

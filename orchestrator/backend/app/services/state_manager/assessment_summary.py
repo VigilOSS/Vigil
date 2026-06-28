@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import copy
+import time
+from threading import Condition, Lock
 from typing import Any
 
+from ... import db
 from ..events import _engagement_or_404
 
 from . import _common
@@ -10,43 +14,121 @@ from .findings import list_exploit_candidates
 from .coverage import coverage_readiness, coverage_rollup, egress_block_status, vendor_saas_hosts_pending_decision
 from .report_readiness import report_readiness
 
+SummaryCacheKey = tuple[tuple[str, int, int, int], int]
+
+_SUMMARY_CACHE_TTL_SECONDS = 1.0
+_summary_cache_lock = Lock()
+_summary_cache_condition = Condition(_summary_cache_lock)
+_summary_cache: dict[SummaryCacheKey, tuple[float, dict[str, Any]]] = {}
+_summary_cache_inflight: set[SummaryCacheKey] = set()
+_summary_cache_generation: dict[SummaryCacheKey, int] = {}
+_summary_cache_global_generation = 0
+
+
+def _summary_cache_key(engagement_id: int) -> SummaryCacheKey:
+    return (db.database_cache_token(), engagement_id)
+
+
+def _summary_generation(cache_key: SummaryCacheKey) -> tuple[int, int]:
+    return (
+        _summary_cache_global_generation,
+        _summary_cache_generation.get(cache_key, 0),
+    )
+
+
+def clear_assessment_summary_cache(engagement_id: int | None = None) -> None:
+    global _summary_cache_global_generation
+    with _summary_cache_condition:
+        if engagement_id is None:
+            _summary_cache.clear()
+            _summary_cache_global_generation += 1
+            _summary_cache_condition.notify_all()
+            return
+        affected_keys = {
+            key
+            for key in (
+                set(_summary_cache)
+                | _summary_cache_inflight
+                | set(_summary_cache_generation)
+            )
+            if key[1] == engagement_id
+        }
+        affected_keys.add(_summary_cache_key(engagement_id))
+        for key in [key for key in _summary_cache if key[1] == engagement_id]:
+            _summary_cache.pop(key, None)
+        for key in affected_keys:
+            _summary_cache_generation[key] = _summary_cache_generation.get(key, 0) + 1
+        _summary_cache_condition.notify_all()
+
 
 
 def assessment_summary(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    exploit_candidate_count = len(list_exploit_candidates(engagement.id))
-    coverage_gate = coverage_readiness(engagement.id)
-    report_gate = report_readiness(engagement.id)
+    cache_key = _summary_cache_key(engagement.id)
+    with _summary_cache_condition:
+        while True:
+            now = time.monotonic()
+            cached = _summary_cache.get(cache_key)
+            if cached is not None and cached[0] > now:
+                return copy.deepcopy(cached[1])
+            if cache_key not in _summary_cache_inflight:
+                _summary_cache_inflight.add(cache_key)
+                generation = _summary_generation(cache_key)
+                break
+            _summary_cache_condition.wait()
+
+    try:
+        payload = _build_assessment_summary(engagement.id)
+    except BaseException:
+        with _summary_cache_condition:
+            _summary_cache_inflight.discard(cache_key)
+            _summary_cache_condition.notify_all()
+        raise
+    with _summary_cache_condition:
+        if _summary_generation(cache_key) == generation:
+            _summary_cache[cache_key] = (
+                time.monotonic() + _SUMMARY_CACHE_TTL_SECONDS,
+                copy.deepcopy(payload),
+            )
+        _summary_cache_inflight.discard(cache_key)
+        _summary_cache_condition.notify_all()
+    return payload
+
+
+def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
+    exploit_candidate_count = len(list_exploit_candidates(engagement_id))
+    coverage_gate = coverage_readiness(engagement_id)
+    report_gate = report_readiness(engagement_id)
     with _common.get_connection() as connection:
-        target_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_targets WHERE engagement_id = ?", (engagement.id,))
-        service_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_services WHERE engagement_id = ?", (engagement.id,))
-        request_variant_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_request_variants WHERE engagement_id = ?", (engagement.id,))
-        request_observation_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_request_observations WHERE engagement_id = ?", (engagement.id,))
-        coverage_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_coverage_items WHERE engagement_id = ?", (engagement.id,))
-        probe_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_probe_runs WHERE engagement_id = ?", (engagement.id,))
+        target_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_targets WHERE engagement_id = ?", (engagement_id,))
+        service_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_services WHERE engagement_id = ?", (engagement_id,))
+        request_variant_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_request_variants WHERE engagement_id = ?", (engagement_id,))
+        request_observation_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_request_observations WHERE engagement_id = ?", (engagement_id,))
+        coverage_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_coverage_items WHERE engagement_id = ?", (engagement_id,))
+        probe_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_probe_runs WHERE engagement_id = ?", (engagement_id,))
         finding_count = _scalar_row(
             connection,
             "SELECT COUNT(*) FROM assessment_findings WHERE engagement_id = ? AND status NOT IN ('merged', 'false_positive')",
-            (engagement.id,),
+            (engagement_id,),
         )
         open_surface_count = _scalar_row(
             connection,
             "SELECT COUNT(*) FROM assessment_surfaces WHERE engagement_id = ? AND status IN ('discovered', 'deferred', 'partially-covered')",
-            (engagement.id,),
+            (engagement_id,),
         )
-        credential_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_credentials WHERE engagement_id = ?", (engagement.id,))
-        access_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_access_records WHERE engagement_id = ?", (engagement.id,))
-        pivot_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_pivots WHERE engagement_id = ?", (engagement.id,))
-        tunnel_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_tunnels WHERE engagement_id = ?", (engagement.id,))
-        blocked_technique_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_blocked_techniques WHERE engagement_id = ?", (engagement.id,))
-        chain_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_attack_chains WHERE engagement_id = ?", (engagement.id,))
+        credential_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_credentials WHERE engagement_id = ?", (engagement_id,))
+        access_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_access_records WHERE engagement_id = ?", (engagement_id,))
+        pivot_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_pivots WHERE engagement_id = ?", (engagement_id,))
+        tunnel_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_tunnels WHERE engagement_id = ?", (engagement_id,))
+        blocked_technique_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_blocked_techniques WHERE engagement_id = ?", (engagement_id,))
+        chain_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_attack_chains WHERE engagement_id = ?", (engagement_id,))
         coverage_rows = connection.execute(
             "SELECT status, COUNT(*) AS total FROM assessment_coverage_items WHERE engagement_id = ? GROUP BY status ORDER BY status ASC",
-            (engagement.id,),
+            (engagement_id,),
         ).fetchall()
         finding_rows = connection.execute(
             "SELECT status, COUNT(*) AS total FROM assessment_findings WHERE engagement_id = ? GROUP BY status ORDER BY status ASC",
-            (engagement.id,),
+            (engagement_id,),
         ).fetchall()
         # Severity rollup for the Overview donut. Mirror the ``finding_count``
         # WHERE clause exactly (merged/false_positive excluded) so the donut
@@ -59,7 +141,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
             GROUP BY severity
             ORDER BY severity ASC
             """,
-            (engagement.id,),
+            (engagement_id,),
         ).fetchall()
         verification_state_rows = connection.execute(
             """
@@ -69,7 +151,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
             GROUP BY verification_state
             ORDER BY verification_state ASC
             """,
-            (engagement.id,),
+            (engagement_id,),
         ).fetchall()
         verification_disposition_rows = connection.execute(
             """
@@ -79,7 +161,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
             GROUP BY verification_disposition
             ORDER BY verification_disposition ASC
             """,
-            (engagement.id,),
+            (engagement_id,),
         ).fetchall()
         top_surfaces = connection.execute(
             """
@@ -96,7 +178,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
                 updated_at DESC
             LIMIT 8
             """,
-            (engagement.id,),
+            (engagement_id,),
         ).fetchall()
         top_findings = connection.execute(
             """
@@ -116,7 +198,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
                 updated_at DESC
             LIMIT 10
             """,
-            (engagement.id,),
+            (engagement_id,),
         ).fetchall()
         recent_probes = connection.execute(
             """
@@ -126,7 +208,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
             ORDER BY created_at DESC, id DESC
             LIMIT 10
             """,
-            (engagement.id,),
+            (engagement_id,),
         ).fetchall()
         open_coverage_items = connection.execute(
             """
@@ -146,7 +228,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
             ORDER BY coverage.updated_at DESC, coverage.id DESC
             LIMIT 12
             """,
-            (engagement.id,),
+            (engagement_id,),
         ).fetchall()
         attack_chains = connection.execute(
             """
@@ -156,7 +238,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
             ORDER BY updated_at DESC, id DESC
             LIMIT 8
             """,
-            (engagement.id,),
+            (engagement_id,),
         ).fetchall()
         service_coverage_gaps = connection.execute(
             """
@@ -166,7 +248,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
             ORDER BY services.updated_at DESC, services.id DESC
             LIMIT 10
             """,
-            (engagement.id,),
+            (engagement_id,),
         ).fetchall()
     return {
         "target_count": target_count,
@@ -188,7 +270,7 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         "coverage_blocker_count": int(coverage_gate["blocker_count"]),
         "report_blocker_count": int(report_gate["blocker_count"]),
         "coverage_statuses": {row["status"]: int(row["total"]) for row in coverage_rows},
-        "coverage_by_reachability": coverage_rollup(engagement.id),
+        "coverage_by_reachability": coverage_rollup(engagement_id),
         "finding_workflow_statuses": {row["status"]: int(row["total"]) for row in finding_rows},
         "finding_verification_states": {row["verification_state"]: int(row["total"]) for row in verification_state_rows},
         "finding_verification_dispositions": {
@@ -200,6 +282,6 @@ def assessment_summary(engagement_id: int) -> dict[str, Any]:
         "open_coverage_items": [dict(row) for row in open_coverage_items],
         "attack_chains": [dict(row) for row in attack_chains],
         "service_coverage_gaps": [dict(row) for row in service_coverage_gaps],
-        "vendor_saas_hosts_pending_decision": vendor_saas_hosts_pending_decision(engagement.id),
-        "egress_status": egress_block_status(engagement.id),
+        "vendor_saas_hosts_pending_decision": vendor_saas_hosts_pending_decision(engagement_id),
+        "egress_status": egress_block_status(engagement_id),
     }
