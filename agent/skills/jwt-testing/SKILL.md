@@ -56,7 +56,7 @@ vuln_class: jwt
 - [ ] If `alg: HS256`, brute-force secret:
       `hashcat -m 16500 jwt.txt rockyou.txt`
 - [ ] Common secrets: `secret`, `password`, application name, blank string
-- [ ] jwt_tool: `python3 jwt_tool.py TOKEN -C -d wordlist.txt`
+- [ ] jwt_tool: `jwt_tool TOKEN -C -d wordlist.txt` (runtime wrapper on PATH)
 - [ ] Once secret found, forge arbitrary tokens
 
 ### 4. Key Confusion (RS256 → HS256)

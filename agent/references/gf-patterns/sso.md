@@ -16,7 +16,8 @@ confusion. Distinct from `auth` (credential entry) and `oauth-oidc` (OAuth2/OIDC
 
 ## Load this reference when
 
-- The corpus contains `/sso/`, `/saml`, `/saml2`, `/cas/`, or `/adfs/` paths
+- The corpus contains `/sso/`, `/saml`, `/saml2`, `/cas/`, `/adfs/`, or
+  `/federationmetadata` paths
 - Param keys `samlresponse`, `samlrequest`, `relaystate`, `wctx`, or `wresult` appear in
   query strings (WS-Federation passive endpoint params)
 - Operator is assessing enterprise identity federation or Okta/AD FS integration
@@ -31,11 +32,30 @@ These are the canonical SAML 2.0 POST-binding parameter names (lowercased after
 
 ## Path patterns that match
 
-`/sso/`, `/sso`, `/saml`, `/saml2`, `/cas/`, `/adfs/`, `/fed/`, `/sts/`
+`/sso/`, `/sso`, `/saml`, `/saml2`, `/cas/`, `/adfs/`, `/fed/`, `/sts/`, `/federationmetadata`
 
 `/saml` is boundary-anchored (via `_fragment_pattern`): it matches `/saml`, `/saml/acs`,
 `/saml/metadata` but NOT `/saml2` — the `2` is not a boundary character. `/saml2` is
 listed separately for SAML 2.0 explicit paths.
+
+### Federation-metadata extension (classify-context-and-surface 2026-06, Part 3 §C.12)
+
+`/federationmetadata` was added to catch the AD FS federation-metadata document
+(`/FederationMetadata/2007-06/FederationMetadata.xml`) — a SAML/WS-Fed metadata
+disclosure and SP-enumeration surface. It is a metadata-only route with no auth
+sibling, so it cleanly raises previously-unmatched federation-metadata URLs from
+priority 0 to `gf:sso` (additive, never a demotion).
+
+The other §C.12 candidates were deliberately NOT added, to keep the change additive:
+
+- `/saml/metadata` and `/adfs/ls` — already covered by the existing `/saml` and
+  `/adfs/` fragments (boundary-anchored), so adding them would be a no-op.
+- `/simplesaml` and `/shibboleth.sso` — NOT added. The canonical product
+  endpoints under them (`/Shibboleth.sso/Login`, `/Shibboleth.sso/Logout`,
+  `/simplesaml/logout.php`) carry an auth fragment that
+  `_suppress_auth_on_sso_route` would then suppress, DEMOTING those rows from
+  `gf:auth` (40) to `gf:sso` (35). That is a non-additive score decrease, so
+  they are left out.
 
 ## Tie-break ordering (override vs trust_surface and auth)
 
@@ -60,6 +80,7 @@ Path-fragment matches:
 
 - `https://target.example/sso/login` — SSO-routed login page
 - `https://target.example/saml/metadata` — SAML metadata document (enumerate IdP/SP config)
+- `https://target.example/FederationMetadata/2007-06/FederationMetadata.xml` — AD FS federation-metadata XML (signing certs, entity IDs, ACS/SLO endpoints, claim mappings)
 - `https://target.example/saml2/idp/SSO` — SAML 2.0 IdP SSO service
 - `https://target.example/cas/login?service=https://app.example` — CAS authentication
 - `https://target.example/adfs/ls/` — AD FS passive login service
@@ -95,6 +116,11 @@ Param-key matches:
   URL-decoded and followed post-authentication without host allow-list validation
 - **WS-Federation `wresult` injection:** the `wresult` token in WS-Fed passive responses is
   an XML security token; equivalent XSW and signature bypass apply
+- **Federation-metadata disclosure / SP enumeration:** an unauthenticated AD FS
+  `/FederationMetadata/.../FederationMetadata.xml` (or SAML SP metadata) document
+  leaks signing certificates, entity IDs, ACS/SLO endpoints, and claim mappings —
+  the reconnaissance basis for assertion-injection and XSW attacks against the
+  federation
 
 ## Corpus grounding
 

@@ -23,7 +23,31 @@ phishing chains.
 ## Parameter keys that match
 
 `redirect, return, returnto, return_to, next, redir, forward, continue, url, rurl, u, target,
-dest, destination, redirect_uri, go`
+dest, destination, redirect_uri, go, goto, rt, to, domain, site`
+
+### Upstream gf param additions (2026-06)
+
+The single-token keys `goto`, `rt`, `to`, `domain`, `site` were folded in from the upstream
+gf pattern sets, which carry classic open-redirect params our set lacked.
+
+The compound `*_url`/`*_uri`/`*_to` open-redirect family (`return_url`, `redirect_url`,
+`callback_url`, `next_url`, …) is handled on TWO layers (Fix 4, landed — see `DRIFT.md` → "Fix 4"):
+
+1. **Curated whole keys (precision).** The common compound names are listed as whole keys above,
+   in both `snake_case` and `concatenated` (camelCase-lowercased) forms, so a bare `?return_url=`
+   clusters `gf:redirect` STRONGLY — *not* `gf:ssrf`. (The inner `url` token alone is an ssrf@40
+   key and would mis-route the row to SSRF; matching the whole name avoids that.) This mirrors how
+   the `idor` bucket enumerates its `*_id` family rather than tokenizing.
+2. **Tiered inner-token rescue (recall).** For novel compound names not curated here,
+   `classify_row` splits the key on `_`/`-`/camelCase and matches the inner tokens at a capped
+   weight (`WEAK_TOKEN_CAP`), so an unrecognized `?someRedirectThing=` is still triaged instead of
+   scoring 0. A weak match never overrides a strong cluster; on a strongly-matched row it is
+   recorded as a `secondary_bucket` for cross-routing.
+
+FP guard: `to`, `domain`, and `site` are mildly generic and can appear on benign navigation
+params. This is acceptable because bucket weight only orders triage — it never gates inclusion
+or skips a row — so a marginal match changes ordering, never suppression. No path fragments were
+added, so generic content paths are unaffected.
 
 ## Path patterns that match
 

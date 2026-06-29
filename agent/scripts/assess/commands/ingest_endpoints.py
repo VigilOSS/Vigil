@@ -17,8 +17,9 @@ from assess.lib.classify import classify_type
 from assess.lib.classify_buckets import classify_from_fields
 from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
-from assess.lib.db import db_init, db_insert_work_item
+from assess.lib.db import db_init, db_insert_out_of_scope_work_item, db_insert_work_item
 from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
+from assess.lib.scope import host_admitted, ingest_scope_filter
 
 
 def _bridge_gf_coverage_items(
@@ -61,10 +62,24 @@ def _bridge_gf_coverage_items(
         )
         return
 
-    for bucket in assignment.get("matched_buckets", []):
+    emitted_families: set[str] = set()
+
+    def _emit_coverage(bucket: str, *, weak: bool) -> None:
         attack_family = vuln_taxonomy.GF_BUCKET_TO_CLASS.get(bucket)
         if attack_family is None:
-            continue
+            return
+        # A weak (secondary) bucket whose attack_family is already covered by a
+        # primary (or earlier-emitted) bucket adds nothing — skip it so a row with
+        # primary `ssrf` + secondary `webhook` (both -> class `ssrf`) does not post
+        # a duplicate coverage item. Primary-vs-primary emission is left as-is
+        # (pre-existing S14 behavior).
+        if weak and attack_family in emitted_families:
+            return
+        note = (
+            f"gf bucket '{bucket}' weak inner-token signal at ingest"
+            if weak
+            else f"gf bucket '{bucket}' matched at ingest"
+        )
         try:
             client.post(
                 "coverage-items",
@@ -74,15 +89,29 @@ def _bridge_gf_coverage_items(
                     "input_slot": "endpoint",
                     "attack_family": attack_family,
                     "status_value": "pending",
-                    "notes": f"gf bucket '{bucket}' matched at ingest",
+                    "notes": note,
                 },
             )
+            emitted_families.add(attack_family)
         except Exception as exc:  # noqa: BLE001 — best-effort, never abort the batch
             print(
                 f"WARN ingest-endpoints: coverage-item POST failed for variant "
                 f"{request_variant_id} bucket '{bucket}' ({attack_family}): {exc}; continuing.",
                 file=sys.stderr,
             )
+
+    # Strong matches create coverage items per attack class. Secondary (weak
+    # inner-token) buckets — from compound keys like `?return_url=` on a row whose
+    # cluster is owned by another bucket — ALSO create coverage items (marked
+    # weak) so a cross-class surface reaches every relevant specialist, not just
+    # the one that won the cluster. `matched_buckets` is byte-identical to before;
+    # `secondary_buckets` is the additive cross-routing signal (Fix 4).
+    primary_buckets = assignment.get("matched_buckets", [])
+    for bucket in primary_buckets:
+        _emit_coverage(bucket, weak=False)
+    for bucket in assignment.get("secondary_buckets", []):
+        if bucket not in primary_buckets:
+            _emit_coverage(bucket, weak=True)
 
 
 def register(subparsers) -> None:
@@ -191,6 +220,14 @@ def run(args) -> None:
     egress_blocked_count = 0
     egress_warned_hosts: set[str] = set()
 
+    # Scope admission gate (defense-in-depth). gau/wayback and other historical
+    # URL sources surface reachable-but-out-of-scope hosts; reachability is not
+    # scope (shared-constraints §1), so an out-of-scope host must never be
+    # admitted as probeable work. Inactive when scope.json has no allowlist.
+    scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
+    out_of_scope_count = 0
+    out_of_scope_warned_hosts: set[str] = set()
+
     input_path = getattr(args, "input_file", None)
     input_stream = open(input_path, "r", encoding="utf-8") if input_path else sys.stdin
     count = 0
@@ -285,7 +322,12 @@ def run(args) -> None:
             if not body_params:
                 body_params = {}
 
-            if override_type:
+            # An explicit producer `type` is authoritative ONLY when it is a real
+            # type. A sentinel `type=="unknown"` is NOT authoritative — it falls
+            # through to classify_type() so path/content-type shape can recover a
+            # real type. Mirrors the correct guard in
+            # `assess.lib.candidate_records.candidate_type()` (Issues 5/D).
+            if override_type and override_type != "unknown":
                 case_type = override_type
             else:
                 # Thread a JSON-provided `content_type` (when present) into the
@@ -299,6 +341,48 @@ def run(args) -> None:
             # Build observation payload
             parsed = urlparse(url)
             apex_host = (parsed.hostname or "").rstrip(".").lower()
+
+            # Scope admission gate (defense-in-depth) — fires BEFORE the egress
+            # check because out-of-scope is the harder boundary (never test) vs
+            # egress-blocked (resolve and retest). A reachable host not admitted
+            # by scope.json (no allowlist match, or matched an out_of_scope
+            # carve-out) is recorded as a skipped row with an auditable
+            # terminal_reason rather than admitted — reversible (no deletion),
+            # no request-observation POSTed (so no service/surface is created for
+            # it), and surfaced by `work-buffer stats --by reason`. This catches
+            # the gau/wayback historical-URL sources that bypass the recon
+            # pipeline's upstream scope filter.
+            if (
+                scope_filter_active
+                and apex_host
+                and not host_admitted(apex_host, scope_allow, scope_deny)
+            ):
+                out_of_scope_count += 1
+                if apex_host not in out_of_scope_warned_hosts:
+                    out_of_scope_warned_hosts.add(apex_host)
+                    print(
+                        f"WARN: {apex_host} is out of scope (no scope.json allowlist "
+                        f"match, or matched an out_of_scope carve-out). Recording its "
+                        f"URLs as skipped (terminal_reason='out-of-scope') instead of "
+                        f"admitting them to the work buffer.",
+                        file=sys.stderr,
+                    )
+                db_insert_out_of_scope_work_item(
+                    db_path,
+                    method=method,
+                    url=url,
+                    url_path=url_path,
+                    query_params=query_params,
+                    body_params=body_params,
+                    path_params=path_params,
+                    cookie_params=cookie_params,
+                    case_type=case_type,
+                    source=source,
+                    params_key_sig=params_sig,
+                    auth_context=auth_context,
+                    host=apex_host,
+                )
+                continue
 
             # Egress-blocked deferral: when the egress reputation check (see
             # cdn-ip-blocking.md) marks a host as CDN-edge-blocking the
@@ -437,6 +521,16 @@ def run(args) -> None:
             f"[ingest] Deferred {egress_blocked_count} URL(s) to egress-blocked hosts "
             f"(cluster_key='deferred:egress-blocked'). Resolve the egress block before retesting "
             f"— see agent/references/runtime-guides/cdn-ip-blocking.md.",
+            file=sys.stderr,
+        )
+    if out_of_scope_count:
+        print(
+            f"[ingest] Excluded {out_of_scope_count} URL(s) across "
+            f"{len(out_of_scope_warned_hosts)} out-of-scope host(s) "
+            f"(status='skipped', terminal_reason='out-of-scope'). Reachable but not "
+            f"in scope.json — these never reach a specialist. Fix scope.json and "
+            f"re-ingest to admit them; review with "
+            f"`vigil assess work-buffer <db> stats --by reason`.",
             file=sys.stderr,
         )
 
