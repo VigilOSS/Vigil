@@ -335,6 +335,7 @@ def _upsert_coverage_item(
     status_value: str,
     notes: str,
     preserve_existing_status: bool = False,
+    refresh_service_status: bool = True,
 ) -> dict[str, Any]:
     normalized_status = _normalize_coverage_status(status_value)
     cursor = connection.execute(
@@ -371,7 +372,7 @@ def _upsert_coverage_item(
         )
         row = connection.execute("SELECT * FROM assessment_coverage_items WHERE id = ?", (row["id"],)).fetchone()
     assert row is not None
-    if row["service_id"] is not None:
+    if refresh_service_status and row["service_id"] is not None:
         _refresh_service_coverage_status(connection, engagement_id, int(row["service_id"]))
     return dict(row)
 
@@ -783,6 +784,146 @@ def list_request_observations(
             (engagement.id, limit, offset),
         )
 
+def _ingest_request_observation(
+    connection,
+    engagement_id: int,
+    *,
+    url: str,
+    method: str,
+    auth_context: str,
+    content_type_family: str,
+    query_schema: dict[str, Any],
+    body_schema: dict[str, Any],
+    path_schema: dict[str, Any],
+    cookie_schema: dict[str, Any],
+    header_schema: dict[str, Any],
+    path_template: str,
+    discovery_source: str,
+    notes: str,
+    response_status: int | None,
+    evidence_ref: str,
+    observation_payload: dict[str, Any],
+    target_identity: str | None,
+    target_kind: str,
+    target_notes: str,
+    target_ip_address: str | None,
+    target_hostname: str | None,
+    banner: str,
+    coverage_candidates: list[dict[str, Any]] | None,
+    auto_generate_coverage: bool,
+    deferred_service_refreshes: set[int] | None = None,
+) -> dict[str, Any]:
+    scheme, host, _, _ = _parse_url(url)
+    _, endpoint, port, service_name = _service_fields_from_url(url)
+    identity = target_identity or host
+    discovered_by = discovery_source
+    target = _upsert_target(
+        connection,
+        engagement_id,
+        identity=identity,
+        kind=target_kind,
+        host=host,
+        ip_address=target_ip_address,
+        hostname=target_hostname or host,
+        notes=target_notes or notes,
+        discovered_by=discovered_by,
+    )
+    service = _upsert_service(
+        connection,
+        engagement_id,
+        endpoint=endpoint,
+        protocol=scheme,
+        port=port,
+        service=service_name,
+        state="discovered",
+        coverage_status="pending",
+        banner=banner,
+        notes=notes,
+        discovered_by=discovered_by,
+        target_identity=identity,
+    )
+    request_variant = _upsert_request_variant(
+        connection,
+        engagement_id,
+        url=url,
+        method=method,
+        auth_context=auth_context,
+        content_type_family=content_type_family,
+        query_schema=query_schema,
+        body_schema=body_schema,
+        path_schema=path_schema,
+        cookie_schema=cookie_schema,
+        header_schema=header_schema,
+        path_template=path_template,
+        discovery_source=discovery_source,
+        notes=notes,
+    )
+    observation = _insert_request_observation(
+        connection,
+        engagement_id,
+        request_variant_id=request_variant["id"],
+        url=url,
+        discovery_source=discovery_source,
+        response_status=response_status,
+        evidence_ref=evidence_ref,
+        observation_payload=observation_payload,
+    )
+    candidates = coverage_candidates or []
+    if auto_generate_coverage:
+        candidates = [
+            *candidates,
+            *_auto_request_coverage_candidates(
+                query_schema=query_schema,
+                body_schema=body_schema,
+                path_schema=path_schema,
+                cookie_schema=cookie_schema,
+                header_schema=header_schema,
+            ),
+            {
+                "input_slot": "service",
+                "attack_family": "service-validation",
+                "status": "pending",
+                "notes": "Auto-generated from service observation",
+            },
+        ]
+    coverage_items: list[dict[str, Any]] = []
+    seen_keys: set[tuple[int | None, int | None, str, str, str]] = set()
+    for candidate in candidates:
+        key = (
+            request_variant["id"] if candidate.get("input_slot") != "service" else None,
+            service["id"] if candidate.get("input_slot") == "service" else None,
+            auth_context,
+            str(candidate.get("input_slot", "unknown")),
+            str(candidate.get("attack_family", "review")),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        coverage_item = _upsert_coverage_item(
+            connection,
+            engagement_id,
+            request_variant_id=key[0],
+            service_id=key[1],
+            auth_context=auth_context,
+            input_slot=key[3],
+            attack_family=key[4],
+            status_value=str(candidate.get("status", "pending")),
+            notes=str(candidate.get("notes", "")),
+            preserve_existing_status=True,
+            refresh_service_status=deferred_service_refreshes is None,
+        )
+        if deferred_service_refreshes is not None and coverage_item["service_id"] is not None:
+            deferred_service_refreshes.add(int(coverage_item["service_id"]))
+        coverage_items.append(coverage_item)
+    return {
+        "target": target,
+        "service": service,
+        "request_variant": request_variant,
+        "request_observation": observation,
+        "coverage_items": coverage_items,
+    }
+
+
 def ingest_request_observation(
     engagement_id: int,
     *,
@@ -811,37 +952,8 @@ def ingest_request_observation(
     auto_generate_coverage: bool,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    scheme, host, _, _ = _parse_url(url)
-    _, endpoint, port, service_name = _service_fields_from_url(url)
-    identity = target_identity or host
-    discovered_by = discovery_source
     with _common.get_connection() as connection:
-        target = _upsert_target(
-            connection,
-            engagement.id,
-            identity=identity,
-            kind=target_kind,
-            host=host,
-            ip_address=target_ip_address,
-            hostname=target_hostname or host,
-            notes=target_notes or notes,
-            discovered_by=discovered_by,
-        )
-        service = _upsert_service(
-            connection,
-            engagement.id,
-            endpoint=endpoint,
-            protocol=scheme,
-            port=port,
-            service=service_name,
-            state="discovered",
-            coverage_status="pending",
-            banner=banner,
-            notes=notes,
-            discovered_by=discovered_by,
-            target_identity=identity,
-        )
-        request_variant = _upsert_request_variant(
+        return _ingest_request_observation(
             connection,
             engagement.id,
             url=url,
@@ -856,69 +968,40 @@ def ingest_request_observation(
             path_template=path_template,
             discovery_source=discovery_source,
             notes=notes,
-        )
-        observation = _insert_request_observation(
-            connection,
-            engagement.id,
-            request_variant_id=request_variant["id"],
-            url=url,
-            discovery_source=discovery_source,
             response_status=response_status,
             evidence_ref=evidence_ref,
             observation_payload=observation_payload,
+            target_identity=target_identity,
+            target_kind=target_kind,
+            target_notes=target_notes,
+            target_ip_address=target_ip_address,
+            target_hostname=target_hostname,
+            banner=banner,
+            coverage_candidates=coverage_candidates,
+            auto_generate_coverage=auto_generate_coverage,
         )
-        candidates = coverage_candidates or []
-        if auto_generate_coverage:
-            candidates = [
-                *candidates,
-                *_auto_request_coverage_candidates(
-                    query_schema=query_schema,
-                    body_schema=body_schema,
-                    path_schema=path_schema,
-                    cookie_schema=cookie_schema,
-                    header_schema=header_schema,
-                ),
-                {
-                    "input_slot": "service",
-                    "attack_family": "service-validation",
-                    "status": "pending",
-                    "notes": "Auto-generated from service observation",
-                },
-            ]
-        coverage_items: list[dict[str, Any]] = []
-        seen_keys: set[tuple[int | None, int | None, str, str, str]] = set()
-        for candidate in candidates:
-            key = (
-                request_variant["id"] if candidate.get("input_slot") != "service" else None,
-                service["id"] if candidate.get("input_slot") == "service" else None,
-                auth_context,
-                str(candidate.get("input_slot", "unknown")),
-                str(candidate.get("attack_family", "review")),
-            )
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            coverage_items.append(
-                _upsert_coverage_item(
+
+
+def ingest_request_observations_bulk(
+    engagement_id: int,
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    records: list[dict[str, Any]] = []
+    deferred_service_refreshes: set[int] = set()
+    with _common.get_connection() as connection:
+        for item in items:
+            records.append(
+                _ingest_request_observation(
                     connection,
                     engagement.id,
-                    request_variant_id=key[0],
-                    service_id=key[1],
-                    auth_context=auth_context,
-                    input_slot=key[3],
-                    attack_family=key[4],
-                    status_value=str(candidate.get("status", "pending")),
-                    notes=str(candidate.get("notes", "")),
-                    preserve_existing_status=True,
+                    deferred_service_refreshes=deferred_service_refreshes,
+                    **item,
                 )
             )
-        return {
-            "target": target,
-            "service": service,
-            "request_variant": request_variant,
-            "request_observation": observation,
-            "coverage_items": coverage_items,
-        }
+        for service_id in sorted(deferred_service_refreshes):
+            _refresh_service_coverage_status(connection, engagement.id, service_id)
+    return {"engagement_id": engagement.id, "count": len(records), "records": records}
 
 def record_coverage_item(
     engagement_id: int,
@@ -946,6 +1029,37 @@ def record_coverage_item(
             notes=notes,
             preserve_existing_status=preserve_existing_status,
         )
+
+def record_coverage_items_bulk(
+    engagement_id: int,
+    items: list[dict[str, Any]],
+    *,
+    preserve_existing_status: bool = True,
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    records: list[dict[str, Any]] = []
+    deferred_service_refreshes: set[int] = set()
+    with _common.get_connection() as connection:
+        for item in items:
+            record = _upsert_coverage_item(
+                connection,
+                engagement.id,
+                request_variant_id=item.get("request_variant_id"),
+                service_id=item.get("service_id"),
+                auth_context=str(item.get("auth_context", "anonymous")),
+                input_slot=str(item.get("input_slot", "endpoint")),
+                attack_family=str(item["attack_family"]),
+                status_value=str(item.get("status_value", "pending")),
+                notes=str(item.get("notes", "")),
+                preserve_existing_status=preserve_existing_status,
+                refresh_service_status=False,
+            )
+            if record["service_id"] is not None:
+                deferred_service_refreshes.add(int(record["service_id"]))
+            records.append(record)
+        for service_id in sorted(deferred_service_refreshes):
+            _refresh_service_coverage_status(connection, engagement.id, service_id)
+    return {"engagement_id": engagement.id, "count": len(records), "records": records}
 
 def list_coverage_items(
     engagement_id: int,
