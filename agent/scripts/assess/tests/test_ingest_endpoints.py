@@ -47,9 +47,20 @@ class _FakeClient:
 
     def __init__(self) -> None:
         self.observations: list[dict] = []
+        self.posts: list[tuple[str, dict]] = []
         self._next_variant_id = 1000
 
     def post(self, endpoint: str, payload: dict) -> dict:
+        self.posts.append((endpoint, payload))
+        if endpoint == "request-observations/bulk":
+            records = []
+            for observation in payload.get("items", []):
+                self.observations.append(observation)
+                self._next_variant_id += 1
+                records.append({"request_variant": {"id": self._next_variant_id}})
+            return {"count": len(records), "records": records}
+        if endpoint == "coverage-items/bulk":
+            return {"count": len(payload.get("items", [])), "records": []}
         if endpoint == "request-observations":
             self.observations.append(payload)
             self._next_variant_id += 1
@@ -148,6 +159,57 @@ def test_ingest_endpoints_persists_content_type_and_survives_retype(
         "was not persisted, so the typer saw an empty content_type"
     )
     assert after[0]["content_type"] == "application/json"
+
+
+def test_ingest_endpoints_batches_request_observation_posts(
+    tmp_path, monkeypatch, capsys
+):
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # db_init requires the file to already exist
+    db_init(str(db))
+
+    input_file = tmp_path / "endpoints.jsonl"
+    input_file.write_text(
+        "\n".join(
+            [
+                "https://h.example/one",
+                "https://h.example/two",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        ingest_endpoints, "load_config", lambda *a, **k: _Cfg(str(tmp_path))
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "auth_active_context", lambda *a, **k: "anonymous"
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "AssessmentClient", lambda *a, **k: fake_client
+    )
+
+    ingest_endpoints.run(_ingest_ns(str(db), str(input_file), str(tmp_path)))
+    capsys.readouterr()  # drain the ingest summary
+
+    request_posts = [
+        endpoint for endpoint, _payload in fake_client.posts
+        if endpoint.startswith("request-observations")
+    ]
+    assert request_posts == ["request-observations/bulk"]
+
+    rows = db_query(
+        str(db),
+        "SELECT request_variant_id, url FROM work_items ORDER BY url",
+        (),
+    )
+    assert [row["url"] for row in rows] == [
+        "https://h.example/one",
+        "https://h.example/two",
+    ]
+    assert all(row["request_variant_id"] for row in rows)
 
 
 def _run_ingest_line(tmp_path, monkeypatch, capsys, line: str) -> None:

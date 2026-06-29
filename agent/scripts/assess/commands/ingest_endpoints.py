@@ -13,6 +13,11 @@ from urllib.parse import urlparse
 
 from assess.lib import vuln_taxonomy
 from assess.lib.auth import auth_active_context
+from assess.lib.bulk_ingest import (
+    DEFAULT_BULK_WRITE_SIZE,
+    post_coverage_items_bulk,
+    post_request_observations_bulk,
+)
 from assess.lib.classify import classify_type
 from assess.lib.classify_buckets import classify_from_fields
 from assess.lib.client import AssessmentClient
@@ -22,8 +27,7 @@ from assess.lib.params import extract_url_path, extract_query_params, extract_pa
 from assess.lib.scope import host_admitted, ingest_scope_filter
 
 
-def _bridge_gf_coverage_items(
-    client,
+def _gf_coverage_item_payloads(
     *,
     request_variant_id: int,
     case_type: str,
@@ -32,19 +36,19 @@ def _bridge_gf_coverage_items(
     body_params,
     path_params,
     auth_context: str,
-) -> None:
-    """Bridge classified gf buckets -> backend class-typed coverage_items (2b/S14).
+) -> list[dict]:
+    """Return class-typed coverage_items for matched gf buckets (2b/S14).
 
     For a row with a resolvable ``request_variant_id`` and matched gf buckets,
-    POST one ``coverage_item`` per matched bucket with the canonical
+    build one ``coverage_item`` per matched bucket with the canonical
     ``attack_family = GF_BUCKET_TO_CLASS[bucket]`` (skipping generic buckets
     whose map value is None). This is ADDITIVE to the generic baseline
     ``_auto_request_coverage_candidates`` (which still runs server-side) — it
     gives the depth ledger a real vuln-class obligation per endpoint, and per
     S14 it bridges EVERY matched bucket, not just the cluster winner.
 
-    Best-effort per row (no-silent-drop doctrine): a failed POST WARNs and
-    continues so one coverage failure never aborts the ingest batch.
+    Posting is handled in batches by the caller so one endpoint corpus does not
+    become one HTTP request per matched bucket.
     """
     try:
         assignment = classify_from_fields(
@@ -60,9 +64,10 @@ def _bridge_gf_coverage_items(
             f"{request_variant_id}: {exc}; skipping class-typed coverage.",
             file=sys.stderr,
         )
-        return
+        return []
 
     emitted_families: set[str] = set()
+    payloads: list[dict] = []
 
     def _emit_coverage(bucket: str, *, weak: bool) -> None:
         attack_family = vuln_taxonomy.GF_BUCKET_TO_CLASS.get(bucket)
@@ -80,25 +85,17 @@ def _bridge_gf_coverage_items(
             if weak
             else f"gf bucket '{bucket}' matched at ingest"
         )
-        try:
-            client.post(
-                "coverage-items",
-                {
-                    "request_variant_id": int(request_variant_id),
-                    "auth_context": auth_context or "anonymous",
-                    "input_slot": "endpoint",
-                    "attack_family": attack_family,
-                    "status_value": "pending",
-                    "notes": note,
-                },
-            )
-            emitted_families.add(attack_family)
-        except Exception as exc:  # noqa: BLE001 — best-effort, never abort the batch
-            print(
-                f"WARN ingest-endpoints: coverage-item POST failed for variant "
-                f"{request_variant_id} bucket '{bucket}' ({attack_family}): {exc}; continuing.",
-                file=sys.stderr,
-            )
+        payloads.append(
+            {
+                "request_variant_id": int(request_variant_id),
+                "auth_context": auth_context or "anonymous",
+                "input_slot": "endpoint",
+                "attack_family": attack_family,
+                "status_value": "pending",
+                "notes": note,
+            }
+        )
+        emitted_families.add(attack_family)
 
     # Strong matches create coverage items per attack class. Secondary (weak
     # inner-token) buckets — from compound keys like `?return_url=` on a row whose
@@ -112,6 +109,7 @@ def _bridge_gf_coverage_items(
     for bucket in assignment.get("secondary_buckets", []):
         if bucket not in primary_buckets:
             _emit_coverage(bucket, weak=True)
+    return payloads
 
 
 def register(subparsers) -> None:

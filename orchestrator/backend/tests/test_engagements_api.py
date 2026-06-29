@@ -887,6 +887,45 @@ def test_coverage_item_endpoint_records_class_typed_item(client, isolate_setting
     assert "idor" in families
 
 
+def test_coverage_item_bulk_endpoint_records_class_typed_items(client, isolate_settings):
+    """Bulk coverage ingestion keeps the gf-bucket bridge from POSTing one
+    coverage item per matched bucket under high-volume recon."""
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment"
+
+    created = client.post(
+        f"{base}/coverage-items/bulk",
+        json={
+            "items": [
+                {
+                    "attack_family": "idor",
+                    "auth_context": "anonymous",
+                    "input_slot": "endpoint",
+                    "status_value": "pending",
+                    "notes": "gf bucket 'idor' matched at ingest",
+                },
+                {
+                    "attack_family": "ssrf",
+                    "auth_context": "anonymous",
+                    "input_slot": "endpoint",
+                    "status_value": "pending",
+                    "notes": "gf bucket 'ssrf' matched at ingest",
+                },
+            ]
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    payload = created.json()
+    assert payload["count"] == 2
+    assert [row["attack_family"] for row in payload["records"]] == ["idor", "ssrf"]
+
+    items = client.get(f"{base}/coverage-items")
+    assert items.status_code == 200
+    families = {row["attack_family"] for row in items.json()}
+    assert {"idor", "ssrf"} <= families
+
+
 def test_coverage_item_list_is_bounded_and_paginates(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
     base = "/engagements/2026-03-30-120000-example/assessment"
@@ -1529,6 +1568,66 @@ def test_request_capture_lists_are_bounded_and_ordered(client, isolate_settings)
     assert variants.status_code == 200, variants.text
     variant_paths = [row["normalized_path"] for row in variants.json()]
     assert variant_paths == ["/path-2", "/path-1"]
+
+
+def test_request_observation_bulk_endpoint_maps_rows_and_preserves_status(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment"
+
+    bulk = client.post(
+        f"{base}/request-observations/bulk",
+        json={
+            "items": [
+                {
+                    "url": "https://example.com/search?q=test",
+                    "query_schema": {"q": {"type": "string"}},
+                    "discovery_source": "recon",
+                },
+                {
+                    "url": "https://example.com/api/users",
+                    "discovery_source": "recon",
+                },
+            ]
+        },
+    )
+
+    assert bulk.status_code == 201, bulk.text
+    payload = bulk.json()
+    assert payload["count"] == 2
+    assert len(payload["records"]) == 2
+    first, second = payload["records"]
+    assert first["request_variant"]["canonical_url"] == "https://example.com/search?q=test"
+    assert second["request_variant"]["canonical_url"] == "https://example.com/api/users"
+    assert first["service"]["id"] == second["service"]["id"]
+    assert first["request_observation"]["observed_url"] == "https://example.com/search?q=test"
+
+    coverage_items = client.get(f"{base}/coverage-items")
+    assert coverage_items.status_code == 200
+    query_item = next(item for item in coverage_items.json() if item["input_slot"] == "query")
+    patched = client.patch(
+        f"{base}/coverage-items/{query_item['id']}",
+        json={"status": "covered", "notes": "Operator validated this coverage item."},
+    )
+    assert patched.status_code == 200, patched.text
+
+    repeat = client.post(
+        f"{base}/request-observations/bulk",
+        json={
+            "items": [
+                {
+                    "url": "https://example.com/search?q=test",
+                    "query_schema": {"q": {"type": "string"}},
+                    "discovery_source": "recon",
+                }
+            ]
+        },
+    )
+    assert repeat.status_code == 201, repeat.text
+
+    refreshed_items = client.get(f"{base}/coverage-items")
+    assert refreshed_items.status_code == 200
+    refreshed_by_slot = {item["input_slot"]: item for item in refreshed_items.json()}
+    assert refreshed_by_slot["query"]["status"] == "covered"
 
 
 def test_summary_vendor_saas_decision_reads_dispatch_decisions(client, isolate_settings):

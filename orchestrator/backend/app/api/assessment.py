@@ -32,6 +32,7 @@ from ..ws import broadcaster
 router = APIRouter(prefix="/engagements/{engagement_key}/assessment", tags=["assessment"])
 
 COMMAND_FINALIZE_PREVIEW_MAX_CHARS = 65_536
+MAX_BULK_ASSESSMENT_WRITE_ITEMS = 500
 
 _ALLOWED_PHASES: frozenset[str] = frozenset(
     {
@@ -81,6 +82,13 @@ class RequestObservationIngestRequest(BaseModel):
     auto_generate_coverage: bool = True
 
 
+class RequestObservationBulkIngestRequest(BaseModel):
+    items: list[RequestObservationIngestRequest] = Field(
+        min_length=1,
+        max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS,
+    )
+
+
 class ProbeRunRecordRequest(BaseModel):
     request_variant_id: int | None = None
     service_id: int | None = None
@@ -120,6 +128,13 @@ class CoverageItemRecordRequest(BaseModel):
     attack_family: str = Field(min_length=1, max_length=64)
     status_value: str = Field(default="pending", min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)
+
+
+class CoverageItemBulkRecordRequest(BaseModel):
+    items: list[CoverageItemRecordRequest] = Field(
+        min_length=1,
+        max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS,
+    )
 
 
 class CommandRunRecordRequest(BaseModel):
@@ -594,6 +609,7 @@ _SUMMARY_AFFECTING_RECORD_TYPES = frozenset(
         "attack_chain",
         "blocked_technique",
         "coverage_item",
+        "coverage_item_bulk",
         "credential",
         "credential_test",
         "dispatch",
@@ -608,6 +624,7 @@ _SUMMARY_AFFECTING_RECORD_TYPES = frozenset(
         "host_liveness",
         "probe_run",
         "request_observation",
+        "request_observation_bulk",
         "surface",
     }
 )
@@ -1315,6 +1332,27 @@ async def create_request_observation(engagement_key: str, request: RequestObserv
     return record
 
 
+@router.post("/request-observations/bulk", status_code=status.HTTP_201_CREATED)
+async def create_request_observations_bulk(
+    engagement_key: str,
+    request: RequestObservationBulkIngestRequest,
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    result = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.ingest_request_observations_bulk,
+            engagement.id,
+            [item.model_dump() for item in request.items],
+        )
+    )
+    await _broadcast(
+        engagement.key,
+        "request_observation_bulk",
+        {"engagement_id": engagement.id, "count": result["count"]},
+    )
+    return result
+
+
 @router.post("/probe-runs", status_code=status.HTTP_201_CREATED)
 async def create_probe_run(engagement_key: str, request: ProbeRunRecordRequest) -> dict[str, Any]:
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
@@ -1333,6 +1371,27 @@ async def create_coverage_item(engagement_key: str, request: CoverageItemRecordR
     )
     await _broadcast(engagement.key, "coverage_item", record)
     return record
+
+
+@router.post("/coverage-items/bulk", status_code=status.HTTP_201_CREATED)
+async def create_coverage_items_bulk(
+    engagement_key: str,
+    request: CoverageItemBulkRecordRequest,
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    result = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_coverage_items_bulk,
+            engagement.id,
+            [item.model_dump() for item in request.items],
+        )
+    )
+    await _broadcast(
+        engagement.key,
+        "coverage_item_bulk",
+        {"engagement_id": engagement.id, "count": result["count"]},
+    )
+    return result
 
 
 @router.post("/command-runs", status_code=status.HTTP_201_CREATED)
