@@ -454,6 +454,14 @@ def _run_ingest(monkeypatch, tmp_path: Path, lines: list[str]) -> dict[str, str]
             pass
 
         def post(self, endpoint, payload):
+            if endpoint == "request-observations/bulk":
+                return {
+                    "count": len(payload.get("items", [])),
+                    "records": [
+                        {"request_variant": {"id": idx}, "service": {"id": idx}}
+                        for idx, _item in enumerate(payload.get("items", []), start=1)
+                    ],
+                }
             return {"request_variant": {"id": 1}, "service": {"id": 1}}
 
         def close(self) -> None:

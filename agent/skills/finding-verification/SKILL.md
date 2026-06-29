@@ -65,6 +65,16 @@ For each finding under review:
    be replayed; leaked tokens must be used; a file-read primitive must read a meaningful file.
    "Vulnerability exists" is not a finding — "attacker extracts session token and accesses the
    victim's vault" is. If the proof requires the triager to imagine the next step, send it back.
+   **Carve-out — a proven primitive with unfinished exfiltration is HELD, not killed.** Distinguish
+   "imagine the next step from no evidence" (kill) from "a reproduced primitive whose extraction is
+   merely incomplete" (hold). A boolean / time-based / OOB SQLi differential that reproduces from a
+   second independent payload — but whose byte-by-byte data extraction is unfinished (rate-limited,
+   slow, partial) — is a real injection primitive: route it to the theoretical holding area
+   (`evidence_type=theoretical` + `details.chain_required=true`, verify `pending_runtime_proof`,
+   record the extraction as `details.required_followup`), NOT a kill. It stays out of
+   report-readiness until an exploit-developer runtime pass completes the extraction and re-verifies
+   it `confirmed`/`downgraded`. This is the disposition that keeps blind injections — the class most
+   dependent on slow extraction — from being silently dropped at the gate.
 4. **Run the C1–C6 FP & severity gate** (above) on data-exposure / write findings.
 5. **Recompute the CVSS vector** from the reproduced impact; correct `cvss_vector` / `cvss_score`
    if the band drifted.

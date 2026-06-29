@@ -406,10 +406,12 @@ def kali_exec(
     # CR-36 — host-resolve + --resolve IP-pin. On macOS Docker Desktop the
     # container resolver flaps (I-013), so a container HTTP probe can return
     # http=000 for a name that resolves fine on the host. Pin the host-resolved
-    # IP into the argv (curl/httpx/nuclei/ffuf/katana) so target HTTP never
-    # depends on the broken container resolver. Transparent no-op off Docker
-    # Desktop and when the operator opts out (VIGIL_NO_RESOLVE_PIN) — pinning is
-    # idempotent (skipped if a --resolve for this host is already present).
+    # IP into the argv (curl ONLY — httpx/nuclei/katana/ffuf reject the
+    # curl-style --resolve flag and abort; see kali_resolve.RESOLVE_PIN_TOOLS) so
+    # target HTTP never depends on the broken container resolver. Transparent
+    # no-op off Docker Desktop and when the operator opts out
+    # (VIGIL_NO_RESOLVE_PIN) — pinning is idempotent (skipped if a --resolve for
+    # this host is already present).
     pinned_ip: str | None = None
     pin_host, pin_port = kali_resolve.target_host_port(derived_tool_name, cmd)
     _pin_eligible = (
