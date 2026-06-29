@@ -56,6 +56,14 @@ class KaliResult:
     # browser verb itself, so the recovery path never self-flags into a loop).
     waf_challenge: bool = False
     waf_challenge_detail: str = ""
+    # The fully-resolved argv that actually ran inside the container, AFTER
+    # kali_exec's transparent mutations (program attribution ``-H`` headers, the
+    # ``--resolve`` IP-pin, injected identity material, nuclei's default
+    # ``-exclude-tags``). Surfaced on the result so the operator/LLM sees what
+    # RAN, not just what it typed — the command written and the command executed
+    # can diverge, and that gap is the most common source of "why did this probe
+    # behave unexpectedly". Empty list only when a caller never populates it.
+    resolved_argv: list[str] = dataclasses.field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #

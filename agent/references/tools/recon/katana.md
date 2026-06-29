@@ -21,15 +21,26 @@ The typed wrapper currently exposes:
 |---|---|
 | `-u <url>` | crawl one URL |
 | `-list <file>` | crawl newline-separated seed URLs |
-| `-jc` | JavaScript endpoint crawling |
-| `-jsl` | jsluice-based extraction |
-| `-d <n>` | maximum crawl depth |
-| `-c <n>` | concurrency |
-| `-rl <n>` | request rate limit |
+| `-d <n>` | maximum crawl depth — **default 5** (deep by default) |
+| `-fs <scope>` | field-scope — **default `fqdn`** (crawl only the exact seeded hosts); pass `rdn` only for wildcard-scoped roots |
+| `-rl <n>` | request rate (req/s) — **default 10, hard-capped at 20** unless `--allow-fast-crawl`; clamped DOWN to the program ceiling |
+| `--allow-fast-crawl` | permit `-rl` above the 20 req/s safety cap |
+| `-c <n>` | concurrency (default 5) |
+| `-kf <set>` | known-files expansion (e.g. `all` for robots/sitemap/well-known) |
+| `-cos <regex>` | crawl-out-of-scope path carve-out (scope.json cannot express path-level OOS) |
+| `-H <header>` | extra request header (repeatable); attribution headers auto-inject on top |
+| `--keep-bodies` | keep body+raw in `-jsonl` (default omits them via `-or -ob` to bound disk) |
+| `--include-static` | crawl static/binary assets too (default excludes them via `-ef`) |
+| `--no-jc` / `--no-jsl` | disable JS-endpoint / jsluice crawl (both **on by default**) |
 | `-headless` | browser-backed crawl path |
 | `-jsonl` | JSONL output |
 | `-o <file>` | output artifact path |
 | `--extra-args "<flags>"` | append version-specific Katana flags after typed flags |
+
+**The doctrine is now the DEFAULT.** A bare `vigil assess kali katana -u <host>` already runs
+`-jc -jsl -d 5 -fs fqdn -or -ob -ef <static set> -rl 10 -c 5`. Override any of these with the typed
+flag above — you no longer hand-assemble them in `--extra-args`. The result's `resolved_argv` shows
+the exact command that ran after attribution-header / IP-pin injection.
 
 Check the live runtime before using long-tail flags:
 
@@ -115,9 +126,9 @@ separately via a scoped subdomain-enum pass and passive `gau --subs` collection 
 **not** by letting an active crawler wander the root domain. Use `-fs rdn` only
 when every seed root is itself a wildcard-scoped in-scope entry.
 
-The typed wrapper does not model `-fs`/`-cos`; pass them via `--extra-args`
-(`--extra-args "-fs fqdn -cos self-service-"`), or use the raw `katana` binary
-directly under `kali job start` for an all-day operator sweep.
+`-fs` and `-cos` are now **typed flags** — `-fs` defaults to `fqdn` (the scope-safe
+choice), and `-cos <regex>` is passed directly (e.g. `-cos self-service-`). No
+`--extra-args` assembly is needed for either.
 
 ### Exclude out-of-scope path patterns with `-cos`
 
@@ -165,6 +176,10 @@ This keeps `url`, `status_code`, `headers`, `content_length`, and tech detection
 while dropping the page bodies (≈726 bytes/line in the same run). If you genuinely
 need bodies for source-analysis, capture them in a separate, bounded pass rather
 than the broad crawl.
+
+**The `vigil assess kali katana` wrapper now injects `-or -ob` by default**, so a
+deep crawl is disk-bounded without you remembering the flags. Pass `--keep-bodies`
+only for that deliberate, bounded body-capture pass.
 
 Example with version-dependent extras:
 

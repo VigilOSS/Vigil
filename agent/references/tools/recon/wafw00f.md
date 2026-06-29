@@ -1,5 +1,6 @@
 ---
 description: WAF identification and fingerprinting
+skill: web-recon
 ---
 
 # wafw00f

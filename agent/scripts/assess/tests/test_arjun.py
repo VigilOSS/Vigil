@@ -991,3 +991,74 @@ def test_merge_signal_lists_dedups_and_preserves():
         arjun_enrich.SIGNALS_UNPARSED_MARKER,
         "x",
     ]
+
+
+# --------------------------------------------------------------------------
+# Incomplete-run guard — a timed-out/killed list run is NOT a clean negative
+# (the "arjun scanned 2 of 134 then SIGTERM, reported a false 0" trap).
+# --------------------------------------------------------------------------
+from assess.lib import kali_cli  # noqa: E402
+
+
+def test_count_list_targets(tmp_path):
+    f = tmp_path / "t.txt"
+    f.write_text("https://a/1\n\n# comment\nhttps://b/2\n  \nhttps://c/3\n")
+    assert kali_cli.count_list_targets(str(f)) == 3
+    assert kali_cli.count_list_targets("/no/such/file") == 0
+    assert kali_cli.count_list_targets("") == 0
+
+
+def test_parse_list_progress():
+    assert kali_cli.parse_list_progress("Scanning 12/134 ...") == (12, 134)
+    assert kali_cli.parse_list_progress("Processing: 3 / 50") == (3, 50)
+    # highest wins; a keyword prefix is REQUIRED so a bare fraction (a URL path,
+    # a status ratio) is never mistaken for progress.
+    assert kali_cli.parse_list_progress("Scanning 1/10 ... Scanning 7/10") == (7, 10)
+    assert kali_cli.parse_list_progress("no progress markers") is None
+    assert kali_cli.parse_list_progress("GET /api/v1/10 -> 200/404") is None
+
+
+def test_incomplete_warning_fires_on_timed_out_multitarget():
+    note = kali_cli.incomplete_list_run_warning(
+        tool="arjun", total_targets=134, timed_out=True, return_code=143,
+        stdout_preview="Scanning 2/134",
+    )
+    assert "INCOMPLETE" in note and "2 of 134" in note
+    # killed via non-zero rc (not just timed_out) also counts
+    assert kali_cli.incomplete_list_run_warning(
+        tool="arjun", total_targets=10, timed_out=False, return_code=143) != ""
+
+
+def test_incomplete_warning_silent_on_clean_or_single():
+    assert kali_cli.incomplete_list_run_warning(
+        tool="arjun", total_targets=50, timed_out=False, return_code=0) == ""
+    # a single-target timeout is a different problem, not flagged as a list truncation
+    assert kali_cli.incomplete_list_run_warning(
+        tool="arjun", total_targets=1, timed_out=True, return_code=143) == ""
+
+
+def test_kali_arjun_warns_incomplete_on_timed_out_list(tmp_path, monkeypatch, capsys):
+    listfile = tmp_path / "targets.txt"
+    listfile.write_text("https://a/1\nhttps://b/2\nhttps://c/3\n")
+
+    class _R:
+        timed_out = True
+        return_code = 143
+        stdout_preview = "Scanning 1/3"
+        stderr_preview = ""
+
+    monkeypatch.setattr(kali_arjun, "kali_exec", lambda cmd, **k: _R())
+    monkeypatch.setattr(kali_arjun, "emit_result", lambda r: None)
+    monkeypatch.setattr(kali_arjun, "kali_args_to_kwargs", lambda a: {})
+    monkeypatch.setattr(kali_arjun, "extend_cmd_with_extra_args", lambda cmd, a: None)
+    monkeypatch.setattr(kali_arjun, "_ensure_json_artifact", lambda a, p: None)
+
+    kali_arjun.run(_arjun_ns(target_url="", import_file=str(listfile)))
+    err = capsys.readouterr().err
+    assert "INCOMPLETE" in err and "arjun" in err
+
+
+def test_kali_arjun_silent_when_single_url_completes(captured_cmd, capsys):
+    # the default -u (single target) run that does NOT time out emits no incomplete warning
+    kali_arjun.run(_arjun_ns())
+    assert "INCOMPLETE" not in capsys.readouterr().err

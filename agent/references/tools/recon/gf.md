@@ -1,5 +1,6 @@
 ---
 description: URL parameter-pattern classifier (xss, ssrf, redirect, idor, sqli, lfi, debug); the patterns are now compiled into `assess.lib.classify_buckets` and applied inline at ingest — this reference documents the bucket source-of-truth
+skill: gau-triage
 ---
 
 # gf (grep-friendly)
