@@ -399,11 +399,13 @@ Step 4: Extract through reflected columns
 ---
 
 ## Kill Signals — Stop Testing When
-- Framework uses ORM exclusively (Django ORM, ActiveRecord, Prisma, Sequelize) with no raw queries in scope → skip classic injection, test only ORDER BY / dynamic identifiers
-- First 5 error-provocation probes all return identical responses with no timing delta → parameterized queries likely, move to next endpoint
-- WAF blocks all payloads AND no alternative injection context found (JSON body, headers) → escalate to operator or move on
-- sqlmap confirms injection → stop manual probing, proceed to exploitation depth
-- Target is cloud-hosted managed DB (RDS, Cloud SQL) → file read/OS command will fail, cap exploitation at data extraction
+- Framework uses an ORM (Django ORM, ActiveRecord, Prisma, Sequelize) → do NOT abandon. Shift to the gaps the ORM cannot parameterize — ORDER BY / GROUP BY / dynamic column+table identifiers, raw-SQL escape hatches (`raw`/`execute`/`$queryRaw`), LIKE patterns, array→`IN()` interpolation — AND run the blind channels. "ORM ⇒ injection is dead" is the assumption that hides modern-SaaS SQLi, not a stop condition.
+- Error-provocation probes return identical responses with no timing delta → parameterized queries are LIKELY but NOT proven. Before moving on you MUST have run a measured-baseline time-based pass AND a boolean-differential pass (and OOB if a callback is available) — five error probes is not a thorough pass. "No SQLi" is credible only after the blind channels are exhausted (`hunting.md` §16: the bar is confidence, not time; §23: a non-conclusive response is a lead, not a verdict).
+- WAF blocks all payloads AND no alternative injection context (JSON body, headers, ORDER BY) found → escalate to the operator. Do not silently drop the surface.
+- sqlmap confirms injection → stop manual probing, proceed to exploitation depth.
+- Target is cloud-hosted managed DB (RDS, Cloud SQL) → file read/OS command will fail; cap exploitation at data extraction (still author the finding).
+
+**A confirmed differential is NEVER dropped as "no SQLi."** A reproduced boolean / time-based / OOB differential whose full data extraction is incomplete (rate-limited, slow, or only partially reconstructed) is a REAL finding — the injection primitive is proven even if exfiltration is unfinished. Hand it back to the operator to record in the theoretical holding area (`evidence_type=theoretical` + `details.chain_required=true`, verified `pending_runtime_proof`) with the byte-by-byte extraction as required follow-up, rather than recording a premature "tested/clean" closure. SQLi is the class most dependent on slow blind extraction, so it is the one most often lost to premature abandonment — see `agent/skills/finding-verification/SKILL.md`.
 
 ## Escalate When
 - A syntactically invalid payload returns the same body as a valid one — errors are swallowed at a WAF/ORM layer, but boolean-blind and time-based channels are still live, switch probe style before moving on

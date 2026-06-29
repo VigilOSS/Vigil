@@ -1332,6 +1332,17 @@ def _run_ingest_bridge(monkeypatch, tmp_path, lines, *, variant_id=501):
             pass
 
         def post(self, endpoint, payload):
+            if endpoint == "request-observations/bulk":
+                return {
+                    "count": len(payload.get("items", [])),
+                    "records": [
+                        {"request_variant": {"id": variant_id}, "service": {"id": 9}}
+                        for _item in payload.get("items", [])
+                    ],
+                }
+            if endpoint == "coverage-items/bulk":
+                coverage_posts.extend(payload.get("items", []))
+                return {"count": len(payload.get("items", [])), "records": payload.get("items", [])}
             if endpoint == "request-observations":
                 return {"request_variant": {"id": variant_id}, "service": {"id": 9}}
             if endpoint == "coverage-items":
@@ -2206,6 +2217,12 @@ def test_s12_ingest_endpoints_admits_ip_localhost_ipv6_and_skips_malformed(
             pass
 
         def post(self, endpoint, payload):
+            if endpoint == "request-observations/bulk":
+                records = []
+                for item in payload.get("items", []):
+                    posted_hosts.append(item.get("target_hostname"))
+                    records.append({"request_variant": {"id": 100 + len(posted_hosts)}})
+                return {"count": len(records), "records": records}
             posted_hosts.append(payload.get("target_hostname"))
             return {"request_variant": {"id": 100 + len(posted_hosts)}}
 

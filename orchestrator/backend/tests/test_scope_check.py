@@ -471,6 +471,16 @@ class _FakeIngestClient:
         self.closed = False
 
     def post(self, endpoint: str, payload: dict) -> dict:
+        if endpoint == "request-observations/bulk":
+            records = []
+            for item in payload.get("items", []):
+                self.posts.append(("request-observations", item))
+                records.append({"request_variant": {"id": 1 + len(self.posts)}, "service": {"id": 7}})
+            return {"count": len(records), "records": records}
+        if endpoint == "coverage-items/bulk":
+            for item in payload.get("items", []):
+                self.posts.append(("coverage-items", item))
+            return {"count": len(payload.get("items", [])), "records": payload.get("items", [])}
         self.posts.append((endpoint, payload))
         # Return a request_variant id so ingest treats it as admitted.
         return {"request_variant": {"id": 1 + len(self.posts)}, "service": {"id": 7}}

@@ -920,6 +920,35 @@ def test_coverage_item_bulk_endpoint_records_class_typed_items(client, isolate_s
     assert payload["count"] == 2
     assert [row["attack_family"] for row in payload["records"]] == ["idor", "ssrf"]
 
+    covered = client.post(
+        f"{base}/coverage-items",
+        json={
+            "attack_family": "idor",
+            "auth_context": "anonymous",
+            "input_slot": "endpoint",
+            "status_value": "covered",
+            "notes": "operator already tested this family",
+        },
+    )
+    assert covered.status_code == 201, covered.text
+
+    repeated_pending = client.post(
+        f"{base}/coverage-items/bulk",
+        json={
+            "items": [
+                {
+                    "attack_family": "idor",
+                    "auth_context": "anonymous",
+                    "input_slot": "endpoint",
+                    "status_value": "pending",
+                    "notes": "repeat gf ingest",
+                },
+            ]
+        },
+    )
+    assert repeated_pending.status_code == 201, repeated_pending.text
+    assert repeated_pending.json()["records"][0]["status"] == "covered"
+
     items = client.get(f"{base}/coverage-items")
     assert items.status_code == 200
     families = {row["attack_family"] for row in items.json()}

@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from assess.lib.auth import auth_active_context
+from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE, post_request_observations_bulk
 from assess.lib.candidate_records import candidate_metadata, candidate_type, json_text, signal_tokens
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
@@ -54,8 +55,86 @@ def run(args) -> None:
     scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
     out_of_scope_count = 0
     out_of_scope_warned_hosts: set[str] = set()
+    skipped_backend = 0
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        pending_rows: list[dict] = []
+        pending_observations: list[dict] = []
+
+        def _flush_observations() -> None:
+            nonlocal count, skipped_backend
+            if not pending_observations:
+                return
+            rows = list(pending_rows)
+            observations = list(pending_observations)
+            pending_rows.clear()
+            pending_observations.clear()
+
+            responses = post_request_observations_bulk(
+                client,
+                observations,
+                warn_prefix="ingest-candidates",
+                fallback_individual=True,
+            )
+            for row, response in zip(rows, responses, strict=True):
+                if isinstance(response, Exception):
+                    skipped_backend += 1
+                    print(
+                        f"ingest-candidates: backend rejected {row['url']}: "
+                        f"{response}; skipping this candidate",
+                        file=sys.stderr,
+                    )
+                    continue
+                request_variant_id = None
+                service_id = None
+                try:
+                    request_variant_id = response.get("request_variant", {}).get("id")
+                except (AttributeError, TypeError):
+                    pass
+                try:
+                    service_id = response.get("service", {}).get("id")
+                except (AttributeError, TypeError):
+                    pass
+                if not request_variant_id and not service_id:
+                    print(
+                        f"ingest-candidates: backend response missing request_variant.id/service.id for {row['url']}",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+
+                if request_variant_id:
+                    queue_key = f"variant:{request_variant_id}:{row['case_type']}"
+                else:
+                    queue_key = f"service:{service_id}:{row['case_type']}"
+
+                metadata = row["metadata"]
+                db_insert_work_item(
+                    db_path,
+                    queue_key=queue_key,
+                    method=row["method"],
+                    url=row["url"],
+                    url_path=row["url_path"],
+                    query_params=json.dumps(row["query_params"]) if isinstance(row["query_params"], dict) else str(row["query_params"]),
+                    body_params=json.dumps(row["body_params"]) if isinstance(row["body_params"], dict) else str(row["body_params"]),
+                    path_params=json.dumps(row["path_params"]) if isinstance(row["path_params"], dict) else str(row["path_params"]),
+                    cookie_params=json.dumps(row["cookie_params"]) if isinstance(row["cookie_params"], dict) else str(row["cookie_params"]),
+                    case_type=row["case_type"],
+                    source=source,
+                    params_key_sig=row["params_sig"],
+                    request_variant_id=int(request_variant_id) if request_variant_id else None,
+                    service_id=int(service_id) if service_id else None,
+                    auth_context=auth_context,
+                    priority_score=metadata.get("priority_score"),
+                    priority_reason=metadata.get("priority_reason"),
+                    cluster_key=metadata.get("cluster_key"),
+                    signals=json_text(metadata.get("signals")),
+                    selected_by=metadata.get("selected_by"),
+                    triage_rationale=metadata.get("triage_rationale"),
+                    live_status=metadata.get("live_status"),
+                    curated=True,
+                )
+                count += 1
+
         with open(records_file, "r", encoding="utf-8") as input_stream:
             for line in input_stream:
                 line = line.strip()
@@ -159,57 +238,32 @@ def run(args) -> None:
                     "auto_generate_coverage": True,
                 }
 
-                response = client.post("request-observations", observation)
-                request_variant_id = None
-                service_id = None
-                try:
-                    request_variant_id = response.get("request_variant", {}).get("id")
-                except (AttributeError, TypeError):
-                    pass
-                try:
-                    service_id = response.get("service", {}).get("id")
-                except (AttributeError, TypeError):
-                    pass
-                if not request_variant_id and not service_id:
-                    print(
-                        f"ingest-candidates: backend response missing request_variant.id/service.id for {url}",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-
-                if request_variant_id:
-                    queue_key = f"variant:{request_variant_id}:{case_type}"
-                else:
-                    queue_key = f"service:{service_id}:{case_type}"
-
-                db_insert_work_item(
-                    db_path,
-                    queue_key=queue_key,
-                    method=method,
-                    url=url,
-                    url_path=url_path,
-                    query_params=json.dumps(query_params) if isinstance(query_params, dict) else str(query_params),
-                    body_params=json.dumps(body_params) if isinstance(body_params, dict) else str(body_params),
-                    path_params=json.dumps(path_params) if isinstance(path_params, dict) else str(path_params),
-                    cookie_params=json.dumps(cookie_params) if isinstance(cookie_params, dict) else str(cookie_params),
-                    case_type=case_type,
-                    source=source,
-                    params_key_sig=params_sig,
-                    request_variant_id=int(request_variant_id) if request_variant_id else None,
-                    service_id=int(service_id) if service_id else None,
-                    auth_context=auth_context,
-                    priority_score=metadata.get("priority_score"),
-                    priority_reason=metadata.get("priority_reason"),
-                    cluster_key=metadata.get("cluster_key"),
-                    signals=json_text(metadata.get("signals")),
-                    selected_by=metadata.get("selected_by"),
-                    triage_rationale=metadata.get("triage_rationale"),
-                    live_status=metadata.get("live_status"),
-                    curated=True,
+                pending_rows.append(
+                    {
+                        "method": method,
+                        "url": url,
+                        "url_path": url_path,
+                        "query_params": query_params,
+                        "body_params": body_params,
+                        "path_params": path_params,
+                        "cookie_params": cookie_params,
+                        "case_type": case_type,
+                        "params_sig": params_sig,
+                        "metadata": metadata,
+                    }
                 )
-                count += 1
+                pending_observations.append(observation)
+                if len(pending_observations) >= DEFAULT_BULK_WRITE_SIZE:
+                    _flush_observations()
+        _flush_observations()
 
     print(f"[ingest] Ingested {count} candidate records from source '{source}'")
+    if skipped_backend:
+        print(
+            f"[ingest] Skipped {skipped_backend} candidate(s) rejected by the backend "
+            f"(see warnings above).",
+            file=sys.stderr,
+        )
     if out_of_scope_count:
         print(
             f"[ingest] Excluded {out_of_scope_count} candidate(s) across "

@@ -704,6 +704,12 @@ def test_ingest_candidates_preserve_metadata_and_route(
             self.engagement_key = engagement_key
 
         def post(self, endpoint: str, payload: dict[str, object]):
+            if endpoint == "request-observations/bulk":
+                records = []
+                for item in payload.get("items", []):
+                    posts.append(("request-observations", item))
+                    records.append({"request_variant": {"id": 701}})
+                return {"count": len(records), "records": records}
             posts.append((endpoint, payload))
             return {"request_variant": {"id": 701}}
 
@@ -854,6 +860,12 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
             self.next_id = 800
 
         def post(self, endpoint: str, payload: dict[str, object]):
+            if endpoint == "request-observations/bulk":
+                records = []
+                for _item in payload.get("items", []):
+                    self.next_id += 1
+                    records.append({"request_variant": {"id": self.next_id}})
+                return {"count": len(records), "records": records}
             self.next_id += 1
             return {"request_variant": {"id": self.next_id}}
 

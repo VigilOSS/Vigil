@@ -212,6 +212,67 @@ def test_ingest_endpoints_batches_request_observation_posts(
     assert all(row["request_variant_id"] for row in rows)
 
 
+def test_ingest_endpoints_preserves_json_liveness_metadata(
+    tmp_path, monkeypatch, capsys
+):
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # db_init requires the file to already exist
+    db_init(str(db))
+
+    input_file = tmp_path / "endpoints.jsonl"
+    input_file.write_text(
+        json.dumps(
+            {
+                "method": "GET",
+                "url": "https://h.example/",
+                "response_status": 401,
+                "type": "unknown",
+                "source": "web-discovery",
+                "live_status": "live",
+                "signals": ["httpx-live"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        ingest_endpoints, "load_config", lambda *a, **k: _Cfg(str(tmp_path))
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "auth_active_context", lambda *a, **k: "anonymous"
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "AssessmentClient", lambda *a, **k: fake_client
+    )
+
+    ns = _ingest_ns(str(db), str(input_file), str(tmp_path))
+    ns.source = "web-discovery"
+    ingest_endpoints.run(ns)
+    capsys.readouterr()  # drain the ingest summary
+
+    assert fake_client.observations[0]["response_status"] == 401
+    assert fake_client.observations[0]["observation_payload"] == {
+        "source": "web-discovery",
+        "signals": ["httpx-live"],
+        "live_status": "live",
+    }
+
+    rows = db_query(
+        str(db),
+        "SELECT response_status, live_status, signals, priority_score, cluster_key "
+        "FROM work_items WHERE url = ?",
+        ("https://h.example/",),
+    )
+    assert len(rows) == 1, "ingest-endpoints did not create the work item"
+    assert rows[0]["response_status"] == 401
+    assert rows[0]["live_status"] == "live"
+    assert json.loads(rows[0]["signals"]) == ["httpx-live"]
+    assert rows[0]["cluster_key"] == "type:host_root"
+    assert rows[0]["priority_score"] == 5
+
+
 def _run_ingest_line(tmp_path, monkeypatch, capsys, line: str) -> None:
     """Run ingest-endpoints over a single JSONL `line` with the stubbed backend."""
     db = tmp_path / "cases.db"

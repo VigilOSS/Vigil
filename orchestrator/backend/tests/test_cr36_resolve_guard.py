@@ -78,10 +78,10 @@ def test_pin_injects_resolve_for_curl_on_docker_desktop():
 def test_pin_is_idempotent_on_repeat_call():
     kr = _import("assess.lib.kali_resolve")
     _rr, dd, _lx = _runtimes()
-    cmd = ["httpx", "-u", "https://api.example.com/"]
-    assert kr.apply_resolve_pin(cmd, "httpx", runtime=dd, ips=["203.0.113.7"]) == "203.0.113.7"
+    cmd = ["curl", "https://api.example.com/"]
+    assert kr.apply_resolve_pin(cmd, "curl", runtime=dd, ips=["203.0.113.7"]) == "203.0.113.7"
     # A second pass must NOT add a second --resolve for the same host:port.
-    assert kr.apply_resolve_pin(cmd, "httpx", runtime=dd, ips=["203.0.113.9"]) is None
+    assert kr.apply_resolve_pin(cmd, "curl", runtime=dd, ips=["203.0.113.9"]) is None
     assert cmd.count("--resolve") == 1
 
 
@@ -171,13 +171,12 @@ def test_resolve_host_ips_ip_literal_is_empty():
 
 def test_pin_tools_excludes_sqlmap_and_ffuf_includes_http_set():
     kr = _import("assess.lib.kali_resolve")
-    # ffuf is excluded (I-10): the image ffuf (v2.x) has no --resolve flag — its
-    # Go flag parser rejects it and aborts with exit 2, so a pin would turn a
-    # recoverable resolver flap into a hard failure. sqlmap likewise has no
-    # host-pin flag. Both stay OUT of the pin set; the http=000 guard handles them.
-    assert kr.RESOLVE_PIN_TOOLS == frozenset({"curl", "httpx", "nuclei", "katana"})
-    assert "ffuf" not in kr.RESOLVE_PIN_TOOLS
-    assert "sqlmap" not in kr.RESOLVE_PIN_TOOLS
+    # curl is the only shipped HTTP tool that accepts curl-style
+    # `--resolve host:port:ip`. ProjectDiscovery tools and ffuf stay OUT of the
+    # pin set; the post-run http=000 guard still handles resolver flaps.
+    assert kr.RESOLVE_PIN_TOOLS == frozenset({"curl"})
+    for tool in ("ffuf", "sqlmap", "httpx", "nuclei", "katana"):
+        assert tool not in kr.RESOLVE_PIN_TOOLS
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -410,7 +409,7 @@ def test_kali_exec_pins_resolve_on_docker_desktop(monkeypatch, fake_engagement):
     monkeypatch.setattr(kali.subprocess, "Popen", fake_popen)
 
     result = kali.kali_exec(
-        ["httpx", "-u", "https://api.example.com/"],
+        ["curl", "-sS", "https://api.example.com/"],
         technique="RECON",
         intent="liveness probe",
         probe_kind="fingerprint",
@@ -418,7 +417,7 @@ def test_kali_exec_pins_resolve_on_docker_desktop(monkeypatch, fake_engagement):
         timeout=30,
         engagement_dir=fake_engagement,
         engagement_key=fake_engagement.name,
-        tool_name="httpx",
+        tool_name="curl",
     )
     # --resolve was injected into the argv that actually ran in-container.
     joined = " ".join(seen["argv"])

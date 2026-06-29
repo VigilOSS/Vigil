@@ -32,6 +32,13 @@ class _FakeClient:
         self._next_variant_id = 3000
 
     def post(self, endpoint: str, payload: dict) -> dict:
+        if endpoint == "request-observations/bulk":
+            records = []
+            for observation in payload.get("items", []):
+                self.observations.append(observation)
+                self._next_variant_id += 1
+                records.append({"request_variant": {"id": self._next_variant_id}})
+            return {"count": len(records), "records": records}
         if endpoint == "request-observations":
             self.observations.append(payload)
             self._next_variant_id += 1

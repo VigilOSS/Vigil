@@ -18,6 +18,7 @@ from assess.lib.bulk_ingest import (
     post_coverage_items_bulk,
     post_request_observations_bulk,
 )
+from assess.lib.candidate_records import int_value, json_text
 from assess.lib.classify import classify_type
 from assess.lib.classify_buckets import classify_from_fields
 from assess.lib.client import AssessmentClient
@@ -232,6 +233,104 @@ def run(args) -> None:
     skipped_template = 0
     skipped_malformed = 0
     skipped_badjson = 0
+    pending_rows: list[dict] = []
+    pending_observations: list[dict] = []
+    pending_coverage_items: list[dict] = []
+
+    def _flush_coverage_items() -> None:
+        if not pending_coverage_items:
+            return
+        items = list(pending_coverage_items)
+        pending_coverage_items.clear()
+        post_coverage_items_bulk(client, items, warn_prefix="ingest-endpoints")
+
+    def _flush_observations() -> None:
+        nonlocal count, skipped_malformed
+        if not pending_observations:
+            return
+        rows = list(pending_rows)
+        observations = list(pending_observations)
+        pending_rows.clear()
+        pending_observations.clear()
+
+        responses = post_request_observations_bulk(
+            client,
+            observations,
+            warn_prefix="ingest-endpoints",
+            fallback_individual=True,
+        )
+        for row, response in zip(rows, responses, strict=True):
+            if isinstance(response, Exception):
+                skipped_malformed += 1
+                print(
+                    f"WARN ingest-endpoints: backend rejected {row['url']}: "
+                    f"{response}; skipping this line",
+                    file=sys.stderr,
+                )
+                continue
+            request_variant_id = None
+            service_id = None
+            try:
+                request_variant_id = response.get("request_variant", {}).get("id")
+            except (AttributeError, TypeError):
+                pass
+            try:
+                service_id = response.get("service", {}).get("id")
+            except (AttributeError, TypeError):
+                pass
+
+            if not request_variant_id and not service_id:
+                skipped_malformed += 1
+                print(
+                    f"WARN ingest-endpoints: backend response missing "
+                    f"request_variant.id/service.id for {row['url']}; skipping this line",
+                    file=sys.stderr,
+                )
+                continue
+
+            queue_key = ""
+            if request_variant_id:
+                queue_key = f"variant:{request_variant_id}:{row['case_type']}"
+            elif service_id:
+                queue_key = f"service:{service_id}:{row['case_type']}"
+
+            db_insert_work_item(
+                db_path,
+                queue_key=queue_key,
+                method=row["method"],
+                url=row["url"],
+                url_path=row["url_path"],
+                query_params=json.dumps(row["query_params"]) if isinstance(row["query_params"], dict) else str(row["query_params"]),
+                body_params=json.dumps(row["body_params"]) if isinstance(row["body_params"], dict) else str(row["body_params"]),
+                path_params=json.dumps(row["path_params"]) if isinstance(row["path_params"], dict) else str(row["path_params"]),
+                cookie_params=json.dumps(row["cookie_params"]) if isinstance(row["cookie_params"], dict) else str(row["cookie_params"]),
+                content_type=row["row_content_type"],
+                response_status=row["response_status"] or 0,
+                case_type=row["case_type"],
+                source=source,
+                params_key_sig=row["params_sig"],
+                request_variant_id=int(request_variant_id) if request_variant_id else None,
+                service_id=int(service_id) if service_id else None,
+                auth_context=auth_context,
+                signals=json_text(row["signals"]),
+                live_status=row["live_status"],
+            )
+            if request_variant_id:
+                pending_coverage_items.extend(
+                    _gf_coverage_item_payloads(
+                        request_variant_id=int(request_variant_id),
+                        case_type=row["case_type"],
+                        url_path=row["url_path"],
+                        query_params=row["query_params"],
+                        body_params=row["body_params"],
+                        path_params=row["path_params"],
+                        auth_context=auth_context,
+                    )
+                )
+                if len(pending_coverage_items) >= DEFAULT_BULK_WRITE_SIZE:
+                    _flush_coverage_items()
+            count += 1
+        _flush_coverage_items()
 
     try:
         for line in input_stream:
@@ -244,6 +343,9 @@ def run(args) -> None:
             url_path = ""
             override_type = ""
             row_content_type = ""
+            response_status: int | None = None
+            live_status: str | None = None
+            signals = None
             query_params: dict = {}
             body_params: dict = {}
             path_params: dict = {}
@@ -264,6 +366,13 @@ def run(args) -> None:
                 url_path = row.get("url_path") or ""
                 override_type = row.get("type") or ""
                 row_content_type = row.get("content_type") or ""
+                response_status = int_value(row.get("response_status"))
+                live_status = (
+                    str(row.get("live_status"))
+                    if row.get("live_status") not in (None, "")
+                    else None
+                )
+                signals = row.get("signals")
                 query_params = row.get("query_params") or {}
                 body_params = row.get("body_params") or {}
                 path_params = row.get("path_params") or {}
@@ -429,9 +538,13 @@ def run(args) -> None:
                 "path_template": "",
                 "discovery_source": source,
                 "notes": "",
-                "response_status": None,
+                "response_status": response_status,
                 "evidence_ref": "",
-                "observation_payload": {"source": source},
+                "observation_payload": {
+                    "source": source,
+                    "signals": signals or [],
+                    "live_status": live_status,
+                },
                 "target_identity": parsed.hostname or "",
                 "target_kind": "host",
                 "target_notes": "",
@@ -442,63 +555,28 @@ def run(args) -> None:
                 "auto_generate_coverage": True,
             }
 
-            response = client.post("request-observations", observation)
-            request_variant_id = None
-            service_id = None
-            try:
-                request_variant_id = response.get("request_variant", {}).get("id")
-            except (AttributeError, TypeError):
-                pass
-            try:
-                service_id = response.get("service", {}).get("id")
-            except (AttributeError, TypeError):
-                pass
-
-            if not request_variant_id and not service_id:
-                skipped_malformed += 1
-                print(
-                    f"WARN ingest-endpoints: backend response missing "
-                    f"request_variant.id/service.id for {url}; skipping this line",
-                    file=sys.stderr,
-                )
-                continue
-
-            queue_key = ""
-            if request_variant_id:
-                queue_key = f"variant:{request_variant_id}:{case_type}"
-            elif service_id:
-                queue_key = f"service:{service_id}:{case_type}"
-
-            db_insert_work_item(
-                db_path,
-                queue_key=queue_key,
-                method=method,
-                url=url,
-                url_path=url_path,
-                query_params=json.dumps(query_params) if isinstance(query_params, dict) else str(query_params),
-                body_params=json.dumps(body_params) if isinstance(body_params, dict) else str(body_params),
-                path_params=json.dumps(path_params) if isinstance(path_params, dict) else str(path_params),
-                cookie_params=json.dumps(cookie_params) if isinstance(cookie_params, dict) else str(cookie_params),
-                content_type=row_content_type,
-                case_type=case_type,
-                source=source,
-                params_key_sig=params_sig,
-                request_variant_id=int(request_variant_id) if request_variant_id else None,
-                service_id=int(service_id) if service_id else None,
-                auth_context=auth_context,
+            pending_rows.append(
+                {
+                    "method": method,
+                    "url": url,
+                    "url_path": url_path,
+                    "query_params": query_params,
+                    "body_params": body_params,
+                    "path_params": path_params,
+                    "cookie_params": cookie_params,
+                    "row_content_type": row_content_type,
+                    "response_status": response_status,
+                    "live_status": live_status,
+                    "signals": signals,
+                    "case_type": case_type,
+                    "params_sig": params_sig,
+                }
             )
-            if request_variant_id:
-                _bridge_gf_coverage_items(
-                    client,
-                    request_variant_id=int(request_variant_id),
-                    case_type=case_type,
-                    url_path=url_path,
-                    query_params=query_params,
-                    body_params=body_params,
-                    path_params=path_params,
-                    auth_context=auth_context,
-                )
-            count += 1
+            pending_observations.append(observation)
+            if len(pending_observations) >= DEFAULT_BULK_WRITE_SIZE:
+                _flush_observations()
+        _flush_observations()
+        _flush_coverage_items()
     finally:
         if input_path and input_stream is not sys.stdin:
             input_stream.close()
