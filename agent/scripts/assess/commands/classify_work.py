@@ -25,6 +25,21 @@ from assess.lib.classify_buckets import INERT_TYPES, classify_row as _classify_r
 from assess.lib.db import db_init
 
 
+def _row_get(row, key, default=None):
+    """Tolerant column getter for a sqlite3.Row (or dict) mirror.
+
+    Returns `default` when the column is absent (a pre-context DB, or a legacy
+    SELECT that did not project the column) instead of raising IndexError/
+    KeyError, so threading the Fix 1 context kwargs never breaks an older
+    schema or caller. Also coalesces a stored NULL to `default`.
+    """
+    try:
+        value = row[key]
+    except (IndexError, KeyError):
+        return default
+    return value if value is not None else default
+
+
 def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "classify-work",
@@ -175,7 +190,8 @@ def run(args: argparse.Namespace) -> None:
         while True:
             rows = conn.execute(
                 f"""
-                SELECT id, type, url_path, query_params, body_params, path_params
+                SELECT id, type, url_path, query_params, body_params, path_params,
+                       url, source, live_status
                 FROM work_items
                 WHERE {where_clause}
                   AND id > ?
@@ -190,7 +206,17 @@ def run(args: argparse.Namespace) -> None:
             for row in rows:
                 last_id = max(last_id, int(row["id"]))
                 classified += 1
-                assignment = _classify_row(row)
+                # Thread the row's URL/source/live_status into the classifier so
+                # the boost-only context layer (Fix 1) is re-applied on
+                # re-classification too — otherwise the 677 nonprod/admin
+                # host_root rows would stay at priority 0 after
+                # `--reclassify-all`. Tolerant getter keeps pre-context DBs safe.
+                assignment = _classify_row(
+                    row,
+                    url=_row_get(row, "url"),
+                    source=_row_get(row, "source"),
+                    live_status=_row_get(row, "live_status"),
+                )
                 cluster_counts[assignment["cluster_key"]] += 1
                 if reclaim_skipped:
                     if assignment["terminal_reason"] is None:

@@ -2,7 +2,7 @@ ARG BASE_IMAGE=kalilinux/kali-rolling@sha256:dddc31e0f4bc57b4b91e9027762544506bf
 ARG PRELOADED_TOOLS=0
 FROM ${BASE_IMAGE}
 ARG PRELOADED_TOOLS=0
-ARG INSTALL_VERSION_STAMP=2026.06.26-recon-tools
+ARG INSTALL_VERSION_STAMP=2026.06.29-jwt-tool
 LABEL vigil.install-versions="${INSTALL_VERSION_STAMP}"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -61,6 +61,11 @@ ARG BUNDLETOOL_VERSION=1.18.3
 # (e.g. *.bank.acme.example) that drop or 403 plain curl's fingerprint. Ships the
 # `curl_chrome116` wrapper with full curl flag-compatibility.
 ARG CURL_IMPERSONATE_VERSION=1.1.0
+# jwt_tool (ticarpi) — comprehensive JWT testing referenced by
+# agent/skills/jwt-testing/SKILL.md (claim editing, alg:none / key-confusion
+# forgery, kid/jku injection, HMAC secret cracking). Native python alg:none +
+# hashcat/john cover the first-pass set; jwt_tool is the full claim-editing path.
+ARG JWT_TOOL_VERSION=v2.3.0
 
 ENV PATH="/opt/Responder:/opt/offsec-venv/bin:/opt/mitmproxy-venv/bin:/opt/pwncat-venv/bin:${PATH}"
 
@@ -321,6 +326,30 @@ RUN set -eux; \
       cloud_enum --help >/dev/null; \
     fi
 
+# jwt_tool (ticarpi) — cloned at a pinned tag + venv + /usr/local/bin/jwt_tool
+# wrapper, mirroring the cloud_enum pattern (its repo is not packaged for
+# pip/pipx). On first run jwt_tool writes ~/.jwt_tool/jwtconf.ini and then
+# exit(1)s for config review, so we pre-generate the config at build time (the
+# bare run below, tolerated via `|| true`) — otherwise the FIRST in-engagement
+# invocation would be consumed by config setup instead of testing the token.
+# The `--help` run after the config exists is the real exit-0 smoke test.
+RUN set -eux; \
+    if [ "$PRELOADED_TOOLS" != "1" ]; then \
+      git init /opt/jwt_tool && \
+      git -C /opt/jwt_tool remote add origin https://github.com/ticarpi/jwt_tool.git && \
+      git -C /opt/jwt_tool fetch --depth 1 origin "refs/tags/${JWT_TOOL_VERSION}" && \
+      git -C /opt/jwt_tool checkout --detach FETCH_HEAD && \
+      python3 -m venv /opt/jwt_tool-venv && \
+      /opt/jwt_tool-venv/bin/pip install --no-cache-dir "pip==${PIP_VERSION}" && \
+      /opt/jwt_tool-venv/bin/pip install --no-cache-dir termcolor cprint pycryptodomex requests ratelimit && \
+      printf '%s\n' '#!/bin/sh' 'exec /opt/jwt_tool-venv/bin/python /opt/jwt_tool/jwt_tool.py "$@"' \
+        > /usr/local/bin/jwt_tool && \
+      chmod +x /usr/local/bin/jwt_tool && \
+      ( jwt_tool >/dev/null 2>&1 || true ) && \
+      test -f /root/.jwt_tool/jwtconf.ini && \
+      jwt_tool --help >/dev/null; \
+    fi
+
 # selenium (system python3) — drives the apt-installed chromium + chromium-driver
 # for `vigil assess kali browser`, the headless-render / JS-bot-challenge recovery
 # path. The browser driver runs as the SYSTEM `python3 -c ...` (so it can find
@@ -340,7 +369,7 @@ RUN chmod +x /usr/local/bin/start-callback
 RUN printf '%s\n' 'export PATH="/opt/Responder:/opt/offsec-venv/bin:/opt/mitmproxy-venv/bin:/opt/pwncat-venv/bin:$PATH"' > /etc/profile.d/vigil-path.sh
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD command -v dtach >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && command -v jsluice >/dev/null && command -v arjun >/dev/null && command -v xmllint >/dev/null && command -v apkeep >/dev/null && command -v apktool >/dev/null && command -v jadx >/dev/null && command -v adb >/dev/null && command -v bundletool >/dev/null && command -v apksigner >/dev/null && command -v aapt >/dev/null && command -v curl_chrome116 >/dev/null || exit 1
+  CMD command -v dtach >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && command -v jsluice >/dev/null && command -v arjun >/dev/null && command -v xmllint >/dev/null && command -v apkeep >/dev/null && command -v apktool >/dev/null && command -v jadx >/dev/null && command -v adb >/dev/null && command -v bundletool >/dev/null && command -v apksigner >/dev/null && command -v aapt >/dev/null && command -v curl_chrome116 >/dev/null && command -v jwt_tool >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash", "-lc", "mkdir -p /data && exec sleep infinity"]

@@ -69,6 +69,12 @@ CLOUD_EXPOSURE_TOOLS = (
 # xmllint (libxml2-utils package) for the Layer-2 XML XPath check.
 PORT_SCAN_BINARIES = ("xmllint",)
 
+# jwt-testing/SKILL.md references jwt_tool for full claim editing, secret
+# cracking, and key confusion. It is a ticarpi repo cloned at a pinned tag with a
+# /usr/local/bin/jwt_tool wrapper (not packaged for pip/pipx), same shape as
+# cloud_enum.
+JWT_TESTING_BINARIES = ("jwt_tool",)
+
 # Android APK engagements preflight these tools before static/dynamic mobile
 # analysis so an APK-only review does not stall on first use.
 ANDROID_APK_BINARIES = (
@@ -123,6 +129,10 @@ def _dockerfile_has_install_line(text: str, binary: str) -> bool:
     # clone via `go build`, not `go install` — accept the clone of its repo.
     if binary == "s3scanner" and "sa7mon/S3Scanner" in text:
         return True
+    # jwt_tool is cloned (not go/pip/pipx-installed) and exposed via a wrapper —
+    # accept the git clone of its repo as the install line.
+    if binary == "jwt_tool" and "jwt_tool.git" in text:
+        return True
     return False
 
 
@@ -169,6 +179,25 @@ def test_runtime_full_dockerfile_declares_port_scan_binaries():
         "agent/docker/runtime-full/Dockerfile is missing install lines for: "
         f"{missing}. port-scanning/SKILL.md `Per-host port-data presence assertion` "
         "depends on these binaries."
+    )
+
+
+def test_runtime_full_dockerfile_declares_jwt_testing_binaries():
+    """F20 — jwt-testing/SKILL.md reaches for jwt_tool for full claim editing, HMAC
+    secret cracking, and key confusion. If the clone/wrapper is dropped, that skill's
+    jwt_tool invocations die on first use and the skill silently degrades to the
+    native alg:none + hashcat first-pass set only."""
+    text = (
+        RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+        + "\n"
+        + RUNTIME_FULL_EXTERNAL_INSTALLER.read_text(encoding="utf-8")
+    )
+    missing = [
+        name for name in JWT_TESTING_BINARIES if not _dockerfile_has_install_line(text, name)
+    ]
+    assert not missing, (
+        "agent/docker/runtime-full/Dockerfile is missing install lines for JWT testing tools: "
+        f"{missing}. jwt-testing/SKILL.md references these for claim editing / secret cracking."
     )
 
 
@@ -261,6 +290,7 @@ def test_runtime_full_container_has_subdomain_enum_binaries():
         *PORT_SCAN_BINARIES,
         *ANDROID_APK_BINARIES,
         *CLOUD_EXPOSURE_TOOLS,
+        *JWT_TESTING_BINARIES,
     )
     proc = subprocess.run(
         ["docker", "exec", container, "which", *expected],

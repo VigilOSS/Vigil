@@ -21,7 +21,21 @@ These are the raw surfaces for LFI, path traversal, log poisoning, and PHP wrapp
 
 ## Parameter keys that match
 
-`file, path, doc, document, page, pg, template, load, include, read`
+`file, path, doc, document, page, pg, template, load, include, read, folder, root, dir, inc,
+conf`
+
+### Upstream gf param additions (2026-06)
+
+The directory/traversal keys `folder`, `root`, `dir`, `inc`, and `conf` were folded in from the
+upstream gf pattern sets, which carry these path-handling params our set lacked. `inc` is the
+common include shorthand (`?inc=header.php`) and `conf` is config inclusion (`?conf=app.ini`);
+`folder`, `root`, and `dir` carry directory references that feed traversal the same way `path`
+does.
+
+FP guard: these are all path-/file-handling param names, so the recall add stays inside the LFI
+surface rather than leaking into unrelated buckets. Bucket weight only orders triage — it never
+gates inclusion — so a marginal match changes ordering, never suppression. No path fragments
+were added.
 
 ## Path patterns that match
 

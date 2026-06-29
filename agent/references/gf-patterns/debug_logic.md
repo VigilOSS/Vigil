@@ -22,13 +22,38 @@ auth bypass, or direct RCE without any parameter fuzzing required.
 
 ## Parameter keys that match
 
-None — debug_logic matches on path fragments only.
+`debug`, `dbg`, `test`.
+
+This bucket was path-only until the 2026-06 Part 6 expansion. The `?debug=1` /
+`?dbg=1` / `?test=1` toggles are a real debug-mode signal it previously missed,
+so those three param keys now also fire the bucket.
+
+`admin`, `grant`, and `access` are deliberately kept **out** of the debug param
+set — those route to the `privileged_action` bucket (class `bfla`) instead, so
+that function-level-authz state changes are not diluted into debug-mode signal.
 
 ## Path patterns that match
 
+Base set:
 `/admin`, `/debug`, `/dbg`, `/dev`, `/staging`, `/stage`, `/test`, `/internal`, `/mgmt`,
 `/manage`, `/console`, `/dashboard`, `/_profiler`, `/phpinfo`, `/actuator`, `/.git`, `/.env`,
 `/config`, `/backup`
+
+Compound/specific ops & health fragments (the bare `/health`, `/info`, `/status`,
+`/version`, `/metrics`, `/env` forms are deliberately NOT added — they flood content
+corpora):
+`/healthz`, `/readyz`, `/server-status`, `/server-info`, `/package.json`,
+`/actuator/health`, `/actuator/env`, `/actuator/mappings`, `/actuator/metrics`,
+`/actuator/beans`, `/prometheus`
+
+**Plan #13 — build / dependency manifests + Java deployment descriptor**
+(source & dependency disclosure, mirroring the existing `/package.json` entry):
+`/composer.json`, `/composer.lock`, `/yarn.lock`, `/package-lock.json`,
+`/web-inf/web.xml`. These are the build-artifact half of Plan #13; the VCS / IDE
+dotfile half (`.svn`, `.hg`, `.gitlab-ci.yml`, `.ds_store`, `.terraform`,
+`.tfstate`) lives in the `interestingext` bucket. The leading-slash form
+(`/composer.json`, not bare `composer.json`) preserves boundary precision, so
+`/mycomposer.json` does not match.
 
 ## Weight and priority interpretation
 

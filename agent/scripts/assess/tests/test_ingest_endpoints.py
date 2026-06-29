@@ -148,3 +148,137 @@ def test_ingest_endpoints_persists_content_type_and_survives_retype(
         "was not persisted, so the typer saw an empty content_type"
     )
     assert after[0]["content_type"] == "application/json"
+
+
+def _run_ingest_line(tmp_path, monkeypatch, capsys, line: str) -> None:
+    """Run ingest-endpoints over a single JSONL `line` with the stubbed backend."""
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # db_init requires the file to already exist
+    db_init(str(db))
+    input_file = tmp_path / "endpoints.jsonl"
+    input_file.write_text(line + "\n", encoding="utf-8")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        ingest_endpoints, "load_config", lambda *a, **k: _Cfg(str(tmp_path))
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "auth_active_context", lambda *a, **k: "anonymous"
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "AssessmentClient", lambda *a, **k: fake_client
+    )
+    ingest_endpoints.run(_ingest_ns(str(db), str(input_file), str(tmp_path)))
+    capsys.readouterr()  # drain the ingest summary
+    return str(db)
+
+
+def test_ingest_explicit_unknown_type_falls_through_to_typer(
+    tmp_path, monkeypatch, capsys
+):
+    # Fix 5 / Issues 5,D: an explicit `type=="unknown"` is NOT authoritative — it
+    # falls through to classify_type(), which types `/v1/users` as `api` (the
+    # bare-URL path shape). Without the guard the row would persist as `unknown`.
+    line = json.dumps(
+        {"method": "GET", "url": "https://h.example/v1/users", "type": "unknown"}
+    )
+    db = _run_ingest_line(tmp_path, monkeypatch, capsys, line)
+    rows = db_query(
+        str(db),
+        "SELECT type FROM work_items WHERE url = ?",
+        ("https://h.example/v1/users",),
+    )
+    assert len(rows) == 1, "ingest-endpoints did not create the work item"
+    assert rows[0]["type"] == "api", (
+        "explicit type=='unknown' was treated as authoritative — it must fall "
+        "through to classify_type()"
+    )
+
+
+def test_ingest_explicit_real_type_still_authoritative(
+    tmp_path, monkeypatch, capsys
+):
+    # The guard ONLY bypasses the `unknown` sentinel — a real explicit type still
+    # wins over classify_type (`/v1/users` would otherwise type `api`).
+    line = json.dumps(
+        {"method": "GET", "url": "https://h.example/v1/users", "type": "auth_entry"}
+    )
+    db = _run_ingest_line(tmp_path, monkeypatch, capsys, line)
+    rows = db_query(
+        str(db),
+        "SELECT type FROM work_items WHERE url = ?",
+        ("https://h.example/v1/users",),
+    )
+    assert len(rows) == 1
+    assert rows[0]["type"] == "auth_entry"
+
+
+def test_ingest_endpoints_scope_filter_excludes_out_of_scope_hosts(
+    tmp_path, monkeypatch, capsys
+):
+    """gau/wayback historical URLs routinely surface reachable-but-out-of-scope
+    hosts (e.g. *.bank.acme.example subdomains the program excluded). ingest-endpoints
+    must admit ONLY scope.json-allowlisted hosts and record the rest as skipped
+    (terminal_reason out-of-scope), never POSTing a request-observation for them
+    (so no service/surface is created for an out-of-scope host). Covers both the
+    denylist carve-out and the no-allowlist-match case."""
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # db_init requires the file to already exist
+    db_init(str(db))
+
+    # In scope: *.example.com (apex + every subdomain). Carve-out: bad.example.com.
+    (tmp_path / "scope.json").write_text(
+        json.dumps({"hosts": ["*.example.com"], "out_of_scope": ["bad.example.com"]}),
+        encoding="utf-8",
+    )
+
+    lines = "\n".join(
+        [
+            json.dumps({"method": "GET", "url": "https://good.example.com/api/v1/users"}),  # admitted
+            json.dumps({"method": "GET", "url": "https://bad.example.com/b"}),              # denied carve-out
+            json.dumps({"method": "GET", "url": "https://evil.other.org/c"}),               # no allowlist match
+        ]
+    )
+    input_file = tmp_path / "endpoints.jsonl"
+    input_file.write_text(lines + "\n", encoding="utf-8")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        ingest_endpoints, "load_config", lambda *a, **k: _Cfg(str(tmp_path))
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "auth_active_context", lambda *a, **k: "anonymous"
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "AssessmentClient", lambda *a, **k: fake_client
+    )
+
+    ingest_endpoints.run(_ingest_ns(str(db), str(input_file), str(tmp_path)))
+    capsys.readouterr()  # drain the ingest summary
+
+    # In-scope host admitted as a real (pending) work item.
+    good = db_query(
+        str(db),
+        "SELECT status FROM work_items WHERE url = ?",
+        ("https://good.example.com/api/v1/users",),
+    )
+    assert len(good) == 1, "in-scope host was not admitted to the work buffer"
+    assert good[0]["status"] == "pending"
+
+    # Both out-of-scope hosts recorded as skipped with the structured reason —
+    # the denylist carve-out AND the no-allowlist-match case.
+    for oos_url in ("https://bad.example.com/b", "https://evil.other.org/c"):
+        rows = db_query(
+            str(db),
+            "SELECT status, cluster_key, terminal_reason FROM work_items WHERE url = ?",
+            (oos_url,),
+        )
+        assert len(rows) == 1, f"no work_items row recorded for out-of-scope {oos_url}"
+        assert rows[0]["status"] == "skipped", f"{oos_url} was not skipped"
+        assert rows[0]["cluster_key"] == "skipped:out-of-scope"
+        assert (rows[0]["terminal_reason"] or "").startswith("skipped:out-of-scope")
+
+    # The out-of-scope hosts never got a request-observation POST (so no service
+    # or surface is created for them); only the admitted host did.
+    observed_urls = {o.get("url") for o in fake_client.observations}
+    assert observed_urls == {"https://good.example.com/api/v1/users"}
