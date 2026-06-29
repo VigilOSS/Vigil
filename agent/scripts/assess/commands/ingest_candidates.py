@@ -11,8 +11,9 @@ from assess.lib.auth import auth_active_context
 from assess.lib.candidate_records import candidate_metadata, candidate_type, json_text, signal_tokens
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.db import db_init, db_insert_work_item
+from assess.lib.db import db_init, db_insert_out_of_scope_work_item, db_insert_work_item
 from assess.lib.params import extract_path_params, extract_query_params, extract_url_path, generate_params_sig
+from assess.lib.scope import host_admitted, ingest_scope_filter
 
 
 def register(subparsers) -> None:
@@ -44,6 +45,15 @@ def run(args) -> None:
     eng_dir = cfg.engagement_dir
     auth_context = auth_active_context(eng_dir)
     count = 0
+
+    # Scope admission gate (defense-in-depth) — same per-URL semantics as
+    # ingest-endpoints. A curated candidate row whose host is not admitted by
+    # scope.json (e.g. carried through from a gau/wayback corpus) is recorded
+    # skipped instead of admitted as probeable work. Inactive when scope.json has
+    # no allowlist (see scope.ingest_scope_filter).
+    scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
+    out_of_scope_count = 0
+    out_of_scope_warned_hosts: set[str] = set()
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         with open(records_file, "r", encoding="utf-8") as input_stream:
@@ -81,6 +91,43 @@ def run(args) -> None:
                 metadata = candidate_metadata(record, case_type, signals)
                 params_sig = generate_params_sig(query_params, body_params)
                 parsed = urlparse(url)
+                cand_host = (parsed.hostname or "").rstrip(".").lower()
+
+                # Out-of-scope candidates are recorded skipped and never POSTed as
+                # observations (so no service/surface is created for an
+                # out-of-scope host) — auditable + reversible, identical to the
+                # ingest-endpoints gate.
+                if (
+                    scope_filter_active
+                    and cand_host
+                    and not host_admitted(cand_host, scope_allow, scope_deny)
+                ):
+                    out_of_scope_count += 1
+                    if cand_host not in out_of_scope_warned_hosts:
+                        out_of_scope_warned_hosts.add(cand_host)
+                        print(
+                            f"WARN: {cand_host} is out of scope (no scope.json "
+                            f"allowlist match, or matched an out_of_scope carve-out). "
+                            f"Recording its candidate URLs as skipped "
+                            f"(terminal_reason='out-of-scope') instead of admitting them.",
+                            file=sys.stderr,
+                        )
+                    db_insert_out_of_scope_work_item(
+                        db_path,
+                        method=method,
+                        url=url,
+                        url_path=url_path,
+                        query_params=query_params,
+                        body_params=body_params,
+                        path_params=path_params,
+                        cookie_params=cookie_params,
+                        case_type=case_type,
+                        source=source,
+                        params_key_sig=params_sig,
+                        auth_context=auth_context,
+                        host=cand_host,
+                    )
+                    continue
 
                 observation_payload: dict[str, object] = {
                     "source": source,
@@ -163,3 +210,12 @@ def run(args) -> None:
                 count += 1
 
     print(f"[ingest] Ingested {count} candidate records from source '{source}'")
+    if out_of_scope_count:
+        print(
+            f"[ingest] Excluded {out_of_scope_count} candidate(s) across "
+            f"{len(out_of_scope_warned_hosts)} out-of-scope host(s) "
+            f"(status='skipped', terminal_reason='out-of-scope'). Reachable but not "
+            f"in scope.json — fix scope.json and re-ingest to admit them; review with "
+            f"`vigil assess work-buffer <db> stats --by reason`.",
+            file=sys.stderr,
+        )

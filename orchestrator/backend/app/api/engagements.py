@@ -96,15 +96,7 @@ def get_engagements(
         description="Filter blue engagements by platform tag.",
     ),
 ) -> list[EngagementResponse]:
-    engagements = list_engagements()
-    if status_filter:
-        engagements = [engagement for engagement in engagements if engagement.status == status_filter]
-    if engagement_type:
-        engagements = [
-            engagement
-            for engagement in engagements
-            if engagement.engagement_type == engagement_type
-        ]
+    engagements = list_engagements(status_filter=status_filter, engagement_type=engagement_type)
     if customer:
         engagements = [
             engagement

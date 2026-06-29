@@ -40,7 +40,7 @@ from types import SimpleNamespace
 from . import vuln_taxonomy
 from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
-from .identity import identity_names, resolve_identity
+from .identity import resolve_identity
 
 # Re-exports — keep this block ordered by source module so the public surface
 # is grep-friendly. Tests patch a number of these via the legacy
@@ -218,10 +218,26 @@ def _identity_header_pairs(material: dict) -> list[tuple[str, str]]:
     if isinstance(cookies, dict) and cookies:
         cookie = "; ".join(f"{k}={v}" for k, v in cookies.items())
         pairs.append(("Cookie", cookie))
-    token = material.get("token") or material.get("bearer")
+    token = _identity_bearer_token(material)
     if token and not any(name.lower() == "authorization" for name, _ in pairs):
         pairs.append(("Authorization", f"Bearer {token}"))
     return pairs
+
+
+def _identity_bearer_token(material: dict) -> str:
+    """Return a bearer token from either legacy top-level fields or backend
+    credential ``tokens`` material.
+    """
+    for value in (material.get("token"), material.get("bearer")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    tokens = material.get("tokens")
+    if isinstance(tokens, dict):
+        for key in ("access_token", "accessToken", "bearer", "token", "id_token", "idToken"):
+            value = tokens.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
 
 
 def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> bool:
@@ -314,7 +330,12 @@ def kali_exec(
     started_at_iso = _utcnow_iso()
     started_monotonic = time.monotonic()
     scope_version = _scope_version(eng_dir)
-    auth_context = _auth_context(eng_dir)
+    # A plain kali exec does not apply credential material. Keep its audit label
+    # anonymous unless the caller explicitly asks for an identity and that
+    # identity is actually injected into the command below. This avoids a
+    # credentials backend read on every recon probe and prevents unauthenticated
+    # commands from being counted as active-identity coverage.
+    auth_context = "anonymous"
     _identity_name: str | None = None
     _identity_material: dict = {}
     if identity is not None:
@@ -322,8 +343,7 @@ def kali_exec(
         if not _identity_material:
             print(
                 f"warning: --identity '{identity}' not found in the credential "
-                f"store (known: {', '.join(identity_names(eng_dir)) or 'none'}); "
-                "no auth material to apply.",
+                "store or temporarily unavailable; no auth material to apply.",
                 file=sys.stderr,
             )
 

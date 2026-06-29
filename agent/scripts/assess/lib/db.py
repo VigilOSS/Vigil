@@ -4,6 +4,7 @@ Kills the 19-positional-parameter db_insert_case() function and SQL injection su
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -235,6 +236,78 @@ def db_connect(db_path: str) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def db_insert_out_of_scope_work_item(
+    db_path: str,
+    *,
+    method: str,
+    url: str,
+    url_path: str,
+    query_params=None,
+    body_params=None,
+    path_params=None,
+    cookie_params=None,
+    case_type: str = "unknown",
+    source: str = "",
+    params_key_sig: str = "",
+    auth_context: str = "anonymous",
+    host: str = "",
+) -> None:
+    """Record a URL whose host is NOT admitted by scope.json as a skipped row.
+
+    Shared by the URL-ingest commands (``ingest-endpoints``,
+    ``ingest-candidates``) so a reachable-but-out-of-scope host — gau/wayback
+    historical URLs, or a curated candidate carrying an OOS host — is recorded
+    auditable and reversible instead of admitted as probeable work. The row is
+    ``status='skipped'``, ``cluster_key='skipped:out-of-scope'``,
+    ``terminal_reason='skipped:out-of-scope | <host>'`` so
+    `work-buffer stats --by reason` / `list-clusters` group it and a later
+    scope.json fix + re-ingest re-admits it. The caller skips the backend
+    request-observation POST, so an out-of-scope host never creates a service or
+    surface either.
+
+    Mirrors ``ingest-endpoints``'s egress-blocked deferral shape, but uses
+    ``status='skipped'`` (out-of-scope is a hard "never test" exclusion, not a
+    resolve-later deferral).
+    """
+    if not url or url == "null":
+        return
+    from assess.lib.classify_buckets import tagged_terminal_reason
+
+    def _as_text(value) -> str:
+        if value is None:
+            return "{}"
+        return json.dumps(value) if isinstance(value, dict) else str(value)
+
+    queue_key = f"skipped:out-of-scope:{host}:{url}"
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute(
+            """INSERT OR IGNORE INTO work_items (
+                queue_key, auth_context, method, url, url_path,
+                query_params, body_params, path_params, cookie_params,
+                type, source, status, params_key_sig,
+                cluster_key, terminal_reason
+            ) VALUES (
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?
+            )""",
+            (
+                queue_key, auth_context, method, url, url_path,
+                _as_text(query_params), _as_text(body_params),
+                _as_text(path_params), _as_text(cookie_params),
+                case_type, source, "skipped", params_key_sig,
+                "skipped:out-of-scope",
+                tagged_terminal_reason("out-of-scope", host),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def db_insert_work_item(
     db_path: str,
     *,
@@ -271,6 +344,7 @@ def db_insert_work_item(
     selected_by: str | None = None,
     triage_rationale: str | None = None,
     live_status: str | None = None,
+    demote_dead_archive: bool = False,
     curated: bool = False,
     connection: sqlite3.Connection | None = None,
 ) -> None:
@@ -298,6 +372,19 @@ def db_insert_work_item(
         query_params=query_params,
         body_params=body_params,
         path_params=path_params,
+        # Boost-only context layer (classify-context-and-surface 2026-06,
+        # Fix 1): thread the full URL authority, ingest source, and liveness
+        # into scoring so nonprod/admin host_root rows and non-default-port /
+        # live / source-analysis surfaces are no longer hard-0. All three are
+        # already in scope as this function's params.
+        url=url,
+        source=source,
+        live_status=live_status,
+        # Fix 6 (Issue H): default-OFF dead-archive demotion. When the caller
+        # opts in, a dead `gau-archive` row that matched no gf bucket is parked
+        # at score 0 with a `low-signal-cluster` terminal_reason so the archive
+        # tail stops competing with live surfaces in priority mode.
+        demote_dead_archive=demote_dead_archive,
     )
     curated_metadata = curated or any(
         value is not None

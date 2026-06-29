@@ -12,12 +12,20 @@ import json
 import shutil
 import subprocess
 import sys
+from typing import Any
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
 
 _ENGAGEMENT_SCOPED_PREFIXES = ("intel", "activity-entries")
+_PAGED_ASSESSMENT_ENDPOINTS = {
+    "coverage-items": 5000,
+    "probe-runs": 5000,
+    "request-observations": 5000,
+    "request-variants": 5000,
+    "surfaces": 5000,
+}
 
 
 def register(subparsers) -> None:
@@ -52,6 +60,30 @@ def register(subparsers) -> None:
 def _is_engagement_scoped(endpoint: str) -> bool:
     head = endpoint.strip("/").split("/", 1)[0]
     return head in _ENGAGEMENT_SCOPED_PREFIXES
+
+
+def _fetch_assessment_endpoint(client: AssessmentClient, endpoint: str) -> Any:
+    path, _sep, raw_query = endpoint.partition("?")
+    normalized_path = path.strip("/")
+    page_limit = _PAGED_ASSESSMENT_ENDPOINTS.get(normalized_path)
+    if page_limit is None or "/" in normalized_path:
+        return client.get(endpoint)
+
+    if raw_query and any(
+        item.startswith("limit=") or item.startswith("offset=")
+        for item in raw_query.split("&")
+    ):
+        return client.get(endpoint)
+    paged_endpoint = normalized_path if not raw_query else endpoint
+    print(
+        f"fetch: auto-paging {normalized_path} with page_size={page_limit}; "
+        "stdout will be one combined JSON array. Add ?limit=N&offset=M to fetch "
+        "one page.",
+        file=sys.stderr,
+    )
+    rows = client.get_all_pages(paged_endpoint, page_size=page_limit)
+    print(f"fetch: fetched {len(rows)} {normalized_path} row(s) across all pages.", file=sys.stderr)
+    return rows
 
 
 _JQ_AVAILABLE: bool | None = None
@@ -117,7 +149,7 @@ def run(args) -> None:
                 endpoint = "intel/summary"
             result = client.get_engagement(endpoint)
         else:
-            result = client.get(endpoint)
+            result = _fetch_assessment_endpoint(client, endpoint)
 
     if isinstance(result, str):
         if args.jq:

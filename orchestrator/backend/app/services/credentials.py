@@ -54,15 +54,14 @@ def resolve_identity(
     * unknown identity -> ``(requested, {})`` so the caller can warn while the
       requested name is still recorded as the probe's auth_context.
     """
-    loaded = load_identities(engagement_id)
-    identities: dict[str, dict[str, Any]] = loaded["identities"]
     if requested is None:
-        if not identities:
+        material = db.get_active_credential(engagement_id)
+        if material is None:
             return (None, {})
-        active = loaded["active_identity"]
-        return (active, identities.get(active, {}))
+        return (str(material.get("identity_name") or DEFAULT_IDENTITY), material)
     requested = requested.strip()
-    return (requested, identities.get(requested, {}))
+    material = db.get_credential(engagement_id, requested)
+    return (requested, material or {})
 
 
 def upsert_material(
@@ -164,7 +163,7 @@ def capture_material(
         raw={k: v for k, v in existing.items() if k not in _MODELED_KEYS},
         notes=str(existing.get("notes") or ""),
         expires_at=existing.get("expires_at"),
-        make_active=not db.list_credentials(engagement_id),
+        make_active=db.get_active_credential(engagement_id) is None,
     )
 
 

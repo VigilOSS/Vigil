@@ -38,6 +38,19 @@ def _create_surface(client) -> dict:
     return response.json()
 
 
+def _create_surface_with_descriptor(client, descriptor: str) -> dict:
+    payload = {
+        "surface_type": "object_reference",
+        "target_descriptor": descriptor,
+        "source_name": "surface-collector",
+        "rationale": "candidate parameter",
+        "evidence_ref": "scans/katana.txt:14",
+    }
+    response = client.post(f"{ASSESSMENT_BASE}/surfaces", json=payload)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 def test_patch_surface_resolves_to_covered_with_rationale(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
     created = _create_surface(client)
@@ -58,6 +71,21 @@ def test_patch_surface_resolves_to_covered_with_rationale(client, isolate_settin
     assert "vulnerability-analyst confirmed" in body["rationale"]
     # Original rationale is retained because update_surface appends.
     assert "GET handler with numeric id parameter" in body["rationale"]
+
+
+def test_list_surfaces_is_bounded_and_paginates(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    created = [
+        _create_surface_with_descriptor(client, f"https://example.test/api/{idx}")
+        for idx in range(3)
+    ]
+
+    response = client.get(f"{ASSESSMENT_BASE}/surfaces?limit=2&offset=1")
+
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    assert len(rows) == 2
+    assert [row["id"] for row in rows] == [created[1]["id"], created[0]["id"]]
 
 
 def test_patch_surface_rejects_unknown_id(client, isolate_settings):

@@ -363,7 +363,7 @@ def _run_scope_gate(
         print(f"check-phase-readiness: backend services fetch failed: {exc}", file=sys.stderr)
         sys.exit(1)
     try:
-        surfaces = client.get("surfaces")
+        surfaces = _get_all_pages(client, "surfaces")
     except AssessError as exc:
         print(f"check-phase-readiness: backend surfaces fetch failed: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -389,6 +389,13 @@ def _run_scope_gate(
         strict_vendor_saas=bool(args.strict_vendor_saas),
     )
     return report, (not report["ready"])
+
+
+def _get_all_pages(client: AssessmentClient, endpoint: str) -> Any:
+    pager = getattr(client, "get_all_pages", None)
+    if callable(pager):
+        return pager(endpoint)
+    return client.get(endpoint)
 
 
 def _run_by_host(

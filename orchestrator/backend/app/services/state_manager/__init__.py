@@ -141,6 +141,7 @@ from .oob import (
 )
 from .assessment_summary import (
     assessment_summary,
+    clear_assessment_summary_cache,
 )
 
 # Private / monkeypatched names, re-exported by object reference so identity is
@@ -265,4 +266,5 @@ __all__ = [
     "get_oob_probe_by_nonce",
     "correlate_oob_interaction",
     "assessment_summary",
+    "clear_assessment_summary_cache",
 ]

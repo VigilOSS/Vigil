@@ -13,6 +13,7 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.db import db_init, db_insert_work_item
 from assess.lib.params import extract_url_path, generate_params_sig
+from assess.lib.scope import host_admitted, ingest_scope_filter
 
 _HTTP_METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "trace")
 
@@ -306,6 +307,34 @@ def run(args) -> None:
     paths = spec.get("paths") or {}
     count = 0
     skipped = 0
+
+    # Scope admission gate (defense-in-depth). Every operation in this spec shares
+    # one base host, so a single check suffices. A spec that declares an ABSOLUTE
+    # `servers`/`host` url (used as-is by _resolve_base_url) bypasses the
+    # _engagement_fallback_base scope check — so an out-of-scope spec host would
+    # otherwise ingest every operation as probeable work. Reachability is not
+    # scope (shared-constraints §1): refuse the whole spec. Composes with the
+    # relative/empty-base refusal below — spec_host is "" for a relative base, so
+    # this check is skipped and that case falls through to the existing handler.
+    # Inactive when scope.json has no allowlist (see scope.ingest_scope_filter).
+    scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
+    spec_host = (urlparse(base_url).hostname or "").rstrip(".").lower()
+    if (
+        scope_filter_active
+        and spec_host
+        and not host_admitted(spec_host, scope_allow, scope_deny)
+    ):
+        _warn(
+            f"spec base host '{spec_host}' is out of scope (no scope.json allowlist "
+            f"match, or matched an out_of_scope carve-out). Refusing to ingest any of "
+            f"this spec's {len(paths)} path(s) — reachability is not scope. Add the "
+            f"host to scope.json and re-run, or fetch a spec whose servers url is in scope."
+        )
+        print(
+            f"[ingest] Ingested 0 endpoints from spec (version {spec_version}); "
+            f"refused {len(paths)} path(s): base host out of scope (see warning above)"
+        )
+        return
 
     if not base_url.startswith(("http://", "https://")):
         _warn(

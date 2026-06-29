@@ -28,6 +28,15 @@ not a prototype. Every change should leave the codebase clearer than it found it
   so nothing half-lands, and keep generated artifacts, schemas, and the map in sync in the same change.
 - **Durable over expedient.** Fix the root cause, not the symptom. Choose the design that still reads
   well in a year and write it so the next maintainer needs no archaeology.
+- **Coverage is the mission; difficulty never narrows scope.** This is threat-hunting tooling — the
+  goal is *precision and deep coverage* so a real finding is never missed. Never drop, defer, or
+  down-scope a detection/classification improvement because the correct mechanism is more code or
+  harder to build; implement the behaviorally-correct, robust version. The *only* reason to reshape a
+  change is correctness — an additive/boost-only invariant, a pinned regression, or a mechanism that
+  would misclassify (e.g. naively splitting compound param keys routes every `?return_url=` to SSRF
+  because `url` is a high-weight key). When correctness forces a reshape, you change *how* the
+  improvement lands (e.g. curated whole-keys + a capped weak-signal tier), not *whether* it lands. A
+  simpler mechanism that misroutes or misses signal is not an acceptable trade for less code.
 
 # Version control: Jujutsu (jj)
 
