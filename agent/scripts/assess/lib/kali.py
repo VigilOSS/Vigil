@@ -65,12 +65,18 @@ from .kali_audit import (
     _write_failed_audit_marker,
 )
 from .kali_cli import (
+    CRAWL_RATE_DEFAULT,
+    CRAWL_RATE_HARD_CAP,
     ScopedErrorParser,
     add_passthrough_args_flag,
     add_required_kali_flags,
+    count_list_targets,
     emit_result,
     extend_cmd_with_extra_args,
+    incomplete_list_run_warning,
     kali_args_to_kwargs,
+    parse_list_progress,
+    resolve_crawl_rate_limit,
 )
 from .kali_output import (
     _REQUIRED_HEADER_INJECTABLE,
@@ -362,6 +368,7 @@ def kali_exec(
             stderr_preview="",
             timed_out=False,
             partial_results=False,
+            resolved_argv=list(cmd),
         )
 
     _check_container_running(container_name)
@@ -886,6 +893,9 @@ def kali_exec(
             transport_error_detail=transport_error_detail,
             waf_challenge=waf_challenge,
             waf_challenge_detail=waf_challenge_detail,
+            # ``cmd`` has been mutated in place by the identity / required-header /
+            # --resolve-pin injectors above, so it is the ACTUAL argv that ran.
+            resolved_argv=list(cmd),
         )
     finally:
         client.close()
@@ -916,6 +926,12 @@ __all__ = [
     "extend_cmd_with_extra_args",
     "kali_args_to_kwargs",
     "emit_result",
+    "resolve_crawl_rate_limit",
+    "CRAWL_RATE_DEFAULT",
+    "CRAWL_RATE_HARD_CAP",
+    "count_list_targets",
+    "parse_list_progress",
+    "incomplete_list_run_warning",
     # Output + RSS (from kali_output)
     "KaliResult",
     "_REQUIRED_HEADER_INJECTABLE",

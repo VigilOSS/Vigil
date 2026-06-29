@@ -57,6 +57,17 @@ OOB callbacks use the shared interactsh infrastructure — agents do not pass ra
 **Retries:** `-retries 2`
 **Stats display:** `-stats`
 
+### WAF resilience (typed flags)
+
+- **`-mhe 50` (max-host-error) is injected by default.** nuclei's own default (~30) makes it
+  ABANDON a host after that many errors — a WAF's 403 storm hits it in seconds, silently killing
+  template coverage on exactly the hardest hosts. The raised default keeps the sweep on-host; raise
+  it further on heavily-WAF'd targets (confirm `-mhe 0` semantics with `vigil assess kali tool-help nuclei`).
+- **`-random-agent`** rotates the User-Agent so a UA-based scanner block does not drop every request.
+- **`-H "<header>"`** (repeatable) sends browser-like headers past edge UA/header filters.
+- **Lead with explicit `-t` template paths.** `-as` (automatic) keys off tech fingerprinting, which a
+  CDN/WAF defeats, so it under-fires alone — treat `-as` as additive, not the primary template source.
+
 ## Output
 
 **Text:** `-o /engagements/$ENGAGEMENT_KEY/scans/nuclei_results.txt`

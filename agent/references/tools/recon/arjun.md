@@ -1,5 +1,6 @@
 ---
 description: Hidden HTTP parameter discovery (GET/POST/JSON/XML), passive OSINT param mining, auth-aware
+skill: parameter-fuzzing
 ---
 
 # arjun
@@ -15,6 +16,25 @@ Run all target-facing Arjun via `vigil assess kali arjun` (typed verb, audit-fla
 - **Tuning / politeness** (`--stable`, `--rate-limit`, `-d` delay, `-T` timeout, `-t` threads, `-c` chunk size): essential on content-heavy targets.
 - **Output:** JSON is ALWAYS written under `scans/arjun/<target>/<hash>.json` for `ingest-arjun`; `-oT` text and `-oB` Burp are also available.
 - **Misc:** `--include` (data in every request), `--casing` (`like_this`/`likeThis`/`likethis`), `--disable-redirects`, `-w` custom wordlist (default = Arjun's full `db/large.txt`).
+
+## One-shot: `vigil assess arjun-sweep`
+The three steps below (select → per-method scan → ingest) are composed into a single audited verb:
+`vigil assess arjun-sweep <cases.db> [--param-poor-only] [--max-per-host N] [--include-unknown]
+--technique PARAM-DISCOVERY --intent "..." --probe-kind fingerprint --phase consume-test --timeout 1800`.
+It gates the list, scans **each method-list under its own `-m`** (so POST/JSON/XML body surfaces are
+not scanned as GET), and **always ingests** — removing the foot-guns (single-`-m` union scan,
+forgotten ingest). It is **sized to finish**: `--stable` is opt-in (off), `-T 7` fails dead targets
+fast, and `--max-targets 100`/method caps the list so it completes inside `--stage-timeout` (deferred
+targets are reported, not dropped). Drop to the manual steps below only for `--passive` (single-`-u`)
+harvesting or per-call control.
+
+> **A timed-out arjun run is NOT a "no params" negative.** A slow config (low `--rate-limit` ×
+> `--stable` × high `-T`) over a large or junk (`--include-unknown`/Wayback) list gets SIGTERM-killed
+> after only a couple of targets; its empty `-oJ` then masquerades as a clean result. The wrapper now
+> prints a loud `INCOMPLETE: arjun ... ~K of N targets` warning on any timed-out/killed list run —
+> treat that as "re-run on a smaller curated live list, sized to finish", never as a verdict. **Size
+> to finish > scan everything once**: a completed run over 16 confirmed-live API endpoints is worth
+> more than a killed run over 134 historic URLs.
 
 ## Workflow — discover → enrich → route → test
 1. **Gate the target list.** NEVER aim Arjun at a raw URL dump or inert assets — on a content-heavy target that's thousands of requests for nothing. Build a disciplined list first:

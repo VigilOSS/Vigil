@@ -287,10 +287,14 @@ def test_verb_translates_argv_into_underlying_command(
                 "recon",
                 "--timeout",
                 "60",
+                # -H / -mc are now TYPED httpx flags; use unmodeled flags here so
+                # this case still exercises the --extra-args passthrough mechanism
+                # (and the quoted-segment shlex split) without colliding with a
+                # typed short flag.
                 "--extra-args",
-                "-H 'X-Forwarded-For: 127.0.0.1' -mc 200",
+                "-mr 'X-Forwarded-For: 127.0.0.1' -debug",
             ],
-            ["-H", "X-Forwarded-For: 127.0.0.1", "-mc", "200"],
+            ["-mr", "X-Forwarded-For: 127.0.0.1", "-debug"],
         ),
         (
             "ffuf",
@@ -309,10 +313,12 @@ def test_verb_translates_argv_into_underlying_command(
                 "consume-test",
                 "--timeout",
                 "1800",
+                # -H / -t are now TYPED ffuf flags; use an unmodeled flag here so
+                # this case still exercises the --extra-args passthrough.
                 "--extra-args",
-                "-H 'X-Real-IP: 127.0.0.1' -t 50",
+                "-mr 'X-Real-IP: 127.0.0.1' -v",
             ],
-            ["-H", "X-Real-IP: 127.0.0.1", "-t", "50"],
+            ["-mr", "X-Real-IP: 127.0.0.1", "-v"],
         ),
         (
             "sqlmap",

@@ -190,8 +190,12 @@ def test_rate_cap_clamps_httpx_and_katana(monkeypatch, tmp_path):
     assert katana_runs[0][katana_runs[0].index("-rlm") + 1] == "300"  # 5*60
 
 
-def test_rate_cap_unset_keeps_verb_default(monkeypatch, tmp_path):
-    _scope(tmp_path)  # no rate_limit → default 150, no katana -rl
+def test_rate_cap_unset_injects_safe_crawl_default(monkeypatch, tmp_path):
+    # No program rate_limit configured. The bulk httpx liveness pass keeps its
+    # own verb default (150), but the katana CRAWL must NOT ride katana's built-in
+    # 150 req/s — it gets the safe crawl default (10 req/s, 600 req/min) so a deep
+    # crawl stays polite by capping rate, not depth.
+    _scope(tmp_path)
     hosts_file = _hosts_file(tmp_path, ["live.example.com"])
     captured: list[list[str]] = []
     live_rows = {"80,443": ['{"url":"https://live.example.com","input":"live.example.com"}']}
@@ -202,7 +206,12 @@ def test_rate_cap_unset_keeps_verb_default(monkeypatch, tmp_path):
     httpx_runs = [c for c in captured if c and c[0] == "httpx"]
     assert httpx_runs[0][httpx_runs[0].index("-rate-limit") + 1] == "150"
     katana_runs = [c for c in captured if c and c[0] == "katana"]
-    assert "-rl" not in katana_runs[0]
+    assert "-rl" in katana_runs[0]
+    assert katana_runs[0][katana_runs[0].index("-rl") + 1] == "10"
+    assert katana_runs[0][katana_runs[0].index("-rlm") + 1] == "600"  # 10*60
+    # JS-aware + scope-safe crawl defaults are baked in.
+    assert "-jsl" in katana_runs[0]
+    assert katana_runs[0][katana_runs[0].index("-fs") + 1] == "fqdn"
 
 
 @pytest.mark.parametrize(

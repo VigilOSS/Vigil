@@ -35,7 +35,7 @@ from assess.commands.ingest_httpx import ingest_httpx_results
 from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.discovery import denoise_hosts
-from assess.lib.kali import kali_exec
+from assess.lib.kali import kali_exec, resolve_crawl_rate_limit
 from assess.lib.kali_output import _apply_required_headers, _required_headers
 from assess.lib import runtime_route, scope
 
@@ -96,7 +96,13 @@ def register(subparsers) -> None:
              "amplifies httpx memory and was an OOM (RC137) trigger on large lists.",
     )
     p.add_argument("--no-crawl", dest="no_crawl", action="store_true", help="Skip the katana crawl stage.")
-    p.add_argument("--katana-depth", dest="katana_depth", default="2", help="katana -d crawl depth (default 2)")
+    p.add_argument("--katana-depth", dest="katana_depth", default="4",
+                   help="katana -d crawl depth (default 4; the fleet crawl fans the whole live "
+                        "set through one blocking call — raise to 5 for a focused re-crawl).")
+    p.add_argument("--katana-rate", dest="katana_rate", default="",
+                   help="katana -rl req/s for the crawl. Default 10, hard-capped at 20, clamped "
+                        "DOWN to the program rate ceiling — so a deep crawl never rides katana's "
+                        "built-in 150 req/s.")
     p.add_argument(
         "--katana-extra-args",
         dest="katana_extra_args",
@@ -413,7 +419,8 @@ _ARG_DEFAULTS = {
     "revalidate_ports": _REVALIDATE_PORTS,
     "tech_detect": False,
     "no_crawl": False,
-    "katana_depth": "2",
+    "katana_depth": "4",
+    "katana_rate": "",
     "katana_extra_args": "",
     "db_path": "",
     "stage_timeout": 1800,
@@ -631,21 +638,25 @@ def run(args) -> None:
             # not blow up the engagement disk with every fetched page (the crawl
             # only needs the discovered URL graph here; bodies are fetched
             # selectively downstream by gau-secrets / js-mining).
+            # `-jsl` adds jsluice endpoint extraction (real coverage, not just the
+            # link graph); `-fs fqdn` keeps the active crawler on the exact seeded
+            # in-scope hosts (it never probes an out-of-scope sibling subdomain it
+            # finds in a link). `-or -ob` already omit body/raw to bound disk.
             katana_cmd = [
-                "katana", "-list", seed_container, "-jc", "-d", str(args.katana_depth),
+                "katana", "-list", seed_container, "-jc", "-jsl",
+                "-d", str(args.katana_depth), "-fs", "fqdn",
                 "-or", "-ob",
                 "-jsonl", "-silent", "-o", katana_container,
             ]
-            # Rate cap (stage 3): clamp katana's per-second / per-minute request
-            # rate to the configured GLOBAL ceiling. katana -rl is req/s and
-            # -rlm is req/min (both single global token buckets); set both so
-            # neither dimension exceeds the cap. The cap bounds per-host only as a
-            # side effect. An unset cap leaves katana's own default pacing (no
-            # hard gate). int() truncates a fractional cap DOWN; the max(1, …)
-            # floor only guards a hand-edited sub-1 scope (rejected at create).
-            if rate_cap is not None:
-                katana_rl = max(1, int(rate_cap))
-                katana_cmd.extend(["-rl", str(katana_rl), "-rlm", str(katana_rl * 60)])
+            # Safe-by-default crawl rate (stage 3): resolve_crawl_rate_limit
+            # defaults to 10 req/s, hard-caps at 20, and clamps DOWN to the
+            # program ceiling (rate_cap) when configured — so an uncapped fleet
+            # crawl never rides katana's built-in 150 req/s. -rl is req/s and -rlm
+            # is req/min (both single global token buckets); set both.
+            katana_rl = resolve_crawl_rate_limit(
+                args.katana_rate, rate_cap=rate_cap, warn=_warn,
+            )
+            katana_cmd.extend(["-rl", str(katana_rl), "-rlm", str(katana_rl * 60)])
             if args.katana_extra_args:
                 katana_cmd.extend(shlex.split(args.katana_extra_args))
             kres = kali_exec(

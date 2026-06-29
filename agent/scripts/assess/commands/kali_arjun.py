@@ -31,8 +31,10 @@ from assess.lib.client import AssessError
 from assess.lib.kali import (
     add_passthrough_args_flag,
     add_required_kali_flags,
+    count_list_targets,
     emit_result,
     extend_cmd_with_extra_args,
+    incomplete_list_run_warning,
     kali_args_to_kwargs,
     kali_exec,
 )
@@ -348,6 +350,24 @@ def run(args) -> None:
     extend_cmd_with_extra_args(cmd, args)
 
     result = kali_exec(cmd, tool_name="arjun", **kali_args_to_kwargs(args))
+
+    # Incomplete-run guard. A slow arjun (low --rate-limit × --stable multi-pass
+    # × high -T) over a large or junk (-i) list is SIGTERM-killed after only a
+    # few targets, and its 0/partial params then masquerade as a clean "no hidden
+    # params" negative. When the run did not finish AND the list had >1 target,
+    # surface the incompleteness loudly so it is never read as a verdict. (See
+    # the "size to finish" doctrine in references/tools/recon/arjun.md.)
+    total = count_list_targets(args.import_file) if args.import_file else 0
+    note = incomplete_list_run_warning(
+        tool="arjun",
+        total_targets=total,
+        timed_out=getattr(result, "timed_out", False),
+        return_code=getattr(result, "return_code", None),
+        stdout_preview=getattr(result, "stdout_preview", "") or "",
+        stderr_preview=getattr(result, "stderr_preview", "") or "",
+    )
+    if note:
+        print(f"WARN {note}", file=sys.stderr)
 
     # Arjun writes NO -oJ file when it discovers 0 params; guarantee the
     # artifact exists (empty object) so the run is always captured and

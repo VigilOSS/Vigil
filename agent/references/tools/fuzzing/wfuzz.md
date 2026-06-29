@@ -1,5 +1,6 @@
 ---
 description: Web fuzzer for parameters, headers, and paths
+skill: directory-fuzzing
 ---
 
 # wfuzz

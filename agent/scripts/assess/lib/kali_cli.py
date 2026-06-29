@@ -298,9 +298,148 @@ def emit_result(result: KaliResult) -> None:
                 "peak_rss_bytes": result.peak_rss_bytes,
                 "timed_out": result.timed_out,
                 "partial_results": result.partial_results,
+                # The argv that ACTUALLY ran inside the container, after the
+                # transparent header / --resolve-pin / exclude-tags injections —
+                # so the operator sees what executed, not just what it typed.
+                "resolved_argv": result.resolved_argv,
                 "stdout_preview": result.stdout_preview,
                 "stderr_preview": result.stderr_preview,
             },
             ensure_ascii=False,
         )
+    )
+
+
+# Safe-by-default crawler rate. A deep crawl (katana -d 5) must NOT ride the
+# tool's built-in 150 req/s default, which is the "depth 5 at a stupid rate"
+# foot-gun. These bound the request rate so depth and politeness stay decoupled:
+# go as deep as you like, but never faster than CRAWL_RATE_HARD_CAP unless the
+# operator opts in explicitly, and always under any program ceiling.
+CRAWL_RATE_DEFAULT = 10
+CRAWL_RATE_HARD_CAP = 20
+
+
+def resolve_crawl_rate_limit(
+    requested,
+    *,
+    rate_cap: float | None,
+    default: int = CRAWL_RATE_DEFAULT,
+    hard_cap: int = CRAWL_RATE_HARD_CAP,
+    allow_fast: bool = False,
+    warn=None,
+) -> int:
+    """Resolve a crawler's ``-rl`` (req/s) for a deep, safe crawl.
+
+    Precedence (most-binding wins):
+      1. A configured program ceiling (``scope.rate_limit`` → ``rate_cap``)
+         ALWAYS clamps DOWN — it is the program's legal/politeness hard ceiling.
+      2. An unset ``requested`` resolves to ``default`` (10): a deep crawl must
+         never inherit the tool's built-in 150 req/s default.
+      3. An operator value above ``hard_cap`` (20) is clamped to ``hard_cap``
+         with a warning, UNLESS ``allow_fast`` (the operator deliberately opted
+         into a faster crawl via ``--allow-fast-crawl``).
+
+    ``warn`` is an optional ``(str) -> None`` sink for the clamp notices (stderr
+    in production). Returns an int ≥ 1.
+    """
+    try:
+        base = int(requested) if requested not in (None, "") else default
+    except (TypeError, ValueError):
+        base = default
+    if base < 1:
+        base = default
+
+    resolved = base
+    if not allow_fast and resolved > hard_cap:
+        if warn is not None:
+            warn(
+                f"crawl rate -rl {resolved} exceeds the {hard_cap} req/s safety cap; "
+                f"clamping to {hard_cap}. A deep crawl stays polite by capping rate, "
+                "not depth. Pass --allow-fast-crawl to override, or lower -rl."
+            )
+        resolved = hard_cap
+
+    if rate_cap is not None:
+        capped = max(1, min(resolved, int(rate_cap)))
+        if capped < resolved and warn is not None:
+            warn(
+                f"crawl rate -rl {resolved} clamped DOWN to the engagement's "
+                f"configured program ceiling ({int(rate_cap)} req/s)."
+            )
+        resolved = capped
+
+    return max(1, resolved)
+
+
+# A list-based tool (arjun -i, nuclei -l, httpx -l, sqlmap -m, ...) given ONE
+# wall-clock --timeout silently truncates when the list is large or per-target
+# cost is high: it is SIGTERM-killed after a fraction of the list, and an empty
+# or partial result then reads as a clean negative — which it is NOT. These two
+# helpers convert that silent partial into an explicit "incomplete, re-run"
+# signal so a timed-out run is never mistaken for "tested, found nothing".
+_LIST_PROGRESS_RE = re.compile(
+    r"(?:scanning|processing|progress|target)[^0-9]{0,12}(\d+)\s*/\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+def count_list_targets(path) -> int:
+    """Count non-empty, non-comment lines in a tool's -i/-l list file.
+
+    Returns 0 when the path is empty/unreadable, so the caller skips the
+    incompleteness check rather than asserting a wrong target count.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except (OSError, TypeError, ValueError):
+        return 0
+    return sum(1 for line in text.splitlines() if line.strip() and not line.strip().startswith("#"))
+
+
+def parse_list_progress(text: str) -> tuple[int, int] | None:
+    """Best-effort ``(processed, total)`` from a list tool's progress output.
+
+    Matches ``Scanning 12/134``, ``Processing: 3 / 50`` and similar; returns the
+    LAST (highest) processed count seen, or None when no marker is present.
+    """
+    best: tuple[int, int] | None = None
+    for m in _LIST_PROGRESS_RE.finditer(text or ""):
+        done, total = int(m.group(1)), int(m.group(2))
+        if best is None or done > best[0]:
+            best = (done, total)
+    return best
+
+
+def incomplete_list_run_warning(
+    *,
+    tool: str,
+    total_targets: int,
+    timed_out: bool,
+    return_code,
+    stdout_preview: str = "",
+    stderr_preview: str = "",
+) -> str:
+    """Return a loud INCOMPLETE-run warning, or ``""`` when the run looks complete.
+
+    Fires only when (a) the run did NOT finish cleanly (timed_out, or killed /
+    non-zero rc) AND (b) the list held >1 target — a single-target timeout is a
+    different problem the operator already sees. When the tool's progress output
+    is parseable, the message names ``~K of N`` actually processed.
+    """
+    killed = bool(timed_out) or (return_code not in (0, None))
+    if not killed or total_targets <= 1:
+        return ""
+    progress = parse_list_progress(f"{stdout_preview or ''}\n{stderr_preview or ''}")
+    if progress is not None:
+        done, total = progress
+        scope = f"~{done} of {total or total_targets} targets"
+    else:
+        scope = f"a list of {total_targets} targets"
+    return (
+        f"INCOMPLETE: {tool} did not finish — it was timed-out/killed after "
+        f"processing {scope}. An empty or partial result is NOT a clean negative; "
+        "the list was not fully scanned (and any 'not found' / 'dead' verdict for "
+        "the unscanned remainder is unsafe). Re-run on a smaller/curated list "
+        "and/or with a larger --timeout (or a faster per-tool config) sized to "
+        "actually finish before treating any absence as a verdict."
     )

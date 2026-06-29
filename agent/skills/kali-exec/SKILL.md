@@ -22,12 +22,14 @@ Skills should point you at `vigil assess contract kali <verb>` for field tables 
 
 ## Verb menu
 
-22 verbs total: 18 typed, 2 fallback, 1 batch fan-out, and 1 host-side maintenance command. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the batch verb fans one audited command out across an operator-supplied value list; the maintenance command reconciles stuck audit rows.
+23 verbs total: 18 typed, 2 fallback, 1 batch fan-out, and 2 host-side maintenance commands. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the batch verb fans one audited command out across an operator-supplied value list; the maintenance commands reconcile stuck audit rows (`sweep-orphans`) and print a tool's live help (`tool-help`).
+
+Every typed verb's result JSON includes a `resolved_argv` — the argv that ACTUALLY ran inside the container AFTER the transparent injections (program attribution `-H` headers, the `--resolve` IP-pin, nuclei's default `-exclude-tags`). Read it to see what executed, not just what you typed.
 
 | Verb | Use | Paired reference |
 |------|-----|------------------|
 | `kali nmap-scan` | Port + service scan with optional NSE scripts. TLS SAN extraction and rDNS via `-sV`. | `references/tools/recon/nmap.md` |
-| `kali nuclei` | Template-based vulnerability scanner. Curated template set is the mandatory web-vuln pass — `nuclei` is the primary, `nikto` is the conditional fallback. | `references/tools/recon/nuclei.md` |
+| `kali nuclei` | Template-based vulnerability scanner. Curated template set is the mandatory web-vuln pass — `nuclei` is the primary, `nikto` is the conditional fallback. WAF-resilient: injects `-mhe 50` by default so a 403 storm doesn't make nuclei abandon the host; lead with explicit `-t`, add `-random-agent`/`-H` past UA blocks. | `references/tools/recon/nuclei.md` |
 | `kali httpx` | Fast HTTP probing: status, title, tech-detect, TLS-grab. Drives WAF-tier and CDN decisions. | `references/tools/recon/httpx.md` |
 | `kali wafw00f` | WAF identification. Run FIRST, before nmap/nikto/dir-fuzz, because WAF tier dictates rate limits for every later tool. | `references/tools/recon/wafw00f.md` |
 | `kali ffuf` | Directory and parameter fuzzing with fast filtering. | `references/tools/fuzzing/ffuf.md` |
@@ -40,7 +42,7 @@ Skills should point you at `vigil assess contract kali <verb>` for field tables 
 | `kali puredns` | Active DNS brute-force with massdns + wildcard filter (Tier C). | `references/tools/recon/puredns.md` |
 | `kali dnsx` | Bulk DNS resolution and record enrichment (Tier D). | `references/tools/recon/dnsx.md` |
 | `kali nikto` (CONDITIONAL — see triggers in `references/tools/recon/nikto.md`) | Web vuln scanner; legacy/odd-stack only. CLI flag is `--host <h>` (not `-h`, which argparse reserves for help) — the underlying nikto invocation builds `nikto -h <host>` correctly. | `references/tools/recon/nikto.md` |
-| `kali katana` | Authenticated crawler with JS-aware extraction (`-jc`, `-jsl`) and `-headless` for browser-semantic crawl deltas. | `agent/references/tools/recon/katana.md` |
+| `kali katana` | JS-aware crawler. Deep + scope-safe + disk-bounded by DEFAULT: `-d 5`, `-fs fqdn`, `-or -ob`, `-ef <static>`, `-jc -jsl`, and a SAFE `-rl 10` (hard-capped 20; `--allow-fast-crawl` to exceed). Depth is decoupled from rate — go deep without going fast. `--keep-bodies` / `--include-static` undo the disk/asset defaults; `-headless` for browser-semantic deltas. | `agent/references/tools/recon/katana.md` |
 | `kali gau` | Historical URL collection (Wayback / OTX / Common Crawl / URLScan). | `references/tools/recon/gau.md` |
 | `kali arjun` | Hidden HTTP-parameter discovery (GET/POST/JSON/XML), `--passive` OSINT mode, auth via `--headers`. Aim it at a GATED list (`vigil assess arjun-select`), then fold results back with `vigil assess ingest-arjun` so the classifier re-routes the now-parameterized endpoint. | `references/tools/recon/arjun.md` |
 | `kali whatweb` | Deep web technology fingerprinting. | `references/tools/recon/whatweb.md` |
@@ -48,6 +50,7 @@ Skills should point you at `vigil assess contract kali <verb>` for field tables 
 | `kali job <start\|status\|tail\|stop\|list>` | **Operator-only** async-job lifecycle for a single authorized long sweep that must outlive its dispatch. Specialists run synchronously instead — see the sync-vs-async decision below. | `references/runtime-guides/kali-cli.md` |
 | `kali sweep` | Value-agnostic batch: runs one audited `kali exec` per `--values` entry (a literal list and/or inclusive integer ranges `a-b`) with `{}` substituted into the command template, then clusters the responses by distinct signature (reachability class + status + body marker) — distinguishing reachable vs. dns-failure vs. connection-refused via the shared reachability taxonomy. One `command-runs` audit row per value. Politeness: `--max-values 200` cap, default `--concurrency 1` (>1 needs `--allow-concurrent`, I-013 per-host rule). It expands ONLY the values you supply — no ID/host generation. | `references/runtime-guides/kali-cli.md` |
 | `kali sweep-orphans` | Host-side reconciler for `assessment_command_runs` rows stuck in `status=running` past `--max-age-seconds` (default 3600s). Probes the in-container PID via `kill -0`; finalizes dead rows to `status=lost`. No audit flags — it is maintenance, not a probe. | `references/runtime-guides/kali-cli.md` |
+| `kali tool-help <tool>` | Print a runtime tool's live `-h`/`--help` from inside the container, so you read the EXACT flags the installed version supports instead of guessing into `--extra-args`. No audit flags — maintenance, not a probe. e.g. `vigil assess kali tool-help katana`. | `references/runtime-guides/kali-cli.md` |
 
 `kali exec` is the escape hatch — use it for tools the typed surface does not yet model (dirb, gobuster, hydra, john, hashcat, custom scripts, etc.) and pass the same audit-metadata flags as a typed verb. `kali job` is the supervisor — see the sync-vs-async decision below.
 

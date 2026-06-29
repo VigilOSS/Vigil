@@ -184,6 +184,46 @@ roster file to edit.
    (`agent/operator-core*.md` or a role prompt under `agent/agents/`). The operator passes the skill
    `path` to the specialist; the operator itself does not read skill bodies.
 
+Frontmatter is load-bearing: `list_skills.py` keys on `description` (falling back to the first `# `
+heading), so a skill with neither is discoverable only by directory name. Always ship a `description`.
+
+## Add a reference
+
+References are the payload / checklist / tooling library specialists load on dispatch. Like skills,
+discovery is a frontmatter scan, so a reference is self-registering — but ONLY if its frontmatter
+carries the keys the pipeline keys on.
+
+1. Create `agent/references/<area>/<name>.md` with YAML frontmatter that includes BOTH a `description`
+   and a `skill:` key:
+
+   ```markdown
+   ---
+   description: One-line summary the operator scans in `vigil assess list-references`
+   skill: <skill-name>   # the paired skill; must match a directory under agent/skills/
+   ---
+
+   # <Title>
+   ...
+   ```
+
+   `agent/scripts/assess/commands/list_references.py` globs `agent/references/**/*.md` and parses the
+   frontmatter. **A reference with no `skill:` key is orphaned** — it never appears under
+   `vigil assess list-references --skill <name>`, so a threat hunter navigating by skill never finds
+   it. The `skill:` value must resolve to a real `agent/skills/<name>/` directory (comma-separate to
+   pair with several). If no skill fits, that is a signal to author one — not to ship the reference
+   unpaired.
+
+2. Confirm discovery and pairing — no other file needs editing:
+
+   ```bash
+   vigil assess list-references | grep <name>
+   vigil assess list-references --skill <skill-name>   # the ref must appear here
+   ```
+
+   `orchestrator/backend/tests/test_reference_frontmatter.py` enforces this in CI: every
+   `agent/references/tools/**/*.md` must carry a `description` + a resolvable `skill:` (a small
+   `_KNOWN_UNPAIRED` allowlist covers refs with no matching skill yet — remove an entry when you pair it).
+
 ## Add an `vigil assess` verb
 
 `vigil assess` is the agent-facing contract surface. A verb is one command module plus its wiring and

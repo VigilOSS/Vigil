@@ -15,8 +15,10 @@ from assess.lib.config import load_config
 from assess.lib.kali import (
     add_passthrough_args_flag,
     add_required_kali_flags,
+    count_list_targets,
     emit_result,
     extend_cmd_with_extra_args,
+    incomplete_list_run_warning,
     kali_args_to_kwargs,
     kali_exec,
 )
@@ -246,9 +248,32 @@ def register(subparsers) -> None:
             "your own value to override (it is used verbatim — no merge)."
         ),
     )
-    p.add_argument("-as", dest="automatic_scan", action="store_true", help="-as automatic scan.")
+    p.add_argument("-as", dest="automatic_scan", action="store_true",
+                   help="-as automatic (tech-matched) scan. Additive — lead with explicit -t, "
+                        "because a CDN/WAF defeats tech fingerprinting so -as under-fires alone.")
     p.add_argument("-severity", dest="severity", default="", help="Comma-separated severity list.")
     p.add_argument("-rate-limit", dest="rate_limit", default="", help="Requests per second.")
+    p.add_argument(
+        "-mhe",
+        "-max-host-error",
+        dest="max_host_error",
+        default="50",
+        help=(
+            "Max errors per host before nuclei abandons it (default 50). nuclei's own "
+            "default (~30) makes a WAF's 403 storm silently kill template coverage on the "
+            "hardest hosts; the raised default keeps the sweep on-host. Pass 0 only after "
+            "confirming the installed nuclei treats 0 as unlimited (vigil assess kali "
+            "tool-help nuclei)."
+        ),
+    )
+    p.add_argument("-random-agent", dest="random_agent", action="store_true",
+                   help="-random-agent: rotate the User-Agent so a UA-based scanner block does "
+                        "not drop every request.")
+    p.add_argument("-H", "-header", dest="headers", action="append", default=None,
+                   help="Extra request header (repeatable), e.g. -H 'Cookie: s=...'. Program "
+                        "attribution headers are injected automatically on top of these.")
+    p.add_argument("-timeout", dest="timeout_http", default="", help="Per-request timeout (seconds).")
+    p.add_argument("-retries", dest="retries", default="", help="Retries per request.")
     p.add_argument("-c", dest="concurrency", default="", help="Worker concurrency.")
     p.add_argument("-bs", dest="bulk_size", default="", help="Bulk batch size.")
     p.add_argument("-stream", dest="stream", action="store_true", help="-stream output mode.")
@@ -279,12 +304,31 @@ def run(args) -> None:
         cmd.extend(["-exclude-tags", exclude_tags])
     elif not _operator_passed_exclude_tags(args):
         cmd.extend(["-exclude-tags", _DEFAULT_EXCLUDE_TAGS])
+        print(
+            f"nuclei: injected default -exclude-tags '{_DEFAULT_EXCLUDE_TAGS}' "
+            "(politeness/safety; pass your own -exclude-tags to override). The "
+            "resolved_argv in the result shows the full command that ran.",
+            file=sys.stderr,
+        )
     if args.automatic_scan:
         cmd.append("-as")
     if args.severity:
         cmd.extend(["-severity", args.severity])
     if args.rate_limit:
         cmd.extend(["-rate-limit", str(args.rate_limit)])
+    # WAF-resilience: keep nuclei on a host through a 403 storm instead of
+    # abandoning it after ~30 errors. Always passed (default 50) unless overridden.
+    mhe = (getattr(args, "max_host_error", "") or "").strip()
+    if mhe:
+        cmd.extend(["-mhe", str(mhe)])
+    if getattr(args, "random_agent", False):
+        cmd.append("-random-agent")
+    for header in getattr(args, "headers", None) or []:
+        cmd.extend(["-H", header])
+    if getattr(args, "timeout_http", ""):
+        cmd.extend(["-timeout", str(args.timeout_http)])
+    if getattr(args, "retries", ""):
+        cmd.extend(["-retries", str(args.retries)])
     if args.concurrency:
         cmd.extend(["-c", str(args.concurrency)])
     if args.bulk_size:
@@ -310,4 +354,19 @@ def run(args) -> None:
     else:
         result = kali_exec(cmd, tool_name="nuclei", **kali_args_to_kwargs(args))
     _zero_byte_post_check(args, result, engagement_dir)
+
+    # Incomplete-run guard: a timed-out nuclei sweep over a host LIST scanned only
+    # part of it, so the absence of findings for the unscanned remainder is not a
+    # clean negative. (Distinct from _zero_byte_post_check, which catches a
+    # template-loader failure.)
+    total = count_list_targets(args.target_list) if args.target_list else 0
+    note = incomplete_list_run_warning(
+        tool="nuclei", total_targets=total,
+        timed_out=getattr(result, "timed_out", False),
+        return_code=getattr(result, "return_code", None),
+        stdout_preview=getattr(result, "stdout_preview", "") or "",
+        stderr_preview=getattr(result, "stderr_preview", "") or "",
+    )
+    if note:
+        print(f"WARN {note}", file=sys.stderr)
     emit_result(result)

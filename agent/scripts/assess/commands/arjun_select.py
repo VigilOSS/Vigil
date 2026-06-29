@@ -309,6 +309,24 @@ def run(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
 
+    # Junk-list guard. --include-unknown admits rows with NULL/unknown live_status
+    # — typically historic gau/Wayback URLs (dead .nsf/.do paths, http->https 301s,
+    # PDFs). Arjun wastes a full slow detection pass on each dead/redirecting
+    # target and finds nothing, so a list padded with these is the classic
+    # "arjun timed out having scanned 2 of N, reported 0 params" trap. Warn loudly
+    # and point at the real fix: confirm liveness first.
+    if args.include_unknown and targets:
+        print(
+            f"arjun-select: --include-unknown admitted unconfirmed-live targets into "
+            f"this {len(targets)}-target list (historic/Wayback rows may be dead .nsf/.do "
+            "paths, 301 redirects, or PDFs). Arjun burns a full slow pass on each and "
+            "finds nothing — a large junk list is the #1 cause of an arjun timeout that "
+            "reports a false 0. Prefer confirming liveness first (`vigil assess ingest-httpx` "
+            "then drop --include-unknown), and keep the list small enough to FINISH "
+            "(`--max-per-host`, fewer targets).",
+            file=sys.stderr,
+        )
+
     # Common foot-gun: an engagement whose liveness ledger was never populated
     # (no `ingest-httpx`) has empty live_status on every row, so the default
     # live-only gate selects nothing. Surface the fix instead of failing silent.
