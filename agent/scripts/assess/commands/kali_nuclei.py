@@ -16,6 +16,7 @@ from assess.lib.kali import (
     add_passthrough_args_flag,
     add_required_kali_flags,
     count_list_targets,
+    safe_engagement_dir,
     emit_result,
     extend_cmd_with_extra_args,
     incomplete_list_run_warning,
@@ -359,7 +360,9 @@ def run(args) -> None:
     # part of it, so the absence of findings for the unscanned remainder is not a
     # clean negative. (Distinct from _zero_byte_post_check, which catches a
     # template-loader failure.)
-    total = count_list_targets(args.target_list) if args.target_list else 0
+    total = count_list_targets(
+        args.target_list, engagement_dir=safe_engagement_dir(args)
+    ) if args.target_list else 0
     note = incomplete_list_run_warning(
         tool="nuclei", total_targets=total,
         timed_out=getattr(result, "timed_out", False),

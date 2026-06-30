@@ -9,6 +9,7 @@ from assess.lib.kali import (
     add_required_kali_flags,
     count_list_targets,
     emit_result,
+    safe_engagement_dir,
     extend_cmd_with_extra_args,
     incomplete_list_run_warning,
     kali_args_to_kwargs,
@@ -106,7 +107,9 @@ def run(args) -> None:
     # under-probes — hosts past the cut never answer and would be wrongly read as
     # dead (and then never tested). Flag the truncation so a partial pass is not a
     # liveness verdict for the unscanned remainder.
-    total = count_list_targets(args.target_list) if args.target_list else 0
+    total = count_list_targets(
+        args.target_list, engagement_dir=safe_engagement_dir(args)
+    ) if args.target_list else 0
     note = incomplete_list_run_warning(
         tool="httpx", total_targets=total,
         timed_out=getattr(result, "timed_out", False),

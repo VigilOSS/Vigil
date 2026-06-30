@@ -77,6 +77,7 @@ from .kali_cli import (
     kali_args_to_kwargs,
     parse_list_progress,
     resolve_crawl_rate_limit,
+    safe_engagement_dir,
 )
 from .kali_output import (
     _REQUIRED_HEADER_INJECTABLE,
@@ -932,6 +933,7 @@ __all__ = [
     "count_list_targets",
     "parse_list_progress",
     "incomplete_list_run_warning",
+    "safe_engagement_dir",
     # Output + RSS (from kali_output)
     "KaliResult",
     "_REQUIRED_HEADER_INJECTABLE",
