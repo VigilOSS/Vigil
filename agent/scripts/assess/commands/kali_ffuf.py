@@ -1,6 +1,8 @@
 """vigil assess kali ffuf — typed wrapper around ffuf inside the runtime."""
 from __future__ import annotations
 
+import sys
+
 from assess.lib.kali import (
     add_passthrough_args_flag,
     add_required_kali_flags,
@@ -9,6 +11,10 @@ from assess.lib.kali import (
     kali_args_to_kwargs,
     kali_exec,
 )
+
+# Pre-flight budget guard (kali_cli argparse seam); imported directly so this
+# unit need not touch the shared kali facade module.
+from assess.lib.kali_cli import coerce_float, preflight_timeout_guard
 
 
 def register(subparsers) -> None:
@@ -23,6 +29,11 @@ def register(subparsers) -> None:
     p.add_argument("-rate", dest="rate", default="", help="Requests per second.")
     p.add_argument("-t", dest="threads", default="", help="Concurrent threads.")
     p.add_argument("-timeout", dest="timeout_http", default="", help="Per-request timeout (seconds).")
+    p.add_argument("-maxtime", dest="maxtime", default="",
+                   help="ffuf -maxtime: max total runtime in SECONDS for the whole job. "
+                        "Cross-checked against --timeout pre-flight so a long fuzz is not "
+                        "SIGTERM-truncated before its own cap and read as 'nothing found' "
+                        "— --timeout is auto-raised to fit it.")
     p.add_argument("-H", dest="headers", action="append", default=None,
                    help="Extra request header (repeatable). Program attribution headers are "
                         "injected automatically on top of these.")
@@ -50,6 +61,8 @@ def run(args) -> None:
         cmd.extend(["-t", str(args.threads)])
     if args.timeout_http:
         cmd.extend(["-timeout", str(args.timeout_http)])
+    if args.maxtime:
+        cmd.extend(["-maxtime", str(args.maxtime)])
     for header in args.headers or []:
         cmd.extend(["-H", header])
     if args.match_codes:
@@ -77,6 +90,21 @@ def run(args) -> None:
     if args.output_format:
         cmd.extend(["-of", args.output_format])
     extend_cmd_with_extra_args(cmd, args)
+
+    # Pre-flight -maxtime vs --timeout guard (I-9b#1). ffuf's own -maxtime caps the
+    # whole job; if the wrapper --timeout is smaller the fuzz is SIGTERM-killed
+    # before that cap and its partial output reads as a clean negative. Auto-raise
+    # --timeout to fit the declared budget (boost-only) so the fuzz can finish.
+    maxtime = coerce_float(getattr(args, "maxtime", ""), 0.0)
+    if maxtime > 0:
+        args.timeout = preflight_timeout_guard(
+            verb="ffuf",
+            internal_budget_s=maxtime,
+            timeout=getattr(args, "timeout", None),
+            warn=lambda m: print(f"WARN {m}", file=sys.stderr),
+            auto_raise=True,
+            exact=True,
+        )
 
     result = kali_exec(cmd, tool_name="ffuf", **kali_args_to_kwargs(args))
     emit_result(result)

@@ -36,6 +36,11 @@ from assess.lib.kali import (
     resolve_crawl_rate_limit,
 )
 
+# The pre-flight budget guard lives in the kali_cli argparse seam (which the kali
+# facade re-exports the rest of this verb's helpers from); import it directly so
+# this unit need not touch the shared facade module.
+from assess.lib.kali_cli import coerce_float, preflight_timeout_guard
+
 # Static / binary extensions excluded from crawling by default (injected as
 # katana ``-ef``). Crawling these wastes requests on assets that hold no routes.
 _DEFAULT_EXCLUDE_EXT = (
@@ -68,6 +73,13 @@ def register(subparsers) -> None:
     p.add_argument("-rl", dest="rate_limit", default="",
                    help="-rl request rate (req/s). Default 10; hard-capped at 20 unless "
                         "--allow-fast-crawl; always clamped DOWN to the program rate ceiling.")
+    p.add_argument("--crawl-budget", dest="crawl_budget", default="",
+                   help="Crawl runtime budget in SECONDS — the crawl's max-runtime "
+                        "ceiling. Emitted to katana as -crawl-duration so the crawl "
+                        "self-stops at this budget, and cross-checked against --timeout "
+                        "pre-flight: a budget larger than the wall-clock would be "
+                        "SIGTERM-truncated and misread as 'nothing found', so --timeout "
+                        "is auto-raised to fit it. (For request RATE, use -rl.)")
     p.add_argument("--allow-fast-crawl", dest="allow_fast_crawl", action="store_true",
                    help="Permit -rl above the 20 req/s safety cap (operator opt-in).")
     p.add_argument("-fs", dest="field_scope", default="fqdn",
@@ -165,6 +177,23 @@ def run(args) -> None:
     if args.jsonl:
         cmd.append("-jsonl")
     extend_cmd_with_extra_args(cmd, args)
+
+    # Pre-flight crawl-budget vs --timeout guard (I-9b#1). A declared crawl budget
+    # is passed to katana as -crawl-duration so the crawl self-stops at it, and
+    # --timeout is auto-raised to fit (boost-only) — so a deep crawl is never
+    # SIGTERM-truncated mid-flight and its partial output misread as a clean
+    # negative (run 36937: killed at --timeout 180 with 1801 lines / 201 JS bodies).
+    crawl_budget = coerce_float(getattr(args, "crawl_budget", ""), 0.0)
+    if crawl_budget > 0:
+        cmd.extend(["-crawl-duration", str(int(crawl_budget))])
+        args.timeout = preflight_timeout_guard(
+            verb="katana",
+            internal_budget_s=crawl_budget,
+            timeout=getattr(args, "timeout", None),
+            warn=lambda m: print(f"WARN {m}", file=sys.stderr),
+            auto_raise=True,
+            exact=True,
+        )
 
     result = kali_exec(cmd, tool_name="katana", **kali_args_to_kwargs(args))
     emit_result(result)

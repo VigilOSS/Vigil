@@ -45,10 +45,17 @@ def auth_runtime_snapshot(engagement_dir: str) -> dict[str, Any]:
 
     cookies = raw.get("cookies") if isinstance(raw.get("cookies"), dict) else {}
     headers = raw.get("headers") if isinstance(raw.get("headers"), dict) else {}
+    # Per-host captured cookie buckets (I-22). A cookie-session identity whose
+    # capture host differs from the primary scope host can have an EMPTY flat
+    # ``cookies`` view yet still hold a live session in ``host_cookies`` — treating
+    # that as "no session" is the exact "session stale" false negative the jar
+    # fixes, so host_cookies counts as session material here too.
+    host_cookies = raw.get("host_cookies") if isinstance(raw.get("host_cookies"), list) else []
+    has_session = bool(cookies or headers or host_cookies)
     notes = str(raw.get("notes") or "")
     auth_context = str(raw.get("auth_context") or "").strip()
     if not auth_context:
-        auth_context = "authenticated" if (cookies or headers) else "anonymous"
+        auth_context = "authenticated" if has_session else "anonymous"
 
     use_for_requests = raw.get("use_for_requests")
     if not isinstance(use_for_requests, bool):
@@ -72,14 +79,14 @@ def auth_runtime_snapshot(engagement_dir: str) -> dict[str, Any]:
             "Auth material is expired; continuing without auth until "
             "credentials are refreshed (vigil auth import / mitmproxy capture)."
         )
-    elif cookies or headers:
+    elif has_session:
         state = "available"
     else:
         state = "missing"
         if use_for_requests:
             warning = (
-                "Auth mode is enabled but the stored credential has no cookies "
-                "or headers; continuing without auth."
+                "Auth mode is enabled but the stored credential has no cookies, "
+                "headers, or host-scoped cookie buckets; continuing without auth."
             )
 
     active_use = bool(use_for_requests and state == "available")
@@ -96,6 +103,7 @@ def auth_runtime_snapshot(engagement_dir: str) -> dict[str, Any]:
         "auth_context": auth_context,
         "cookies": cookies,
         "headers": headers,
+        "host_cookies": host_cookies,
         "expires_at": expires_at,
         "notes": notes,
         "warning": warning,

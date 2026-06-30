@@ -412,6 +412,59 @@ def test_ingest_endpoints_scope_filter_excludes_out_of_scope_hosts(
     assert observed_urls == {"https://good.example.com/api/v1/users"}
 
 
+def test_ingest_endpoints_over_long_url_skipped_batch_survives(
+    tmp_path, monkeypatch, capsys
+):
+    """I-12: a single pathologically long URL (>4096 chars) must be skipped and
+    reported, never carried into the bulk request-observation POST where one
+    over-long row can fail the WHOLE batch at the backend's length validation and
+    silently drop every good row with it. The well-formed rows around it still
+    ingest."""
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # db_init requires the file to already exist
+    db_init(str(db))
+
+    over_long = "https://h.example/" + "a" * 5000
+    assert len(over_long) > 4096
+    lines = "\n".join(
+        [
+            "https://h.example/one",
+            over_long,
+            "https://h.example/two",
+        ]
+    )
+    input_file = tmp_path / "endpoints.jsonl"
+    input_file.write_text(lines + "\n", encoding="utf-8")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        ingest_endpoints, "load_config", lambda *a, **k: _Cfg(str(tmp_path))
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "auth_active_context", lambda *a, **k: "anonymous"
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "AssessmentClient", lambda *a, **k: fake_client
+    )
+
+    ingest_endpoints.run(_ingest_ns(str(db), str(input_file), str(tmp_path)))
+    captured = capsys.readouterr()
+
+    # The two well-formed URLs ingested; the over-long one did not.
+    rows = db_query(str(db), "SELECT url FROM work_items ORDER BY url", ())
+    assert [row["url"] for row in rows] == [
+        "https://h.example/one",
+        "https://h.example/two",
+    ]
+    # The over-long URL never reached the backend payload, so it could not take
+    # the batch down with it.
+    observed_urls = {o.get("url") for o in fake_client.observations}
+    assert observed_urls == {"https://h.example/one", "https://h.example/two"}
+    # The drop is reported (per-line WARN + the summary breakdown), not silent.
+    assert "over-long URL" in captured.err
+    assert "1 over-long-URL" in captured.err
+
+
 def test_out_of_scope_insert_retires_existing_pending_same_url(tmp_path):
     db = tmp_path / "cases.db"
     db.write_bytes(b"")  # db_init requires the file to already exist

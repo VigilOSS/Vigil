@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from assess.commands import dns_discovery as dd
-from assess.commands.kali_dnsx import DNSX_PROFILES
+from assess.commands.kali_dnsx import DNSX_PROFILES, resolution_failures
 from assess.lib.config import Config
 
 
@@ -237,3 +237,126 @@ def test_resolve_stage_respects_explicit_profile_override_even_when_bruting(monk
     cmd = _capture_resolve_cmd(monkeypatch, brute=True, dnsx_profile="bursty-ok")
     # Operator explicitly chose bursty-ok: do NOT silently swap to brute-resolve.
     assert _flag_value(cmd, "-retry") == str(DNSX_PROFILES["bursty-ok"].retry) == "2"
+
+
+# --------------------------------------------------------------------------- #
+# I-6 — resolver surfaces a per-host resolution-FAILURE signal (I-006 class).
+#
+# dnsx resolves with ``-silent``, so an in-scope host that ENTERS the resolver
+# but produces no A/AAAA (e.g. a CNAME pointing off-network or a dangling CNAME —
+# a subdomain-takeover lead) is omitted from the ``-o`` output with no trace.
+# Diffing the resolver INPUT host-set against the resolved OUTPUT host-set must
+# surface that gap as an explicit resolution-failure signal (logged + in the
+# command result), never a silent drop. This is NOT the unbounded-permutation
+# brute hazard guard (a separate code path) — raw brute guesses never reach the
+# resolve input; puredns validates them first.
+# --------------------------------------------------------------------------- #
+
+
+def test_resolution_failures_diffs_input_against_resolved():
+    """Pure helper: hosts in the resolve INPUT but absent from the resolved OUTPUT
+    are returned (sorted, de-duped, case/trailing-dot-insensitive); blanks drop."""
+    resolver_input = ["A.example.com", "dangling.example.com", "resolves.example.com", ""]
+    resolved_output = ["resolves.example.com", "a.example.com."]  # case + trailing dot
+    assert resolution_failures(resolver_input, resolved_output) == ["dangling.example.com"]
+
+
+def test_resolution_failures_empty_when_all_resolved():
+    assert resolution_failures(["a.example.com", "b.example.com"],
+                               ["b.example.com", "a.example.com"]) == []
+
+
+def test_discover_once_surfaces_in_scope_resolution_failure(tmp_path, monkeypatch):
+    """An in-scope host that goes INTO the resolve but yields no A/AAAA must come
+    back as an explicit resolution failure (3rd return element + a WARN), never
+    vanish from the output."""
+    eng_dir = tmp_path / "eng"
+    (eng_dir / "scans" / "dns-discovery").mkdir(parents=True)
+    cfg = _cfg(eng_dir)
+
+    # Two in-scope hosts enter the resolve; only one produces an address.
+    seed = {"resolves.example.com", "dangling.example.com"}
+
+    def fake_resolve_stage(args, cfg_, merged_arg, resolved_arg, route):
+        # dnsx -silent writes ONLY the host that produced an A record; the
+        # dangling-CNAME host is omitted with no trace.
+        host, _ = dd._paths(cfg_, "resolved_hosts.txt")
+        host.write_text("resolves.example.com\n", encoding="utf-8")
+
+    monkeypatch.setattr(dd, "_resolve_stage", fake_resolve_stage)
+    monkeypatch.setattr(dd, "_route_for", lambda args, tool: "container")
+
+    args = _run_args(str(eng_dir), no_passive=True, no_ct=True, brute=False)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        resolved, bruted, failures = dd._discover_once(args, cfg, ["example.com"], set(seed), 1)
+
+    assert resolved == {"resolves.example.com"}
+    assert failures == {"dangling.example.com"}
+    # Logged, not silently dropped.
+    assert "dangling.example.com" in err.getvalue()
+    assert "resolution failure" in err.getvalue().lower()
+
+
+def test_run_writes_resolution_failure_artifact(tmp_path, monkeypatch):
+    """``run`` persists the canonical resolution-failure artifact and reports it."""
+    eng_dir = tmp_path / "eng"
+    (eng_dir / "scans" / "dns-discovery").mkdir(parents=True)
+    monkeypatch.setattr(dd, "load_config", lambda _flag: _cfg(eng_dir))
+    monkeypatch.setattr(
+        dd, "_discover_once",
+        lambda *a, **k: ({"a.example.com"}, ["example.com"], {"dangling.example.com"}),
+    )
+    monkeypatch.setattr(dd, "_select_parent_targets", lambda *a, **k: [])
+
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        dd.run(_run_args(str(eng_dir), no_converge=True))
+
+    failures = eng_dir / "scans" / "dns-discovery" / "resolution_failures.txt"
+    assert failures.read_text(encoding="utf-8") == "dangling.example.com\n"
+    assert "dangling.example.com" in err.getvalue()
+
+
+def test_resolution_failure_artifact_truncates_stale_and_excludes_resolved(tmp_path, monkeypatch):
+    """A host that ALSO resolved (a later-pass win) is not a failure, and a prior
+    run's stale failure list is truncated — never left to mislead follow-on work."""
+    eng_dir = tmp_path / "eng"
+    out = eng_dir / "scans" / "dns-discovery"
+    out.mkdir(parents=True)
+    (out / "resolution_failures.txt").write_text("old-stale.example.com\n", encoding="utf-8")
+
+    monkeypatch.setattr(dd, "load_config", lambda _flag: _cfg(eng_dir))
+    monkeypatch.setattr(
+        dd, "_discover_once",
+        lambda *a, **k: ({"now.example.com"}, ["example.com"], {"now.example.com"}),
+    )
+    monkeypatch.setattr(dd, "_select_parent_targets", lambda *a, **k: [])
+
+    with contextlib.redirect_stderr(io.StringIO()):
+        dd.run(_run_args(str(eng_dir), no_converge=True))
+
+    assert (out / "resolution_failures.txt").read_text(encoding="utf-8") == ""
+
+
+def test_resolution_failures_surfaced_even_when_nothing_resolved(tmp_path, monkeypatch):
+    """The worst I-6 case — every in-scope host pointed off-network so the resolve
+    produced ZERO hosts — must STILL surface the failures, not bury them behind
+    the 'no hosts resolved' early-exit."""
+    eng_dir = tmp_path / "eng"
+    (eng_dir / "scans" / "dns-discovery").mkdir(parents=True)
+    monkeypatch.setattr(dd, "load_config", lambda _flag: _cfg(eng_dir))
+    monkeypatch.setattr(
+        dd, "_discover_once",
+        lambda *a, **k: (set(), ["example.com"], {"off.example.com", "net.example.com"}),
+    )
+    monkeypatch.setattr(dd, "_select_parent_targets", lambda *a, **k: [])
+
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc, contextlib.redirect_stderr(err):
+        dd.run(_run_args(str(eng_dir), no_converge=True))
+
+    assert exc.value.code == 0
+    failures = eng_dir / "scans" / "dns-discovery" / "resolution_failures.txt"
+    assert failures.read_text(encoding="utf-8") == "net.example.com\noff.example.com\n"
+    assert "no hosts resolved" in err.getvalue()

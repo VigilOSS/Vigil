@@ -40,10 +40,27 @@ from assess.lib.kali import (
     kali_exec,
 )
 
+# Pre-flight budget helpers (kali_cli argparse seam); imported directly so this
+# unit need not touch the shared kali facade module.
+from assess.lib.kali_cli import (
+    coerce_float,
+    estimate_list_sweep_seconds,
+    preflight_timeout_guard,
+)
+
 # Arjun's own four methods, verbatim. JSON/XML matter for modern APIs.
 _ARJUN_METHODS = ("GET", "POST", "XML", "JSON")
 # Arjun's three param-casing styles.
 _ARJUN_CASINGS = ("like_this", "likeThis", "likethis")
+
+# Arjun CLI defaults used by the pre-flight runtime estimate when a knob is unset
+# (mirror Arjun v2.2.7's own defaults): -T 15s/request, -t 5 threads,
+# --rate-limit 9999 (effectively unlimited). --stable does extra confirmation
+# rounds, so it roughly doubles the request-rounds per target.
+_ARJUN_DEFAULT_HTTP_TIMEOUT = 15.0
+_ARJUN_DEFAULT_THREADS = 5
+_ARJUN_DEFAULT_RATE_LIMIT = 9999.0
+_ARJUN_STABLE_PASSES = 2
 
 # Methods whose discovered params land in the request BODY rather than the
 # query string. GET stays query; everything else is a body parameter. Mirrored
@@ -355,6 +372,41 @@ def run(args) -> None:
 
     extend_cmd_with_extra_args(cmd, args)
 
+    # Count the -i list once: it feeds BOTH the pre-flight sizing estimate and the
+    # post-run incompleteness guard below.
+    total = count_list_targets(
+        args.import_file, engagement_dir=safe_engagement_dir(args)
+    ) if args.import_file else 0
+
+    # Pre-flight sizing estimate (I-20(b)). A slow arjun (low --rate-limit ×
+    # --stable multi-pass × high -T) over a large or junk -i list cannot complete
+    # under the wrapper --timeout — it is SIGTERM-killed after a few targets and
+    # its 0/partial params masquerade as a clean "no hidden params" negative. Warn
+    # BEFORE the run (the estimate is a worst-case heads-up, so warn-only — never
+    # auto-raise a fuzzy estimate). The complementary post-run guard below catches
+    # the case the estimate under-counts.
+    if total > 1:
+        est = estimate_list_sweep_seconds(
+            targets=total,
+            passes=_ARJUN_STABLE_PASSES if getattr(args, "stable", False) else 1,
+            per_request_seconds=coerce_float(
+                getattr(args, "timeout_http", ""), _ARJUN_DEFAULT_HTTP_TIMEOUT
+            ),
+            workers=int(coerce_float(getattr(args, "threads", ""), _ARJUN_DEFAULT_THREADS)),
+            rate_limit=coerce_float(getattr(args, "rate_limit", ""), _ARJUN_DEFAULT_RATE_LIMIT),
+        )
+        preflight_timeout_guard(
+            verb="arjun",
+            internal_budget_s=est,
+            timeout=getattr(args, "timeout", None),
+            warn=lambda m: print(f"WARN {m}", file=sys.stderr),
+            sizing_hint=(
+                "Curate to confirmed-LIVE-200 param-bearing endpoints (a larger list "
+                "is the wrong instinct here), raise --timeout to fit, lower -T, or "
+                "raise --rate-limit/-t so the run finishes before the wall."
+            ),
+        )
+
     result = kali_exec(cmd, tool_name="arjun", **kali_args_to_kwargs(args))
 
     # Incomplete-run guard. A slow arjun (low --rate-limit × --stable multi-pass
@@ -363,9 +415,6 @@ def run(args) -> None:
     # params" negative. When the run did not finish AND the list had >1 target,
     # surface the incompleteness loudly so it is never read as a verdict. (See
     # the "size to finish" doctrine in references/tools/recon/arjun.md.)
-    total = count_list_targets(
-        args.import_file, engagement_dir=safe_engagement_dir(args)
-    ) if args.import_file else 0
     note = incomplete_list_run_warning(
         tool="arjun",
         total_targets=total,
