@@ -26,7 +26,6 @@ ROOT_MANAGED_NAMES = {
     "README.md",
     "CODE-MAP.md",
     "TODOs",
-    "ISSUES.md",
     "agent",
     "orchestrator",
     "docker",
