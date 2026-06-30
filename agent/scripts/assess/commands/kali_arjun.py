@@ -31,16 +31,36 @@ from assess.lib.client import AssessError
 from assess.lib.kali import (
     add_passthrough_args_flag,
     add_required_kali_flags,
+    count_list_targets,
+    safe_engagement_dir,
     emit_result,
     extend_cmd_with_extra_args,
+    incomplete_list_run_warning,
     kali_args_to_kwargs,
     kali_exec,
+)
+
+# Pre-flight budget helpers (kali_cli argparse seam); imported directly so this
+# unit need not touch the shared kali facade module.
+from assess.lib.kali_cli import (
+    coerce_float,
+    estimate_list_sweep_seconds,
+    preflight_timeout_guard,
 )
 
 # Arjun's own four methods, verbatim. JSON/XML matter for modern APIs.
 _ARJUN_METHODS = ("GET", "POST", "XML", "JSON")
 # Arjun's three param-casing styles.
 _ARJUN_CASINGS = ("like_this", "likeThis", "likethis")
+
+# Arjun CLI defaults used by the pre-flight runtime estimate when a knob is unset
+# (mirror Arjun v2.2.7's own defaults): -T 15s/request, -t 5 threads,
+# --rate-limit 9999 (effectively unlimited). --stable does extra confirmation
+# rounds, so it roughly doubles the request-rounds per target.
+_ARJUN_DEFAULT_HTTP_TIMEOUT = 15.0
+_ARJUN_DEFAULT_THREADS = 5
+_ARJUN_DEFAULT_RATE_LIMIT = 9999.0
+_ARJUN_STABLE_PASSES = 2
 
 # Methods whose discovered params land in the request BODY rather than the
 # query string. GET stays query; everything else is a body parameter. Mirrored
@@ -245,12 +265,15 @@ def _host_json_path(args, json_path: str) -> str | None:
     return os.path.join(eng_dir, json_path)
 
 
-def _ensure_json_artifact(args, json_path: str) -> None:
-    """Write an empty ``{}`` at the -oJ path if arjun produced no file.
+def _ensure_json_artifact(args, json_path: str, *, incomplete: bool = False) -> None:
+    """Write a placeholder at the -oJ path if arjun produced no file.
 
     Arjun omits the -oJ file entirely when it discovers 0 params; this keeps the
     run's artifact present + auditable and lets ``ingest-arjun`` always find a
-    file. Best-effort — never raises into the verb.
+    file. When the run was INCOMPLETE (timed out / killed before finishing the
+    list) the placeholder is the incomplete-run sentinel instead of a bare ``{}``
+    (Finding 1), so a later ``ingest-arjun`` can tell an empty artifact apart from
+    a genuine "0 hidden params" negative. Best-effort — never raises into the verb.
     """
     host = _host_json_path(args, json_path)
     if not host:
@@ -258,8 +281,10 @@ def _ensure_json_artifact(args, json_path: str) -> None:
     try:
         p = Path(host)
         if not p.exists():
+            from assess.lib.arjun_enrich import incomplete_sentinel
+
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text("{}", encoding="utf-8")
+            p.write_text(incomplete_sentinel() if incomplete else "{}", encoding="utf-8")
     except OSError:
         pass
 
@@ -347,11 +372,64 @@ def run(args) -> None:
 
     extend_cmd_with_extra_args(cmd, args)
 
+    # Count the -i list once: it feeds BOTH the pre-flight sizing estimate and the
+    # post-run incompleteness guard below.
+    total = count_list_targets(
+        args.import_file, engagement_dir=safe_engagement_dir(args)
+    ) if args.import_file else 0
+
+    # Pre-flight sizing estimate (I-20(b)). A slow arjun (low --rate-limit ×
+    # --stable multi-pass × high -T) over a large or junk -i list cannot complete
+    # under the wrapper --timeout — it is SIGTERM-killed after a few targets and
+    # its 0/partial params masquerade as a clean "no hidden params" negative. Warn
+    # BEFORE the run (the estimate is a worst-case heads-up, so warn-only — never
+    # auto-raise a fuzzy estimate). The complementary post-run guard below catches
+    # the case the estimate under-counts.
+    if total > 1:
+        est = estimate_list_sweep_seconds(
+            targets=total,
+            passes=_ARJUN_STABLE_PASSES if getattr(args, "stable", False) else 1,
+            per_request_seconds=coerce_float(
+                getattr(args, "timeout_http", ""), _ARJUN_DEFAULT_HTTP_TIMEOUT
+            ),
+            workers=int(coerce_float(getattr(args, "threads", ""), _ARJUN_DEFAULT_THREADS)),
+            rate_limit=coerce_float(getattr(args, "rate_limit", ""), _ARJUN_DEFAULT_RATE_LIMIT),
+        )
+        preflight_timeout_guard(
+            verb="arjun",
+            internal_budget_s=est,
+            timeout=getattr(args, "timeout", None),
+            warn=lambda m: print(f"WARN {m}", file=sys.stderr),
+            sizing_hint=(
+                "Curate to confirmed-LIVE-200 param-bearing endpoints (a larger list "
+                "is the wrong instinct here), raise --timeout to fit, lower -T, or "
+                "raise --rate-limit/-t so the run finishes before the wall."
+            ),
+        )
+
     result = kali_exec(cmd, tool_name="arjun", **kali_args_to_kwargs(args))
 
+    # Incomplete-run guard. A slow arjun (low --rate-limit × --stable multi-pass
+    # × high -T) over a large or junk (-i) list is SIGTERM-killed after only a
+    # few targets, and its 0/partial params then masquerade as a clean "no hidden
+    # params" negative. When the run did not finish AND the list had >1 target,
+    # surface the incompleteness loudly so it is never read as a verdict. (See
+    # the "size to finish" doctrine in references/tools/recon/arjun.md.)
+    note = incomplete_list_run_warning(
+        tool="arjun",
+        total_targets=total,
+        timed_out=getattr(result, "timed_out", False),
+        return_code=getattr(result, "return_code", None),
+        stdout_preview=getattr(result, "stdout_preview", "") or "",
+        stderr_preview=getattr(result, "stderr_preview", "") or "",
+    )
+    if note:
+        print(f"WARN {note}", file=sys.stderr)
+
     # Arjun writes NO -oJ file when it discovers 0 params; guarantee the
-    # artifact exists (empty object) so the run is always captured and
-    # ingest-arjun always finds a file. Best-effort, never fatal.
-    _ensure_json_artifact(args, json_path)
+    # artifact exists so the run is always captured and ingest-arjun always finds
+    # a file. When the run was incomplete, write the sentinel (not a bare {}) so
+    # an empty artifact is never misread as a clean negative. Best-effort.
+    _ensure_json_artifact(args, json_path, incomplete=bool(note))
 
     emit_result(result)

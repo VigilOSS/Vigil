@@ -24,7 +24,12 @@ import json
 
 from assess.commands import classify_work
 from assess.commands import ingest_endpoints
-from assess.lib.db import db_init, db_query
+from assess.lib.db import (
+    db_init,
+    db_insert_out_of_scope_work_item,
+    db_insert_work_item,
+    db_query,
+)
 
 
 class _Cfg:
@@ -212,6 +217,67 @@ def test_ingest_endpoints_batches_request_observation_posts(
     assert all(row["request_variant_id"] for row in rows)
 
 
+def test_ingest_endpoints_preserves_json_liveness_metadata(
+    tmp_path, monkeypatch, capsys
+):
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # db_init requires the file to already exist
+    db_init(str(db))
+
+    input_file = tmp_path / "endpoints.jsonl"
+    input_file.write_text(
+        json.dumps(
+            {
+                "method": "GET",
+                "url": "https://h.example/",
+                "response_status": 401,
+                "type": "unknown",
+                "source": "web-discovery",
+                "live_status": "live",
+                "signals": ["httpx-live"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        ingest_endpoints, "load_config", lambda *a, **k: _Cfg(str(tmp_path))
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "auth_active_context", lambda *a, **k: "anonymous"
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "AssessmentClient", lambda *a, **k: fake_client
+    )
+
+    ns = _ingest_ns(str(db), str(input_file), str(tmp_path))
+    ns.source = "web-discovery"
+    ingest_endpoints.run(ns)
+    capsys.readouterr()  # drain the ingest summary
+
+    assert fake_client.observations[0]["response_status"] == 401
+    assert fake_client.observations[0]["observation_payload"] == {
+        "source": "web-discovery",
+        "signals": ["httpx-live"],
+        "live_status": "live",
+    }
+
+    rows = db_query(
+        str(db),
+        "SELECT response_status, live_status, signals, priority_score, cluster_key "
+        "FROM work_items WHERE url = ?",
+        ("https://h.example/",),
+    )
+    assert len(rows) == 1, "ingest-endpoints did not create the work item"
+    assert rows[0]["response_status"] == 401
+    assert rows[0]["live_status"] == "live"
+    assert json.loads(rows[0]["signals"]) == ["httpx-live"]
+    assert rows[0]["cluster_key"] == "type:host_root"
+    assert rows[0]["priority_score"] == 5
+
+
 def _run_ingest_line(tmp_path, monkeypatch, capsys, line: str) -> None:
     """Run ingest-endpoints over a single JSONL `line` with the stubbed backend."""
     db = tmp_path / "cases.db"
@@ -344,3 +410,148 @@ def test_ingest_endpoints_scope_filter_excludes_out_of_scope_hosts(
     # or surface is created for them); only the admitted host did.
     observed_urls = {o.get("url") for o in fake_client.observations}
     assert observed_urls == {"https://good.example.com/api/v1/users"}
+
+
+def test_ingest_endpoints_over_long_url_skipped_batch_survives(
+    tmp_path, monkeypatch, capsys
+):
+    """I-12: a single pathologically long URL (>4096 chars) must be skipped and
+    reported, never carried into the bulk request-observation POST where one
+    over-long row can fail the WHOLE batch at the backend's length validation and
+    silently drop every good row with it. The well-formed rows around it still
+    ingest."""
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # db_init requires the file to already exist
+    db_init(str(db))
+
+    over_long = "https://h.example/" + "a" * 5000
+    assert len(over_long) > 4096
+    lines = "\n".join(
+        [
+            "https://h.example/one",
+            over_long,
+            "https://h.example/two",
+        ]
+    )
+    input_file = tmp_path / "endpoints.jsonl"
+    input_file.write_text(lines + "\n", encoding="utf-8")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        ingest_endpoints, "load_config", lambda *a, **k: _Cfg(str(tmp_path))
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "auth_active_context", lambda *a, **k: "anonymous"
+    )
+    monkeypatch.setattr(
+        ingest_endpoints, "AssessmentClient", lambda *a, **k: fake_client
+    )
+
+    ingest_endpoints.run(_ingest_ns(str(db), str(input_file), str(tmp_path)))
+    captured = capsys.readouterr()
+
+    # The two well-formed URLs ingested; the over-long one did not.
+    rows = db_query(str(db), "SELECT url FROM work_items ORDER BY url", ())
+    assert [row["url"] for row in rows] == [
+        "https://h.example/one",
+        "https://h.example/two",
+    ]
+    # The over-long URL never reached the backend payload, so it could not take
+    # the batch down with it.
+    observed_urls = {o.get("url") for o in fake_client.observations}
+    assert observed_urls == {"https://h.example/one", "https://h.example/two"}
+    # The drop is reported (per-line WARN + the summary breakdown), not silent.
+    assert "over-long URL" in captured.err
+    assert "1 over-long-URL" in captured.err
+
+
+def test_out_of_scope_insert_retires_existing_pending_same_url(tmp_path):
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # db_init requires the file to already exist
+    db_init(str(db))
+
+    url = "https://bad.example.com/api/v1/users"
+    db_insert_work_item(
+        str(db),
+        queue_key="variant:123:api",
+        method="GET",
+        url=url,
+        url_path="/api/v1/users",
+        query_params="{}",
+        body_params="{}",
+        path_params="{}",
+        cookie_params="{}",
+        case_type="api",
+        source="recon",
+        params_key_sig="",
+        request_variant_id=123,
+        auth_context="anonymous",
+    )
+
+    before = db_query(
+        str(db),
+        "SELECT status, terminal_reason FROM work_items WHERE queue_key = ?",
+        ("variant:123:api",),
+    )
+    assert before == [{"status": "pending", "terminal_reason": None}]
+
+    db_insert_out_of_scope_work_item(
+        str(db),
+        method="GET",
+        url=url,
+        url_path="/api/v1/users",
+        query_params={},
+        body_params={},
+        path_params={},
+        cookie_params={},
+        case_type="api",
+        source="recon",
+        params_key_sig="",
+        auth_context="anonymous",
+        host="bad.example.com",
+    )
+
+    rows = db_query(
+        str(db),
+        "SELECT queue_key, status, cluster_key, terminal_reason "
+        "FROM work_items WHERE url = ? ORDER BY id",
+        (url,),
+    )
+    assert rows == [
+        {
+            "queue_key": "variant:123:api",
+            "status": "skipped",
+            "cluster_key": "skipped:out-of-scope",
+            "terminal_reason": "skipped:out-of-scope | bad.example.com",
+        }
+    ]
+
+    db_insert_work_item(
+        str(db),
+        queue_key="variant:123:api",
+        method="GET",
+        url=url,
+        url_path="/api/v1/users",
+        query_params="{}",
+        body_params="{}",
+        path_params="{}",
+        cookie_params="{}",
+        case_type="api",
+        source="recon",
+        params_key_sig="",
+        request_variant_id=123,
+        auth_context="anonymous",
+    )
+
+    readmitted = db_query(
+        str(db),
+        "SELECT status, cluster_key, terminal_reason FROM work_items WHERE queue_key = ?",
+        ("variant:123:api",),
+    )
+    assert readmitted == [
+        {
+            "status": "pending",
+            "cluster_key": "gf:api-versioning",
+            "terminal_reason": None,
+        }
+    ]

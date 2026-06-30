@@ -50,7 +50,7 @@ headless escalation, rate, exclusion, and ingestion doctrine.
 
 ```bash
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -c 10 -rl 20 \
+  -u https://target.example -d 3 -c 10 -rl 20 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_output.txt \
   --technique DISCOVERY --intent "live crawl of target.example" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -64,7 +64,7 @@ gau/httpx/fuzzing path.
 
 ```bash
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -headless -c 5 -rl 10 \
+  -u https://target.example -d 3 -headless -c 5 -rl 10 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_headless_output.txt \
   --technique DISCOVERY --intent "browser-semantic crawl of target.example" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -80,8 +80,8 @@ version-specific `--extra-args`.
 
 ```bash
 vigil assess kali katana \
-  -u URL -d 3 -jc -jsl -c 10 -rl 20 \
-  --extra-args '-H "Cookie: ..." -H "Authorization: Bearer ..."' \
+  -u URL -d 3 -c 10 -rl 20 \
+  -H "Cookie: ..." -H "Authorization: Bearer ..." \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_auth_output.txt \
   --technique DISCOVERY --intent "auth-aware crawl of URL" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -235,6 +235,16 @@ and produce the priority manifest. Then release them back:
 ```bash
 vigil assess work-buffer "$DB" reset-stale 0
 ```
+
+**Auth-gate redirect classification:** A URL that returns a 302 (or 301/307/308) redirect to a login page, SSO entry point, or policy wall is NOT a terminal "covered / gated" classification — it is a **bypass-test LEAD.** The redirect proves the route exists and is being enforced, which is exactly the signal the auth-bypass sweep needs. Emit a `bypass-lead` surface record for it rather than closing the work item:
+
+```bash
+vigil assess record-surface auth-bypass-lead "https://TARGET/protected" surface-collector \
+  --rationale "302 -> /login: gate confirmed; route exists and is enforced — bypass-test target" \
+  --status discovered
+```
+
+Triage must not consume the redirect signal and silently close the work item as "gated." Closing it ends the lead. The auth-bypass sweep (see `agent/skills/auth-bypass/SKILL.md` "Attack the Gate Itself") consumes these leads in Phase 3. See `agent/rules/hunting.md §23` for the general lead-not-verdict doctrine.
 
 **Triage categories** (see agent prompt for full pattern lists):
 

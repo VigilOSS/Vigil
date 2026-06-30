@@ -518,6 +518,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         repos=list(plan.repos),
         date_label=plan.date_label,
     )
+    _write_engagement_brief_stub(agent_root, eng_dir)
     # No auth.json scaffold: credentials live in the centralized store and an
     # engagement with no credentials reads as anonymous (vigil auth import /
     # mitmproxy capture populate it). See orchestrator credentials API.
@@ -1350,6 +1351,94 @@ def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, targ
         lines.append(f"- **Target**: {target}")
     lines.extend([f"- **Engagement Date**: {date_label}", "- **Status**: Pending - report not yet generated", "", "---", ""])
     (eng_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+# Canonical program-brief section headings (workflow specification §2 / workflow specification
+# §3.10). The stub mirrors the `agent/references/_template-engagement.md`
+# template's shape so an engagement starts with a structured, fill-in-the-blanks
+# program brief even before an operator authors one.
+_ENGAGEMENT_BRIEF_SECTIONS: tuple[tuple[str, str], ...] = (
+    (
+        "In-Scope / Out-of-Scope",
+        "In-scope assets / targets (note Core vs Supplemental tiers when their "
+        "rules differ) and the explicit out-of-scope carve-outs.",
+    ),
+    (
+        "Required Request Headers / Deconfliction Marker",
+        "Mandatory attribution headers (e.g. `X-Bug-Bounty: <handle>`) and how the "
+        "program wants traffic marked for deconfliction (header vs User-Agent).",
+    ),
+    (
+        "Rate Cap",
+        "Program-mandated request-rate ceiling, if any (req/s); leave blank to use "
+        "per-tool defaults.",
+    ),
+    (
+        "No-Fire Endpoints",
+        "Endpoints that must never be triggered (signup, password-reset, "
+        "support/report/ticket, contact-form, ...). Characterize statically instead.",
+    ),
+    (
+        "Irreversible / Notifying Flows",
+        "Actions that create persistent state or reach a human inbox/queue/audit "
+        "trail — surface a `scope_decision` rather than firing them.",
+    ),
+    (
+        "Exfiltration Limits",
+        "How far a proof-of-concept may go when reading data (record counts, "
+        "redaction, stop conditions).",
+    ),
+    (
+        "Parked / Non-Submittable Findings",
+        "Classes the program will not reward or that are explicitly out of bounds.",
+    ),
+    (
+        "Ban-Risk Rules",
+        'Hard rules whose violation risks a platform ban (e.g. "do not modify '
+        'customer account data → instant ban").',
+    ),
+    (
+        "Passive-DNS / Recon Coverage Keys",
+        "Free API keys that raise subdomain coverage "
+        "(`SUBFINDER_CHAOS_API_KEY`, `SUBFINDER_GITHUB_TOKEN`) — set them and re-run "
+        "dns-discovery.",
+    ),
+)
+
+
+def _write_engagement_brief_stub(agent_root: Path, eng_dir: Path) -> None:
+    """Seed a STUB `ENGAGEMENT.md` program brief into the engagement run dir.
+
+    `ENGAGEMENT.md` is referenced by ``agent/operator-core.md`` as a MANDATORY
+    read whose hard requirements override default tool behavior and the
+    AUTHORIZATION note, but nothing scaffolded it before — so a real program's
+    ROE had no structured home in a fresh engagement. This drops an
+    ENGAGEMENT-NEUTRAL scaffold (no host/program specifics — operators fill it
+    in per engagement, or delete it when an engagement has no program brief)
+    mirroring the section shape of the ``agent/references/_template-engagement.md``
+    template (P3-C). The template is referenced by path rather than copied so the
+    stub stays self-contained and deterministic whether or not the template has
+    landed yet; when present, the template carries the fuller guidance/examples.
+    """
+    template_path = agent_root / "references" / "_template-engagement.md"
+    lines = [
+        "# Engagement Program Brief",
+        "",
+        "> **STUB — fill this in per engagement, or delete it if this engagement has",
+        "> no program brief.** When present, this file is a MANDATORY read for the",
+        "> operator (see `agent/operator-core.md` → \"Engagement Program Brief —",
+        "> ENGAGEMENT.md\"); its hard requirements override default tool behavior and",
+        "> the AUTHORIZATION note. It is the home for per-engagement ROE so those",
+        "> rules stay OUT of the global operator prompt.",
+        ">",
+        f"> Structured template (full guidance + examples): `{template_path}`",
+        "> Kept ENGAGEMENT-NEUTRAL on purpose — no host/program specifics are seeded",
+        "> here. Populate each section from the program brief before recon/testing.",
+        "",
+    ]
+    for heading, guidance in _ENGAGEMENT_BRIEF_SECTIONS:
+        lines.extend([f"## {heading}", "", f"<!-- {guidance} -->", ""])
+    (eng_dir / "ENGAGEMENT.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def _init_cases_db(agent_root: Path, eng_dir: Path) -> None:

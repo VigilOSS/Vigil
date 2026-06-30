@@ -22,12 +22,14 @@ Skills should point you at `vigil assess contract kali <verb>` for field tables 
 
 ## Verb menu
 
-22 verbs total: 18 typed, 2 fallback, 1 batch fan-out, and 1 host-side maintenance command. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the batch verb fans one audited command out across an operator-supplied value list; the maintenance command reconciles stuck audit rows.
+24 verbs total: 19 typed, 2 fallback, 1 batch fan-out, and 2 host-side maintenance commands. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the batch verb fans one audited command out across an operator-supplied value list; the maintenance commands reconcile stuck audit rows (`sweep-orphans`) and print a tool's live help (`tool-help`).
+
+Every typed verb's result JSON includes a `resolved_argv` — the argv that ACTUALLY ran inside the container AFTER the transparent injections (program attribution `-H` headers, the `--resolve` IP-pin, nuclei's default `-exclude-tags`). Read it to see what executed, not just what you typed.
 
 | Verb | Use | Paired reference |
 |------|-----|------------------|
 | `kali nmap-scan` | Port + service scan with optional NSE scripts. TLS SAN extraction and rDNS via `-sV`. | `references/tools/recon/nmap.md` |
-| `kali nuclei` | Template-based vulnerability scanner. Curated template set is the mandatory web-vuln pass — `nuclei` is the primary, `nikto` is the conditional fallback. | `references/tools/recon/nuclei.md` |
+| `kali nuclei` | Template-based vulnerability scanner. Curated template set is the mandatory web-vuln pass — `nuclei` is the primary, `nikto` is the conditional fallback. WAF-resilient: injects `-mhe 50` by default so a 403 storm doesn't make nuclei abandon the host; lead with explicit `-t`, add `-random-agent`/`-H` past UA blocks. | `references/tools/recon/nuclei.md` |
 | `kali httpx` | Fast HTTP probing: status, title, tech-detect, TLS-grab. Drives WAF-tier and CDN decisions. | `references/tools/recon/httpx.md` |
 | `kali wafw00f` | WAF identification. Run FIRST, before nmap/nikto/dir-fuzz, because WAF tier dictates rate limits for every later tool. | `references/tools/recon/wafw00f.md` |
 | `kali ffuf` | Directory and parameter fuzzing with fast filtering. | `references/tools/fuzzing/ffuf.md` |
@@ -40,14 +42,16 @@ Skills should point you at `vigil assess contract kali <verb>` for field tables 
 | `kali puredns` | Active DNS brute-force with massdns + wildcard filter (Tier C). | `references/tools/recon/puredns.md` |
 | `kali dnsx` | Bulk DNS resolution and record enrichment (Tier D). | `references/tools/recon/dnsx.md` |
 | `kali nikto` (CONDITIONAL — see triggers in `references/tools/recon/nikto.md`) | Web vuln scanner; legacy/odd-stack only. CLI flag is `--host <h>` (not `-h`, which argparse reserves for help) — the underlying nikto invocation builds `nikto -h <host>` correctly. | `references/tools/recon/nikto.md` |
-| `kali katana` | Authenticated crawler with JS-aware extraction (`-jc`, `-jsl`) and `-headless` for browser-semantic crawl deltas. | `agent/references/tools/recon/katana.md` |
+| `kali katana` | JS-aware crawler. Deep + scope-safe + disk-bounded by DEFAULT: `-d 5`, `-fs fqdn`, `-or -ob`, `-ef <static>`, JavaScript endpoint crawling + jsluice extraction, and a SAFE `-rl 10` (hard-capped 20; `--allow-fast-crawl` to exceed). Depth is decoupled from rate — go deep without going fast. `--keep-bodies` / `--include-static` undo the disk/asset defaults; `-headless` for browser-semantic deltas. | `agent/references/tools/recon/katana.md` |
 | `kali gau` | Historical URL collection (Wayback / OTX / Common Crawl / URLScan). | `references/tools/recon/gau.md` |
 | `kali arjun` | Hidden HTTP-parameter discovery (GET/POST/JSON/XML), `--passive` OSINT mode, auth via `--headers`. Aim it at a GATED list (`vigil assess arjun-select`), then fold results back with `vigil assess ingest-arjun` so the classifier re-routes the now-parameterized endpoint. | `references/tools/recon/arjun.md` |
 | `kali whatweb` | Deep web technology fingerprinting. | `references/tools/recon/whatweb.md` |
+| `kali browser` | Headless-chromium (selenium) render of one URL: origin status + final DOM + screenshot as one JSON. The trustworthy-signal recovery for a curl/httpx run flagged `status='waf_challenge'` (real browser clears JS bot-challenges). | `references/tools/recon/kali-browser.md` |
 | `kali exec <cmd>` | Raw passthrough for tools not yet typed. Same audit metadata flags. | `references/runtime-guides/kali-cli.md` |
 | `kali job <start\|status\|tail\|stop\|list>` | **Operator-only** async-job lifecycle for a single authorized long sweep that must outlive its dispatch. Specialists run synchronously instead — see the sync-vs-async decision below. | `references/runtime-guides/kali-cli.md` |
 | `kali sweep` | Value-agnostic batch: runs one audited `kali exec` per `--values` entry (a literal list and/or inclusive integer ranges `a-b`) with `{}` substituted into the command template, then clusters the responses by distinct signature (reachability class + status + body marker) — distinguishing reachable vs. dns-failure vs. connection-refused via the shared reachability taxonomy. One `command-runs` audit row per value. Politeness: `--max-values 200` cap, default `--concurrency 1` (>1 needs `--allow-concurrent`, I-013 per-host rule). It expands ONLY the values you supply — no ID/host generation. | `references/runtime-guides/kali-cli.md` |
 | `kali sweep-orphans` | Host-side reconciler for `assessment_command_runs` rows stuck in `status=running` past `--max-age-seconds` (default 3600s). Probes the in-container PID via `kill -0`; finalizes dead rows to `status=lost`. No audit flags — it is maintenance, not a probe. | `references/runtime-guides/kali-cli.md` |
+| `kali tool-help <tool>` | Print a runtime tool's live `-h`/`--help` from inside the container, so you read the EXACT flags the installed version supports instead of guessing into `--extra-args`. No audit flags — maintenance, not a probe. e.g. `vigil assess kali tool-help katana`. | `references/runtime-guides/kali-cli.md` |
 
 `kali exec` is the escape hatch — use it for tools the typed surface does not yet model (dirb, gobuster, hydra, john, hashcat, custom scripts, etc.) and pass the same audit-metadata flags as a typed verb. `kali job` is the supervisor — see the sync-vs-async decision below.
 
@@ -58,11 +62,19 @@ Every typed verb accepts an optional `--extra-args "<shell-quoted string>"` to b
 Critical: `--destructive` still applies. If the extra args include a write/delete (`--os-shell` for sqlmap, `--script vuln` for nmap, etc.), you must also pass `--destructive` so the audit row reflects the actual blast radius.
 
 ```bash
+# Headers (-H) and match-codes (-mc) are now TYPED flags — pass them directly.
+# Reserve --extra-args for genuinely unmodeled flags.
 vigil assess kali httpx -u https://x -tech-detect \
-  --extra-args "-H 'X-Forwarded-For: 127.0.0.1' -mc 200,302" \
+  -H 'X-Forwarded-For: 127.0.0.1' -mc 200,302 \
+  --extra-args "-sr -include-response" \
   --technique DISCOVERY --intent "tech detect with custom headers" \
   --probe-kind fingerprint --phase recon --timeout 60
 ```
+
+**Quoting gotcha:** an `--extra-args` VALUE that begins with a now-typed short flag
+(e.g. `-H`, `-t`) is greedily claimed by argparse as that flag and rejected
+("expected one argument"). Use the typed flag instead, or — for an unmodeled flag
+whose value must lead with a dash — the equals form `--extra-args=-X ...`.
 
 ## Synchronous vs. async decision
 
@@ -323,7 +335,7 @@ headless escalation, and ingestion rules.
 ```bash
 # JS-aware authenticated crawl with rate cap.
 vigil assess kali katana \
-  -u https://app.example.com -jc -jsl -d 4 -c 10 -rl 20 \
+  -u https://app.example.com -d 4 -c 10 -rl 20 \
   -jsonl -o /engagements/$ENGAGEMENT_KEY/scans/katana_app.jsonl \
   --technique DISCOVERY --intent "JS-aware crawl of app.example.com" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -406,7 +418,7 @@ When you know what you want to learn, this lookup gets you to the right verb wit
 - "Find directories on a target?" → `kali ffuf -u <url>/FUZZ -w <wordlist>`.
 - "Sweep for CVEs/misconfigs/exposures?" → `kali nuclei -l <list> -t http/cves/,http/misconfiguration/,http/exposures/`.
 - "Probe a SQLi candidate?" → `kali sqlmap -u <url> --technique=<BEUSTQ subset> --batch`.
-- "Crawl a JS-heavy SPA?" → `kali katana -u <url> -jc -jsl` and apply `agent/references/tools/recon/katana.md`.
+- "Crawl a JS-heavy SPA?" → `kali katana -u <url> -headless` and apply `agent/references/tools/recon/katana.md`.
 - "Harvest historical URLs without touching the target?" → `kali gau <domain> --subs`.
 - "Enumerate subdomains?" → `kali subfinder -d <domain> -all` then `kali puredns resolve` then `kali dnsx`.
 - "Inventory runtime tools or versions?" → `kali exec --technique HEALTH --intent "tooling inventory" --probe-kind fingerprint --phase <phase> --timeout 60 -- which <tool...>`.
@@ -515,6 +527,26 @@ Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `to
 ## Process cleanup discipline
 
 Use PID-targeted cleanup, not binary-name signals — `pkill -f nmap` or `pkill -f ffuf` kills sibling specialists' parallel scans in the shared runtime, losing potentially hours of recon. For async jobs, use `vigil assess kali job stop <id>` (signals only the job-owned in-container PID); for synchronous calls, the CLI already handles the SIGTERM/SIGKILL escalation on `--timeout` expiry so no manual cleanup is needed.
+
+## Wire-Byte Verification Before Trusting a 406 / Content-Negotiation Verdict
+
+A 406 Not Acceptable response (or any content-negotiation-derived verdict) can be fabricated by a **malformed request**, not by the real target behavior. The most common source is an unquoted header value in shell argv that splits at whitespace into two separate tokens before it reaches the HTTP request:
+
+```bash
+# WRONG — the Accept header splits; the request goes out without a valid Accept
+curl https://TARGET/api/endpoint -H Content-Type: application/json
+
+# CORRECT — quote the entire header value so it reaches the wire intact
+curl https://TARGET/api/endpoint -H "Content-Type: application/json"
+```
+
+Before treating a 406 (or a content-negotiation-driven "handler not reached" result) as target behavior:
+
+1. **Inspect the recorded argv.** The audit row's `resolved_argv` field shows what ACTUALLY ran inside the container. Read it with `vigil assess get-command-run <id>` and confirm every `-H` value is quoted and complete.
+2. **Capture the raw wire bytes.** Re-run with `-v` (curl) or `-debug` (httpx) to see the literal request headers sent. A missing or truncated header explains the 406 without any target-side enforcement.
+3. **Send a canonical request.** Construct the request with explicit, fully-quoted headers and confirm the 406 persists before recording "content-negotiation blocked" as a verdict.
+
+An unquoted-header 406 is a **tooling artifact**, not a target signal — it fabricates a "handler not reached" lead that closes coverage prematurely. See `agent/rules/hunting.md §23` ("A non-conclusive response is a LEAD, not a verdict") for the doctrine.
 
 ## Troubleshooting and runtime errors
 

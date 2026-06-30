@@ -104,6 +104,10 @@ def _missing_block_families(unit_ledger) -> set[str]:
     return {e["family"] for e in unit_ledger["missing_block"]}
 
 
+def _signal_uncovered(unit_ledger) -> set[str]:
+    return set(unit_ledger.get("signal_classes_uncovered") or [])
+
+
 def _seed_giving_unit(client, isolate_settings, key):
     eng_id = _seed(client, isolate_settings, key)
     base = "https://rock.example.com/giving"
@@ -382,3 +386,40 @@ def test_coverage_item_requires_rationale(client, isolate_settings):
     ledger2 = _deep_unit(eng_id)
     unit2 = _by_host_prefix(ledger2, "rock.example.com", "/giving")
     assert "injection" in _covered_families(unit2)
+
+
+def test_signal_classes_uncovered_flags_sibling_class_blind_spot(client, isolate_settings):
+    """Per-class enforcement (advisory): a pending gf `sqli` coverage_item makes
+    `sqli` a per-class signal. An `ssti` probe covers the injection FAMILY, so the
+    family-level gate is satisfied — yet `sqli` was never class-specifically probed,
+    so it surfaces in `signal_classes_uncovered`. This is the single-class blind spot
+    the field exposes WITHOUT changing the family math."""
+    eng_id = _seed_giving_unit(client, isolate_settings, "2026-06-09-200020-sig")
+    vid = _variant_id_for(eng_id, "/giving/account")
+    state_manager.record_coverage_item(
+        eng_id, request_variant_id=vid, service_id=None, auth_context="anonymous",
+        input_slot="endpoint", attack_family="sqli", status_value="pending",
+        notes="gf bucket 'sqli' matched at ingest",
+    )
+    _probe(eng_id, attack_family="ssti", result_status="tested", variant_id=vid,
+           tool_name="tplmap")
+
+    unit = _by_host_prefix(_deep_unit(eng_id), "rock.example.com", "/giving")
+    assert "injection" in _covered_families(unit)          # family covered by ssti
+    assert "injection" not in _missing_block_families(unit)  # family gate satisfied
+    assert "sqli" in _signal_uncovered(unit)               # per-class gap still surfaced
+
+
+def test_signal_classes_uncovered_cleared_by_class_specific_probe(client, isolate_settings):
+    """A class-specific `sqli` probe clears `sqli` from signal_classes_uncovered."""
+    eng_id = _seed_giving_unit(client, isolate_settings, "2026-06-09-200021-sig2")
+    vid = _variant_id_for(eng_id, "/giving/account")
+    state_manager.record_coverage_item(
+        eng_id, request_variant_id=vid, service_id=None, auth_context="anonymous",
+        input_slot="endpoint", attack_family="sqli", status_value="pending",
+        notes="gf bucket 'sqli' matched at ingest",
+    )
+    _probe(eng_id, attack_family="sqli", result_status="tested", variant_id=vid,
+           tool_name="sqlmap")
+    unit = _by_host_prefix(_deep_unit(eng_id), "rock.example.com", "/giving")
+    assert "sqli" not in _signal_uncovered(unit)

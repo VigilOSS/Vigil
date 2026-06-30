@@ -40,7 +40,7 @@ from types import SimpleNamespace
 from . import vuln_taxonomy
 from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
-from .identity import resolve_identity
+from .identity import host_cookie_hosts, host_cookies_for, resolve_identity
 
 # Re-exports — keep this block ordered by source module so the public surface
 # is grep-friendly. Tests patch a number of these via the legacy
@@ -65,12 +65,19 @@ from .kali_audit import (
     _write_failed_audit_marker,
 )
 from .kali_cli import (
+    CRAWL_RATE_DEFAULT,
+    CRAWL_RATE_HARD_CAP,
     ScopedErrorParser,
     add_passthrough_args_flag,
     add_required_kali_flags,
+    count_list_targets,
     emit_result,
     extend_cmd_with_extra_args,
+    incomplete_list_run_warning,
     kali_args_to_kwargs,
+    parse_list_progress,
+    resolve_crawl_rate_limit,
+    safe_engagement_dir,
 )
 from .kali_output import (
     _REQUIRED_HEADER_INJECTABLE,
@@ -80,6 +87,7 @@ from .kali_output import (
     _auth_context,
     _engagement_type,
     _existing_header_names,
+    _in_scope_allow_entries,
     _peak_rss_kilobytes_to_bytes,
     _read_proc_peak_rss,
     _read_safely,
@@ -90,6 +98,7 @@ from .kali_output import (
     detect_waf_challenge,
     extract_probe_response_headers,
     is_http_prober,
+    required_header_attribution_gap,
 )
 from . import kali_resolve
 from .kali_runtime_exec import (
@@ -202,11 +211,21 @@ def _emit_probe_run(
 _IDENTITY_INJECTABLE_TOOLS = frozenset({"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"})
 
 
-def _identity_header_pairs(material: dict) -> list[tuple[str, str]]:
+def _identity_header_pairs(
+    material: dict, *, request_host: str = ""
+) -> list[tuple[str, str]]:
     """Flatten an identity's auth material into ``(header, value)`` pairs.
 
-    Supports a ``headers`` map, a ``cookies`` map (joined into one ``Cookie``
-    header), and an optional bearer ``token``. Order is deterministic.
+    Supports a ``headers`` map, a ``cookies`` map plus the request-host-scoped
+    ``host_cookies`` jar (joined into one ``Cookie`` header the way a browser
+    sends it), and an optional bearer ``token``. Order is deterministic.
+
+    ``request_host`` selects the matching ``host_cookies`` bucket(s) (I-22): a
+    cookie-session app on a host other than the capture-time primary scope host
+    would otherwise be sent the flat (mismatched/empty) cookie view and read the
+    request as "session stale". The host-scoped bucket overlays the flat
+    ``cookies`` view so the right session rides each host; with no ``host_cookies``
+    (or no match) the behavior is the unchanged flat-cookie injection.
     """
     pairs: list[tuple[str, str]] = []
     headers = material.get("headers")
@@ -214,9 +233,13 @@ def _identity_header_pairs(material: dict) -> list[tuple[str, str]]:
         for key, value in headers.items():
             if str(key).strip():
                 pairs.append((str(key), str(value)))
+    cookie_map: dict[str, str] = {}
     cookies = material.get("cookies")
-    if isinstance(cookies, dict) and cookies:
-        cookie = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    if isinstance(cookies, dict):
+        cookie_map.update({str(k): str(v) for k, v in cookies.items()})
+    cookie_map.update(host_cookies_for(material, request_host))
+    if cookie_map:
+        cookie = "; ".join(f"{k}={v}" for k, v in cookie_map.items())
         pairs.append(("Cookie", cookie))
     token = _identity_bearer_token(material)
     if token and not any(name.lower() == "authorization" for name, _ in pairs):
@@ -252,7 +275,8 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
     """
     if not isinstance(material, dict):
         return False
-    pairs = _identity_header_pairs(material)
+    request_host = kali_resolve.target_host_port(tool_name, cmd)[0]
+    pairs = _identity_header_pairs(material, request_host=request_host)
     if not pairs:
         return False
     exe = os.path.basename(str(cmd[0])).lower() if cmd else ""
@@ -260,6 +284,20 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
         return False
     for name, value in pairs:
         cmd.extend(["-H", f"{name}: {value}"])
+    # WARN when the identity carries captured host_cookies that did NOT make it
+    # into this request — a request to a host with no matching bucket (or a
+    # list-mode run with no single request host) — so a cookie-session app isn't
+    # silently probed without its session and read as "session stale" (I-22).
+    bucket_hosts = host_cookie_hosts(material)
+    if bucket_hosts and not host_cookies_for(material, request_host):
+        print(
+            "warning: identity carries captured host_cookies for "
+            f"{', '.join(sorted(set(bucket_hosts)))} but none match this run's "
+            f"request host '{request_host or '(none / list-mode)'}' — the request "
+            "runs without that host session and a cookie-session app may read it "
+            "as stale; target a single host this identity has a session for.",
+            file=sys.stderr,
+        )
     return True
 
 
@@ -362,6 +400,7 @@ def kali_exec(
             stderr_preview="",
             timed_out=False,
             partial_results=False,
+            resolved_argv=list(cmd),
         )
 
     _check_container_running(container_name)
@@ -386,10 +425,12 @@ def kali_exec(
     # IP-pin/exec — so the injected ``-H`` args land in the recorded audit argv.
     # For a ``sh -c``/``bash -c`` wrapper the header is BEST-EFFORT injected into
     # the curl/wget sub-commands inside the script TEXT (W5); a plain argv append
-    # would land on the shell, not the inner tool. WARN (never block) only when
-    # no safe -H injection is possible — a missing attribution header is a
-    # reduced reward, not a ban-risk, so a hard block (which would stall a
-    # legitimate multi-curl probe mid-hunt) is never the right call.
+    # would land on the shell, not the inner tool. This Layer-1 injection only
+    # WARNs when no safe -H injection is possible (an unknown tool, or a script we
+    # could not rewrite) — it does not itself block. The Layer-2 backstop just
+    # below is the hard stop: per ADR 0010, an un-attributed request that REACHES
+    # an in-scope host on a required-headers engagement is a ban-risk, so it is
+    # REFUSED rather than sent. Local / non-target commands stay unaffected.
     _req_headers = _required_headers(eng_dir)
     if _req_headers:
         status = _apply_required_headers(cmd, derived_tool_name, _req_headers)
@@ -403,13 +444,52 @@ def kali_exec(
                 file=sys.stderr,
             )
 
+        # Layer-2 fail-closed attribution backstop (ADR 0010). After every
+        # transparent mutation (identity, Layer-1 required-header injection) the
+        # assembled command is inspected one last time: when it REACHES an
+        # in-scope host WITHOUT carrying the marker, REFUSE the run rather than
+        # send un-attributed traffic to a program-governed host (a ban-risk on
+        # federal/managed programs). This catches the gaps Layer 1 leaves — a
+        # `bash -c "curl <in-scope>"` whose script couldn't be injected, an
+        # unknown tool, or wafw00f. Local/non-target commands and passive skip-set
+        # tools are unaffected (the gate is fail-OPEN for everything else).
+        gap = required_header_attribution_gap(
+            cmd, derived_tool_name, _req_headers, _in_scope_allow_entries(eng_dir)
+        )
+        if gap:
+            refusal = (
+                f"RUNTIME ERROR: refusing to run — {gap}. Program-required "
+                "attribution headers must ride every in-scope HTTP request "
+                "(missing attribution is a ban-risk on federal/managed programs). "
+                "Add the marker the tool's own way (curl/httpx -H, whatweb "
+                "--header, nikto -Add-header, arjun --headers) or call curl "
+                "directly instead of wrapping it in bash -c, then re-run."
+            )
+            print(refusal, file=sys.stderr)
+            return KaliResult(
+                run_id=None,
+                status="refused",
+                return_code=None,
+                stdout_path=str(stdout_path),
+                stderr_path=str(stderr_path),
+                duration_ms=int((time.monotonic() - started_monotonic) * 1000),
+                peak_rss_bytes=None,
+                stdout_preview="",
+                stderr_preview=refusal,
+                timed_out=False,
+                partial_results=False,
+                resolved_argv=list(cmd),
+            )
+
     # CR-36 — host-resolve + --resolve IP-pin. On macOS Docker Desktop the
     # container resolver flaps (I-013), so a container HTTP probe can return
     # http=000 for a name that resolves fine on the host. Pin the host-resolved
-    # IP into the argv (curl/httpx/nuclei/ffuf/katana) so target HTTP never
-    # depends on the broken container resolver. Transparent no-op off Docker
-    # Desktop and when the operator opts out (VIGIL_NO_RESOLVE_PIN) — pinning is
-    # idempotent (skipped if a --resolve for this host is already present).
+    # IP into the argv (curl ONLY — httpx/nuclei/katana/ffuf reject the
+    # curl-style --resolve flag and abort; see kali_resolve.RESOLVE_PIN_TOOLS) so
+    # target HTTP never depends on the broken container resolver. Transparent
+    # no-op off Docker Desktop and when the operator opts out
+    # (VIGIL_NO_RESOLVE_PIN) — pinning is idempotent (skipped if a --resolve for
+    # this host is already present).
     pinned_ip: str | None = None
     pin_host, pin_port = kali_resolve.target_host_port(derived_tool_name, cmd)
     _pin_eligible = (
@@ -884,6 +964,9 @@ def kali_exec(
             transport_error_detail=transport_error_detail,
             waf_challenge=waf_challenge,
             waf_challenge_detail=waf_challenge_detail,
+            # ``cmd`` has been mutated in place by the identity / required-header /
+            # --resolve-pin injectors above, so it is the ACTUAL argv that ran.
+            resolved_argv=list(cmd),
         )
     finally:
         client.close()
@@ -914,6 +997,13 @@ __all__ = [
     "extend_cmd_with_extra_args",
     "kali_args_to_kwargs",
     "emit_result",
+    "resolve_crawl_rate_limit",
+    "CRAWL_RATE_DEFAULT",
+    "CRAWL_RATE_HARD_CAP",
+    "count_list_targets",
+    "parse_list_progress",
+    "incomplete_list_run_warning",
+    "safe_engagement_dir",
     # Output + RSS (from kali_output)
     "KaliResult",
     "_REQUIRED_HEADER_INJECTABLE",
@@ -922,6 +1012,7 @@ __all__ = [
     "_auth_context",
     "_engagement_type",
     "_existing_header_names",
+    "_in_scope_allow_entries",
     "_peak_rss_kilobytes_to_bytes",
     "_read_proc_peak_rss",
     "_read_safely",
@@ -932,6 +1023,7 @@ __all__ = [
     "detect_waf_challenge",
     "extract_probe_response_headers",
     "is_http_prober",
+    "required_header_attribution_gap",
     # Runtime exec + kill cascade (from kali_runtime_exec)
     "_build_docker_exec",
     "_check_container_running",

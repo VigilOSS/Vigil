@@ -32,9 +32,21 @@ Flag semantics (master plan §6 "Consolidated-command flag semantics"):
     that does not fold it by default.
   * ``--strict-deep``     — gate on app-unit DETECTION (default OFF; detection is
     warm-first). Escalates an unsatisfied deep_required unit to a non-zero exit.
-  * ``--strict``          — CI-style: exit 1 on ANY open advisory item (preserves
-    the old ``check-intel-readiness --strict``). Does NOT imply ``--strict-deep``.
+  * ``--strict``          — CI-style: exit 1 on ANY open advisory item — an open
+    intel-closure item (preserves the old ``check-intel-readiness --strict``) OR
+    an open recon-pipeline stage gap (P-1, see below). Does NOT imply
+    ``--strict-deep``.
   * ``--json``            — emit the structured projection (the downstream contract).
+
+P-1 (item 2.1) — recon-pipeline stage-completion audit. On the pipeline phases
+(``recon``/``collect``) the backend folds a ``stage_audit`` block into the
+phase-readiness payload: it diffs the command-run ledger
+(``assessment_command_runs``) against a per-phase EXPECTED-STAGE checklist
+(subdomain/dns → httpx → katana → gau → trufflehog; collect → nuclei) and flags
+any stage that ``timed_out`` / produced ``partial_results`` / NEVER RAN. The gap
+report is ADVISORY by default (WARN/report only); ``--strict`` escalates an open
+stage gap to a non-zero exit. The EXPECTED-STAGE map lives backend-side in
+``state_manager.phase_readiness.PHASE_EXPECTED_STAGES``.
 
 The terminal ``report``/``complete`` hard block is INDEPENDENT of both ``--strict``
 and ``--strict-deep`` — it lives on the ``transition-phase`` precondition and is
@@ -176,8 +188,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         dest="strict",
         action="store_true",
         help=(
-            "CI-style: exit 1 on any open advisory item (preserves the old "
-            "check-intel-readiness --strict). Does NOT imply --strict-deep."
+            "CI-style: exit 1 on any open advisory item — an open intel-closure "
+            "item (preserves the old check-intel-readiness --strict) OR an open "
+            "recon-pipeline stage gap (timed_out/partial/never-ran). Does NOT "
+            "imply --strict-deep."
         ),
     )
     p.add_argument(
@@ -231,6 +245,20 @@ def run(args: argparse.Namespace) -> None:
         else:
             text_lines.extend(cov_blockers)
             if phase == "consume":
+                exit_nonzero = True
+
+        # P-1 (item 2.1) — recon-pipeline stage-completion audit. The backend
+        # folds a ``stage_audit`` block into the phase-readiness payload for the
+        # pipeline phases (recon/collect). It is ADVISORY by default (WARN/report
+        # only); --strict escalates an open stage gap to a non-zero exit,
+        # alongside the existing --strict intel-closure escalation below.
+        stage_audit = backend.get("stage_audit")
+        if isinstance(stage_audit, dict) and stage_audit.get("applicable"):
+            stage_has_open, stage_lines = cc.render_stage_audit(stage_audit)
+            projection["stage_audit"] = stage_audit
+            projection["stage_audit_open_gaps"] = bool(stage_has_open)
+            text_lines.extend(stage_lines)
+            if args.strict and stage_has_open:
                 exit_nonzero = True
 
         stage = _PHASE_REQUIRE_STAGE.get(phase)

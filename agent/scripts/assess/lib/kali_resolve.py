@@ -13,10 +13,11 @@ The durable fix has two halves, both implemented here and wired from
 1. **Pre-flight ``--resolve`` pin** (:func:`apply_resolve_pin`): before the run, on
    Docker Desktop, resolve the target host on the HOST (``socket.getaddrinfo``) and
    inject ``--resolve <host>:<port>:<ip>`` into the tool argv so the in-container
-   HTTP request bypasses the broken container resolver entirely. curl, httpx,
-   nuclei and katana all accept ``--resolve`` with identical ``host:port:ip``
-   syntax. ffuf is deliberately NOT pinned (I-10): its flag parser has no
-   ``--resolve`` and would abort the run; see ``RESOLVE_PIN_TOOLS``.
+   HTTP request bypasses the broken container resolver entirely. ONLY curl is
+   pinned — ``--resolve host:port:ip`` is a curl-specific feature. httpx, nuclei,
+   katana and ffuf are deliberately NOT pinned: their Go flag parser rejects
+   ``--resolve`` ("flag provided but not defined: -resolve", exit 2) and aborts the
+   run before the probe fires; see ``RESOLVE_PIN_TOOLS``.
 
 2. **Post-run host-resolved retry input** (:func:`resolve_host_ips`): when the
    false-negative guard in ``kali_exec`` detects the ``http=000`` /
@@ -51,9 +52,19 @@ from . import runtime_route
 from .kali_audit import _extract_target_anchor
 
 # Tools whose HTTP request honors a ``--resolve host:port:ip`` pin with curl's
-# syntax. curl/httpx/nuclei/katana all accept the identical ``host:port:ip``
-# form. sqlmap and ffuf are EXCLUDED — they have no equivalent host-pin flag, so
-# injecting ``--resolve`` makes them reject the argument and abort the run.
+# syntax. ONLY curl does — ``--resolve`` is a curl-specific feature. httpx,
+# nuclei, katana, ffuf, and sqlmap are EXCLUDED: their Go flag parser has no
+# ``--resolve`` and rejects it with "flag provided but not defined: -resolve"
+# (exit 2) BEFORE the probe fires — so injecting the pin turns a recoverable
+# Docker-Desktop resolver flap into a hard, silent total failure of every pinned
+# run. The ``-r/-resolvers`` flag these ProjectDiscovery tools DO have is a
+# resolver-LIST file (which DNS servers to query), a different feature that does
+# NOT pin host->ip. Verified empirically against the shipped image: katana
+# v1.5.0 / httpx v1.9.0 / nuclei v3.7.1 all reject ``--resolve``. They STAY
+# http-probers (``is_http_prober`` / ``_HTTP_PROBER_TOOLS``), so the post-run
+# http=000 false-negative guard still arms and records a TRANSPORT ERROR (not a
+# target verdict), directing the operator to re-run via the host path — the
+# safety property holds without the broken pin, exactly as for ffuf below.
 #
 # ffuf in particular (I-10): the image's ffuf (v2.x) has no ``--resolve`` flag —
 # its Go flag parser errors with "flag provided but not defined: -resolve" and
@@ -66,7 +77,7 @@ from .kali_audit import _extract_target_anchor
 # guard still arms for it and records a TRANSPORT ERROR (not a target verdict),
 # directing the operator to re-run via the host path — the safety property holds
 # without the broken pin.
-RESOLVE_PIN_TOOLS: frozenset[str] = frozenset({"curl", "httpx", "nuclei", "katana"})
+RESOLVE_PIN_TOOLS: frozenset[str] = frozenset({"curl"})
 
 # Operator escape hatch. Truthy disables host-resolve + --resolve pinning even on
 # Docker Desktop (mirrors the --no-resolve-pin flag; threaded via env because the

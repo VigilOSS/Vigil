@@ -991,3 +991,106 @@ def test_merge_signal_lists_dedups_and_preserves():
         arjun_enrich.SIGNALS_UNPARSED_MARKER,
         "x",
     ]
+
+
+# --------------------------------------------------------------------------
+# Incomplete-run guard — a timed-out/killed list run is NOT a clean negative
+# (the "arjun scanned 2 of 134 then SIGTERM, reported a false 0" trap).
+# --------------------------------------------------------------------------
+from assess.lib import kali_cli  # noqa: E402
+
+
+def test_count_list_targets(tmp_path):
+    f = tmp_path / "t.txt"
+    f.write_text("https://a/1\n\n# comment\nhttps://b/2\n  \nhttps://c/3\n")
+    assert kali_cli.count_list_targets(str(f)) == 3
+    assert kali_cli.count_list_targets("/no/such/file") == 0
+    assert kali_cli.count_list_targets("") == 0
+
+
+def test_count_list_targets_anchors_container_path(tmp_path):
+    # Finding 2: the tool sees an in-container `/engagements/<key>/...` path; read
+    # raw on the host it doesn't exist (returns 0, silently disabling the guard).
+    # With engagement_dir it must anchor to the host file and count correctly.
+    (tmp_path / "scans" / "arjun-sweep").mkdir(parents=True)
+    listfile = tmp_path / "scans" / "arjun-sweep" / "GET.txt"
+    listfile.write_text("https://x/a\nhttps://x/b\nhttps://x/c\n")
+    container = "/engagements/eng/scans/arjun-sweep/GET.txt"
+    assert kali_cli.count_list_targets(container) == 0  # the bug, unanchored
+    assert kali_cli.count_list_targets(container, engagement_dir=str(tmp_path)) == 3
+    # engagement-relative paths anchor too.
+    assert kali_cli.count_list_targets(
+        "scans/arjun-sweep/GET.txt", engagement_dir=str(tmp_path)
+    ) == 3
+    # a bare host-absolute path is read as-is (no engagement_dir needed).
+    assert kali_cli.count_list_targets(str(listfile)) == 3
+
+
+def test_incomplete_sentinel_round_trip():
+    # Finding 1: a killed/timed-out run with no output writes a sentinel instead
+    # of a bare {} so ingest can tell it apart from a real "0 params" negative.
+    from assess.lib import arjun_enrich as ae
+
+    sentinel = ae.incomplete_sentinel()
+    assert ae.artifact_is_incomplete(sentinel) is True
+    assert ae.parse_arjun_json(sentinel) == []  # sentinel key is skipped, no junk record
+    # a genuine empty / real artifact is NOT flagged incomplete
+    assert ae.artifact_is_incomplete("{}") is False
+    assert ae.artifact_is_incomplete('{"https://x/a": ["id", "q"]}') is False
+    assert len(ae.parse_arjun_json('{"https://x/a": ["id", "q"]}')) == 1
+
+
+def test_parse_list_progress():
+    assert kali_cli.parse_list_progress("Scanning 12/134 ...") == (12, 134)
+    assert kali_cli.parse_list_progress("Processing: 3 / 50") == (3, 50)
+    # highest wins; a keyword prefix is REQUIRED so a bare fraction (a URL path,
+    # a status ratio) is never mistaken for progress.
+    assert kali_cli.parse_list_progress("Scanning 1/10 ... Scanning 7/10") == (7, 10)
+    assert kali_cli.parse_list_progress("no progress markers") is None
+    assert kali_cli.parse_list_progress("GET /api/v1/10 -> 200/404") is None
+
+
+def test_incomplete_warning_fires_on_timed_out_multitarget():
+    note = kali_cli.incomplete_list_run_warning(
+        tool="arjun", total_targets=134, timed_out=True, return_code=143,
+        stdout_preview="Scanning 2/134",
+    )
+    assert "INCOMPLETE" in note and "2 of 134" in note
+    # killed via non-zero rc (not just timed_out) also counts
+    assert kali_cli.incomplete_list_run_warning(
+        tool="arjun", total_targets=10, timed_out=False, return_code=143) != ""
+
+
+def test_incomplete_warning_silent_on_clean_or_single():
+    assert kali_cli.incomplete_list_run_warning(
+        tool="arjun", total_targets=50, timed_out=False, return_code=0) == ""
+    # a single-target timeout is a different problem, not flagged as a list truncation
+    assert kali_cli.incomplete_list_run_warning(
+        tool="arjun", total_targets=1, timed_out=True, return_code=143) == ""
+
+
+def test_kali_arjun_warns_incomplete_on_timed_out_list(tmp_path, monkeypatch, capsys):
+    listfile = tmp_path / "targets.txt"
+    listfile.write_text("https://a/1\nhttps://b/2\nhttps://c/3\n")
+
+    class _R:
+        timed_out = True
+        return_code = 143
+        stdout_preview = "Scanning 1/3"
+        stderr_preview = ""
+
+    monkeypatch.setattr(kali_arjun, "kali_exec", lambda cmd, **k: _R())
+    monkeypatch.setattr(kali_arjun, "emit_result", lambda r: None)
+    monkeypatch.setattr(kali_arjun, "kali_args_to_kwargs", lambda a: {})
+    monkeypatch.setattr(kali_arjun, "extend_cmd_with_extra_args", lambda cmd, a: None)
+    monkeypatch.setattr(kali_arjun, "_ensure_json_artifact", lambda a, p, **k: None)
+
+    kali_arjun.run(_arjun_ns(target_url="", import_file=str(listfile)))
+    err = capsys.readouterr().err
+    assert "INCOMPLETE" in err and "arjun" in err
+
+
+def test_kali_arjun_silent_when_single_url_completes(captured_cmd, capsys):
+    # the default -u (single target) run that does NOT time out emits no incomplete warning
+    kali_arjun.run(_arjun_ns())
+    assert "INCOMPLETE" not in capsys.readouterr().err

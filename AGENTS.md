@@ -184,6 +184,46 @@ roster file to edit.
    (`agent/operator-core*.md` or a role prompt under `agent/agents/`). The operator passes the skill
    `path` to the specialist; the operator itself does not read skill bodies.
 
+Frontmatter is load-bearing: `list_skills.py` keys on `description` (falling back to the first `# `
+heading), so a skill with neither is discoverable only by directory name. Always ship a `description`.
+
+## Add a reference
+
+References are the payload / checklist / tooling library specialists load on dispatch. Like skills,
+discovery is a frontmatter scan, so a reference is self-registering — but ONLY if its frontmatter
+carries the keys the pipeline keys on.
+
+1. Create `agent/references/<area>/<name>.md` with YAML frontmatter that includes BOTH a `description`
+   and a `skill:` key:
+
+   ```markdown
+   ---
+   description: One-line summary the operator scans in `vigil assess list-references`
+   skill: <skill-name>   # the paired skill; must match a directory under agent/skills/
+   ---
+
+   # <Title>
+   ...
+   ```
+
+   `agent/scripts/assess/commands/list_references.py` globs `agent/references/**/*.md` and parses the
+   frontmatter. **A reference with no `skill:` key is orphaned** — it never appears under
+   `vigil assess list-references --skill <name>`, so a threat hunter navigating by skill never finds
+   it. The `skill:` value must resolve to a real `agent/skills/<name>/` directory (comma-separate to
+   pair with several). If no skill fits, that is a signal to author one — not to ship the reference
+   unpaired.
+
+2. Confirm discovery and pairing — no other file needs editing:
+
+   ```bash
+   vigil assess list-references | grep <name>
+   vigil assess list-references --skill <skill-name>   # the ref must appear here
+   ```
+
+   `orchestrator/backend/tests/test_reference_frontmatter.py` enforces this in CI: every
+   `agent/references/tools/**/*.md` must carry a `description` + a resolvable `skill:` (a small
+   `_KNOWN_UNPAIRED` allowlist covers refs with no matching skill yet — remove an entry when you pair it).
+
 ## Add an `vigil assess` verb
 
 `vigil assess` is the agent-facing contract surface. A verb is one command module plus its wiring and
@@ -282,6 +322,33 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
    Commit the fixture and definition together so replay stays zero-token. Use
    `vigil assess eval-capture ... --check` after a re-run to diff a fresh capture against the committed
    baseline without overwriting it; it exits non-zero on a coverage regression.
+
+## Promote engagement lessons to the prompt layer
+
+After each engagement, review it for durable, capability-neutral lessons and promote them so
+future engagements benefit. This closes the loop the tool-registration recipes above leave open
+for prompt-level learning — a tool's kali wrapper lands via the recipes above; engagement
+methodology observations belong here.
+
+1. **Identify promotable lessons.** Review any `ISSUES.md` or `METHODOLOGY-GAPS.md` artifacts
+   the engagement produced. A lesson is promotable when it generalizes across engagements without
+   naming a specific host, slug, CMS, or program-specific rule. Engagement-specific ROE (no-fire
+   endpoints, required request headers, specific marker values, rate caps) belongs in the
+   ENGAGEMENT.md template or `scope.json`, not in global prompts — it never enters
+   `operator-core.md` or `shared-constraints*.md`.
+
+2. **Route to the right layer.** Choose the lowest-specificity layer the lesson fits:
+   - Operator-loop workflow or dispatch doctrine → `agent/operator-core.md` (rerender after editing)
+   - Always-active hunting / reporting / adversarial guardrails → `agent/rules/*.md` (no render)
+   - Vuln-family or tool procedure methodology → `agent/skills/<name>/SKILL.md` (no render; follow
+     **Add a skill** above if no existing skill fits)
+   - Rules that must hold across many specialists → `agent/shared-constraints.md` (no render)
+
+3. **Verify.**
+   - [ ] Each edited file contains no real host, slug, program name, or per-engagement ROE.
+   - [ ] If `agent/operator-core.md` or `agent/agents/*.md` was touched: rerender
+         (`cd agent && ./scripts/render-operator-prompts.sh repo`) and review wrapper diffs.
+   - [ ] If a new skill was created: `vigil assess list-skills | grep <name>` confirms discovery.
 
 # Code map maintenance
 

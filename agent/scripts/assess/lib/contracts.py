@@ -304,6 +304,7 @@ KALI_TARGET_VERBS: tuple[str, ...] = (
 
 KALI_MAINT_VERBS: tuple[str, ...] = (
     "sweep-orphans",
+    "tool-help",
 )
 
 KALI_VERBS: tuple[str, ...] = KALI_TARGET_VERBS + KALI_MAINT_VERBS
@@ -391,6 +392,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         schema_name="finding-record.schema.json",
         preferred_invocations=(
             "vigil assess record-finding <agent-name> <finding-json-file>",
+            "vigil assess record-finding <agent-name> <finding-json-file> --update <existing-slug>",
         ),
         author_supplied_fields=(
             "title",
@@ -424,6 +426,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Set details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete but only becomes exploitation-worthy as part of a larger chain. Specialists own these via record-finding/update-finding; verification reviews but does not own them.",
             "Do not put `link_kind=root_cause` in the `links` array. Record the finding first, then `vigil assess link-finding` after verification — root/sibling grouping is an explicit lifecycle action.",
             "evidence_ref must point at an existing engagement file (auto-registered and linked on record). URL refs, prose refs, and path-shaped refs with no file are REJECTED — they cannot satisfy report-readiness artifact indexing. Put external URLs in details.references; pass --allow-unindexed-evidence only for a theoretical/code-inferred finding with no file.",
+            "Dedup keys on (defect_family + root_cause_key + auth_context + canonical_location). A net-new record whose tuple collides with an EXISTING reported/active finding under a different slug is REFUSED, not silently merged. For a genuinely-distinct sibling on the same root cause, give it its OWN root_cause_key/defect_family and attach it with link-finding; pass --update <slug> ONLY to intentionally modify that exact existing finding.",
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
@@ -434,6 +437,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("evidence", "use details.evidence"),
             ("impact", "use details.impact"),
             ("links[].link_kind=root_cause", "use `vigil assess link-finding <sibling-slug> --root-cause <root-slug>` after verification"),
+            ("reusing a reported finding's root_cause_key + canonical_location for a new finding", "differentiate the root_cause_key/defect_family and use link-finding, or pass --update <slug> to modify the existing finding"),
         ),
         examples=(
             {
@@ -1308,8 +1312,35 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "--scripts default,vuln triggers heavy NSE — run synchronously with --timeout 1800+; a long budget is killed cleanly on expiry.",
     ),
     "nuclei": (
-        "Pass either -u or -l. Severity filters and `-as` (automatic) shape the run.",
+        "Pass either -u or -l. LEAD with explicit `-t` template paths — `-as` (automatic) keys off "
+        "tech fingerprinting, which a CDN/WAF defeats, so `-as` under-fires alone; treat it as additive.",
+        "WAF-resilience: the wrapper injects `-mhe 50` by default so a host's 403 storm does not make "
+        "nuclei ABANDON the host after ~30 errors (its own default). Add `-random-agent` and `-H` "
+        "browser headers when the edge blocks scanner UAs.",
+        "Politeness `-exclude-tags dos,fuzz,intrusive,brute-force` is injected by default (announced on "
+        "stderr); pass your own `-exclude-tags` to override it verbatim. The result's `resolved_argv` "
+        "shows the exact command that ran after injection.",
         "Long sweeps run synchronously with a generous --timeout. `vigil assess kali job start` is operator-only — specialists never background (see kali-exec skill).",
+    ),
+    "katana": (
+        "Deep + scope-safe + disk-bounded by DEFAULT: `-d 5`, `-fs fqdn` (crawl only the exact seeded "
+        "hosts — never wander to out-of-scope sibling subdomains found in links), `-or -ob` (omit "
+        "body/raw so a deep crawl does not fill the disk), `-ef <static set>`, and JS endpoint crawling "
+        "+ jsluice extraction. Override each with one flag; `--keep-bodies` / `--include-static` undo "
+        "the disk/asset defaults for a bounded source pass.",
+        "Rate is SAFE by default and decoupled from depth: `-rl 10`, hard-capped at 20 req/s (warn + "
+        "clamp above; `--allow-fast-crawl` to exceed) and always clamped DOWN to the program rate "
+        "ceiling. Go as deep as you like — politeness comes from the rate cap, not a shallow crawl.",
+        "Use `-fs rdn` ONLY when every seed root is itself a wildcard-scoped in-scope entry. Recover "
+        "wildcard breadth via subdomain-enum + passive gau, NOT by letting the active crawler roam.",
+        "A `--timeout` cut still yields usable output: katana streams routes to `-o` from line 1, so a "
+        "timed-out deep crawl leaves partial-but-ingestible results on disk (`partial_results=true`).",
+    ),
+    "tool-help": (
+        "Prints a runtime tool's live `-h`/`--help` from inside the container so you read the EXACT "
+        "flags the INSTALLED version supports instead of guessing into --extra-args.",
+        "Maintenance, not a probe: takes NO --technique/--intent/--probe-kind/--phase/--timeout and "
+        "writes no audit row. Usage: `vigil assess kali tool-help katana`.",
     ),
     "sqlmap": (
         "sqlmap's own `--technique` is exposed as `--sql-technique` so it doesn't collide with the audit `--technique` flag.",
@@ -1383,7 +1414,20 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     ),
     "nuclei": (
         {
-            "command": "vigil assess kali nuclei -l hosts.txt -t http/cves/ -severity high,critical -rate-limit 50 -c 25 -bs 25 -jsonl -o scans/nuclei.jsonl --technique RECON --intent 'reactive sweep on Phase-1 URL delta' --probe-kind fingerprint --phase recon --timeout 1800",
+            "command": "vigil assess kali nuclei -l hosts.txt -t http/cves/,http/misconfiguration/,http/exposures/ -severity high,critical -mhe 50 -random-agent -rate-limit 50 -c 25 -bs 25 -jsonl -o scans/nuclei.jsonl --technique RECON --intent 'reactive sweep on Phase-1 URL delta (WAF-resilient)' --probe-kind fingerprint --phase recon --timeout 1800",
+        },
+    ),
+    "katana": (
+        {
+            "command": "vigil assess kali katana -u https://target.example -o scans/katana_target.jsonl -jsonl --technique DISCOVERY --intent 'deep JS-aware scoped crawl' --probe-kind fingerprint --phase collect --timeout 1800",
+        },
+        {
+            "command": "vigil assess kali katana -u https://app.target.example -headless --allow-fast-crawl -rl 40 -o scans/katana_spa.jsonl -jsonl --technique DISCOVERY --intent 'headless crawl for browser-generated routes' --probe-kind fingerprint --phase collect --timeout 1800",
+        },
+    ),
+    "tool-help": (
+        {
+            "command": "vigil assess kali tool-help katana",
         },
     ),
     "sqlmap": (
@@ -1521,6 +1565,31 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
             common_mistakes=(
                 ("--phase", "sweep-orphans is host-side maintenance and does not take audit flags"),
                 ("--technique", "sweep-orphans is host-side maintenance and does not take audit flags"),
+            ),
+            examples=examples,
+        )
+
+    if verb == "tool-help":
+        return CommandContract(
+            name="kali tool-help",
+            summary=(
+                "Print a runtime tool's live -h/--help from inside the container "
+                "so you read the EXACT flags the installed version supports."
+            ),
+            schema_name="argparse (no backend audit row)",
+            preferred_invocations=(
+                "vigil assess kali tool-help katana",
+                "vigil assess kali tool-help nuclei --help-flag --help",
+            ),
+            author_supplied_fields=(
+                "<tool> (positional, e.g. katana)",
+                "--help-flag <flag> (optional; default tries -h then --help)",
+                "--container-name <name> (optional; default the runtime container)",
+            ),
+            notes=_KALI_VERB_NOTES.get(verb, ()),
+            common_mistakes=(
+                ("--phase", "tool-help is host-side maintenance and does not take audit flags"),
+                ("--technique", "tool-help is host-side maintenance and does not take audit flags"),
             ),
             examples=examples,
         )

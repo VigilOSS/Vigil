@@ -66,6 +66,16 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         frozenset({
             "cmd", "exec", "command", "shell", "run", "execute",
             "ping", "exe", "func", "function", "cli", "daemon",
+            # Curated command-exec compound families (Fix 4 precision layer; both
+            # snake_case and concatenated forms). A bare `?cmd_exec=` would
+            # otherwise only reach rce via the capped weak inner-token tier — these
+            # promote the common compound names to the full rce weight.
+            "cmd_exec", "cmdexec", "exec_cmd", "execcmd",
+            "run_cmd", "runcmd", "run_command", "runcommand",
+            "shell_cmd", "shellcmd", "shell_exec", "shellexec",
+            "system_cmd", "systemcmd", "system_command", "systemcommand",
+            "exec_command", "execcommand", "cmd_line", "cmdline",
+            "command_line", "commandline",
         }),
         ("/exec/", "/cmd/", "/shell/"),
     ),
@@ -176,6 +186,18 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             "file", "path", "doc", "document", "page", "pg", "template",
             "load", "include", "read",
             "folder", "root", "dir", "inc", "conf",
+            # Curated file-inclusion / traversal compound families (Fix 4 precision
+            # layer; both snake_case and concatenated forms). A bare `?file_path=`
+            # would otherwise only reach lfi via the capped weak inner-token tier;
+            # these promote the common compound names to the full lfi weight.
+            "file_path", "filepath", "download_path", "downloadpath",
+            "include_path", "includepath", "config_path", "configpath",
+            "config_file", "configfile", "log_path", "logpath",
+            "log_file", "logfile", "doc_path", "docpath",
+            "local_path", "localpath", "root_path", "rootpath",
+            "base_path", "basepath", "template_path", "templatepath",
+            "read_file", "readfile", "load_file", "loadfile",
+            "include_file", "includefile",
         }),
         (),
     ),
@@ -652,8 +674,19 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
     ),
     (
         "ssti",
+        # Curated template-injection compound families (Fix 4 precision layer; both
+        # snake_case and concatenated forms). The render-flavored compounds live
+        # here; the path/file-flavored `template_path`/`template_file` go to `lfi`
+        # (file inclusion), which outranks ssti(25) anyway.
         25,
-        frozenset({"template", "tpl", "theme", "layout", "view"}),
+        frozenset({
+            "template", "tpl", "theme", "layout", "view",
+            "template_name", "templatename", "template_string", "templatestring",
+            "template_content", "templatecontent", "render_template", "rendertemplate",
+            "page_template", "pagetemplate", "email_template", "emailtemplate",
+            "custom_template", "customtemplate", "template_engine", "templateengine",
+            "template_code", "templatecode",
+        }),
         (),
     ),
     (

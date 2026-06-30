@@ -56,6 +56,14 @@ class KaliResult:
     # browser verb itself, so the recovery path never self-flags into a loop).
     waf_challenge: bool = False
     waf_challenge_detail: str = ""
+    # The fully-resolved argv that actually ran inside the container, AFTER
+    # kali_exec's transparent mutations (program attribution ``-H`` headers, the
+    # ``--resolve`` IP-pin, injected identity material, nuclei's default
+    # ``-exclude-tags``). Surfaced on the result so the operator/LLM sees what
+    # RAN, not just what it typed — the command written and the command executed
+    # can diverge, and that gap is the most common source of "why did this probe
+    # behave unexpectedly". Empty list only when a caller never populates it.
+    resolved_argv: list[str] = dataclasses.field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -706,17 +714,20 @@ def _required_headers(engagement_dir: Path) -> dict[str, str]:
 
 
 # Program-mandated attribution headers (e.g. BugCrowd's ``X-Bug-Bounty: <handle>``)
-# must ride every in-scope HTTP probe. Three-way classifier:
+# must ride every in-scope HTTP probe. Four-way classifier:
 #   * INJECTABLE — HTTP-to-target tools that accept ``-H "Name: Val"``; inject.
+#   * FLAG-MAP   — HTTP-to-target tools whose header flag is NOT ``-H`` (whatweb
+#                  ``--header``, nikto ``-Add-header``, arjun ``--headers``);
+#                  inject via the tool's own flag (Layer 1, I-3).
 #   * SKIP       — passive / third-party-archive / DNS / L3-L4 tools that never
 #                  send HTTP to the in-scope target. Injecting here would LEAK
 #                  the researcher handle to web.archive.org/CommonCrawl/DNS APIs
 #                  or is meaningless, so silently skip (never warn).
-#   * else       — HTTP-to-target tools that can't take ``-H`` (nikto/whatweb/
-#                  wafw00f/httprobe) AND tools whose header flag is not ``-H``
-#                  (arjun uses a newline-separated ``--headers`` block, not
-#                  ``-H``): WARN (never block), since this argv can't carry the
-#                  header as ``-H`` — the operator injects it the tool's way.
+#   * else       — HTTP-to-target tools whose header flag can't carry an inline
+#                  value (wafw00f's ``-H``/``--headers`` reads a FILE, not a
+#                  string) or an unknown tool: WARN (never block). The Layer-2
+#                  fail-closed backstop (:func:`required_header_attribution_gap`)
+#                  is the safety net that REFUSES an un-attributed in-scope run.
 #
 # This classifier + injector lives here (rather than in kali.py) so BOTH the
 # container path (kali.kali_exec) AND the audited host path (the recon
@@ -725,6 +736,24 @@ def _required_headers(engagement_dir: Path) -> dict[str, str]:
 _REQUIRED_HEADER_INJECTABLE = frozenset(
     {"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"}
 )
+
+# Layer-1 extension (I-3) — HTTP-to-target tools whose attribution-header flag is
+# NOT the curl-style ``-H "Name: Value"``. Each entry maps a tool to
+# ``(inject_flag, single_newline_block)``:
+#   * whatweb ``--header "K: V"`` — repeatable, one header per flag occurrence;
+#   * nikto   ``-Add-header "K: V"`` — repeatable (nikto's ``-H`` is ``-Help``;
+#                  the real header flag is ``-Add-header``, verified in-container);
+#   * arjun   ``--headers "K: V"`` — a SINGLE flag whose value is newline-joined
+#                  for multiple headers (a second ``--headers`` would clobber the
+#                  first under argparse store), so ``single_newline_block=True``.
+# wafw00f is deliberately ABSENT: its ``-H``/``--headers`` reads a FILE path, not
+# an inline string, so it can't carry an inline marker and relies on the Layer-2
+# backstop instead.
+_REQUIRED_HEADER_FLAG_SPECS: dict[str, tuple[str, bool]] = {
+    "whatweb": ("--header", False),
+    "nikto": ("-Add-header", False),
+    "arjun": ("--headers", True),
+}
 _REQUIRED_HEADER_SKIP = frozenset(
     {
         "gau",
@@ -755,6 +784,69 @@ def _existing_header_names(cmd: list[str]) -> set[str]:
             if head:
                 names.add(head.lower())
     return names
+
+
+def _flag_header_names(cmd: list[str], flags: tuple[str, ...]) -> set[str]:
+    """Lower-cased header names already carried by any flag in ``flags``.
+
+    A single value may pack several newline-separated headers (arjun's
+    ``--headers`` block), so each line of every matching value is examined.
+    """
+    names: set[str] = set()
+    for idx, token in enumerate(cmd):
+        if token in flags and idx + 1 < len(cmd):
+            for line in cmd[idx + 1].splitlines():
+                head = line.split(":", 1)[0].strip()
+                if head:
+                    names.add(head.lower())
+    return names
+
+
+def _inject_tool_flag_headers(
+    cmd: list[str], tool: str, headers: dict[str, str]
+) -> str:
+    """Inject required header(s) into ``cmd`` via a non-``-H`` tool's own flag.
+
+    Returns ``"injected"`` when a missing header was added, ``"noop"`` when every
+    required header is already present. Idempotent on the header NAME.
+    """
+    inject_flag, single_block = _REQUIRED_HEADER_FLAG_SPECS[tool]
+    if single_block:
+        # arjun-style: one flag, newline-joined value; argparse keeps the LAST,
+        # so merge into the last existing block rather than append a second flag
+        # that would clobber an operator-supplied auth-headers block.
+        last_idx: Optional[int] = None
+        for idx in range(len(cmd) - 1):
+            if cmd[idx] == inject_flag:
+                last_idx = idx
+        existing: set[str] = set()
+        if last_idx is not None:
+            for line in cmd[last_idx + 1].splitlines():
+                head = line.split(":", 1)[0].strip()
+                if head:
+                    existing.add(head.lower())
+        missing = [(n, v) for n, v in headers.items() if n.lower() not in existing]
+        if not missing:
+            return "noop"
+        addition = "\n".join(f"{n}: {v}" for n, v in missing)
+        if last_idx is not None:
+            cmd[last_idx + 1] = f"{cmd[last_idx + 1]}\n{addition}"
+        else:
+            cmd.extend([inject_flag, addition])
+        return "injected"
+
+    # Repeatable flag (whatweb ``--header``, nikto ``-Add-header``). whatweb also
+    # accepts ``-H`` as an alias, so an operator ``-H`` counts as already-present.
+    recognized = (inject_flag, "-H") if tool == "whatweb" else (inject_flag,)
+    existing = _flag_header_names(cmd, recognized)
+    injected = False
+    for name, value in headers.items():
+        if name.lower() in existing:
+            continue
+        cmd.extend([inject_flag, f"{name}: {value}"])
+        existing.add(name.lower())
+        injected = True
+    return "injected" if injected else "noop"
 
 
 # --------------------------------------------------------------------------- #
@@ -931,9 +1023,13 @@ def _apply_required_headers(
                         injected the same header on an injectable tool).
       * ``"skipped"`` — passive/archive/DNS/L3-L4 tool that does not send HTTP
                         to the in-scope target; nothing applied, no warning.
-      * ``"injected"``— at least one header was appended as ``-H "Name: Val"``.
-      * ``"warned"``  — an HTTP-capable but non-injectable/unknown tool; cmd is
-                        left untouched and the caller warns.
+      * ``"injected"``— at least one header was appended, either as ``-H "Name:
+                        Val"`` (curl-shaped tools) or via a non-``-H`` tool's own
+                        flag (whatweb ``--header`` / nikto ``-Add-header`` / arjun
+                        ``--headers``; see ``_REQUIRED_HEADER_FLAG_SPECS``).
+      * ``"warned"``  — an HTTP-capable tool whose flag can't carry an inline
+                        header (wafw00f) or an unknown tool; cmd is left untouched
+                        and the caller warns. The Layer-2 backstop is the net.
 
     Idempotency: a header is skipped when an existing ``-H`` value already names
     it (case-insensitive on the header name, tolerating ``Name:`` and
@@ -968,6 +1064,8 @@ def _apply_required_headers(
     name_lower = tool_name.lower()
     if name_lower in _REQUIRED_HEADER_SKIP:
         return "skipped"
+    if name_lower in _REQUIRED_HEADER_FLAG_SPECS:
+        return _inject_tool_flag_headers(cmd, name_lower, headers)
     if name_lower not in _REQUIRED_HEADER_INJECTABLE:
         return "warned"
 
@@ -980,6 +1078,119 @@ def _apply_required_headers(
         existing.add(name.lower())
         injected = True
     return "injected" if injected else "noop"
+
+
+# --------------------------------------------------------------------------- #
+# Layer 2 — DYNAMIC fail-closed attribution backstop (ADR 0010)
+# --------------------------------------------------------------------------- #
+#
+# Layer 1 injects the program attribution header into the curated set of
+# HTTP-to-target tools. Layer 2 needs NO per-tool header knowledge: after the
+# FINAL argv (and any shell-script text) is assembled, a command that REACHES an
+# in-scope host WITHOUT the configured marker is REFUSED rather than sent
+# un-attributed — a missing attribution header on a federal/managed program is a
+# ban-risk, not merely a reduced reward (the prior best-effort posture; see ADR
+# 0010 for the reversal). This catches every gap Layer 1 leaves: a ``bash -c
+# "curl <in-scope>"`` whose script could not be injected, an unknown/future tool,
+# and a tool whose flag can't carry an inline value (wafw00f).
+#
+# Local/non-target commands, passive skip-set tools (which query the archive/DNS,
+# not the in-scope host), and engagements with no ``required_headers`` are
+# unaffected — the gate is fail-OPEN for everything but un-attributed in-scope
+# traffic.
+
+
+def _command_reaches_in_scope_host(
+    cmd: list[str], allow_entries: list[dict[str, str]]
+) -> str:
+    """Return the first in-scope host the command's tokens reach, or ``""``.
+
+    Each argv element is shell-lexed (so a ``sh -c`` script's inner tokens and
+    quoted multi-token args are examined too) and every resulting word is run
+    through the scope host extractor; the first word that yields an in-scope host
+    wins. Purely lexical — no DNS/HTTP — so it is safe inside the exec gate.
+    """
+    from . import scope
+
+    if not allow_entries:
+        return ""
+    for arg in cmd:
+        try:
+            words = shlex.split(arg)
+        except ValueError:
+            words = arg.split()
+        if not words:
+            words = [arg]
+        for word in words:
+            host = scope.host_from_token(word)
+            if host and scope.host_in_scope(host, allow_entries):
+                return host
+    return ""
+
+
+def required_header_attribution_gap(
+    cmd: list[str],
+    tool_name: str,
+    headers: dict[str, str],
+    allow_entries: list[dict[str, str]],
+) -> str:
+    """Layer-2 fail-closed attribution backstop (ADR 0010).
+
+    Return a non-empty REFUSAL reason when ALL of:
+      * the engagement configured ``required_headers`` (``headers`` non-empty);
+      * the derived tool is NOT a passive/archive/DNS/L3-L4 skip-set tool (those
+        never send attributable HTTP to the in-scope target, so the in-scope
+        host token is merely their query subject, not a host they connect to);
+      * the assembled command REACHES an in-scope host; AND
+      * at least one required marker's ``Name: Value`` literal is ABSENT from the
+        command text.
+    Otherwise return ``""`` — the run proceeds. The reason names the missing
+    marker(s) so the caller can tell the operator exactly what to add.
+    """
+    if not headers:
+        return ""
+    if (tool_name or "").strip().lower() in _REQUIRED_HEADER_SKIP:
+        return ""
+    reached = _command_reaches_in_scope_host(cmd, allow_entries)
+    if not reached:
+        return ""
+    haystack = " ".join(cmd).lower()
+    missing = [
+        f"{name}: {value}"
+        for name, value in headers.items()
+        if f"{name}: {value}".lower() not in haystack
+    ]
+    if not missing:
+        return ""
+    markers = ", ".join(f"'{m}'" for m in missing)
+    return (
+        f"command reaches in-scope host '{reached}' but is missing required "
+        f"attribution header(s) {markers}"
+    )
+
+
+def _in_scope_allow_entries(engagement_dir: Path) -> list[dict[str, str]]:
+    """In-scope host allow-entries for the Layer-2 backstop, or ``[]`` when scope
+    is absent/unreadable (the backstop then degrades to a no-op rather than block
+    a run on a config error). Reads ``scope.json`` directly — it does NOT call
+    ``scope.load_scope`` so the hot exec path neither rewrites the scope file nor
+    pays its normalization cost on every command.
+    """
+    from . import scope
+
+    scope_path = engagement_dir / "scope.json"
+    if not scope_path.is_file():
+        return []
+    try:
+        data = json.loads(scope_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    try:
+        return scope.scope_entries(data)
+    except SystemExit:
+        return []
 
 
 def _auth_context(engagement_dir: Path) -> str:

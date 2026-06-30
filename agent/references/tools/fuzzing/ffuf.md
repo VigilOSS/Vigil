@@ -1,5 +1,6 @@
 ---
 description: Web fuzzing (parameters, vhosts, targeted directory work)
+skill: directory-fuzzing
 ---
 
 # ffuf

@@ -15,14 +15,33 @@ from assess.lib.config import load_config
 from assess.lib.kali import (
     add_passthrough_args_flag,
     add_required_kali_flags,
+    count_list_targets,
+    safe_engagement_dir,
     emit_result,
     extend_cmd_with_extra_args,
+    incomplete_list_run_warning,
     kali_args_to_kwargs,
     kali_exec,
 )
 
+# Pre-flight budget helpers (kali_cli argparse seam); imported directly so this
+# unit need not touch the shared kali facade module.
+from assess.lib.kali_cli import (
+    coerce_float,
+    estimate_list_sweep_seconds,
+    preflight_timeout_guard,
+)
+
 
 _NUCLEI_LOCK_TIMEOUT_S = 1800.0
+
+# nuclei CLI defaults used by the pre-flight runtime floor when a knob is unset:
+# -timeout 10s/request, -c 25 workers, -rl 150 req/s. The floor assumes ≥1
+# request-round per host (nuclei fires many templates per host, so this UNDER-
+# counts — a conservative floor that only fires when even it exceeds --timeout).
+_NUCLEI_DEFAULT_HTTP_TIMEOUT = 10.0
+_NUCLEI_DEFAULT_CONCURRENCY = 25
+_NUCLEI_DEFAULT_RATE_LIMIT = 150.0
 
 # Politeness/safety exclude-tags injected by default when the operator does not
 # supply their own. Keeps broad sweeps from firing DoS/fuzz/intrusive/brute-force
@@ -246,9 +265,32 @@ def register(subparsers) -> None:
             "your own value to override (it is used verbatim — no merge)."
         ),
     )
-    p.add_argument("-as", dest="automatic_scan", action="store_true", help="-as automatic scan.")
+    p.add_argument("-as", dest="automatic_scan", action="store_true",
+                   help="-as automatic (tech-matched) scan. Additive — lead with explicit -t, "
+                        "because a CDN/WAF defeats tech fingerprinting so -as under-fires alone.")
     p.add_argument("-severity", dest="severity", default="", help="Comma-separated severity list.")
     p.add_argument("-rate-limit", dest="rate_limit", default="", help="Requests per second.")
+    p.add_argument(
+        "-mhe",
+        "-max-host-error",
+        dest="max_host_error",
+        default="50",
+        help=(
+            "Max errors per host before nuclei abandons it (default 50). nuclei's own "
+            "default (~30) makes a WAF's 403 storm silently kill template coverage on the "
+            "hardest hosts; the raised default keeps the sweep on-host. Pass 0 only after "
+            "confirming the installed nuclei treats 0 as unlimited (vigil assess kali "
+            "tool-help nuclei)."
+        ),
+    )
+    p.add_argument("-random-agent", dest="random_agent", action="store_true",
+                   help="-random-agent: rotate the User-Agent so a UA-based scanner block does "
+                        "not drop every request.")
+    p.add_argument("-H", "-header", dest="headers", action="append", default=None,
+                   help="Extra request header (repeatable), e.g. -H 'Cookie: s=...'. Program "
+                        "attribution headers are injected automatically on top of these.")
+    p.add_argument("-timeout", dest="timeout_http", default="", help="Per-request timeout (seconds).")
+    p.add_argument("-retries", dest="retries", default="", help="Retries per request.")
     p.add_argument("-c", dest="concurrency", default="", help="Worker concurrency.")
     p.add_argument("-bs", dest="bulk_size", default="", help="Bulk batch size.")
     p.add_argument("-stream", dest="stream", action="store_true", help="-stream output mode.")
@@ -279,12 +321,31 @@ def run(args) -> None:
         cmd.extend(["-exclude-tags", exclude_tags])
     elif not _operator_passed_exclude_tags(args):
         cmd.extend(["-exclude-tags", _DEFAULT_EXCLUDE_TAGS])
+        print(
+            f"nuclei: injected default -exclude-tags '{_DEFAULT_EXCLUDE_TAGS}' "
+            "(politeness/safety; pass your own -exclude-tags to override). The "
+            "resolved_argv in the result shows the full command that ran.",
+            file=sys.stderr,
+        )
     if args.automatic_scan:
         cmd.append("-as")
     if args.severity:
         cmd.extend(["-severity", args.severity])
     if args.rate_limit:
         cmd.extend(["-rate-limit", str(args.rate_limit)])
+    # WAF-resilience: keep nuclei on a host through a 403 storm instead of
+    # abandoning it after ~30 errors. Always passed (default 50) unless overridden.
+    mhe = (getattr(args, "max_host_error", "") or "").strip()
+    if mhe:
+        cmd.extend(["-mhe", str(mhe)])
+    if getattr(args, "random_agent", False):
+        cmd.append("-random-agent")
+    for header in getattr(args, "headers", None) or []:
+        cmd.extend(["-H", header])
+    if getattr(args, "timeout_http", ""):
+        cmd.extend(["-timeout", str(args.timeout_http)])
+    if getattr(args, "retries", ""):
+        cmd.extend(["-retries", str(args.retries)])
     if args.concurrency:
         cmd.extend(["-c", str(args.concurrency)])
     if args.bulk_size:
@@ -303,6 +364,39 @@ def run(args) -> None:
         engagement_dir = Path(cfg.engagement_dir)
     except SystemExit:
         engagement_dir = None
+
+    # Count the -l host list once: it feeds BOTH the pre-flight sizing floor and
+    # the post-run incompleteness guard below.
+    total = count_list_targets(
+        args.target_list, engagement_dir=safe_engagement_dir(args)
+    ) if args.target_list else 0
+
+    # Pre-flight sizing floor (I-9b#1). A nuclei sweep over a large host LIST under
+    # a low -rl / per-request -timeout cannot finish before the wrapper --timeout —
+    # it is SIGTERM-killed part-way and the unscanned remainder reads as a clean
+    # negative. Warn BEFORE the run (the floor under-counts the per-host template
+    # volume, so warn-only). The post-run incompleteness guard catches the rest.
+    if total > 1:
+        est = estimate_list_sweep_seconds(
+            targets=total,
+            passes=1,
+            per_request_seconds=coerce_float(
+                getattr(args, "timeout_http", ""), _NUCLEI_DEFAULT_HTTP_TIMEOUT
+            ),
+            workers=int(coerce_float(getattr(args, "concurrency", ""), _NUCLEI_DEFAULT_CONCURRENCY)),
+            rate_limit=coerce_float(getattr(args, "rate_limit", ""), _NUCLEI_DEFAULT_RATE_LIMIT),
+        )
+        preflight_timeout_guard(
+            verb="nuclei",
+            internal_budget_s=est,
+            timeout=getattr(args, "timeout", None),
+            warn=lambda m: print(f"WARN {m}", file=sys.stderr),
+            sizing_hint=(
+                "Split the host list, raise --timeout to fit, or raise -rl/-c so the "
+                "sweep finishes before the wall."
+            ),
+        )
+
     lock_path = _nuclei_lock_path_for(getattr(args, "output", ""), engagement_dir)
     if lock_path is not None:
         with _nuclei_output_lock(lock_path):
@@ -310,4 +404,18 @@ def run(args) -> None:
     else:
         result = kali_exec(cmd, tool_name="nuclei", **kali_args_to_kwargs(args))
     _zero_byte_post_check(args, result, engagement_dir)
+
+    # Incomplete-run guard: a timed-out nuclei sweep over a host LIST scanned only
+    # part of it, so the absence of findings for the unscanned remainder is not a
+    # clean negative. (Distinct from _zero_byte_post_check, which catches a
+    # template-loader failure.)
+    note = incomplete_list_run_warning(
+        tool="nuclei", total_targets=total,
+        timed_out=getattr(result, "timed_out", False),
+        return_code=getattr(result, "return_code", None),
+        stdout_preview=getattr(result, "stdout_preview", "") or "",
+        stderr_preview=getattr(result, "stderr_preview", "") or "",
+    )
+    if note:
+        print(f"WARN {note}", file=sys.stderr)
     emit_result(result)

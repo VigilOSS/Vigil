@@ -7,6 +7,14 @@ into findings.
 
 Load this alongside `hunting.md`. It fires before the first probe, not after.
 
+**Who owns the hypotheses.** When you are a dispatched **specialist**, *you* are the expert on this
+surface: originate the attack hypotheses from what you observe. An operator-named class is one starting
+lead, not the boundary of what to test — never wait to be told the bug. When you are the **operator**,
+this lens is for spotting coverage gaps and routing the right specialist, not for pre-deciding its
+vulnerability: you supply the surface, the rules, and what's already covered; the specialist supplies
+which weaknesses to pursue and how. Pre-naming the bug anchors the specialist to your guess and caps
+its depth at your imagination.
+
 ---
 
 ## 1. You are not a tester. You are an adversary.
@@ -199,6 +207,39 @@ The hypothesis-driven probe is faster than the shotgun approach because:
 
 Spray payloads when you have no hypothesis and need to generate one. Otherwise, think first: "What
 single request, if it returned X, would prove that Y is true?" Then send that request.
+
+---
+
+## 10. Dispatch one lens. Cycle across batches.
+
+When dispatching a specialist, name ONE developer-failure **lens** — a family of
+related developer assumptions that fail together:
+
+| Lens | What fails together |
+|---|---|
+| **Caching** | stale invalidation, shared-key leakage, cache-key injection |
+| **Data handling / over-trust** | caller-supplied values accepted without re-validation, over-broad deserialization |
+| **Business logic** | step-skip, out-of-order state, coupon/quota abuse |
+| **Race conditions** | TOCTOU, non-atomic credit/inventory, session-merge |
+| **Mass assignment** | unfiltered bind, hidden field promotion |
+| **Upload / file handling** | extension bypass, path traversal on store, content-type trust |
+| **Client-side trust** | server echoes client-controlled values, DOM sink injection |
+
+A lens is not a bug: it describes *how the developer was thinking*, so the
+specialist derives the right hypotheses rather than executing a pre-named
+checklist. Naming the bug caps depth at the operator's guess; naming the lens
+lets the specialist generalize to every surface the bug class touches.
+
+**Cadence rule:**
+- A winning lens on a worked surface → **re-run it on NEW surfaces** (the same
+  failure mode recurs wherever the same developer pattern exists).
+- A fresh lens on an already-worked surface → **dispatch it now**; a surface
+  proven clean under caching assumptions may still be vulnerable under race or
+  upload assumptions.
+
+Cycle lenses across batches. The operator names the surface and the lens; the
+specialist originates every hypothesis under it. This is the generative complement
+of the open-objective dispatch doctrine in `operator-core.md §DISPATCH`.
 
 ---
 

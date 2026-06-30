@@ -1,5 +1,6 @@
 ---
 description: HTTP probing, tech detection, live host confirmation
+skill: web-recon
 ---
 
 # httpx

@@ -14,20 +14,50 @@ def _bulk_endpoint_missing(exc: AssessError) -> bool:
     return message.startswith("HTTP 404") or message.startswith("HTTP 405")
 
 
-def post_request_observations_bulk(client, observations: list[dict[str, Any]], *, warn_prefix: str) -> list[dict[str, Any]]:
+def _bulk_payload_error(exc: AssessError) -> bool:
+    message = str(exc)
+    return (
+        message.startswith("HTTP 400")
+        or message.startswith("HTTP 413")
+        or message.startswith("HTTP 422")
+    )
+
+
+def _chunks(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    return [items[index:index + size] for index in range(0, len(items), size)]
+
+
+def post_request_observations_bulk(
+    client,
+    observations: list[dict[str, Any]],
+    *,
+    warn_prefix: str,
+    fallback_individual: bool = False,
+) -> list[dict[str, Any] | Exception]:
     if not observations:
         return []
     try:
         response = client.post("request-observations/bulk", {"items": observations})
     except AssessError as exc:
-        if not _bulk_endpoint_missing(exc):
+        should_retry_individually = _bulk_endpoint_missing(exc) or (
+            fallback_individual and _bulk_payload_error(exc)
+        )
+        if not should_retry_individually:
             raise
         print(
-            f"WARN {warn_prefix}: backend lacks request-observations/bulk; "
-            "falling back to per-row POSTs until the orchestrator backend is upgraded.",
+            f"WARN {warn_prefix}: request-observations bulk POST failed "
+            f"({exc}); retrying {len(observations)} row(s) individually.",
             file=sys.stderr,
         )
-        return [client.post("request-observations", observation) for observation in observations]
+        records: list[dict[str, Any] | Exception] = []
+        for observation in observations:
+            try:
+                records.append(client.post("request-observations", observation))
+            except Exception as row_exc:  # noqa: BLE001 - caller decides row policy
+                if not fallback_individual:
+                    raise
+                records.append(row_exc)
+        return records
     records = response.get("records") if isinstance(response, dict) else None
     if not isinstance(records, list):
         raise RuntimeError("backend bulk response missing records list")
@@ -42,28 +72,29 @@ def post_request_observations_bulk(client, observations: list[dict[str, Any]], *
 def post_coverage_items_bulk(client, items: list[dict[str, Any]], *, warn_prefix: str) -> None:
     if not items:
         return
-    try:
-        client.post("coverage-items/bulk", {"items": items})
-        return
-    except AssessError as exc:
-        if not _bulk_endpoint_missing(exc):
+    for chunk in _chunks(items, DEFAULT_BULK_WRITE_SIZE):
+        try:
+            client.post("coverage-items/bulk", {"items": chunk})
+            continue
+        except AssessError as exc:
+            if not (_bulk_endpoint_missing(exc) or _bulk_payload_error(exc)):
+                print(
+                    f"WARN {warn_prefix}: coverage-items bulk POST failed for "
+                    f"{len(chunk)} item(s): {exc}; continuing.",
+                    file=sys.stderr,
+                )
+                continue
             print(
                 f"WARN {warn_prefix}: coverage-items bulk POST failed for "
-                f"{len(items)} item(s): {exc}; continuing.",
+                f"{len(chunk)} item(s): {exc}; retrying individually.",
                 file=sys.stderr,
             )
-            return
-        print(
-            f"WARN {warn_prefix}: backend lacks coverage-items/bulk; "
-            "falling back to per-row coverage POSTs until the orchestrator backend is upgraded.",
-            file=sys.stderr,
-        )
-    for item in items:
-        try:
-            client.post("coverage-items", item)
-        except Exception as exc:  # noqa: BLE001 - best-effort coverage bridge
-            print(
-                f"WARN {warn_prefix}: coverage-item POST failed for "
-                f"{item.get('attack_family', 'unknown')}: {exc}; continuing.",
-                file=sys.stderr,
-            )
+        for item in chunk:
+            try:
+                client.post("coverage-items", item)
+            except Exception as exc:  # noqa: BLE001 - best-effort coverage bridge
+                print(
+                    f"WARN {warn_prefix}: coverage-item POST failed for "
+                    f"{item.get('attack_family', 'unknown')}: {exc}; continuing.",
+                    file=sys.stderr,
+                )

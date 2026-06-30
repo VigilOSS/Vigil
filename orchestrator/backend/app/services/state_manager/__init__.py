@@ -97,8 +97,10 @@ from .depth_ledger import (
 )
 from .phase_readiness import (
     phase_readiness,
+    stage_completion_audit,
     PHASES as PHASE_READINESS_PHASES,
     PHASE_REQUIRE_STAGE,
+    PHASE_EXPECTED_STAGES,
 )
 from .report_readiness import (
     report_readiness,
@@ -234,8 +236,10 @@ __all__ = [
     "depth_ledger",
     "terminal_depth_block",
     "phase_readiness",
+    "stage_completion_audit",
     "PHASE_READINESS_PHASES",
     "PHASE_REQUIRE_STAGE",
+    "PHASE_EXPECTED_STAGES",
     "report_readiness",
     "list_report_findings",
     "list_report_finding_groups",

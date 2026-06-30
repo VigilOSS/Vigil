@@ -1,5 +1,6 @@
 ---
 description: Web vulnerability scanner — **conditional, fingerprint-gated** (legacy/odd-stack triggers; nuclei is the primary web-vuln pass)
+skill: web-recon
 ---
 
 # nikto — Conditional Web Vulnerability Scanner
