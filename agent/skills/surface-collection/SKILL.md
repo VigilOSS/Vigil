@@ -50,7 +50,7 @@ headless escalation, rate, exclusion, and ingestion doctrine.
 
 ```bash
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -c 10 -rl 20 \
+  -u https://target.example -d 3 -c 10 -rl 20 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_output.txt \
   --technique DISCOVERY --intent "live crawl of target.example" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -64,7 +64,7 @@ gau/httpx/fuzzing path.
 
 ```bash
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -headless -c 5 -rl 10 \
+  -u https://target.example -d 3 -headless -c 5 -rl 10 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_headless_output.txt \
   --technique DISCOVERY --intent "browser-semantic crawl of target.example" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -80,8 +80,8 @@ version-specific `--extra-args`.
 
 ```bash
 vigil assess kali katana \
-  -u URL -d 3 -jc -jsl -c 10 -rl 20 \
-  --extra-args '-H "Cookie: ..." -H "Authorization: Bearer ..."' \
+  -u URL -d 3 -c 10 -rl 20 \
+  -H "Cookie: ..." -H "Authorization: Bearer ..." \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_auth_output.txt \
   --technique DISCOVERY --intent "auth-aware crawl of URL" \
   --probe-kind fingerprint --phase collect --timeout 1800

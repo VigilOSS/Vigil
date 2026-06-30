@@ -9,7 +9,7 @@ blob the LLM has to remember:
     out-of-scope sibling subdomains it finds in links;
   * disk-bounded by default (``-or -ob``) — a deep crawl streams routes, not the
     multi-GB body/raw blobs that fill the runtime disk;
-  * JS-aware by default (``-jc -jsl``) — the route graph plus jsluice endpoints;
+  * JS-aware by default — the wrapper sends raw katana ``-jc -jsl`` unless disabled;
   * static assets excluded by default (``-ef <image/font/media set>``);
   * politely rated by default (``-rl 10``, hard cap 20, clamps to the program
     ceiling) — so ``-d 5`` cannot turn into "depth 5 at katana's built-in
@@ -20,6 +20,7 @@ safety net for unmodeled katana flags.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 
 from assess.lib import scope as scope_lib
@@ -51,11 +52,16 @@ def register(subparsers) -> None:
     add_passthrough_args_flag(p)
     p.add_argument("-u", dest="target_url", default="", help="Target URL.")
     p.add_argument("-list", dest="target_list", default="", help="File of newline-separated URLs.")
-    # JS-aware crawl is ON by default (doctrine baseline `-jc -jsl`); opt out per run.
+    # JS-aware crawl is ON by default. Keep old positive toggles parseable for
+    # copied commands, but advertise only the negative opt-outs.
+    p.add_argument("-jc", dest="legacy_jc", action="store_true",
+                   help=argparse.SUPPRESS)
+    p.add_argument("-jsl", dest="legacy_jsl", action="store_true",
+                   help=argparse.SUPPRESS)
     p.add_argument("--no-jc", dest="no_jc", action="store_true",
-                   help="Disable JavaScript endpoint crawling (-jc is on by default).")
+                   help="Disable JavaScript endpoint crawling (enabled by default).")
     p.add_argument("--no-jsl", dest="no_jsl", action="store_true",
-                   help="Disable jsluice endpoint extraction (-jsl is on by default).")
+                   help="Disable jsluice endpoint extraction (enabled by default).")
     p.add_argument("-d", dest="depth", default="5",
                    help="-d max crawl depth (default 5 — deep by default; depth is decoupled from rate).")
     p.add_argument("-c", dest="concurrency", default="5", help="-c concurrency (default 5).")
