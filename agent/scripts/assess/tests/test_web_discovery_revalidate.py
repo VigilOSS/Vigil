@@ -209,9 +209,10 @@ def test_rate_cap_unset_injects_safe_crawl_default(monkeypatch, tmp_path):
     assert "-rl" in katana_runs[0]
     assert katana_runs[0][katana_runs[0].index("-rl") + 1] == "10"
     assert katana_runs[0][katana_runs[0].index("-rlm") + 1] == "600"  # 10*60
-    # JS-aware + scope-safe crawl defaults are baked in.
+    # JS-aware + scope-safe + deep crawl defaults are baked in.
     assert "-jsl" in katana_runs[0]
     assert katana_runs[0][katana_runs[0].index("-fs") + 1] == "fqdn"
+    assert katana_runs[0][katana_runs[0].index("-d") + 1] == "4"  # fleet-crawl depth default
 
 
 @pytest.mark.parametrize(

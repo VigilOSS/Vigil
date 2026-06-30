@@ -101,12 +101,12 @@ Keep crawls scoped and bounded:
   `agent/references/runtime-guides/cdn-edge-behavior.md`.
 - Prefer browser-like headers on CDN/Bot-Manager targets when the edge blocks
   scanner user agents.
-- Exclude static/binary extensions when the installed Katana supports an exclude
-  flag. Pass it via `--extra-args` only after checking `katana -h`; common
-  candidates are image/font/archive/media extensions.
-- Use known-file discovery such as `-kf all` through `--extra-args` when the
-  installed Katana version supports it and the dispatch needs robots/sitemap or
-  well-known route expansion.
+- Static/binary extensions are excluded by default (the wrapper injects an `-ef`
+  set); pass `--include-static` to crawl them, or `-ef <list>` via `--extra-args`
+  to override the set.
+- Known-file discovery is a typed flag: `-kf all` (robots/sitemap/well-known
+  expansion) — no `--extra-args` needed. `vigil assess kali tool-help katana`
+  confirms the installed version's `-kf` values.
 
 ### Field-scope: `-fs fqdn` is the scope-safe default for mixed-scope seed lists
 
@@ -145,12 +145,18 @@ to in-scope targets (e.g. Bugcrowd's `X-Bug-Bounty: BugCrowd-<username>`); a
 missing/incorrect value commonly incurs a bounty penalty. Inject it on every
 active probe via `-H`:
 
+Note: the program-attribution header is **auto-injected** by the wrapper from the
+engagement's `required_headers`, so you usually do not pass it by hand. When you
+do need an explicit header, `-H` is a **typed flag** (repeatable) — pass it
+directly, not via `--extra-args` (a `--extra-args` value beginning with `-H` is
+rejected by argparse):
+
 ```bash
 # raw binary (under kali job start) — exact program format, no space after colon:
 katana -list seeds.txt -H X-Bug-Bounty:BugCrowd-<username> ...
-# typed wrapper:
+# typed wrapper — -H is a typed, repeatable flag:
 vigil assess kali katana -u https://target.example \
-  --extra-args '-H "X-Bug-Bounty: BugCrowd-<username>"' ...
+  -H "X-Bug-Bounty: BugCrowd-<username>" ...
 ```
 
 This applies to **all active tools** (katana, httpx, nuclei, ffuf, curl). It does
@@ -184,11 +190,11 @@ only for that deliberate, bounded body-capture pass.
 Example with version-dependent extras:
 
 ```bash
+# -kf is a typed flag; static-asset exclusion (-ef) is already the wrapper default.
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -c 8 -rl 15 \
+  -u https://target.example -kf all \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_target.txt \
-  --extra-args "-kf all -ef png,jpg,jpeg,gif,svg,css,woff,woff2,ttf,eot,ico,mp4,mp3,avi,zip,tar,gz,7z" \
-  --technique DISCOVERY --intent "bounded JS-aware crawl with known-file expansion" \
+  --technique DISCOVERY --intent "JS-aware crawl with known-file expansion" \
   --probe-kind fingerprint --phase collect --timeout 1800
 ```
 
@@ -203,10 +209,10 @@ When the engagement's credential store marks credentials as available
 pass only the needed headers:
 
 ```bash
+# -H is a typed, repeatable flag — pass auth headers directly, not via --extra-args.
 vigil assess kali katana \
   -u https://target.example/app \
-  -d 3 -jc -jsl -c 8 -rl 15 \
-  --extra-args '-H "Cookie: session=..." -H "Authorization: Bearer ..."' \
+  -H "Cookie: session=..." -H "Authorization: Bearer ..." \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_target_auth.txt \
   --technique DISCOVERY --intent "authenticated Katana crawl of target.example" \
   --probe-kind fingerprint --phase collect --timeout 1800

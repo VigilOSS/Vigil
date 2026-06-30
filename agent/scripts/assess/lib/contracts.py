@@ -1419,7 +1419,7 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
             "command": "vigil assess kali katana -u https://target.example -o scans/katana_target.jsonl -jsonl --technique DISCOVERY --intent 'deep JS-aware scoped crawl' --probe-kind fingerprint --phase collect --timeout 1800",
         },
         {
-            "command": "vigil assess kali katana -u https://app.target.example -headless --allow-fast-crawl -rl 15 -o scans/katana_spa.jsonl -jsonl --technique DISCOVERY --intent 'headless crawl for browser-generated routes' --probe-kind fingerprint --phase collect --timeout 1800",
+            "command": "vigil assess kali katana -u https://app.target.example -headless --allow-fast-crawl -rl 40 -o scans/katana_spa.jsonl -jsonl --technique DISCOVERY --intent 'headless crawl for browser-generated routes' --probe-kind fingerprint --phase collect --timeout 1800",
         },
     ),
     "tool-help": (
