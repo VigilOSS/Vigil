@@ -239,32 +239,70 @@ claimed user. Velocity is the discriminator; threshold is 800 km/h
 (commercial cruise speed cap on the ground; subsonic civil aviation max
 ~900 km/h).
 
-**Action.** Merge the four sign-in streams by `createdDateTime`,
-compute haversine distance between consecutive events, divide by the
-time delta. Chain to `ioc-enrichment` for MaxMind GeoIP2 lookups so the
-investigation uses consistent geolocation. Reference Python (full
-script lives under `agent/scripts/m365/impossible_travel.py`):
+**Action.** The detector is a deterministic, stdlib-only script at
+`agent/scripts/m365/impossible_travel.py`. It reads Microsoft Graph
+`signIn` JSON — a bare array, a Graph `{"value": [...]}` list-response
+wrapper, or JSON Lines — from a file argument or stdin, groups events by
+user, sorts each user's events by `createdDateTime`, and walks consecutive
+geo-located pairs computing the haversine great-circle distance over the
+time delta. It uses the real Graph v1.0 `signIn` field paths:
+
+- **user** — `userPrincipalName` (always lowercase; falls back to `userId`)
+- **time** — `createdDateTime` (ISO-8601, UTC, e.g. `2023-12-01T16:03:35Z`)
+- **ip** — `ipAddress`
+- **geo** — `location.geoCoordinates.latitude` / `.longitude`
+- **place** — `location.city` / `location.countryOrRegion` (2-letter code)
+
+It skips events with missing/null `geoCoordinates` (cannot place them — the
+surrounding geo-located events still pair), guards zero/negative time deltas
+(no division by zero), sorts away out-of-order timestamps, and flags any
+pair whose required velocity exceeds `--threshold-kmh` (default **800**
+km/h — the commercial-flight band; subsonic civil aviation tops out near
+~900 km/h). Chain to `ioc-enrichment` for the ASN / MaxMind GeoIP overlay
+(the Common-FP below) so a VPN-exit or CDN-PoP pair is not miscalled as
+adversarial travel — the script reads the Entra-provided `geoCoordinates`
+directly; ASN disambiguation is the enrichment layer on top.
+
+Concatenate the four per-stream sign-in artifacts from step 2 into one
+event set (`$DIR/signin_merged_<slug>_<window>.json` — a JSON array or the
+Graph `value`-wrapped shape; both are accepted), then run the offline
+correlation. The audit-pipeline wrapper standardizes it under host-exec and
+yields the command-run-id the closing sequence registers against (the
+wrapper is optional for offline parse over already-registered artifacts per
+`agent/shared-constraints-blue.md` §6, but use it for chain of custody):
+
+```bash
+vigil assess host-exec --tool python3 --technique T1078.004 \
+  --phase investigate --scope-host <tenant-slug> --target-host <upn> \
+  --intent "impossible-travel velocity correlation for <upn>" \
+  -- python3 agent/scripts/m365/impossible_travel.py \
+     "$DIR/signin_merged_<slug>_<window>.json" --json \
+  > "$ENGAGEMENT_DIR/ir/evidence/impossible_travel_<slug>.jsonl"
+```
+
+`--json` emits one JSON object per flagged pair (JSON Lines) — it redirects
+straight into the `.jsonl` evidence file; drop `--json` for a human-readable
+table, and pass `--threshold-kmh <n>` to override the 800 km/h ceiling.
+Register the JSONL with `--kind ir_evidence`. Each flagged pair carries:
 
 ```python
-# core loop — full script handles missing geo, glob, JSON shape variants
-for prev, cur in zip(events, events[1:]):
-    p, c = prev["location"]["geoCoordinates"], cur["location"]["geoCoordinates"]
-    d_km = haversine(p["latitude"], p["longitude"], c["latitude"], c["longitude"])
-    dt_h = (iso(cur["createdDateTime"]) - iso(prev["createdDateTime"])).total_seconds() / 3600
+# core loop — the full script groups by user, sorts by time, skips missing geo
+for prev, cur in zip(events, events[1:]):  # events: one user, time-sorted
+    p = prev["location"]["geoCoordinates"]; c = cur["location"]["geoCoordinates"]
+    d_km = haversine_km(p["latitude"], p["longitude"], c["latitude"], c["longitude"])
+    dt_h = (parse_iso(cur["createdDateTime"]) - parse_iso(prev["createdDateTime"])).total_seconds() / 3600
     if dt_h > 0 and (v := d_km / dt_h) > 800:
-        emit({"from": prev["createdDateTime"], "to": cur["createdDateTime"],
+        emit({"user": user, "from": prev["createdDateTime"], "to": cur["createdDateTime"],
               "from_ip": prev["ipAddress"], "to_ip": cur["ipAddress"],
+              "from_city": p_city, "to_city": c_city,
+              "from_country": p_country, "to_country": c_country,
               "km": round(d_km, 1), "hours": round(dt_h, 3), "kmh": round(v, 0)})
 ```
 
-Wrap with `vigil assess host-exec --tool python3 --technique T1078.004
---phase investigate --scope-host <tenant-slug> --target-host <upn>`.
-Output to `$ENGAGEMENT_DIR/ir/evidence/impossible_travel_<slug>.jsonl`
-and register with `--kind ir_evidence`.
-
 **Evidence.** `impossible_travel_<slug>.jsonl` with paired sign-in
-timestamps + ASN + geo + computed velocity. The verifier reads this file
-directly during Check 1 (reachability).
+timestamps + IPs + city/country geo + computed velocity (km, hours, km/h);
+the ASN overlay comes from the `ioc-enrichment` chain. The verifier reads
+this file directly during Check 1 (reachability).
 
 **Common-FP.** A user on a commercial flight with onboard Wi-Fi
 (satellite-routed; geolocates to the ground station, often a different
