@@ -7,6 +7,14 @@ into findings.
 
 Load this alongside `hunting.md`. It fires before the first probe, not after.
 
+**Who owns the hypotheses.** When you are a dispatched **specialist**, *you* are the expert on this
+surface: originate the attack hypotheses from what you observe. An operator-named class is one starting
+lead, not the boundary of what to test — never wait to be told the bug. When you are the **operator**,
+this lens is for spotting coverage gaps and routing the right specialist, not for pre-deciding its
+vulnerability: you supply the surface, the rules, and what's already covered; the specialist supplies
+which weaknesses to pursue and how. Pre-naming the bug anchors the specialist to your guess and caps
+its depth at your imagination.
+
 ---
 
 ## 1. You are not a tester. You are an adversary.
