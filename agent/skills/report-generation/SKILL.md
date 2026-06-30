@@ -121,14 +121,7 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 
 ### 3. Findings (sorted CRITICAL -> INFO, each self-contained)
 
-**Length discipline per section:**
-
-| Section | Limit | Rule |
-|---------|-------|------|
-| Description | 2-4 sentences | First sentence = attacker outcome. No class definitions. No restating the title. |
-| Steps to Reproduce | Numbered, 1 action per step | No narrative between steps. Each step includes request block + response excerpt (5-15 lines, proof line bolded/annotated) inline. Copy-pasteable commands where possible. |
-| Impact | 1-2 sentences | Quantified. What the attacker gets, how many records/users/systems affected. |
-| Remediation | 1-2 sentences | Names the technology and the specific fix. No generic advice. |
+Length discipline: see `agent/rules/reporting.md` Rule 10.
 
 ```markdown
 ### 001: [Title] [SEVERITY]
@@ -182,8 +175,47 @@ Before generating the report body, run these checks against the backend data. If
 2. **Root-cause consolidation check:** use `vigil assess list-report-findings --mode final --json` and `vigil assess check-phase-readiness --phase report` to confirm intentional root/sibling groups are already represented. If two reportable findings still share the same vulnerable component or configuration and are not grouped, stop and ask the operator to run `vigil assess link-finding` or merge them. Apply the BugCrowd/HackerOne standard: one root cause, one submission.
 3. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
 4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
+5. **Required information per finding:** verify every included finding carries: target/feature/affected asset; bug class and exact endpoint or component; request method or triggering action; attacker context (and victim context for cross-user issues); exact request, sequence, or reproduction steps; exact response or artifact proving impact; data exposed, state changed, or access gained; severity rationale and CVSS factors where the report uses CVSS; recommended fix or control that failed.
 
 Only proceed to report generation after validation passes or the operator resolves flagged issues.
+
+## CVSS Sourcing and Calculation
+
+When a finding was validated by `vulnerability-analyst` or `exploit-developer`, the CVSS data may already be stored in the finding's `details` object as `cvss_vector` and `cvss_score`. Use that pre-computed vector as the starting point. Recalculate only if the final report scope or proved impact would shift at least one CVSS base metric (AV, AC, PR, UI, S, C, I, A) by one or more levels relative to what was recorded at validation time.
+
+If the report uses CVSS, calculate from the proved attack, not from the imagined worst case:
+
+- `AV`: Network for internet-reachable issues
+- `AC`: Low for stable repro, High for race/timing or brittle chains
+- `PR`: None / Low / High based on actual attacker starting point
+- `UI`: None unless a victim must click, view, or perform an action
+- `S`: Changed only when impact crosses into another trust domain
+- `C/I/A`: score only what the proof demonstrates
+
+Common patterns:
+
+- `IDOR read PII with normal auth`: `AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N` → around Medium
+- `Unauthenticated admin creation or auth bypass`: `AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` → Critical
+- `SSRF to metadata or privileged internal API`: `AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N` → Critical
+
+## Proof Standard by Finding Class
+
+Each finding class has a minimum evidence bar. If the evidence does not meet this bar, the finding is not ready for the report — send it back to the operator.
+
+**No-theory rule:** `rules/hunting.md` rule 2 applies to report inclusion. A finding without execution proof from the vendor's code is theory — send it back to the operator rather than including it. Source code analysis supports the description but does not replace a POC that calls the vulnerable function and shows the output.
+
+| Finding Class | Minimum Proof |
+|---|---|
+| IDOR / Broken Access Control | Request as attacker → response containing victim's data or state change on victim's resource. Both contexts (attacker auth, victim data) must be visible. |
+| SQL Injection | Extracted data the attacker should not have, or demonstrated control flow (sleep timing with exact delta, UNION output, error-based extraction). Not just `sqlmap: injectable`. |
+| XSS (Stored) | Payload rendered in a victim's authenticated session with DOM proof or session context. |
+| XSS (Reflected) | Payload reflected in response with content-type and context showing execution. |
+| Auth Bypass | Privileged action performed without valid credentials or with insufficient privilege. Show the unauthorized response containing privileged data or confirming the state change. |
+| RCE | Command output from the target (hostname, id, file read). Not just "the payload was accepted." |
+| SSRF | Response body from an internal resource, DNS/OOB callback with correlation ID, or cloud metadata content. |
+| File Read / Path Traversal | Contents of a file outside the web root (e.g., /etc/passwd, application config). |
+| Information Disclosure | The specific sensitive data exposed, with confirmation it is not intentionally public. |
+| CSRF | State change on victim's account triggered from attacker-controlled origin, with before/after proof. |
 
 ## Generation Procedure
 
