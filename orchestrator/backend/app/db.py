@@ -1078,6 +1078,36 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_assessment_surfaces_updated "
         "ON assessment_surfaces(engagement_id, updated_at DESC, id DESC)"
     )
+    # Durable surface ↔ request-variant cross-link. Keyed on request_variant_id
+    # (the value the backend hands back on a request-observation POST), NOT a
+    # local cases.db work_item id — that local PK is ephemeral and the backend
+    # has never seen it.
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS surface_request_variant_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                surface_id INTEGER NOT NULL,
+                request_variant_id INTEGER NOT NULL,
+                relation TEXT NOT NULL DEFAULT '',
+                evidence_ref TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(surface_id, request_variant_id, relation),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(surface_id) REFERENCES assessment_surfaces(id) ON DELETE CASCADE,
+                FOREIGN KEY(request_variant_id) REFERENCES assessment_request_variants(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_surface_request_variant_links_surface "
+        "ON surface_request_variant_links(engagement_id, surface_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_surface_request_variant_links_variant "
+        "ON surface_request_variant_links(engagement_id, request_variant_id)"
+    )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_findings_status_updated "
         "ON assessment_findings(engagement_id, status, updated_at DESC, id DESC)"

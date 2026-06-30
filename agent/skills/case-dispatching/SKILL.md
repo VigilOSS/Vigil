@@ -180,6 +180,17 @@ Triage these BEFORE the dispatching pass, not during. A specialist that opens an
 
 This step pairs with `agent/scripts/assess/lib/contracts.py` `validate_specialist_dispatch_contract`, which gates active-probing dispatches (vulnerability-analyst, exploit-developer) on `scope_host` membership in `scope.json` `hosts`. The validator catches mistakes at register time; this step catches them before they reach the validator.
 
+## Linking Surfaces to Work-Buffer Clusters
+
+When a recorded surface (`vigil assess record-surface`) corresponds to a cluster of work-buffer items already ingested with a durable `request_variant_id`, link them on the backend so the surface's coverage trail points at the exact requests that back it:
+
+```bash
+vigil assess link-surface-work-items "$DB" --cluster <cluster_key> --surface-id <id> \
+  --relation primary-endpoint --evidence-ref "<artifact path>"
+```
+
+Selection is by `--cluster` (the work buffer's `cluster_key`) or `--queue-key`; a work item that never successfully posted to the backend (no `request_variant_id`) is skipped with a warning rather than failing the whole run.
+
 ## Key Rules
 
 - Use `vigil assess work-buffer "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state

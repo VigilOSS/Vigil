@@ -219,15 +219,35 @@ def edit_auth(engagement_dir: Path, identity: str | None = None) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
-def export_curl_args(engagement_dir: Path, identity: str | None = None) -> str:
-    """Render the identity's material as curl ``-H`` arguments (operator copy-paste)."""
+def export_curl_args(
+    engagement_dir: Path, identity: str | None = None, *, host: str | None = None
+) -> str:
+    """Render the identity's material as curl ``-H`` arguments (operator copy-paste).
+
+    ``host`` overlays the matching ``host_cookies`` bucket(s) on top of the
+    legacy flat ``cookies`` view — the same host-scoped lookup
+    ``vigil assess kali --identity`` already applies at injection time (I-22).
+    Without it, a multi-host engagement (several unrelated domains under one
+    scope.json) only ever exports whatever happened to land in the flat
+    ``cookies`` field, which silently drops every host except the one that
+    capture-time scoping flattened against — pass the target host explicitly
+    to get the right session.
+    """
     material = (
         _active_material(engagement_dir)
         if identity is None
         else _api(engagement_dir, "GET", f"/{identity}")
     )
+    raw_cookies = material.get("cookies")
+    cookies = dict(raw_cookies) if isinstance(raw_cookies, dict) else {}
+    if host:
+        from .paths import add_assess_import_path
+
+        add_assess_import_path(_install_root(engagement_dir))
+        from assess.lib.identity import host_cookies_for  # type: ignore[import-not-found]
+
+        cookies.update(host_cookies_for(material, host))
     parts: list[str] = []
-    cookies = material.get("cookies") if isinstance(material.get("cookies"), dict) else {}
     if cookies:
         cookie_value = "; ".join(f"{k}={v}" for k, v in cookies.items())
         parts.append(f"-H 'Cookie: {cookie_value}'")

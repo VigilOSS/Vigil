@@ -372,6 +372,50 @@ def test_capture_auth_posts_to_matched_engagement_only(tmp_path: Path) -> None:
     assert kw["cookies"] == {"session": "abc123", "csrf": "xyz"}
 
 
+def test_capture_auth_scope_host_is_captured_host_not_primary_scope(
+    tmp_path: Path,
+) -> None:
+    """Multi-host engagement: scope_host must be the host actually captured, not
+    the first scope pattern.
+
+    Two unrelated hosts share one engagement. Capturing a session on the
+    non-primary host (b.example.com) must scope the flat-cookie view to
+    b.example.com — the legacy ``scope_patterns[0]`` primary would have scoped it
+    to a.example.com, silently dropping b's session from every flat-view consumer
+    (e.g. ``vigil auth export``). This is the I-22 multi-host regression guard.
+    """
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-multi", hosts=["a.example.com", "b.example.com"])
+
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    calls = _record_captures(collector)
+
+    entry = collector._match_engagement("b.example.com")
+    assert entry is not None
+    # Premise guard: b.example.com is NOT the primary scope pattern, so the legacy
+    # code would have mis-scoped the capture.
+    assert entry.scope_patterns[0].lstrip("*.") != "b.example.com"
+
+    request = _FakeRequest(
+        url="https://b.example.com/login",
+        method="POST",
+        cookies={"session": "b-sess"},
+    )
+    response = _FakeHttpResponse(status_code=200, headers={}, body=b"{}")
+    collector._capture_auth(entry, _FakeFlow(request, response))
+
+    assert len(calls) == 1
+    _, kw = calls[0]
+    assert kw["host"] == "b.example.com"
+    # The fix: scope_host is the actually-captured host, so b's session lands in
+    # b's flat cookie view instead of being scoped to a.example.com and dropped.
+    assert kw["scope_host"] == "b.example.com"
+
+
 def test_capture_auth_extracts_bearer_token_from_login_response(tmp_path: Path) -> None:
     """A login JSON response with a token yields an Authorization header + token
     in the posted capture delta."""
