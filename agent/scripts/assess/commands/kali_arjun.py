@@ -32,6 +32,7 @@ from assess.lib.kali import (
     add_passthrough_args_flag,
     add_required_kali_flags,
     count_list_targets,
+    safe_engagement_dir,
     emit_result,
     extend_cmd_with_extra_args,
     incomplete_list_run_warning,
@@ -247,12 +248,15 @@ def _host_json_path(args, json_path: str) -> str | None:
     return os.path.join(eng_dir, json_path)
 
 
-def _ensure_json_artifact(args, json_path: str) -> None:
-    """Write an empty ``{}`` at the -oJ path if arjun produced no file.
+def _ensure_json_artifact(args, json_path: str, *, incomplete: bool = False) -> None:
+    """Write a placeholder at the -oJ path if arjun produced no file.
 
     Arjun omits the -oJ file entirely when it discovers 0 params; this keeps the
     run's artifact present + auditable and lets ``ingest-arjun`` always find a
-    file. Best-effort — never raises into the verb.
+    file. When the run was INCOMPLETE (timed out / killed before finishing the
+    list) the placeholder is the incomplete-run sentinel instead of a bare ``{}``
+    (Finding 1), so a later ``ingest-arjun`` can tell an empty artifact apart from
+    a genuine "0 hidden params" negative. Best-effort — never raises into the verb.
     """
     host = _host_json_path(args, json_path)
     if not host:
@@ -260,8 +264,10 @@ def _ensure_json_artifact(args, json_path: str) -> None:
     try:
         p = Path(host)
         if not p.exists():
+            from assess.lib.arjun_enrich import incomplete_sentinel
+
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text("{}", encoding="utf-8")
+            p.write_text(incomplete_sentinel() if incomplete else "{}", encoding="utf-8")
     except OSError:
         pass
 
@@ -357,7 +363,9 @@ def run(args) -> None:
     # params" negative. When the run did not finish AND the list had >1 target,
     # surface the incompleteness loudly so it is never read as a verdict. (See
     # the "size to finish" doctrine in references/tools/recon/arjun.md.)
-    total = count_list_targets(args.import_file) if args.import_file else 0
+    total = count_list_targets(
+        args.import_file, engagement_dir=safe_engagement_dir(args)
+    ) if args.import_file else 0
     note = incomplete_list_run_warning(
         tool="arjun",
         total_targets=total,
@@ -370,8 +378,9 @@ def run(args) -> None:
         print(f"WARN {note}", file=sys.stderr)
 
     # Arjun writes NO -oJ file when it discovers 0 params; guarantee the
-    # artifact exists (empty object) so the run is always captured and
-    # ingest-arjun always finds a file. Best-effort, never fatal.
-    _ensure_json_artifact(args, json_path)
+    # artifact exists so the run is always captured and ingest-arjun always finds
+    # a file. When the run was incomplete, write the sentinel (not a bare {}) so
+    # an empty artifact is never misread as a clean negative. Best-effort.
+    _ensure_json_artifact(args, json_path, incomplete=bool(note))
 
     emit_result(result)

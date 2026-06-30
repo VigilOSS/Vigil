@@ -220,9 +220,14 @@ def run(args: argparse.Namespace) -> None:
             print(f"WARN {note}", file=sys.stderr)
 
         # arjun writes no -oJ file on 0 findings; guarantee one so ingest always
-        # has a file to read (mirrors kali_arjun._ensure_json_artifact).
+        # has a file to read (mirrors kali_arjun._ensure_json_artifact). When this
+        # method run was incomplete, write the sentinel (not a bare {}) so ingest
+        # never reads the empty artifact as a clean negative.
         if not json_host.exists():
-            json_host.write_text("{}", encoding="utf-8")
+            from assess.lib.arjun_enrich import incomplete_sentinel
+            json_host.write_text(
+                incomplete_sentinel() if note else "{}", encoding="utf-8"
+            )
 
         ingest_arjun.run(SimpleNamespace(
             db_path=db_path,

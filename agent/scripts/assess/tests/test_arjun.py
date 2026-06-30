@@ -1008,6 +1008,38 @@ def test_count_list_targets(tmp_path):
     assert kali_cli.count_list_targets("") == 0
 
 
+def test_count_list_targets_anchors_container_path(tmp_path):
+    # Finding 2: the tool sees an in-container `/engagements/<key>/...` path; read
+    # raw on the host it doesn't exist (returns 0, silently disabling the guard).
+    # With engagement_dir it must anchor to the host file and count correctly.
+    (tmp_path / "scans" / "arjun-sweep").mkdir(parents=True)
+    listfile = tmp_path / "scans" / "arjun-sweep" / "GET.txt"
+    listfile.write_text("https://x/a\nhttps://x/b\nhttps://x/c\n")
+    container = "/engagements/eng/scans/arjun-sweep/GET.txt"
+    assert kali_cli.count_list_targets(container) == 0  # the bug, unanchored
+    assert kali_cli.count_list_targets(container, engagement_dir=str(tmp_path)) == 3
+    # engagement-relative paths anchor too.
+    assert kali_cli.count_list_targets(
+        "scans/arjun-sweep/GET.txt", engagement_dir=str(tmp_path)
+    ) == 3
+    # a bare host-absolute path is read as-is (no engagement_dir needed).
+    assert kali_cli.count_list_targets(str(listfile)) == 3
+
+
+def test_incomplete_sentinel_round_trip():
+    # Finding 1: a killed/timed-out run with no output writes a sentinel instead
+    # of a bare {} so ingest can tell it apart from a real "0 params" negative.
+    from assess.lib import arjun_enrich as ae
+
+    sentinel = ae.incomplete_sentinel()
+    assert ae.artifact_is_incomplete(sentinel) is True
+    assert ae.parse_arjun_json(sentinel) == []  # sentinel key is skipped, no junk record
+    # a genuine empty / real artifact is NOT flagged incomplete
+    assert ae.artifact_is_incomplete("{}") is False
+    assert ae.artifact_is_incomplete('{"https://x/a": ["id", "q"]}') is False
+    assert len(ae.parse_arjun_json('{"https://x/a": ["id", "q"]}')) == 1
+
+
 def test_parse_list_progress():
     assert kali_cli.parse_list_progress("Scanning 12/134 ...") == (12, 134)
     assert kali_cli.parse_list_progress("Processing: 3 / 50") == (3, 50)
@@ -1051,7 +1083,7 @@ def test_kali_arjun_warns_incomplete_on_timed_out_list(tmp_path, monkeypatch, ca
     monkeypatch.setattr(kali_arjun, "emit_result", lambda r: None)
     monkeypatch.setattr(kali_arjun, "kali_args_to_kwargs", lambda a: {})
     monkeypatch.setattr(kali_arjun, "extend_cmd_with_extra_args", lambda cmd, a: None)
-    monkeypatch.setattr(kali_arjun, "_ensure_json_artifact", lambda a, p: None)
+    monkeypatch.setattr(kali_arjun, "_ensure_json_artifact", lambda a, p, **k: None)
 
     kali_arjun.run(_arjun_ns(target_url="", import_file=str(listfile)))
     err = capsys.readouterr().err

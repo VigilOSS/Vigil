@@ -383,14 +383,51 @@ _LIST_PROGRESS_RE = re.compile(
 )
 
 
-def count_list_targets(path) -> int:
+def _anchor_list_path(path, engagement_dir) -> str:
+    """Map a tool's -i/-l value to a HOST-readable path.
+
+    The value the operator passes is the path the tool sees INSIDE the container —
+    typically ``/engagements/<key>/scans/...`` or an engagement-relative path. Read
+    host-side, that path does not exist, so a naive read returns 0 lines and
+    silently disables the incompleteness guard for the very container-path case
+    that motivated it. With ``engagement_dir`` known, translate it; a bare
+    host-absolute path or an unknown engagement is returned unchanged.
+    """
+    s = str(path or "")
+    if not s or not engagement_dir:
+        return s
+    if s.startswith("/engagements/"):
+        parts = s.split("/")
+        # /engagements/<key>/<rest...> -> <engagement_dir>/<rest...>
+        return str(Path(engagement_dir).joinpath(*parts[3:])) if len(parts) >= 4 else s
+    if not s.startswith("/"):
+        return str(Path(engagement_dir) / s)
+    return s
+
+
+def safe_engagement_dir(args) -> str | None:
+    """Best-effort resolve the engagement dir for path-anchoring; never raises."""
+    try:
+        from assess.lib.config import load_config
+
+        return load_config(getattr(args, "engagement_dir", None)).engagement_dir
+    except (Exception, SystemExit):  # noqa: BLE001 — anchoring is best-effort
+        return None
+
+
+def count_list_targets(path, engagement_dir=None) -> int:
     """Count non-empty, non-comment lines in a tool's -i/-l list file.
 
-    Returns 0 when the path is empty/unreadable, so the caller skips the
-    incompleteness check rather than asserting a wrong target count.
+    Pass ``engagement_dir`` so a container/relative path is anchored to the host
+    before reading (see :func:`_anchor_list_path`); without it the guard silently
+    no-ops on the in-container path the tool actually receives. Returns 0 when the
+    path is empty/unreadable, so the caller skips the incompleteness check rather
+    than asserting a wrong target count.
     """
     try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        text = Path(_anchor_list_path(path, engagement_dir)).read_text(
+            encoding="utf-8", errors="replace"
+        )
     except (OSError, TypeError, ValueError):
         return 0
     return sum(1 for line in text.splitlines() if line.strip() and not line.strip().startswith("#"))
