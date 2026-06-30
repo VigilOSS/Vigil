@@ -667,6 +667,9 @@ def run(args) -> None:
             if getattr(kres, "return_code", 0) not in (0, None):
                 print(f"web-discovery: katana exited {kres.return_code}; crawl output may be partial.", file=sys.stderr)
             print(f"web-discovery: crawled {len(live_urls)} live URLs with katana", file=sys.stderr)
+            _rargv = getattr(kres, "resolved_argv", None)
+            if _rargv:
+                print(f"web-discovery: katana argv: {' '.join(_rargv)}", file=sys.stderr)
         else:
             print("web-discovery: no live URLs to crawl; skipping katana.", file=sys.stderr)
 

@@ -49,6 +49,22 @@ from assess.lib.kali import (
 # dropped. 0 = unlimited (opt out of sizing).
 _DEFAULT_MAX_TARGETS = 100
 
+# Arjun only accepts these four -m modes (kali_arjun._ARJUN_METHODS). A work-item
+# method is a raw HTTP verb, so map body verbs (PUT/PATCH/DELETE) onto arjun's
+# body mode (POST) and HEAD onto GET — otherwise `arjun -m PUT` fails outright and
+# its empty {} artifact reads as a false negative.
+_ARJUN_MODES = frozenset({"GET", "POST", "XML", "JSON"})
+
+
+def _arjun_mode(method: str) -> str:
+    m = (method or "GET").strip().upper() or "GET"
+    if m in _ARJUN_MODES:
+        return m
+    if m == "HEAD":
+        return "GET"
+    # PUT / PATCH / DELETE and any other body-bearing verb -> arjun's POST mode.
+    return "POST"
+
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
@@ -135,9 +151,18 @@ def run(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
 
+    # Group by arjun MODE (not the raw HTTP verb): PUT/PATCH/DELETE collapse onto
+    # POST, HEAD onto GET, so every run uses a -m arjun actually accepts. Dedupe
+    # URLs within a mode (a route exposed as both POST and PUT would otherwise
+    # appear twice in the POST list).
     by_method: dict[str, list[str]] = {}
+    _seen: dict[str, set[str]] = {}
     for method, url in targets:
-        by_method.setdefault(method, []).append(url)
+        mode = _arjun_mode(method)
+        if url in _seen.setdefault(mode, set()):
+            continue
+        _seen[mode].add(url)
+        by_method.setdefault(mode, []).append(url)
 
     out_dir = eng_dir / "scans" / "arjun-sweep"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -213,6 +238,9 @@ def run(args: argparse.Namespace) -> None:
             "status": getattr(result, "status", "unknown"),
             "incomplete": bool(note),
             "run_id": getattr(result, "run_id", None),
+            # Surface the actual argv that ran (post header/IP-pin injection) so
+            # the composed sweep is as transparent as a single typed verb.
+            "resolved_argv": list(getattr(result, "resolved_argv", []) or []),
             "json": str(json_host),
         })
 

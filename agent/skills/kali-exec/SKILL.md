@@ -22,7 +22,7 @@ Skills should point you at `vigil assess contract kali <verb>` for field tables 
 
 ## Verb menu
 
-23 verbs total: 18 typed, 2 fallback, 1 batch fan-out, and 2 host-side maintenance commands. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the batch verb fans one audited command out across an operator-supplied value list; the maintenance commands reconcile stuck audit rows (`sweep-orphans`) and print a tool's live help (`tool-help`).
+24 verbs total: 19 typed, 2 fallback, 1 batch fan-out, and 2 host-side maintenance commands. Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the batch verb fans one audited command out across an operator-supplied value list; the maintenance commands reconcile stuck audit rows (`sweep-orphans`) and print a tool's live help (`tool-help`).
 
 Every typed verb's result JSON includes a `resolved_argv` — the argv that ACTUALLY ran inside the container AFTER the transparent injections (program attribution `-H` headers, the `--resolve` IP-pin, nuclei's default `-exclude-tags`). Read it to see what executed, not just what you typed.
 
@@ -46,6 +46,7 @@ Every typed verb's result JSON includes a `resolved_argv` — the argv that ACTU
 | `kali gau` | Historical URL collection (Wayback / OTX / Common Crawl / URLScan). | `references/tools/recon/gau.md` |
 | `kali arjun` | Hidden HTTP-parameter discovery (GET/POST/JSON/XML), `--passive` OSINT mode, auth via `--headers`. Aim it at a GATED list (`vigil assess arjun-select`), then fold results back with `vigil assess ingest-arjun` so the classifier re-routes the now-parameterized endpoint. | `references/tools/recon/arjun.md` |
 | `kali whatweb` | Deep web technology fingerprinting. | `references/tools/recon/whatweb.md` |
+| `kali browser` | Headless-chromium (selenium) render of one URL: origin status + final DOM + screenshot as one JSON. The trustworthy-signal recovery for a curl/httpx run flagged `status='waf_challenge'` (real browser clears JS bot-challenges). | `references/tools/recon/kali-browser.md` |
 | `kali exec <cmd>` | Raw passthrough for tools not yet typed. Same audit metadata flags. | `references/runtime-guides/kali-cli.md` |
 | `kali job <start\|status\|tail\|stop\|list>` | **Operator-only** async-job lifecycle for a single authorized long sweep that must outlive its dispatch. Specialists run synchronously instead — see the sync-vs-async decision below. | `references/runtime-guides/kali-cli.md` |
 | `kali sweep` | Value-agnostic batch: runs one audited `kali exec` per `--values` entry (a literal list and/or inclusive integer ranges `a-b`) with `{}` substituted into the command template, then clusters the responses by distinct signature (reachability class + status + body marker) — distinguishing reachable vs. dns-failure vs. connection-refused via the shared reachability taxonomy. One `command-runs` audit row per value. Politeness: `--max-values 200` cap, default `--concurrency 1` (>1 needs `--allow-concurrent`, I-013 per-host rule). It expands ONLY the values you supply — no ID/host generation. | `references/runtime-guides/kali-cli.md` |
@@ -61,11 +62,19 @@ Every typed verb accepts an optional `--extra-args "<shell-quoted string>"` to b
 Critical: `--destructive` still applies. If the extra args include a write/delete (`--os-shell` for sqlmap, `--script vuln` for nmap, etc.), you must also pass `--destructive` so the audit row reflects the actual blast radius.
 
 ```bash
+# Headers (-H) and match-codes (-mc) are now TYPED flags — pass them directly.
+# Reserve --extra-args for genuinely unmodeled flags.
 vigil assess kali httpx -u https://x -tech-detect \
-  --extra-args "-H 'X-Forwarded-For: 127.0.0.1' -mc 200,302" \
+  -H 'X-Forwarded-For: 127.0.0.1' -mc 200,302 \
+  --extra-args "-sr -include-response" \
   --technique DISCOVERY --intent "tech detect with custom headers" \
   --probe-kind fingerprint --phase recon --timeout 60
 ```
+
+**Quoting gotcha:** an `--extra-args` VALUE that begins with a now-typed short flag
+(e.g. `-H`, `-t`) is greedily claimed by argparse as that flag and rejected
+("expected one argument"). Use the typed flag instead, or — for an unmodeled flag
+whose value must lead with a dash — the equals form `--extra-args=-X ...`.
 
 ## Synchronous vs. async decision
 

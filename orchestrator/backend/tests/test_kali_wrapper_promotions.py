@@ -307,3 +307,98 @@ def test_arjun_sweep_caps_max_targets_and_flags_incomplete(monkeypatch, tmp_path
     # only the capped 2 targets were written into the scanned list file.
     listfile = tmp_path / "scans" / "arjun-sweep" / "GET.txt"
     assert len([ln for ln in listfile.read_text().splitlines() if ln.strip()]) == 2
+
+
+def test_arjun_sweep_zero_targets_does_not_scan(monkeypatch, tmp_path, capsys):
+    db = tmp_path / "cases.db"
+    db.write_text("")
+    sweep = _import("assess.commands.arjun_sweep")
+    monkeypatch.setattr(sweep, "anchor_engagement_relative", lambda p, d: str(db))
+    monkeypatch.setattr(
+        sweep, "load_config",
+        lambda d: SimpleNamespace(engagement_dir=str(tmp_path), engagement_key="eng"),
+    )
+    monkeypatch.setattr(sweep.arjun_select, "select_targets", lambda rows, **kw: [])
+    monkeypatch.setattr(_import("assess.lib.db"), "db_query", lambda *a, **k: [{"url": "x"}])
+    called: list[int] = []
+    monkeypatch.setattr(sweep, "kali_exec", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(sweep.ingest_arjun, "run", lambda ns: called.append(1))
+    _import("assess.cli").main(["arjun-sweep", str(db), *_AUDIT])
+    out = capsys.readouterr().out
+    assert not called  # no scan, no ingest on an empty target set
+    assert '"selected": 0' in out
+
+
+def test_arjun_sweep_maps_body_verbs_to_post(monkeypatch, tmp_path):
+    db = tmp_path / "cases.db"
+    db.write_text("")
+    sweep = _import("assess.commands.arjun_sweep")
+    kali = _import("assess.lib.kali")
+    monkeypatch.setattr(sweep, "anchor_engagement_relative", lambda p, d: str(db))
+    monkeypatch.setattr(
+        sweep, "load_config",
+        lambda d: SimpleNamespace(engagement_dir=str(tmp_path), engagement_key="eng"),
+    )
+    # arjun only accepts GET/POST/XML/JSON: PUT/PATCH/DELETE -> POST, HEAD -> GET.
+    monkeypatch.setattr(
+        sweep.arjun_select, "select_targets",
+        lambda rows, **kw: [
+            ("PUT", "https://x/a"), ("PATCH", "https://x/b"),
+            ("DELETE", "https://x/c"), ("HEAD", "https://x/d"),
+        ],
+    )
+    monkeypatch.setattr(_import("assess.lib.db"), "db_query", lambda *a, **k: [])
+    cmds: list[list[str]] = []
+
+    def fake_exec(cmd, **k):
+        cmds.append(list(cmd))
+        return kali.KaliResult(
+            run_id=1, status="completed", return_code=0, stdout_path="", stderr_path="",
+            duration_ms=1, peak_rss_bytes=None, stdout_preview="", stderr_preview="",
+            timed_out=False, partial_results=False,
+        )
+
+    monkeypatch.setattr(sweep, "kali_exec", fake_exec)
+    monkeypatch.setattr(sweep.ingest_arjun, "run", lambda ns: None)
+    _import("assess.cli").main(["arjun-sweep", str(db), *_AUDIT])
+    modes = {c[c.index("-m") + 1] for c in cmds if "-m" in c}
+    assert modes == {"POST", "GET"}  # no raw PUT/PATCH/DELETE reaches arjun
+
+
+def test_nuclei_timeout_and_retries_passthrough(monkeypatch):
+    captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_nuclei")
+    _import("assess.cli").main([
+        "kali", "nuclei", "-u", "https://x", "-t", "http/cves/",
+        "-timeout", "8", "-retries", "3", *_AUDIT,
+    ])
+    cmd = captured["cmd"]
+    assert _val_after(cmd, "-timeout") == "8"
+    assert _val_after(cmd, "-retries") == "3"
+
+
+def test_tool_help_falls_back_to_double_dash_help(monkeypatch, capsys):
+    th = _import("assess.commands.kali_tool_help")
+    monkeypatch.setattr(th, "_check_container_running", lambda c: None)
+    calls: list[str] = []
+
+    def fake_run_help(container, tool, flag):
+        calls.append(flag)
+        if flag == "-h":  # first attempt yields nothing -> fall through to --help
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="REAL HELP\n", stderr="")
+
+    monkeypatch.setattr(th, "_run_help", fake_run_help)
+    _import("assess.cli").main(["kali", "tool-help", "katana"])
+    assert calls == ["-h", "--help"]
+    assert "REAL HELP" in capsys.readouterr().out
+
+
+def test_resolve_crawl_rate_limit_precedence():
+    f = _import("assess.lib.kali").resolve_crawl_rate_limit
+    assert f("", rate_cap=None) == 10                       # unset -> safe default
+    assert f("80", rate_cap=None) == 20                     # above hard cap -> clamp to 20
+    assert f("80", rate_cap=None, allow_fast=True) == 80    # opt-in override of the cap
+    assert f("", rate_cap=5.0) == 5                         # program ceiling clamps DOWN
+    assert f("80", rate_cap=5.0, allow_fast=True) == 5      # ceiling beats allow_fast
+    assert f("0", rate_cap=None) == 10                      # <1 -> default
+    assert f("bad", rate_cap=None) == 10                    # non-numeric -> default
