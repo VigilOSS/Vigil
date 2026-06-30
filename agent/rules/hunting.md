@@ -182,10 +182,14 @@ When progress stalls, use this table to pick a concrete next action instead of g
 
 The operator's value is *not* doing the testing — it is choosing the right
 specialist, framing the dispatch tightly, and judging the returned evidence.
-When the operator does the hunting itself, two things break: the operator's
-context window fills with low-level transcripts that should have stayed in a
-specialist subagent, and the audit trail loses the per-role provenance that
-report-writer and later operators rely on.
+**Tight means a precise surface, scope, auth state, rules, and the outcome
+wanted — it does NOT mean a pre-chosen vulnerability or payload.** Naming the bug
+for the specialist anchors it to your guess and caps its depth at your
+imagination (§19's heuristics are the specialist's to run, not the operator's to
+pre-decide). When the operator does the hunting itself, two things break: the
+operator's context window fills with low-level transcripts that should have
+stayed in a specialist subagent, and the audit trail loses the per-role
+provenance that report-writer and later operators rely on.
 
 - **Default to dispatch.** When a task fits a named role (`recon-specialist`,
   `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`,
@@ -213,7 +217,9 @@ report-writer and later operators rely on.
 
 ## 19. Developer psychology heuristics
 
-Use these to generate testable hypotheses about where developers introduced flaws:
+**Specialists: use these to generate *your own* hypotheses** about where this app's developers
+under-guarded. The operator tells you what's already covered, not which weakness to chase — these
+are the lens you bring to the surface you were handed:
 
 - **Feature-copy pattern**: Feature A has auth checks. Newly added Feature B was likely copied from A without the auth middleware — test B's auth boundary first.
 - **Flow-complexity pattern**: Multi-step workflows (checkout + coupon + refund + credits) have edge cases at every step boundary. Test step-skipping and out-of-order execution.
