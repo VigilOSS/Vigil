@@ -24,8 +24,24 @@ from assess.lib.kali import (
     kali_exec,
 )
 
+# Pre-flight budget helpers (kali_cli argparse seam); imported directly so this
+# unit need not touch the shared kali facade module.
+from assess.lib.kali_cli import (
+    coerce_float,
+    estimate_list_sweep_seconds,
+    preflight_timeout_guard,
+)
+
 
 _NUCLEI_LOCK_TIMEOUT_S = 1800.0
+
+# nuclei CLI defaults used by the pre-flight runtime floor when a knob is unset:
+# -timeout 10s/request, -c 25 workers, -rl 150 req/s. The floor assumes ≥1
+# request-round per host (nuclei fires many templates per host, so this UNDER-
+# counts — a conservative floor that only fires when even it exceeds --timeout).
+_NUCLEI_DEFAULT_HTTP_TIMEOUT = 10.0
+_NUCLEI_DEFAULT_CONCURRENCY = 25
+_NUCLEI_DEFAULT_RATE_LIMIT = 150.0
 
 # Politeness/safety exclude-tags injected by default when the operator does not
 # supply their own. Keeps broad sweeps from firing DoS/fuzz/intrusive/brute-force
@@ -348,6 +364,39 @@ def run(args) -> None:
         engagement_dir = Path(cfg.engagement_dir)
     except SystemExit:
         engagement_dir = None
+
+    # Count the -l host list once: it feeds BOTH the pre-flight sizing floor and
+    # the post-run incompleteness guard below.
+    total = count_list_targets(
+        args.target_list, engagement_dir=safe_engagement_dir(args)
+    ) if args.target_list else 0
+
+    # Pre-flight sizing floor (I-9b#1). A nuclei sweep over a large host LIST under
+    # a low -rl / per-request -timeout cannot finish before the wrapper --timeout —
+    # it is SIGTERM-killed part-way and the unscanned remainder reads as a clean
+    # negative. Warn BEFORE the run (the floor under-counts the per-host template
+    # volume, so warn-only). The post-run incompleteness guard catches the rest.
+    if total > 1:
+        est = estimate_list_sweep_seconds(
+            targets=total,
+            passes=1,
+            per_request_seconds=coerce_float(
+                getattr(args, "timeout_http", ""), _NUCLEI_DEFAULT_HTTP_TIMEOUT
+            ),
+            workers=int(coerce_float(getattr(args, "concurrency", ""), _NUCLEI_DEFAULT_CONCURRENCY)),
+            rate_limit=coerce_float(getattr(args, "rate_limit", ""), _NUCLEI_DEFAULT_RATE_LIMIT),
+        )
+        preflight_timeout_guard(
+            verb="nuclei",
+            internal_budget_s=est,
+            timeout=getattr(args, "timeout", None),
+            warn=lambda m: print(f"WARN {m}", file=sys.stderr),
+            sizing_hint=(
+                "Split the host list, raise --timeout to fit, or raise -rl/-c so the "
+                "sweep finishes before the wall."
+            ),
+        )
+
     lock_path = _nuclei_lock_path_for(getattr(args, "output", ""), engagement_dir)
     if lock_path is not None:
         with _nuclei_output_lock(lock_path):
@@ -360,9 +409,6 @@ def run(args) -> None:
     # part of it, so the absence of findings for the unscanned remainder is not a
     # clean negative. (Distinct from _zero_byte_post_check, which catches a
     # template-loader failure.)
-    total = count_list_targets(
-        args.target_list, engagement_dir=safe_engagement_dir(args)
-    ) if args.target_list else 0
     note = incomplete_list_run_warning(
         tool="nuclei", total_targets=total,
         timed_out=getattr(result, "timed_out", False),

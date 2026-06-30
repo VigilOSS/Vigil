@@ -13,6 +13,33 @@ from assess.lib.kali import (
     kali_exec,
 )
 
+# Pre-flight budget guard (kali_cli argparse seam); imported directly so this
+# unit need not touch the shared kali facade module.
+from assess.lib.kali_cli import coerce_float, preflight_timeout_guard
+
+# A "heavy" sqlmap config (deep --level/--risk payload set, or table enumeration/
+# dump) routinely runs many minutes against a single injectable param. sqlmap has
+# no total-runtime cap flag, so the foot-gun is a heavy config under a short
+# --timeout: it is SIGTERM-killed mid-enumeration and the aborted run reads as
+# "not injectable" / "nothing to dump". This conservative floor is the wall-clock
+# below which a heavy run is flagged pre-flight (I-9b#1 class).
+_SQLMAP_HEAVY_FLOOR_S = 600
+_SQLMAP_HEAVY_LEVEL = 4
+_SQLMAP_HEAVY_RISK = 3
+
+
+def _sqlmap_is_heavy(args) -> bool:
+    """True when the config implies a long, payload-heavy run.
+
+    Deep ``--level``/``--risk`` multiply the payload set per param; ``--dump``/
+    ``--tables`` add enumeration that walks the DBMS over the (slow) injection.
+    """
+    if coerce_float(getattr(args, "level", ""), 0) >= _SQLMAP_HEAVY_LEVEL:
+        return True
+    if coerce_float(getattr(args, "risk", ""), 0) >= _SQLMAP_HEAVY_RISK:
+        return True
+    return bool(getattr(args, "dump", False) or getattr(args, "tables", False))
+
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
@@ -74,6 +101,23 @@ def run(args) -> None:
     if args.dump:
         cmd.append("--dump")
     extend_cmd_with_extra_args(cmd, args)
+
+    # Pre-flight sizing guard (I-9b#1 class). A heavy --level/--risk/--dump/--tables
+    # run under a short --timeout is SIGTERM-killed mid-enumeration and the aborted
+    # run reads as a clean "not injectable" / "nothing to dump". Warn (warn-only —
+    # the floor is a heuristic, not a contract) so the budget is sized up front.
+    if _sqlmap_is_heavy(args):
+        preflight_timeout_guard(
+            verb="sqlmap",
+            internal_budget_s=_SQLMAP_HEAVY_FLOOR_S,
+            timeout=getattr(args, "timeout", None),
+            warn=lambda m: print(f"WARN {m}", file=sys.stderr),
+            sizing_hint=(
+                "A deep --level/--risk or --dump/--tables run routinely takes many "
+                f"minutes; size --timeout to ≥{_SQLMAP_HEAVY_FLOOR_S}s or narrow the "
+                "config so a SIGTERM mid-enumeration is not misread as a negative."
+            ),
+        )
 
     result = kali_exec(cmd, tool_name="sqlmap", **kali_args_to_kwargs(args))
     emit_result(result)

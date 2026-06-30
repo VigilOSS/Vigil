@@ -159,6 +159,13 @@ def _load_egress_blocked_hosts(path: str | None) -> set[str]:
     return blocked
 
 
+# Per-URL length cap for ingestion. A URL longer than this is skipped and
+# reported rather than carried into the bulk request-observation POST, where a
+# single over-long row can fail the WHOLE batch at the backend's length
+# validation and silently drop every good row with it (I-12). Matches the
+# per-line skip discipline already used for template/malformed/bad-JSON lines.
+MAX_INGEST_URL_LENGTH = 4096
+
 _FQDN_RE = re.compile(r"^[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}(?:[:/?#]|$)")
 _IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}(?:[:/?#]|$)")
 _LOCALHOST_RE = re.compile(r"^localhost(?:[:/?#]|$)", re.IGNORECASE)
@@ -233,6 +240,7 @@ def run(args) -> None:
     skipped_template = 0
     skipped_malformed = 0
     skipped_badjson = 0
+    skipped_overlong = 0
     pending_rows: list[dict] = []
     pending_observations: list[dict] = []
     pending_coverage_items: list[dict] = []
@@ -420,6 +428,15 @@ def run(args) -> None:
                 continue
             url = resolved
 
+            if len(url) > MAX_INGEST_URL_LENGTH:
+                skipped_overlong += 1
+                print(
+                    f"WARN ingest-endpoints: skipping over-long URL "
+                    f"({len(url)} chars, cap {MAX_INGEST_URL_LENGTH}): {url[:120]}",
+                    file=sys.stderr,
+                )
+                continue
+
             if not url_path or url_path == "null":
                 url_path = extract_url_path(url)
             if not query_params:
@@ -583,13 +600,14 @@ def run(args) -> None:
         client.close()
 
     print(f"[ingest] Ingested {count} work items from source '{source}'")
-    total_skipped = skipped_template + skipped_malformed + skipped_badjson
+    total_skipped = skipped_template + skipped_malformed + skipped_badjson + skipped_overlong
     if total_skipped:
         print(
             f"[ingest] Skipped {total_skipped} line(s): "
             f"{skipped_template} template/fuzz/empty, "
             f"{skipped_malformed} malformed/unkeyable, "
-            f"{skipped_badjson} bad-JSON (see WARN lines above).",
+            f"{skipped_badjson} bad-JSON, "
+            f"{skipped_overlong} over-long-URL (see WARN lines above).",
             file=sys.stderr,
         )
     if egress_blocked_count:

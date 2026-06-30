@@ -427,3 +427,181 @@ def test_resolve_crawl_rate_limit_precedence():
     assert f("80", rate_cap=5.0, allow_fast=True) == 5      # ceiling beats allow_fast
     assert f("0", rate_cap=None) == 10                      # <1 -> default
     assert f("bad", rate_cap=None) == 10                    # non-numeric -> default
+
+
+# ── pre-flight internal-budget vs --timeout guard (I-9b#1 + I-20(b)) ─────────
+
+
+def _audit(timeout):
+    """Required audit flags with an explicit --timeout (overrides the shared
+    _AUDIT default so a per-test wall-clock budget can be asserted)."""
+    return [
+        "--technique", "DISCOVERY", "--intent", "x",
+        "--probe-kind", "fingerprint", "--phase", "recon",
+        "--timeout", str(timeout),
+    ]
+
+
+def test_preflight_timeout_guard_autoraises_exact_budget():
+    cli = _import("assess.lib.kali_cli")
+    msgs: list[str] = []
+    out = cli.preflight_timeout_guard(
+        verb="katana", internal_budget_s=600, timeout=180,
+        warn=msgs.append, auto_raise=True, exact=True,
+    )
+    assert out == 600                       # boost-only raise to fit the budget
+    assert msgs and "180" in msgs[0] and "600" in msgs[0]
+
+
+def test_preflight_timeout_guard_warn_only_leaves_timeout_unchanged():
+    cli = _import("assess.lib.kali_cli")
+    msgs: list[str] = []
+    out = cli.preflight_timeout_guard(
+        verb="arjun", internal_budget_s=600, timeout=180, warn=msgs.append,
+    )
+    assert out == 180                       # warn-only: never silently changes the budget
+    assert msgs
+
+
+def test_preflight_timeout_guard_silent_when_budget_fits():
+    cli = _import("assess.lib.kali_cli")
+    msgs: list[str] = []
+    out = cli.preflight_timeout_guard(
+        verb="katana", internal_budget_s=100, timeout=180,
+        warn=msgs.append, auto_raise=True, exact=True,
+    )
+    assert out == 180
+    assert not msgs
+
+
+def test_preflight_timeout_guard_tolerates_missing_timeout():
+    cli = _import("assess.lib.kali_cli")
+    msgs: list[str] = []
+    # A unit-test namespace may carry no --timeout; the guard must not raise.
+    out = cli.preflight_timeout_guard(
+        verb="arjun", internal_budget_s=600, timeout=None, warn=msgs.append,
+    )
+    assert out is None and not msgs
+
+
+def test_estimate_list_sweep_seconds_floors_and_skips_single():
+    cli = _import("assess.lib.kali_cli")
+    # I-20 shape: 134 targets × 2 (--stable) passes × 12s/req ÷ 5 workers ≈ 643s.
+    est = cli.estimate_list_sweep_seconds(
+        targets=134, passes=2, per_request_seconds=12, workers=5, rate_limit=6,
+    )
+    assert est > 600
+    # A low rate-limit caps effective parallelism BELOW the worker pool.
+    slow = cli.estimate_list_sweep_seconds(
+        targets=134, passes=2, per_request_seconds=12, workers=5, rate_limit=2,
+    )
+    assert slow > est
+    # A single target is a different (already-visible) problem -> skipped.
+    assert cli.estimate_list_sweep_seconds(
+        targets=1, passes=2, per_request_seconds=99, workers=1, rate_limit=1,
+    ) == 0
+
+
+def test_katana_crawl_budget_autoraises_timeout_and_emits_crawl_duration(monkeypatch, capsys):
+    captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_katana")
+    _import("assess.cli").main(
+        ["kali", "katana", "-u", "https://x", "--crawl-budget", "600", *_audit(180)]
+    )
+    err = capsys.readouterr().err
+    cmd = captured["cmd"]
+    # the declared crawl budget is passed to katana so it self-stops at 600s ...
+    assert _val_after(cmd, "-crawl-duration") == "600"
+    # ... and --timeout is auto-raised to fit it (was 180) so it is not truncated.
+    assert captured["kwargs"]["timeout"] >= 600
+    assert "WARN" in err and "600" in err and "180" in err
+
+
+def test_katana_crawl_budget_within_timeout_keeps_timeout(monkeypatch, capsys):
+    captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_katana")
+    _import("assess.cli").main(
+        ["kali", "katana", "-u", "https://x", "--crawl-budget", "120", *_audit(1800)]
+    )
+    err = capsys.readouterr().err
+    assert _val_after(captured["cmd"], "-crawl-duration") == "120"
+    assert captured["kwargs"]["timeout"] == 1800     # budget fits -> unchanged
+    assert "WARN" not in err
+
+
+def test_katana_without_crawl_budget_emits_no_crawl_duration(monkeypatch, capsys):
+    captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_katana")
+    _import("assess.cli").main(["kali", "katana", "-u", "https://x", *_audit(180)])
+    assert "-crawl-duration" not in captured["cmd"]
+    assert "WARN" not in capsys.readouterr().err
+
+
+def test_ffuf_maxtime_autoraises_timeout(monkeypatch, capsys):
+    captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_ffuf")
+    _import("assess.cli").main(
+        ["kali", "ffuf", "-u", "https://x/FUZZ", "-w", "/w.txt",
+         "-maxtime", "600", *_audit(120)]
+    )
+    err = capsys.readouterr().err
+    assert _val_after(captured["cmd"], "-maxtime") == "600"
+    assert captured["kwargs"]["timeout"] >= 600
+    assert "WARN" in err and "ffuf" in err
+
+
+def test_arjun_preflight_warns_when_list_cannot_finish(monkeypatch, capsys, tmp_path):
+    listfile = tmp_path / "targets.txt"
+    listfile.write_text("\n".join(f"https://x/{i}" for i in range(50)) + "\n")
+    captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_arjun")
+    _import("assess.cli").main([
+        "kali", "arjun", "-i", str(listfile),
+        "--rate-limit", "6", "--stable", "-T", "12", *_audit(120),
+    ])
+    err = capsys.readouterr().err
+    # 50 × 2 (stable) × 12 ÷ 5 = 240s worst-case >> 120s wall-clock.
+    assert "WARN" in err and "arjun" in err
+    assert "120" in err
+    # an ESTIMATE never silently changes the budget — warn-only.
+    assert captured["kwargs"]["timeout"] == 120
+
+
+def test_arjun_preflight_silent_when_sized_to_finish(monkeypatch, capsys, tmp_path):
+    listfile = tmp_path / "targets.txt"
+    listfile.write_text("\n".join(f"https://x/{i}" for i in range(3)) + "\n")
+    captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_arjun")
+    _import("assess.cli").main(
+        ["kali", "arjun", "-i", str(listfile), *_audit(1800)]
+    )
+    assert "WARN" not in capsys.readouterr().err
+    assert captured["kwargs"]["timeout"] == 1800
+
+
+def test_nuclei_preflight_warns_on_undersized_list_sweep(monkeypatch, capsys, tmp_path):
+    listfile = tmp_path / "hosts.txt"
+    listfile.write_text("\n".join(f"https://h{i}" for i in range(100)) + "\n")
+    captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_nuclei")
+    _import("assess.cli").main([
+        "kali", "nuclei", "-l", str(listfile), "-t", "http/cves/",
+        "-rate-limit", "5", "-timeout", "10", *_audit(120),
+    ])
+    err = capsys.readouterr().err
+    # 100 hosts × 10s/req ÷ min(25 conc, 5 rl)=5 = 200s worst-case > 120s.
+    assert "WARN" in err and "nuclei" in err
+    assert captured["kwargs"]["timeout"] == 120     # estimate -> warn-only
+
+
+def test_sqlmap_preflight_warns_on_heavy_config_under_short_timeout(monkeypatch, capsys):
+    captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_sqlmap")
+    _import("assess.cli").main([
+        "kali", "sqlmap", "-u", "https://x/?id=1",
+        "--level", "5", "--risk", "3", "--batch", *_audit(120),
+    ])
+    err = capsys.readouterr().err
+    assert "WARN" in err and "sqlmap" in err
+    assert captured["kwargs"]["timeout"] == 120     # heuristic -> warn-only
+
+
+def test_sqlmap_preflight_silent_on_light_config(monkeypatch, capsys):
+    captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_sqlmap")
+    _import("assess.cli").main(
+        ["kali", "sqlmap", "-u", "https://x/?id=1", "--batch", *_audit(120)]
+    )
+    assert "WARN" not in capsys.readouterr().err
+    assert captured["kwargs"]["timeout"] == 120     # budget passes through unchanged

@@ -392,6 +392,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         schema_name="finding-record.schema.json",
         preferred_invocations=(
             "vigil assess record-finding <agent-name> <finding-json-file>",
+            "vigil assess record-finding <agent-name> <finding-json-file> --update <existing-slug>",
         ),
         author_supplied_fields=(
             "title",
@@ -425,6 +426,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Set details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete but only becomes exploitation-worthy as part of a larger chain. Specialists own these via record-finding/update-finding; verification reviews but does not own them.",
             "Do not put `link_kind=root_cause` in the `links` array. Record the finding first, then `vigil assess link-finding` after verification — root/sibling grouping is an explicit lifecycle action.",
             "evidence_ref must point at an existing engagement file (auto-registered and linked on record). URL refs, prose refs, and path-shaped refs with no file are REJECTED — they cannot satisfy report-readiness artifact indexing. Put external URLs in details.references; pass --allow-unindexed-evidence only for a theoretical/code-inferred finding with no file.",
+            "Dedup keys on (defect_family + root_cause_key + auth_context + canonical_location). A net-new record whose tuple collides with an EXISTING reported/active finding under a different slug is REFUSED, not silently merged. For a genuinely-distinct sibling on the same root cause, give it its OWN root_cause_key/defect_family and attach it with link-finding; pass --update <slug> ONLY to intentionally modify that exact existing finding.",
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
@@ -435,6 +437,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("evidence", "use details.evidence"),
             ("impact", "use details.impact"),
             ("links[].link_kind=root_cause", "use `vigil assess link-finding <sibling-slug> --root-cause <root-slug>` after verification"),
+            ("reusing a reported finding's root_cause_key + canonical_location for a new finding", "differentiate the root_cause_key/defect_family and use link-finding, or pass --update <slug> to modify the existing finding"),
         ),
         examples=(
             {

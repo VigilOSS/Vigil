@@ -2,16 +2,19 @@
 
 Bug-bounty programs (e.g. BugCrowd) require an attribution header — such as
 ``X-Bug-Bounty: <handle>`` — on every in-scope HTTP probe. ``kali.py`` injects
-those headers at the single ``kali_exec`` chokepoint via a three-way classifier:
+those headers at the single ``kali_exec`` chokepoint via a four-way classifier:
 
   * INJECTABLE (curl/httpx/nuclei/ffuf/sqlmap/katana) → append ``-H``.
+  * FLAG-MAP (whatweb ``--header`` / nikto ``-Add-header`` / arjun ``--headers``)
+    → HTTP-to-target tools whose header flag is NOT ``-H``; inject via the tool's
+    own flag (Layer-1 I-3 extension; see ``_REQUIRED_HEADER_FLAG_SPECS``).
   * SKIP (gau/waybackurls/subfinder/amass/dnsx/nmap/naabu/masscan/puredns) →
     passive/archive/DNS/L3-L4, never reaches the in-scope target, so silently
     skip (no leak of the handle to web.archive.org / DNS APIs).
-  * else (nikto/whatweb/wafw00f/httprobe/arjun/unknown) → WARN (never block);
-    cmd unchanged. httprobe DOES reach the target but has no ``-H`` flag; arjun
-    takes a newline ``--headers`` block, not ``-H`` — both must warn so the
-    operator injects the header the tool's own way rather than silently dropping.
+  * else (wafw00f/httprobe/unknown) → WARN (never block); cmd unchanged. wafw00f's
+    ``-H``/``--headers`` reads a FILE not an inline string, and httprobe has no
+    header flag at all, so neither can carry the marker inline — the Layer-2
+    fail-closed backstop (ADR 0010) refuses an un-attributed in-scope run instead.
 
 These tests cover the pure ``_apply_required_headers`` classifier and the
 ``_required_headers`` scope reader. The full ``kali_exec`` wiring (audit argv,
@@ -44,6 +47,22 @@ def test_injectable_tools_append_header_exact(tool):
     assert cmd == [tool, "https://target.example", "-H", "X-Bug-Bounty: handle"]
 
 
+# whatweb/nikto/arjun are HTTP-to-target tools whose attribution-header flag is
+# NOT curl's ``-H`` (whatweb ``--header``, nikto ``-Add-header``, arjun
+# ``--headers``), so Layer 1 (I-3) injects via the tool's own flag rather than
+# warning. Exhaustive idempotency / arjun-single-block-merge coverage lives in the
+# assess suite's test_required_headers_shell_inject.py; here we pin the four-way
+# reclassification (was WARN) through kali.py's back-compat re-export.
+@pytest.mark.parametrize(
+    "tool, flag", [("whatweb", "--header"), ("nikto", "-Add-header"), ("arjun", "--headers")]
+)
+def test_flag_map_tools_inject_via_own_flag(tool, flag):
+    cmd = [tool, "https://target.example"]
+    status = kali._apply_required_headers(cmd, tool, _HEADERS)
+    assert status == "injected"
+    assert cmd == [tool, "https://target.example", flag, "X-Bug-Bounty: handle"]
+
+
 @pytest.mark.parametrize(
     "tool", ["gau", "waybackurls", "subfinder", "amass", "dnsx", "nmap", "naabu", "masscan", "puredns"]
 )
@@ -55,10 +74,12 @@ def test_skip_tools_unchanged(tool):
     assert cmd == original
 
 
-# arjun (newline --headers block, not -H) and httprobe (sends HTTP to the target
-# but has no -H flag) must WARN, not silently inject a -H the tool rejects/ignores
-# or silently skip a request that actually reaches the in-scope target.
-@pytest.mark.parametrize("tool", ["nikto", "whatweb", "wafw00f", "arjun", "httprobe", "some-unknown-tool"])
+# wafw00f (its ``-H``/``--headers`` reads a FILE, not an inline string), httprobe
+# (sends HTTP to the target but has NO header flag) and any unknown tool must WARN:
+# none can carry the marker inline, so Layer 1 leaves the cmd untouched and the
+# Layer-2 backstop refuses the un-attributed in-scope run. (whatweb/nikto/arjun
+# used to land here but now inject via their own flag — see the FLAG-MAP test.)
+@pytest.mark.parametrize("tool", ["wafw00f", "httprobe", "some-unknown-tool"])
 def test_non_injectable_http_tools_warn_unchanged(tool):
     cmd = [tool, "https://target.example"]
     original = list(cmd)

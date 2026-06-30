@@ -9,6 +9,14 @@ from pathlib import Path
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
+# Backend activity-event field cap (CreateEventRequest.task_name max_length at
+# orchestrator/backend/app/api/events.py). The backend derives the chain_key as
+# `_slugify(title)` with no length cap and accepts titles up to 512 chars, so a
+# long title yields a chain_key well over this cap. The chain row persists, but
+# the event emit would 422 and silently drop the activity-feed event — so we
+# truncate the chain_key used in the event CLI-side (I-18).
+EVENT_TASK_NAME_MAX = 128
+
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("record-chain", help="Record an attack chain")
@@ -50,14 +58,19 @@ def run(args) -> None:
         print("record-chain: backend did not return a valid chain", file=sys.stderr)
         sys.exit(1)
 
-    # Emit event
+    # Emit event. Truncate the chain_key used in the event to the backend
+    # task_name cap so a long title does not 422 the activity-feed emit (which
+    # would silently drop the event even though the chain row persisted). Bound
+    # the summary the same way so it stays under its own cap. The FULL chain_key
+    # is still printed below for downstream consumers.
+    event_chain_key = chain_key[:EVENT_TASK_NAME_MAX]
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         client.post_event({
             "event_type": "chain.created",
             "phase": os.environ.get("ORCHESTRATOR_PHASE", "unknown"),
-            "task_name": chain_key,
+            "task_name": event_chain_key,
             "agent_name": args.agent_name,
-            "summary": f"Attack chain recorded: {chain_key}",
+            "summary": f"Attack chain recorded: {event_chain_key}",
         })
 
     print(chain_key)

@@ -148,10 +148,11 @@ def test_dns_host_dispatch_skips_dnsx_header(tmp_path, monkeypatch) -> None:
     assert "-H" not in captured[0]
 
 
-@pytest.mark.parametrize("warn_tool", ["whatweb"])
+@pytest.mark.parametrize("warn_tool", ["wafw00f"])
 def test_host_routed_non_injectable_http_tool_warns(tmp_path, monkeypatch, capsys, warn_tool) -> None:
-    # An HTTP-capable but non-injectable tool (no -H) WARNs (never blocks) and
-    # leaves argv untouched — same contract as the container path.
+    # An HTTP-capable tool whose header flag can't carry an inline value (wafw00f's
+    # -H/--headers reads a FILE) WARNs (never blocks) and leaves argv untouched —
+    # same contract as the container path; the Layer-2 backstop is its safety net.
     eng_dir = tmp_path / "eng"
     _scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
     captured = _capture_host_exec(monkeypatch, web_discovery)
@@ -166,3 +167,23 @@ def test_host_routed_non_injectable_http_tool_warns(tmp_path, monkeypatch, capsy
 
     assert captured == [[warn_tool, "https://example.com"]]
     assert "no known -H injection" in capsys.readouterr().err
+
+
+def test_host_routed_whatweb_carries_header_flag(tmp_path, monkeypatch) -> None:
+    # Layer 1 now injects the program attribution header into whatweb via its own
+    # ``--header`` flag (shared classifier), so the host path carries it too.
+    eng_dir = tmp_path / "eng"
+    _scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    captured = _capture_host_exec(monkeypatch, web_discovery)
+
+    web_discovery._host_dispatch(
+        ["whatweb", "https://example.com"],
+        intent="web-discovery: fingerprint",
+        tool_name="whatweb",
+        timeout=60,
+        engagement_dir=str(eng_dir),
+    )
+
+    argv = captured[0]
+    assert "--header" in argv
+    assert argv[argv.index("--header") + 1] == "X-Bug-Bounty: vigiloss"

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shlex
 import sys
@@ -480,3 +481,117 @@ def incomplete_list_run_warning(
         "and/or with a larger --timeout (or a faster per-tool config) sized to "
         "actually finish before treating any absence as a verdict."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Pre-flight internal-budget vs --timeout guard (I-9b#1 + I-20(b)).
+#
+# The POST-run guard above turns a *finished* truncation into an explicit
+# signal. This is the complementary PRE-flight check: a crawl/discovery/param-
+# sweep whose OWN runtime budget already exceeds the wrapper --timeout is going
+# to be SIGTERM-killed mid-run, and its truncated output then reads as a clean
+# negative — so catch the self-contradiction at DISPATCH, before the run, not in
+# the audit row afterward (the I-9 katana run 36937 was `--timeout 180` while its
+# own crawl budget was 10 min; the I-20 arjun run did 2 of 134 targets before the
+# kill). Two flavors, chosen by the caller:
+#   * a verb with an EXACT declared budget — a real tool flag that caps total
+#     runtime (katana -crawl-duration, ffuf -maxtime) — auto-RAISES --timeout to
+#     fit it (boost-only) and warns, so the run can actually finish.
+#   * a verb whose runtime can only be ESTIMATED (arjun/nuclei list sweeps,
+#     sqlmap heavy configs) WARNs with a sizing hint and never silently changes
+#     the budget — a worst-case estimate is a heads-up, not a contract.
+# --------------------------------------------------------------------------- #
+
+
+def coerce_float(value, default: float = 0.0) -> float:
+    """Best-effort float of a CLI flag string; ``default`` when empty/unparseable.
+
+    Verb knobs arrive as argparse strings (``""`` when unset). This resolves a
+    knob to a number with its per-tool default so the estimators below get clean
+    inputs without each call site re-implementing the try/except.
+    """
+    try:
+        if value in (None, ""):
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def estimate_list_sweep_seconds(
+    *,
+    targets: int,
+    passes: int,
+    per_request_seconds: float,
+    workers: int = 1,
+    rate_limit: float | None = None,
+) -> float:
+    """Worst-case seconds for a per-target list sweep (arjun ``-i`` / nuclei ``-l``).
+
+    Models the I-9b/I-20 truncation failure: each of ``targets`` targets needs
+    ``passes`` request-rounds, a dead/slow target burns the FULL
+    ``per_request_seconds`` each round (the dominant cost on a junk list — a dead
+    .nsf 301 eats the whole -T), and the run retires those rounds across at most
+    ``effective`` workers in parallel. Parallelism is bounded BOTH by the worker
+    pool (``workers`` — arjun ``-t`` / nuclei ``-c``) AND the politeness rate
+    (``rate_limit`` req/s), whichever is smaller — a ``--rate-limit 6`` cannot
+    sustain more than ~6 concurrent retirements regardless of the thread count.
+
+    Returns ``0.0`` for ≤1 target (a single slow target is a different, already-
+    visible problem — same skip the post-run guard uses) so the caller no-ops.
+    """
+    if targets <= 1 or passes <= 0 or per_request_seconds <= 0:
+        return 0.0
+    effective = max(1, int(workers))
+    if rate_limit and rate_limit > 0:
+        effective = max(1, min(effective, int(math.ceil(rate_limit))))
+    return targets * passes * float(per_request_seconds) / effective
+
+
+def preflight_timeout_guard(
+    *,
+    verb: str,
+    internal_budget_s: float,
+    timeout,
+    warn,
+    auto_raise: bool = False,
+    exact: bool = False,
+    sizing_hint: str = "",
+):
+    """Compare a verb's internal runtime budget to the wrapper ``--timeout``.
+
+    Returns the (possibly raised) timeout so the caller can write it back. When
+    ``internal_budget_s`` exceeds ``timeout``: emit a WARN through ``warn`` and,
+    only when ``auto_raise``, return ``ceil(internal_budget_s)`` so a DECLARED
+    budget is never truncated by a smaller wall-clock (boost-only; it never
+    shrinks the budget). With ``auto_raise`` False the timeout is returned
+    unchanged (warn-only). ``exact`` only tunes the wording (declared vs
+    estimated). A missing/unparseable ``timeout`` (e.g. a unit-test namespace
+    with no ``--timeout``) is returned untouched and never warns.
+    """
+    try:
+        budget = float(internal_budget_s)
+        wall = int(timeout)
+    except (TypeError, ValueError):
+        return timeout
+    if budget <= 0 or wall <= 0 or budget <= wall:
+        return timeout
+    needed = int(math.ceil(budget))
+    kind = "declared" if exact else "estimated worst-case"
+    hint = sizing_hint or (
+        f"Raise --timeout to ≥{needed}s, or shrink the run so it finishes in time."
+    )
+    if auto_raise:
+        warn(
+            f"{verb}: {kind} internal runtime budget ≈ {needed}s exceeds --timeout "
+            f"{wall}s — the run would be SIGTERM-killed mid-flight and its truncated "
+            f"output misread as a clean negative. Auto-raising --timeout to {needed}s "
+            f"(boost-only) so the run can finish. {hint}"
+        )
+        return needed
+    warn(
+        f"{verb}: {kind} internal runtime budget ≈ {needed}s exceeds --timeout "
+        f"{wall}s — this run will likely be SIGTERM-killed before it finishes, and a "
+        f"partial/empty result is NOT a clean negative. {hint}"
+    )
+    return wall

@@ -87,6 +87,48 @@ def _raise_stale_finding_conflict() -> None:
     )
 
 
+# I-21 (clobber guard): the dedup UPSERT in ``_semantic_finding_match`` matches a
+# net-new record onto an existing finding by the
+# ``(defect_family + root_cause_key + auth_context + canonical_location)`` tuple
+# (excluding ``merged``), NOT by slug. When that match lands on a load-bearing
+# finding (already ``reported`` or ``active``) under a DIFFERENT slug, a silent
+# overwrite destroys a reported finding. Refuse unless the caller named that
+# exact existing slug — the ``--update <slug>`` CLI opt-in, or an explicit slug
+# on the raw POST. ``draft`` (still being shaped) and ``false_positive`` /
+# ``merged`` (intentionally sticky) stay outside the guard so the historical
+# dedup upsert behavior is preserved for them. Mirrored CLI-side in
+# ``record_finding.py`` so a CLI bypass cannot defeat this HTTP enforcement.
+_CLOBBER_GUARDED_WORKFLOW_STATUSES: frozenset[WorkflowStatus] = frozenset(
+    {WorkflowStatus.ACTIVE, WorkflowStatus.REPORTED}
+)
+
+
+def _raise_finding_clobber_conflict(
+    existing: dict[str, Any],
+    *,
+    defect_family: str,
+    root_cause_key: str,
+    auth_context: str,
+    canonical_location: str,
+) -> None:
+    existing_slug = str(existing.get("slug", ""))
+    existing_status = _row_workflow_status(existing)
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"Refusing to clobber {existing_status} finding '{existing_slug}': this record's "
+            f"dedup tuple (defect_family={defect_family!r}, root_cause_key={root_cause_key!r}, "
+            f"auth_context={auth_context!r}, canonical_location={canonical_location!r}) matches "
+            f"it under a different slug, and merging would silently overwrite a {existing_status} "
+            f"finding. If this is a distinct sibling on the same root cause, give it a DISTINCT "
+            f"root_cause_key/defect_family and attach it with "
+            f"`vigil assess link-finding <new-slug> --root-cause {existing_slug}`; to "
+            f"intentionally modify '{existing_slug}', re-record with --update {existing_slug} "
+            f"(or POST with slug={existing_slug!r})."
+        ),
+    )
+
+
 # CR-31 (slug atomicity): the (engagement_id, slug) UNIQUE index in db.py is the
 # hard DB-level backstop against two concurrent record-finding lanes minting the
 # same auto-assigned slug (e.g. both VA-012). ``BEGIN IMMEDIATE`` serializes the
@@ -399,6 +441,24 @@ def create_finding(
             auth_context=auth_context,
             title=title,
         )
+        if existing is not None:
+            # I-21: the operator "named" this exact finding only when the
+            # incoming slug resolves to it (matched by slug in
+            # ``_semantic_finding_match``'s first tier). A tuple/title dedup
+            # match onto a DIFFERENT (or unnamed) slug is the silent-clobber
+            # path — refuse it for load-bearing reported/active findings.
+            named_existing_slug = bool(slug) and str(existing["slug"]) == slug
+            if (
+                not named_existing_slug
+                and _row_workflow_status(existing) in _CLOBBER_GUARDED_WORKFLOW_STATUSES
+            ):
+                _raise_finding_clobber_conflict(
+                    existing,
+                    defect_family=defect_family,
+                    root_cause_key=root_cause_key,
+                    auth_context=auth_context,
+                    canonical_location=canonical_location,
+                )
         before_state = _finding_state_snapshot(existing) if existing is not None else None
         if existing is None:
             # CR-31: allocate the slug + INSERT under the (engagement_id, slug)
