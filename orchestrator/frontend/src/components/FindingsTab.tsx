@@ -164,6 +164,18 @@ const VERIFICATION_LABELS: Record<string, string> = {
   unreviewed: "Unreviewed",
 };
 
+// External-program submission state — a SEPARATE axis from workflow_status.
+// "none" is the default (never submitted externally) and is intentionally
+// absent here: rows with submission_status=none render no submission pill at
+// all, so this map only covers the meaningful, displayable states.
+const SUBMISSION_LABELS: Record<string, string> = {
+  submitted: "Submitted",
+  accepted: "Accepted",
+  needs_info: "Needs info",
+  rejected: "Rejected",
+  duplicate: "Duplicate",
+};
+
 function verificationLabel(finding: FindingLike): string {
   const k = verificationKey(finding);
   return VERIFICATION_LABELS[k] || k;
@@ -171,6 +183,18 @@ function verificationLabel(finding: FindingLike): string {
 
 function workflowLabel(finding: FindingLike): string {
   return WORKFLOW_LABELS[finding.workflow_status] || finding.workflow_status;
+}
+
+function submissionLabel(finding: FindingLike): string {
+  return SUBMISSION_LABELS[finding.submission_status] || finding.submission_status;
+}
+
+// A submission_status is worth surfacing only when it is set to something
+// other than the "none" default — otherwise every never-submitted finding
+// would carry a noisy pill. Tolerates older payloads where the field is
+// absent (treated as none / not meaningful).
+function hasSubmissionStatus(status: string | undefined | null): boolean {
+  return !!status && status !== "none";
 }
 
 export function relTime(iso: string | undefined | null): string {
@@ -305,11 +329,13 @@ export type Derived = {
   title: string;
   severity: string;
   workflow_status: string;
+  submission_status: string;
   verification_state: string;
   verification_disposition: string;
   verificationKey: string;
   verificationLabel: string;
   workflowLabel: string;
+  submissionLabel: string;
   canonical_location: string;
   summary: string;
   source_name: string;
@@ -801,11 +827,13 @@ export function FindingsTab({
         title: f.title,
         severity: f.severity,
         workflow_status: f.workflow_status,
+        submission_status: f.submission_status,
         verification_state: f.verification_state,
         verification_disposition: f.verification_disposition,
         verificationKey: verificationKey(f),
         verificationLabel: verificationLabel(f),
         workflowLabel: workflowLabel(f),
+        submissionLabel: submissionLabel(f),
         canonical_location: f.canonical_location,
         summary: f.summary,
         source_name: f.source_name,
@@ -1774,6 +1802,14 @@ function FindingMiniRow({
       </span>
       {d.root_cause_effect === "eliminates_attack_path" && <span className="tag chain">Residual path</span>}
       <span className={`pill pill-${d.workflow_status}`}>{d.workflowLabel}</span>
+      {hasSubmissionStatus(d.submission_status) && (
+        <span
+          className={`pill submission-pill submission-${d.submission_status}`}
+          title={`External submission: ${d.submissionLabel}`}
+        >
+          {d.submissionLabel}
+        </span>
+      )}
     </button>
   );
 }
@@ -2024,6 +2060,14 @@ function Drawer({
           {d.verificationKey !== "unreviewed" && (
             <span className={`pill pill-${d.verificationKey}`}>
               {d.verificationLabel}
+            </span>
+          )}
+          {hasSubmissionStatus(d.submission_status) && (
+            <span
+              className={`pill submission-pill submission-${d.submission_status}`}
+              title={`External submission: ${d.submissionLabel}`}
+            >
+              {d.submissionLabel}
             </span>
           )}
           {d.cwe_id && <span className="tag cwe">{d.cwe_id}</span>}

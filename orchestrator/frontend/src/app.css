@@ -2162,6 +2162,27 @@ input {
 .findings-redesign .pill-downgraded { background: rgba(23, 53, 76, 0.12); color: var(--accent); }
 .findings-redesign .pill-disputed   { background: color-mix(in srgb, var(--disputed) 16%, transparent); color: var(--disputed); }
 
+/* ── Submission-status pills (external-program axis) ──────
+ * A SEPARATE axis from the workflow/verification pills above: a finding can be
+ * workflow_status=reported AND submission_status=accepted at once. The shared
+ * .pill base supplies the chip shape; .submission-pill adds a leading ↗ marker
+ * so the external-submission axis never reads as a workflow pill, and the
+ * .submission-* classes reuse the same workflow/severity colour recipe
+ * (accepted=green/ok, rejected=red/danger, needs_info=amber/warn,
+ * submitted=neutral/pending, duplicate=muted/slate). "none" has no class — it
+ * is never rendered. */
+.findings-redesign .submission-pill::before {
+  content: "↗";
+  margin-right: 1px;
+  font-size: 0.9em;
+  opacity: 0.75;
+}
+.findings-redesign .submission-accepted   { background: rgba(47, 127, 82, 0.16); color: var(--ok); }
+.findings-redesign .submission-rejected    { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.findings-redesign .submission-needs_info  { background: rgba(244, 162, 89, 0.18); color: var(--warn); }
+.findings-redesign .submission-submitted   { background: rgba(140, 123, 98, 0.15); color: var(--pending); }
+.findings-redesign .submission-duplicate   { background: color-mix(in srgb, var(--chip-slate) 12%, transparent); color: var(--chip-slate); }
+
 /* Pager */
 .findings-redesign .list-footer {
   border-top: 1px solid var(--border);
@@ -4063,6 +4084,14 @@ body.detail-modal-open {
 :root[data-theme="dark"] .findings-redesign .pill-downgraded { background: rgba(121,169,212,0.2); color: #9ec5e8; }
 /* .pill-disputed uses --disputed var (both themes) — no dark override needed. */
 :root[data-theme="dark"] .findings-redesign .pill-false_positive { background: rgba(184,171,146,0.18); color: #cec3ae; }
+
+/* Submission-status pills — dark-theme bg/fg, mirroring the workflow pill
+ * dark overrides above so the external-submission axis matches the theme. */
+:root[data-theme="dark"] .findings-redesign .submission-accepted   { background: rgba(95,192,138,0.22); color: #9fdcb8; }
+:root[data-theme="dark"] .findings-redesign .submission-rejected    { background: rgba(229,108,108,0.22); color: #f09494; }
+:root[data-theme="dark"] .findings-redesign .submission-needs_info  { background: rgba(240,138,82,0.22); color: #f4b092; }
+:root[data-theme="dark"] .findings-redesign .submission-submitted   { background: rgba(184,171,146,0.18); color: #cec3ae; }
+:root[data-theme="dark"] .findings-redesign .submission-duplicate   { background: rgba(184,171,146,0.18); color: #cec3ae; }
 
 /* .severity-* now use color-mix(var(--sev-*)) — dark override no longer needed. */
 

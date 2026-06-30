@@ -332,6 +332,25 @@
       "title": "Evidence Type",
       "description": "Strength of evidence. 'network-confirmed': live exploit or observed response. 'code-inferred': static/dataflow analysis without runtime proof. 'theoretical': logic-based hypothesis, no code or traffic evidence. 'informational': non-exploitable observation."
     },
+    "submission_status": {
+      "maxLength": 32,
+      "minLength": 1,
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "title": "Submission Status",
+      "description": "External bug-bounty/program submission state, ORTHOGONAL to workflow_status (report-inclusion). 'none': not submitted. 'submitted': sent to the program. 'accepted'/'rejected'/'duplicate': program triage outcome. 'needs_info': program requested more detail. Omit to keep the default 'none'.",
+      "enum": [
+        "none",
+        "submitted",
+        "accepted",
+        "needs_info",
+        "rejected",
+        "duplicate"
+      ]
+    },
     "request_variant_id": {
       "type": "integer",
       "default": null,

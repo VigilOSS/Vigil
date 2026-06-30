@@ -21,6 +21,24 @@ SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
 )
 
 
+# Canonical external-submission vocabulary for `update-finding --submission-status`.
+# MIRRORS the backend `SubmissionStatus` StrEnum / `SUBMISSION_STATUSES` set in
+# orchestrator/backend/app/services/state_manager/_common.py. The CLI (agent/
+# scripts) and backend (orchestrator) are separate packages and cannot import
+# each other, so the set is duplicated here and pinned in sync by
+# test_submission_status (the same convention as SPECIALIST_DISPATCH_MODES vs the
+# backend _KNOWN_DISPATCH_MODES). submission_status is ORTHOGONAL to
+# workflow_status — it never changes report-inclusion.
+SUBMISSION_STATUSES: tuple[str, ...] = (
+    "none",
+    "submitted",
+    "accepted",
+    "needs_info",
+    "rejected",
+    "duplicate",
+)
+
+
 _DISPATCH_MODE_BY_ROLE: dict[str, str] = {
     "vulnerability-analyst": "hypothesis-driven",
     "exploit-developer": "deep-manual",
@@ -717,11 +735,16 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Use for workflow and metadata updates that are NOT verification lifecycle transitions.",
             "Reopening a verified or false-positive finding for re-triage belongs in reset-finding.",
             "Verification disposition changes, disputed reviews, and false_positive kills belong in verify-finding or kill-finding.",
+            "--submission-status tracks EXTERNAL bug-bounty/program submission state and is ORTHOGONAL to "
+            "--workflow-status (which is report-inclusion). Setting one never changes the other. Allowed values: "
+            + ", ".join(SUBMISSION_STATUSES)
+            + " (default 'none' = not submitted).",
         ),
         common_mistakes=(
             ("verification_state", "use verify-finding or kill-finding for verification lifecycle changes"),
             ("verification_disposition", "use verify-finding or kill-finding for verification lifecycle changes"),
             ("workflow_status=false_positive", "use kill-finding instead of update-finding"),
+            ("submission_status to mark a finding reported", "submission_status is external submission state; use --workflow-status reported for report-inclusion"),
         ),
         examples=(
             {
@@ -731,6 +754,10 @@ _CONTRACTS: dict[str, CommandContract] = {
             {
                 "severity": "low",
                 "summary": "Retest reduced the confirmed impact.",
+            },
+            {
+                "submission_status": "accepted",
+                "reason_text": "Program triaged the report as accepted.",
             },
         ),
     ),
