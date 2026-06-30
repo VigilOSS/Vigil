@@ -210,6 +210,39 @@ single request, if it returned X, would prove that Y is true?" Then send that re
 
 ---
 
+## 10. Dispatch one lens. Cycle across batches.
+
+When dispatching a specialist, name ONE developer-failure **lens** — a family of
+related developer assumptions that fail together:
+
+| Lens | What fails together |
+|---|---|
+| **Caching** | stale invalidation, shared-key leakage, cache-key injection |
+| **Data handling / over-trust** | caller-supplied values accepted without re-validation, over-broad deserialization |
+| **Business logic** | step-skip, out-of-order state, coupon/quota abuse |
+| **Race conditions** | TOCTOU, non-atomic credit/inventory, session-merge |
+| **Mass assignment** | unfiltered bind, hidden field promotion |
+| **Upload / file handling** | extension bypass, path traversal on store, content-type trust |
+| **Client-side trust** | server echoes client-controlled values, DOM sink injection |
+
+A lens is not a bug: it describes *how the developer was thinking*, so the
+specialist derives the right hypotheses rather than executing a pre-named
+checklist. Naming the bug caps depth at the operator's guess; naming the lens
+lets the specialist generalize to every surface the bug class touches.
+
+**Cadence rule:**
+- A winning lens on a worked surface → **re-run it on NEW surfaces** (the same
+  failure mode recurs wherever the same developer pattern exists).
+- A fresh lens on an already-worked surface → **dispatch it now**; a surface
+  proven clean under caching assumptions may still be vulnerable under race or
+  upload assumptions.
+
+Cycle lenses across batches. The operator names the surface and the lens; the
+specialist originates every hypothesis under it. This is the generative complement
+of the open-objective dispatch doctrine in `operator-core.md §DISPATCH`.
+
+---
+
 ## Relationship to `hunting.md`
 
 This document generates hypotheses. `hunting.md` gates them into findings.

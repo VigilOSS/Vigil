@@ -157,6 +157,14 @@ with an entire untested application (the "a URL can be a whole application"
 rule below is the companion check). Treat ledger-green as the minimum bar you
 cleared, then keep looking for the surface the ledger could not see.
 
+**A negative verdict on one tier or lens does not cover siblings.** A
+"fails-closed" / "covered" / "no-params" negative is only valid when it names the exact
+**tier + lens** it was proven on and the run **completed** (not timed-out or partial). A
+sibling tier — different auth level, different role, different trust context — or a new
+lens on an already-worked surface is a fresh test, not a redundant one. Before recording
+a negative and closing the work item, state "proven fails-closed at [tier] / [lens] /
+[run-id]" — anything shorter than that is a disposition you cannot defend.
+
 **Pull the next uncovered host; do not sample.** The default loop is
 structural, not intuitive: take the next `uncovered` real-app host straight off
 `vigil assess coverage` and give it a lane, rather than choosing what to test
@@ -304,6 +312,21 @@ evidence. That follow-up `curl` is not "noisy curl that should have been a
 tool" — it is the surgical capture step the tool cannot perform. Keep
 doing them.
 
+## 22a. A self-imposed discovery restriction is not a target fact
+
+A self-imposed "I won't enumerate because it might violate RoB" is a conservative
+interpretation, not a target fact. Light, targeted, low-rate **curated** content-discovery
+of *known* protected resources — a path already found in JS, a parameter visible in a
+form, a directory referenced in a redirect — counts as "identifying an indicator" and IS
+compliant under a "minimal testing" commitment. The honest RoB line is **rate +
+wordlist-size + stop-on-sensitive-data**, not "never enumerate."
+
+Before accepting a self-imposed restriction as a severity cap, re-read the program's
+exact language. If the policy forbids high-volume automated scanning but not targeted
+discovery of paths you already have evidence for, re-dispatch with the restriction relaxed
+to the correct reading — treating an over-restriction as a finding boundary is exactly
+where depth is lost.
+
 ## 23. A non-conclusive response is a LEAD, not a verdict
 
 A response only becomes a verdict when it actually answers the question. A status
@@ -356,6 +379,23 @@ and returns the **real origin** status + DOM; only that rendered origin response
 The kali path surfaces this as `status=waf_challenge` precisely so it cannot close a surface as
 `404`/`patched`/`gated`/`not-present`; do not override it with the challenge's status code.
 
+**(e) An auth-gate redirect is a bypass-test LEAD, not a "covered/gated" closure.**
+A `302` to a login or policy page proves the gate *fired* — it says nothing about whether
+the gate is bypassable. Classifying a redirected endpoint as "covered/gated" and closing
+it consumes the signal without doing the work. Record the redirect as a lead and run a
+bypass-technique sweep (static-extension exemption, path-normalization confusion,
+routing-header injection, verb tampering) before the surface is dispositioned — the
+auth-bypass skill carries the sweep methodology.
+
+**(f) Verify the exact bytes on the wire before treating a `406` / content-negotiation
+response as target behavior.** An unquoted header value in curl argv shell-splits into
+separate tokens, producing a malformed request that the connection layer rejects before it
+reaches the application. The resulting `406` or error is a **Kali-side artifact**, not a
+target response. Before closing a content-negotiation probe, confirm the request was sent
+with the header intact: replay with `--verbose` and inspect the `>` request lines to
+verify the `Accept:`/`Content-Type:` value was transmitted as a single token. An artifact
+from a malformed argv is not evidence the handler was reached.
+
 **Re-derive un-pushed signals from RAW evidence.** A prior agent's stopping point — a
 "tested / clean / disproven" note, a `notes/PHASE-3-REMAINING-WORK.md` line, an inherited
 disposition — is a **view to re-verify, not ground truth**. Before accepting any negative
@@ -366,6 +406,26 @@ prior pass may have been a downstream validation error mistaken for an auth gate
 may have been an `http=000` transport error (c); a "clean" may have been a status-only probe that
 never read the body (a); a "gated"/"not-present" may have been a WAF challenge page never
 re-rendered in a browser (d).
+
+## 24. OOB self-resolution caveat — confirm on a public egress source
+
+Blind SSRF is confirmed only when the callback arrives at a **publicly routable** listener
+from a **public egress source IP**, or when the callback includes a real HTTP interaction
+(status line, headers) originating from the target's egress path. A DNS hit that
+originates from a container-bridge or private subnet address — 172.x.x.x, 10.x.x.x, or
+the Kali runtime's own IP — is **self-resolution**: the Kali container resolved the OOB
+host itself, not the target server. Self-resolution is infrastructure noise, not a
+finding.
+
+To avoid fabricating self-resolution hits:
+- Place OOB callback hosts in **request bodies**, not in curl header argv. Curl resolves
+  header values before the request reaches the wire; a host in
+  `-H "X-Forwarded-For: http://<oob>"` may be resolved by the Kali container, not the
+  target.
+- Use `vigil oob mint` to get a nonce-tagged callback URL; correlate with
+  `vigil oob poll`, which matches probe-to-callback and shows the source IP. A hit whose
+  source IP falls in RFC-1918 space is self-resolution regardless of the DNS name.
+- Confirm public egress on the OOB hit before recording a SSRF finding.
 
 ## A URL can be a whole application — go deep on app units
 
