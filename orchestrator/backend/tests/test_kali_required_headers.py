@@ -38,7 +38,7 @@ from assess.lib import kali  # noqa: E402
 _HEADERS = {"X-Bug-Bounty": "handle"}
 
 
-@pytest.mark.parametrize("tool", ["curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"])
+@pytest.mark.parametrize("tool", ["curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana", "dalfox"])
 def test_injectable_tools_append_header_exact(tool):
     cmd = [tool, "https://target.example"]
     status = kali._apply_required_headers(cmd, tool, _HEADERS)
@@ -64,7 +64,8 @@ def test_flag_map_tools_inject_via_own_flag(tool, flag):
 
 
 @pytest.mark.parametrize(
-    "tool", ["gau", "waybackurls", "subfinder", "amass", "dnsx", "nmap", "naabu", "masscan", "puredns"]
+    "tool",
+    ["gau", "waybackurls", "subfinder", "amass", "dnsx", "nmap", "naabu", "masscan", "puredns", "tlsx"],
 )
 def test_skip_tools_unchanged(tool):
     cmd = [tool, "target.example"]

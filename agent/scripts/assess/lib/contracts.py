@@ -298,6 +298,9 @@ KALI_TARGET_VERBS: tuple[str, ...] = (
     "asnmap",
     "bbot",
     "browser",
+    "tlsx",
+    "dalfox",
+    "robots",
     "exec",
     "job",
 )
@@ -305,6 +308,7 @@ KALI_TARGET_VERBS: tuple[str, ...] = (
 KALI_MAINT_VERBS: tuple[str, ...] = (
     "sweep-orphans",
     "tool-help",
+    "gf",
 )
 
 KALI_VERBS: tuple[str, ...] = KALI_TARGET_VERBS + KALI_MAINT_VERBS
@@ -1387,6 +1391,28 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Use --wait-selector '<css>' to wait for a specific element (explicit wait, bounded by --page-timeout); otherwise it falls back to --settle seconds after load. --page-timeout defaults to 30s, --settle to 2s.",
         "Read-only navigation — leave --destructive off unless you point it at a state-changing URL.",
     ),
+    "tlsx": (
+        "Bulk TLS cert harvester: opens TLS handshakes against hosts/IPs and pulls SAN/CN/subject-org/issuer fields + JARM/JA3 fingerprints. The SAN/CN harvest expands the subdomain set (private-CA certs that never hit CT logs); the org/issuer + fingerprints drive cert pivoting (siblings sharing a cert/TLS stack).",
+        "Pass <host> / -u <host> for one target or -l <file> for a list (hosts/IPs/CIDRs). A bare invocation defaults to the SAN+CN harvest profile (-san -cn -resp-only -silent) — a clean name list for subdomain expansion. Add -so/-cert for issuer/org, -jarm/-ja3 for fingerprint pivoting, -json for the structured per-field form.",
+        "Speaks raw TLS, NOT HTTP — it carries no attribution header and is in the required-header SKIP set (parity with nmap). Read-only handshakes: leave --destructive off.",
+        "Complements `cero` (also a SAN scraper): tlsx adds structured JSON + JARM/JA3. The Docker per-dest-IP fan-out hazard applies to whole-CIDR feeds — prefer resolved origin/staging IPs (see references/tools/recon/tlsx.md and cero.md).",
+    ),
+    "dalfox": (
+        "Parameter→XSS confirmation. Chain AFTER arjun: arjun isolates the injectable param, dalfox fires reflection-aware payloads and verifies execution (DOM/HTML/attribute context). Pass -u <url> for one target (dalfox `url` mode) or -i <file> for a list (`file` mode); -p <param> focuses dalfox on the arjun-isolated parameter.",
+        "Reflective by DEFAULT — no blind/OOB payloads fire unless you pass --blind <callback>, which sends OOB payloads that may persist (stored XSS): pair --blind with --destructive so the audit row is truthful.",
+        "WAF-aware: --waf-evasion enables dalfox's evasion mode; --skip-bav drops the basic-another-vuln scan to keep the run focused on XSS. Politeness: --delay (ms), -w workers. dalfox's own request timeout is --dalfox-timeout (renamed to avoid the audit --timeout collision).",
+        "dalfox is required-header INJECTABLE (curl-style -H), so a program marker rides every probe automatically; -H/--cookie pass auth so XSS gated behind a session is reachable.",
+    ),
+    "robots": (
+        "Pre-crawl known-file fetch: probes each host for /robots.txt, /sitemap.xml and /.well-known/security.txt BEFORE the katana crawl — Disallow lines + sitemap URLs routinely name admin/staging paths the crawler would otherwise miss. Pass <host>/-u or -l <list>; override the set with --paths.",
+        "SCOPE is the marginal pre-crawl fetch ONLY. katana's own -kf (known-files) flag already expands robots/sitemap/well-known DURING the crawl (kali_katana.py) — run robots first for the high-signal seed, then crawl; do not treat -kf as redundant.",
+        "Engine is httpx (tool_bin=httpx in the audit row) probing the well-known paths, so it inherits httpx's required-header injection + scope posture. -mc defaults to 200,301,302,401,403 so a gated-but-present file (401/403) still surfaces. Read-only GETs: leave --destructive off.",
+    ),
+    "gf": (
+        "Pattern-bucket a URL corpus by vuln-param family (ssrf/idor/sqli/lfi/redirect/xss/...). Sends NO target traffic — a pure local text filter — so it is a MAINTENANCE verb: it takes NO --technique/--intent/--probe-kind/--phase/--timeout and writes no audit row.",
+        "Complements (does not replace) the inline `assess.lib.classify_buckets` classifier, which is the source-of-truth applied automatically at ingest. Reach for `kali gf` for ad-hoc triage of a corpus on disk you have not ingested, or to cross-check one bucket against the upstream gf pattern library.",
+        "Usage: `vigil assess kali gf <pattern> -i <urls-file> [-o <out>]`; `--list` enumerates the installed patterns. The corpus is read host-side and piped over `docker exec -i` to gf in the runtime (no container-path translation).",
+    ),
     "exec": (
         "Use only when no typed verb fits. Tool-name attribution falls back to argv[0] for audit recording.",
     ),
@@ -1479,6 +1505,27 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
             "command": "vigil assess kali browser https://app.target.example/dashboard --wait-selector '#root' --page-timeout 45 --screenshot scans/browser/dash.png --technique RECON --intent 'render SPA dashboard after auth' --probe-kind baseline --phase consume-test --timeout 180",
         },
     ),
+    "tlsx": (
+        {
+            "command": "vigil assess kali tlsx -l /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt -san -cn -resp-only -silent -o /engagements/$ENGAGEMENT_KEY/scans/tlsx_sans.txt --technique RECON --intent 'TLS SAN/CN harvest for subdomain expansion' --probe-kind fingerprint --phase recon --timeout 600",
+        },
+        {
+            "command": "vigil assess kali tlsx -u origin.target.example -cert -jarm -json -o /engagements/$ENGAGEMENT_KEY/scans/tlsx_origin.json --technique OSINT --intent 'issuer + JARM fingerprint for cert pivoting' --probe-kind fingerprint --phase recon --timeout 300",
+        },
+    ),
+    "dalfox": (
+        {
+            "command": "vigil assess kali dalfox -u 'https://target.example/search?q=test' -p q --skip-bav --silence -o scans/dalfox_q.txt --technique XSS --intent 'confirm reflected XSS on arjun-surfaced q param' --probe-kind payload --phase consume-test --timeout 1800",
+        },
+        {
+            "command": "vigil assess kali dalfox -i /engagements/$ENGAGEMENT_KEY/scans/arjun_xss_candidates.txt --waf-evasion -w 30 --delay 100 --format json -o scans/dalfox_batch.json --technique XSS --intent 'reflective XSS sweep over arjun param-bearing URLs (WAF-aware)' --probe-kind payload --phase consume-test --timeout 3600",
+        },
+    ),
+    "robots": (
+        {
+            "command": "vigil assess kali robots -l /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt -o scans/robots_known_files.txt --technique RECON --intent 'pre-crawl robots/sitemap/security.txt fetch for high-signal path seeds' --probe-kind fingerprint --phase recon --timeout 300",
+        },
+    ),
     "job": (
         {
             "command": "vigil assess kali job start --technique CVE-VALIDATION --intent 'long nuclei sweep' --probe-kind fingerprint --phase recon --timeout 21600 -- nuclei -l targets.txt -t http/cves/",
@@ -1496,6 +1543,14 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
         },
         {
             "command": "vigil assess kali sweep-orphans --scope all --dry-run",
+        },
+    ),
+    "gf": (
+        {
+            "command": "vigil assess kali gf ssrf -i /engagements/$ENGAGEMENT_KEY/scans/gau_target.txt -o /engagements/$ENGAGEMENT_KEY/scans/gf_ssrf.txt",
+        },
+        {
+            "command": "vigil assess kali gf --list",
         },
     ),
 }
@@ -1590,6 +1645,37 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
             common_mistakes=(
                 ("--phase", "tool-help is host-side maintenance and does not take audit flags"),
                 ("--technique", "tool-help is host-side maintenance and does not take audit flags"),
+            ),
+            examples=examples,
+        )
+
+    if verb == "gf":
+        return CommandContract(
+            name="kali gf",
+            summary=(
+                "Pattern-bucket a URL corpus by vuln-param family (ssrf/idor/sqli/"
+                "lfi/redirect/xss/...). A local text filter — sends no target "
+                "traffic, so no audit flags. Complements (does not replace) the "
+                "inline assess.lib.classify_buckets classifier applied at ingest."
+            ),
+            schema_name="argparse (docker exec gf; no backend audit row)",
+            preferred_invocations=(
+                "vigil assess kali gf <pattern> -i <urls-file> -o <out-file>",
+                "vigil assess kali gf ssrf -i scans/gau_target.txt -o scans/gf_ssrf.txt",
+                "vigil assess kali gf --list",
+            ),
+            author_supplied_fields=(
+                "<pattern> (positional, e.g. ssrf | idor | sqli | lfi | redirect | xss)",
+                "-i / --input <url-file> (the corpus to bucket)",
+                "-o / --output <file> (optional; default stdout)",
+                "--list (optional, enumerate installed patterns)",
+                "--container-name <name> (optional; default the runtime container)",
+            ),
+            notes=_KALI_VERB_NOTES.get(verb, ()),
+            common_mistakes=(
+                ("--phase", "gf is a local filter (no target traffic) and does not take audit flags"),
+                ("--technique", "gf is a local filter (no target traffic) and does not take audit flags"),
+                ("expecting gf to replace the inline classifier", "the classify_buckets classifier runs automatically at ingest; gf is for ad-hoc on-disk triage"),
             ),
             examples=examples,
         )
