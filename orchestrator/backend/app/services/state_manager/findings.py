@@ -11,7 +11,7 @@ from ..search import (
 )
 
 from . import _common
-from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, VERIFICATION_DISPOSITION_RANK, VERIFICATION_STATE_RANK, WORKFLOW_STATUS_RANK, VerificationDisposition, VerificationState, WorkflowStatus, _finding_confidence_tuple, _finding_not_found, _json_object, _json_text, _merge_object_text, _normalize_severity, _normalize_verification_disposition, _normalize_verification_state, _normalize_workflow_status, _require_canonical_finding_slug, _resolve_existing_finding_slug, _row_verification_disposition, _row_verification_state, _row_workflow_status, _serialize_finding_record, _slugify, _stronger_severity
+from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, VERIFICATION_DISPOSITION_RANK, VERIFICATION_STATE_RANK, WORKFLOW_STATUS_RANK, VerificationDisposition, VerificationState, WorkflowStatus, _finding_confidence_tuple, _finding_not_found, _json_object, _json_text, _merge_object_text, _normalize_severity, _normalize_submission_status, _normalize_verification_disposition, _normalize_verification_state, _normalize_workflow_status, _require_canonical_finding_slug, _resolve_existing_finding_slug, _row_verification_disposition, _row_verification_state, _row_workflow_status, _serialize_finding_record, _slugify, _stronger_severity
 from .links import _is_root_cause_link, _upsert_finding_link
 
 
@@ -402,11 +402,13 @@ def create_finding(
     details: dict[str, Any] | None,
     provenance: dict[str, Any] | None,
     evidence_type: str | None = None,
+    submission_status: str | None = None,
     request_variant_id: int | None,
     service_id: int | None,
     surface_id: int | None,
     links: list[dict[str, Any]] | None,
     explicit_workflow_override: bool = False,
+    explicit_submission_override: bool = False,
     explicit_verification_state_override: bool = False,
     explicit_verification_disposition_override: bool = False,
     explicit_severity_override: bool = False,
@@ -429,6 +431,11 @@ def create_finding(
     incoming_verification_state = _normalize_verification_state(verification_state)
     incoming_verification_disposition = _normalize_verification_disposition(verification_disposition)
     incoming_severity = _normalize_severity(severity)
+    # submission_status is its own axis: validate + default to 'none' on a true
+    # INSERT. On an UPDATE (upsert match), only overwrite when the caller
+    # explicitly set it — otherwise preserve the stored value so a re-record /
+    # an unrelated workflow patch never clobbers external submission tracking.
+    incoming_submission_status = _normalize_submission_status(submission_status)
     with _common.get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         existing = _semantic_finding_match(
@@ -475,9 +482,9 @@ def create_finding(
                         """
                         INSERT INTO assessment_findings (
                             engagement_id, slug, title, severity, status, verification_state, verification_disposition, defect_family, root_cause_key, auth_context,
-                            canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type
+                            canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type, submission_status
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             engagement.id,
@@ -498,6 +505,7 @@ def create_finding(
                             _json_text(details),
                             _json_text(provenance),
                             evidence_type,
+                            incoming_submission_status,
                         ),
                     )
                     break
@@ -545,6 +553,7 @@ def create_finding(
                     details_json = ?,
                     provenance_json = ?,
                     evidence_type = COALESCE(?, evidence_type),
+                    submission_status = COALESCE(?, submission_status),
                     last_seen_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
@@ -587,6 +596,9 @@ def create_finding(
                     _json_text(details) if details_mode == "replace" else _merge_object_text(existing["details_json"], details),
                     _merge_object_text(existing["provenance_json"], provenance),
                     evidence_type,
+                    # None => COALESCE preserves the stored submission_status; a
+                    # value => an explicit operator override of the submission axis.
+                    incoming_submission_status if explicit_submission_override else None,
                     existing["id"],
                 ),
             )
@@ -702,6 +714,7 @@ def update_finding(
     details: dict[str, Any] | None,
     provenance: dict[str, Any] | None,
     evidence_type: str | None = None,
+    submission_status: str | None = None,
 ) -> dict[str, Any]:
     # severity / workflow_status / verification_state / verification_disposition
     # are partial-update fields: ``None`` means "preserve the existing value".
@@ -733,11 +746,13 @@ def update_finding(
         details=details,
         provenance=provenance,
         evidence_type=evidence_type,
+        submission_status=submission_status,
         request_variant_id=None,
         service_id=None,
         surface_id=None,
         links=None,
         explicit_workflow_override=workflow_status is not None,
+        explicit_submission_override=submission_status is not None,
         explicit_verification_state_override=verification_state is not None,
         explicit_verification_disposition_override=verification_disposition is not None,
         explicit_severity_override=severity is not None,
@@ -765,6 +780,7 @@ def patch_finding(
     details: dict[str, Any] | None = None,
     provenance: dict[str, Any] | None = None,
     evidence_type: str | None = None,
+    submission_status: str | None = None,
     transition_action: str | None = None,
     transition_reason_code: str = "",
     transition_reason_text: str = "",
@@ -853,11 +869,13 @@ def patch_finding(
         details=details,
         provenance=provenance,
         evidence_type=evidence_type,
+        submission_status=submission_status,
         request_variant_id=None,
         service_id=None,
         surface_id=None,
         links=None,
         explicit_workflow_override=workflow_status is not None,
+        explicit_submission_override=submission_status is not None,
         explicit_verification_state_override=verification_state is not None,
         explicit_verification_disposition_override=verification_disposition is not None,
         explicit_severity_override=severity is not None,

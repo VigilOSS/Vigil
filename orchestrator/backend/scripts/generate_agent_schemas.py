@@ -29,7 +29,7 @@ from app.api.assessment import (  # noqa: E402
     ProbeRunRecordRequest,
 )
 from app.api.code_analysis import AnalysisResultRecord, CodeFileClassification  # noqa: E402
-from app.services.state_manager._common import VerificationDisposition  # noqa: E402
+from app.services.state_manager._common import SubmissionStatus, VerificationDisposition  # noqa: E402
 from assess.lib.contracts import get_contract  # noqa: E402
 
 
@@ -38,6 +38,8 @@ from assess.lib.contracts import get_contract  # noqa: E402
 # /findings (e.g. ``pending_runtime_proof``). Enum iteration order is stable, so
 # this keeps the generated schema deterministic.
 _VERIFICATION_DISPOSITION_VALUES = [member.value for member in VerificationDisposition]
+# Likewise sourced from the canonical SubmissionStatus StrEnum.
+_SUBMISSION_STATUS_VALUES = [member.value for member in SubmissionStatus]
 
 
 @dataclass(frozen=True)
@@ -584,6 +586,10 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     },
                     "evidence_type": {
                         "description": "Strength of evidence. 'network-confirmed': live exploit or observed response. 'code-inferred': static/dataflow analysis without runtime proof. 'theoretical': logic-based hypothesis, no code or traffic evidence. 'informational': non-exploitable observation.",
+                    },
+                    "submission_status": {
+                        "description": "External bug-bounty/program submission state, ORTHOGONAL to workflow_status (report-inclusion). 'none': not submitted. 'submitted': sent to the program. 'accepted'/'rejected'/'duplicate': program triage outcome. 'needs_info': program requested more detail. Omit to keep the default 'none'.",
+                        "enum": list(_SUBMISSION_STATUS_VALUES),
                     },
                     "request_variant_id": {"type": "integer", "minimum": 1},
                     "service_id": {"type": "integer", "minimum": 1},

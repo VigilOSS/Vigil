@@ -75,6 +75,11 @@ export type AssessmentFinding = {
   title: string;
   severity: string;
   workflow_status: string;
+  // External-program submission state, ORTHOGONAL to workflow_status: a finding
+  // can be workflow_status=reported AND submission_status=accepted at once.
+  // One of: none (default) | submitted | accepted | needs_info | rejected |
+  // duplicate. Typed as string to match workflow_status above.
+  submission_status: string;
   verification_state: string;
   verification_disposition: string;
   canonical_location: string;

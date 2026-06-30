@@ -1059,6 +1059,7 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 details_json TEXT NOT NULL DEFAULT '{}',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
                 evidence_type TEXT,
+                submission_status TEXT NOT NULL DEFAULT 'none',
                 merged_into_finding_id INTEGER,
                 last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -2020,6 +2021,11 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         # informational. Report-writer treats NULL as 'unknown' and falls
         # back to its existing details-content inspection.
         "evidence_type": "TEXT",
+        # External bug-bounty / program submission state, ORTHOGONAL to the
+        # workflow_status (report-inclusion) axis. Existing rows backfill to the
+        # 'none' default; new findings track submitted/accepted/needs_info/
+        # rejected/duplicate independently of workflow_status.
+        "submission_status": "TEXT NOT NULL DEFAULT 'none'",
         "merged_into_finding_id": "INTEGER",
         "last_seen_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
         "evidence_artifact_id": "INTEGER REFERENCES assessment_artifacts(id) ON DELETE SET NULL",
