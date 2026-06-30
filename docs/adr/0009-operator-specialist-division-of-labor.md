@@ -115,5 +115,17 @@ supplies the how-and-which-weakness.*
 
 ## Follow-ups
 
-- Mirror P1/P2 into `operator-core-code.md` + the `code-*` roster if the philosophy should be
-  system-wide (the code roster already leans autonomous, so this is lower priority).
+- **Code track (done, surgically).** A review found the code roster is already largely ADR-0009-correct:
+  `code-vuln-hunter` originates hypotheses from the code, and guidance hypotheses are explicitly
+  deferred to *after* the unconstrained broad pass to prevent anchoring (`operator-core-code.md`,
+  `code-architect.md`). So the code mirror is NOT a wholesale reframe — that would regress the part of
+  the system the web reframe was trying to reach. Only the genuine reframe-miss was fixed: the code-role
+  dispatch line in `operator-core.md` ("the CWE patterns to apply" → "the CWE pattern *references to
+  load* … do not pre-name the bug"). Separately, the drifted, redundant hand-maintained slot→class
+  table in `operator-core-code.md` was replaced with a pointer to the backend-computed
+  `applicable_vuln_classes` / canonical `vuln_taxonomy.py` (it had already drifted — missing the
+  `EXEC-POLICY` slot type), and the architect prompt's stale "8 slot types" summary was corrected to 9.
+- Remaining code-track prompt-economy trims (duplicated kali command-history paragraph, the dispatch-
+  context-template/checklist overlap, structural-index path-resolution prose repeated across the
+  operator + specialists, the effort-threshold constant repeated 7+ places) are catalogued but deferred —
+  consolidation work, not behavior changes.
