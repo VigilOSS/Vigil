@@ -199,6 +199,49 @@ def render_intel_readiness(data: Any) -> tuple[bool, list[str]]:
     return True, lines
 
 
+def render_stage_audit(audit: Any) -> tuple[bool, list[str]]:
+    """Render the recon-pipeline stage-completion audit (item 2.1 / P-1).
+
+    Consumes the ``stage_audit`` block the backend folds into the
+    ``/phase-readiness`` payload for the recon/collect pipeline phases. Returns
+    ``(has_open_gaps, lines)`` — ``has_open_gaps`` drives the ``--strict`` exit
+    (exit 1 when ≥1 expected stage timed out / produced partial results / never
+    ran). Without ``--strict`` the block is a WARN/report only and the caller
+    leaves the exit code untouched.
+
+    A phase with no EXPECTED-STAGE checklist (``applicable=False``) renders
+    nothing, so the caller can append unconditionally.
+    """
+    if not isinstance(audit, dict) or not audit.get("applicable", False):
+        return False, []
+
+    phase = str(audit.get("phase") or "")
+    expected = [s for s in (audit.get("expected_stages") or [])]
+    gaps = [g for g in (audit.get("gaps") or []) if isinstance(g, dict)]
+
+    if not gaps:
+        return False, [
+            f"stage-completion audit ({phase} pipeline): ok — all "
+            f"{len(expected)} expected stage(s) ran to completion"
+        ]
+
+    lines = [
+        f"stage-completion audit ({phase} pipeline): {len(gaps)} open stage gap(s) "
+        f"of {len(expected)} expected — re-run or accept-with-reason:"
+    ]
+    for gap in gaps:
+        ids = [i for i in (gap.get("command_run_ids") or [])]
+        ids_str = (
+            f" [run(s) {', '.join('#' + str(i) for i in ids)}]" if ids else ""
+        )
+        disposition = str(gap.get("disposition") or "gap")
+        verb = "never ran" if disposition == "never_ran" else disposition
+        lines.append(
+            f"  - {gap.get('stage')} ({gap.get('label')}): {verb}{ids_str}"
+        )
+    return True, lines
+
+
 # ===========================================================================
 # check-scope-coverage — per-scope-entry audit (old check_scope_coverage.py body)
 # ===========================================================================
@@ -1940,6 +1983,7 @@ __all__ = [
     "render_surface_coverage",
     "render_report_readiness",
     "render_intel_readiness",
+    "render_stage_audit",
     "build_scope_coverage_report",
     "build_redispatch_block",
     "fetch_prior_dispatches",

@@ -164,3 +164,144 @@ def test_cli_phase_choices_accept_consume_test_alias():
     mod.register(sub)
     ns = parser.parse_args(["check-phase-readiness", "--phase", "consume-test"])
     assert ns.phase == "consume-test"
+
+
+# ---------------------------------------------------------------------------
+# P-1 (item 2.1) — recon-pipeline stage-completion audit over the command-run
+# ledger. This is the sub-check that diffs ``assessment_command_runs`` against
+# a per-phase EXPECTED-STAGE checklist and flags timed_out / partial_results /
+# never-ran stages. It is a SEPARATE function from per_host_coverage (which must
+# never read the command-run ledger); these tests pin the gap detection.
+# ---------------------------------------------------------------------------
+
+
+def _seed_command_run(
+    eng_id: int,
+    *,
+    command: str,
+    status: str | None = None,
+    timed_out: bool = False,
+    return_code: int | None = None,
+    phase: str = "recon",
+) -> dict:
+    """Insert a single command-run row through the service layer.
+
+    ``tool_name`` is left as the route-collapsed ``command`` so the audit must
+    derive the stage from the persisted ``tool_bin`` (e.g. ``katana``) exactly
+    as production rows do — no argv hand-parsing.
+    """
+    return state_manager.record_command_run(
+        eng_id,
+        command=command,
+        tool_name="command",
+        agent_name="recon-specialist",
+        phase=phase,
+        started_at="2026-05-17T10:00:00Z",
+        completed_at="2026-05-17T10:01:00Z",
+        return_code=return_code,
+        timed_out=timed_out,
+        status=status,
+    )
+
+
+def _seed_clean_recon_pipeline(eng_id: int) -> None:
+    """Record one cleanly-successful run for every recon EXPECTED stage."""
+    for command in (
+        "dnsx -l hosts.txt -resp",
+        "httpx -l hosts.txt -title",
+        "katana -u https://app.example.com -jc",
+        "gau app.example.com",
+        "trufflehog filesystem ./scans",
+    ):
+        _seed_command_run(eng_id, command=command, status="completed", return_code=0)
+
+
+def test_stage_audit_flags_timed_out_crawl_and_never_run_historical(client, isolate_settings):
+    """A recon ledger with a timed-out katana AND no gau run flags BOTH gaps.
+
+    This is the exact false-GREEN the audit exists to catch: katana timed out
+    (partial corpus) and gau never ran, yet the durable-state gate was green.
+    """
+    eng_id = _seed(client, isolate_settings)
+    # Stages that ran cleanly so they are NOT flagged.
+    _seed_command_run(eng_id, command="dnsx -l hosts.txt", status="completed", return_code=0)
+    _seed_command_run(eng_id, command="httpx -l hosts.txt", status="completed", return_code=0)
+    _seed_command_run(eng_id, command="trufflehog filesystem ./scans", status="completed", return_code=0)
+    # katana timed out → crawl stage is a gap.
+    timed = _seed_command_run(
+        eng_id, command="katana -u https://app.example.com", status="timed_out", timed_out=True
+    )
+    # gau is NOT recorded → historical_urls stage never ran.
+
+    audit = pr_mod.stage_completion_audit(eng_id, "recon")
+    assert audit["applicable"] is True
+    gaps = {g["stage"]: g for g in audit["gaps"]}
+    assert set(gaps) == {"crawl", "historical_urls"}, audit
+    assert gaps["crawl"]["disposition"] == "timed_out"
+    assert int(timed["id"]) in gaps["crawl"]["command_run_ids"]
+    assert gaps["historical_urls"]["disposition"] == "never_ran"
+    assert gaps["historical_urls"]["command_run_ids"] == []
+    assert audit["open_gap_count"] == 2
+    assert set(audit["satisfied_stages"]) == {"subdomain_enum", "http_liveness", "secret_mining"}
+
+
+def test_stage_audit_clean_ledger_has_no_gaps(client, isolate_settings):
+    """When every EXPECTED recon stage ran cleanly the audit reports no gaps."""
+    eng_id = _seed(client, isolate_settings)
+    _seed_clean_recon_pipeline(eng_id)
+    audit = pr_mod.stage_completion_audit(eng_id, "recon")
+    assert audit["applicable"] is True
+    assert audit["gaps"] == []
+    assert audit["open_gap_count"] == 0
+    assert set(audit["satisfied_stages"]) == set(pr_mod.PHASE_EXPECTED_STAGES["recon"])
+
+
+def test_stage_audit_flags_partial_results(client, isolate_settings):
+    """A completed-but-partial katana is a crawl gap with disposition partial_results.
+
+    ``partial_results`` is only settable via the finalize PATCH, so the row is
+    recorded (running) then finalized completed-with-partial — mirroring a real
+    job that finished but truncated its output corpus.
+    """
+    eng_id = _seed(client, isolate_settings)
+    _seed_command_run(eng_id, command="dnsx -l hosts.txt", status="completed", return_code=0)
+    _seed_command_run(eng_id, command="httpx -l hosts.txt", status="completed", return_code=0)
+    _seed_command_run(eng_id, command="gau app.example.com", status="completed", return_code=0)
+    _seed_command_run(eng_id, command="trufflehog filesystem ./scans", status="completed", return_code=0)
+    running = _seed_command_run(eng_id, command="katana -u https://app.example.com")
+    finalized = state_manager.finalize_command_run(
+        eng_id,
+        command_run_id=int(running["id"]),
+        status_value="completed",
+        return_code=0,
+        ended_at="2026-05-17T10:05:00Z",
+        partial_results=True,
+    )
+    assert finalized["partial_results"] is True
+
+    audit = pr_mod.stage_completion_audit(eng_id, "recon")
+    gaps = {g["stage"]: g for g in audit["gaps"]}
+    assert set(gaps) == {"crawl"}, audit
+    assert gaps["crawl"]["disposition"] == "partial_results"
+    assert int(running["id"]) in gaps["crawl"]["command_run_ids"]
+
+
+def test_stage_audit_not_applicable_for_phase_without_expected_stages(client, isolate_settings):
+    """Phases with no EXPECTED-STAGE checklist (verify) report applicable=False."""
+    eng_id = _seed(client, isolate_settings)
+    audit = pr_mod.stage_completion_audit(eng_id, "verify")
+    assert audit["applicable"] is False
+    assert audit["gaps"] == []
+    assert audit["expected_stages"] == []
+
+
+def test_phase_readiness_folds_stage_audit_into_recon_and_collect_only(client, isolate_settings):
+    """The assembly carries ``stage_audit`` exactly on the pipeline phases."""
+    eng_id = _seed(client, isolate_settings)
+    for phase in ("recon", "collect"):
+        payload = state_manager.phase_readiness(eng_id, phase)
+        assert "stage_audit" in payload, phase
+        assert payload["stage_audit"]["phase"] == phase
+    for phase in ("consume", "verify", "exploit", "report"):
+        payload = state_manager.phase_readiness(eng_id, phase)
+        assert "stage_audit" not in payload, phase
