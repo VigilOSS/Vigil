@@ -350,6 +350,15 @@ class SurfaceUpdateRequest(BaseModel):
     followup_condition: str | None = Field(default=None, max_length=500)
 
 
+class SurfaceRequestVariantLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    surface_id: int = Field(ge=1)
+    request_variant_id: int = Field(ge=1)
+    relation: str = Field(default="", max_length=128)
+    evidence_ref: str = Field(default="", max_length=1024)
+
+
 class OobProbeRecordRequest(BaseModel):
     """Record an OAST probe minted by ``vigil oob mint``.
 
@@ -1689,6 +1698,52 @@ async def update_surface_endpoint(
     )
     await _broadcast(engagement.key, "surface", record)
     return record
+
+
+@router.post("/surface-request-variant-links", status_code=status.HTTP_201_CREATED)
+async def create_surface_request_variant_link_endpoint(
+    engagement_key: str,
+    request: SurfaceRequestVariantLinkRequest,
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.create_surface_request_variant_link,
+            engagement.id,
+            surface_id=request.surface_id,
+            request_variant_id=request.request_variant_id,
+            relation=request.relation,
+            evidence_ref=request.evidence_ref,
+        )
+    )
+    await _broadcast(engagement.key, "surface_request_variant_link", record)
+    return record
+
+
+@router.get("/surface-request-variant-links/by-surface/{surface_id}")
+def get_surface_request_variant_links_by_surface(
+    engagement_key: str,
+    surface_id: int,
+    limit: int = Query(default=DEFAULT_SURFACE_LIMIT, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_surface_request_variant_links_by_surface(
+        engagement.id, surface_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/surface-request-variant-links/by-request-variant/{request_variant_id}")
+def get_surface_request_variant_links_by_variant(
+    engagement_key: str,
+    request_variant_id: int,
+    limit: int = Query(default=DEFAULT_SURFACE_LIMIT, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_surface_request_variant_links_by_variant(
+        engagement.id, request_variant_id, limit=limit, offset=offset
+    )
 
 
 class AppUnitOverrideRequest(BaseModel):
