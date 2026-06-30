@@ -74,9 +74,10 @@ and the Classification Decision Framework flowchart. The five tiers and priority
 ## Slot Types (Shannon's Classification)
 
 Annotate what kind of untrusted data enters critical and high files. See skill file
-(Step 10) for the full slot type table with descriptions and examples. The 8 types are:
+(Step 10) for the full slot type table with descriptions and examples (the canonical
+set; do not re-list it elsewhere). The 9 types are:
 `NETWORK-INPUT`, `URL-COMPONENT`, `CMD-ARGUMENT`, `FILE-CONTENT`, `ENV-VARIABLE`,
-`CALLBACK-DATA`, `PROTOCOL-FIELD`, `SERIALIZED-DATA`.
+`CALLBACK-DATA`, `PROTOCOL-FIELD`, `SERIALIZED-DATA`, `EXEC-POLICY`.
 
 A file may have multiple slot types. Record primary and secondary.
 Use an explicit role label that preserves the security context — examples:

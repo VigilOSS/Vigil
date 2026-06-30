@@ -290,27 +290,11 @@ using the available subagent budget.
   batch share a module context, enabling cross-file reasoning within the batch.
 - **Slot types** -- the slot type annotations for each file from Phase 1 classification.
 - **Applicable vulnerability classes** -- use the `applicable_vuln_classes` list from the backend
-  queue fetch payload. The backend computes this canonically from slot types, role, and language.
-  The hunter must evaluate every applicable class, not just the ones named in hypotheses.
-  Reference mapping:
-
-  | Slot Type | Native (C/C++) | Managed (Python/JS/Java/Go) |
-  |---|---|---|
-  | NETWORK-INPUT | buffer-overflow, integer-overflow, format-string | web-app-injection, web-app-auth, ssrf, open-redirect, path-traversal |
-  | PROTOCOL-FIELD | buffer-overflow, integer-overflow, format-string | web-app-injection, web-app-auth, race-condition |
-  | URL-COMPONENT | injection, auth-bypass, ssrf, open-redirect, web-app-auth | (same) |
-  | FILE-CONTENT | injection, buffer-overflow, type-confusion, path-traversal, xxe, file-upload | (same) |
-  | CMD-ARGUMENT | injection, format-string, path-traversal | (same) |
-  | CALLBACK-DATA | use-after-free, race-condition, type-confusion, deserialization | (same) |
-  | ENV-VARIABLE | injection, path-traversal | (same) |
-  | SERIALIZED-DATA | buffer-overflow, integer-overflow, type-confusion, deserialization | deserialization |
-  | Role contains crypto | crypto-misuse | (always) |
-  | Role contains auth/session | auth-bypass, web-app-auth | (always) |
-  | Role contains error/exception | error-handling, null-dereference | error-handling, null-dereference |
-  | Role contains memory/allocator | uninitialized-memory, algorithmic-dos | algorithmic-dos |
-  | Role contains parser/decoder/deserializer | algorithmic-dos | algorithmic-dos |
-  | Role contains graphql/resolver/serializer/orm/controller/view | web-app-data-exposure | web-app-data-exposure |
-  | Role contains llm/prompt/rag/mcp | ai-ml-security | ai-ml-security |
+  queue fetch payload. The backend computes this canonically from slot types, role, and language
+  (`SLOT_VULN_CLASSES` in `orchestrator/backend/app/services/code_analysis.py`, derived from the
+  canonical taxonomy `agent/scripts/assess/lib/vuln_taxonomy.py`). Pass that computed list through;
+  do NOT transcribe a slot→class table here — a hand-copied one drifts from the backend. The hunter
+  must evaluate every class the payload names, not just the ones touched by hypotheses.
 
 - **Guidance hypotheses** -- labeled "check AFTER broad analysis" in the dispatch context.
   These are the attack hypotheses from Phase 1 that touch files in this batch. The hunter
