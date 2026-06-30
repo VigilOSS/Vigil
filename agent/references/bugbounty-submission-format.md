@@ -149,6 +149,7 @@ Verify every item before handing the submission file to the operator. Any failin
 - [ ] No internal finding slugs, engagement paths, or tool run IDs anywhere in the body
 - [ ] Remediation names a specific technology and control, not generic advice — ≤3 items, no "validate the fix" item
 - [ ] PoC form matches the reproduction: inline-only → no block; script → PoC block with correct extension, `**Run:**` command, and one-line `**Pass if:**`; multi-file → all files listed in the block
+- [ ] The PoC was re-run in a clean environment (fresh clone or fresh account) and the submission's output matches that run, not a cached result
 
 **Human voice — AI tell elimination (Rule 20)**
 - [ ] No "Defender-positive", "Dead ends", "Negative findings", or "What was ruled out" section or sub-section exists anywhere in the submission
@@ -160,6 +161,9 @@ Verify every item before handing the submission file to the operator. Any failin
 - [ ] The word "submission" does not appear in the body prose — use "finding" or "report"
 - [ ] CWE, CVSS, or VRT that appear in header fields are not restated or justified inside body prose
 - [ ] Related findings (if present) are one sentence each at the end of the submission, not multi-paragraph cross-references
+- [ ] No em-dash appears more than once per paragraph; replace surplus em-dashes with a period, comma, or parentheses (em-dash density is a top statistical AI tell)
+- [ ] Contractions appear where natural (doesn't, it's, I've, won't) — the prose is not uniformly formal
+- [ ] At least one sentence carries a first-person observation or hunch (e.g. "I traced the failure to…") — not uniform third-person narration. (External submissions only; the internal report.md stays impersonal.)
 
 ## Example
 

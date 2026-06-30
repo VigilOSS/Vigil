@@ -155,6 +155,12 @@ Background that materially matters goes into `Vulnerability Details`, not the op
 
 Preferred pattern: subject-verb-object. The endpoint does X. The attacker sends Y. The response contains Z.
 
+**Descriptors → name what the thing does.**
+
+| Instead of | Write |
+|---|---|
+| `robust` · `comprehensive` · `seamless` · `crucial` · `admirably honest` · `the crux of the matter` | Name what the thing does instead of rating it |
+
 **External submissions → focus on the finding, not the researcher.**
 
 Compliance is assumed. Restating it implies uncertainty:
@@ -271,3 +277,5 @@ External submissions (bug bounty, disclosure email) are read by humans. The patt
 **Header metadata lives in the header.** CWE, CVSS, and VRT declared in header fields need no in-body explanation. One field, one place.
 
 **Preferred phrase:** `this finding` (not `this submission`).
+
+**If flagged as AI-generated:** the correction is shorter, rougher, and more specific — never longer and more polished. Uniform polish is itself the tell.

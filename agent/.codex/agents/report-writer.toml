@@ -54,7 +54,7 @@ Before writing anything, verify:
 - [ ] You loaded `agent/shared-constraints.md` for red reports or `agent/shared-constraints-blue.md` for blue reports
 - [ ] You loaded the report-generation skill (`agent/skills/report-generation/SKILL.md`)
 - [ ] For blue reports, you loaded `agent/skills/report-generation/templates/blue.md` and are writing an incident closeout/report, not a vulnerability disclosure
-- [ ] You reviewed the Proof Standard by Finding Class table below — every finding must meet its class-specific evidence bar before inclusion
+- [ ] You reviewed the Proof Standard by Finding Class in `agent/skills/report-generation/SKILL.md` — every finding must meet its class-specific evidence bar before inclusion
 - [ ] You have the dispatch context (engagement directory, phase, any operator instructions on report scope)
 
 If any item is unchecked, STOP and load it now. Writing a report without the skill and proof standards means producing findings that will not survive triage review.
@@ -107,49 +107,14 @@ directives for this agent:
 - **Quantify where possible:** user count, data class, scope of exposure, or operational blast radius
 - **Stay human:** write to an operator, triager, or engineer, not to a scoring system
 
-## Required Information Checklist
-
-Before writing, gather or confirm:
-
-- Target / feature / affected asset
-- Bug class and exact endpoint or component
-- Request method or triggering action
-- Attacker context and, when relevant, victim context
-- Exact request, sequence, or reproduction steps
-- Exact response or artifact proving impact
-- Data exposed, state changed, or access gained
-- Severity rationale and CVSS factors where the report uses CVSS
-- Recommended fix or control that failed
+Required information checklist: see Pre-Report Validation check 5 in `agent/skills/report-generation/SKILL.md`.
 
 ## Title Formula
 
 Use the title formula from `agent/rules/reporting.md` Rule 8. Rewrite upstream titles that
 do not follow the formula — the report is the deliverable and titles must be consistent.
 
-## CVSS Source
-
-When a finding was validated by `vulnerability-analyst` or `exploit-developer`, the CVSS data
-may already be stored in the finding's `details` object as `cvss_vector` and `cvss_score`.
-Use that pre-computed vector as the starting point. Recalculate only if the final report scope
-or proved impact would shift at least one CVSS base metric (AV, AC, PR, UI, S, C, I, A) by one
-or more levels relative to what was recorded at validation time.
-
-## CVSS 3.1 Guidance
-
-If the report uses CVSS, calculate from the proved attack, not from the imagined worst case:
-
-- `AV`: Network for internet-reachable issues
-- `AC`: Low for stable repro, High for race/timing or brittle chains
-- `PR`: None / Low / High based on actual attacker starting point
-- `UI`: None unless a victim must click, view, or perform an action
-- `S`: Changed only when impact crosses into another trust domain
-- `C/I/A`: score only what the proof demonstrates
-
-Common patterns:
-
-- `IDOR read PII with normal auth`: `AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N` -> around Medium
-- `Unauthenticated admin creation or auth bypass`: `AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H` -> Critical
-- `SSRF to metadata or privileged internal API`: `AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N` -> Critical
+CVSS sourcing and calculation: see `agent/skills/report-generation/SKILL.md`.
 
 ## Default Finding Structure
 
@@ -170,24 +135,7 @@ When defending a non-trivial severity, concise phrases like these help:
 - `The attack is externally reachable and reproducible with a small number of requests.`
 - `The issue is automatable across multiple records or accounts.`
 
-## Proof Standard by Finding Class
-
-Each finding class has a minimum evidence bar. If the evidence does not meet this bar, the finding is not ready for the report — send it back to the operator.
-
-**No-theory rule:** `rules/hunting.md` rule 2 applies to report inclusion. A finding without execution proof from the vendor's code is theory — send it back to the operator rather than including it. Source code analysis supports the description but does not replace a POC that calls the vulnerable function and shows the output.
-
-| Finding Class | Minimum Proof |
-|---|---|
-| IDOR / Broken Access Control | Request as attacker → response containing victim's data or state change on victim's resource. Both contexts (attacker auth, victim data) must be visible. |
-| SQL Injection | Extracted data the attacker should not have, or demonstrated control flow (sleep timing with exact delta, UNION output, error-based extraction). Not just `sqlmap: injectable`. |
-| XSS (Stored) | Payload rendered in a victim's authenticated session with DOM proof or session context. |
-| XSS (Reflected) | Payload reflected in response with content-type and context showing execution. |
-| Auth Bypass | Privileged action performed without valid credentials or with insufficient privilege. Show the unauthorized response containing privileged data or confirming the state change. |
-| RCE | Command output from the target (hostname, id, file read). Not just "the payload was accepted." |
-| SSRF | Response body from an internal resource, DNS/OOB callback with correlation ID, or cloud metadata content. |
-| File Read / Path Traversal | Contents of a file outside the web root (e.g., /etc/passwd, application config). |
-| Information Disclosure | The specific sensitive data exposed, with confirmation it is not intentionally public. |
-| CSRF | State change on victim's account triggered from attacker-controlled origin, with before/after proof. |
+Proof standard by finding class: see `agent/skills/report-generation/SKILL.md` — every finding must meet its class bar before inclusion.
 
 ## Mandatory Closing Sequence
 
@@ -249,19 +197,7 @@ The default output is `report.md` (internal engagement report). Two alternate mo
 - **Bug bounty submissions** — load `agent/references/bugbounty-submission-format.md` and the LDAP injection example.
 - **Email disclosures** — load `agent/references/disclosure-email-format.md` and the fast-import example.
 
-### Bug bounty: mandatory AI-tell check before delivery
-
-Before producing a bug bounty submission, run the full pre-submission checklist in `agent/references/bugbounty-submission-format.md`, including the **Human voice — AI tell elimination** block. Every item in that block must pass. The most common failures are:
-
-- Defender-positive or dead-end sections (probe results that found nothing)
-- Probe counts or per-phase timing in the deconfliction block
-- Titles longer than 12 words or with sub-clauses
-- CVSS `I:H` assigned when writes returned HTTP 200 but were rejected at the application layer
-- Remediation with more than 3 items or a "validate the fix" step
-- Attack scenario using a cartoonish persona
-- Sentences instructing the reviewer how to interpret the finding
-
-`reporting.md` Rule 20 governs all of these. Read it before drafting.
+Before delivering any external submission, run the full pre-submission checklist in `agent/references/bugbounty-submission-format.md` (the canonical AI-tell gate); `agent/rules/reporting.md` Rule 20 is the authoritative rule behind it.
 
 ## Handoffs
 
