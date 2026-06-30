@@ -279,30 +279,50 @@ def db_insert_out_of_scope_work_item(
         return json.dumps(value) if isinstance(value, dict) else str(value)
 
     queue_key = f"skipped:out-of-scope:{host}:{url}"
+    terminal_reason = tagged_terminal_reason("out-of-scope", host)
     conn = sqlite3.connect(db_path, timeout=5.0)
     try:
         conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute(
-            """INSERT OR IGNORE INTO work_items (
-                queue_key, auth_context, method, url, url_path,
-                query_params, body_params, path_params, cookie_params,
-                type, source, status, params_key_sig,
-                cluster_key, terminal_reason
-            ) VALUES (
-                ?, ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?
-            )""",
+        retired = conn.execute(
+            """UPDATE work_items
+            SET status = 'skipped',
+                assigned_agent = NULL,
+                consumed_at = NULL,
+                priority_score = 0,
+                priority_reason = NULL,
+                cluster_key = ?,
+                terminal_reason = ?
+            WHERE url = ?
+              AND status = 'pending'
+            """,
             (
-                queue_key, auth_context, method, url, url_path,
-                _as_text(query_params), _as_text(body_params),
-                _as_text(path_params), _as_text(cookie_params),
-                case_type, source, "skipped", params_key_sig,
                 "skipped:out-of-scope",
-                tagged_terminal_reason("out-of-scope", host),
+                terminal_reason,
+                url,
             ),
-        )
+        ).rowcount
+        if retired == 0:
+            conn.execute(
+                """INSERT OR IGNORE INTO work_items (
+                    queue_key, auth_context, method, url, url_path,
+                    query_params, body_params, path_params, cookie_params,
+                    type, source, status, params_key_sig,
+                    cluster_key, terminal_reason
+                ) VALUES (
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?
+                )""",
+                (
+                    queue_key, auth_context, method, url, url_path,
+                    _as_text(query_params), _as_text(body_params),
+                    _as_text(path_params), _as_text(cookie_params),
+                    case_type, source, "skipped", params_key_sig,
+                    "skipped:out-of-scope",
+                    terminal_reason,
+                ),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -489,6 +509,62 @@ def db_insert_work_item(
                     case_type, source, status, params_key_sig,
                 ),
             )
+        readmitted = conn.execute(
+            """UPDATE work_items
+            SET request_variant_id = ?,
+                service_id = ?,
+                coverage_item_id = ?,
+                auth_context = ?,
+                method = ?,
+                url = ?,
+                url_path = ?,
+                query_params = ?,
+                body_params = ?,
+                path_params = ?,
+                cookie_params = ?,
+                headers = ?,
+                body = ?,
+                content_type = ?,
+                content_length = ?,
+                request_body_truncated = ?,
+                response_status = ?,
+                response_headers = ?,
+                response_size = ?,
+                response_snippet = ?,
+                response_truncated = ?,
+                type = ?,
+                source = ?,
+                status = ?,
+                assigned_agent = NULL,
+                consumed_at = NULL,
+                params_key_sig = ?,
+                priority_score = ?,
+                priority_reason = ?,
+                cluster_key = ?,
+                terminal_reason = ?
+            WHERE queue_key = ?
+              AND status = 'skipped'
+              AND terminal_reason LIKE 'skipped:out-of-scope%'
+            """,
+            (
+                request_variant_id, service_id, coverage_item_id, auth_context,
+                method, url, url_path,
+                query_params, body_params, path_params, cookie_params,
+                headers, body, content_type, content_length,
+                1 if request_body_truncated else 0,
+                response_status, response_headers, response_size, response_snippet,
+                1 if response_truncated else 0,
+                case_type, source, status, params_key_sig,
+                assignment["priority_score"],
+                assignment["priority_reason"],
+                assignment["cluster_key"],
+                assignment["terminal_reason"],
+                queue_key,
+            ),
+        ).rowcount
+        if readmitted and not curated_metadata:
+            conn.commit()
+            return
         if curated_metadata:
             # Candidate-record ingest is an explicit curated path. Apply its
             # metadata even when a URL was already inserted through a plain URL
