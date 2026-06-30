@@ -31,6 +31,7 @@ from assess.lib.gau_pipeline import (
     gau_cache_key,
     resolve_db_path,
     resolve_pipeline_paths,
+    run_uro_dedup,
     utcnow_iso,
     write_cache_meta,
 )
@@ -242,6 +243,33 @@ def run(args: argparse.Namespace) -> None:
     else:
         line_count = decision.meta.line_count if decision.meta else count_lines(paths.output_path)
 
+    # uro structural dedup before ingest (shared with gau-secrets/gau-js so the
+    # gau pipelines dedupe consistently): collapse near-duplicate URLs — same
+    # path, different param VALUES; cache-busted asset variants — to one
+    # representative so the work buffer is not flooded. A uro hiccup must never
+    # cost the whole corpus, so on failure WARN and fall back to the raw output
+    # (ingest's classifier dedupes by template again downstream).
+    ingest_input = paths.output_path
+    deduped_count: int | None = None
+    deduped_path = paths.work_dir / "gau_deduped.txt"
+    try:
+        deduped_count = run_uro_dedup(
+            paths,
+            cfg=cfg,
+            phase=args.phase,
+            timeout=int(args.timeout),
+            target=args.target,
+            source_path=paths.output_path,
+            dest_path=deduped_path,
+        )
+        ingest_input = deduped_path
+    except AssessError as exc:
+        print(
+            f"gau-endpoints: uro dedup failed ({exc}); ingesting the undeduped "
+            f"gau corpus instead.",
+            file=sys.stderr,
+        )
+
     # Ensure cases.db exists before we try to write into it. New temp DBs
     # passed via --db must be initialized; existing engagement DBs are
     # already migrated.
@@ -255,7 +283,7 @@ def run(args: argparse.Namespace) -> None:
         _run_ingest_endpoints(
             db_path=db_path,
             source=args.source,
-            input_file=paths.output_path,
+            input_file=ingest_input,
             engagement_dir=Path(cfg.engagement_dir),
         )
     except AssessError as exc:
@@ -276,6 +304,8 @@ def run(args: argparse.Namespace) -> None:
             "gau_argv": gau_argv,
             "gau_output_path": str(paths.output_path),
             "gau_line_count": line_count,
+            "deduped_count": deduped_count,
+            "ingest_input_path": str(ingest_input),
             "ingest_source": args.source,
             "db_path": str(db_path),
             **work_summary,

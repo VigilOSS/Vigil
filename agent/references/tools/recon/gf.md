@@ -8,7 +8,22 @@ skill: gau-triage
 **Purpose:** Classify URLs by vulnerability-parameter patterns using pre-baked JSON pattern
 files. Bug-bounty staple for triaging large historical URL corpora (gau, waybackurls, katana).
 
-**In this repo**: the gf bucket patterns are compiled into `assess.lib.classify_buckets._BUCKETS` and applied inline at ingest — operators do not need to run `gf` directly. The runtime image still ships `gf` plus the upstream pattern library for ad-hoc one-off triage, invokable via `vigil assess kali exec --technique RECON --intent "<why>" --probe-kind fingerprint --phase recon --timeout <seconds> -- gf ...`.
+**In this repo**: the gf bucket patterns are compiled into `assess.lib.classify_buckets._BUCKETS` and applied inline at ingest — that classifier is the **source-of-truth** and runs automatically on every ingested URL, so operators rarely need to run `gf` directly. The runtime image still ships `gf` plus the upstream pattern library for ad-hoc one-off triage of a corpus you have **not** ingested (a raw gau/wayback dump), or to cross-check a single bucket against the upstream pattern library.
+
+## `vigil assess kali gf` (typed maintenance verb)
+
+For ad-hoc on-disk triage there is a typed verb that **complements — does not replace —** the inline classifier:
+
+```bash
+# Bucket a corpus on disk by one pattern
+vigil assess kali gf ssrf -i /engagements/$ENGAGEMENT_KEY/scans/gau_target.txt \
+  -o /engagements/$ENGAGEMENT_KEY/scans/gf_ssrf.txt
+
+# List the patterns installed in the runtime
+vigil assess kali gf --list
+```
+
+`kali gf` is a **maintenance verb**: it sends NO target traffic (a pure local text filter), so it takes **no** audit flags (`--technique`/`--intent`/`--probe-kind`/`--phase`/`--timeout`) and writes no command-run audit row — the same category as `tool-help`/`sweep-orphans`. The corpus is read host-side and piped over `docker exec -i` to `gf` inside the runtime (where `~/.gf` lives), and the matched URLs come back on stdout (or `-o <file>`). Prefer the inline ingest classifier for anything entering the work buffer; reach for `kali gf` only for one-off triage or pattern cross-checks. (You can still drop to `vigil assess kali exec … -- gf …` for flag combinations the typed verb does not model.)
 
 ## Install layout
 
@@ -78,7 +93,7 @@ occasionally adds patterns.
 
 ## Pipeline patterns
 
-`gf` is a host-side URL classifier — it reads a corpus file and writes matched URLs to stdout. Run it on the host without `vigil assess kali`; feed its output into a file, then pass the file to `vigil assess kali` verbs for the target-facing steps.
+`gf` is a URL classifier — it reads a corpus file and writes matched URLs to stdout, sending no target traffic. Run it via `vigil assess kali gf` (above) or directly on the host for raw shell loops; feed its output into a file, then pass the file to `vigil assess kali` verbs for the target-facing steps.
 
 ```bash
 # Classify the corpus into per-bucket files (host-side, no target traffic)

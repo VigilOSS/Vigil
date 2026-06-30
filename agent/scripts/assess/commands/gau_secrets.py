@@ -26,6 +26,7 @@ from assess.lib.gau_pipeline import (
     emit_pipeline_summary,
     gau_cache_key,
     resolve_pipeline_paths,
+    run_uro_dedup,
     utcnow_iso,
     write_cache_meta,
 )
@@ -185,28 +186,22 @@ def _filter_url_list(input_path: Path, output_path: Path, max_targets: int) -> i
 
 
 def _run_uro(paths, *, cfg, args, source_path: Path, dest_path: Path) -> int:
-    """Run uro inside the runtime container to structurally dedupe URLs."""
-    container_src = f"{paths.container_work_dir}/{source_path.name}"
-    container_dst = f"{paths.container_work_dir}/{dest_path.name}"
-    cmd = [
-        "bash", "-lc",
-        f"uro -i {quote(container_src)} -o {quote(container_dst)}",
-    ]
-    result = kali_exec(
-        cmd,
-        technique="RECON",
-        intent=f"uro structural dedup for {args.target}",
-        probe_kind="fingerprint",
+    """Run uro inside the runtime container to structurally dedupe URLs.
+
+    Thin wrapper over the shared `gau_pipeline.run_uro_dedup` so all three gau
+    pipelines dedupe identically. gau-secrets keeps the strict policy: a uro
+    failure raises (the body-fetch needs the trimmed list), which `run()` already
+    catches and surfaces as a clean exit.
+    """
+    return run_uro_dedup(
+        paths,
+        cfg=cfg,
         phase=args.phase,
         timeout=int(args.timeout),
-        tool_name="uro",
-        config=cfg,
+        target=args.target,
+        source_path=source_path,
+        dest_path=dest_path,
     )
-    if int(result.return_code or 0) != 0:
-        raise AssessError(
-            f"uro exited {result.return_code}; see {result.stderr_path}"
-        )
-    return count_lines(dest_path)
 
 
 def _run_httpx_store_response(paths, *, cfg, args, target_list_path: Path) -> dict:
