@@ -551,6 +551,17 @@ def main(argv: list[str] | None = None) -> None:
                 "--all", action="store_true",
                 help="Clear ALL identities (default: only the active identity)",
             )
+        if auth_name == "export":
+            auth_cmd.add_argument(
+                "--host",
+                help=(
+                    "Target host to scope captured per-host session cookies to "
+                    "(e.g. portal.acme-agency.example). Required on a multi-host engagement "
+                    "to get the right session — without it this only renders "
+                    "the legacy flat cookie view, which can be empty even when "
+                    "a proxy-captured session exists for that host."
+                ),
+            )
     auth_import = auth_sub.add_parser("import")
     auth_import.add_argument("engagement", nargs="?")
     auth_import.add_argument("--source")
@@ -1446,7 +1457,7 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
     elif args.auth_command == "show":
         print(json.dumps(auth_module.read_auth(engagement), indent=2, sort_keys=True))
     elif args.auth_command == "export":
-        print(auth_module.export_curl_args(engagement, identity))
+        print(auth_module.export_curl_args(engagement, identity, host=getattr(args, "host", None)))
     elif args.auth_command == "edit":
         auth_module.edit_auth(engagement, identity)
     elif args.auth_command == "clear":

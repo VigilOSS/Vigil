@@ -503,6 +503,7 @@ def run(args) -> None:
                 url_path = extract_url_path(url_with_query)
                 case_type = classify_type(method, url_path, "", "")
                 params_sig = generate_params_sig(query_params, body_params)
+                evidence_ref = str(operation.get("evidence_ref") or "")
 
                 parsed = urlparse(url_with_query)
                 observation = {
@@ -519,7 +520,7 @@ def run(args) -> None:
                     "discovery_source": "api-spec",
                     "notes": "Derived from accessible API specification.",
                     "response_status": None,
-                    "evidence_ref": "",
+                    "evidence_ref": evidence_ref,
                     "observation_payload": {"source": "api-spec"},
                     "target_identity": parsed.hostname or "",
                     "target_kind": "host",

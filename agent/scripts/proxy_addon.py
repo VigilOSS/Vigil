@@ -915,13 +915,19 @@ class CaseCollector:
         if not (merged or tokens or headers):
             return
 
-        primary_host = (
-            entry.scope_patterns[0].lstrip("*.") if entry.scope_patterns else ""
-        ).lower()
+        # scope_host gates which host_cookies buckets get flattened into the
+        # identity's legacy single-host `cookies` view (capture_material /
+        # _flat_cookies_for_scope). It must be the host that was ACTUALLY
+        # captured, not an arbitrary "primary" scope pattern — a multi-host
+        # engagement (several unrelated domains in one scope.json) would
+        # otherwise only ever populate the flat view for whichever host
+        # happens to be first in scope.json's `hosts` list, silently dropping
+        # every other host's session from `cookies` (host_cookies still has
+        # it, but flat-view consumers like `vigil auth export` do not).
         self._post_credentials_capture(
             entry,
             host=hostname,
-            scope_host=primary_host,
+            scope_host=hostname,
             cookies=merged,
             headers=headers,
             tokens=tokens,

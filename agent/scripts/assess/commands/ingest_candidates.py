@@ -9,12 +9,30 @@ from urllib.parse import urlparse
 
 from assess.lib.auth import auth_active_context
 from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE, post_request_observations_bulk
-from assess.lib.candidate_records import candidate_metadata, candidate_type, json_text, signal_tokens
+from assess.lib.candidate_records import candidate_metadata, candidate_type, json_text, signal_tokens, surface_refs
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.db import db_init, db_insert_out_of_scope_work_item, db_insert_work_item
 from assess.lib.params import extract_path_params, extract_query_params, extract_url_path, generate_params_sig
 from assess.lib.scope import host_admitted, ingest_scope_filter
+from assess.lib.surface_links import create_surface_request_variant_link
+
+
+def _coerce_header_params(value: object) -> dict[str, str]:
+    """Normalize a candidate record's header field to dict[str, str].
+
+    Accepts the dict shape (``{"X-Api-Key": "demo"}``, matching the backend's
+    ``header_schema``) and the list-of-names shape used elsewhere in this
+    codebase (``["X-Api-Key"]``, e.g. arjun_enrich.py/ingest_arjun.py),
+    mapping list entries to an empty example value. Anything else (string,
+    number, None) falls back to ``{}`` rather than reaching the backend as a
+    non-dict and 422-ing the whole candidate.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return {str(name): "" for name in value if str(name).strip()}
+    return {}
 
 
 def register(subparsers) -> None:
@@ -56,13 +74,15 @@ def run(args) -> None:
     out_of_scope_count = 0
     out_of_scope_warned_hosts: set[str] = set()
     skipped_backend = 0
+    links_created = 0
+    links_skipped = 0
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         pending_rows: list[dict] = []
         pending_observations: list[dict] = []
 
         def _flush_observations() -> None:
-            nonlocal count, skipped_backend
+            nonlocal count, skipped_backend, links_created, links_skipped
             if not pending_observations:
                 return
             rows = list(pending_rows)
@@ -118,6 +138,7 @@ def run(args) -> None:
                     body_params=json.dumps(row["body_params"]) if isinstance(row["body_params"], dict) else str(row["body_params"]),
                     path_params=json.dumps(row["path_params"]) if isinstance(row["path_params"], dict) else str(row["path_params"]),
                     cookie_params=json.dumps(row["cookie_params"]) if isinstance(row["cookie_params"], dict) else str(row["cookie_params"]),
+                    headers=json.dumps(row["headers"]) if isinstance(row["headers"], dict) and row["headers"] else "",
                     case_type=row["case_type"],
                     source=source,
                     params_key_sig=row["params_sig"],
@@ -134,6 +155,37 @@ def run(args) -> None:
                     curated=True,
                 )
                 count += 1
+
+                if row["surface_refs"]:
+                    if not request_variant_id:
+                        # A service-only resolution (no request_variant_id) has
+                        # nothing for the link to attach to — surface_refs is
+                        # silently unusable here, but the operator must see why.
+                        links_skipped += len(row["surface_refs"])
+                        print(
+                            f"ingest-candidates: {row['url']} resolved to a service "
+                            f"only (no request_variant_id); dropping {len(row['surface_refs'])} "
+                            f"surface_refs link(s)",
+                            file=sys.stderr,
+                        )
+                    else:
+                        for surface_id in row["surface_refs"]:
+                            try:
+                                create_surface_request_variant_link(
+                                    client,
+                                    surface_id=surface_id,
+                                    request_variant_id=int(request_variant_id),
+                                    evidence_ref=row["evidence_ref"],
+                                )
+                                links_created += 1
+                            except Exception as link_exc:  # noqa: BLE001 - a bad surface ref must not drop ingest
+                                links_skipped += 1
+                                print(
+                                    f"ingest-candidates: failed to link surface {surface_id} "
+                                    f"to request_variant {request_variant_id} for {row['url']}: "
+                                    f"{link_exc}; skipping this link",
+                                    file=sys.stderr,
+                                )
 
         with open(records_file, "r", encoding="utf-8") as input_stream:
             for line in input_stream:
@@ -164,6 +216,14 @@ def run(args) -> None:
                 body_params = record.get("body_params") or {}
                 path_params = record.get("path_params") or extract_path_params(url_path)
                 cookie_params = record.get("cookie_params") or {}
+                # `header_params` is conventionally a list[str] of header names
+                # elsewhere in this codebase (arjun_enrich.py, ingest_arjun.py),
+                # but the backend's header_schema is dict[str, Any] — coerce
+                # either shape so a list-shaped record doesn't 422 the whole
+                # candidate (header_schema was previously always {}, so this
+                # path was unreachable before headers were wired through).
+                header_params = _coerce_header_params(record.get("headers") or record.get("header_params"))
+                evidence_ref = str(record.get("evidence_ref") or "")
 
                 signals = signal_tokens(record)
                 case_type = candidate_type(record, method, url_path, signals)
@@ -221,12 +281,12 @@ def run(args) -> None:
                     "body_schema": body_params,
                     "path_schema": path_params,
                     "cookie_schema": cookie_params,
-                    "header_schema": {},
+                    "header_schema": header_params,
                     "path_template": "",
                     "discovery_source": source,
                     "notes": str(metadata.get("triage_rationale") or ""),
                     "response_status": None,
-                    "evidence_ref": "",
+                    "evidence_ref": evidence_ref,
                     "observation_payload": observation_payload,
                     "target_identity": parsed.hostname or "",
                     "target_kind": "host",
@@ -247,9 +307,12 @@ def run(args) -> None:
                         "body_params": body_params,
                         "path_params": path_params,
                         "cookie_params": cookie_params,
+                        "headers": header_params,
                         "case_type": case_type,
                         "params_sig": params_sig,
                         "metadata": metadata,
+                        "evidence_ref": evidence_ref,
+                        "surface_refs": surface_refs(record),
                     }
                 )
                 pending_observations.append(observation)
@@ -258,6 +321,11 @@ def run(args) -> None:
         _flush_observations()
 
     print(f"[ingest] Ingested {count} candidate records from source '{source}'")
+    if links_created or links_skipped:
+        print(
+            f"[ingest] Created {links_created} surface link(s) from candidate "
+            f"surface_refs; skipped {links_skipped}."
+        )
     if skipped_backend:
         print(
             f"[ingest] Skipped {skipped_backend} candidate(s) rejected by the backend "

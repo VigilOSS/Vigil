@@ -1374,6 +1374,125 @@ def update_surface(
         assert row is not None
         return dict(row)
 
+def _upsert_surface_request_variant_link(
+    connection,
+    engagement_id: int,
+    *,
+    surface_id: int,
+    request_variant_id: int,
+    relation: str,
+    evidence_ref: str,
+) -> dict[str, Any]:
+    connection.execute(
+        """
+        INSERT INTO surface_request_variant_links (engagement_id, surface_id, request_variant_id, relation, evidence_ref)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(surface_id, request_variant_id, relation) DO UPDATE SET
+            evidence_ref = COALESCE(NULLIF(excluded.evidence_ref, ''), surface_request_variant_links.evidence_ref),
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (engagement_id, surface_id, request_variant_id, relation, evidence_ref),
+    )
+    row = connection.execute(
+        """
+        SELECT *
+        FROM surface_request_variant_links
+        WHERE surface_id = ? AND request_variant_id = ? AND relation = ?
+        """,
+        (surface_id, request_variant_id, relation),
+    ).fetchone()
+    assert row is not None
+    return dict(row)
+
+def create_surface_request_variant_link(
+    engagement_id: int,
+    *,
+    surface_id: int,
+    request_variant_id: int,
+    relation: str = "",
+    evidence_ref: str = "",
+) -> dict[str, Any]:
+    """Link a surface to a request variant by their durable backend ids.
+
+    ``request_variant_id`` is the cross-system join key (handed back on a
+    request-observation POST); a local cases.db work_item id would be
+    meaningless here. Both ends are validated against the engagement so a
+    typo'd id is a 404 rather than a dangling row.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        surface = connection.execute(
+            "SELECT id FROM assessment_surfaces WHERE engagement_id = ? AND id = ?",
+            (engagement.id, surface_id),
+        ).fetchone()
+        if surface is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"surface id={surface_id} not found",
+            )
+        variant = connection.execute(
+            "SELECT id FROM assessment_request_variants WHERE engagement_id = ? AND id = ?",
+            (engagement.id, request_variant_id),
+        ).fetchone()
+        if variant is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"request_variant id={request_variant_id} not found",
+            )
+        return _upsert_surface_request_variant_link(
+            connection,
+            engagement.id,
+            surface_id=surface_id,
+            request_variant_id=request_variant_id,
+            relation=relation,
+            evidence_ref=evidence_ref,
+        )
+
+def list_surface_request_variant_links_by_surface(
+    engagement_id: int,
+    surface_id: int,
+    *,
+    limit: int = DEFAULT_SURFACE_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_assessment_list_window(limit, offset)
+    with _common.get_connection() as connection:
+        return _fetch_all(
+            connection,
+            """
+            SELECT *
+            FROM surface_request_variant_links
+            WHERE engagement_id = ? AND surface_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, surface_id, limit, offset),
+        )
+
+def list_surface_request_variant_links_by_variant(
+    engagement_id: int,
+    request_variant_id: int,
+    *,
+    limit: int = DEFAULT_SURFACE_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_assessment_list_window(limit, offset)
+    with _common.get_connection() as connection:
+        return _fetch_all(
+            connection,
+            """
+            SELECT *
+            FROM surface_request_variant_links
+            WHERE engagement_id = ? AND request_variant_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, request_variant_id, limit, offset),
+        )
+
 HIGH_RISK_DEFERRED_SURFACE_TYPES: frozenset[str] = frozenset(
     {"account_recovery", "dynamic_render", "object_reference", "privileged_write"}
 )
