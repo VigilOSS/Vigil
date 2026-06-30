@@ -8,6 +8,28 @@ category: Disclosure & Reporting Formats
 
 Use this format when the operator requests a bug bounty submission (Bugcrowd, HackerOne, or similar platform). Each finding is a standalone submission.
 
+## Staging Convention
+
+Each submission is staged in its own directory under the engagement root before the operator submits it to the platform:
+
+```
+$ENGAGEMENT_DIR/submissions/<slug>/
+    submission.md       # this file — the drafted submission text
+    poc.<ext>           # any PoC script or artifact referenced in the submission
+```
+
+The directory name is the finding's backend slug (e.g., `submissions/VA-003/`). The slug stays in the directory name only — it must not appear inside `submission.md` (see "No internal identifiers" below).
+
+PoC artifacts live here alongside `submission.md`. Do NOT place them under `tools/exploit-state/pocs/` — that is the exploitation artifact store, not the submission staging area.
+
+After staging `submission.md` and submitting to the platform, set the finding's submission status:
+
+```bash
+vigil assess update-finding <slug> --submission-status submitted --reason "Submitted to <program>"
+```
+
+Update `submission_status` as the program responds (`accepted` / `needs_info` / `rejected` / `duplicate`). This field is orthogonal to `workflow_status` — it tracks program-facing state only and never changes whether the finding is included in the internal report. See "Submission Status Lifecycle" in `agent/skills/report-generation/SKILL.md` for the full sequence.
+
 ## Copy-paste workflow
 
 The output is designed to map cleanly onto the platform's submission form. The operator takes the produced file and copies each block into the matching platform field:

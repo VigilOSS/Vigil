@@ -336,7 +336,9 @@ Load before writing:
 - `agent/references/disclosure-email-format.md` — authoritative spec (structure, rules, anti-patterns)
 - `agent/references/examples/disclosure-email-fast-import.txt` — working example with control test
 
-Output path: `$ENGAGEMENT_DIR/tools/exploit-state/pocs/report-<slug>.txt`
+Output path: `$ENGAGEMENT_DIR/submissions/<slug>/disclosure.txt`
+
+The `submissions/<slug>/` directory is the staging tree for all external deliverables for that finding (see "Per-Finding Submission Staging" below).
 
 ## Bug Bounty Submissions
 
@@ -346,6 +348,64 @@ each finding becomes a standalone submission — never bundle findings.
 Load before writing:
 - `agent/references/bugbounty-submission-format.md` — authoritative spec (structure, rules)
 - `agent/references/examples/bugbounty-submission-ldap-injection.md` — working example with POC
+
+Output path: `$ENGAGEMENT_DIR/submissions/<slug>/submission.md`
+
+The `submissions/<slug>/` directory is the staging tree for all external deliverables for that finding (see "Per-Finding Submission Staging" below).
+
+## Per-Finding Submission Staging
+
+Each finding that is submitted externally gets a dedicated staging directory under the engagement root:
+
+```
+$ENGAGEMENT_DIR/submissions/<slug>/
+    submission.md       # the drafted submission text (bug bounty platform body)
+    disclosure.txt      # or: the disclosure email text (email disclosure mode)
+    poc.<ext>           # any PoC artifact referenced in the submission
+```
+
+Rules for the staging tree:
+- The directory name is the finding slug (e.g., `submissions/VA-003/`). The slug is internal and never appears inside the submission body — only in the directory name.
+- `submission.md` maps directly to the `bugbounty-submission-format.md` structure (title, VRT, severity, PoC block, body). The operator copies content from it into the platform's submission form.
+- PoC artifacts live alongside `submission.md` in the same directory — NOT under `tools/exploit-state/pocs/`, which is the exploitation artifact store, not a submission staging area.
+- The directory is created when the operator dispatches report-writer in bug bounty submission mode; it does not exist for findings that are not submitted externally.
+
+## Submission Status Lifecycle
+
+`submission_status` is an independent axis on every finding, orthogonal to `workflow_status`. A finding can be `workflow_status=reported` (included in the internal report) AND `submission_status=accepted` (confirmed by the program) simultaneously — setting one never changes the other.
+
+Allowed values: `none` (default) | `submitted` | `accepted` | `needs_info` | `rejected` | `duplicate`
+
+Lifecycle transitions via the CLI:
+
+```bash
+# 1. After staging submission.md and submitting to the platform:
+vigil assess update-finding <slug> \
+  --submission-status submitted \
+  --reason "Submitted to program on <date>"
+
+# 2. Program confirms the finding:
+vigil assess update-finding <slug> \
+  --submission-status accepted \
+  --reason "Program accepted and assigned bounty"
+
+# 3. Program requests more information — triggers a targeted reply:
+vigil assess update-finding <slug> \
+  --submission-status needs_info \
+  --reason "Triager requested reproduction steps for the auth bypass"
+
+# 4. Program closes as known or duplicate:
+vigil assess update-finding <slug> \
+  --submission-status rejected \
+  --reason "Program: out of scope"
+vigil assess update-finding <slug> \
+  --submission-status duplicate \
+  --reason "Program: duplicate of existing report"
+```
+
+The `needs_info` state is the trigger for a targeted reply: re-read the triager's question, update `submissions/<slug>/submission.md` with clarification, and re-submit the specific section — do not re-draft the entire submission.
+
+`workflow_status` is unchanged by any submission outcome. A finding that the program rejects as duplicate still carries `workflow_status=reported` in the internal engagement record — the internal report is complete regardless of program outcome.
 
 ## Blue Mode
 

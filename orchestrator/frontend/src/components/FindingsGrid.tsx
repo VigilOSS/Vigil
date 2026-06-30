@@ -46,6 +46,20 @@ function WorkflowCell({ data }: ICellRendererParams<Derived>) {
   return <span className={`pill pill-${data.workflow_status}`}>{data.workflowLabel}</span>;
 }
 
+function SubmissionCell({ data }: ICellRendererParams<Derived>) {
+  if (!data) return null;
+  // External-program submission state is a separate axis from workflow_status
+  // and is only meaningful once a finding has actually been submitted — render
+  // an empty cell for the "none" default so the column stays quiet. Distinct
+  // .submission-pill styling keeps it from reading as a workflow pill.
+  if (!data.submission_status || data.submission_status === "none") return null;
+  return (
+    <span className={`pill submission-pill submission-${data.submission_status}`}>
+      {data.submissionLabel}
+    </span>
+  );
+}
+
 function VerificationCell({ data }: ICellRendererParams<Derived>) {
   if (!data) return null;
   // Verification reuses the same status-* badge classes the drawer uses,
@@ -97,6 +111,13 @@ export default function FindingsGrid({ rows, selected, onOpen }: FindingsGridPro
         width: 130,
         cellRenderer: WorkflowCell,
         valueGetter: (p) => p.data?.workflow_status || "",
+      },
+      {
+        headerName: "Submission",
+        colId: "submission",
+        width: 140,
+        cellRenderer: SubmissionCell,
+        valueGetter: (p) => p.data?.submission_status || "",
       },
       {
         headerName: "Verification",

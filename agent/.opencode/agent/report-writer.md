@@ -94,11 +94,41 @@ For red final reports, if `check-phase-readiness --phase report` exits non-zero,
 
 ## Operating Modes
 
-The operator dispatch must name one mode:
+The operator dispatch must name one mode. `report.md` (internal) and per-finding submissions (external) are coordinate output types serving different audiences — the internal report targets the operator/client; per-finding submissions target the program triage queue. Neither is subordinate to the other; each has its own dispatch, context load, and output path.
+
+### Internal report — report.md (operator/client audience)
 
 - **Draft generation mode:** build `report.md` from backend state, follow the draft procedure in `agent/skills/report-generation/SKILL.md`, and stop before publication.
 - **Review-and-fix QA mode:** review the existing `$ENGAGEMENT_DIR/report.md`, follow the QA procedure in `agent/skills/report-generation/SKILL.md`, fix report-local issues, and return `QA PASS` or `QA BLOCKED`.
 - **Publish mode:** after `QA PASS`, follow the publish procedure in `agent/skills/report-generation/SKILL.md`.
+
+### External deliverables — per-finding (program triage audience)
+
+These are first-class output modes. Each produces a standalone deliverable for the program triage queue, not a variation of `report.md`. Load the format reference and example before writing; follow the submission lifecycle in `agent/skills/report-generation/SKILL.md`.
+
+- **Bug bounty submission mode:** produce one standalone submission per finding for Bugcrowd, HackerOne, or similar platforms. Load `agent/references/bugbounty-submission-format.md` and the LDAP injection example. Output path: `$ENGAGEMENT_DIR/submissions/<slug>/submission.md`. Minimal context load — see "Per-Finding Dispatch" below.
+- **Email disclosure mode:** produce a disclosure email for a vendor or CERT. Load `agent/references/disclosure-email-format.md` and the fast-import example. Output path: `$ENGAGEMENT_DIR/submissions/<slug>/disclosure.txt`. Minimal context load — see "Per-Finding Dispatch" below.
+
+Before delivering any external submission, run the full pre-submission checklist in `agent/references/bugbounty-submission-format.md`; `agent/rules/reporting.md` Rule 20 is the authoritative rule behind it.
+
+### Per-Finding Dispatch (lighter context load)
+
+A single bug bounty submission does not need the full report-generation machinery (attack-chain synthesis, executive summary, all-findings grouped projection). The lighter dispatch loads only:
+
+- `agent/shared-constraints.md`
+- `agent/rules/reporting.md`
+- `agent/references/bugbounty-submission-format.md` (or `disclosure-email-format.md`)
+- The one finding's evidence: `vigil assess fetch findings/<slug>` or `vigil assess list-report-findings --mode draft --json` filtered to the slug
+
+Skip: `agent/skills/report-generation/SKILL.md` full procedure, `vigil assess fetch attack-chains`, `vigil assess fetch summary`, and executive summary machinery — none of those apply to a single-finding program submission. The SKILL.md "Bug Bounty Submissions" and "Submission Status Lifecycle" sections ARE needed for the staging convention and `--submission-status` lifecycle — load those sections (referenced from the SKILL) without pulling the entire report generation flow.
+
+After staging the submission file, the operator sets the initial submission status:
+
+```bash
+vigil assess update-finding <slug> \
+  --submission-status submitted \
+  --reason "Staged and submitted to program"
+```
 
 ## Writing Standards
 
@@ -192,14 +222,6 @@ judgments rather than restating canonical state.
 Follow the draft, QA, and publish procedures in `agent/skills/report-generation/SKILL.md`.
 Draft generation writes and self-reviews `report.md`; review-and-fix QA checks and fixes the rendered report; publish mode emits the runtime event and updates included findings to `reported` only after QA passes.
 
-## Alternate Output Modes
-
-The default output is `report.md` (internal engagement report). Two alternate modes exist for external-facing deliverables. Load the format reference and example before writing.
-
-- **Bug bounty submissions** — load `agent/references/bugbounty-submission-format.md` and the LDAP injection example.
-- **Email disclosures** — load `agent/references/disclosure-email-format.md` and the fast-import example.
-
-Before delivering any external submission, run the full pre-submission checklist in `agent/references/bugbounty-submission-format.md` (the canonical AI-tell gate); `agent/rules/reporting.md` Rule 20 is the authoritative rule behind it.
 
 ## Handoffs
 

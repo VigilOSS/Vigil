@@ -501,6 +501,19 @@ class MergeFindingsRequest(BaseModel):
     source_name: str = Field(default="operator", min_length=1, max_length=128)
 
 
+def _reject_invalid_submission_status(value: str | None) -> None:
+    """HTTP enforcement seam for submission_status.
+
+    References the canonical ``state_manager.SUBMISSION_STATUSES`` set (owned in
+    the state-manager layer) so the vocabulary has a single backend source of
+    truth. ``None`` is allowed (means "unset" — default 'none' on create,
+    preserve on patch). Raises in a Pydantic validator → HTTP 422 at the API.
+    """
+    if value is not None and value not in state_manager.SUBMISSION_STATUSES:
+        allowed = ", ".join(sorted(state_manager.SUBMISSION_STATUSES))
+        raise ValueError(f"submission_status must be one of: {allowed}")
+
+
 class FindingRecordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -526,6 +539,12 @@ class FindingRecordRequest(BaseModel):
     evidence_type: Literal[
         "network-confirmed", "code-inferred", "theoretical", "informational"
     ] | None = None
+    # External submission-tracking axis, ORTHOGONAL to workflow_status. Nullable
+    # with default None: a true create lands the 'none' default server-side, and
+    # a re-record upsert that omits it preserves the stored value (so external
+    # submission tracking is never clobbered by an unrelated record). Validated
+    # against the canonical state_manager.SUBMISSION_STATUSES set below.
+    submission_status: str | None = Field(default=None, min_length=1, max_length=32)
     request_variant_id: int | None = None
     service_id: int | None = None
     surface_id: int | None = None
@@ -535,6 +554,11 @@ class FindingRecordRequest(BaseModel):
     def _root_cause_links_use_helper(self) -> "FindingRecordRequest":
         if any(link.link_kind == state_manager.ROOT_CAUSE_LINK_KIND for link in self.links):
             raise ValueError("root_cause links must be created with link-finding / PUT /findings/{slug}/root-cause")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_submission_status(self) -> "FindingRecordRequest":
+        _reject_invalid_submission_status(self.submission_status)
         return self
 
 
@@ -565,9 +589,18 @@ class FindingPatchRequest(BaseModel):
     evidence_type: Literal[
         "network-confirmed", "code-inferred", "theoretical", "informational"
     ] | None = None
+    # Optional on patch: None preserves the stored submission_status (the
+    # workflow axis can move without disturbing the submission axis). Validated
+    # against the canonical state_manager.SUBMISSION_STATUSES set.
+    submission_status: str | None = Field(default=None, min_length=1, max_length=32)
     reason_code: str = Field(default="", max_length=128)
     reason_text: str = Field(default="", max_length=4096)
     artifact_ref: str = Field(default="", max_length=1024)
+
+    @model_validator(mode="after")
+    def _validate_submission_status(self) -> "FindingPatchRequest":
+        _reject_invalid_submission_status(self.submission_status)
+        return self
 
     @model_validator(mode="after")
     def _require_notes_when_replacing(self) -> "FindingPatchRequest":
@@ -1802,6 +1835,7 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
             details=request.details,
             provenance=request.provenance,
             evidence_type=request.evidence_type,
+            submission_status=request.submission_status,
             request_variant_id=request.request_variant_id,
             service_id=request.service_id,
             surface_id=request.surface_id,
@@ -1851,6 +1885,7 @@ async def patch_finding(
             details_mode=request.details_mode,
             provenance=request.provenance,
             evidence_type=request.evidence_type,
+            submission_status=request.submission_status,
             transition_reason_code=request.reason_code,
             transition_reason_text=request.reason_text,
             transition_artifact_ref=request.artifact_ref,
