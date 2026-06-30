@@ -37,6 +37,7 @@ import sys
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from shlex import quote
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -517,6 +518,70 @@ def count_lines(path: Path) -> int:
         for _ in fh:
             count += 1
     return count
+
+
+def build_uro_command(paths: GauOutputPaths, *, source_path: Path, dest_path: Path) -> list[str]:
+    """Build the in-container uro dedup argv for a source→dest URL file pair.
+
+    Pure (no exec) so the argv shape is unit-testable. ``source_path`` and
+    ``dest_path`` must live under ``paths.work_dir`` so their basenames resolve
+    against ``paths.container_work_dir`` (the bind-mounted same directory the
+    container sees). The values are ``shlex.quote``-d because they ride a
+    ``bash -lc`` string.
+    """
+    container_src = f"{paths.container_work_dir}/{source_path.name}"
+    container_dst = f"{paths.container_work_dir}/{dest_path.name}"
+    return ["bash", "-lc", f"uro -i {quote(container_src)} -o {quote(container_dst)}"]
+
+
+def run_uro_dedup(
+    paths: GauOutputPaths,
+    *,
+    cfg: Config,
+    phase: str,
+    timeout: int,
+    target: str,
+    source_path: Path,
+    dest_path: Path,
+) -> int:
+    """Structurally dedupe a URL file with uro inside the runtime container.
+
+    uro collapses near-duplicate URLs — same path with different parameter
+    VALUES, cache-busted asset variants (`app.js?v=1` vs `app.js?v=2`),
+    incremental id paths — to one representative, so the downstream body-fetch /
+    ingest works a smaller, non-redundant set. This is the single source for the
+    uro stage so all three gau pipelines (`gau-secrets`, `gau-endpoints`,
+    `gau-js-endpoints`) dedupe identically.
+
+    Returns the deduped line count; raises :class:`AssessError` on a non-zero uro
+    exit so the caller can decide whether to abort (gau-secrets, whose body-fetch
+    needs the trimmed list) or fall back to the undeduped file (gau-endpoints /
+    gau-js-endpoints, where ingest/classification dedupe again downstream).
+
+    The ``kali`` import is function-level so this module stays import-light (it is
+    a pure pipeline lib elsewhere) and so a unit test can monkeypatch
+    ``assess.lib.kali.kali_exec``.
+    """
+    from .client import AssessError
+    from .kali import kali_exec
+
+    cmd = build_uro_command(paths, source_path=source_path, dest_path=dest_path)
+    result = kali_exec(
+        cmd,
+        technique="RECON",
+        intent=f"uro structural dedup for {target}",
+        probe_kind="fingerprint",
+        phase=phase,
+        timeout=int(timeout),
+        tool_name="uro",
+        config=cfg,
+    )
+    if int(getattr(result, "return_code", 0) or 0) != 0:
+        raise AssessError(
+            f"uro exited {getattr(result, 'return_code', '?')}; "
+            f"see {getattr(result, 'stderr_path', '?')}"
+        )
+    return count_lines(dest_path)
 
 
 def add_engagement_flags(parser, *, allow_db_override: bool = True) -> None:

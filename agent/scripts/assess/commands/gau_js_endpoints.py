@@ -42,6 +42,7 @@ from assess.lib.gau_pipeline import (
     resolve_db_path,
     resolve_js_endpoint,
     resolve_pipeline_paths,
+    run_uro_dedup,
 )
 from assess.lib.kali import kali_exec
 
@@ -279,7 +280,33 @@ def _fetch_js_bodies(paths, *, cfg, args) -> int:
             kept += 1
     if kept == 0:
         raise AssessError("no .js URLs in cached gau corpus; nothing to body-fetch")
-    container_targets = f"{paths.container_work_dir}/{js_list.name}"
+    # uro structural dedup of the .js target list (shared with gau-secrets/
+    # gau-endpoints so the gau pipelines dedupe consistently): collapse
+    # cache-busted bundle variants (app.js?v=1 vs app.js?v=2) to one so we
+    # body-fetch a smaller, non-redundant set. A uro hiccup must not block the
+    # fetch — WARN and fall back to the raw list.
+    fetch_list = js_list
+    deduped_js = paths.work_dir / "js_targets_deduped.txt"
+    try:
+        deduped = run_uro_dedup(
+            paths,
+            cfg=cfg,
+            phase=args.phase,
+            timeout=int(args.timeout),
+            target=args.target,
+            source_path=js_list,
+            dest_path=deduped_js,
+        )
+        if deduped > 0:
+            fetch_list = deduped_js
+            kept = deduped
+    except AssessError as exc:
+        print(
+            f"gau-js-endpoints: uro dedup failed ({exc}); body-fetching the "
+            f"undeduped .js list.",
+            file=sys.stderr,
+        )
+    container_targets = f"{paths.container_work_dir}/{fetch_list.name}"
     container_bodies = paths.container_bodies_dir
     cmd = [
         "bash", "-lc",

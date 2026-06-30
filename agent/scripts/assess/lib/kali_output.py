@@ -734,7 +734,11 @@ def _required_headers(engagement_dir: Path) -> dict[str, str]:
 # host-dispatch wrappers in commands/web_discovery.py / dns_discovery.py) apply
 # the SAME injectable/skip rules. kali.py re-exports these names for back-compat.
 _REQUIRED_HEADER_INJECTABLE = frozenset(
-    {"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"}
+    # dalfox sends active XSS payloads to the in-scope target and takes the
+    # curl-style ``-H "Name: Value"`` (repeatable), so it injects via the same
+    # ``-H`` path as curl/httpx — never leave a dalfox probe un-attributed on a
+    # required-headers program.
+    {"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana", "dalfox"}
 )
 
 # Layer-1 extension (I-3) — HTTP-to-target tools whose attribution-header flag is
@@ -765,6 +769,12 @@ _REQUIRED_HEADER_SKIP = frozenset(
         "naabu",
         "masscan",
         "puredns",
+        # tlsx opens a raw TLS handshake to harvest cert SAN/CN/issuer fields;
+        # like nmap it is an L4-L6 connect that carries NO HTTP request, so an
+        # HTTP attribution header cannot ride it. Skip (don't WARN, don't let the
+        # Layer-2 backstop REFUSE a legitimate TLS cert grab) — same posture as
+        # nmap/naabu/masscan, which also reach the target without speaking HTTP.
+        "tlsx",
     }
 )
 
