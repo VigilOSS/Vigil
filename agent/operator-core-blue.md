@@ -276,7 +276,7 @@ L3 KILL outcomes do NOT delete artifacts. `vigil assess artifact mark-scratch
 --id <id>` keeps the artifact auditable but excludes it from resume brief and
 final report.
 
-CLI: `agent/scripts/assess/commands/artifact.py` (`sync | search | get |
+CLI: `agent/scripts/assess/commands/artifact.py` (`refresh | search | get |
 register | mark-scratch | unmark-scratch`).
 
 ## Audit Pipeline

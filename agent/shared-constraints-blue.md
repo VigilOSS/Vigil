@@ -122,7 +122,7 @@ The backend computes SHA-256, FTS-indexes a preview, and links the artifact to
 its producer agent (`producer_agent_id`, `producer_agent_role`), the originating
 command run (`producer_command_run_id`), and the finding it substantiates
 (`related_finding_slug`). The `assessment_artifacts` table at
-`orchestrator/backend/app/db.py:1372` is the schema source of truth.
+`orchestrator/backend/app/db.py:1652` is the schema source of truth.
 
 Use `--sensitive` for PII-bearing exports (mailbox content, full sign-in
 history, IAM principal listings) so the FTS preview is suppressed but the
