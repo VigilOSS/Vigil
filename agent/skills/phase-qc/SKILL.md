@@ -56,6 +56,21 @@ phase's full dispatch transcripts:
    — slug, severity, status, `canonical_location`, and the `details` story (evidence /
    impact / cvss_vector).
 
+## Stage-Completion Audit (Pipeline Gate)
+
+Before running the judgment-question pass below, run the stage-completion audit. This is a prerequisite check — it confirms that every expected pipeline stage has a completed audit row; the judgment pass then reasons on top of those results, not on a pipeline that silently dropped stages.
+
+```bash
+vigil assess check-phase-readiness --phase <current-phase> --by-host
+```
+
+Walk the output for any stage flagged `timed_out`, `partial`, or never run (absent from the ledger). For each:
+
+- [ ] **Re-run the stage** if it is still worth running (scope unchanged, tool available, budget permits). A `timed_out` nuclei sweep over 500 hosts is not a verdict — it is a coverage gap. Raise `--timeout` or scope the list down and re-dispatch.
+- [ ] **Accept with reason** if re-run is not warranted (out-of-scope host discovered mid-run, tool unavailable, operator explicitly deferred): record the deferral via `vigil assess agent decision --kind coverage_deferral --payload-json '{"stage": "...", "host": "...", "reason": "..."}' --surfaced-to-user` so the gap is audited, not invisible.
+
+A stage that is silently absent from the ledger is a coverage gap the five judgment questions cannot see — `coverage` miss kind catches depth and surface gaps but cannot flag a tool that never ran. The stage audit catches what the ledger's binary state cannot.
+
 ## Procedure
 
 For each in-scope host/surface (from the ledger) and each finding (from the list),

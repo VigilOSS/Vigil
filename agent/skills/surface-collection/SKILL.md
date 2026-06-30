@@ -236,6 +236,16 @@ and produce the priority manifest. Then release them back:
 vigil assess work-buffer "$DB" reset-stale 0
 ```
 
+**Auth-gate redirect classification:** A URL that returns a 302 (or 301/307/308) redirect to a login page, SSO entry point, or policy wall is NOT a terminal "covered / gated" classification — it is a **bypass-test LEAD.** The redirect proves the route exists and is being enforced, which is exactly the signal the auth-bypass sweep needs. Emit a `bypass-lead` surface record for it rather than closing the work item:
+
+```bash
+vigil assess record-surface auth-bypass-lead "https://TARGET/protected" surface-collector \
+  --rationale "302 -> /login: gate confirmed; route exists and is enforced — bypass-test target" \
+  --status discovered
+```
+
+Triage must not consume the redirect signal and silently close the work item as "gated." Closing it ends the lead. The auth-bypass sweep (see `agent/skills/auth-bypass/SKILL.md` "Attack the Gate Itself") consumes these leads in Phase 3. See `agent/rules/hunting.md §23` for the general lead-not-verdict doctrine.
+
 **Triage categories** (see agent prompt for full pattern lists):
 
 1. **Leaked secrets in parameters** — credential-like query param names

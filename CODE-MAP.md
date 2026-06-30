@@ -30,6 +30,7 @@ Keep it light:
 - `agent/shared-constraints.md`, `agent/shared-constraints-code.md`, and `agent/shared-constraints-blue.md` - first-load specialist constraints. Why: global safety, scope, output rules, and mode-specific audit/tenant rules live outside individual agent prompts.
 - `agent/rules/` - always-active policy overlays. Why: resume hydration plus hunting/reporting/adversarial guardrails apply across prompts.
 - `agent/agents/` - canonical specialist prompt sources. Why: role-specific behavior belongs here, not in generated wrappers.
+- `ENGAGEMENT.md` (per-engagement) and `scope.json` - per-engagement ROE and machine-enforced scope. Why: engagement-specific rules of behavior (no-fire endpoints, required headers, rate caps, exfiltration limits) belong here and never enter operator-core or shared-constraints. The four prompt altitudes: global behavior → `operator-core.md`; all-specialist safety → `shared-constraints*.md`; per-engagement ROE → `ENGAGEMENT.md`; machine-enforced scope → `scope.json`.
 
 ### Skill and reference library
 

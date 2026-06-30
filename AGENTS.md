@@ -323,6 +323,33 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
    `vigil assess eval-capture ... --check` after a re-run to diff a fresh capture against the committed
    baseline without overwriting it; it exits non-zero on a coverage regression.
 
+## Promote engagement lessons to the prompt layer
+
+After each engagement, review it for durable, capability-neutral lessons and promote them so
+future engagements benefit. This closes the loop the tool-registration recipes above leave open
+for prompt-level learning — a tool's kali wrapper lands via the recipes above; engagement
+methodology observations belong here.
+
+1. **Identify promotable lessons.** Review any `ISSUES.md` or `METHODOLOGY-GAPS.md` artifacts
+   the engagement produced. A lesson is promotable when it generalizes across engagements without
+   naming a specific host, slug, CMS, or program-specific rule. Engagement-specific ROE (no-fire
+   endpoints, required request headers, specific marker values, rate caps) belongs in the
+   ENGAGEMENT.md template or `scope.json`, not in global prompts — it never enters
+   `operator-core.md` or `shared-constraints*.md`.
+
+2. **Route to the right layer.** Choose the lowest-specificity layer the lesson fits:
+   - Operator-loop workflow or dispatch doctrine → `agent/operator-core.md` (rerender after editing)
+   - Always-active hunting / reporting / adversarial guardrails → `agent/rules/*.md` (no render)
+   - Vuln-family or tool procedure methodology → `agent/skills/<name>/SKILL.md` (no render; follow
+     **Add a skill** above if no existing skill fits)
+   - Rules that must hold across many specialists → `agent/shared-constraints.md` (no render)
+
+3. **Verify.**
+   - [ ] Each edited file contains no real host, slug, program name, or per-engagement ROE.
+   - [ ] If `agent/operator-core.md` or `agent/agents/*.md` was touched: rerender
+         (`cd agent && ./scripts/render-operator-prompts.sh repo`) and review wrapper diffs.
+   - [ ] If a new skill was created: `vigil assess list-skills | grep <name>` confirms discovery.
+
 # Code map maintenance
 
 If you make a change that would make `CODE-MAP.md` inaccurate, update `CODE-MAP.md` in the same change.

@@ -222,6 +222,23 @@ silent `operator` attribution breaks coverage ownership.
 
 ---
 
+## 2d. Side-Effect Preflight
+
+Before sending a request that could **create persistent state or reach a human** —
+signup, request-access, support/report/ticket, password-reset, contact-form, or any
+endpoint whose name or path suggests a write that notifies someone — ask:
+
+> Does success *or* failure land in a real inbox, queue, or audit trail?
+
+If yes, or if unknown: **do not fire the probe.** Characterize the endpoint statically
+(HTTP method, parameters, response shape on a GET/HEAD) and surface a `scope_decision`
+record so the operator can decide whether it is in scope to test. Irreversible and
+notifying side-effects are not proved by triggering them — triggering them is the harm.
+The engagement-specific list of no-fire endpoints belongs in the `ENGAGEMENT.md` template;
+the principle here covers the class.
+
+---
+
 ## Contract-First Rule
 
 Before the **first invocation of any `vigil assess` verb that mutates durable
@@ -474,6 +491,13 @@ set chain metadata in `details` during `record-finding` or `update-finding`:
 }
 ```
 Use this instead of inventing a special workflow status for chain-only findings.
+
+**Proof-not-collection — one minimal sample is sufficient.** When you have proven access
+to a data set, one minimal **redacted** sample is all the evidence the finding needs.
+Never bulk-pull real user records, credentials, or PII to "demonstrate" a finding —
+volume does not strengthen the proof and only increases harm. The "evidence beats volume"
+rule (`hunting.md §6`) applies at the collection boundary: more records is not more
+proof, and extracting more is the harm, not the demonstration.
 
 **The `notes` field must contain replayable commands** — not prose descriptions. Instead of
 "Login to phpMyAdmin with blank password," write the actual command: curl with headers, cookies,

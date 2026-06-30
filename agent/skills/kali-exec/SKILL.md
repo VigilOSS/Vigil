@@ -528,6 +528,26 @@ Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `to
 
 Use PID-targeted cleanup, not binary-name signals — `pkill -f nmap` or `pkill -f ffuf` kills sibling specialists' parallel scans in the shared runtime, losing potentially hours of recon. For async jobs, use `vigil assess kali job stop <id>` (signals only the job-owned in-container PID); for synchronous calls, the CLI already handles the SIGTERM/SIGKILL escalation on `--timeout` expiry so no manual cleanup is needed.
 
+## Wire-Byte Verification Before Trusting a 406 / Content-Negotiation Verdict
+
+A 406 Not Acceptable response (or any content-negotiation-derived verdict) can be fabricated by a **malformed request**, not by the real target behavior. The most common source is an unquoted header value in shell argv that splits at whitespace into two separate tokens before it reaches the HTTP request:
+
+```bash
+# WRONG — the Accept header splits; the request goes out without a valid Accept
+curl https://TARGET/api/endpoint -H Content-Type: application/json
+
+# CORRECT — quote the entire header value so it reaches the wire intact
+curl https://TARGET/api/endpoint -H "Content-Type: application/json"
+```
+
+Before treating a 406 (or a content-negotiation-driven "handler not reached" result) as target behavior:
+
+1. **Inspect the recorded argv.** The audit row's `resolved_argv` field shows what ACTUALLY ran inside the container. Read it with `vigil assess get-command-run <id>` and confirm every `-H` value is quoted and complete.
+2. **Capture the raw wire bytes.** Re-run with `-v` (curl) or `-debug` (httpx) to see the literal request headers sent. A missing or truncated header explains the 406 without any target-side enforcement.
+3. **Send a canonical request.** Construct the request with explicit, fully-quoted headers and confirm the 406 persists before recording "content-negotiation blocked" as a verdict.
+
+An unquoted-header 406 is a **tooling artifact**, not a target signal — it fabricates a "handler not reached" lead that closes coverage prematurely. See `agent/rules/hunting.md §23` ("A non-conclusive response is a LEAD, not a verdict") for the doctrine.
+
 ## Troubleshooting and runtime errors
 
 When `vigil assess kali --help` errors or a verb fails unexpectedly, see `agent/references/runtime-guides/kali-cli.md` for diagnosis steps (runtime status, dtach reachability, dedup-window, common error messages).
