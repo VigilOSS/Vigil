@@ -327,7 +327,7 @@ exit is gated on:
   `assessment_artifacts` with producer-agent linkage
 - Resume-brief renders cleanly for the next phase's specialists
 
-`vigil assess transition-phase --to <next>` reports the DoD gaps; do not force-
+`vigil assess transition-phase <next>` reports the DoD gaps; do not force-
 transition without resolving them.
 
 ## 21. Writing discipline (anti-slop)

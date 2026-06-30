@@ -315,7 +315,7 @@ vigil assess ingest-arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target
 
 For more depth on a high-value endpoint, drop `-w` (full default list) and/or add `--passive`
 (it archive-augments the wordlist — note it still actively scans, so it adds traffic, not
-politeness; see `agent/skills/parameter-fuzzing/SKILL.md` and `references/tools/recon/arjun.md`).
+politeness; see `agent/skills/parameter-fuzzing/SKILL.md` and `agent/references/tools/recon/arjun.md`).
 Enriched rows carry `selected_by=arjun` and a `triage_rationale` (which names `kali sqlmap` for
 DB-class params), so Phase 3 dispatch picks them up like any other high-priority cluster.
 
@@ -373,8 +373,8 @@ The surface-collector agent prompt defines the full output format. Key sections:
 ## Extended Resources
 
 - `agent/references/tools/recon/katana.md` — live crawl doctrine, JS-aware defaults, headless escalation, and ingestion handoff
-- `references/tools/recon/gau.md` — gau CLI reference and pipeline patterns
-- `references/tools/recon/httpx.md` — HTTP probing reference for URL validation
+- `agent/references/tools/recon/gau.md` — gau CLI reference and pipeline patterns
+- `agent/references/tools/recon/httpx.md` — HTTP probing reference for URL validation
 - `agent/skills/browser-semantic-analysis/SKILL.md` — browser execution decision tree for JS-heavy apps, soft errors, browser-originated APIs, and headless/headed deltas
 - `agent/references/runtime-guides/browser-semantic-evidence.md` — evidence contract and headed-browser escalation rules
 - `agent/skills/gau-triage/SKILL.md` — deeper follow-up pass for large historical URL corpora: cluster review on top of inline-classified buffer, httpx body capture, and trufflehog secret scan

@@ -214,7 +214,7 @@ Reputation results land in the existing intel schema. There is **no**
 | `org-fact` (ASN ownership → company name) | `intel_org_facts` | `record-intel org-fact` |
 | `note` (free-form reputation summary; ASN reputation; hash reputation; anything that doesn't fit a structured row) | `intel_notes` | `record-intel note` |
 
-The intel schema is documented in `orchestrator/backend/app/db.py:1862-2094`
+The intel schema is documented in `orchestrator/backend/app/db.py:2145-2413`
 (the `CREATE TABLE` blocks). The schema files in `agent/schemas/intel-*.schema.json`
 describe the JSON payload shape per type.
 
@@ -369,7 +369,7 @@ this pass; missing providers (no API key, rate-limited) surface as
 - `agent/scripts/assess/lib/intel_types.py` — canonical intel-type ↔
   schema-file mapping; the list there is the source of truth for
   `record-intel <type>` verbs.
-- `orchestrator/backend/app/db.py:1862-2094` — schema source of truth
+- `orchestrator/backend/app/db.py:2145-2413` — schema source of truth
   for `intel_*` tables (intel_tech_components, intel_people,
   intel_emails, intel_domains, intel_cves, intel_dns_records,
   intel_social_profiles, intel_breach_records, intel_org_facts,
