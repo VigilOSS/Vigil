@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -83,6 +84,30 @@ def test_katana_bakes_in_deep_safe_defaults(monkeypatch):
     assert "-or" in cmd and "-ob" in cmd         # disk-bounded by default
     assert "-ef" in cmd                          # static assets excluded by default
     assert "-jc" in cmd and "-jsl" in cmd        # JS-aware by default
+
+
+def test_katana_accepts_legacy_positive_js_flags(monkeypatch):
+    captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_katana")
+    cli = _import("assess.cli")
+    cli.main(["kali", "katana", "-u", "https://x.example", "-jc", "-jsl", *_AUDIT])
+
+    cmd = captured["cmd"]
+    assert cmd.count("-jc") == 1
+    assert cmd.count("-jsl") == 1
+
+
+def test_katana_help_hides_legacy_positive_js_flags(capsys):
+    cli = _import("assess.cli")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["kali", "katana", "-h"])
+
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--no-jc" in out
+    assert "--no-jsl" in out
+    assert re.search(r"(^|\s)-jc($|[\s,])", out) is None
+    assert re.search(r"(^|\s)-jsl($|[\s,])", out) is None
 
 
 def test_katana_rate_hard_caps_at_20_and_allow_fast_overrides(monkeypatch):

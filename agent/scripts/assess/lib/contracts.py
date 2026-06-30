@@ -1322,9 +1322,9 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     "katana": (
         "Deep + scope-safe + disk-bounded by DEFAULT: `-d 5`, `-fs fqdn` (crawl only the exact seeded "
         "hosts — never wander to out-of-scope sibling subdomains found in links), `-or -ob` (omit "
-        "body/raw so a deep crawl does not fill the disk), `-ef <static set>`, and `-jc -jsl` (JS + "
-        "jsluice). Override each with one flag; `--keep-bodies` / `--include-static` undo the disk/asset "
-        "defaults for a bounded source pass.",
+        "body/raw so a deep crawl does not fill the disk), `-ef <static set>`, and JS endpoint crawling "
+        "+ jsluice extraction. Override each with one flag; `--keep-bodies` / `--include-static` undo "
+        "the disk/asset defaults for a bounded source pass.",
         "Rate is SAFE by default and decoupled from depth: `-rl 10`, hard-capped at 20 req/s (warn + "
         "clamp above; `--allow-fast-crawl` to exceed) and always clamped DOWN to the program rate "
         "ceiling. Go as deep as you like — politeness comes from the rate cap, not a shallow crawl.",

@@ -126,7 +126,7 @@ first-class path is Katana headless. The full crawl doctrine lives in
 
 ```bash
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -headless \
+  -u https://target.example -d 3 -headless \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_headless.txt \
   --technique DISCOVERY --intent "browser-semantic crawl for JS-generated routes" \
   --probe-kind fingerprint --phase collect --timeout 1800

@@ -37,10 +37,11 @@ The typed wrapper currently exposes:
 | `-o <file>` | output artifact path |
 | `--extra-args "<flags>"` | append version-specific Katana flags after typed flags |
 
-**The doctrine is now the DEFAULT.** A bare `vigil assess kali katana -u <host>` already runs
-`-jc -jsl -d 5 -fs fqdn -or -ob -ef <static set> -rl 10 -c 5`. Override any of these with the typed
-flag above — you no longer hand-assemble them in `--extra-args`. The result's `resolved_argv` shows
-the exact command that ran after attribution-header / IP-pin injection.
+**The doctrine is now the DEFAULT.** A bare `vigil assess kali katana -u <host>` already enables
+JavaScript endpoint crawling and jsluice extraction, then applies `-d 5`, `-fs fqdn`, `-or -ob`,
+`-ef <static set>`, `-rl 10`, and `-c 5`. Override any of these with the typed flag above — you no
+longer hand-assemble them in `--extra-args`. The result's `resolved_argv` shows the exact command
+that ran after attribution-header / IP-pin injection.
 
 Check the live runtime before using long-tail flags:
 
@@ -56,15 +57,16 @@ Use this as the normal Phase 2 crawl posture for a single app-like host:
 
 ```bash
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -c 10 -rl 20 \
+  -u https://target.example -d 3 -c 10 -rl 20 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_target.txt \
   --technique DISCOVERY --intent "live Katana crawl of target.example" \
   --probe-kind fingerprint --phase collect --timeout 1800
 ```
 
-Depth `3` with `-jc -jsl` is the baseline. Depth `1` is a smoke test, not a
-coverage pass. Raise depth only for a named reason such as nested documentation,
-API explorer routes, or app sections discovered late in the crawl.
+Depth `3` with the default JavaScript endpoint and jsluice extraction is the
+baseline. Depth `1` is a smoke test, not a coverage pass. Raise depth only for a
+named reason such as nested documentation, API explorer routes, or app sections
+discovered late in the crawl.
 
 ## SPA / JS-Heavy Escalation
 
@@ -74,7 +76,7 @@ matrix; Katana only supplies the broad headless crawl.
 
 ```bash
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -headless -c 5 -rl 10 \
+  -u https://target.example -d 3 -headless -c 5 -rl 10 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_target_headless.txt \
   --technique DISCOVERY --intent "headless Katana crawl for JS-generated routes" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -175,6 +177,7 @@ JS file). For any deep/long crawl where you only need the discovered routes plus
 metadata, add **`-or`** (omit-raw) and **`-ob`** (omit-body):
 
 ```bash
+# Raw katana binary, not the typed wrapper: pass JS flags explicitly.
 katana -list seeds.txt -d 5 -jc -jsl -kf all -fs fqdn -j -or -ob -o out.jsonl ...
 ```
 

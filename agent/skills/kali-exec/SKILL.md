@@ -42,7 +42,7 @@ Every typed verb's result JSON includes a `resolved_argv` — the argv that ACTU
 | `kali puredns` | Active DNS brute-force with massdns + wildcard filter (Tier C). | `references/tools/recon/puredns.md` |
 | `kali dnsx` | Bulk DNS resolution and record enrichment (Tier D). | `references/tools/recon/dnsx.md` |
 | `kali nikto` (CONDITIONAL — see triggers in `references/tools/recon/nikto.md`) | Web vuln scanner; legacy/odd-stack only. CLI flag is `--host <h>` (not `-h`, which argparse reserves for help) — the underlying nikto invocation builds `nikto -h <host>` correctly. | `references/tools/recon/nikto.md` |
-| `kali katana` | JS-aware crawler. Deep + scope-safe + disk-bounded by DEFAULT: `-d 5`, `-fs fqdn`, `-or -ob`, `-ef <static>`, `-jc -jsl`, and a SAFE `-rl 10` (hard-capped 20; `--allow-fast-crawl` to exceed). Depth is decoupled from rate — go deep without going fast. `--keep-bodies` / `--include-static` undo the disk/asset defaults; `-headless` for browser-semantic deltas. | `agent/references/tools/recon/katana.md` |
+| `kali katana` | JS-aware crawler. Deep + scope-safe + disk-bounded by DEFAULT: `-d 5`, `-fs fqdn`, `-or -ob`, `-ef <static>`, JavaScript endpoint crawling + jsluice extraction, and a SAFE `-rl 10` (hard-capped 20; `--allow-fast-crawl` to exceed). Depth is decoupled from rate — go deep without going fast. `--keep-bodies` / `--include-static` undo the disk/asset defaults; `-headless` for browser-semantic deltas. | `agent/references/tools/recon/katana.md` |
 | `kali gau` | Historical URL collection (Wayback / OTX / Common Crawl / URLScan). | `references/tools/recon/gau.md` |
 | `kali arjun` | Hidden HTTP-parameter discovery (GET/POST/JSON/XML), `--passive` OSINT mode, auth via `--headers`. Aim it at a GATED list (`vigil assess arjun-select`), then fold results back with `vigil assess ingest-arjun` so the classifier re-routes the now-parameterized endpoint. | `references/tools/recon/arjun.md` |
 | `kali whatweb` | Deep web technology fingerprinting. | `references/tools/recon/whatweb.md` |
@@ -335,7 +335,7 @@ headless escalation, and ingestion rules.
 ```bash
 # JS-aware authenticated crawl with rate cap.
 vigil assess kali katana \
-  -u https://app.example.com -jc -jsl -d 4 -c 10 -rl 20 \
+  -u https://app.example.com -d 4 -c 10 -rl 20 \
   -jsonl -o /engagements/$ENGAGEMENT_KEY/scans/katana_app.jsonl \
   --technique DISCOVERY --intent "JS-aware crawl of app.example.com" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -418,7 +418,7 @@ When you know what you want to learn, this lookup gets you to the right verb wit
 - "Find directories on a target?" → `kali ffuf -u <url>/FUZZ -w <wordlist>`.
 - "Sweep for CVEs/misconfigs/exposures?" → `kali nuclei -l <list> -t http/cves/,http/misconfiguration/,http/exposures/`.
 - "Probe a SQLi candidate?" → `kali sqlmap -u <url> --technique=<BEUSTQ subset> --batch`.
-- "Crawl a JS-heavy SPA?" → `kali katana -u <url> -jc -jsl` and apply `agent/references/tools/recon/katana.md`.
+- "Crawl a JS-heavy SPA?" → `kali katana -u <url> -headless` and apply `agent/references/tools/recon/katana.md`.
 - "Harvest historical URLs without touching the target?" → `kali gau <domain> --subs`.
 - "Enumerate subdomains?" → `kali subfinder -d <domain> -all` then `kali puredns resolve` then `kali dnsx`.
 - "Inventory runtime tools or versions?" → `kali exec --technique HEALTH --intent "tooling inventory" --probe-kind fingerprint --phase <phase> --timeout 60 -- which <tool...>`.
