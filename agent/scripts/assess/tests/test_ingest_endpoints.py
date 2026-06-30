@@ -24,7 +24,12 @@ import json
 
 from assess.commands import classify_work
 from assess.commands import ingest_endpoints
-from assess.lib.db import db_init, db_query
+from assess.lib.db import (
+    db_init,
+    db_insert_out_of_scope_work_item,
+    db_insert_work_item,
+    db_query,
+)
 
 
 class _Cfg:
@@ -405,3 +410,95 @@ def test_ingest_endpoints_scope_filter_excludes_out_of_scope_hosts(
     # or surface is created for them); only the admitted host did.
     observed_urls = {o.get("url") for o in fake_client.observations}
     assert observed_urls == {"https://good.example.com/api/v1/users"}
+
+
+def test_out_of_scope_insert_retires_existing_pending_same_url(tmp_path):
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # db_init requires the file to already exist
+    db_init(str(db))
+
+    url = "https://bad.example.com/api/v1/users"
+    db_insert_work_item(
+        str(db),
+        queue_key="variant:123:api",
+        method="GET",
+        url=url,
+        url_path="/api/v1/users",
+        query_params="{}",
+        body_params="{}",
+        path_params="{}",
+        cookie_params="{}",
+        case_type="api",
+        source="recon",
+        params_key_sig="",
+        request_variant_id=123,
+        auth_context="anonymous",
+    )
+
+    before = db_query(
+        str(db),
+        "SELECT status, terminal_reason FROM work_items WHERE queue_key = ?",
+        ("variant:123:api",),
+    )
+    assert before == [{"status": "pending", "terminal_reason": None}]
+
+    db_insert_out_of_scope_work_item(
+        str(db),
+        method="GET",
+        url=url,
+        url_path="/api/v1/users",
+        query_params={},
+        body_params={},
+        path_params={},
+        cookie_params={},
+        case_type="api",
+        source="recon",
+        params_key_sig="",
+        auth_context="anonymous",
+        host="bad.example.com",
+    )
+
+    rows = db_query(
+        str(db),
+        "SELECT queue_key, status, cluster_key, terminal_reason "
+        "FROM work_items WHERE url = ? ORDER BY id",
+        (url,),
+    )
+    assert rows == [
+        {
+            "queue_key": "variant:123:api",
+            "status": "skipped",
+            "cluster_key": "skipped:out-of-scope",
+            "terminal_reason": "skipped:out-of-scope | bad.example.com",
+        }
+    ]
+
+    db_insert_work_item(
+        str(db),
+        queue_key="variant:123:api",
+        method="GET",
+        url=url,
+        url_path="/api/v1/users",
+        query_params="{}",
+        body_params="{}",
+        path_params="{}",
+        cookie_params="{}",
+        case_type="api",
+        source="recon",
+        params_key_sig="",
+        request_variant_id=123,
+        auth_context="anonymous",
+    )
+
+    readmitted = db_query(
+        str(db),
+        "SELECT status, cluster_key, terminal_reason FROM work_items WHERE queue_key = ?",
+        ("variant:123:api",),
+    )
+    assert readmitted == [
+        {
+            "status": "pending",
+            "cluster_key": "gf:api-versioning",
+            "terminal_reason": None,
+        }
+    ]
