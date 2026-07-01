@@ -1165,10 +1165,16 @@ def required_header_attribution_gap(
     if not reached:
         return ""
     haystack = " ".join(cmd).lower()
+    # Match name:value tolerating any whitespace after the colon, so a manually
+    # supplied ``-H "X-Bug-Bounty:handle"`` (no space) is recognized as present
+    # rather than mistakenly refused — Layer-1 idempotency is name-only and does
+    # not re-canonicalize an operator's own spacing.
     missing = [
         f"{name}: {value}"
         for name, value in headers.items()
-        if f"{name}: {value}".lower() not in haystack
+        if not re.search(
+            re.escape(name.lower()) + r":\s*" + re.escape(value.lower()), haystack
+        )
     ]
     if not missing:
         return ""
