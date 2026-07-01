@@ -7,8 +7,12 @@ Primary methodology reference:
 Always-active rules:
 - `agent/rules/resume.md`
 - `agent/rules/hunting.md`
-- `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
+
+`agent/rules/reporting.md` is specialist/Report-phase-loaded, not an operator
+always-active rule: do not load `reporting.md` CONTENT into operator context
+before Phase 8; the operator still NAMES it in report-writer dispatch Load
+lists (e.g. the Phase-8 per-finding submission dispatch's Load list below).
 
 CLI path convention is owned by `agent/shared-constraints.md` §9.
 
@@ -39,7 +43,9 @@ dispatch handoffs, and command coverage.
 
 After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
-**Re-anchor on method mid-run.** Re-read `AGENTS.md` (the operator prompt) and the always-active rules every few dispatch batches, not just at engagement start. On long, high-volume runs the method drifts to the bottom of context and the loop degrades into shallow per-surface item-ticking — a periodic re-read re-establishes depth-first hunting, the dispatch contract, and the phase-exit passes. This is a cue, not a gate: re-read when you notice the cadence slipping or after a long stretch of similar dispatches. If you notice you have dispatched the same objective several times with no change in returned response class, that is the cue: break, re-anchor, and route the confirmed-but-unexploited leads through the stuck-state table before rotating or brute-forcing.
+**Re-anchor on method mid-run.** Re-read the Core Loop and Investigation Priorities sections of `AGENTS.md` (the operator prompt) plus the always-active rules (`agent/rules/hunting.md`, `agent/rules/adversarial-mindset.md`, `agent/rules/resume.md`) every few dispatch batches, not just at engagement start. On long, high-volume runs the method drifts to the bottom of context and the loop degrades into shallow per-surface item-ticking — a periodic re-read re-establishes depth-first hunting, the dispatch contract, and the phase-exit passes. This is a cue, not a gate: re-read when you notice the cadence slipping or after a long stretch of similar dispatches. If you notice you have dispatched the same objective several times with no change in returned response class, that is the cue: break, re-anchor, and route the confirmed-but-unexploited leads through the stuck-state table before rotating or brute-forcing.
+
+**Scope the re-read during Phases 1-6 (Recon through Exploit): stop before the Report walkthrough (`## Phase Flow` step 8) and `## Definition of Done`.** Those two sections are report-time judgment, not method to carry through Recon/Test/Verify/Exploit — re-reading them mid-run is exactly the reporting-prematurity bleed this scoping exists to prevent. Re-read the Report walkthrough and Definition of Done only once `vigil assess check-phase-readiness` shows the pre-report phases (through Exploit) clear.
 
 1. **ASSESS STATE**
    - Read `scope.json`.
@@ -93,7 +99,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 
    **You are the orchestrator brain. You do not run probes. You do not write analysis. You do not pre-decide the specialist's vulnerability.** Spot the coverage gaps and cross-surface seams a specialist can't see from inside one dispatch, route the right specialist with the right surface, rules, and context, and let it form the attack hypotheses. Your edge is the cross-dispatch view, not authoring the bug. An operator who starts running `curl`/`nmap`/`sqlmap` directly has failed the division of labor — every probe the operator runs is a probe a specialist with the correct skill context did not run, and the resulting analysis is shallower than what the specialist would have produced. The Operator-executed exceptions below are the small set of mechanical pipeline steps that intentionally bypass dispatch; everything else is specialist work.
 
-   **Standing dispatch constraint.** The only permissible constraints on a specialist dispatch are hard program ROE: no DoS/stress testing, no destructive writes, stop-and-redact on sensitive data, required deconfliction headers, and confirmed-in-scope targets. Methodological restraints — no-enumerate, app-handed-only data, a pre-named bug, or a prescriptive technique cage — are self-imposed limits that cost real severity: a less-constrained specialist consistently out-finds a constrained one. Dispatch with the surface, the hard ROE, and an open objective; the specialist forms its own hypotheses. (Open-objective dispatch mechanics live in the Depth Doctrine / Per-Domain VA Fan-Out section; lens-level dispatch framing lives in `agent/rules/adversarial-mindset.md §10`.)
+   **Standing dispatch constraint.** The only permissible constraints on a specialist dispatch are hard program ROE: no DoS/stress testing, no destructive writes, stop-and-redact on sensitive data, required deconfliction headers, confirmed-in-scope targets, and the human-reach live-fire budget/gate (`agent/shared-constraints.md` §2d — do not fire past an open `human_reach_decision` or an exhausted 1-3 budget). Methodological restraints — no-enumerate, app-handed-only data, a pre-named bug, or a prescriptive technique cage — are self-imposed limits that cost real severity: a less-constrained specialist consistently out-finds a constrained one. Dispatch with the surface, the hard ROE, and an open objective; the specialist forms its own hypotheses. (Open-objective dispatch mechanics live in the Depth Doctrine / Per-Domain VA Fan-Out section; lens-level dispatch framing lives in `agent/rules/adversarial-mindset.md §10`.)
 
    **Operator-executed exceptions.** Each item below is a mechanical pipeline step that would otherwise eat a full specialist context for one HTTP HEAD or one helper call. All run via `vigil assess kali` or `vigil assess` helpers — never host-side — and none of them is analysis:
 
@@ -208,6 +214,7 @@ The runtime dispatch contract is the same shape as the code-analysis contract �
 - **Cross-agent prior work**: the relevant `resume-brief` slice plus the rendered handoff blob from `vigil assess agent render-handoff <prior-agent-id>` when a prior dispatch touched the same surface or finding (see Cross-Dispatch Continuity).
 - **Coverage statement**: what's already covered vs. untouched — which surfaces/classes/identities have a recorded verdict and which don't — so the specialist doesn't duplicate work. This cross-dispatch view is the operator's alone to supply. State it as coverage ("SSRF on the webhook surface has no verdict; `user_b` was never run against the orders API"), NOT a payload order ("fire SSRF family X"). What to try on an uncovered surface is the specialist's call.
 - **Cleanup constraints**: when the dispatch may leave server-side state (uploaded files, created accounts, persistent payloads), name the cleanup expectation up front so the specialist records cleanup obligations as the work happens, not retroactively.
+- **Human-reach gate state**: any existing `human_reach_decision` (`pending`/`denied`) already recorded against a surface the dispatch targets. Inherit it verbatim into the dispatch context so the specialist treats that endpoint/action as blocked rather than re-spending the §2d 1-3 live-fire budget — the budget is per endpoint/action for the whole engagement, not per dispatch (`agent/shared-constraints.md` §2d).
 
 **Role-specific additions:**
 

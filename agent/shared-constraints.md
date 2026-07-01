@@ -226,16 +226,120 @@ silent `operator` attribution breaks coverage ownership.
 
 Before sending a request that could **create persistent state or reach a human** —
 signup, request-access, support/report/ticket, password-reset, contact-form, or any
-endpoint whose name or path suggests a write that notifies someone — ask:
+endpoint whose name or path suggests a write that notifies someone — run this
+procedure.
 
-> Does success *or* failure land in a real inbox, queue, or audit trail?
+**Posture change: this section moved from zero-fire to capped-live-fire.**
+Previously: "if yes, or if unknown: do not fire the probe" — permanent, no path to
+resolve a genuine unknown. Now: static-first (unlimited), then a hard, small,
+audited live-fire budget to resolve real ambiguity, gated by a durable recorded
+decision. This is a deliberate loosening of a global default, not a relaxation of
+caution — read the whole procedure, including the cross-dispatch rule, before
+relying on the budget.
 
-If yes, or if unknown: **do not fire the probe.** Characterize the endpoint statically
-(HTTP method, parameters, response shape on a GET/HEAD) and surface a `scope_decision`
-record so the operator can decide whether it is in scope to test. Irreversible and
-notifying side-effects are not proved by triggering them — triggering them is the harm.
-The engagement-specific list of no-fire endpoints belongs in the `ENGAGEMENT.md` template;
-the principle here covers the class.
+### Step 1 — mandatory-first, unlimited static characterization
+
+Before any live fire, characterize the endpoint statically. This step carries no
+request budget — run as many read-only, non-triggering probes as needed:
+
+- The HTTP method(s) and parameters the endpoint accepts
+- The response shape on a non-triggering `GET`/`HEAD`/`OPTIONS` (status, headers,
+  body fields) — never the write verb itself
+- What the source, API spec, or documentation say the endpoint does
+- Cross-reference `ENGAGEMENT.md` §4 (No-Fire Endpoints) and §5 (Irreversible and
+  Notifying Flows) for a pre-declared answer, including its Known-Safe Test
+  Destinations table
+
+### Step 2 — the reaches-a-real-third-party test
+
+Ask: does success *or* failure land in a real inbox, queue, audit trail, or notify
+a real person who is not the researcher?
+
+**POSITIVE (reaches a real third party) — examples, not exhaustive:**
+- A live support/ticket queue that a real agent reads and actions
+- An email, SMS, or push notification delivered to a non-researcher-owned address
+- A role/access request routed to a real approver
+- A pager/on-call alert
+- A post to a customer-visible channel (public comment, shared workspace, forum)
+
+**NEGATIVE (does not reach a real third party) — examples, not exhaustive:**
+- A researcher-owned test identity (an account, mailbox, or phone number the
+  researcher provisioned and controls)
+- A documented sandbox/staging environment with no live inbox behind it
+- A mock/stub queue that accepts the request but has no delivery path
+- A self-directed notification to the researcher's own test account
+
+A proven-NEGATIVE endpoint is ordinary surface — hunt it fully; it carries no
+side-effect risk. Step 1's static pass should aim to reach one of these two
+answers; only genuine ambiguity after a thorough static characterization proceeds
+to Step 3.
+
+### Step 3 — hard 1-3 live-fire budget (POSITIVE, or unresolved after Step 1-2)
+
+If Step 2 resolves POSITIVE, or static characterization leaves it genuinely
+**unknown**, you may spend a budget of **1-3 live requests, per endpoint/action,
+across the WHOLE engagement** (not per dispatch — see the cross-dispatch rule
+below) to resolve the ambiguity. Stop the instant either condition is met:
+
+- the probe **confirms** the endpoint reaches a real third party, or
+- the budget (3 attempts) is **exhausted**.
+
+**This budget is a prompt-enforced discipline / WARN backstop, not a hard technical
+cap** — nothing in the CLI counts or blocks it. Hold yourself to it with the same
+discipline as a hard cap anyway: it exists to bound the harm of a wrong "unknown"
+call, not to license routine live-fire testing of notify-shaped endpoints. 1-3 is
+the **global ceiling**; `ENGAGEMENT.md` may only **tighten** it for a program (cap
+at 1 live attempt, or reinstate zero-fire for a named endpoint) — it may never
+loosen it.
+
+### Cross-dispatch rule — check before every fire, do not re-spend
+
+**Before ANY live human-reach fire**, check for an existing `human_reach_decision`
+already recorded against that exact endpoint/action — via `vigil assess resume-brief`
+(recent decisions surface there; narrow with `--q <endpoint-or-keyword>`) or by
+reviewing `agent decision` history for the surface. If a `human_reach_decision` on
+that endpoint/action already carries `choice=pending` or `choice=denied`, treat it
+as **blocked — do not fire**, regardless of whether your own dispatch has spent any
+of the nominal 1-3 itself.
+
+**The 1-3 budget is per endpoint/action for the whole engagement, not per dispatch
+and not per specialist** — a fresh dispatch does not get a fresh budget, and two
+specialists must not each independently spend 3 against the same target. The
+operator is expected to inject any open human-reach gate for a surface into the
+dispatch context before sending a specialist at it (see `operator-core.md`
+Dispatch Context Template), so the state is inherited rather than rediscovered —
+but do not rely on that alone; check directly before firing.
+
+### Recording and continuation gate
+
+Any specialist records the decision directly (same pattern as `scope_decision`):
+
+```bash
+vigil assess agent decision --kind human_reach_decision --choice pending \
+    --surfaced-to-user \
+    --payload-json '{"endpoint": "<path-or-url>", "action": "<what-it-does>",
+    "live_attempts_used": <n>, "destination_class": "real_third_party|unknown",
+    "evidence": "<what Step 1-3 showed>"}'
+```
+
+Do not continue live-firing that endpoint/action until the operator resolves the
+decision. Valid resolutions:
+
+- `approved_continue` — proceed with further live-fire (rare; the operator has
+  independent grounds the destination is safe)
+- `approved_limited` — proceed under a named, narrower constraint
+- `denied` — do not fire again; treat as permanently blocked for this
+  endpoint/action
+- `not_real_recipient` — the destination was confirmed NOT a real third party;
+  this **retroactively lifts the cap** for that endpoint and its siblings (it
+  reverts to ordinary surface, per the negative-example list in Step 2)
+
+Irreversible and notifying side-effects are not proved by triggering them beyond
+this bounded, gated budget — firing past the budget, or past an open
+`pending`/`denied` gate, is the harm this procedure exists to prevent. The
+engagement-specific list of no-fire endpoints and known-safe test destinations
+belongs in the `ENGAGEMENT.md` template (§4, §5); the principle here covers the
+class.
 
 ---
 
@@ -596,7 +700,7 @@ Record state immediately using `vigil assess` with JSON files:
 - **Credential tests:** `vigil assess post credential-tests <json-file>`
 - **Access records:** `vigil assess post access-records <json-file>`
 - **Coverage updates:** `vigil assess patch coverage-items/<id> <json-file>`
-- **Blocked techniques:** `vigil assess post blocked-techniques <json-file>`
+- **Blocked techniques:** `vigil assess block-technique --technique <TECHNIQUE> --target-kind <kind> --target-ref <ref> --reason <why>` (the technique-key auto-derives; override with `--technique-key`. Review with `vigil assess list-blocked-techniques`). Prefer this first-class verb over the raw `vigil assess post blocked-techniques <json-file>`.
 - **Probe runs:** `vigil assess post probe-runs <json-file>`
 
 Write payloads to `/tmp/<type>-<slug>.json` before calling — inline JSON shell arguments cause escaping damage and are not auditable.
@@ -667,8 +771,8 @@ well-known file:
 - `$DIR/.listener_url` — present when the operator has provisioned a reverse-shell listener / tunnel address. Read it to learn where shells should call back.
 
 Agents READ `.listener_url` (never write it). When `.listener_url` is missing
-and exploitation needs one, record a blocked technique via `vigil assess post
-blocked-techniques <json-file>` instead of attempting to bind a port yourself.
+and exploitation needs one, record a blocked technique via `vigil assess
+block-technique` instead of attempting to bind a port yourself.
 
 OOB callback domains are not engagement files. Get readiness and the configured
 base domain from `vigil oob status --json` (expect `health=ok`); create or reuse a

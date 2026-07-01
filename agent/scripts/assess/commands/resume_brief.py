@@ -115,6 +115,7 @@ def _render_markdown(brief: dict) -> str:
             lines.append(f"  - … showing {len(shown)} of {len(rows)} (medium+ always shown)")
     _render_surfaces(lines, brief.get("surfaces") or {})
     _render_work_buffer(lines, brief.get("work_buffer") or {})
+    _render_attempts(lines, brief.get("attempts") or {})
     lines.extend(["", "## Dispatches"])
     dispatches = brief.get("dispatches") or {}
     for row in dispatches.get("stale_in_progress_dispatches") or []:
@@ -253,6 +254,55 @@ def _render_work_buffer(lines: list, work_buffer: dict) -> None:
         lines.append(f"  - {name}: {count}")
     if len(items) > _WORK_BUFFER_BUCKET_LIMIT:
         lines.append(f"  - … showing {_WORK_BUFFER_BUCKET_LIMIT} of {len(items)} buckets")
+
+
+_ATTEMPTS_RENDER_LIMIT = 8
+
+
+def _render_attempts(lines: list, attempts: dict) -> None:
+    """Render the ## Attempts do-today ledger (P1-C). No-op when the brief
+    carries no attempts block (older backend) or all three sources are empty —
+    a fresh engagement should not accrue a noise section.
+
+    Surfaces three previously resume-invisible signals so a re-dispatch reads
+    what was already tried-and-walled-off on a surface: recorded blocked
+    techniques, non-covering probe runs, and roe_blocked findings."""
+    if not attempts:
+        return
+    blocked = attempts.get("blocked_techniques") or []
+    probes = attempts.get("noncovering_probe_runs") or []
+    roe = attempts.get("roe_blocked_findings") or []
+    if not (blocked or probes or roe):
+        return
+    lines.extend(["", "## Attempts"])
+
+    lines.append(f"- blocked techniques ({attempts.get('blocked_techniques_count', len(blocked))}):")
+    if not blocked:
+        lines.append("  - none")
+    for row in blocked[:_ATTEMPTS_RENDER_LIMIT]:
+        target = f"{row.get('target_kind') or '-'}:{row.get('target_ref') or '-'}"
+        lines.append(
+            f"  - #{row.get('id')} {row.get('technique') or '-'} "
+            f"[{row.get('retry_state') or '-'}] {target} :: "
+            f"{_trim(row.get('reason') or '', 120)}"
+        )
+
+    lines.append(f"- non-covering probe runs ({attempts.get('noncovering_probe_runs_count', len(probes))}):")
+    if not probes:
+        lines.append("  - none")
+    for row in probes[:_ATTEMPTS_RENDER_LIMIT]:
+        host_path = f"{row.get('target_host') or '-'}{row.get('target_path') or ''}"
+        lines.append(
+            f"  - #{row.get('id')} {row.get('attack_family') or '-'} "
+            f"[{row.get('result_status') or '-'}] {row.get('tool_name') or '-'} "
+            f"{_trim(host_path, 80)}"
+        )
+
+    lines.append(f"- roe-blocked findings ({attempts.get('roe_blocked_findings_count', len(roe))}):")
+    if not roe:
+        lines.append("  - none")
+    for row in roe[:_ATTEMPTS_RENDER_LIMIT]:
+        lines.append("  - " + _finding_line(row))
 
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}

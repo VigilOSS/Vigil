@@ -23,8 +23,13 @@ Primary methodology reference:
 Always-active rules:
 - `agent/rules/resume.md`
 - `agent/rules/hunting.md`
-- `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
+
+`agent/rules/reporting.md` is specialist/Report-phase-loaded, not an operator
+always-active rule: do not load `reporting.md` CONTENT into operator context
+before the report dispatch; `report-writer` and the code specialists that draft
+report-bound text (`code-vuln-hunter`, `code-vuln-verifier`) still load it
+directly via their own Load-First lists.
 
 CLI path convention is owned by `agent/shared-constraints-code.md` §9.
 

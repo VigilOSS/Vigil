@@ -193,3 +193,136 @@ def test_delete_one_and_all(client, isolate_settings):
 def test_credentials_404_for_unknown_engagement(client, isolate_settings):
     _seed(client, isolate_settings)
     assert client.get("/engagements/nope/credentials").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Logout / deletion-cookie guard (the bug: a logout Set-Cookie wiped the store)
+# ---------------------------------------------------------------------------
+
+def test_capture_logout_deleted_value_does_not_wipe_stored_cookie(client, isolate_settings):
+    """A logout Set-Cookie with value 'deleted' must never overwrite a live session.
+
+    Regression for: CMS F5/APM sends Set-Cookie: MRHSession=deleted on logout,
+    which used to wipe the stored MRHSession for ALL concurrent engagements.
+    """
+    _seed(client, isolate_settings)
+    # 1. Seed a live session.
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.cms.gov",
+            "scope_host": "example.cms.gov",
+            "cookies": {"MRHSession": "abc123valid", "F5_ST": "ST2of2id9876"},
+        },
+    )
+    # Confirm the live session is stored.
+    before = client.get(f"/engagements/{KEY}/credentials/default").json()
+    assert before["cookies"]["MRHSession"] == "abc123valid"
+    assert before["cookies"]["F5_ST"] == "ST2of2id9876"
+
+    # 2. Simulate a logout — backend receives deletion-value cookies.
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.cms.gov",
+            "scope_host": "example.cms.gov",
+            "cookies": {"MRHSession": "deleted", "F5_ST": "deleted"},
+        },
+    )
+
+    # 3. The stored session must be unchanged — logout is a no-op at the store.
+    after = client.get(f"/engagements/{KEY}/credentials/default").json()
+    assert after["cookies"]["MRHSession"] == "abc123valid", (
+        "logout 'deleted' value must not overwrite stored live cookie"
+    )
+    assert after["cookies"]["F5_ST"] == "ST2of2id9876", (
+        "logout 'deleted' value must not overwrite stored live cookie"
+    )
+
+
+def test_capture_empty_value_does_not_wipe_stored_cookie(client, isolate_settings):
+    """A cookie with empty value (RFC 6265 deletion) is also treated as a no-op."""
+    _seed(client, isolate_settings)
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.cms.gov",
+            "scope_host": "example.cms.gov",
+            "cookies": {"MRHSession": "alive-session"},
+        },
+    )
+    # Empty-value capture (simulates Max-Age=0 / Expires-past that proxy already stripped).
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.cms.gov",
+            "scope_host": "example.cms.gov",
+            "cookies": {"MRHSession": ""},
+        },
+    )
+    after = client.get(f"/engagements/{KEY}/credentials/default").json()
+    assert after["cookies"]["MRHSession"] == "alive-session", (
+        "empty-value cookie must not wipe a stored live cookie"
+    )
+
+
+def test_capture_fresh_login_cookie_updates_stored_value(client, isolate_settings):
+    """A fresh non-deletion Set-Cookie (real login) must update the stored value."""
+    _seed(client, isolate_settings)
+    # Seed old session.
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.cms.gov",
+            "scope_host": "example.cms.gov",
+            "cookies": {"MRHSession": "old-session"},
+        },
+    )
+    # New login delivers a fresh valid cookie.
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.cms.gov",
+            "scope_host": "example.cms.gov",
+            "cookies": {"MRHSession": "brand-new-session"},
+        },
+    )
+    after = client.get(f"/engagements/{KEY}/credentials/default").json()
+    assert after["cookies"]["MRHSession"] == "brand-new-session", (
+        "a fresh valid cookie value must replace the old one"
+    )
+
+
+def test_capture_mixed_deletion_and_live_cookies(client, isolate_settings):
+    """Mixed payload: only live (non-deletion) cookies in the delta are applied."""
+    _seed(client, isolate_settings)
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.cms.gov",
+            "scope_host": "example.cms.gov",
+            "cookies": {"MRHSession": "live", "other": "value"},
+        },
+    )
+    # Delta contains one deletion and one new live cookie.
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.cms.gov",
+            "scope_host": "example.cms.gov",
+            "cookies": {"MRHSession": "deleted", "new_cookie": "fresh"},
+        },
+    )
+    after = client.get(f"/engagements/{KEY}/credentials/default").json()
+    # MRHSession must not be overwritten.
+    assert after["cookies"]["MRHSession"] == "live"
+    # The new live cookie must be added.
+    assert after["cookies"]["new_cookie"] == "fresh"

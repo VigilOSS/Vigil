@@ -35,7 +35,7 @@ def _load_proxy_addon_module():
     mitmproxy_module = ModuleType("mitmproxy")
     mitmproxy_module.http = SimpleNamespace(HTTPFlow=object)
     mitmproxy_module.ctx = SimpleNamespace(
-        options=SimpleNamespace(engagements_root="", engagement_dir="", registry_poll_seconds=30),
+        options=SimpleNamespace(engagements_root="", registry_poll_seconds=30),
         log=SimpleNamespace(info=lambda *a, **k: None, warn=lambda *a, **k: None, error=lambda *a, **k: None),
     )
     sys.modules["mitmproxy"] = mitmproxy_module

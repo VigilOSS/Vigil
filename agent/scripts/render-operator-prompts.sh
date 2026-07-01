@@ -294,7 +294,7 @@ render_prompt_locality() {
 - Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
 - Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md` / `.opencode/agent/*.md` / `.goose/recipes/*.yaml`
-- Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
+- Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/adversarial-mindset.md`. `agent/rules/reporting.md` is specialist/Report-phase-loaded (named in report-writer dispatch Load lists, not loaded into operator context before Phase 8).
 - Skill discovery: `vigil assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
 - Reference discovery: `vigil assess list-references` (compact name + one-line description + paired skill; `--skill <name>` for a skill's paired refs).

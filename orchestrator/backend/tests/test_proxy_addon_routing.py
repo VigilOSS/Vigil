@@ -36,9 +36,7 @@ def _load_proxy_addon_module():
             warn=lambda *_a, **_k: None,
             error=lambda *_a, **_k: None,
         ),
-        options=SimpleNamespace(
-            engagements_root="", engagement_dir="", registry_poll_seconds=30
-        ),
+        options=SimpleNamespace(engagements_root="", registry_poll_seconds=30),
     )
     sys.modules.setdefault("mitmproxy", mitmproxy)
     sys.modules.setdefault("mitmproxy.http", http)
@@ -74,6 +72,23 @@ def _seed_engagement(
 # ---------------------------------------------------------------------------
 # Filesystem registry + matching
 # ---------------------------------------------------------------------------
+
+
+def test_load_exposes_only_shared_engagements_root_option() -> None:
+    module = _load_proxy_addon_module()
+    collector = module.CaseCollector()
+    added: list[tuple] = []
+
+    class Loader:
+        def add_option(self, *args) -> None:
+            added.append(args)
+
+    collector.load(Loader())
+
+    option_names = [args[0] for args in added]
+    assert "engagements_root" in option_names
+    assert "registry_poll_seconds" in option_names
+    assert "engagement_dir" not in option_names
 
 
 def test_registry_scans_each_engagement_scope_json(tmp_path: Path) -> None:
@@ -760,3 +775,56 @@ def test_insert_case_recovers_from_connection_invisible_to_readers(
         .fetchall()
     )
     assert orphan_rows == [("variant:2:page",)]
+
+
+# ---------------------------------------------------------------------------
+# _is_deletion_set_cookie unit tests (logout guard)
+# ---------------------------------------------------------------------------
+
+
+def test_is_deletion_set_cookie_f5_apm_deleted_value():
+    """F5/APM CMS logout: value is the literal string 'deleted'."""
+    module = _load_proxy_addon_module()
+    # Canonical CMS logout pattern.
+    assert module._is_deletion_set_cookie("MRHSession=deleted; path=/; Secure; HttpOnly") is True
+    assert module._is_deletion_set_cookie("F5_ST=deleted; path=/") is True
+    # Case-insensitive.
+    assert module._is_deletion_set_cookie("MRHSession=DELETED; path=/") is True
+    assert module._is_deletion_set_cookie("MRHSession=Deleted") is True
+
+
+def test_is_deletion_set_cookie_empty_value():
+    """Empty value is a deletion (Max-Age=0 stripped by some stacks before the value)."""
+    module = _load_proxy_addon_module()
+    assert module._is_deletion_set_cookie("MRHSession=; path=/") is True
+    assert module._is_deletion_set_cookie("MRHSession=") is True
+
+
+def test_is_deletion_set_cookie_max_age_zero():
+    """Max-Age=0 is the RFC 6265 deletion mechanism."""
+    module = _load_proxy_addon_module()
+    assert module._is_deletion_set_cookie("sid=abc; Max-Age=0") is True
+    assert module._is_deletion_set_cookie("sid=abc; max-age=0; path=/") is True
+    assert module._is_deletion_set_cookie("sid=abc; Max-Age=-1") is True
+
+
+def test_is_deletion_set_cookie_expires_in_past():
+    """Expires with an epoch / far-past date is a deletion."""
+    module = _load_proxy_addon_module()
+    assert module._is_deletion_set_cookie(
+        "sid=abc; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    ) is True
+    assert module._is_deletion_set_cookie(
+        "sid=abc; expires=Thu, 01 Jan 1970 00:00:01 GMT"
+    ) is True
+
+
+def test_is_deletion_set_cookie_live_cookie_not_deletion():
+    """A normal session cookie must not be treated as a deletion."""
+    module = _load_proxy_addon_module()
+    assert module._is_deletion_set_cookie("MRHSession=abc123valid; path=/; Secure") is False
+    assert module._is_deletion_set_cookie("sid=xyz; Max-Age=3600") is False
+    # A far-future Expires is not a deletion (timegm >= now).
+    assert module._is_deletion_set_cookie(
+        "sid=abc; Expires=Thu, 01 Jan 2099 00:00:00 GMT"
+    ) is False
