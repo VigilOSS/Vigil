@@ -2307,6 +2307,82 @@ def test_classifier_version_deterministic_across_pythonhashseed() -> None:
     assert v_a == v_b == v_c, f"non-deterministic: {v_a!r} {v_b!r} {v_c!r}"
 
 
+def test_classifier_version_inputs_cover_every_classification_constant() -> None:
+    """Completeness guard (review MED): CLASSIFIER_VERSION must digest EVERY
+    classification-affecting module-level constant, not just the four headline
+    tables. If a taxonomy constant is missing from the input set, editing it does
+    NOT bump the digest and `--reclassify-stale` silently misses the rows it
+    changes. This pins the exact set so adding a new classification constant
+    without wiring it into the digest fails here (and forces a `.pattern` string
+    for any regex, since a bare Pattern is not JSON-serializable)."""
+    import json
+
+    import assess.lib.classify_buckets as cb
+
+    inputs = cb._CLASSIFIER_VERSION_INPUTS
+
+    # The digest input must stay JSON-serializable after canonicalization (a
+    # stray compiled Pattern would crash `json.dumps` here).
+    json.dumps(cb._canonicalize(inputs), sort_keys=True)
+
+    # Every classification-affecting constant `classify_row`/`_context_bonus`/the
+    # path predicates read is digested. Regexes are digested by `.pattern`.
+    assert inputs["buckets"] is cb._BUCKETS
+    assert inputs["regex_bucket_rules"] is cb._REGEX_BUCKET_RULES
+    assert inputs["type_floor"] is cb._TYPE_FLOOR
+    assert inputs["inert_types"] is cb.INERT_TYPES
+    assert inputs["privileged_action_verbs"] is cb._PRIVILEGED_ACTION_VERBS
+    assert inputs["full_url_regex_buckets"] is cb._FULL_URL_REGEX_BUCKETS
+    assert inputs["auth_saml_fragments"] is cb._AUTH_SAML_FRAGMENTS
+    assert inputs["upload_generic_shadows"] is cb._UPLOAD_GENERIC_SHADOWS
+    assert inputs["placeholder_tokens"] is cb._PLACEHOLDER_TOKENS
+    assert inputs["cluster_placeholders"] is cb._CLUSTER_PLACEHOLDERS
+    assert inputs["uuid_re"] == cb._UUID_RE.pattern
+    assert inputs["long_hex_re"] == cb._LONG_HEX_RE.pattern
+    assert inputs["year_re"] == cb._YEAR_RE.pattern
+    assert inputs["numeric_re"] == cb._NUMERIC_RE.pattern
+    assert inputs["opaque_token_re"] == cb._OPAQUE_TOKEN_RE.pattern
+    assert inputs["api_version_seg_re"] == cb._API_VERSION_SEG_RE.pattern
+    assert inputs["weak_token_cap"] == cb.WEAK_TOKEN_CAP
+    assert inputs["camel_boundary_re"] == cb._CAMEL_BOUNDARY_RE.pattern
+    assert inputs["fragment_boundary"] == cb._FRAGMENT_BOUNDARY
+    assert inputs["nonprod_host_label_re"] == cb._NONPROD_HOST_LABEL_RE.pattern
+    assert inputs["nondefault_ports"] is cb._NONDEFAULT_PORTS
+    assert inputs["live_status_tokens"] is cb._LIVE_STATUS_TOKENS
+    assert inputs["gau_archive_source"] == cb._GAU_ARCHIVE_SOURCE
+    assert inputs["dead_live_status_tokens"] is cb._DEAD_LIVE_STATUS_TOKENS
+    assert inputs["logic_revision"] == cb._CLASSIFIER_LOGIC_REVISION
+
+
+def test_classifier_version_tracks_logic_revision_and_tables() -> None:
+    """A bump to `_CLASSIFIER_LOGIC_REVISION` (the escape hatch for pure-logic
+    edits) OR to any digested taxonomy table must change CLASSIFIER_VERSION. We
+    recompute the digest over a mutated copy of the inputs and assert it moves,
+    proving both the logic-revision hatch and a representative context/demotion
+    table actually feed the stamp."""
+    import hashlib
+    import json
+
+    import assess.lib.classify_buckets as cb
+
+    def _digest(inputs: dict) -> str:
+        return hashlib.sha256(
+            json.dumps(cb._canonicalize(inputs), sort_keys=True).encode("utf-8")
+        ).hexdigest()[:12]
+
+    base = dict(cb._CLASSIFIER_VERSION_INPUTS)
+    assert _digest(base) == cb.CLASSIFIER_VERSION
+
+    bumped_logic = dict(base)
+    bumped_logic["logic_revision"] = base["logic_revision"] + 1
+    assert _digest(bumped_logic) != cb.CLASSIFIER_VERSION
+
+    # A representative previously-undigested table now moves the stamp too.
+    changed_ports = dict(base)
+    changed_ports["nondefault_ports"] = frozenset(base["nondefault_ports"] | {"9999"})
+    assert _digest(changed_ports) != cb.CLASSIFIER_VERSION
+
+
 def test_classifier_version_stamped_on_inline_insert(tmp_path: Path) -> None:
     """db_insert_work_item stamps the current CLASSIFIER_VERSION at ingest, so a
     freshly-ingested row is never treated as stale by --reclassify-stale."""

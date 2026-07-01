@@ -6,10 +6,15 @@ next engagement see "this was tried and blocked here" instead of rediscovering
 the wall per-dispatch. Wires the previously CLI-less
 ``assessment_blocked_techniques`` backend table (POST/GET /blocked-techniques).
 
-This is a POINTER, not a finding: a blocked technique stays out of the report.
-When a finding/chain later satisfies the block, link it with
-``vigil assess link-finding <blocked-slug> --link-kind unblocked_by
---target-kind finding --target-ref <slug>`` so the unblock path is first-class.
+This is a POINTER, not a finding: a blocked technique stays out of the report,
+and — unlike a finding — it has NO slug, so it can never be the SUBJECT of a
+``link-finding`` call (that resolver is findings-only and hard-404s a non-slug).
+Record the unblock relationship on the FINDING side instead: when a finding/chain
+later satisfies the wall, link it with
+``vigil assess link-finding <unblocking-finding-slug> --link-kind unblocks
+--target-kind blocked_technique --target-ref <technique_key>`` so the unblock
+path is first-class (the finding points AT the blocked-technique key this verb
+emits/derives).
 """
 from __future__ import annotations
 
@@ -82,7 +87,16 @@ def register(subparsers) -> None:
         ),
     )
     block.add_argument("--evidence-ref", dest="evidence_ref", default="", help="Optional engagement-relative evidence path.")
-    block.add_argument("--notes", default="", help="Optional free-text notes (unblock requirements, requested-from, etc.).")
+    block.add_argument(
+        "--notes",
+        default="",
+        help=(
+            "Short free-text cue (also surfaced in the resume brief). The DURABLE "
+            "home for unblock requirements is the RELATED finding's "
+            "details.unblock_requirements {kind, description, requested_from}, not "
+            "this note — keep --notes to a one-line pointer."
+        ),
+    )
     block.add_argument("--source-name", dest="source_name", default="operator", help="Recording actor (stored in provenance).")
     block.add_argument("--provenance-inline", dest="provenance_inline", help="Inline JSON object merged into provenance.")
     block.set_defaults(func=run_block)

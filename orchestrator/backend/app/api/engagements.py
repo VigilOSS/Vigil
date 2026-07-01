@@ -38,6 +38,11 @@ class EngagementResponse(BaseModel):
     platforms: list[str] = Field(default_factory=list)
     tenant_reference_paths: list[str] = Field(default_factory=list)
     out_of_scope: list[str] = Field(default_factory=list)
+    # Per-engagement mitmproxy capture policy (backend-owned durable state). The
+    # shared proxy addon reads this off the registry payload so restarting it
+    # never silently changes capture behavior; a capture-policy.json filesystem
+    # mirror next to scope.json is the offline fallback.
+    capture_policy: dict = Field(default_factory=dict)
 
 
 class SessionResponse(BaseModel):
@@ -73,6 +78,7 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
         platforms=list(engagement.platforms or []),
         tenant_reference_paths=list(engagement.tenant_reference_paths or []),
         out_of_scope=list(engagement.out_of_scope or []),
+        capture_policy=dict(engagement.capture_policy or {}),
     )
 
 

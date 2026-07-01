@@ -14,6 +14,7 @@ in sync with the orchestrator (filesystem scan as fallback).
 import calendar
 import email.utils
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -63,8 +64,22 @@ BINARY_PREFIXES = ("image/", "video/", "audio/", "font/")
 
 LOGIN_URL_RE = re.compile(r"(login|auth|signin|session|token)", re.IGNORECASE)
 
-TOKEN_KEYS_RE = re.compile(r"(token|access_token|jwt)", re.IGNORECASE)
-BEARER_TOKEN_KEYS_RE = re.compile(r"(access_token|id_token|jwt|token)", re.IGNORECASE)
+# Any key that looks like it holds a token — used to accumulate the ``tokens``
+# delta (refresh_token / csrf_token / access_token / …). Storing these is safe;
+# they are NOT, on their own, promoted to an ``Authorization: Bearer`` header.
+TOKEN_KEYS_RE = re.compile(r"(token|jwt)", re.IGNORECASE)
+# EXACT keys (case-insensitive) whose value may be synthesized into an
+# ``Authorization: Bearer`` header, in priority order. Deliberately excludes the
+# bare ``token`` substring so ``refresh_token`` / ``csrf_token`` / ``token_type``
+# never seed the wrong bearer (which previously produced ``Bearer Bearer`` or a
+# refresh/csrf value in Authorization).
+BEARER_TOKEN_PRIORITY = ("access_token", "id_token", "jwt")
+# Token values that are actually type labels, never a credential to bear.
+_NON_BEARER_VALUES = frozenset({"bearer", "basic"})
+
+# Traffic-store (Phase 5 full-flow capture) layout, engagement-root-relative.
+TRAFFIC_BODIES_DIR = "traffic/mitmproxy/bodies"
+TRAFFIC_FLOWS_DIR = "traffic/mitmproxy/flows"
 
 # Dynamic path-segment patterns
 _DYNAMIC_RE = re.compile(
@@ -83,6 +98,21 @@ DELETED_ENGAGEMENTS_DIR = ".deleted-engagements"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _dequote_cookie_value(value: str) -> str:
+    """Strip a single pair of surrounding DQUOTEs from a cookie value.
+
+    RFC 6265 permits a quoted cookie-value (``name="value"``). A logout that
+    sends ``MRHSession=""`` must be recognized as a deletion (its unquoted value
+    is empty), and a live quoted value must be STORED unquoted so downstream
+    injection doesn't double-quote it. Only a matched leading+trailing pair is
+    removed; an unbalanced quote is left untouched.
+    """
+    v = (value or "").strip()
+    if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+        return v[1:-1]
+    return v
 
 
 def _is_deletion_set_cookie(sc: str) -> bool:
@@ -106,7 +136,10 @@ def _is_deletion_set_cookie(sc: str) -> bool:
     if "=" not in name_val:
         return False
     _, v = name_val.split("=", 1)
-    v = v.strip()
+    # Dequote before evaluating: a quoted-empty logout cookie (MRHSession="")
+    # is a deletion sentinel whose surrounding quotes would otherwise mask the
+    # empty value and let the logout overwrite a live session.
+    v = _dequote_cookie_value(v)
     # Empty value or literal "deleted" — skip immediately.
     if not v or v.lower() == "deleted":
         return True
@@ -153,6 +186,7 @@ class EngagementEntry:
     out_of_scope_patterns: list[str] = field(default_factory=list)
     scope_priority: int = 0
     updated_at: str = ""
+    capture_policy: dict = field(default_factory=dict)
     db: sqlite3.Connection | None = None
 
 
@@ -180,6 +214,166 @@ def _scope_match_score(pattern: str, hostname: str) -> int | None:
         # Literal: encode in the high bits so it always beats wildcards.
         return 1_000_000 + len(pattern)
     return None
+
+
+def _content_type_family(content_type: str) -> str:
+    """Bucket a Content-Type into a coarse family for indexing/filtering.
+
+    ``html``/``xml`` are tested BEFORE the generic ``text/`` fallback so
+    ``text/html`` records as ``html`` (previously the ``text/`` branch shadowed
+    it and the html/xml families were dead).
+    """
+    ct = (content_type or "").lower()
+    if not ct:
+        return "unknown"
+    if "json" in ct:
+        return "json"
+    if "javascript" in ct or "ecmascript" in ct:
+        return "javascript"
+    if "html" in ct:
+        return "html"
+    if "xml" in ct:
+        return "xml"
+    if ct.startswith("text/"):
+        return "text"
+    return "unknown"
+
+
+def _entry_host(entry: str) -> str:
+    """Extract the bare hostname from a URL-form scope entry (``https://h/x``)."""
+    try:
+        parsed = urlparse(entry)
+    except ValueError:
+        return ""
+    return (parsed.hostname or "").lower()
+
+
+def _parse_cidr(entry: str):
+    """Return an ``ip_network`` for a CIDR entry, or None if it is not one."""
+    try:
+        return ipaddress.ip_network(entry, strict=False)
+    except ValueError:
+        return None
+
+
+def _coerce_ip(value):
+    if not value:
+        return None
+    try:
+        return ipaddress.ip_address(str(value))
+    except ValueError:
+        return None
+
+
+def _out_of_scope_covers(
+    patterns: list[str], hostname: str, resolved_ip: str | None = None
+) -> bool:
+    """Return True when ANY out_of_scope entry could plausibly cover ``hostname``.
+
+    The out-of-scope denylist ALWAYS wins (operator priority #1: never
+    capture/route/persist an out-of-scope host). Beyond literal and ``*.``
+    wildcard host patterns, this understands:
+
+    * URL-form entries (``https://host/path``) — reduced to their bare host and
+      matched as a host pattern.
+    * CIDR entries (``10.0.0.0/8``) — matched against the flow's resolved server
+      IP (or an IP-literal hostname) when one is available.
+
+    FAIL-CLOSED, BUT PER-FLOW: a CIDR carve-out whose IP cannot be resolved for
+    THIS flow drops THIS flow (host_ip is per-flow, so the failure is scoped to the
+    single unevaluable flow, not the whole engagement). Host/path and URL-form
+    entries are reduced to their host component and matched as host patterns; an
+    entry with NO bindable host (a bare path like ``/api/internal`` or an
+    unparseable URL) is host-blind and is SKIPPED here — a single unbindable entry
+    must never wipe out an entire engagement's capture. Path-level scoping the
+    proxy cannot enforce by host is still honored on the IP-aware surfaces
+    (scope.host_admitted).
+    """
+    hostname = (hostname or "").lower()
+    host_ip = _coerce_ip(resolved_ip) or _coerce_ip(hostname)
+    for raw in patterns:
+        entry = (raw or "").strip().lower()
+        if not entry:
+            continue
+        if "://" in entry:
+            host = _entry_host(entry)
+            if host and _scope_match_score(host, hostname) is not None:
+                return True
+            # Host-less/unparseable URL-form (e.g. bare "://"): there is no host
+            # to bind the carve-out to, so it is host-blind. SKIP it rather than
+            # dropping every host in the engagement — a single unparseable entry
+            # must never wipe out the whole engagement's capture. Path-level
+            # scoping is still honored on the IP-aware surfaces (scope.host_admitted).
+            continue
+        if "/" in entry:
+            network = _parse_cidr(entry)
+            if network is not None:
+                # CIDR carve-out — match against the flow's resolved server IP.
+                if host_ip is None:
+                    # CIDR present but no IP to test THIS flow — uncertain, so
+                    # fail closed on this one flow (per-flow, not engagement-wide).
+                    return True
+                if host_ip in network:
+                    return True
+                continue
+            # A slash-bearing entry that is NOT a valid CIDR is a host/path or
+            # host-relative carve-out (e.g. "example.com/admin", "/api/internal").
+            # The proxy can only filter by HOST, so reduce it to its host
+            # component and match as a host pattern. A leading-slash / host-less
+            # path ("/api/internal") has no host to bind → SKIP it (host-blind);
+            # never drop the whole engagement's traffic on an unbindable entry.
+            host = entry.split("/", 1)[0].strip()
+            if host and _scope_match_score(host, hostname) is not None:
+                return True
+            continue
+        # Plain host pattern (literal or ``*.`` wildcard).
+        if _scope_match_score(entry, hostname) is not None:
+            return True
+    return False
+
+
+def _normalize_capture_policy(raw) -> dict:
+    """Coerce a registry/​filesystem capture-policy blob into the addon's shape.
+
+    Matches the backend ``DEFAULT_CAPTURE_POLICY`` contract: raw-body capture is
+    OFF unless ``enabled`` is explicitly true.
+    """
+    data = raw if isinstance(raw, dict) else {}
+
+    def _flag(key: str) -> bool:
+        return bool(data.get(key, False))
+
+    try:
+        max_body = int(data.get("max_body_bytes", BODY_TRUNCATE))
+    except (TypeError, ValueError):
+        max_body = BODY_TRUNCATE
+
+    def _ct_list(key: str) -> list[str]:
+        value = data.get(key, [])
+        if not isinstance(value, list):
+            return []
+        return [str(item).lower() for item in value if isinstance(item, str) and item]
+
+    return {
+        "enabled": _flag("enabled"),
+        "capture_request_bodies": _flag("capture_request_bodies"),
+        "capture_response_bodies": _flag("capture_response_bodies"),
+        "max_body_bytes": max(0, max_body),
+        "content_type_allow": _ct_list("content_type_allow"),
+        "content_type_deny": _ct_list("content_type_deny"),
+        "redaction_profile": str(data.get("redaction_profile") or "none"),
+    }
+
+
+def _body_capture_allowed(content_type: str, allow: list[str], deny: list[str]) -> bool:
+    """Apply the policy content-type allow/deny lists (substring match)."""
+    ct = (content_type or "").lower()
+    for item in deny:
+        if item and item in ct:
+            return False
+    if allow:
+        return any(item and item in ct for item in allow)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +512,7 @@ class CaseCollector:
                     existing.out_of_scope_patterns = entry.out_of_scope_patterns
                     existing.scope_priority = entry.scope_priority
                     existing.updated_at = entry.updated_at
+                    existing.capture_policy = entry.capture_policy
                     new_registry[entry.key] = existing
                 else:
                     new_registry[entry.key] = entry
@@ -409,6 +604,7 @@ class CaseCollector:
             except (TypeError, ValueError):
                 scope_priority = 0
             updated_at = str(row.get("updated_at") or "")
+            capture_policy = _normalize_capture_policy(row.get("capture_policy"))
             entries.append(
                 EngagementEntry(
                     key=key,
@@ -417,6 +613,7 @@ class CaseCollector:
                     out_of_scope_patterns=out_of_scope_patterns,
                     scope_priority=scope_priority,
                     updated_at=updated_at,
+                    capture_policy=capture_policy,
                 )
             )
         return entries
@@ -464,6 +661,7 @@ class CaseCollector:
                 )
             except OSError:
                 updated_at = ""
+            capture_policy = self._capture_policy_from_root(engagement_dir)
             entries.append(
                 EngagementEntry(
                     key=engagement_dir.name,
@@ -472,9 +670,23 @@ class CaseCollector:
                     out_of_scope_patterns=out_of_scope_patterns,
                     scope_priority=scope_priority,
                     updated_at=updated_at,
+                    capture_policy=capture_policy,
                 )
             )
         return entries
+
+    @staticmethod
+    def _capture_policy_from_root(engagement_dir: Path) -> dict:
+        """Read the ``capture-policy.json`` mirror the backend writes next to
+        ``scope.json``. This is the filesystem fallback the shared proxy uses
+        when the orchestrator registry fetch is unavailable."""
+        policy_path = engagement_dir / "capture-policy.json"
+        try:
+            with policy_path.open("r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return _normalize_capture_policy({})
+        return _normalize_capture_policy(raw)
 
     @staticmethod
     def _scope_patterns_from_dict(scope_data: dict) -> list[str]:
@@ -545,7 +757,9 @@ class CaseCollector:
 
     # -- matching -----------------------------------------------------------
 
-    def _match_engagement(self, hostname: str) -> EngagementEntry | None:
+    def _match_engagement(
+        self, hostname: str, resolved_ip: str | None = None
+    ) -> EngagementEntry | None:
         if not hostname:
             return None
         hostname = hostname.lower()
@@ -574,24 +788,22 @@ class CaseCollector:
             return None
         chosen = best[3]
         # Out-of-scope carve-out: a host admitted by an in-scope wildcard but
-        # matching ANY of the engagement's out_of_scope patterns must not be
-        # captured or routed. The denylist wins — drop the flow entirely.
-        # NOTE: ``_scope_match_score`` understands only literal and ``*.``
-        # wildcard patterns, so a CIDR or URL out_of_scope entry is inert HERE
-        # (same limitation the in-scope match path has — the proxy routes by
-        # hostname and never resolves an IP). CIDR/URL carve-outs are still
-        # honored on the IP-aware surfaces (filter-scope / dispatch gate /
-        # ingest-spec) via ``scope.host_admitted``.
-        for pattern in chosen.out_of_scope_patterns:
-            if _scope_match_score(pattern, hostname) is not None:
-                suppress_key = (hostname, chosen.key)
-                if suppress_key not in self._routed_log_seen:
-                    self._routed_log_seen.add(suppress_key)
-                    ctx.log.info(
-                        f"proxy_addon: suppressed {hostname} — matches out_of_scope "
-                        f"carve-out '{pattern}' for engagement {chosen.key}"
-                    )
-                return None
+        # covered by ANY of the engagement's out_of_scope entries must not be
+        # captured or routed. The denylist ALWAYS wins — drop the flow entirely.
+        # ``_out_of_scope_covers`` understands literal/``*.`` host patterns,
+        # URL-form entries (reduced to their host) and CIDR entries (matched
+        # against ``resolved_ip`` when the flow carries the server IP), and
+        # FAILS CLOSED on any entry it cannot evaluate with certainty so an
+        # unparseable carve-out never silently admits an out-of-scope host.
+        if _out_of_scope_covers(chosen.out_of_scope_patterns, hostname, resolved_ip):
+            suppress_key = (hostname, chosen.key)
+            if suppress_key not in self._routed_log_seen:
+                self._routed_log_seen.add(suppress_key)
+                ctx.log.info(
+                    f"proxy_addon: suppressed {hostname} — matches out_of_scope "
+                    f"carve-out for engagement {chosen.key}"
+                )
+            return None
         log_key = (hostname, chosen.key)
         if log_key not in self._routed_log_seen:
             self._routed_log_seen.add(log_key)
@@ -754,18 +966,17 @@ class CaseCollector:
             return None
 
         parsed = urlparse(url)
-        ct_lower = (content_type or "").lower()
-        content_family = "unknown"
-        if "json" in ct_lower:
-            content_family = "json"
-        elif "javascript" in ct_lower:
-            content_family = "javascript"
-        elif "xml" in ct_lower:
-            content_family = "xml"
-        elif "text/" in ct_lower:
-            content_family = "text"
-        elif "html" in ct_lower:
-            content_family = "html"
+        content_family = _content_type_family(content_type)
+
+        # ``body_schema`` is typed dict[str, Any] on the backend. A request with
+        # a top-level JSON ARRAY or SCALAR body decodes to a list/str/number
+        # here; sending that would 422 the observation and drop the WHOLE
+        # capture (silent data loss). Only forward a parsed body when it is a
+        # dict; otherwise send {} — the raw body is still preserved in
+        # ``body_params`` (cases.db) and the full-flow sidecar.
+        body_schema = json.loads(params.get("body_params") or "{}")
+        if not isinstance(body_schema, dict):
+            body_schema = {}
 
         payload = {
             "url": url,
@@ -773,7 +984,7 @@ class CaseCollector:
             "auth_context": auth_context,
             "content_type_family": content_family,
             "query_schema": json.loads(params.get("query_params") or "{}"),
-            "body_schema": json.loads(params.get("body_params") or "{}"),
+            "body_schema": body_schema,
             "path_schema": json.loads(params.get("path_params") or "{}"),
             "cookie_schema": json.loads(params.get("cookie_params") or "{}"),
             "header_schema": {},
@@ -887,15 +1098,82 @@ class CaseCollector:
                 f"proxy_addon: credential capture failed for {entry.key} — {exc}"
             )
 
-    def _capture_auth(self, entry: EngagementEntry, flow: http.HTTPFlow):
+    @staticmethod
+    def _collect_token_pairs(obj) -> dict[str, str]:
+        """Collect string token-keyed fields from ONE object level.
+
+        The capture endpoint types tokens as str->str, so a non-string
+        token-keyed field (null / number / further-nested object) is skipped —
+        forwarding it would 422 the whole POST and silently drop the capture.
+        """
+        out: dict[str, str] = {}
+        if not isinstance(obj, dict):
+            return out
+        for key, value in obj.items():
+            if not isinstance(key, str) or not TOKEN_KEYS_RE.search(key):
+                continue
+            if isinstance(value, str) and value:
+                out.setdefault(key, value)
+        return out
+
+    def _extract_login_tokens(self, body_json) -> dict[str, str]:
+        """Extract token fields from a login response, recursing ONE level.
+
+        Top-level string token fields win over nested ones of the same name.
+        Recurses one level into nested objects and into objects inside arrays so
+        a bearer nested under e.g. ``{"data": {"access_token": ...}}`` or
+        ``{"tokens": [{"jwt": ...}]}`` still enters the store (previously only
+        top-level string keys were read).
+        """
+        tokens: dict[str, str] = {}
+        if not isinstance(body_json, dict):
+            return tokens
+        tokens.update(self._collect_token_pairs(body_json))
+        for value in body_json.values():
+            if isinstance(value, dict):
+                for k, v in self._collect_token_pairs(value).items():
+                    tokens.setdefault(k, v)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        for k, v in self._collect_token_pairs(item).items():
+                            tokens.setdefault(k, v)
+        return tokens
+
+    @staticmethod
+    def _bearer_from_tokens(tokens: dict[str, str]) -> str | None:
+        """Synthesize an ``Authorization: Bearer`` value from token fields.
+
+        Picks by PRIORITY (access_token > id_token > jwt), matched on the EXACT
+        key name (case-insensitive) — never the bare ``token`` substring, so
+        ``refresh_token`` / ``csrf_token`` / ``token_type`` cannot seed the
+        bearer. Values that are themselves type labels (``bearer`` / ``basic``)
+        are skipped so we never emit ``Bearer bearer``.
+        """
+        lowered = {str(k).lower(): v for k, v in tokens.items()}
+        for pref in BEARER_TOKEN_PRIORITY:
+            value = lowered.get(pref)
+            if not isinstance(value, str) or not value:
+                continue
+            if value.strip().lower() in _NON_BEARER_VALUES:
+                continue
+            return value if value.lower().startswith("bearer ") else f"Bearer {value}"
+        return None
+
+    def _capture_auth(
+        self,
+        entry: EngagementEntry,
+        flow: http.HTTPFlow,
+        resolved_ip: str | None = None,
+    ):
         """Capture auth material from a flow into the centralized credential
         store (the ``default`` identity).
 
         The addon extracts the per-flow delta (this host's request + Set-Cookie
-        cookies, any bearer token / Authorization header from a login response)
-        and POSTs it; the backend owns the merge (host buckets, flat cookies,
-        header/token accumulation). mitmproxy hooks run single-threaded so
-        captures serialize naturally — no client-side lock needed.
+        cookies, the request Authorization header, any bearer token from a login
+        response) and POSTs it; the backend owns the merge (host buckets, flat
+        cookies, header/token accumulation). mitmproxy hooks run single-threaded
+        so captures serialize naturally — no client-side lock needed.
         """
         req = flow.request
         resp = flow.response
@@ -907,8 +1185,16 @@ class CaseCollector:
         if not hostname:
             return
 
+        # Defense in depth: NEVER harvest credentials for a host any out_of_scope
+        # entry could plausibly cover, even if a routing change ever let this run
+        # for such a host. Out-of-scope always wins (operator priority #1).
+        if _out_of_scope_covers(entry.out_of_scope_patterns, hostname, resolved_ip):
+            return
+
         # -- 1. Request cookies (mitmproxy parses them correctly) ------------
-        merged: dict[str, str] = dict(req.cookies.items())
+        merged: dict[str, str] = {
+            k: _dequote_cookie_value(v) for k, v in req.cookies.items()
+        }
 
         # -- 2. Set-Cookie response headers ----------------------------------
         set_cookies = resp.headers.get_all("set-cookie")
@@ -917,7 +1203,8 @@ class CaseCollector:
                 # Skip logout/expiry deletions — a logout must NEVER overwrite
                 # a stored live session cookie with a deletion sentinel.
                 # F5/APM sends ``MRHSession=deleted`` on CMS logout; RFC 6265
-                # deletions use Max-Age=0 or an Expires in the past.
+                # deletions use Max-Age=0 or an Expires in the past; a
+                # quoted-empty ``MRHSession=""`` is also a deletion.
                 if _is_deletion_set_cookie(sc):
                     ctx.log.debug(
                         f"proxy_addon: skipping deletion Set-Cookie: {sc.split(';')[0]!r}"
@@ -926,11 +1213,24 @@ class CaseCollector:
                 name_val = sc.split(";")[0]
                 if "=" in name_val:
                     k, v = name_val.split("=", 1)
-                    merged[k.strip()] = v.strip()
+                    # Store the DEQUOTED value so a live quoted cookie is not
+                    # persisted (and later re-injected) with surrounding quotes.
+                    merged[k.strip()] = _dequote_cookie_value(v)
 
-        # -- 3. Token extraction from login-like JSON responses --------------
+        # -- 3. Token / Authorization extraction -----------------------------
         tokens: dict[str, str] = {}
         headers: dict[str, str] = {}
+
+        # 3a. Bearer-only / already-authenticated sessions: the REQUEST carries
+        # the live credential in its Authorization header. Capture it directly
+        # so a session that never issues a login-JSON response (or nests its
+        # token) still enters the store.
+        req_authorization = req.headers.get("authorization", "") or ""
+        if req_authorization.strip():
+            headers["Authorization"] = req_authorization.strip()
+
+        # 3b. Login-like JSON responses: accumulate token fields (recursing one
+        # level) and synthesize a bearer from the highest-priority token key.
         if req.method == "POST" and LOGIN_URL_RE.search(req.pretty_url):
             resp_body = self._safe_content(resp)
             if resp_body:
@@ -938,27 +1238,11 @@ class CaseCollector:
                     body_json = json.loads(resp_body)
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     body_json = None
-                if isinstance(body_json, dict):
-                    for key in list(body_json.keys()):
-                        if not TOKEN_KEYS_RE.search(key):
-                            continue
-                        token_value = body_json[key]
-                        # The capture endpoint types tokens as str->str; a
-                        # non-string token-keyed field (null / number / nested)
-                        # would 422 the whole POST and silently drop the
-                        # capture, so skip non-string values.
-                        if not isinstance(token_value, str) or not token_value:
-                            continue
-                        tokens[key] = token_value
-                        if (
-                            BEARER_TOKEN_KEYS_RE.search(key)
-                            and "Authorization" not in headers
-                        ):
-                            headers["Authorization"] = (
-                                token_value
-                                if token_value.lower().startswith("bearer ")
-                                else f"Bearer {token_value}"
-                            )
+                tokens.update(self._extract_login_tokens(body_json))
+                if "Authorization" not in headers:
+                    bearer = self._bearer_from_tokens(tokens)
+                    if bearer:
+                        headers["Authorization"] = bearer
 
         if not (merged or tokens or headers):
             return
@@ -1180,9 +1464,16 @@ class CaseCollector:
         hostname = parsed.hostname or ""
         path = parsed.path or "/"
 
+        # The flow's resolved server IP (when mitmproxy has it) lets the
+        # out-of-scope carve-out evaluate CIDR denylist entries. Routing itself
+        # still keys on the canonical request HOSTNAME — the IP only tightens the
+        # out-of-scope gate, never widens matching.
+        resolved_ip = self._resolved_server_ip(flow)
+
         # Engagement routing replaces the old global is_in_scope: hostname →
-        # the best-matching engagement, or drop if no engagement claims it.
-        entry = self._match_engagement(hostname)
+        # the best-matching engagement, or drop if no engagement claims it (or if
+        # an out_of_scope carve-out covers it).
+        entry = self._match_engagement(hostname, resolved_ip=resolved_ip)
         if entry is None:
             return
 
@@ -1191,7 +1482,7 @@ class CaseCollector:
             return
 
         # Auth capture (side-effect: POSTs captured credentials to the backend)
-        self._capture_auth(entry, flow)
+        self._capture_auth(entry, flow, resolved_ip=resolved_ip)
 
         params = self._extract_params(flow)
 
@@ -1199,15 +1490,29 @@ class CaseCollector:
         req_headers_json = json.dumps(req_headers_dict)
         auth_context = self._request_auth_context(entry, req_headers_dict, params)
 
-        # Prefer response content type for classification/storage. Request content
-        # type is often empty for GETs and would misclassify normal pages as unknown.
-        content_type = resp.headers.get("content-type", "") or req.headers.get("content-type", "") or ""
+        # Two distinct content types. Classification/case_type PREFER the response
+        # type (a GET's request type is empty and would misclassify normal pages
+        # as unknown). The stored request-side row fields (content_type stored
+        # alongside body/content_length/request_body_truncated) use the REQUEST
+        # type so the saved request body and its content_type are consistent.
+        request_content_type = req.headers.get("content-type", "") or ""
+        response_content_type = resp.headers.get("content-type", "") or ""
+        classify_content_type = response_content_type or request_content_type
+        content_family = _content_type_family(classify_content_type)
+
         raw_req_body = self._safe_content(req)
         content_length = len(raw_req_body)
 
-        case_type = self._classify_type(req.method, path, content_type, req_headers_dict)
+        case_type = self._classify_type(
+            req.method, path, classify_content_type, req_headers_dict
+        )
 
-        saved_body, request_body_truncated = self._apply_body_policy(raw_req_body, content_type)
+        # Gate the REQUEST body save on the REQUEST content type — the previous
+        # code gated it on the RESPONSE type, so a JSON POST answered by e.g.
+        # image/png had its request body silently dropped (data loss).
+        saved_body, request_body_truncated = self._apply_body_policy(
+            raw_req_body, request_content_type
+        )
 
         response_status = resp.status_code
         resp_headers_json = json.dumps(dict(resp.headers))
@@ -1234,7 +1539,7 @@ class CaseCollector:
             url=req.pretty_url,
             method=req.method,
             auth_context=auth_context,
-            content_type=content_type,
+            content_type=classify_content_type,
             params=params,
             response_status=response_status,
             evidence_ref="proxy",
@@ -1243,37 +1548,306 @@ class CaseCollector:
                 "response_headers": dict(resp.headers),
             },
         )
-        if not assessment_record:
-            return
 
-        request_variant_id = assessment_record["request_variant"]["id"]
-        service = assessment_record.get("service") or {}
-        service_id = service.get("id")
-        queue_key = f"variant:{request_variant_id}:{case_type}"
+        request_variant_id = None
+        if assessment_record:
+            request_variant_id = assessment_record["request_variant"]["id"]
+            service = assessment_record.get("service") or {}
+            service_id = service.get("id")
+            queue_key = f"variant:{request_variant_id}:{case_type}"
 
-        self._insert_case(
+            self._insert_case(
+                entry,
+                queue_key=queue_key,
+                request_variant_id=request_variant_id,
+                service_id=service_id,
+                auth_context=auth_context,
+                method=req.method,
+                url=req.pretty_url,
+                url_path=path,
+                params=params,
+                headers=req_headers_json,
+                body=saved_body,
+                content_type=request_content_type,
+                content_length=content_length,
+                request_body_truncated=request_body_truncated,
+                response_status=response_status,
+                response_headers=resp_headers_json,
+                response_size=response_size,
+                response_snippet=response_snippet,
+                response_truncated=response_truncated,
+                case_type=case_type,
+                params_key_sig=params_key_sig,
+            )
+
+        # Phase 5 full-flow capture. Runs regardless of the observation POST
+        # (which needs the backend) so raw sidecars + the JSONL index are still
+        # written locally when the backend is unreachable — no silent data loss.
+        # A no-op when the engagement's capture policy leaves raw-body capture
+        # OFF (the default). Never raises up through the flow hook.
+        self._maybe_capture_full_flow(
             entry,
-            queue_key=queue_key,
+            flow,
+            hostname=hostname,
+            path=path,
+            resolved_ip=resolved_ip,
             request_variant_id=request_variant_id,
-            service_id=service_id,
             auth_context=auth_context,
-            method=req.method,
-            url=req.pretty_url,
-            url_path=path,
-            params=params,
-            headers=req_headers_json,
-            body=saved_body,
-            content_type=content_type,
-            content_length=content_length,
-            request_body_truncated=request_body_truncated,
+            content_family=content_family,
+            request_content_type=request_content_type,
+            response_content_type=response_content_type,
             response_status=response_status,
-            response_headers=resp_headers_json,
-            response_size=response_size,
-            response_snippet=response_snippet,
-            response_truncated=response_truncated,
-            case_type=case_type,
-            params_key_sig=params_key_sig,
+            raw_req_body=raw_req_body,
+            resp_body=resp_body,
         )
+
+    # -- Phase 5: full-flow capture -----------------------------------------
+
+    @staticmethod
+    def _resolved_server_ip(flow) -> str | None:
+        """Best-effort extraction of the flow's resolved server IP.
+
+        mitmproxy has usually connected upstream by ``response()`` time, so the
+        server IP is available for CIDR out-of-scope evaluation. Returns None for
+        stubbed/streamed flows without a server connection.
+        """
+        try:
+            server_conn = getattr(flow, "server_conn", None)
+            if server_conn is None:
+                return None
+            peer = getattr(server_conn, "ip_address", None) or getattr(
+                server_conn, "peername", None
+            )
+            if isinstance(peer, (tuple, list)) and peer:
+                return str(peer[0])
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _flow_timing(flow) -> tuple[str | None, int | None]:
+        """Return (started_at ISO-8601, timing_ms) from the flow timestamps."""
+        try:
+            req = flow.request
+            resp = flow.response
+            start = getattr(req, "timestamp_start", None)
+            end = getattr(resp, "timestamp_end", None) if resp else None
+            started_at = None
+            if start:
+                started_at = datetime.fromtimestamp(
+                    float(start), tz=timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            timing_ms = None
+            if start and end and end >= start:
+                timing_ms = int((float(end) - float(start)) * 1000)
+            return started_at, timing_ms
+        except Exception:
+            return None, None
+
+    def _write_body_sidecar(
+        self, root: Path, body: bytes, policy: dict, content_type: str
+    ) -> tuple[str | None, str, int, bool]:
+        """Persist a body under ``traffic/mitmproxy/bodies/<sha256>.bin``.
+
+        Honors the content-type allow/deny lists and ``max_body_bytes``. Returns
+        ``(relative_path, sha256, stored_bytes, truncated)``. The sha256 is over
+        the STORED bytes so the sidecar content hashes to its own filename and
+        identical bodies dedupe. Returns ``(None, "", 0, False)`` when the body is
+        empty or the policy excludes this content type. Degrades gracefully: a
+        write failure logs and returns no path rather than raising.
+        """
+        if not body:
+            return None, "", 0, False
+        if not _body_capture_allowed(
+            content_type,
+            policy.get("content_type_allow") or [],
+            policy.get("content_type_deny") or [],
+        ):
+            return None, "", 0, False
+        cap = policy.get("max_body_bytes", BODY_TRUNCATE)
+        if not isinstance(cap, int) or cap < 0:
+            cap = BODY_TRUNCATE
+        stored = body[:cap]
+        truncated = len(body) > len(stored)
+        sha = hashlib.sha256(stored).hexdigest()
+        rel_path = f"{TRAFFIC_BODIES_DIR}/{sha}.bin"
+        try:
+            bodies_dir = root / TRAFFIC_BODIES_DIR
+            bodies_dir.mkdir(parents=True, exist_ok=True)
+            target = bodies_dir / f"{sha}.bin"
+            if not target.exists():
+                tmp = target.with_name(f"{sha}.bin.{os.getpid()}.tmp")
+                tmp.write_bytes(stored)
+                tmp.rename(target)
+        except OSError as exc:
+            ctx.log.warn(f"proxy_addon: cannot write body sidecar {rel_path} — {exc}")
+            return None, sha, len(stored), truncated
+        return rel_path, sha, len(stored), truncated
+
+    def _append_flow_index(self, root: Path, record: dict) -> str | None:
+        """Append one JSONL line to ``traffic/mitmproxy/flows/<date>.jsonl``.
+
+        Returns the engagement-root-relative path, or None on write failure
+        (logged, never raised)."""
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        rel_path = f"{TRAFFIC_FLOWS_DIR}/{date}.jsonl"
+        try:
+            flows_dir = root / TRAFFIC_FLOWS_DIR
+            flows_dir.mkdir(parents=True, exist_ok=True)
+            with (flows_dir / f"{date}.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=True) + "\n")
+        except OSError as exc:
+            ctx.log.warn(f"proxy_addon: cannot append flow index {rel_path} — {exc}")
+            return None
+        return rel_path
+
+    def _post_http_flow(self, entry: EngagementEntry, record: dict) -> None:
+        """POST the compact full-flow record to the Stage-1 ingest route.
+
+        Best-effort: the route never 422s a well-formed flow, but any transport
+        failure only costs the backend row — the sidecar + JSONL index are
+        already durable on disk."""
+        if not self._backend_configured():
+            self._warn_backend_unavailable()
+            return
+        request = Request(
+            f"{self.orchestrator_base_url}/engagements/{entry.key}/assessment/http-flows",
+            data=json.dumps(record, ensure_ascii=True).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                response.read()
+        except Exception as exc:
+            ctx.log.error(
+                f"proxy_addon: http-flow ingest failed for {entry.key} — {exc}"
+            )
+
+    def _maybe_capture_full_flow(
+        self,
+        entry: EngagementEntry,
+        flow,
+        *,
+        hostname: str,
+        path: str,
+        resolved_ip: str | None,
+        request_variant_id: int | None,
+        auth_context: str,
+        content_family: str,
+        request_content_type: str,
+        response_content_type: str,
+        response_status,
+        raw_req_body: bytes,
+        resp_body: bytes,
+    ) -> None:
+        """Write raw body sidecars + JSONL index and POST the full-flow record.
+
+        No-op unless the engagement's capture policy enables raw-body capture.
+        Wrapped so a capture failure NEVER crashes the flow hook.
+        """
+        try:
+            policy = _normalize_capture_policy(entry.capture_policy)
+            if not policy.get("enabled"):
+                return
+
+            req = flow.request
+            resp = flow.response
+            parsed = urlparse(req.pretty_url)
+            root = entry.root
+
+            req_path = None
+            req_sha = ""
+            req_bytes = 0
+            req_trunc = False
+            if policy.get("capture_request_bodies"):
+                req_path, req_sha, req_bytes, req_trunc = self._write_body_sidecar(
+                    root, raw_req_body, policy, request_content_type
+                )
+
+            resp_path = None
+            resp_sha = ""
+            resp_bytes = 0
+            resp_trunc = False
+            if policy.get("capture_response_bodies"):
+                resp_path, resp_sha, resp_bytes, resp_trunc = self._write_body_sidecar(
+                    root, resp_body, policy, response_content_type
+                )
+
+            started_at, timing_ms = self._flow_timing(flow)
+
+            # Host-mismatch telemetry: compare the canonical request authority to
+            # the Host header and the negotiated SNI. Routing already used the
+            # canonical hostname — this is diagnostic only (never changes routing).
+            url_authority = parsed.netloc or ""
+            host_header = req.headers.get("host", "") or ""
+            sni = ""
+            try:
+                client_conn = getattr(flow, "client_conn", None)
+                sni = (getattr(client_conn, "sni", None) or "") if client_conn else ""
+                if not sni:
+                    server_conn = getattr(flow, "server_conn", None)
+                    sni = (getattr(server_conn, "sni", None) or "") if server_conn else ""
+            except Exception:
+                sni = ""
+            host_header_host = host_header.split(":", 1)[0].strip().lower()
+            sni_l = (sni or "").strip().lower()
+            host_mismatch = bool(
+                (host_header_host and host_header_host != hostname)
+                or (sni_l and sni_l != hostname)
+            )
+
+            flow_uid = str(getattr(flow, "id", "") or "")
+            if not flow_uid:
+                digest = hashlib.sha256(
+                    f"{req.method}\n{req.pretty_url}\n{started_at or ''}\n{response_status}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest()
+                flow_uid = digest
+
+            record = {
+                "flow_uid": flow_uid,
+                "method": req.method,
+                "scheme": parsed.scheme or "",
+                "host": hostname,
+                "port": parsed.port,
+                "url": req.pretty_url,
+                "path": path,
+                "response_status": response_status,
+                "request_content_type": request_content_type,
+                "response_content_type": response_content_type,
+                "content_type_family": content_family,
+                "auth_context": auth_context,
+                "request_body_sha256": req_sha,
+                "response_body_sha256": resp_sha,
+                "request_body_bytes": req_bytes,
+                "response_body_bytes": resp_bytes,
+                "request_body_truncated": req_trunc,
+                "response_body_truncated": resp_trunc,
+                "request_body_artifact_path": req_path,
+                "response_body_artifact_path": resp_path,
+                "request_headers": dict(req.headers),
+                "response_headers": dict(resp.headers) if resp else {},
+                "redaction_status": policy.get("redaction_profile") or "none",
+                "host_mismatch": host_mismatch,
+                "url_authority": url_authority,
+                "host_header": host_header,
+                "sni": sni,
+                "timing_ms": timing_ms,
+                "started_at": started_at,
+                "request_variant_id": request_variant_id,
+            }
+
+            index_path = self._append_flow_index(root, record)
+            post_record = dict(record)
+            if index_path:
+                post_record["index_artifact_path"] = index_path
+            self._post_http_flow(entry, post_record)
+        except Exception as exc:  # never crash the flow hook
+            ctx.log.error(
+                f"proxy_addon: full-flow capture failed for {entry.key} — {exc}"
+            )
 
 
 addons = [CaseCollector()]

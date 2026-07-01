@@ -136,6 +136,16 @@ def register(subparsers) -> None:
         action="store_true",
         help="Exit non-zero if the backend audit row cannot be recorded; use for blue WRITE actions.",
     )
+    p.add_argument(
+        "--finding",
+        dest="finding",
+        default="",
+        help=(
+            "Optional finding slug (or numeric id) to link this command-run to on "
+            "record (assessment_command_runs.finding_id). Resolved to the finding's "
+            "id at audit time; a bad ref WARNs and records the run unlinked."
+        ),
+    )
     p.set_defaults(func=run)
 
 
@@ -205,6 +215,8 @@ def _merge_from_json(args: argparse.Namespace, doc: dict) -> None:
         "audit_source": "audit_source",
         "allow_destructive": "allow_destructive",
         "require_audit": "require_audit",
+        "finding": "finding",
+        "finding_id": "finding",
     }
     for json_key, attr in field_map.items():
         if json_key in doc and doc[json_key] is not None:
@@ -251,6 +263,24 @@ def _build_notes(scope_host: str) -> str:
     if not payload:
         return ""
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _resolve_finding_id(client: AssessmentClient, ref: str) -> int:
+    """Resolve a ``--finding`` reference (slug or numeric id) to a finding_id int.
+
+    A bare integer is used directly (the backend re-validates ownership). Any
+    other value is treated as a finding slug and looked up so the operator can
+    pass the human slug (e.g. VA-047) they already hold.
+    """
+    ref = str(ref).strip()
+    try:
+        return int(ref)
+    except ValueError:
+        pass
+    row = client.get(f"findings/{ref}")
+    if not isinstance(row, dict) or not row.get("id"):
+        raise AssessError(f"finding {ref!r} not found")
+    return int(row["id"])
 
 
 def _resolve_agent_name(args: argparse.Namespace) -> str:
@@ -380,23 +410,51 @@ def run(args) -> None:
     record_run_id: int | str = ""
     audit_record_failed = False
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        # Optional finding linkage. Resolve the slug/id to the finding's numeric
+        # id here so a bad ref does not 404 the WHOLE audit row (the command
+        # already ran) — on failure we WARN and record the run unlinked, honoring
+        # host-exec's non-fatal audit doctrine.
+        finding_ref = str(getattr(args, "finding", "") or "").strip()
+        if finding_ref:
+            try:
+                payload["finding_id"] = _resolve_finding_id(client, finding_ref)
+            except Exception as exc:  # noqa: BLE001 — link is best-effort, never blocks audit
+                print(
+                    f"[host-exec] WARN: could not link finding {finding_ref!r}: {exc}; "
+                    "recording the run unlinked.",
+                    file=sys.stderr,
+                )
         endpoint = "command-runs/host-exec"
+        response = None
         try:
             response = client.post(endpoint, payload)
-        except AssessError as exc:
-            audit_record_failed = True
-            print(
-                f"[host-exec] WARN: audit record failed -- {exc}",
-                file=sys.stderr,
-            )
-            response = None
         except Exception as exc:  # noqa: BLE001 — must never eat the exit code
-            audit_record_failed = True
-            print(
-                f"[host-exec] WARN: audit record failed -- {exc}",
-                file=sys.stderr,
-            )
-            response = None
+            # A best-effort finding link must NEVER sink the audit row (the command
+            # already ran). A bad numeric --finding skips the client-side slug lookup
+            # above and only 404s server-side (same for a valid-but-wrong-engagement
+            # id); if the POST failed with a finding_id attached, drop the link and
+            # retry once unlinked before declaring the audit failed.
+            if "finding_id" in payload:
+                bad_id = payload.pop("finding_id")
+                print(
+                    f"[host-exec] WARN: could not link finding id={bad_id}: {exc}; "
+                    "recording the run unlinked.",
+                    file=sys.stderr,
+                )
+                try:
+                    response = client.post(endpoint, payload)
+                except Exception as exc2:  # noqa: BLE001 — must never eat the exit code
+                    audit_record_failed = True
+                    print(
+                        f"[host-exec] WARN: audit record failed -- {exc2}",
+                        file=sys.stderr,
+                    )
+            else:
+                audit_record_failed = True
+                print(
+                    f"[host-exec] WARN: audit record failed -- {exc}",
+                    file=sys.stderr,
+                )
         if isinstance(response, dict):
             record_run_id = response.get("run_id") or response.get("id") or ""
 

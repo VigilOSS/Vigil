@@ -88,6 +88,35 @@ def test_generic_unblocked_by_posts_to_links(tmp_path, monkeypatch, capsys):
     assert payload["notes"] == "VA-071 yields the admin session"
 
 
+def test_generic_unblocks_blocked_technique_posts_to_links(tmp_path, monkeypatch, capsys):
+    """The finding-side unblock of a blocked TECHNIQUE: the unblocking finding is
+    the link subject, target_kind=blocked_technique, target_ref=<technique_key>.
+    target_kind is free text end-to-end, so blocked_technique needs no backend
+    change and the technique_key is passed verbatim (never resolved as a slug)."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "link-finding", "VA-071",
+            "--link-kind", "unblocks",
+            "--target-kind", "blocked_technique",
+            "--target-ref", "bfla:host:api-example-com",
+            "--note", "org-admin account provisioned; role-grant endpoint now reachable",
+        ],
+        str(tmp_path),
+    )
+    link_finding.run(args)
+    capsys.readouterr()
+
+    assert fake.puts == []
+    endpoint, payload = fake.posts[0]
+    assert endpoint == "findings/VA-071/links"
+    assert payload["link_kind"] == "unblocks"
+    assert payload["target_kind"] == "blocked_technique"
+    assert payload["target_ref"] == "bfla:host:api-example-com"
+    assert payload["target_id"] is None
+
+
 def test_generic_link_by_target_id(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)

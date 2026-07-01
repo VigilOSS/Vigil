@@ -381,9 +381,9 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
     - ``noncovering_probe_runs``: ``assessment_probe_runs`` whose result_status
       is NOT in the covering subset (tested/signal) — i.e. blocked / no-signal /
       attempted / error attempts that established no coverage.
-    - ``roe_blocked_findings``: findings whose ``details_json`` carries the
-      ``roe_blocked`` free-text convention (mirrors the existing chain_required
-      LIKE-filter). Projected as finding pointers.
+    - ``roe_blocked_findings``: findings whose ``details_json`` has
+      ``roe_blocked`` set true (value-aware json_extract, mirroring the
+      chain_required predicate). Projected as finding pointers.
 
     Each list is bounded and, where the row carries a timestamp, since-filtered.
     Counts are the pre-truncation totals so a truncated list still signals depth.
@@ -391,7 +391,7 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
     blocked_rows = connection.execute(
         """
         SELECT id, technique_key, technique, target_kind, target_ref,
-               reason, retry_state, evidence_ref, updated_at
+               reason, retry_state, evidence_ref, notes, updated_at
         FROM assessment_blocked_techniques
         WHERE engagement_id = ?
         ORDER BY updated_at DESC, id DESC
@@ -410,6 +410,7 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
                 "reason": str(row["reason"] or "")[:300],
                 "retry_state": row["retry_state"] or "",
                 "evidence_ref": row["evidence_ref"] or "",
+                "notes": str(row["notes"] or "")[:300],
                 "updated_at": row["updated_at"],
             }
             for row in blocked_rows
@@ -454,7 +455,7 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
     roe_blocked_findings = _limited_findings(
         connection,
         engagement_id,
-        "details_json LIKE '%roe_blocked%'",
+        "json_extract(details_json,'$.roe_blocked') = 1",
         since=since,
     )
 
@@ -472,7 +473,7 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
     ).fetchone()[0]
     roe_blocked_total = connection.execute(
         "SELECT COUNT(*) FROM assessment_findings "
-        "WHERE engagement_id = ? AND details_json LIKE '%roe_blocked%'",
+        "WHERE engagement_id = ? AND json_extract(details_json,'$.roe_blocked') = 1",
         (engagement_id,),
     ).fetchone()[0]
 
@@ -536,7 +537,7 @@ def build_resume_brief(
             "chain_required": _limited_findings(
                 connection,
                 engagement_id,
-                "details_json LIKE '%chain_required%'",
+                "json_extract(details_json,'$.chain_required') = 1",
                 since=since,
             ),
         }

@@ -74,6 +74,7 @@
       "enum": [
         "none",
         "pending_runtime_proof",
+        "blocked",
         "confirmed",
         "downgraded",
         "false_positive"

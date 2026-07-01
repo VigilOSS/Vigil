@@ -114,9 +114,14 @@ def capture_material(
     """Merge a proxy-captured delta into an identity and persist it.
 
     Replicates the merge the mitmproxy addon used to do against auth.json:
-    cookies are accumulated into per-host buckets, the flat ``cookies`` view is
-    recomputed from buckets matching the engagement's primary scope host (or its
-    subdomains), and any extracted bearer/Authorization headers + tokens are
+    cookies are accumulated into per-host buckets, and the flat ``cookies`` view
+    is recomputed as a UNION across every captured (in-scope) host bucket so
+    flat-view consumers (e.g. ``vigil auth status``) never undercount a
+    multi-host session. ``scope_host`` here is the host that was ACTUALLY
+    captured (the addon passes the captured host, not a "primary" scope pattern);
+    it only breaks cookie-name collisions in the flat view — the freshest
+    captured host wins. ``host_cookies`` remains the authoritative per-host
+    source of truth. Any extracted bearer/Authorization headers + tokens are
     merged in. Marks the identity proxy_capture / available / authenticated.
     """
     existing = db.get_credential(engagement_id, identity_name) or {}
@@ -134,7 +139,8 @@ def capture_material(
         # (full Set-Cookie directive available); this is defense-in-depth
         # at the persist layer in case any caller sends a deletion delta.
         live_cookies = {
-            k: v for k, v in cookies.items()
+            k: _dequote_cookie_value(v)
+            for k, v in cookies.items()
             if not _is_deletion_cookie_value(v)
         }
         if live_cookies:
@@ -191,17 +197,38 @@ def clear(engagement_id: int, identity_name: str | None) -> None:
 def _flat_cookies_for_scope(
     host_cookies: list[dict[str, Any]], scope_host: str
 ) -> dict[str, str]:
-    """Flatten per-host cookie buckets matching the primary scope host/subdomains."""
+    """Flatten host-cookie buckets into the legacy single-host ``cookies`` view.
+
+    UNION across EVERY captured host bucket (all buckets are in-scope — the proxy
+    never captures an out-of-scope host) so a multi-host session is never
+    undercounted by flat-view consumers. On a cookie-name collision the bucket
+    matching ``scope_host`` (the just-captured host, or its subdomains) wins so
+    the freshest capture is reflected; ``host_cookies`` stays the authoritative
+    per-host source of truth for consumers that need host-correct values.
+
+    INVARIANT: this flat union is for DISPLAY / aggregate consumers only (e.g.
+    ``vigil auth status``). Per-host REPLAY must NOT inject this union — it would
+    bleed one host's uniquely-named cookies into another host's request. Replay
+    reads ``host_cookies`` per request host (kali ``_identity_header_pairs`` uses
+    the matching bucket ALONE, falling back to the flat view only when the host
+    has no bucket). Do not route this union into a per-host request path.
+    """
     scope = (scope_host or "").lower().lstrip("*.")
     flat: dict[str, str] = {}
+    scoped: dict[str, str] = {}
     for bucket in host_cookies:
         if not isinstance(bucket, dict):
             continue
+        entry = bucket.get("cookies")
+        if not isinstance(entry, dict):
+            continue
+        pairs = {str(k): str(v) for k, v in entry.items()}
+        flat.update(pairs)
         bhost = str(bucket.get("host", "")).lower()
-        if not scope or bhost == scope or bhost.endswith("." + scope):
-            entry = bucket.get("cookies")
-            if isinstance(entry, dict):
-                flat.update({str(k): str(v) for k, v in entry.items()})
+        if scope and (bhost == scope or bhost.endswith("." + scope)):
+            scoped.update(pairs)
+    # Captured-host buckets win name collisions.
+    flat.update(scoped)
     return flat
 
 
@@ -209,15 +236,35 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _dequote_cookie_value(value: Any) -> Any:
+    """Strip a single pair of surrounding DQUOTEs from a cookie value.
+
+    RFC 6265 permits a quoted cookie-value (``name="value"``). A quoted-empty
+    logout cookie (``MRHSession=""``) must be recognized as a deletion, and a
+    live quoted value must be STORED unquoted so a later injection doesn't
+    double-quote it. Non-strings and unbalanced quotes pass through untouched.
+    """
+    if not isinstance(value, str):
+        return value
+    v = value.strip()
+    if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+        return v[1:-1]
+    return v
+
+
 def _is_deletion_cookie_value(value: Any) -> bool:
     """Return True if a cookie value is a deletion sentinel.
 
     Complements the full Set-Cookie parsing in proxy_addon._is_deletion_set_cookie
     as a last-resort filter at the persist layer: any caller that sends a cookie
-    with value ``deleted`` (case-insensitive) or empty string is treated as a
-    no-op for that key rather than overwriting a stored live session value.
+    with value ``deleted`` (case-insensitive), empty, or quoted-empty (``""``) is
+    treated as a no-op for that key rather than overwriting a stored live session
+    value.
     """
     if not isinstance(value, str):
         return False
-    v = value.strip()
+    v = _dequote_cookie_value(value)
+    if not isinstance(v, str):
+        return False
+    v = v.strip()
     return not v or v.lower() == "deleted"

@@ -156,6 +156,32 @@ def test_block_technique_rejects_out_of_enum_technique(tmp_path, monkeypatch, ca
     assert "not a valid technique" in capsys.readouterr().err
 
 
+def test_block_technique_doctrine_points_at_finding_side_unblock():
+    """The doctrine fix: a blocked technique has no slug, so the unblock is
+    recorded on the FINDING side (link-finding <finding> --link-kind unblocks
+    --target-kind blocked_technique), never with the technique as the subject."""
+    doc = block_technique.__doc__ or ""
+    assert "blocked_technique" in doc
+    assert "--link-kind unblocks" in doc
+    assert "no slug" in doc.lower()
+    # The old broken form (technique as the link subject) is gone.
+    assert "<blocked-slug>" not in doc
+
+
+def test_block_technique_notes_help_points_at_unblock_requirements():
+    """--notes is a short cue; the durable home for unblock requirements is the
+    finding's details.unblock_requirements."""
+    parser = _parser()
+    sub_action = next(
+        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
+    )
+    block_parser = sub_action.choices["block-technique"]
+    notes_help = next(
+        (a.help or "") for a in block_parser._actions if "--notes" in a.option_strings
+    )
+    assert "details.unblock_requirements" in notes_help
+
+
 def test_list_blocked_techniques_json_and_empty(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)

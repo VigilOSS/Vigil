@@ -326,3 +326,84 @@ def test_capture_mixed_deletion_and_live_cookies(client, isolate_settings):
     assert after["cookies"]["MRHSession"] == "live"
     # The new live cookie must be added.
     assert after["cookies"]["new_cookie"] == "fresh"
+
+
+def test_capture_quoted_empty_cookie_does_not_wipe_stored(client, isolate_settings):
+    """A QUOTED-empty logout cookie (MRHSession="") is a deletion sentinel.
+
+    Its surrounding DQUOTEs must be stripped before the deletion check so the
+    unquoted-empty value is recognized and the live session is preserved.
+    """
+    _seed(client, isolate_settings)
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.cms.gov",
+            "scope_host": "example.cms.gov",
+            "cookies": {"MRHSession": "alive-session"},
+        },
+    )
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.cms.gov",
+            "scope_host": "example.cms.gov",
+            "cookies": {"MRHSession": '""'},  # quoted-empty logout
+        },
+    )
+    after = client.get(f"/engagements/{KEY}/credentials/default").json()
+    assert after["cookies"]["MRHSession"] == "alive-session", (
+        "quoted-empty logout cookie must not wipe a stored live cookie"
+    )
+
+
+def test_capture_quoted_live_cookie_stored_dequoted(client, isolate_settings):
+    """A live quoted cookie value must be STORED without its surrounding quotes
+    so a later injection does not double-quote it."""
+    _seed(client, isolate_settings)
+    mat = client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "example.cms.gov",
+            "scope_host": "example.cms.gov",
+            "cookies": {"sid": '"abc123"'},
+        },
+    ).json()
+    assert mat["cookies"]["sid"] == "abc123", "quoted value must be stored dequoted"
+
+
+def test_capture_flat_cookies_union_across_hosts(client, isolate_settings):
+    """The flat ``cookies`` view must UNION across every captured host bucket so a
+    multi-host session is never undercounted, even when each capture passes a
+    different (captured) scope_host.
+    """
+    _seed(client, isolate_settings)
+    # Capture on host A with its own scope_host.
+    client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "a.example.com",
+            "scope_host": "a.example.com",
+            "cookies": {"sid_a": "1"},
+        },
+    )
+    # Capture on an UNRELATED host B with scope_host=B — the legacy scope-filtered
+    # flat view would have dropped host A's cookie here.
+    mat = client.post(
+        f"/engagements/{KEY}/credentials/capture",
+        json={
+            "identity_name": "default",
+            "host": "b.other.com",
+            "scope_host": "b.other.com",
+            "cookies": {"sid_b": "2"},
+        },
+    ).json()
+    # Both hosts' cookies are present in the flat view (union, no undercount).
+    assert mat["cookies"] == {"sid_a": "1", "sid_b": "2"}
+    # host_cookies remains the authoritative per-host source of truth.
+    hosts = {b["host"] for b in mat["host_cookies"]}
+    assert hosts == {"a.example.com", "b.other.com"}

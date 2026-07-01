@@ -446,7 +446,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "details.poc_code holds exploit scripts; details.poc_request / details.poc_response hold a structured HTTP request/response pair.",
             "details.references is an array of strings for CVE links, advisories, or related docs.",
             "Set details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete but only becomes exploitation-worthy as part of a larger chain. Specialists own these via record-finding/update-finding; verification reviews but does not own them.",
-            "Blocked-attempt convention (do-today, no schema/enum yet): when a technique is proven-shaped but walled off by missing provisioning, set details.block_reason (short why), details.unblock_requirements {kind ∈ account|line|device|credential|access, description, requested_from}, and details.attempts_summary (what was already tried). A blocked finding stays OUT of the report; record the wall with `vigil assess block-technique` and, once a finding/chain satisfies it, connect them with `vigil assess link-finding <slug> --link-kind unblocked_by --target-kind finding --target-ref <unblocking-slug>`.",
+            "Blocked-attempt convention (schema-validated under details): when a technique is proven-shaped but walled off by missing provisioning, set details.block_reason (short why), details.unblock_requirements {kind, description, requested_from}, and details.attempts_summary (what was already tried). These keys are validated by finding-record.schema.json under details (additionalProperties=false); only `kind` carries a documented vocabulary (account|line|device|credential|access) — that vocabulary is a convention, NOT a JSON-Schema-enforced enum. A blocked finding stays OUT of the report; record the wall with `vigil assess block-technique` and, once a finding/chain satisfies it, connect them from the finding side with `vigil assess link-finding <unblocking-finding-slug> --link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>`.",
             "Do not put `link_kind=root_cause` in the `links` array. Record the finding first, then `vigil assess link-finding` after verification — root/sibling grouping is an explicit lifecycle action.",
             "evidence_ref must point at an existing engagement file (auto-registered and linked on record). URL refs, prose refs, and path-shaped refs with no file are REJECTED — they cannot satisfy report-readiness artifact indexing. Put external URLs in details.references; pass --allow-unindexed-evidence only for a theoretical/code-inferred finding with no file.",
             "Dedup keys on (defect_family + root_cause_key + auth_context + canonical_location). A net-new record whose tuple collides with an EXISTING reported/active finding under a different slug is REFUSED, not silently merged. For a genuinely-distinct sibling on the same root cause, give it its OWN root_cause_key/defect_family and attach it with link-finding; pass --update <slug> ONLY to intentionally modify that exact existing finding.",
@@ -562,6 +562,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_attack_path --note 'Root removes this exploit chain; residual XXE remains.'",
             "vigil assess link-finding <sibling-slug> --clear-root-cause",
             "vigil assess link-finding <blocked-slug> --link-kind unblocked_by --target-kind finding --target-ref <unblocking-slug>",
+            "vigil assess link-finding <unblocking-finding-slug> --link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>",
             "vigil assess link-finding <slug> --link-kind related --target-kind chain --target-id 12",
         ),
         author_supplied_fields=(
@@ -580,6 +581,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Use --effect eliminates_attack_path when fixing the root removes only the demonstrated chain and the sibling still needs standalone remediation; use eliminates_finding when the root fix retires the sibling entirely.",
             "Generic mode (--link-kind + --target-kind + --target-id/--target-ref): records an arbitrary typed link (POST /findings/{slug}/links). link_kind=root_cause is refused here — use --root-cause.",
             "Unblock path (first-class): a blocked finding stays OUT of the report, but when a finding/chain that satisfies the wall lands, link it with `--link-kind unblocked_by --target-kind finding --target-ref <unblocking-slug>` (or --target-kind chain --target-id <id>) so the operator and the next engagement see the connection.",
+            "Blocked TECHNIQUE (from block-technique) unblock: a blocked technique has no slug and cannot be a link SUBJECT — record it on the FINDING side with `--link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>` (the unblocking finding points at the technique key). target_kind is free text, so blocked_technique is accepted without a backend change.",
         ),
         common_mistakes=(
             ("root_cause_key", "do not repurpose root_cause_key as a display grouping field; use link-finding for intentional groups"),
@@ -609,8 +611,75 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "A do-today pointer, NOT a finding — a blocked technique stays OUT of the report. It records what was tried-and-walled-off so the operator and the next engagement do not rediscover the wall per-dispatch. Surfaced under the resume-brief Attempts section.",
             "retry_state soft vocab: pending (block may lift once a prerequisite lands) | retryable (worth another attempt now) | no_retry (permanent wall). Free text; these are the documented, resume-legible values.",
-            "When a finding/chain later satisfies the block, link it: `vigil assess link-finding <blocked-finding-slug> --link-kind unblocked_by --target-kind finding --target-ref <unblocking-slug>` (or --target-kind chain). The unblock path is first-class even though the blocked finding itself is not reported.",
-            "Put the wall's provisioning need in details.unblock_requirements on the RELATED finding (kind ∈ account|line|device|credential|access, description, requested_from); the block-technique row carries the short reason + retry_state.",
+            "A blocked technique has NO slug, so it can never be the SUBJECT of link-finding. Record the unblock from the FINDING side: when a finding/chain satisfies the wall, `vigil assess link-finding <unblocking-finding-slug> --link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>`. The unblock path is first-class even though the blocked technique itself is not reported.",
+            "Put the wall's provisioning need in details.unblock_requirements on the RELATED finding (kind ∈ account|line|device|credential|access, description, requested_from); the block-technique row carries the short reason + retry_state, and --notes is a one-line cue (also shown in the resume brief), not the durable home for unblock requirements.",
+        ),
+    ),
+    "http": CommandContract(
+        name="http",
+        summary="Query, export, and configure captured full-flow HTTP traffic (the canonical mitmproxy flow store + per-engagement capture policy).",
+        schema_name="assessment_http_flows + assessment_capture_policy tables / /assessment/http-flows + /assessment/capture-policy endpoints",
+        preferred_invocations=(
+            "vigil assess http list --host api.example.com --method POST --content-type json",
+            "vigil assess http show <flow_uid>",
+            "vigil assess http search 'admin' --auth-context anonymous --json",
+            "vigil assess http export-har --host api.example.com -o traffic/api.har",
+            "vigil assess http import-har traffic/api.har",
+            "vigil assess http policy",
+            "vigil assess http policy set --enabled --capture-request-bodies --max-body-bytes 262144 --content-type-allow application/json",
+        ),
+        author_supplied_fields=(
+            "subcommand: list | show | search | export-har | import-har | policy [set]",
+            "list/search/export-har filters: --host / --method / --status / --content-type / --auth-context / --truncated|--no-truncated / --q / --limit / --offset",
+            "show: <flow_uid> (or numeric id) positional",
+            "export-har: -o/--output <file>",
+            "import-har: <har-file> positional",
+            "policy set: --enabled/--no-enabled, --capture-request-bodies, --capture-response-bodies, --max-body-bytes, --content-type-allow, --content-type-deny, --redaction-profile",
+        ),
+        helper_defaults=(
+            ("capture policy", "raw-body capture is OFF by default; `policy set` is a partial update (unset fields retain their stored value)"),
+            ("query filters", "only non-empty filters are sent; the backend caps list/search at 5000 rows"),
+        ),
+        notes=(
+            "Capture is a per-engagement POLICY (backend state + a `capture-policy.json` filesystem mirror the addon reads offline), NOT a proxy start selector — the shared selector-less proxy routes by hostname and honours this policy per host.",
+            "`show` and `export-har` expose only engagement-local metadata + body sidecars; raw bodies stay engagement-local by default.",
+            "`export-har` writes HAR 1.2 with Vigil routing/auth/truncation metadata on each entry's `_vigil` field; `import-har` reads `_vigil` for a lossless round-trip.",
+            "Prefer these verbs over raw `vigil assess fetch \"http-flows?...\"` — they keep query-string details out of operator instructions.",
+        ),
+        common_mistakes=(
+            ("--enabled to disable capture", "use --no-enabled; --enabled turns raw-body capture ON"),
+            ("policy set with no fields", "pass at least one field — an empty update is rejected"),
+        ),
+    ),
+    "record-attempt": CommandContract(
+        name="record-attempt",
+        summary="Record a NON-covering probe attempt (attempted|blocked|no-signal|error) under a lens so a touched-but-inconclusive target is on the ledger without counting as coverage.",
+        schema_name="backend ProbeRunRecordRequest (POST /probe-runs)",
+        preferred_invocations=(
+            "vigil assess record-attempt --result-status blocked --attack-family ssrf --lens tenant-boundary --target-host api.example.com --target-path /fetch --notes 'WAF 403 on every internal host' --finding VA-047",
+            "vigil assess record-attempt --result-status no-signal --attack-family idor --target-host app.example.com --target-path /orders/1001 --auth-context member --input-slot path",
+            "vigil assess record-attempt --result-status attempted --attack-family open-redirect --lens blind-oob --evidence-ref scans/redirect-probe.txt",
+        ),
+        author_supplied_fields=(
+            "--result-status (attempted|blocked|no-signal|error — non-covering only)",
+            "--attack-family (a vuln_taxonomy class)",
+            "--lens / --target-host / --target-path / --target-port / --auth-context as applicable",
+        ),
+        helper_defaults=(
+            ("tool_name", "manual"),
+            ("auth_context", "anonymous"),
+            ("input_slot", "unknown"),
+            ("lens", '"" (part of the probe key: a different lens is a distinct attempt)'),
+        ),
+        notes=(
+            "Non-covering by design: `tested`/`signal` (covering) verdicts are NOT accepted here — record those through the normal probe pipeline with real evidence. This verb exists so 'a non-conclusive response is a lead, not a verdict' attempts are captured for the resume-brief Attempts ledger.",
+            "The same target under a DIFFERENT --lens is a distinct attempt (lens is hashed into the probe key), not a dedup collision — use it to record the mindset the probe ran under.",
+            "--finding <slug> backfills the attempt→finding link (finding_id); it is COALESCE-backfilled on a re-run of the same probe, so a later record-attempt can attach the link an earlier one omitted.",
+            "An out-of-vocab --attack-family WARNs but is stored verbatim (the backend persists TEXT for forward-compatibility).",
+        ),
+        common_mistakes=(
+            ("--result-status tested", "covering verdicts are recorded by the probe pipeline with evidence, not by record-attempt; use attempted/blocked/no-signal/error here"),
+            ("recording a wall here instead of block-technique", "record-attempt logs a single probe attempt; a durable technique-level wall on a target belongs in `vigil assess block-technique`"),
         ),
     ),
     "list-finding-group": CommandContract(
@@ -2231,7 +2300,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             schema_name="backend decision-record (POST /dispatch-decisions)",
             preferred_invocations=(
                 "vigil assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user",
-                "vigil assess agent decision --kind egress_decision --choice browser-based-tool --payload-json '{\"egress_block_pct\": 67}'",
+                "vigil assess agent decision --kind egress_decision --payload-json '{\"choice\": \"browser-based-tool\", \"egress_block_pct\": 67}'",
                 "vigil assess agent decision --kind dispatch_blocked --phase recon --reason \"missing massdns binary in runtime image\" --surfaced-to-user",
             ),
             author_supplied_fields=(

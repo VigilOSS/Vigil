@@ -295,12 +295,13 @@ loosen it.
 ### Cross-dispatch rule — check before every fire, do not re-spend
 
 **Before ANY live human-reach fire**, check for an existing `human_reach_decision`
-already recorded against that exact endpoint/action — via `vigil assess resume-brief`
-(recent decisions surface there; narrow with `--q <endpoint-or-keyword>`) or by
-reviewing `agent decision` history for the surface. If a `human_reach_decision` on
-that endpoint/action already carries `choice=pending` or `choice=denied`, treat it
-as **blocked — do not fire**, regardless of whether your own dispatch has spent any
-of the nominal 1-3 itself.
+already recorded against that exact endpoint/action — query the authoritative,
+kind-filtered, paginated decision log:
+`vigil assess fetch "dispatch-decisions?kind=human_reach_decision"` (grep the
+returned JSON for the target host/endpoint to find the matching row). If a
+`human_reach_decision` on that endpoint/action already carries a `payload.choice`
+of `pending` or `denied`, treat it as **blocked — do not fire**, regardless of
+whether your own dispatch has spent any of the nominal 1-3 itself.
 
 **The 1-3 budget is per endpoint/action for the whole engagement, not per dispatch
 and not per specialist** — a fresh dispatch does not get a fresh budget, and two
@@ -315,15 +316,19 @@ but do not rely on that alone; check directly before firing.
 Any specialist records the decision directly (same pattern as `scope_decision`):
 
 ```bash
-vigil assess agent decision --kind human_reach_decision --choice pending \
-    --surfaced-to-user \
-    --payload-json '{"endpoint": "<path-or-url>", "action": "<what-it-does>",
-    "live_attempts_used": <n>, "destination_class": "real_third_party|unknown",
+vigil assess agent decision --kind human_reach_decision --surfaced-to-user \
+    --payload-json '{"choice": "pending", "endpoint": "<path-or-url>",
+    "action": "<what-it-does>", "live_attempts_used": <n>,
+    "destination_class": "real_third_party|unknown",
     "evidence": "<what Step 1-3 showed>"}'
 ```
 
-Do not continue live-firing that endpoint/action until the operator resolves the
-decision. Valid resolutions:
+The `choice` field **must** live inside `--payload-json` (as above), not as a
+standalone `--choice` flag: when `--payload-json` is supplied the CLI uses it
+verbatim and ignores the shorthand flags, so a top-level `--choice` would be
+silently dropped and the cross-dispatch gate — which reads `payload.choice` —
+would never fire. Do not continue live-firing that endpoint/action until the
+operator resolves the decision. Valid resolutions:
 
 - `approved_continue` — proceed with further live-fire (rare; the operator has
   independent grounds the destination is safe)
@@ -701,7 +706,9 @@ Record state immediately using `vigil assess` with JSON files:
 - **Access records:** `vigil assess post access-records <json-file>`
 - **Coverage updates:** `vigil assess patch coverage-items/<id> <json-file>`
 - **Blocked techniques:** `vigil assess block-technique --technique <TECHNIQUE> --target-kind <kind> --target-ref <ref> --reason <why>` (the technique-key auto-derives; override with `--technique-key`. Review with `vigil assess list-blocked-techniques`). Prefer this first-class verb over the raw `vigil assess post blocked-techniques <json-file>`.
+- **Captured HTTP traffic:** `vigil assess http list --host <host> --method <verb> --content-type <family>` queries the canonical full-flow store (`vigil assess http show <flow_uid>` for one flow, `vigil assess http search <text>` for a LIKE query, `vigil assess http export-har -o <file>` / `vigil assess http import-har <file>` for HAR round-trips). Capture is a per-engagement policy, not a proxy selector — review it with `vigil assess http policy` and toggle raw-body capture with `vigil assess http policy set --enabled --capture-request-bodies` (raw-body capture is OFF by default).
 - **Probe runs:** `vigil assess post probe-runs <json-file>`
+- **Non-covering probe attempts:** `vigil assess record-attempt --result-status <attempted|blocked|no-signal|error> --attack-family <class> --lens <lens> --target-host <host> [--finding <slug>]` records a touched-but-inconclusive target (a lead, not a verdict) on the resume-brief Attempts ledger without counting as coverage. Covering `tested`/`signal` verdicts go through the normal probe pipeline with evidence, not here.
 
 Write payloads to `/tmp/<type>-<slug>.json` before calling — inline JSON shell arguments cause escaping damage and are not auditable.
 
