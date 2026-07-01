@@ -75,9 +75,7 @@ def _load_proxy_addon_module():
             warn=lambda *_args, **_kwargs: None,
             error=lambda *_args, **_kwargs: None,
         ),
-        options=SimpleNamespace(
-            engagements_root="", engagement_dir="", registry_poll_seconds=30
-        ),
+        options=SimpleNamespace(engagements_root="", registry_poll_seconds=30),
     )
     sys.modules.setdefault("mitmproxy", mitmproxy)
     sys.modules.setdefault("mitmproxy.http", http)
@@ -134,14 +132,16 @@ def _insert_work_item(
     priority_score: int = 0,
     cluster_key: str | None = None,
     terminal_reason: str | None = None,
+    classifier_version: str | None = None,
 ) -> int:
     conn = sqlite3.connect(str(db_path))
     try:
         cursor = conn.execute(
             """INSERT INTO work_items
             (queue_key, method, url, url_path, query_params, body_params,
-             type, source, status, priority_score, cluster_key, terminal_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             type, source, status, priority_score, cluster_key, terminal_reason,
+             classifier_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 queue_key,
                 method,
@@ -155,6 +155,7 @@ def _insert_work_item(
                 priority_score,
                 cluster_key,
                 terminal_reason,
+                classifier_version,
             ),
         )
         conn.commit()
@@ -167,6 +168,7 @@ def _run_classify(db_path: Path, batch: int = 500, extra_args: list[str] | None 
     module = _load_classify_module()
     extras = extra_args or []
     reclassify_all = "--reclassify-all" in extras
+    reclassify_stale = "--reclassify-stale" in extras
     reclaim_skipped = "--reclaim-skipped" in extras
     only_unscored = "--only-unscored" in extras  # deprecated alias, kept for back-compat
     module.run(
@@ -174,6 +176,7 @@ def _run_classify(db_path: Path, batch: int = 500, extra_args: list[str] | None 
             db_path=str(db_path),
             batch=batch,
             reclassify_all=reclassify_all,
+            reclassify_stale=reclassify_stale,
             reclaim_skipped=reclaim_skipped,
             only_unscored=only_unscored,
         )
@@ -2264,3 +2267,310 @@ def test_s12_ingest_endpoints_admits_ip_localhost_ipv6_and_skips_malformed(
     assert "malformed endpoint line" in captured.err
     assert "template/fuzz-marker" in captured.err
     assert "Skipped" in captured.err
+
+
+# --------------------------------------------------------------------------- #
+# P1-D — reclassification staleness (classifier_version stamp + --reclassify-stale)
+# --------------------------------------------------------------------------- #
+
+
+def test_classifier_version_deterministic_across_pythonhashseed() -> None:
+    """CRITICAL (review HIGH-1): CLASSIFIER_VERSION must be identical across
+    processes with different PYTHONHASHSEED. If it were PYTHONHASHSEED-randomized
+    (the `repr(frozenset)` / builtin-`hash()` trap), the ingest process and the
+    `--reclassify-stale` process would compute different digests and EVERY row
+    would look stale on every run. We compute it in two subprocesses under
+    different seeds and assert equality (and that it is not accidentally empty).
+    """
+    import os
+    import subprocess
+
+    scripts_root = _scripts_root()
+    snippet = "import assess.lib.classify_buckets as cb; print(cb.CLASSIFIER_VERSION)"
+
+    def _compute(seed: str) -> str:
+        env = dict(os.environ)
+        env["PYTHONHASHSEED"] = seed
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{scripts_root}{os.pathsep}{existing}" if existing else str(scripts_root)
+        )
+        out = subprocess.check_output(
+            [sys.executable, "-c", snippet], env=env, text=True
+        )
+        return out.strip()
+
+    v_a = _compute("0")
+    v_b = _compute("1")
+    v_c = _compute("987654321")
+    assert v_a and len(v_a) == 12
+    assert v_a == v_b == v_c, f"non-deterministic: {v_a!r} {v_b!r} {v_c!r}"
+
+
+def test_classifier_version_stamped_on_inline_insert(tmp_path: Path) -> None:
+    """db_insert_work_item stamps the current CLASSIFIER_VERSION at ingest, so a
+    freshly-ingested row is never treated as stale by --reclassify-stale."""
+    cb = _classify_buckets()
+    db_path = _make_fresh_db(tmp_path)
+    db_module = _load_db_module()
+
+    db_module.db_insert_work_item(
+        str(db_path),
+        queue_key="fresh:1",
+        method="GET",
+        url="https://target.example/exec/run?cmd=id",
+        url_path="/exec/run",
+        query_params=json.dumps({"cmd": "id"}),
+        body_params="{}",
+        path_params="{}",
+        case_type="unknown",
+        source="test",
+        params_key_sig="",
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT cluster_key, classifier_version FROM work_items WHERE queue_key = ?",
+            ("fresh:1",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "gf:rce"
+    assert row[1] == cb.CLASSIFIER_VERSION
+
+
+def test_classify_work_default_stamps_classifier_version(tmp_path: Path, capsys) -> None:
+    """The default classify-work pass stamps CLASSIFIER_VERSION on never-scored
+    rows (and surfaces it + a from_version histogram in the JSON summary)."""
+    cb = _classify_buckets()
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path,
+        queue_key="v:1",
+        url_path="/exec/run",
+        query_params={"cmd": "id"},
+    )
+
+    _run_classify(db_path)
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["classifier_version"] == cb.CLASSIFIER_VERSION
+    # The one never-scored row came from an unstamped (NULL) state.
+    assert summary["from_version"] == {"none": 1}
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT classifier_version FROM work_items WHERE queue_key = ?",
+            ("v:1",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == cb.CLASSIFIER_VERSION
+
+
+def test_reclassify_stale_restamps_only_stale_rows(tmp_path: Path, capsys) -> None:
+    """--reclassify-stale restamps NULL + old-version rows (re-scoring them from
+    the current bucket table) while leaving current-version and 'manual' rows
+    untouched. --reclassify-all then proves it DOES touch the 'manual' row."""
+    cb = _classify_buckets()
+    current = cb.CLASSIFIER_VERSION
+    manual = cb.MANUAL_CLASSIFIER_VERSION
+    db_path = _make_fresh_db(tmp_path)
+
+    # A: legacy NULL version, scored under an "old" bucket table.
+    _insert_work_item(
+        db_path, queue_key="A:null", url_path="/exec/run",
+        query_params={"cmd": "id"}, priority_score=11, cluster_key="gf:oldbucket",
+        classifier_version=None,
+    )
+    # B: an explicit old (non-current) version.
+    _insert_work_item(
+        db_path, queue_key="B:old", url_path="/exec/run",
+        query_params={"cmd": "id"}, priority_score=11, cluster_key="gf:oldbucket",
+        classifier_version="oldversion01",
+    )
+    # C: already at the current version — must be left alone.
+    _insert_work_item(
+        db_path, queue_key="C:current", url_path="/exec/run",
+        query_params={"cmd": "id"}, priority_score=50, cluster_key="gf:rce",
+        classifier_version=current,
+    )
+    # D: hand-tuned 'manual' row — protected from --reclassify-stale.
+    _insert_work_item(
+        db_path, queue_key="D:manual", url_path="/exec/run",
+        query_params={"cmd": "id"}, priority_score=77, cluster_key="gf:custom-manual",
+        classifier_version=manual,
+    )
+
+    def _snapshot():
+        conn = sqlite3.connect(str(db_path))
+        try:
+            return {
+                r[0]: (r[1], r[2], r[3])
+                for r in conn.execute(
+                    "SELECT queue_key, cluster_key, priority_score, classifier_version "
+                    "FROM work_items"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+
+    before = _snapshot()
+
+    _run_classify(db_path, extra_args=["--reclassify-stale"])
+    summary = json.loads(capsys.readouterr().out)
+    after = _snapshot()
+
+    # A + B were stale → re-scored to the current bucket (gf:rce/50) and stamped.
+    assert after["A:null"] == ("gf:rce", 50, current)
+    assert after["B:old"] == ("gf:rce", 50, current)
+    # C (current) and D (manual) are byte-identical to before.
+    assert after["C:current"] == before["C:current"]
+    assert after["D:manual"] == before["D:manual"]
+    assert after["D:manual"][2] == manual
+
+    # Only the two stale rows were touched.
+    assert summary["updated"] == 2
+    assert summary["classified"] == 2
+    assert summary["from_version"] == {"none": 1, "oldversion01": 1}
+
+    # --reclassify-all IS the nuclear option: it re-scores the 'manual' row too.
+    _run_classify(db_path, extra_args=["--reclassify-all"])
+    capsys.readouterr()
+    nuked = _snapshot()
+    assert nuked["D:manual"] == ("gf:rce", 50, current)
+
+
+def test_reclassify_stale_is_idempotent(tmp_path: Path, capsys) -> None:
+    """A second --reclassify-stale run reports 0 updates: after the first pass
+    every touched row carries the current version, so nothing is stale."""
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(
+        db_path, queue_key="A:null", url_path="/exec/run",
+        query_params={"cmd": "id"}, classifier_version=None,
+    )
+    _insert_work_item(
+        db_path, queue_key="B:old", url_path="/proxy/x",
+        query_params={"url": "http://evil"}, classifier_version="oldversion01",
+    )
+
+    _run_classify(db_path, extra_args=["--reclassify-stale"])
+    first = json.loads(capsys.readouterr().out)
+    assert first["updated"] == 2
+
+    _run_classify(db_path, extra_args=["--reclassify-stale"])
+    second = json.loads(capsys.readouterr().out)
+    assert second["classified"] == 0
+    assert second["updated"] == 0
+    assert second["from_version"] == {}
+
+
+def test_classifier_version_migration_adds_column_without_data_loss(tmp_path: Path) -> None:
+    """A legacy work_items table (no classifier_version column) picks the column
+    up via db_init's ALTER migration, and existing rows are preserved with a
+    NULL stamp (so --reclassify-stale treats them as stale on first run)."""
+    db_path = tmp_path / "legacy.db"
+    db_path.touch()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """CREATE TABLE work_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_key TEXT NOT NULL,
+                auth_context TEXT NOT NULL DEFAULT 'anonymous',
+                method TEXT NOT NULL,
+                url TEXT NOT NULL,
+                url_path TEXT NOT NULL,
+                type TEXT NOT NULL DEFAULT 'unknown',
+                source TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                priority_score INTEGER NOT NULL DEFAULT 0,
+                cluster_key TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(queue_key)
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO work_items (queue_key, method, url, url_path, source, type, "
+            "priority_score, cluster_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("legacy:1", "GET", "https://t.example/exec/run", "/exec/run",
+             "legacy", "unknown", 42, "gf:oldbucket"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db_module = _load_db_module()
+    db_module.db_init(str(db_path))
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(work_items)").fetchall()}
+        assert "classifier_version" in columns
+        row = conn.execute(
+            "SELECT priority_score, cluster_key, classifier_version "
+            "FROM work_items WHERE queue_key = ?",
+            ("legacy:1",),
+        ).fetchone()
+    finally:
+        conn.close()
+    # Existing data preserved; new column defaults NULL.
+    assert row == (42, "gf:oldbucket", None)
+
+
+def test_stats_by_classifier_version(tmp_path: Path, capsys) -> None:
+    """`work-buffer stats --by classifier_version` groups rows by their version
+    stamp so an operator can size taxonomy drift before a reclassify."""
+    cb = _classify_buckets()
+    db_path = _make_fresh_db(tmp_path)
+    _insert_work_item(db_path, queue_key="a", url_path="/a", classifier_version=cb.CLASSIFIER_VERSION)
+    _insert_work_item(db_path, queue_key="b", url_path="/b", classifier_version=cb.CLASSIFIER_VERSION)
+    _insert_work_item(db_path, queue_key="c", url_path="/c", classifier_version="oldversion01")
+    _insert_work_item(db_path, queue_key="d", url_path="/d", classifier_version=None)
+    _insert_work_item(db_path, queue_key="e", url_path="/e", classifier_version=cb.MANUAL_CLASSIFIER_VERSION)
+
+    _run_dispatch(db_path, "stats", by="classifier_version")
+    out = capsys.readouterr().out
+    assert f"{cb.CLASSIFIER_VERSION}|pending|2" in out
+    assert "oldversion01|pending|1" in out
+    assert "(none)|pending|1" in out
+    assert "manual|pending|1" in out
+
+
+def test_mark_manual_protects_row_from_reclassify_stale(tmp_path: Path, capsys) -> None:
+    """work-buffer mark-manual stamps classifier_version='manual', which then
+    survives a --reclassify-stale run untouched."""
+    cb = _classify_buckets()
+    db_path = _make_fresh_db(tmp_path)
+    row_id = _insert_work_item(
+        db_path, queue_key="hand:1", url_path="/exec/run",
+        query_params={"cmd": "id"}, priority_score=90, cluster_key="gf:hand-tuned",
+        classifier_version=None,
+    )
+
+    _run_dispatch(db_path, "mark-manual", [str(row_id)])
+    assert "manual" in capsys.readouterr().out
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        stamped = conn.execute(
+            "SELECT classifier_version FROM work_items WHERE id = ?", (row_id,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert stamped == cb.MANUAL_CLASSIFIER_VERSION
+
+    # A --reclassify-stale run must not touch the hand-tuned row.
+    _run_classify(db_path, extra_args=["--reclassify-stale"])
+    capsys.readouterr()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT priority_score, cluster_key, classifier_version "
+            "FROM work_items WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == (90, "gf:hand-tuned", cb.MANUAL_CLASSIFIER_VERSION)

@@ -603,7 +603,7 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
         oob_state = "unknown"
 
     mitm_label = "running" if mitm_running else "stopped"
-    mitm_hint = "" if mitm_running else f"   (auth capture: vigil mitmproxy start {key})"
+    mitm_hint = "" if mitm_running else "   (auth capture: vigil mitmproxy start)"
     oob_hint = "" if oob_state == "running" else "   (callbacks: vigil oob start)"
 
     print(f"[vigil] engagement: {key}", file=sys.stderr)

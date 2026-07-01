@@ -357,6 +357,59 @@ def _run_ingest_line(tmp_path, monkeypatch, capsys, line: str) -> None:
     return str(db)
 
 
+def test_ingest_endpoints_carries_request_response_payloads_when_present(
+    tmp_path, monkeypatch, capsys
+):
+    """P1-F: when a JSON producer emits headers/body/response_headers/
+    response_snippet, ingest-endpoints threads them onto the work_item instead
+    of dropping them at this second silent-truncation point. headers/
+    response_headers arriving as dicts are JSON-serialized; body/response_snippet
+    strings pass through."""
+    line = json.dumps(
+        {
+            "method": "POST",
+            "url": "https://h.example/api/orders",
+            "content_type": "application/json",
+            "headers": {"Content-Type": "application/json", "X-Req": "1"},
+            "body": '{"qty": 2}',
+            "response_headers": {"Content-Type": "application/json"},
+            "response_snippet": '{"order_id": 42, "status": "created"}',
+        }
+    )
+    db = _run_ingest_line(tmp_path, monkeypatch, capsys, line)
+    rows = db_query(
+        str(db),
+        "SELECT headers, body, response_headers, response_snippet "
+        "FROM work_items WHERE url = ?",
+        ("https://h.example/api/orders",),
+    )
+    assert len(rows) == 1, "ingest-endpoints did not create the work item"
+    assert json.loads(rows[0]["headers"]) == {"Content-Type": "application/json", "X-Req": "1"}
+    assert rows[0]["body"] == '{"qty": 2}'
+    assert json.loads(rows[0]["response_headers"]) == {"Content-Type": "application/json"}
+    assert rows[0]["response_snippet"] == '{"order_id": 42, "status": "created"}'
+
+
+def test_ingest_endpoints_bare_url_leaves_payloads_empty(
+    tmp_path, monkeypatch, capsys
+):
+    """P1-F regression: the passthrough is a clean no-op for the current
+    bare-URL sources (katana/gau/recon) that carry no payloads — the fields
+    default empty, unchanged from before the fix."""
+    db = _run_ingest_line(tmp_path, monkeypatch, capsys, "https://h.example/plain")
+    rows = db_query(
+        str(db),
+        "SELECT headers, body, response_headers, response_snippet "
+        "FROM work_items WHERE url = ?",
+        ("https://h.example/plain",),
+    )
+    assert len(rows) == 1
+    assert (rows[0]["headers"] or "") == ""
+    assert (rows[0]["body"] or "") == ""
+    assert (rows[0]["response_headers"] or "") == ""
+    assert (rows[0]["response_snippet"] or "") == ""
+
+
 def test_ingest_explicit_unknown_type_falls_through_to_typer(
     tmp_path, monkeypatch, capsys
 ):

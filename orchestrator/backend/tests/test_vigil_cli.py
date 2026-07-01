@@ -206,7 +206,8 @@ def test_engagement_create_emits_post_create_footer(
     captured = capsys.readouterr()
     assert "mitmproxy: stopped" in captured.err
     assert "oob:" in captured.err and "stopped" in captured.err
-    assert f"vigil mitmproxy start {created.key}" in captured.err
+    assert "vigil mitmproxy start" in captured.err
+    assert f"vigil mitmproxy start {created.key}" not in captured.err
     assert "vigil oob start" in captured.err
     assert f"vigil engagement start {created.key} --client codex" in captured.err
 
@@ -2947,13 +2948,10 @@ def test_auth_without_engagement_context_requires_key_or_select(tmp_path: Path, 
         main_module.main(["--root", str(install_root), "auth", "status"])
 
 
-def test_mitmproxy_start_legacy_engagement_arg_is_ignored(
+def test_mitmproxy_start_rejects_legacy_engagement_arg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Legacy `vigil mitmproxy start <engagement>` is a no-op selector — the
-    proxy serves every active engagement. The CLI should accept it silently
-    (printing one notice) rather than error out.
-    """
+    """The proxy serves every active engagement; no engagement selector exists."""
     from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
@@ -2968,10 +2966,12 @@ def test_mitmproxy_start_legacy_engagement_arg_is_ignored(
 
     monkeypatch.setattr(main_module, "start_proxy", fake_start_proxy)
 
-    main_module.main(["--root", str(install_root), "mitmproxy", "start", "eng-1"])
-    assert captured["engagements_root"] == install_root / "agent" / "engagements"
+    with pytest.raises(SystemExit) as exc:
+        main_module.main(["--root", str(install_root), "mitmproxy", "start", "eng-1"])
+    assert exc.value.code == 2
+    assert "engagements_root" not in captured
     err = capsys.readouterr().err
-    assert "ignoring engagement selector" in err
+    assert "unrecognized arguments: eng-1" in err
 
 
 def test_mitmproxy_reload_touches_sentinel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

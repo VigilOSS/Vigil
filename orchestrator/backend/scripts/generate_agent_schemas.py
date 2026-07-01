@@ -209,6 +209,36 @@ _FINDING_DETAIL_PROPERTIES = {
         "items": {"type": "string"},
         "description": "Concrete next steps needed to validate or complete the chain (e.g. 'Confirm reachable network caller for the URL parser').",
     },
+    "roe_blocked": {
+        "type": "boolean",
+        "description": "Set true when the primitive is proved but the program's rules of engagement forbid the final proof step; grade at impact-if-true. Distinct from a provisioning/access wall (see block_reason) and from chain_required (which needs another bug).",
+    },
+    "block_reason": {
+        "type": "string",
+        "description": "Why the finding cannot be advanced right now — a provisioning/access wall blocking the next proof step (as opposed to an ROE policy wall or a missing-bug chain park). Surfaced in the resume-brief Attempts ledger.",
+    },
+    "unblock_requirements": {
+        "type": "object",
+        "description": "What must be provisioned to lift the block so the finding can be driven to proof. When the unblocker is another finding or chain, link it with `vigil assess link-finding <slug> --link-kind unblocked_by ...`.",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "description": "Category of what is needed: account | line | device | credential | access.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Concretely what to provision (e.g. 'a test account in the org-admin group with role-management entitlement').",
+            },
+            "requested_from": {
+                "type": "string",
+                "description": "Who can provide it (e.g. 'program contact', 'target admin').",
+            },
+        },
+    },
+    "attempts_summary": {
+        "type": "string",
+        "description": "One-line summary of what was tried and the result, for the resume-brief Attempts ledger (e.g. 'anonymous + member + billing-admin sessions all 403 at the function gate').",
+    },
     "variant_of": {
         "type": "string",
         "description": "Slug of the root finding when this record is a verified same-class variant (e.g. 'sqli-search-q').",

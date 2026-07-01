@@ -440,12 +440,11 @@ def main(argv: list[str] | None = None) -> None:
     mitm_sub = mitm_p.add_subparsers(dest="mitmproxy_command", required=True)
     mitm_start = mitm_sub.add_parser(
         "start",
-        help="Start (or restart) the proxy container; builds the image first if missing.",
+        help=(
+            "Start (or restart) the shared proxy container for all active "
+            "engagements; builds the image first if missing."
+        ),
     )
-    # Positional kept as a deprecated shim — one or two release cycles of grace
-    # so existing operator habits don't error out.
-    mitm_start.add_argument("engagement", nargs="?", help=argparse.SUPPRESS)
-    mitm_start.add_argument("--select", action="store_true", help=argparse.SUPPRESS)
     mitm_start.add_argument("--port", type=int, default=8080, help="Host port to bind (default 8080).")
     mitm_start.add_argument(
         "--build",
@@ -1280,14 +1279,6 @@ def _runtime_shell_exec(command_parts: list[str]) -> None:
 def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
     engagements_root = install_root / "agent" / "engagements"
     if args.mitmproxy_command == "start":
-        if args.engagement or args.select:
-            # The engagement positional / --select is a legacy shim. The proxy
-            # now serves every active engagement at once, so we silently ignore
-            # the value after printing one line so the operator knows.
-            print(
-                "[vigil] mitmproxy now serves all active engagements; ignoring engagement selector.",
-                file=sys.stderr,
-            )
         engagements_root.mkdir(parents=True, exist_ok=True)
         start_proxy(
             MitmproxyOptions(

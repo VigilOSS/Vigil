@@ -10,7 +10,7 @@ Intercept browser traffic to capture authenticated sessions (cookies, tokens, he
 
 ```bash
 vigil engagement list --json
-vigil mitmproxy start <engagement-key>
+vigil mitmproxy start
 ```
 
 ## Browser Proxy Setup (FoxyProxy)
@@ -57,13 +57,13 @@ If you need to regenerate the CA (e.g., compromise, rotation):
 ```bash
 docker volume rm mitmproxy-ca
 vigil engagement list --json
-vigil mitmproxy start <engagement-key>
+vigil mitmproxy start
 # Re-install the new cert using Option A or B above
 ```
 
 ## Login Capture Workflow
 
-1. List engagements and start the proxy explicitly: `vigil engagement list --json` then `vigil mitmproxy start <engagement-key>`
+1. List engagements and start the shared proxy explicitly: `vigil engagement list --json` then `vigil mitmproxy start`
 2. Configure browser proxy (see above)
 3. Navigate to the target login page and authenticate
 4. Browse a few authenticated pages (admin, settings, API endpoints)
@@ -97,16 +97,19 @@ vigil logs mitmproxy --lines 80
 vigil mitmproxy stop
 
 # Restart (reuses same CA cert from volume)
-vigil mitmproxy start <engagement-key>
+vigil mitmproxy start
 
 # Custom port
-vigil mitmproxy start <engagement-key> --port 9090
+vigil mitmproxy start --port 9090
 ```
 
 ## How It Works
 
 The proxy runs `mitmdump` with `proxy_addon.py`, which:
 - Filters noise (analytics, CDNs, tracking pixels)
+- Serves all active engagements and routes each flow by hostname against the
+  active engagement scope registry; there is no engagement selector on
+  `vigil mitmproxy start`
 - Classifies requests by type (API, form, page, JS, GraphQL, WebSocket, etc.)
 - Detects login flows and POSTs captured session material to the backend credential store
 - Records intercepted traffic to `cases.db` for work-buffer ingestion

@@ -245,6 +245,24 @@ def _ensure_url_scheme(url: str) -> str | None:
     return None
 
 
+def _payload_text(value) -> str:
+    """Coerce a JSON-provided request/response payload field to storable TEXT.
+
+    ``headers``/``response_headers`` may arrive as a dict (HAR-style header maps)
+    or as a pre-serialized string; ``body``/``response_snippet`` arrive as
+    strings. A dict is JSON-serialized; None/absent becomes ``""`` so the
+    passthrough is a clean no-op for the bare-URL sources that carry none of
+    these. Everything else is stringified defensively.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
 def run(args) -> None:
     # Anchor a relative cases.db to the engagement dir (not the cwd) so the
     # is_file() check and db_init() operate on the engagement's database even
@@ -362,6 +380,15 @@ def run(args) -> None:
                 body_params=json.dumps(row["body_params"]) if isinstance(row["body_params"], dict) else str(row["body_params"]),
                 path_params=json.dumps(row["path_params"]) if isinstance(row["path_params"], dict) else str(row["path_params"]),
                 cookie_params=json.dumps(row["cookie_params"]) if isinstance(row["cookie_params"], dict) else str(row["cookie_params"]),
+                # P1-F: pass request/response payloads through to storage. These
+                # are "" for the current bare-URL sources (a harmless no-op), and
+                # carry real payloads once a producer (e.g. the deferred HAR
+                # ingest path) emits them — closing the second silent-truncation
+                # point where ingest-endpoints dropped body/response fields.
+                headers=row.get("headers", ""),
+                body=row.get("body", ""),
+                response_headers=row.get("response_headers", ""),
+                response_snippet=row.get("response_snippet", ""),
                 content_type=row["row_content_type"],
                 response_status=row["response_status"] or 0,
                 case_type=row["case_type"],
@@ -409,6 +436,16 @@ def run(args) -> None:
             body_params: dict = {}
             path_params: dict = {}
             cookie_params: dict = {}
+            # P1-F: request/response payload passthrough. Bare-URL sources
+            # (katana/gau/recon) carry none of these, so they default empty (a
+            # no-op — see the passthrough note at db_insert_work_item below). A
+            # richer JSON producer (e.g. the deferred HAR ingest path) that DOES
+            # emit them then lands them on the work item instead of being
+            # silently dropped at this second truncation point.
+            headers = ""
+            body = ""
+            response_headers = ""
+            response_snippet = ""
 
             if line.startswith("{"):
                 try:
@@ -436,6 +473,15 @@ def run(args) -> None:
                 body_params = row.get("body_params") or {}
                 path_params = row.get("path_params") or {}
                 cookie_params = row.get("cookie_params") or {}
+                # P1-F: carry request/response payloads when a producer emits
+                # them. headers/response_headers may arrive as a dict (HAR-style)
+                # or a pre-serialized string; normalize dicts to JSON text since
+                # db_insert_work_item stores them as TEXT. body/response_snippet
+                # are already text (or absent -> "").
+                headers = _payload_text(row.get("headers"))
+                body = _payload_text(row.get("body"))
+                response_headers = _payload_text(row.get("response_headers"))
+                response_snippet = _payload_text(row.get("response_snippet"))
                 if not url:
                     skipped_malformed += 1
                     print(
@@ -638,6 +684,11 @@ def run(args) -> None:
                     "signals": signals,
                     "case_type": case_type,
                     "params_sig": params_sig,
+                    # P1-F payload passthrough (empty for bare-URL sources).
+                    "headers": headers,
+                    "body": body,
+                    "response_headers": response_headers,
+                    "response_snippet": response_snippet,
                 }
             )
             pending_observations.append(observation)

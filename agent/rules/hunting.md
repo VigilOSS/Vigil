@@ -35,6 +35,8 @@ A strong-but-unproven finding is parked, not dropped: hold it with `evidence_typ
 
 **ROE-blocked proof is a CANDIDATE, not a severity downgrade.** This rule demands the attacker outcome — but when you cannot safely complete the final proof step because the program's rules of engagement forbid it (touching real customer data, pivoting into production, exfiltrating a record you have already shown you can reach), that is a constraint on *you*, not a weakness in the finding. Do not lower the severity to match what you were permitted to demonstrate. Grade the **candidate at impact-if-true** — the severity it carries if the blocked step succeeds, which the surrounding evidence already makes likely — and record the single unblocking test that would convert it: set `details.roe_blocked=true` and put the exact next action in `details.required_followup`. This is distinct from the theoretical/`chain_required` park above (which needs another *bug* to land): here the primitive is proved and only the demonstration is walled off by policy. An ROE wall must never masquerade as a low-severity verdict.
 
+**Blocked-for-provisioning is a THIRD category — distinct from both `roe_blocked` and theoretical/`chain_required`.** `roe_blocked` means the primitive is proved and only the final demonstration is walled off by policy; theoretical/`chain_required` means the finding needs another *bug* to complete. A third case is neither: the attempt cannot even start because a precondition is missing — no test account in the required group, no access to the physical line/device, no additional credential or access grant — and the wall may be permanent for this engagement. Record this with `details.block_reason` (why the attempt could not proceed) and `details.unblock_requirements` (`{kind: account|line|device|credential|access, description, requested_from}` — what is missing and who/what would need to provision it); roll repeated attempts up into `details.attempts_summary` instead of scattering them across free-text notes. A `blocked` finding stays OUT of the report — unlike an `roe_blocked` candidate, it is not gradeable at impact-if-true, because the primitive itself was never reached. But the unblock path is first-class, not a dead end: when a later finding or chain lands that would satisfy the block (the missing account gets provisioned, the missing device turns up, the missing credential surfaces elsewhere), link the two — `vigil assess link-finding <blocked-finding-slug> --link-kind unblocked_by --target-kind finding --target-ref <finding-that-unblocks-it>` — so the operator, and the next engagement against this target, see the connection instead of re-discovering it from scratch.
+
 ## 3. Precondition equivalence check
 
 Before rating severity, identify the precondition required to trigger the vulnerability. If that precondition already grants the attacker equivalent or greater access than the vulnerability itself provides, the finding is defense-in-depth (Low), not an independent exploit. Score on incremental impact over the precondition, not total impact of the chain.
@@ -67,6 +69,20 @@ Push-harder signals include:
 ## 5. Exhaust the surface — rotate only when genuinely dry
 
 Leave a surface only when it is genuinely dry: no meaningful routes, no privileged features, no object references, and no useful source intelligence after a *thorough* pass. "Slow" is not "dry" — do not rotate on a timer; rotate when you have actually exhausted the surface.
+
+## 5a. A human-reach determination is part of exhausting a surface
+
+An endpoint whose human-reach status is still **unknown** — the `agent/shared-constraints.md`
+§2d preflight did not resolve it, and no `human_reach_decision` has been recorded —
+is an **open question, not a silent skip**. Do not close a surface as exhausted
+while a notify-shaped endpoint on it sits undetermined; run it through the §2d
+procedure (static characterization, then the bounded live-fire budget if still
+ambiguous) so it lands in the same recorded-verdict system as every other lead.
+A name alone — `send-notification`, `alert-approver`, `ticket-create` — is a
+hypothesis about behavior, not proof it reaches anyone: an endpoint that only
+*looks* notify-shaped may resolve NEGATIVE under §2d and become ordinary surface,
+and one that looks harmless may resolve POSITIVE. The recorded determination —
+not the name — decides how you treat it.
 
 ## 6. Evidence beats volume
 

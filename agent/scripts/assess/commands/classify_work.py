@@ -21,7 +21,12 @@ import sqlite3
 from collections import Counter
 
 from assess.lib.classify import classify_type
-from assess.lib.classify_buckets import INERT_TYPES, classify_row as _classify_row
+from assess.lib.classify_buckets import (
+    CLASSIFIER_VERSION,
+    INERT_TYPES,
+    MANUAL_CLASSIFIER_VERSION,
+    classify_row as _classify_row,
+)
 from assess.lib.db import db_init
 
 
@@ -65,6 +70,25 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "operator triage (e.g. priority_score raised by hand, custom "
             "cluster_key) — narrow your scope or accept the loss before "
             "running."
+        ),
+    )
+    p.add_argument(
+        "--reclassify-stale",
+        dest="reclassify_stale",
+        action="store_true",
+        help=(
+            "Re-score only rows whose `classifier_version` is stale — NULL "
+            "(legacy, scored before the version stamp existed) or different from "
+            "the CURRENT `classify_buckets.CLASSIFIER_VERSION` — while LEAVING "
+            "rows stamped `manual` (via `work-buffer mark-manual`) untouched. "
+            "This is the targeted alternative to `--reclassify-all`: after a "
+            "deliberate `_BUCKETS` change it restamps exactly the rows scored "
+            "under the old taxonomy and is idempotent (a second run reports 0 "
+            "updates because every touched row is now at the current version). "
+            "NOTE: on a legacy DB where no row was ever stamped, the whole "
+            "in-scope corpus is NULL and therefore treated as stale on the "
+            "first run — i.e. first-run scope == `--reclassify-all`; subsequent "
+            "runs narrow to genuinely-stale rows."
         ),
     )
     p.add_argument(
@@ -128,6 +152,7 @@ def run(args: argparse.Namespace) -> None:
     db_path = args.db_path
     batch = max(1, int(args.batch))
     reclassify_all = bool(getattr(args, "reclassify_all", False))
+    reclassify_stale = bool(getattr(args, "reclassify_stale", False))
     reclaim_skipped = bool(getattr(args, "reclaim_skipped", False))
     retype = bool(getattr(args, "retype", False))
     retype_all = bool(getattr(args, "retype_all", False))
@@ -164,6 +189,21 @@ def run(args: argparse.Namespace) -> None:
     if reclaim_skipped:
         where_clause: str = "status = 'skipped'"
         where_params: tuple = ()
+    elif reclassify_stale:
+        # Restamp only rows scored under an OLD (or unknown/legacy-NULL) bucket
+        # table, never operator-marked `manual` rows. The two `classifier_version
+        # IS NULL OR ...` disjunctions are deliberate: a bare `!= 'manual'` /
+        # `!= :current` would drop NULL rows (SQL `NULL != x` is NULL, not TRUE),
+        # but legacy NULL rows are EXACTLY the stale rows we must pick up. So:
+        #   * stale     = (version IS NULL) OR (version != current)
+        #   * not-manual = (version IS NULL) OR (version != 'manual')
+        # → NULL kept, current excluded, 'manual' excluded, any other value kept.
+        where_clause = (
+            f"{base_predicate} "
+            "AND (classifier_version IS NULL OR classifier_version != ?) "
+            "AND (classifier_version IS NULL OR classifier_version != ?)"
+        )
+        where_params = (*inert_params, CLASSIFIER_VERSION, MANUAL_CLASSIFIER_VERSION)
     elif reclassify_all:
         where_clause = base_predicate
         where_params = inert_params
@@ -183,6 +223,11 @@ def run(args: argparse.Namespace) -> None:
         updated = 0
         reclaimed = 0
         cluster_counts: Counter[str] = Counter()
+        # Histogram of the `classifier_version` each touched row carried BEFORE
+        # this pass (NULL → "none"). Lets an operator see, after a taxonomy bump,
+        # how many rows were legacy-unstamped vs scored under a specific prior
+        # digest — the audit trail `--reclassify-stale` restamps from.
+        from_version_counts: Counter[str] = Counter()
 
         # Track an offset so we don't loop forever in the wide WHERE case
         # (where rows already match it after the UPDATE).
@@ -191,7 +236,7 @@ def run(args: argparse.Namespace) -> None:
             rows = conn.execute(
                 f"""
                 SELECT id, type, url_path, query_params, body_params, path_params,
-                       url, source, live_status
+                       url, source, live_status, classifier_version
                 FROM work_items
                 WHERE {where_clause}
                   AND id > ?
@@ -206,6 +251,7 @@ def run(args: argparse.Namespace) -> None:
             for row in rows:
                 last_id = max(last_id, int(row["id"]))
                 classified += 1
+                from_version_counts[_row_get(row, "classifier_version") or "none"] += 1
                 # Thread the row's URL/source/live_status into the classifier so
                 # the boost-only context layer (Fix 1) is re-applied on
                 # re-classification too — otherwise the 677 nonprod/admin
@@ -228,6 +274,7 @@ def run(args: argparse.Namespace) -> None:
                             priority_reason = ?,
                             cluster_key = ?,
                             terminal_reason = ?,
+                            classifier_version = ?,
                             status = CASE WHEN ? IS NOT NULL THEN 'skipped' ELSE 'pending' END
                         WHERE id = ?
                         """,
@@ -236,6 +283,7 @@ def run(args: argparse.Namespace) -> None:
                             assignment["priority_reason"],
                             assignment["cluster_key"],
                             assignment["terminal_reason"],
+                            CLASSIFIER_VERSION,
                             assignment["terminal_reason"],
                             row["id"],
                         ),
@@ -248,6 +296,7 @@ def run(args: argparse.Namespace) -> None:
                             priority_reason = ?,
                             cluster_key = ?,
                             terminal_reason = COALESCE(?, terminal_reason),
+                            classifier_version = ?,
                             status = CASE WHEN ? IS NOT NULL THEN 'skipped' ELSE status END
                         WHERE id = ?
                         """,
@@ -256,6 +305,7 @@ def run(args: argparse.Namespace) -> None:
                             assignment["priority_reason"],
                             assignment["cluster_key"],
                             assignment["terminal_reason"],
+                            CLASSIFIER_VERSION,
                             assignment["terminal_reason"],
                             row["id"],
                         ),
@@ -270,7 +320,11 @@ def run(args: argparse.Namespace) -> None:
             "classified": classified,
             "updated": updated,
             "reclaimed_to_pending": reclaimed,
+            "classifier_version": CLASSIFIER_VERSION,
             "by_cluster": dict(sorted(cluster_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "from_version": dict(
+                sorted(from_version_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+            ),
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     finally:
@@ -403,6 +457,7 @@ def _retype_pass(db_path: str, *, batch: int, retype_all: bool) -> None:
                         priority_reason = ?,
                         cluster_key = ?,
                         terminal_reason = ?,
+                        classifier_version = ?,
                         status = CASE
                             WHEN ? IS NOT NULL THEN 'skipped'
                             WHEN status = 'skipped' THEN 'pending'
@@ -417,6 +472,7 @@ def _retype_pass(db_path: str, *, batch: int, retype_all: bool) -> None:
                         assignment["priority_reason"],
                         assignment["cluster_key"],
                         assignment["terminal_reason"],
+                        CLASSIFIER_VERSION,
                         assignment["terminal_reason"],
                         row["id"],
                     ),

@@ -23,6 +23,7 @@ Design notes:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -1109,6 +1110,69 @@ INERT_TYPES: frozenset[str] = frozenset(
 # Backwards-compatible alias for the previous private name; new code should
 # import the public `INERT_TYPES` symbol above.
 _INERT_TYPES = INERT_TYPES
+
+
+# ---------------------------------------------------------------------------- #
+# Classifier version stamp (reclassification staleness).
+#
+# `CLASSIFIER_VERSION` is a short, cross-process-DETERMINISTIC digest of the
+# classification tables (`_BUCKETS`, `_REGEX_BUCKET_RULES`, `_TYPE_FLOOR`,
+# `INERT_TYPES`). `db_insert_work_item()` stamps it inline at ingest and
+# `classify-work` re-stamps it on every re-classification, so a later
+# `classify-work --reclassify-stale` can tell rows scored under an OLD bucket
+# table from rows already at the current taxonomy — restamping only the stale
+# ones instead of the all-or-nothing `--reclassify-all`.
+#
+# DETERMINISM IS LOAD-BEARING (do not "simplify" this). The digest MUST be
+# identical across separate Python processes (the ingest process and the
+# `--reclassify-stale` process compute it independently); if it were not, every
+# row would always look stale and every run would reclassify the whole corpus.
+# That rules out `repr(frozenset(...))`, `str(set(...))`, and the builtin
+# `hash()` — all three are PYTHONHASHSEED-randomized, so their output varies run
+# to run. The same trap is documented at
+# `src/vigil_cli/bench/factory/axes.py:116` (blake2s chosen over `hash()` for
+# exactly this reason).
+#
+# We instead CANONICALIZE the input: recursively turn every set/frozenset into a
+# SORTED list (order-independent), leave tuples/lists in declaration order
+# (order IS meaningful for `_BUCKETS` tie-breaks), sort dict keys, then hash the
+# `sort_keys=True` JSON. A comment/refactor edit that does not change the tables
+# leaves the digest byte-identical; a real taxonomy edit (new bucket, changed
+# weight, new inert type, new regex rule) bumps it.
+def _canonicalize(obj: Any) -> Any:
+    """Return a JSON-serializable, order-canonical mirror of ``obj``.
+
+    Sets/frozensets → sorted lists (membership, not iteration order, is what
+    matters). Dicts → key-sorted dicts with canonicalized values. Tuples/lists
+    → lists with canonicalized elements, order PRESERVED (declaration order is
+    semantically significant for `_BUCKETS`). Scalars pass through unchanged.
+    """
+    if isinstance(obj, (set, frozenset)):
+        return sorted(_canonicalize(item) for item in obj)
+    if isinstance(obj, dict):
+        return {key: _canonicalize(value) for key, value in sorted(obj.items())}
+    if isinstance(obj, (list, tuple)):
+        return [_canonicalize(item) for item in obj]
+    return obj
+
+
+_CLASSIFIER_VERSION_INPUTS: dict[str, Any] = {
+    "buckets": _BUCKETS,
+    "regex_bucket_rules": _REGEX_BUCKET_RULES,
+    "type_floor": _TYPE_FLOOR,
+    "inert_types": INERT_TYPES,
+}
+CLASSIFIER_VERSION: str = hashlib.sha256(
+    json.dumps(_canonicalize(_CLASSIFIER_VERSION_INPUTS), sort_keys=True).encode("utf-8")
+).hexdigest()[:12]
+
+# Sentinel `classifier_version` value for rows an operator has hand-tuned. It is
+# NOT a real digest, so it never equals `CLASSIFIER_VERSION` and is protected
+# from `--reclassify-stale` (which excludes it explicitly). `work-buffer
+# mark-manual <id>` stamps it; `--reclassify-all` is the only path that
+# overwrites it. Single source of truth so `classify_work.py` and the
+# `mark-manual` verb reference the same string.
+MANUAL_CLASSIFIER_VERSION: str = "manual"
 
 
 # Structured reason tags for deferred/skipped work items. SINGLE SOURCE OF TRUTH

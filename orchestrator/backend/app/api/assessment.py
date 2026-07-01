@@ -477,7 +477,12 @@ class BlockedTechniqueRecordRequest(BaseModel):
     target_kind: str = Field(min_length=1, max_length=64)
     target_ref: str = Field(min_length=1, max_length=1024)
     reason: str = Field(min_length=1, max_length=4096)
-    retry_state: str = Field(default="no_retry", min_length=1, max_length=64)
+    # Align the API default with the SQL column default (db.py: assessment_
+    # blocked_techniques.retry_state DEFAULT 'pending'). Both are free TEXT with
+    # no CHECK; a mismatched default (was "no_retry") meant a create that omitted
+    # retry_state landed a different value depending on whether it went through
+    # the Pydantic model or a raw INSERT. Soft vocab: pending|retryable|no_retry.
+    retry_state: str = Field(default="pending", min_length=1, max_length=64)
     evidence_ref: str = Field(default="", max_length=1024)
     notes: str = Field(default="", max_length=4096)
     provenance: dict[str, Any] = Field(default_factory=dict)

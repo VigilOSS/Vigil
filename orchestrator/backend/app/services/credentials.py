@@ -128,12 +128,22 @@ def capture_material(
     }
     host_l = (host or "").lower()
     if cookies:
-        if host_l in index:
-            merged = dict(host_cookies[index[host_l]].get("cookies") or {})
-            merged.update(cookies)
-            host_cookies[index[host_l]]["cookies"] = merged
-        else:
-            host_cookies.append({"host": host_l, "cookies": dict(cookies)})
+        # Strip deletion cookies before merging — never let a logout
+        # Set-Cookie (value == "deleted", empty) overwrite or evict a stored
+        # live session cookie.  The primary filter is in the proxy_addon
+        # (full Set-Cookie directive available); this is defense-in-depth
+        # at the persist layer in case any caller sends a deletion delta.
+        live_cookies = {
+            k: v for k, v in cookies.items()
+            if not _is_deletion_cookie_value(v)
+        }
+        if live_cookies:
+            if host_l in index:
+                merged = dict(host_cookies[index[host_l]].get("cookies") or {})
+                merged.update(live_cookies)
+                host_cookies[index[host_l]]["cookies"] = merged
+            else:
+                host_cookies.append({"host": host_l, "cookies": dict(live_cookies)})
 
     merged_headers = _as_dict(existing.get("headers"))
     merged_headers.update(headers or {})
@@ -197,3 +207,17 @@ def _flat_cookies_for_scope(
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _is_deletion_cookie_value(value: Any) -> bool:
+    """Return True if a cookie value is a deletion sentinel.
+
+    Complements the full Set-Cookie parsing in proxy_addon._is_deletion_set_cookie
+    as a last-resort filter at the persist layer: any caller that sends a cookie
+    with value ``deleted`` (case-insensitive) or empty string is treated as a
+    no-op for that key rather than overwriting a stored live session value.
+    """
+    if not isinstance(value, str):
+        return False
+    v = value.strip()
+    return not v or v.lower() == "deleted"

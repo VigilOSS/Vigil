@@ -11,6 +11,8 @@ and the addon picks the matching engagement per request from a registry kept
 in sync with the orchestrator (filesystem scan as fallback).
 """
 
+import calendar
+import email.utils
 import hashlib
 import json
 import os
@@ -76,6 +78,58 @@ DEFAULT_REGISTRY_POLL_SECONDS = 30
 RELOAD_SENTINEL = ".mitmproxy-reload-requested"
 ROUTES_CACHE = ".mitmproxy-routes.json"
 DELETED_ENGAGEMENTS_DIR = ".deleted-engagements"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_deletion_set_cookie(sc: str) -> bool:
+    """Return True if a Set-Cookie directive is a cookie deletion / logout signal.
+
+    Detects RFC 6265 deletion patterns and the F5/APM (CMS portal) convention:
+
+    * value is the literal string ``deleted`` (case-insensitive) — F5/APM sends
+      ``Set-Cookie: MRHSession=deleted; ...`` on logout.
+    * value is empty — ``Set-Cookie: MRHSession=; ...``
+    * ``Max-Age=0`` (or negative) — RFC 6265 §5.3 step 3 expiry trigger.
+    * ``Expires`` attribute with a date in the past — legacy deletion method.
+
+    Returning True causes the caller to skip the cookie entirely rather than
+    overwriting a stored live session value with a deletion sentinel.
+    """
+    parts = [p.strip() for p in sc.split(";")]
+    if not parts:
+        return False
+    name_val = parts[0]
+    if "=" not in name_val:
+        return False
+    _, v = name_val.split("=", 1)
+    v = v.strip()
+    # Empty value or literal "deleted" — skip immediately.
+    if not v or v.lower() == "deleted":
+        return True
+    # Scan directives for Max-Age / Expires deletion markers.
+    now = time.time()
+    for attr in parts[1:]:
+        attr_lower = attr.lower()
+        if attr_lower.startswith("max-age="):
+            try:
+                age = int(attr[len("max-age="):].strip())
+                if age <= 0:
+                    return True
+            except ValueError:
+                pass
+        elif attr_lower.startswith("expires="):
+            exp_str = attr[len("expires="):].strip()
+            try:
+                parsed = email.utils.parsedate(exp_str)
+                if parsed and calendar.timegm(parsed) < now:
+                    return True
+            except Exception:
+                pass
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -170,12 +224,6 @@ class CaseCollector:
             "Path to the directory containing all engagement subdirectories",
         )
         loader.add_option(
-            "engagement_dir",
-            str,
-            "",
-            "(Deprecated) Path to a single engagement directory; falls back to its parent.",
-        )
-        loader.add_option(
             "registry_poll_seconds",
             int,
             DEFAULT_REGISTRY_POLL_SECONDS,
@@ -188,15 +236,6 @@ class CaseCollector:
                 self._poll_seconds = max(1, int(ctx.options.registry_poll_seconds))
             except (TypeError, ValueError):
                 self._poll_seconds = DEFAULT_REGISTRY_POLL_SECONDS
-        # Single-engagement legacy option: treat the engagement's parent as the
-        # registry root so existing operator workflows keep working while we
-        # bridge to the multi-engagement contract.
-        if "engagement_dir" in updates and ctx.options.engagement_dir and not (
-            "engagements_root" in updates and ctx.options.engagements_root
-        ):
-            legacy_dir = Path(ctx.options.engagement_dir)
-            if legacy_dir.is_dir():
-                self.engagements_root = legacy_dir.parent
         if "engagements_root" in updates and ctx.options.engagements_root:
             self.engagements_root = Path(ctx.options.engagements_root)
         if self.engagements_root is not None and not self.registry:
@@ -875,6 +914,15 @@ class CaseCollector:
         set_cookies = resp.headers.get_all("set-cookie")
         if set_cookies:
             for sc in set_cookies:
+                # Skip logout/expiry deletions — a logout must NEVER overwrite
+                # a stored live session cookie with a deletion sentinel.
+                # F5/APM sends ``MRHSession=deleted`` on CMS logout; RFC 6265
+                # deletions use Max-Age=0 or an Expires in the past.
+                if _is_deletion_set_cookie(sc):
+                    ctx.log.debug(
+                        f"proxy_addon: skipping deletion Set-Cookie: {sc.split(';')[0]!r}"
+                    )
+                    continue
                 name_val = sc.split(";")[0]
                 if "=" in name_val:
                     k, v = name_val.split("=", 1)
