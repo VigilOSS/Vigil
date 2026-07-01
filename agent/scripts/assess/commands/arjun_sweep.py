@@ -66,6 +66,30 @@ def _arjun_mode(method: str) -> str:
     return "POST"
 
 
+def _ensure_json_artifact(json_host: Path, *, incomplete: bool) -> None:
+    """Ensure a per-method Arjun JSON artifact exists and is marked if partial."""
+    try:
+        if incomplete:
+            from assess.lib.arjun_enrich import (
+                incomplete_sentinel,
+                mark_artifact_incomplete,
+            )
+
+            if json_host.exists():
+                json_host.write_text(
+                    mark_artifact_incomplete(
+                        json_host.read_text(encoding="utf-8", errors="replace")
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                json_host.write_text(incomplete_sentinel(), encoding="utf-8")
+        elif not json_host.exists():
+            json_host.write_text("{}", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "arjun-sweep",
@@ -223,11 +247,7 @@ def run(args: argparse.Namespace) -> None:
         # has a file to read (mirrors kali_arjun._ensure_json_artifact). When this
         # method run was incomplete, write the sentinel (not a bare {}) so ingest
         # never reads the empty artifact as a clean negative.
-        if not json_host.exists():
-            from assess.lib.arjun_enrich import incomplete_sentinel
-            json_host.write_text(
-                incomplete_sentinel() if note else "{}", encoding="utf-8"
-            )
+        _ensure_json_artifact(json_host, incomplete=bool(note))
 
         ingest_arjun.run(SimpleNamespace(
             db_path=db_path,

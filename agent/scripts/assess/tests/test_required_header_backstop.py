@@ -67,6 +67,18 @@ def test_bash_c_curl_in_scope_with_marker_in_script_passes() -> None:
     assert gap == ""
 
 
+def test_in_scope_marker_without_space_after_colon_passes() -> None:
+    # F2: an operator hand-writing "-H X-Bug-Bounty:vigiloss" (no space after the
+    # colon — valid curl) genuinely carries the marker, so the backstop must NOT
+    # refuse it. Layer-1 idempotency is name-only (it does not re-canonicalize the
+    # operator's spacing), and Layer-2 now matches name:value spacing-tolerantly.
+    gap = kali_output.required_header_attribution_gap(
+        ["curl", "-H", "X-Bug-Bounty:vigiloss", "https://app.example.com/x"],
+        "curl", dict(HDR), _allow("app.example.com"),
+    )
+    assert gap == ""
+
+
 def test_wildcard_scope_subdomain_reached_without_marker_is_refused() -> None:
     gap = kali_output.required_header_attribution_gap(
         ["whatweb", "https://deep.api.example.com"], "whatweb", dict(HDR),

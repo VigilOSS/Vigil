@@ -274,8 +274,9 @@ wrapper is optional for offline parse over already-registered artifacts per
 ```bash
 vigil assess host-exec --tool python3 --technique T1078.004 \
   --phase investigate --scope-host <tenant-slug> --target-host <upn> \
+  --cwd "$ENGAGEMENT_DIR/../.." \
   --intent "impossible-travel velocity correlation for <upn>" \
-  -- python3 agent/scripts/m365/impossible_travel.py \
+  -- python3 scripts/m365/impossible_travel.py \
      "$DIR/signin_merged_<slug>_<window>.json" --json \
   > "$ENGAGEMENT_DIR/ir/evidence/impossible_travel_<slug>.jsonl"
 ```

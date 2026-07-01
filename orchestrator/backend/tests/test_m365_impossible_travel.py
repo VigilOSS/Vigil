@@ -217,6 +217,17 @@ class TestDetectImpossibleTravel:
         assert f["km"] > 9_000
         assert f["kmh"] > 800  # ~10,800 km/h
 
+    def test_upn_grouping_is_case_insensitive(self):
+        events = [
+            _signin("Alice@Contoso.com", "2023-12-01T16:00:00Z", NEW_YORK),
+            _signin("alice@acme.example", "2023-12-01T17:00:00Z", TOKYO),
+        ]
+
+        flags = self.mod.detect_impossible_travel(events)
+
+        assert len(flags) == 1
+        assert flags[0]["user"] == "alice@acme.example"
+
     def test_same_metro_hours_apart_not_flagged(self):
         events = [
             _signin("user@acme.example", "2023-12-01T09:00:00Z", NEW_YORK),
@@ -415,6 +426,24 @@ class TestCLI:
         rc = self.mod.main([str(infile)])
         out = capsys.readouterr().out
         assert rc == 0 and "victim@acme.example" in out
+
+    def test_empty_graph_value_page_is_not_malformed(self, tmp_path, capsys):
+        # F1: a well-formed {"value": []} (a user with zero sign-ins in the window)
+        # is a legitimate empty result, not a malformed/truncated document.
+        infile = tmp_path / "empty.json"
+        infile.write_text(json.dumps({"value": []}), encoding="utf-8")
+        rc = self.mod.main([str(infile)])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "malformed" not in captured.err.lower()
+
+    def test_truncated_json_object_still_errors(self, tmp_path, capsys):
+        # The fix must not weaken malformed detection: a truncated / invalid JSON
+        # object is still a hard error.
+        infile = tmp_path / "bad.json"
+        infile.write_text('{"value"', encoding="utf-8")
+        rc = self.mod.main([str(infile)])
+        assert rc == 1
 
     def test_json_output_is_jsonl(self, tmp_path, capsys):
         infile = tmp_path / "signins.json"

@@ -151,6 +151,27 @@ def incomplete_sentinel(reason: str = "timed_out_or_killed") -> str:
     return json.dumps({INCOMPLETE_SENTINEL_KEY: True, "_reason": reason})
 
 
+def mark_artifact_incomplete(
+    text: str, reason: str = "timed_out_or_killed"
+) -> str:
+    """Return ``text`` annotated with the incomplete-run sentinel.
+
+    Existing Arjun JSON objects may contain partial endpoint results from a run
+    that timed out after writing the artifact. Preserve those rows and add the
+    sentinel; for invalid/non-object artifacts, fall back to the standalone
+    sentinel shape so downstream ingest still treats the run as incomplete.
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return incomplete_sentinel(reason)
+    if not isinstance(data, dict):
+        return incomplete_sentinel(reason)
+    data[INCOMPLETE_SENTINEL_KEY] = True
+    data.setdefault("_reason", reason)
+    return json.dumps(data, sort_keys=True)
+
+
 def artifact_is_incomplete(text: str) -> bool:
     """True when an arjun -oJ artifact carries the incomplete-run sentinel."""
     try:
