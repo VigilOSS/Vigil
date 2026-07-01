@@ -118,7 +118,7 @@ def _user_key(event: dict) -> str:
     """User identifier: userPrincipalName, else userId, else '<unknown>'."""
     upn = event.get("userPrincipalName")
     if isinstance(upn, str) and upn.strip():
-        return upn
+        return upn.strip().lower()
     uid = event.get("userId")
     if isinstance(uid, str) and uid.strip():
         return uid

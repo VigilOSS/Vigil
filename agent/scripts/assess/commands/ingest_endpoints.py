@@ -20,7 +20,7 @@ from assess.lib.bulk_ingest import (
 )
 from assess.lib.candidate_records import int_value, json_text
 from assess.lib.classify import classify_type
-from assess.lib.classify_buckets import classify_from_fields
+from assess.lib.classify_buckets import classify_from_fields, weak_tokens_for_key
 from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.db import db_init, db_insert_out_of_scope_work_item, db_insert_work_item
@@ -32,6 +32,7 @@ def _gf_coverage_item_payloads(
     *,
     request_variant_id: int,
     case_type: str,
+    url: str,
     url_path: str,
     query_params,
     body_params,
@@ -54,6 +55,7 @@ def _gf_coverage_item_payloads(
     try:
         assignment = classify_from_fields(
             case_type=case_type,
+            url=url,
             url_path=url_path,
             query_params=json.dumps(query_params) if isinstance(query_params, dict) else str(query_params or "{}"),
             body_params=json.dumps(body_params) if isinstance(body_params, dict) else str(body_params or "{}"),
@@ -69,8 +71,57 @@ def _gf_coverage_item_payloads(
 
     emitted_families: set[str] = set()
     payloads: list[dict] = []
+    primary_buckets = assignment.get("matched_buckets", [])
+
+    def _iter_param_keys(value) -> list[str]:
+        if isinstance(value, dict):
+            return [str(k) for k in value.keys()]
+        if not value:
+            return []
+        try:
+            decoded = json.loads(str(value))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if not isinstance(decoded, dict):
+            return []
+        return [str(k) for k in decoded.keys()]
+
+    def _has_redirect_family_url_suffix() -> bool:
+        redirect_family_tokens = {
+            "back",
+            "callback",
+            "continue",
+            "dest",
+            "destination",
+            "failure",
+            "forward",
+            "goto",
+            "next",
+            "origin",
+            "redirect",
+            "return",
+            "success",
+        }
+        for key in (
+            _iter_param_keys(query_params)
+            + _iter_param_keys(body_params)
+            + _iter_param_keys(path_params)
+        ):
+            tokens = weak_tokens_for_key(key)
+            if tokens & {"url", "uri"} and tokens & redirect_family_tokens:
+                return True
+        return False
+
+    def _skip_weak_secondary(bucket: str) -> bool:
+        if bucket != "ssrf":
+            return False
+        if not ({"redirect", "oauth-oidc"} & set(primary_buckets)):
+            return False
+        return _has_redirect_family_url_suffix()
 
     def _emit_coverage(bucket: str, *, weak: bool) -> None:
+        if weak and _skip_weak_secondary(bucket):
+            return
         attack_family = vuln_taxonomy.GF_BUCKET_TO_CLASS.get(bucket)
         if attack_family is None:
             return
@@ -104,7 +155,6 @@ def _gf_coverage_item_payloads(
     # weak) so a cross-class surface reaches every relevant specialist, not just
     # the one that won the cluster. `matched_buckets` is byte-identical to before;
     # `secondary_buckets` is the additive cross-routing signal (Fix 4).
-    primary_buckets = assignment.get("matched_buckets", [])
     for bucket in primary_buckets:
         _emit_coverage(bucket, weak=False)
     for bucket in assignment.get("secondary_buckets", []):
@@ -328,6 +378,7 @@ def run(args) -> None:
                     _gf_coverage_item_payloads(
                         request_variant_id=int(request_variant_id),
                         case_type=row["case_type"],
+                        url=row["url"],
                         url_path=row["url_path"],
                         query_params=row["query_params"],
                         body_params=row["body_params"],

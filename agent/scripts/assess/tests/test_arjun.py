@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from assess.commands import arjun_select, kali_arjun
+from assess.commands import arjun_select, arjun_sweep, kali_arjun
 from assess.lib import arjun_enrich
 
 
@@ -1038,6 +1038,56 @@ def test_incomplete_sentinel_round_trip():
     assert ae.artifact_is_incomplete("{}") is False
     assert ae.artifact_is_incomplete('{"https://x/a": ["id", "q"]}') is False
     assert len(ae.parse_arjun_json('{"https://x/a": ["id", "q"]}')) == 1
+
+
+def test_mark_artifact_incomplete_preserves_partial_records():
+    text = arjun_enrich.mark_artifact_incomplete(
+        '{"https://x/a": ["id", "q"]}'
+    )
+
+    assert arjun_enrich.artifact_is_incomplete(text) is True
+    assert arjun_enrich.parse_arjun_json(text) == [
+        {
+            "endpoint": "https://x/a",
+            "method": "GET",
+            "params": ["id", "q"],
+            "header_params": [],
+        }
+    ]
+
+
+def test_kali_arjun_marks_existing_incomplete_artifact(tmp_path, monkeypatch):
+    from assess.lib import config
+
+    artifact = tmp_path / "scans" / "arjun" / "out.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"https://x/a": ["id"]}', encoding="utf-8")
+    monkeypatch.setattr(
+        config,
+        "load_config",
+        lambda _flag: argparse.Namespace(engagement_dir=str(tmp_path)),
+    )
+
+    kali_arjun._ensure_json_artifact(
+        argparse.Namespace(engagement_dir=str(tmp_path)),
+        "/engagements/eng/scans/arjun/out.json",
+        incomplete=True,
+    )
+
+    text = artifact.read_text(encoding="utf-8")
+    assert arjun_enrich.artifact_is_incomplete(text) is True
+    assert arjun_enrich.parse_arjun_json(text)[0]["endpoint"] == "https://x/a"
+
+
+def test_arjun_sweep_marks_existing_incomplete_artifact(tmp_path):
+    artifact = tmp_path / "GET.json"
+    artifact.write_text('{"https://x/a": ["id"]}', encoding="utf-8")
+
+    arjun_sweep._ensure_json_artifact(artifact, incomplete=True)
+
+    text = artifact.read_text(encoding="utf-8")
+    assert arjun_enrich.artifact_is_incomplete(text) is True
+    assert arjun_enrich.parse_arjun_json(text)[0]["endpoint"] == "https://x/a"
 
 
 def test_parse_list_progress():
