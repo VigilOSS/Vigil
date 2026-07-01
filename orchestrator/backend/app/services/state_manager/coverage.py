@@ -415,27 +415,32 @@ def _probe_key(
     target_host: str = "",
     target_path: str = "",
     target_port: int | None = None,
+    lens: str = "",
 ) -> tuple[str, str]:
     payload_hash = hashlib.sha256(payload_value.encode("utf-8")).hexdigest() if payload_value else ""
+    key_fields: dict[str, Any] = {
+        "request_variant_id": request_variant_id,
+        "service_id": service_id,
+        "coverage_item_id": coverage_item_id,
+        "auth_context": auth_context,
+        "input_slot": input_slot,
+        "attack_family": attack_family,
+        "payload_family": payload_family,
+        "payload_hash": payload_hash,
+        "tool_name": tool_name,
+        "target_host": target_host,
+        "target_path": target_path,
+        "target_port": target_port,
+    }
+    # lens partitions the probe space: the SAME target/payload probed under a
+    # DIFFERENT mindset is a distinct attempt, not a dedup hit. Add it to the key
+    # ONLY when set — a bare lens="" is not a distinct partition, and omitting the
+    # field keeps lens-less probes hashing to the SAME key they had before the
+    # lens column existed, so dedup stays intact for rows written pre-migration.
+    if lens:
+        key_fields["lens"] = lens
     probe_key = hashlib.sha256(
-        json.dumps(
-            {
-                "request_variant_id": request_variant_id,
-                "service_id": service_id,
-                "coverage_item_id": coverage_item_id,
-                "auth_context": auth_context,
-                "input_slot": input_slot,
-                "attack_family": attack_family,
-                "payload_family": payload_family,
-                "payload_hash": payload_hash,
-                "tool_name": tool_name,
-                "target_host": target_host,
-                "target_path": target_path,
-                "target_port": target_port,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        json.dumps(key_fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return payload_hash, probe_key
 
@@ -461,8 +466,24 @@ def _upsert_probe_run(
     target_host: str = "",
     target_path: str = "",
     target_port: int | None = None,
+    lens: str = "",
+    finding_id: int | None = None,
 ) -> dict[str, Any]:
     result_status = _normalize_probe_result_status(result_status)
+    # lens is free-text: light strip/normalize only, never hard-enumerated.
+    lens = (lens or "").strip()
+    # Validate the optional finding linkage up front so a typo'd id is a clean
+    # 404 rather than a raw FK IntegrityError (foreign_keys is ON).
+    if finding_id is not None:
+        finding_row = connection.execute(
+            "SELECT id FROM assessment_findings WHERE engagement_id = ? AND id = ?",
+            (engagement_id, finding_id),
+        ).fetchone()
+        if finding_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"finding id={finding_id} not found",
+            )
     payload_hash, probe_key = _probe_key(
         request_variant_id=request_variant_id,
         service_id=service_id,
@@ -476,15 +497,17 @@ def _upsert_probe_run(
         target_host=target_host,
         target_path=target_path,
         target_port=target_port,
+        lens=lens,
     )
     connection.execute(
         """
         INSERT INTO assessment_probe_runs (
             engagement_id, request_variant_id, service_id, coverage_item_id, auth_context, input_slot, attack_family,
             payload_family, payload_value_hash, probe_key, tool_name, agent_name, result_status,
-            observed_http_status, signal_type, evidence_ref, notes, target_host, target_path, target_port
+            observed_http_status, signal_type, evidence_ref, notes, target_host, target_path, target_port,
+            lens, finding_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(engagement_id, probe_key) DO UPDATE SET
             agent_name = COALESCE(NULLIF(excluded.agent_name, ''), assessment_probe_runs.agent_name),
             result_status = excluded.result_status,
@@ -494,6 +517,10 @@ def _upsert_probe_run(
             target_host = COALESCE(NULLIF(excluded.target_host, ''), assessment_probe_runs.target_host),
             target_path = COALESCE(NULLIF(excluded.target_path, ''), assessment_probe_runs.target_path),
             target_port = COALESCE(excluded.target_port, assessment_probe_runs.target_port),
+            -- finding_id backfills on a re-run of the same probe_key (it is NOT
+            -- part of probe_key); lens IS part of probe_key so it never differs
+            -- on a conflict and needs no update clause.
+            finding_id = COALESCE(excluded.finding_id, assessment_probe_runs.finding_id),
             notes = CASE
                 WHEN excluded.notes = '' THEN assessment_probe_runs.notes
                 WHEN assessment_probe_runs.notes = '' THEN excluded.notes
@@ -521,6 +548,8 @@ def _upsert_probe_run(
             target_host,
             target_path,
             target_port,
+            lens,
+            finding_id,
         ),
     )
     row = connection.execute(
@@ -1112,6 +1141,8 @@ def record_probe_run(
     target_host: str = "",
     target_path: str = "",
     target_port: int | None = None,
+    lens: str = "",
+    finding_id: int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -1136,6 +1167,8 @@ def record_probe_run(
             target_host=target_host,
             target_path=target_path,
             target_port=target_port,
+            lens=lens,
+            finding_id=finding_id,
         )
 
 def list_probe_runs(

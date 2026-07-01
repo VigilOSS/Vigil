@@ -138,6 +138,20 @@
       "default": null,
       "title": "Target Port",
       "description": "TCP port probed. Omit when port is implied by the scheme (80/443)."
+    },
+    "lens": {
+      "default": "",
+      "maxLength": 128,
+      "title": "Lens",
+      "type": "string"
+    },
+    "finding_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "default": null,
+      "title": "Finding Id"
     }
   },
   "required": [

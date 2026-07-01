@@ -59,7 +59,7 @@ def register(subparsers) -> None:
         dest="link_kind",
         default=None,
         help=(
-            "Generic link kind, e.g. unblocked_by | related | depends_on | attempt. "
+            "Generic link kind, e.g. unblocks | unblocked_by | related | depends_on | attempt. "
             "Selects generic mode (requires --target-kind). "
             f"'{_ROOT_CAUSE_LINK_KIND}' is refused here — use --root-cause."
         ),
@@ -68,7 +68,11 @@ def register(subparsers) -> None:
         "--target-kind",
         dest="target_kind",
         default=None,
-        help="Generic link target kind, e.g. finding | chain | surface | command_run | probe_run.",
+        help=(
+            "Generic link target kind, e.g. finding | blocked_technique | chain | surface | "
+            "command_run | probe_run. Use blocked_technique (with --target-ref <technique_key>) "
+            "to record that this finding unblocks a walled-off technique."
+        ),
     )
     p.add_argument("--target-id", dest="target_id", type=int, default=None, help="Generic link target id (int).")
     p.add_argument("--target-ref", dest="target_ref", default=None, help="Generic link target reference (e.g. a finding slug).")

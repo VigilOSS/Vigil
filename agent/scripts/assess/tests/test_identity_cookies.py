@@ -76,12 +76,23 @@ def test_pairs_inject_host_scoped_cookie_and_bearer() -> None:
     assert headers["Authorization"] == "Bearer tok"
 
 
-def test_pairs_overlay_host_cookies_on_flat_view() -> None:
-    pairs = kali._identity_header_pairs(_material(), request_host="portal.example.com")
-    cookie = dict(pairs)["Cookie"]
-    # Flat view is still present (back-compat) and the host bucket is added.
-    assert "flat=1" in cookie
+def test_pairs_use_host_bucket_alone_not_flat_union() -> None:
+    # When the request host HAS a matching bucket, ONLY that bucket's cookies ride
+    # the request. The flat ``cookies`` view is a cross-host UNION, so blending it
+    # in would leak another host's uniquely-named session cookie into this request.
+    cookie = dict(kali._identity_header_pairs(_material(), request_host="portal.example.com"))["Cookie"]
     assert "JSESSIONID=PORTAL" in cookie
+    # api.example.com's cookie must NOT ride a portal request (cross-host leak).
+    assert "apikey" not in cookie
+    # the standalone flat view is not blended when a bucket matched.
+    assert "flat=1" not in cookie
+
+
+def test_pairs_fall_back_to_flat_when_no_bucket_matches() -> None:
+    # A host with no matching bucket falls back to the flat view (manual/legacy
+    # identities, or a host we never captured a bucket for).
+    cookie = dict(kali._identity_header_pairs(_material(), request_host="unrelated.test")).get("Cookie", "")
+    assert cookie == "flat=1"
 
 
 def test_pairs_without_host_cookies_unchanged() -> None:

@@ -223,9 +223,11 @@ def _identity_header_pairs(
     ``request_host`` selects the matching ``host_cookies`` bucket(s) (I-22): a
     cookie-session app on a host other than the capture-time primary scope host
     would otherwise be sent the flat (mismatched/empty) cookie view and read the
-    request as "session stale". The host-scoped bucket overlays the flat
-    ``cookies`` view so the right session rides each host; with no ``host_cookies``
-    (or no match) the behavior is the unchanged flat-cookie injection.
+    request as "session stale". When a per-host bucket matches, it is used ALONE:
+    the flat ``cookies`` view is a UNION across every captured host, so blending it
+    in would leak another host's uniquely-named session cookies into this request
+    (cross-host session bleed). Only when this host has no bucket do we fall back to
+    the flat view (manual/legacy identities with no ``host_cookies``).
     """
     pairs: list[tuple[str, str]] = []
     headers = material.get("headers")
@@ -234,10 +236,17 @@ def _identity_header_pairs(
             if str(key).strip():
                 pairs.append((str(key), str(value)))
     cookie_map: dict[str, str] = {}
-    cookies = material.get("cookies")
-    if isinstance(cookies, dict):
-        cookie_map.update({str(k): str(v) for k, v in cookies.items()})
-    cookie_map.update(host_cookies_for(material, request_host))
+    host_scoped = host_cookies_for(material, request_host)
+    if host_scoped:
+        # Authoritative per-host bucket: use it alone (no flat-union blend), so a
+        # cookie captured for a DIFFERENT host never rides this request.
+        cookie_map.update(host_scoped)
+    else:
+        # No matching bucket (manual/legacy identity, or a host we never captured):
+        # fall back to the flat cookie view.
+        cookies = material.get("cookies")
+        if isinstance(cookies, dict):
+            cookie_map.update({str(k): str(v) for k, v in cookies.items()})
     if cookie_map:
         cookie = "; ".join(f"{k}={v}" for k, v in cookie_map.items())
         pairs.append(("Cookie", cookie))

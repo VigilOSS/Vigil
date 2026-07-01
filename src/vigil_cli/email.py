@@ -82,19 +82,24 @@ function run(argv) {
     return out;
   }
 
-  function collectMessages(messages, accountName, mailboxName, payload) {
+  function collectMessages(messages, accountName, mailboxName, payload, opts) {
     if (!Array.isArray(messages)) {
       return;
     }
-    for (let i = messages.length - 1; i >= 0 && payload.messages.length < limit; i -= 1) {
-      const message = messages[i];
+    const total = messages.length;
+    if (total === 0) {
+      return;
+    }
+    const options = opts || {};
+
+    function dateAt(idx) {
+      const value = safe(() => messages[idx].dateReceived(), null);
+      return value ? new Date(value) : null;
+    }
+
+    function pushMessage(idx) {
+      const message = messages[idx];
       const received = safe(() => message.dateReceived(), null);
-      const receivedDate = received ? new Date(received) : null;
-      if (receivedDate && receivedDate < since) {
-        // Inbox messages are roughly newest-last; once we cross the cutoff the
-        // rest of this mailbox is older, so stop scanning it.
-        break;
-      }
       payload.messages.push({
         account: String(accountName || ""),
         mailbox: String(mailboxName || ""),
@@ -105,12 +110,69 @@ function run(argv) {
         received_at: isoDate(received),
       });
     }
+
+    // Bound how many messages we are willing to inspect per mailbox so a
+    // large mailbox (or an order we can't trust) can't blow the automation
+    // timeout; `scanned` is independent of `limit`, which only caps
+    // *matched* messages.
+    const scanCap = Math.max(limit * 5, 500);
+
+    // Mail.app message-array order is NOT reliably "oldest-first,
+    // newest-last" across account/mailbox types -- IMAP/Gmail-backed
+    // mailboxes are frequently newest-first (index 0 is the newest message),
+    // the opposite of what a fixed "break once we cross the cutoff" scan
+    // assumes. Trusting a hardcoded direction can silently skip the very
+    // messages we care about (e.g. a short-lived OTP that just arrived), so
+    // detect the direction empirically per mailbox from its two end
+    // messages, and never trust it for the synthetic cross-account
+    // `Mail.inbox` aggregate (its ordering isn't guaranteed monotonic at
+    // all, since it interleaves multiple accounts).
+    let newestFirst = null;
+    if (!options.forceFullScan) {
+      const firstDate = dateAt(0);
+      const lastDate = dateAt(total - 1);
+      if (firstDate && lastDate && firstDate.getTime() !== lastDate.getTime()) {
+        newestFirst = firstDate.getTime() > lastDate.getTime();
+      }
+    }
+
+    if (newestFirst === true) {
+      for (let i = 0, scanned = 0; i < total && payload.messages.length < limit && scanned < scanCap; i += 1, scanned += 1) {
+        const receivedDate = dateAt(i);
+        if (receivedDate && receivedDate < since) {
+          break; // strictly newest-first: everything after this is older still.
+        }
+        pushMessage(i);
+      }
+      return;
+    }
+
+    if (newestFirst === false) {
+      for (let i = total - 1, scanned = 0; i >= 0 && payload.messages.length < limit && scanned < scanCap; i -= 1, scanned += 1) {
+        const receivedDate = dateAt(i);
+        if (receivedDate && receivedDate < since) {
+          break; // strictly oldest-first: everything before this is older still.
+        }
+        pushMessage(i);
+      }
+      return;
+    }
+
+    // Direction unknown/untrusted (ties, a single message, or the synthetic
+    // aggregate mailbox): scan without an early-exit break so we never
+    // silently drop a recent message, bounded by scanCap instead.
+    for (let i = total - 1, scanned = 0; i >= 0 && payload.messages.length < limit && scanned < scanCap; i -= 1, scanned += 1) {
+      const receivedDate = dateAt(i);
+      if (receivedDate && receivedDate >= since) {
+        pushMessage(i);
+      }
+    }
   }
 
   const Mail = Application("Mail");
   const payload = { messages: [], scan_errors: [] };
 
-  collectMessages(safe(() => Mail.inbox.messages(), []), "", "Inbox", payload);
+  collectMessages(safe(() => Mail.inbox.messages(), []), "", "Inbox", payload, { forceFullScan: true });
 
   const accounts = safe(() => Mail.accounts(), []);
   for (const account of accounts) {

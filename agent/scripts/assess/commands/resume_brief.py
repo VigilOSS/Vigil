@@ -276,33 +276,55 @@ def _render_attempts(lines: list, attempts: dict) -> None:
         return
     lines.extend(["", "## Attempts"])
 
-    lines.append(f"- blocked techniques ({attempts.get('blocked_techniques_count', len(blocked))}):")
+    blocked_count = attempts.get("blocked_techniques_count", len(blocked))
+    lines.append(f"- blocked techniques ({blocked_count}):")
     if not blocked:
         lines.append("  - none")
-    for row in blocked[:_ATTEMPTS_RENDER_LIMIT]:
+    shown_blocked = blocked[:_ATTEMPTS_RENDER_LIMIT]
+    for row in shown_blocked:
         target = f"{row.get('target_kind') or '-'}:{row.get('target_ref') or '-'}"
-        lines.append(
+        line = (
             f"  - #{row.get('id')} {row.get('technique') or '-'} "
             f"[{row.get('retry_state') or '-'}] {target} :: "
             f"{_trim(row.get('reason') or '', 120)}"
         )
+        notes = _trim(row.get("notes") or "", 120)
+        if notes:
+            line += f" — unblock: {notes}"
+        lines.append(line)
+    _render_attempts_more(lines, len(shown_blocked), blocked_count)
 
-    lines.append(f"- non-covering probe runs ({attempts.get('noncovering_probe_runs_count', len(probes))}):")
+    probes_count = attempts.get("noncovering_probe_runs_count", len(probes))
+    lines.append(f"- non-covering probe runs ({probes_count}):")
     if not probes:
         lines.append("  - none")
-    for row in probes[:_ATTEMPTS_RENDER_LIMIT]:
+    shown_probes = probes[:_ATTEMPTS_RENDER_LIMIT]
+    for row in shown_probes:
         host_path = f"{row.get('target_host') or '-'}{row.get('target_path') or ''}"
         lines.append(
             f"  - #{row.get('id')} {row.get('attack_family') or '-'} "
             f"[{row.get('result_status') or '-'}] {row.get('tool_name') or '-'} "
             f"{_trim(host_path, 80)}"
         )
+    _render_attempts_more(lines, len(shown_probes), probes_count)
 
-    lines.append(f"- roe-blocked findings ({attempts.get('roe_blocked_findings_count', len(roe))}):")
+    roe_count = attempts.get("roe_blocked_findings_count", len(roe))
+    lines.append(f"- roe-blocked findings ({roe_count}):")
     if not roe:
         lines.append("  - none")
-    for row in roe[:_ATTEMPTS_RENDER_LIMIT]:
+    shown_roe = roe[:_ATTEMPTS_RENDER_LIMIT]
+    for row in shown_roe:
         lines.append("  - " + _finding_line(row))
+    _render_attempts_more(lines, len(shown_roe), roe_count)
+
+
+def _render_attempts_more(lines: list, shown: int, total: int) -> None:
+    """Emit a truncation hint when the rendered (since-filtered, capped) list is
+    shorter than the absolute count. The counts are deliberate absolute totals
+    (like finding_counts), so shown < total is expected under --since or capping;
+    the hint keeps the reconciliation unambiguous, mirroring the Findings section."""
+    if shown < total:
+        lines.append(f"  - … showing {shown} of {total}")
 
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}

@@ -121,7 +121,7 @@ def test_resume_brief_attempts_section_surfaces_all_three_sources(client, isolat
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
 
-    # (1) blocked technique
+    # (1) blocked technique — notes carries the unblock requirement.
     assert client.post(
         f"{BASE}/blocked-techniques",
         json={
@@ -131,6 +131,7 @@ def test_resume_brief_attempts_section_surfaces_all_three_sources(client, isolat
             "target_ref": "VA-101",
             "reason": "needs org-admin group account to reach role-grant",
             "retry_state": "pending",
+            "notes": "retry after VA-101 yields an org-admin session token",
         },
     ).status_code == 201
 
@@ -158,15 +159,20 @@ def test_resume_brief_attempts_section_surfaces_all_three_sources(client, isolat
         },
     ).status_code == 201
 
-    # (3) a roe_blocked finding + an ordinary finding that must NOT appear.
+    # (3) a roe_blocked finding + an ordinary finding (no key) + a finding
+    # carrying roe_blocked:false — value-aware json_extract must exclude the
+    # last two (a value-blind LIKE '%roe_blocked%' would wrongly bucket VA-052).
     _seed_finding(client, eng, "VA-050", details={"roe_blocked": True, "block_reason": "policy forbids the final destructive step"})
     _seed_finding(client, eng, "VA-051", details={})
+    _seed_finding(client, eng, "VA-052", details={"roe_blocked": False})
 
     attempts = client.get(f"{BASE}/resume-brief").json()["attempts"]
 
     blocked = attempts["blocked_techniques"]
     assert [row["technique"] for row in blocked] == ["BFLA"]
     assert attempts["blocked_techniques_count"] == 1
+    # notes (the documented unblock-requirement home) is projected into the brief.
+    assert blocked[0]["notes"] == "retry after VA-101 yields an org-admin session token"
 
     probes = attempts["noncovering_probe_runs"]
     assert [row["result_status"] for row in probes] == ["no-signal"]
@@ -176,8 +182,31 @@ def test_resume_brief_attempts_section_surfaces_all_three_sources(client, isolat
     roe = attempts["roe_blocked_findings"]
     roe_slugs = {row["slug"] for row in roe}
     assert "VA-050" in roe_slugs
-    assert "VA-051" not in roe_slugs
+    assert "VA-051" not in roe_slugs  # no roe_blocked key
+    assert "VA-052" not in roe_slugs  # roe_blocked:false must NOT match
+    assert attempts["roe_blocked_findings_count"] == 1
     assert attempts["roe_blocked_findings_count"] == len(roe)
+
+
+def test_resume_brief_chain_required_bucket_is_value_aware(client, isolate_settings) -> None:
+    """The findings.chain_required bucket uses a value-aware json_extract, not a
+    value-blind LIKE '%chain_required%'. The canonical record-finding example ships
+    chain_required:false, so an ordinary finding carrying the key set false (and a
+    finding with no key) must NOT be bucketed as chain-gated; only chain_required:true
+    lands. Mirrors _finding_summary's bool(details.get('chain_required'))."""
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+    _seed_finding(client, eng, "VA-090", details={"chain_required": True, "chain_rationale": "needs prior auth-bypass"})
+    _seed_finding(client, eng, "VA-091", details={"chain_required": False})
+    _seed_finding(client, eng, "VA-092", details={})
+
+    chain = client.get(f"{BASE}/resume-brief").json()["findings"]["chain_required"]
+    chain_slugs = {row["slug"] for row in chain}
+    assert "VA-090" in chain_slugs           # chain_required:true
+    assert "VA-091" not in chain_slugs       # chain_required:false must NOT match
+    assert "VA-092" not in chain_slugs       # no chain_required key
+    assert all(row["chain_required"] for row in chain)
 
 
 def test_resume_brief_attempts_since_filters(client, isolate_settings) -> None:
