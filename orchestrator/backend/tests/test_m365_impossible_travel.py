@@ -416,6 +416,24 @@ class TestCLI:
         out = capsys.readouterr().out
         assert rc == 0 and "victim@acme.example" in out
 
+    def test_empty_graph_value_page_is_not_malformed(self, tmp_path, capsys):
+        # F1: a well-formed {"value": []} (a user with zero sign-ins in the window)
+        # is a legitimate empty result, not a malformed/truncated document.
+        infile = tmp_path / "empty.json"
+        infile.write_text(json.dumps({"value": []}), encoding="utf-8")
+        rc = self.mod.main([str(infile)])
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "malformed" not in captured.err.lower()
+
+    def test_truncated_json_object_still_errors(self, tmp_path, capsys):
+        # The fix must not weaken malformed detection: a truncated / invalid JSON
+        # object is still a hard error.
+        infile = tmp_path / "bad.json"
+        infile.write_text('{"value"', encoding="utf-8")
+        rc = self.mod.main([str(infile)])
+        assert rc == 1
+
     def test_json_output_is_jsonl(self, tmp_path, capsys):
         infile = tmp_path / "signins.json"
         infile.write_text(json.dumps(self._impossible_events()), encoding="utf-8")

@@ -367,15 +367,20 @@ def main(argv=None) -> int:
         print(f"impossible_travel: {exc}", file=sys.stderr)
         return 1
 
-    # A non-empty payload that begins like a JSON object but yields zero events
-    # is a parse failure (e.g. a truncated wrapper), not an empty result set.
+    # A payload that begins like a JSON object but yields zero events is only a
+    # parse failure when it is not valid JSON. A well-formed {"value": []} — a
+    # user with no sign-ins in the window — is a legitimate empty result set,
+    # not a malformed document, so it falls through to the normal "no events".
     if raw.strip().startswith("{") and not events:
-        print(
-            "impossible_travel: input looked like a JSON object but no sign-in "
-            "events could be parsed (malformed or truncated document)",
-            file=sys.stderr,
-        )
-        return 1
+        try:
+            json.loads(raw)
+        except ValueError:
+            print(
+                "impossible_travel: input looked like a JSON object but could "
+                "not be parsed (malformed or truncated document)",
+                file=sys.stderr,
+            )
+            return 1
 
     flagged = detect_impossible_travel(events, threshold_kmh=args.threshold_kmh)
 
