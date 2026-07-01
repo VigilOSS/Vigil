@@ -280,11 +280,22 @@ def _ensure_json_artifact(args, json_path: str, *, incomplete: bool = False) -> 
         return
     try:
         p = Path(host)
-        if not p.exists():
-            from assess.lib.arjun_enrich import incomplete_sentinel
+        from assess.lib.arjun_enrich import incomplete_sentinel, mark_artifact_incomplete
 
+        if incomplete:
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(incomplete_sentinel() if incomplete else "{}", encoding="utf-8")
+            if p.exists():
+                p.write_text(
+                    mark_artifact_incomplete(
+                        p.read_text(encoding="utf-8", errors="replace")
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                p.write_text(incomplete_sentinel(), encoding="utf-8")
+        elif not p.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("{}", encoding="utf-8")
     except OSError:
         pass
 

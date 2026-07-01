@@ -217,6 +217,17 @@ class TestDetectImpossibleTravel:
         assert f["km"] > 9_000
         assert f["kmh"] > 800  # ~10,800 km/h
 
+    def test_upn_grouping_is_case_insensitive(self):
+        events = [
+            _signin("Alice@Contoso.com", "2023-12-01T16:00:00Z", NEW_YORK),
+            _signin("alice@acme.example", "2023-12-01T17:00:00Z", TOKYO),
+        ]
+
+        flags = self.mod.detect_impossible_travel(events)
+
+        assert len(flags) == 1
+        assert flags[0]["user"] == "alice@acme.example"
+
     def test_same_metro_hours_apart_not_flagged(self):
         events = [
             _signin("user@acme.example", "2023-12-01T09:00:00Z", NEW_YORK),

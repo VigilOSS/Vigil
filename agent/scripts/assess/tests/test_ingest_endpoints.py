@@ -278,6 +278,62 @@ def test_ingest_endpoints_preserves_json_liveness_metadata(
     assert rows[0]["priority_score"] == 5
 
 
+def test_gf_coverage_payloads_use_full_url_context_for_regex_buckets():
+    payloads = ingest_endpoints._gf_coverage_item_payloads(
+        request_variant_id=123,
+        case_type="unknown",
+        url="https://h.example/probe?x=http://169.254.169.254/latest/meta-data",
+        url_path="/probe",
+        query_params={"x": "http://169.254.169.254/latest/meta-data"},
+        body_params={},
+        path_params={},
+        auth_context="anonymous",
+    )
+
+    assert {
+        (payload["attack_family"], payload["notes"])
+        for payload in payloads
+    } == {("ssrf", "gf bucket 'cloud_metadata' matched at ingest")}
+
+
+def test_gf_coverage_payloads_use_full_url_context_for_object_storage_hosts():
+    payloads = ingest_endpoints._gf_coverage_item_payloads(
+        request_variant_id=123,
+        case_type="unknown",
+        url="https://public-bucket.s3.amazonaws.com/reports/q1.pdf",
+        url_path="/reports/q1.pdf",
+        query_params={},
+        body_params={},
+        path_params={},
+        auth_context="anonymous",
+    )
+
+    assert {
+        (payload["attack_family"], payload["notes"])
+        for payload in payloads
+    } == {("info-disclosure", "gf bucket 'object-storage' matched at ingest")}
+
+
+def test_gf_coverage_payloads_skip_redirect_url_suffix_as_weak_ssrf():
+    payloads = ingest_endpoints._gf_coverage_item_payloads(
+        request_variant_id=123,
+        case_type="unknown",
+        url="https://h.example/callback?return_url=https://login.example/sso",
+        url_path="/callback",
+        query_params={"return_url": "https://login.example/sso"},
+        body_params={},
+        path_params={},
+        auth_context="anonymous",
+    )
+
+    assert "open-redirect" in {payload["attack_family"] for payload in payloads}
+    assert "ssrf" not in {payload["attack_family"] for payload in payloads}
+    assert all(
+        "gf bucket 'ssrf' weak inner-token signal at ingest" != payload["notes"]
+        for payload in payloads
+    )
+
+
 def _run_ingest_line(tmp_path, monkeypatch, capsys, line: str) -> None:
     """Run ingest-endpoints over a single JSONL `line` with the stubbed backend."""
     db = tmp_path / "cases.db"
