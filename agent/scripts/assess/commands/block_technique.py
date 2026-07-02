@@ -19,6 +19,7 @@ emits/derives).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -111,6 +112,11 @@ def register(subparsers) -> None:
 
 _KEY_SANITIZE_RE = re.compile(r"[^a-z0-9]+")
 
+# The backend caps ``BlockedTechniqueRecordRequest.technique_key`` at 256 chars
+# while ``target_ref`` accepts up to 1024, so a full endpoint URL as target_ref
+# would otherwise derive an over-long key and 422 the POST.
+_MAX_TECHNIQUE_KEY_LEN = 256
+
 
 def _derive_technique_key(technique: str, target_kind: str, target_ref: str) -> str:
     """Stable, deterministic upsert key from the three identity fields.
@@ -119,13 +125,28 @@ def _derive_technique_key(technique: str, target_kind: str, target_ref: str) -> 
     (same technique on the same target) upserts the row rather than creating a
     duplicate. Kept human-legible (``ssrf:host:api-example-com``) so an operator
     scanning ``list-blocked-techniques`` can read it.
+
+    A long ``target_ref`` (e.g. a full endpoint URL, which the API permits up to
+    1024 chars) can push the derived key past the backend's 256-char
+    ``technique_key`` limit and 422 the POST. When that happens the key is
+    bounded to a readable prefix plus a short deterministic hash of the full
+    key, so it still fits, stays unique, and remains stable across re-records.
     """
     parts = [technique, target_kind, target_ref]
     slugged = [
         _KEY_SANITIZE_RE.sub("-", str(part).strip().lower()).strip("-")
         for part in parts
     ]
-    return ":".join(part for part in slugged if part)
+    key = ":".join(part for part in slugged if part)
+    if len(key) <= _MAX_TECHNIQUE_KEY_LEN:
+        return key
+    # Bound it: a 12-hex-char digest of the FULL key keeps distinct long refs
+    # distinct (identical refs still collide → still upsert), appended to a
+    # truncated readable prefix so the total never exceeds the 256-char cap.
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    suffix = f"-{digest}"
+    prefix = key[: _MAX_TECHNIQUE_KEY_LEN - len(suffix)].rstrip("-")
+    return f"{prefix}{suffix}"
 
 
 def run_block(args) -> None:
