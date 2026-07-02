@@ -136,6 +136,53 @@ def test_block_technique_upsert_updates_same_key(tmp_path, monkeypatch, capsys):
     assert rows[0]["retry_state"] == "no_retry"
 
 
+def test_derive_technique_key_bounds_long_ref_but_preserves_short():
+    """A full endpoint URL as target_ref (the API accepts up to 1024 chars) must
+    not push the derived key past the backend's 256-char technique_key limit and
+    422 the POST. Short refs stay byte-identical (human-legible); long refs are
+    bounded to a prefix + deterministic hash suffix that still fits and upserts."""
+    # Short ref: unchanged, still readable.
+    short = block_technique._derive_technique_key("SSRF", "host", "api.example.com")
+    assert short == "ssrf:host:api-example-com"
+
+    # Long endpoint URL: bounded to <= 256 while staying deterministic.
+    long_ref = "https://api.example.com/v2/" + "segment/" * 90 + "endpoint?x=1"
+    assert len(long_ref) <= 1024  # within the API's target_ref cap...
+    key = block_technique._derive_technique_key("idor", "endpoint", long_ref)
+    assert len(key) <= 256  # ...but the derived key is bounded to the 256 cap
+    assert key  # non-empty (backend min_length=1)
+    # Stable: same identity -> same key (so re-recording upserts, not duplicates).
+    assert key == block_technique._derive_technique_key("idor", "endpoint", long_ref)
+    # Distinct long refs sharing a prefix -> distinct keys (hash suffix separates).
+    other = block_technique._derive_technique_key("idor", "endpoint", long_ref + "-alt")
+    assert other != key
+    assert len(other) <= 256
+
+
+def test_block_technique_long_url_target_ref_posts_bounded_key(tmp_path, monkeypatch, capsys):
+    """End-to-end: `block-technique --target-kind endpoint --target-ref <long URL>`
+    posts a technique_key within the backend's 256-char limit."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    long_ref = "https://api.example.com/v2/" + "segment/" * 90 + "endpoint?x=1"
+    args = _parse(
+        [
+            "block-technique",
+            "--technique", "idor",
+            "--target-kind", "endpoint",
+            "--target-ref", long_ref,
+            "--reason", "needs a second account",
+        ],
+        str(tmp_path),
+    )
+    block_technique.run_block(args)
+    capsys.readouterr()
+
+    _endpoint, payload = fake.posts[0]
+    assert payload["target_ref"] == long_ref  # full ref still recorded
+    assert len(payload["technique_key"]) <= 256  # derived key fits the limit
+
+
 def test_block_technique_rejects_out_of_enum_technique(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)

@@ -88,14 +88,34 @@ def test_pairs_use_host_bucket_alone_not_flat_union() -> None:
     assert "flat=1" not in cookie
 
 
-def test_pairs_fall_back_to_flat_when_no_bucket_matches() -> None:
-    # A host with no matching bucket falls back to the flat view (manual/legacy
-    # identities, or a host we never captured a bucket for).
+def test_pairs_omit_cookies_when_buckets_exist_but_none_match() -> None:
+    # An identity WITH per-host buckets, targeting a host that matches NONE of them,
+    # must NOT fall back to the flat ``cookies`` view: that flat view is a
+    # display-only UNION across every captured host, so injecting it here would
+    # bleed an unrelated host's session cookies onto this target (cross-host bleed).
+    # No matching bucket → no Cookie header at all.
     cookie = dict(kali._identity_header_pairs(_material(), request_host="unrelated.test")).get("Cookie", "")
-    assert cookie == "flat=1"
+    assert cookie == ""
+
+
+def test_pairs_omit_realistic_union_flat_view_on_host_mismatch() -> None:
+    # Mirror how the backend actually builds the flat ``cookies`` view: a UNION of
+    # every captured host bucket. A run against a host with no matching bucket must
+    # send NEITHER host's session cookie — the whole point of the P1 fix.
+    mat = {
+        "cookies": {"JSESSIONID": "PORTAL", "apikey": "K"},  # realistic cross-host union
+        "host_cookies": [
+            {"host": "portal.example.com", "cookies": {"JSESSIONID": "PORTAL"}},
+            {"host": "api.example.com", "cookies": {"apikey": "K"}},
+        ],
+    }
+    pairs = dict(kali._identity_header_pairs(mat, request_host="victim.test"))
+    assert "Cookie" not in pairs  # no cross-host session cookie rides an unrelated target
 
 
 def test_pairs_without_host_cookies_unchanged() -> None:
+    # A manual/legacy identity with NO per-host buckets still falls back to the
+    # flat view — that flat view is the identity's only (single-host) session.
     pairs = kali._identity_header_pairs({"cookies": {"s": "b"}}, request_host="x.test")
     assert dict(pairs)["Cookie"] == "s=b"
 
@@ -114,11 +134,17 @@ def test_apply_injects_portal_session_for_portal_target() -> None:
 
 
 def test_apply_warns_when_host_cookies_unused_for_request_host(capsys) -> None:
-    # The identity has buckets for portal/example.com but the run targets a host
-    # with NO matching bucket — warn so the session-stale risk is visible.
+    # The identity has buckets for portal/api.example.com but the run targets a
+    # host with NO matching bucket. Its only material is those per-host cookies, so
+    # nothing rides this request (the cross-host flat union is correctly omitted)
+    # and _apply_identity_material returns False — but the session-stale WARN must
+    # STILL fire so the operator knows the session did not ride, and no unrelated
+    # host's cookie leaks onto the target.
     cmd = ["curl", "-s", "https://nomatch.test/x"]
     applied = kali._apply_identity_material(cmd, "curl", _material())
-    assert applied is True
+    assert applied is False
+    # No cross-host cookie leaked into the argv.
+    assert "Cookie:" not in " ".join(cmd)
     err = capsys.readouterr().err
     assert "host_cookies" in err
     assert "nomatch.test" in err

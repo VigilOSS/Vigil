@@ -174,6 +174,39 @@ def test_har_export_import_round_trip(client, isolate_settings):
     assert round_tripped["sni"] == "api.example.com"
 
 
+def test_import_drops_stale_cross_engagement_request_variant_id(client, isolate_settings):
+    # A HAR exported from ANOTHER engagement carries ``_vigil.request_variant_id``
+    # — a source-DB id. If passed straight into the destination it hits the
+    # request_variant_id FK (IntegrityError → 500) or mis-links to an unrelated
+    # local variant sharing that id. Import must DISCARD it: the flow imports
+    # successfully with request_variant_id = None, never a 500.
+    key = "2026-06-01-000007-varid"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    har = {
+        "log": {
+            "version": "1.2",
+            "creator": {"name": "vigil", "version": "1.0"},
+            "entries": [
+                {
+                    "startedDateTime": "2026-06-01T12:00:00Z",
+                    "time": 10,
+                    "request": {"method": "GET", "url": "https://api.example.com/v1/x", "headers": []},
+                    "response": {"status": 200, "headers": []},
+                    # 999999 does not exist in the destination engagement's variants.
+                    "_vigil": {"flow_uid": "foreign-var", "request_variant_id": 999999},
+                }
+            ],
+        }
+    }
+    imported = client.post(BASE.format(key=key) + "/import-har", json=har)
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["count"] == 1
+    # Stale foreign variant id was discarded, not persisted (no FK violation).
+    assert imported.json()["flows"][0]["request_variant_id"] is None
+    detail = client.get(BASE.format(key=key) + "/foreign-var").json()
+    assert detail["request_variant_id"] is None
+
+
 def test_capture_policy_default_off_and_put(client, isolate_settings):
     key = "2026-06-01-000007-flows"
     root = write_engagement(isolate_settings["engagements_dir"], key)

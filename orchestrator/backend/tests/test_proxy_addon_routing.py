@@ -1493,3 +1493,31 @@ def test_capture_policy_from_backend_registry_row(tmp_path: Path, monkeypatch):
     entries = collector._fetch_registry_from_backend()
     assert entries[0].capture_policy["enabled"] is True
     assert entries[0].capture_policy["max_body_bytes"] == 512
+
+
+# ---------------------------------------------------------------------------
+# Body-capture content-type filter: MIME wildcards (image/*) must match
+# ---------------------------------------------------------------------------
+
+
+def test_body_capture_deny_honors_mime_wildcard():
+    """A ``content_type_deny`` of ``image/*`` (the exact value the capture-policy
+    API stores) must exclude ``image/png`` — a substring-only check treated
+    ``image/*`` as literal text and never matched, so binary responses were still
+    captured when ``capture_response_bodies`` was on, bypassing the policy."""
+    module = _load_proxy_addon_module()
+    # Deny image/* -> image/png and a bare "image" are excluded; non-image passes.
+    assert module._body_capture_allowed("image/png", [], ["image/*"]) is False
+    assert module._body_capture_allowed("image/jpeg", [], ["image/*"]) is False
+    assert module._body_capture_allowed("image", [], ["image/*"]) is False
+    assert module._body_capture_allowed("application/json", [], ["image/*"]) is True
+
+
+def test_body_capture_allow_honors_mime_wildcard_and_substring_still_works():
+    module = _load_proxy_addon_module()
+    # Allow-list wildcard: only text/* captured.
+    assert module._body_capture_allowed("text/html; charset=utf-8", ["text/*"], []) is True
+    assert module._body_capture_allowed("application/json", ["text/*"], []) is False
+    # Historical substring entries keep working (no regression).
+    assert module._body_capture_allowed("image/png", [], ["image/"]) is False
+    assert module._body_capture_allowed("application/json", [], ["json"]) is False

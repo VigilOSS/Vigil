@@ -389,6 +389,22 @@ def run(args) -> None:
                 body=row.get("body", ""),
                 response_headers=row.get("response_headers", ""),
                 response_snippet=row.get("response_snippet", ""),
+                # A richer JSON/HAR ingest can re-visit a URL first admitted by a
+                # bare-URL source: the backend upsert returns the SAME
+                # request_variant id, so `queue_key` collides and the plain
+                # `INSERT OR IGNORE` path leaves the pre-existing empty
+                # headers/body/response in place. Mark payload-carrying rows as
+                # `curated` so db_insert_work_item takes its update-existing path
+                # and lands the new payload on the already-admitted row instead of
+                # dropping it. Bare-URL rows carry no payload, so they keep the
+                # cheap non-curated path (no operator-triage clobber, no extra
+                # lookups) exactly as before.
+                curated=bool(
+                    row.get("headers")
+                    or row.get("body")
+                    or row.get("response_headers")
+                    or row.get("response_snippet")
+                ),
                 content_type=row["row_content_type"],
                 response_status=row["response_status"] or 0,
                 case_type=row["case_type"],

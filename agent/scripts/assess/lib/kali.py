@@ -324,8 +324,11 @@ def _identity_header_pairs(
     request as "session stale". When a per-host bucket matches, it is used ALONE:
     the flat ``cookies`` view is a UNION across every captured host, so blending it
     in would leak another host's uniquely-named session cookies into this request
-    (cross-host session bleed). Only when this host has no bucket do we fall back to
-    the flat view (manual/legacy identities with no ``host_cookies``).
+    (cross-host session bleed). We fall back to the flat view ONLY for identities
+    that carry no per-host buckets at all (manual/legacy identities with no
+    ``host_cookies``); when buckets exist but none match this request host, we omit
+    cookies entirely rather than route the display-only union onto an unrelated
+    target.
 
     ``state_changing`` gates the CSRF double-submit header: on a POST/PUT/PATCH/
     DELETE the ``material["csrf"]`` mapping (if present) mirrors the named cookie's
@@ -344,9 +347,15 @@ def _identity_header_pairs(
         # Authoritative per-host bucket: use it alone (no flat-union blend), so a
         # cookie captured for a DIFFERENT host never rides this request.
         cookie_map.update(host_scoped)
-    else:
-        # No matching bucket (manual/legacy identity, or a host we never captured):
-        # fall back to the flat cookie view.
+    elif not host_cookie_hosts(material):
+        # This identity has NO captured per-host buckets at all (a manual/legacy
+        # identity whose only cookies live in the flat ``cookies`` view): fall
+        # back to that flat view. When per-host buckets DO exist but none match
+        # this request host (or a list-mode run left ``request_host`` empty) we
+        # deliberately OMIT cookies rather than fall back — ``material["cookies"]``
+        # is a DISPLAY-ONLY union across every captured host, so injecting it here
+        # would bleed another host's uniquely-named session cookies into this
+        # unrelated target (cross-host session bleed).
         cookies = material.get("cookies")
         if isinstance(cookies, dict):
             cookie_map.update({str(k): str(v) for k, v in cookies.items()})
@@ -397,22 +406,22 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
     """
     if not isinstance(material, dict):
         return False
+    exe = os.path.basename(str(cmd[0])).lower() if cmd else ""
+    if exe not in _IDENTITY_INJECTABLE_TOOLS:
+        return False
     request_host = kali_resolve.target_host_port(tool_name, cmd)[0]
     state_changing = _request_is_state_changing(cmd)
     pairs = _identity_header_pairs(
         material, request_host=request_host, state_changing=state_changing
     )
-    if not pairs:
-        return False
-    exe = os.path.basename(str(cmd[0])).lower() if cmd else ""
-    if exe not in _IDENTITY_INJECTABLE_TOOLS:
-        return False
-    for name, value in pairs:
-        cmd.extend(["-H", f"{name}: {value}"])
     # WARN when the identity carries captured host_cookies that did NOT make it
     # into this request — a request to a host with no matching bucket (or a
     # list-mode run with no single request host) — so a cookie-session app isn't
     # silently probed without its session and read as "session stale" (I-22).
+    # Emitted BEFORE the empty-``pairs`` short-circuit: when the identity's only
+    # material is per-host cookies and none match this host, we now correctly omit
+    # the cross-host flat-union fallback, which can leave ``pairs`` empty — but the
+    # operator still needs to know the session did not ride this run.
     bucket_hosts = host_cookie_hosts(material)
     if bucket_hosts and not host_cookies_for(material, request_host):
         print(
@@ -423,6 +432,10 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
             "as stale; target a single host this identity has a session for.",
             file=sys.stderr,
         )
+    if not pairs:
+        return False
+    for name, value in pairs:
+        cmd.extend(["-H", f"{name}: {value}"])
     return True
 
 

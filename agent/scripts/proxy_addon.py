@@ -365,14 +365,37 @@ def _normalize_capture_policy(raw) -> dict:
     }
 
 
+def _content_type_pattern_matches(pattern: str, content_type: str) -> bool:
+    """Match one allow/deny entry against a content type.
+
+    Understands the standard MIME wildcard ``type/*`` (e.g. ``image/*`` — the
+    exact form the capture-policy API stores) as a family PREFIX match so
+    ``image/*`` covers ``image/png``; a bare ``type`` with no subtype is also
+    covered. Every other entry keeps the historical substring semantics
+    (``image/`` or ``json`` still match ``image/png`` / ``application/json``).
+    """
+    if not pattern:
+        return False
+    if pattern.endswith("/*"):
+        prefix = pattern[:-1]  # "image/*" -> "image/"
+        base = pattern[:-2]    # "image/*" -> "image"
+        return content_type.startswith(prefix) or content_type == base
+    return pattern in content_type
+
+
 def _body_capture_allowed(content_type: str, allow: list[str], deny: list[str]) -> bool:
-    """Apply the policy content-type allow/deny lists (substring match)."""
+    """Apply the policy content-type allow/deny lists.
+
+    Entries match by substring, except ``type/*`` MIME wildcards which match the
+    whole family by prefix (see ``_content_type_pattern_matches``) so a deny of
+    ``image/*`` actually excludes ``image/png`` instead of silently capturing it.
+    """
     ct = (content_type or "").lower()
     for item in deny:
-        if item and item in ct:
+        if _content_type_pattern_matches(item, ct):
             return False
     if allow:
-        return any(item and item in ct for item in allow)
+        return any(_content_type_pattern_matches(item, ct) for item in allow)
     return True
 
 
