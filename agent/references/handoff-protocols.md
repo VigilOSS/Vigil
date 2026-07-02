@@ -87,7 +87,7 @@ Output: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED sig
 
 1. Record all findings durably via `vigil assess record-finding` — this is the immediate obligation
 2. Queue live findings for Phase 4 Verify, not exploitation. Verification decides which findings become confirmed, downgraded, killed, or chain-required before exploit work is spent.
-3. When a finding is real only as part of a chain, keep it in the normal finding table and set `details.chain_required`, `details.chain_rationale`, and `details.required_followup` via `record-finding` or `update-finding`
+3. When a finding is real only as part of a chain, keep it in the normal finding table and set `details.chain_required`, `details.chain_rationale`, and `details.required_followup` via `record-finding`'s JSON payload or `vigil assess update-finding <slug> --details-inline '{"chain_required": true, "chain_rationale": "...", "required_followup": ["..."]}'`
 4. FUZZER_NEEDED → dispatch fuzzer within Phase 3 — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`**, feed results back through vuln-analyst
 5. Mark work-buffer batch done: `vigil assess work-buffer "$DB" done "id1,id2,..."`
 6. Continue the Phase 3 consumption loop (steps b–f in Phase Flow)

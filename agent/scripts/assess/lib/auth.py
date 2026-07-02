@@ -80,6 +80,12 @@ def auth_runtime_snapshot(engagement_dir: str) -> dict[str, Any]:
             "credentials are refreshed (vigil auth import / mitmproxy capture)."
         )
     elif has_session:
+        # "available" means the material is PRESENT and usable — it does NOT mean
+        # the session is confirmed live. Presence != liveness: a captured cookie
+        # session (F5 APM / SiteMinder) can be dead while still "available" here.
+        # The honest liveness signal is exposed as ``liveness`` below (always
+        # "unknown" from this snapshot — it never probes; a live check requires
+        # ``vigil assess auth-status --probe``).
         state = "available"
     else:
         state = "missing"
@@ -98,6 +104,11 @@ def auth_runtime_snapshot(engagement_dir: str) -> dict[str, Any]:
         "exists": material_present,
         "mode": mode,
         "state": state,
+        # Presence != liveness. This snapshot never sends a request, so it can only
+        # honestly report liveness as "unknown"; an actual live/dead verdict comes
+        # from `vigil assess auth-status --probe`, which GETs an authed URL as the
+        # identity. (`state="available"` above only means material is present.)
+        "liveness": "unknown",
         "use_for_requests": use_for_requests,
         "active_use": active_use,
         "auth_context": auth_context,

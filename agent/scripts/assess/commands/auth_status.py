@@ -44,7 +44,138 @@ def register(subparsers) -> None:
         default=300,
         help="Seconds before expires_at to flag as 'expiring soon' (default: 300)",
     )
+    p.add_argument(
+        "--probe",
+        action="store_true",
+        help=(
+            "Actively verify session liveness: GET --probe-url through the kali "
+            "runtime AS the active identity (its cookies are injected by the same "
+            "code the runtime uses). Presence of credentials is NOT liveness; "
+            "without --probe, liveness is reported as 'unknown'."
+        ),
+    )
+    p.add_argument(
+        "--probe-url",
+        dest="probe_url",
+        help=(
+            "URL to GET as the active identity for the --probe liveness check. A "
+            "redirect to a login/`/my.policy` location is classified DEAD; a 2xx is LIVE."
+        ),
+    )
     p.set_defaults(func=run)
+
+
+# Location substrings that mark a redirect as a bounce back to authentication —
+# an authed request that lands here means the SESSION IS DEAD (F5 APM `/my.policy`,
+# a login/SSO/SAML redirect, an OAuth/OIDC authorize hop). Ambiguous 3xx to a
+# non-login page is left UNKNOWN rather than falsely called dead.
+_LOGIN_LOCATION_MARKERS = (
+    "/my.policy",
+    "/login",
+    "/signin",
+    "/sign-in",
+    "/saml",
+    "samlrequest",
+    "/idp",
+    "/authorize",
+    "/oauth2/authorize",
+    "/adfs/",
+    "/auth/realms",
+    "returnurl=",
+    "redirect_uri=",
+)
+
+
+def _classify_liveness(status: int | None, location: str | None) -> str:
+    """Classify an authed-probe response as ``live`` / ``dead`` / ``unknown``.
+
+    LOCKED rule: a 3xx redirect to a login/`/my.policy`-style location, or an
+    explicit 401, means the session is DEAD (the authed request was bounced to
+    re-auth). A 2xx is LIVE. Everything else — a transport error (status None), an
+    ambiguous 3xx to a non-login page, a 403 that may be WAF/authz rather than
+    session death — is UNKNOWN. Never assert a liveness we cannot prove. Pure
+    function: unit-tested in isolation from the live network call.
+    """
+    if status is None:
+        return "unknown"
+    loc = (location or "").lower()
+    if 200 <= status < 300:
+        return "live"
+    if status == 401:
+        return "dead"
+    if 300 <= status < 400:
+        if any(marker in loc for marker in _LOGIN_LOCATION_MARKERS):
+            return "dead"
+        return "unknown"
+    return "unknown"
+
+
+def _extract_marker(text: str, key: str) -> str | None:
+    """Return the value after the first line starting with ``key`` (or None)."""
+    for line in (text or "").splitlines():
+        if line.startswith(key):
+            return line[len(key):].strip()
+    return None
+
+
+def _run_identity_probe(
+    engagement_dir: str, identity: str | None, url: str, *, timeout: int = 15
+) -> dict:
+    """GET ``url`` as ``identity`` through the kali-exec path and classify liveness.
+
+    Shells the existing ``kali_exec`` runtime path with ``identity=<active>`` so the
+    request carries the identity's cookies via ``_apply_identity_material`` — the
+    SAME injection code the runtime uses, never reinvented here. curl reports the
+    status + any redirect target via ``-w`` markers; redirects are not followed so a
+    302 to a login page is preserved as the dead-session signal. Any failure yields
+    ``liveness="unknown"`` with a populated ``error`` (never a false verdict).
+    """
+    from pathlib import Path
+
+    try:
+        from assess.lib.kali import kali_exec
+    except Exception as exc:  # noqa: BLE001 — import guarded so probe never hard-fails
+        return {"liveness": "unknown", "http_status": None, "location": None,
+                "error": f"probe unavailable: {exc}"}
+    wfmt = "VIGIL_HTTP_CODE=%{http_code}\nVIGIL_REDIRECT=%{redirect_url}\n"
+    cmd = ["curl", "-sS", "--max-time", str(timeout), "-o", "/dev/null", "-w", wfmt, url]
+    try:
+        result = kali_exec(
+            cmd,
+            technique="AUTH",
+            intent="auth liveness probe (auth-status --probe)",
+            probe_kind="fingerprint",
+            phase="recon",
+            timeout=timeout + 10,
+            engagement_dir=Path(engagement_dir),
+            identity=identity,
+            tool_name="curl",
+        )
+    except Exception as exc:  # noqa: BLE001 — a live probe must never crash auth-status
+        return {"liveness": "unknown", "http_status": None, "location": None,
+                "error": f"probe exec failed: {exc}"}
+    out = getattr(result, "stdout_preview", "") or ""
+    raw_status = _extract_marker(out, "VIGIL_HTTP_CODE=")
+    location = _extract_marker(out, "VIGIL_REDIRECT=")
+    status: int | None
+    try:
+        status = int(raw_status) if raw_status else None
+    except ValueError:
+        status = None
+    if status in (None, 0) or getattr(result, "transport_error", False):
+        return {
+            "liveness": "unknown",
+            "http_status": status,
+            "location": location or None,
+            "error": getattr(result, "transport_error_detail", "")
+            or "no HTTP status parsed from probe output",
+        }
+    return {
+        "liveness": _classify_liveness(status, location),
+        "http_status": status,
+        "location": location or None,
+        "error": None,
+    }
 
 
 def _parse_iso8601(value: str | None) -> datetime | None:
@@ -189,6 +320,26 @@ def run(args) -> None:
         if client is not None:
             client.close()
 
+    # Liveness is UNKNOWN unless actively probed: a stored credential's presence
+    # (cookies/headers) is NOT proof the session is still valid. --probe runs a
+    # real authed GET to confirm live vs dead.
+    liveness = "unknown"
+    liveness_detail: dict | None = None
+    if getattr(args, "probe", False):
+        probe_url = getattr(args, "probe_url", None)
+        if not probe_url:
+            liveness_detail = {"liveness": "unknown", "http_status": None,
+                               "location": None, "error": "--probe requires --probe-url <url>"}
+        elif not auth:
+            liveness_detail = {"liveness": "unknown", "http_status": None,
+                               "location": None, "error": "no active identity/session to probe"}
+        else:
+            active_identity = auth.get("identity_name") if isinstance(auth, dict) else None
+            liveness_detail = _run_identity_probe(
+                cfg.engagement_dir, active_identity, probe_url
+            )
+        liveness = liveness_detail["liveness"]
+
     state = {
         "engagement_key": cfg.engagement_key,
         "auth_context": auth.get("auth_context") or "anonymous",
@@ -199,6 +350,8 @@ def run(args) -> None:
         "expires_state": expires_state,
         "expires_in_seconds": expires_in_seconds,
         "tokens": shapes,
+        "liveness": liveness,
+        "liveness_probe": liveness_detail,
         "last_auth_probe": last_probe,
         "recommend": _refresh_recommendation(auth, shapes),
     }
@@ -226,6 +379,15 @@ def run(args) -> None:
             print(f"  - {s}")
     else:
         print("tokens:         (none detected)")
+    if liveness_detail is not None:
+        detail = f"http_status={liveness_detail.get('http_status')}"
+        if liveness_detail.get("location"):
+            detail += f" location={liveness_detail['location']}"
+        if liveness_detail.get("error"):
+            detail += f" error={liveness_detail['error']}"
+        print(f"liveness:       {liveness}  ({detail})")
+    else:
+        print(f"liveness:       {liveness}  (not probed; presence != live — pass --probe)")
     if last_probe:
         print(
             f"last_auth_probe: run_id={last_probe.get('run_id')} "

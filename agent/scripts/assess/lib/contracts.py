@@ -890,6 +890,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess update-finding <slug> <patch-json-file>",
             'vigil assess update-finding <slug> --status reported --reason "Published in report"',
             'vigil assess update-finding <slug> --inline \'{"workflow_status":"draft","reason_text":"Needs more evidence"}\'',
+            'vigil assess update-finding <slug> --details-inline \'{"chain_required":true,"chain_rationale":"...","required_followup":["..."]}\'',
+            'vigil assess update-finding <slug> --details-inline \'{"cvss_score":9.1}\' --details-replace',
         ),
         author_supplied_fields=(
             "at least one patch field",
@@ -902,12 +904,22 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--workflow-status (which is report-inclusion). Setting one never changes the other. Allowed values: "
             + ", ".join(SUBMISSION_STATUSES)
             + " (default 'none' = not submitted).",
+            "--details-inline '<json object>' merges the given object into the finding's stored details "
+            "(the patch payload field is `details`, plain flags or --inline JSON both accept it). Pair with "
+            "--details-replace to overwrite the whole details object instead of merging — --details-replace "
+            "requires a details payload (via --details-inline or a `details` key in a file/--inline payload) "
+            "because running it without one would wipe existing details.",
+            "The patch payload field is `details` on write; the API returns it back as `details_json` on read "
+            "(GET/list responses). They are the same data under two names — do not conclude a `details` write "
+            "was dropped just because the read-back shows `details_json` instead. A top-level `details_json` "
+            "key in the patch payload itself is rejected with a 422 (unknown field) — always write `details`.",
         ),
         common_mistakes=(
             ("verification_state", "use verify-finding or kill-finding for verification lifecycle changes"),
             ("verification_disposition", "use verify-finding or kill-finding for verification lifecycle changes"),
             ("workflow_status=false_positive", "use kill-finding instead of update-finding"),
             ("submission_status to mark a finding reported", "submission_status is external submission state; use --workflow-status reported for report-inclusion"),
+            ("details_json as a top-level patch field", "the payload field is details (it is stored as / read back as details_json); details_json is rejected with a 422"),
         ),
         examples=(
             {
@@ -921,6 +933,17 @@ _CONTRACTS: dict[str, CommandContract] = {
             {
                 "submission_status": "accepted",
                 "reason_text": "Program triaged the report as accepted.",
+            },
+            {
+                "details": {
+                    "chain_required": True,
+                    "chain_rationale": "This primitive becomes meaningful only after pivoting into the admin export flow.",
+                    "required_followup": [
+                        "Test sibling privileged write routes",
+                        "Attempt authenticated export with stolen token",
+                    ],
+                },
+                "reason_text": "Tagged chain-required after Phase 4 review.",
             },
         ),
     ),

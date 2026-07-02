@@ -355,7 +355,8 @@ Treat the contract output as the source of truth for arg ordering, flag
 names, enum values, and required fields. Do not infer field names from
 similar tools — five of the most common dispatch errors in recent
 engagements (`record-surface` arg ordering, `record-finding` agent prefix,
-`update-finding --details-patch`, `kali katana -H`, `kali exec
+`update-finding` guessing a nonexistent `--details-patch` flag instead of
+the real `--details-inline`/`--details-replace`, `kali katana -H`, `kali exec
 --probe-kind active`) would each have been prevented by running
 `contract` before the first call.
 
@@ -531,7 +532,8 @@ Run `vigil assess contract record-finding` for the canonical field list and exam
 This keeps CVSS queryable from the API and gives report-writer structured data to format.
 
 When a finding is only reportable as part of a chain, keep it in the same finding lifecycle and
-set chain metadata in `details` during `record-finding` or `update-finding`:
+set chain metadata in `details` during `record-finding` (as part of the finding JSON payload), or on
+an already-recorded finding via `vigil assess update-finding <slug> --details-inline '{"chain_required": true, "chain_rationale": "...", "required_followup": ["..."]}'`:
 ```json
 "details": {
   "chain_required": true,

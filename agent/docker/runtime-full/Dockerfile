@@ -21,6 +21,7 @@ ARG DPAPICK3_VERSION=0.7.1
 ARG AIOQUIC_VERSION=1.2.0
 ARG FLASK_VERSION=3.1.2
 ARG URO_VERSION=1.0.2
+ARG BOTO3_VERSION=1.43.39
 ARG CHISEL_VERSION=1.11.4
 ARG LIGOLO_VERSION=0.8.2
 ARG NUCLEI_VERSION=v3.7.1
@@ -138,7 +139,8 @@ RUN set -eux; \
         "dpapick3==${DPAPICK3_VERSION}" \
         "aioquic==${AIOQUIC_VERSION}" \
         "flask==${FLASK_VERSION}" \
-        "uro==${URO_VERSION}"; \
+        "uro==${URO_VERSION}" \
+        "boto3==${BOTO3_VERSION}"; \
     fi
 
 RUN set -eux; \

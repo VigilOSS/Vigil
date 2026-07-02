@@ -21,6 +21,42 @@ from .paths import resolve_orchestrator_base_url
 
 DEFAULT_IDENTITY = "default"
 
+# HTTP verbs that mutate server state and therefore need a CSRF double-submit
+# header. Duplicated (not imported) from ``assess.lib.kali._STATE_CHANGING_METHODS``
+# on purpose: this operator CLI lives in a different package than the assess
+# runtime and must not depend on it. Keep the two in sync.
+_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _csrf_export_arg(
+    material: dict[str, Any], cookies: dict[str, str], method: str | None
+) -> str:
+    """Render the opt-in CSRF double-submit ``-H`` arg for the copy-paste path.
+
+    Mirrors ``assess.lib.kali._csrf_double_submit_pair`` so the printed curl matches
+    what ``vigil assess kali --identity`` injects at exec time: the header is emitted
+    ONLY on a state-changing ``method``, ONLY when the identity declares the
+    app-specific ``csrf`` mapping AND the named cookie is present in the rendered
+    cookie view, and NEVER when the identity already carries that header (so an
+    operator-set header is not duplicated). Returns ``""`` in every other case.
+    """
+    if not method or str(method).strip().upper() not in _STATE_CHANGING_METHODS:
+        return ""
+    csrf = material.get("csrf")
+    if not isinstance(csrf, dict):
+        return ""
+    cookie_name = str(csrf.get("cookie") or "").strip()
+    header_name = str(csrf.get("header") or "").strip()
+    if not cookie_name or not header_name:
+        return ""
+    value = cookies.get(cookie_name)
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    existing = {str(k).lower() for k in (material.get("headers") or {})}
+    if header_name.lower() in existing:
+        return ""
+    return f"-H '{header_name}: {value}'"
+
 
 def _install_root(engagement_dir: Path) -> Path:
     # engagement_dir = <install_root>/agent/engagements/<key>
@@ -93,13 +129,22 @@ def status_line(engagement_dir: Path) -> str:
     headers_val = material.get("headers")
     headers = headers_val if isinstance(headers_val, dict) else {}
     expires_at = material.get("expires_at")
-    stale = _is_stale(str(expires_at)) if expires_at else False
+    # Honesty fix: `stale` is a claim about liveness. We can only compute it from
+    # an expiry timestamp. With no expires_at (the cookie-capture case — F5 APM /
+    # SiteMinder sessions carry none) the old code hardcoded `stale=false`, i.e.
+    # asserted the session was fresh when we had no basis to. A dead session then
+    # reads as live (a false negative). Emit `stale=unknown` instead; a live probe
+    # (`vigil assess auth-status --probe`) is the only way to confirm liveness.
+    if expires_at:
+        stale_repr = "true" if _is_stale(str(expires_at)) else "false"
+    else:
+        stale_repr = "unknown"
     return (
         f"{_key(engagement_dir)}\tmode={material.get('mode', 'none')}"
         f"\tstate={material.get('state', 'none')}"
         f"\tidentity={material.get('identity_name', '-')}"
         f"\tcookies={len(cookies)}\theaders={len(headers)}"
-        f"\texpires_at={expires_at or '-'}\tstale={str(stale).lower()}"
+        f"\texpires_at={expires_at or '-'}\tstale={stale_repr}"
     )
 
 
@@ -220,7 +265,11 @@ def edit_auth(engagement_dir: Path, identity: str | None = None) -> None:
 
 
 def export_curl_args(
-    engagement_dir: Path, identity: str | None = None, *, host: str | None = None
+    engagement_dir: Path,
+    identity: str | None = None,
+    *,
+    host: str | None = None,
+    method: str | None = None,
 ) -> str:
     """Render the identity's material as curl ``-H`` arguments (operator copy-paste).
 
@@ -232,6 +281,12 @@ def export_curl_args(
     ``cookies`` field, which silently drops every host except the one that
     capture-time scoping flattened against — pass the target host explicitly
     to get the right session.
+
+    ``method`` gates the opt-in CSRF double-submit header the same way exec-time
+    injection does: pass ``POST``/``PUT``/``PATCH``/``DELETE`` and the printed curl
+    gains the app-specific ``-H '<csrf-header>: <cookie-value>'`` so a copy-pasted
+    write is not CSRF-rejected. Safe methods (or an unset method) print no CSRF
+    header — matching what a GET run injects.
     """
     material = (
         _active_material(engagement_dir)
@@ -251,9 +306,172 @@ def export_curl_args(
     if cookies:
         cookie_value = "; ".join(f"{k}={v}" for k, v in cookies.items())
         parts.append(f"-H 'Cookie: {cookie_value}'")
+        csrf_arg = _csrf_export_arg(material, cookies, method)
+        if csrf_arg:
+            parts.append(csrf_arg)
     for key, value in (material.get("headers") or {}).items():
         parts.append(f"-H '{key}: {value}'")
     return " ".join(parts)
+
+
+# Location substrings that mark a redirect as a bounce back to authentication —
+# an authed request that lands here means the SESSION IS DEAD (F5 APM `/my.policy`,
+# a login/SSO/SAML redirect, an OAuth/OIDC authorize hop). App-specific enough to
+# vary, but these cover the common gate shapes; ambiguous 3xx to a non-login page
+# is left UNKNOWN rather than falsely called dead.
+_LOGIN_LOCATION_MARKERS = (
+    "/my.policy",
+    "/login",
+    "/signin",
+    "/sign-in",
+    "/saml",
+    "samlrequest",
+    "/idp",
+    "/authorize",
+    "/oauth2/authorize",
+    "/adfs/",
+    "/auth/realms",
+    "returnurl=",
+    "redirect_uri=",
+)
+
+
+def _classify_liveness(status: int, location: str) -> str:
+    """Classify an authed-probe response as ``live`` / ``dead`` / ``unknown``.
+
+    LOCKED rule: a 3xx redirect to a login/`/my.policy`-style location, or an
+    explicit 401, means the session is DEAD (the authed request was bounced to
+    re-auth). A 2xx is LIVE. Everything else — a transport error, an ambiguous 3xx
+    to a non-login page, a 403 that may be WAF/authz rather than session death — is
+    UNKNOWN. Never assert a liveness we cannot prove.
+    """
+    loc = (location or "").lower()
+    if 200 <= status < 300:
+        return "live"
+    if status == 401:
+        return "dead"
+    if 300 <= status < 400:
+        if any(marker in loc for marker in _LOGIN_LOCATION_MARKERS):
+            return "dead"
+        return "unknown"
+    return "unknown"
+
+
+def _bearer_token(material: dict[str, Any]) -> str:
+    """Return a bearer token from legacy top-level fields or ``tokens`` material.
+
+    Mirrors ``assess.lib.kali._identity_bearer_token`` so the CLI probe carries the
+    same Authorization the runtime injects.
+    """
+    for value in (material.get("token"), material.get("bearer")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    tokens = material.get("tokens")
+    if isinstance(tokens, dict):
+        for key in ("access_token", "accessToken", "bearer", "token", "id_token", "idToken"):
+            value = tokens.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _authed_request_headers(
+    engagement_dir: Path, material: dict[str, Any], host: str
+) -> dict[str, str]:
+    """Build the request headers for a host-side authed probe from identity material.
+
+    Cookies are host-scoped the same way ``vigil assess kali --identity`` injects
+    them (the matching ``host_cookies`` bucket, falling back to the flat view), plus
+    the identity's headers and a bearer token when present.
+    """
+    headers: dict[str, str] = {}
+    for key, value in (material.get("headers") or {}).items():
+        if str(key).strip():
+            headers[str(key)] = str(value)
+    cookies: dict[str, str] = {}
+    host_scoped: dict[str, str] = {}
+    try:
+        from .paths import add_assess_import_path
+
+        add_assess_import_path(_install_root(engagement_dir))
+        from assess.lib.identity import host_cookies_for  # type: ignore[import-not-found]
+
+        host_scoped = host_cookies_for(material, host)
+    except Exception:  # noqa: BLE001 — assess import optional; fall back to flat view
+        host_scoped = {}
+    if host_scoped:
+        cookies.update(host_scoped)
+    else:
+        raw = material.get("cookies")
+        if isinstance(raw, dict):
+            cookies.update({str(k): str(v) for k, v in raw.items()})
+    if cookies and not any(k.lower() == "cookie" for k in headers):
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    token = _bearer_token(material)
+    if token and not any(k.lower() == "authorization" for k in headers):
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def probe_liveness(
+    engagement_dir: Path,
+    url: str,
+    identity: str | None = None,
+    *,
+    timeout: int = 15,
+) -> dict[str, Any]:
+    """Send a lightweight authed GET with the active identity's material and
+    classify session liveness.
+
+    Redirects are NOT followed — a 302 to a login page IS the dead-session signal.
+    Returns ``{"liveness", "http_status", "location", "error"}``; a transport error
+    yields ``liveness="unknown"`` with a populated ``error`` (never a false verdict).
+    """
+    material = (
+        _active_material(engagement_dir)
+        if identity is None
+        else _api(engagement_dir, "GET", f"/{identity}")
+    )
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return {
+            "liveness": "unknown",
+            "http_status": None,
+            "location": None,
+            "error": f"invalid probe URL {url!r} (expected an absolute http(s) URL)",
+        }
+    headers = _authed_request_headers(engagement_dir, material, parsed.hostname)
+    conn_cls = (
+        http.client.HTTPSConnection
+        if parsed.scheme == "https"
+        else http.client.HTTPConnection
+    )
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    conn = conn_cls(parsed.hostname, port, timeout=timeout)
+    try:
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        status = resp.status
+        location = resp.getheader("Location") or ""
+        resp.read()
+    except OSError as exc:
+        return {
+            "liveness": "unknown",
+            "http_status": None,
+            "location": None,
+            "error": f"probe request failed: {exc}",
+        }
+    finally:
+        conn.close()
+    return {
+        "liveness": _classify_liveness(status, location),
+        "http_status": status,
+        "location": location or None,
+        "error": None,
+    }
 
 
 def _empty_auth() -> dict[str, object]:

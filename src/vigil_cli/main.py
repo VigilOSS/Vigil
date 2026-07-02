@@ -550,6 +550,25 @@ def main(argv: list[str] | None = None) -> None:
                 "--all", action="store_true",
                 help="Clear ALL identities (default: only the active identity)",
             )
+        if auth_name == "status":
+            auth_cmd.add_argument(
+                "--probe",
+                action="store_true",
+                help=(
+                    "Actively verify session liveness with a lightweight authed GET "
+                    "(requires --probe-url). Without it, `stale` reflects only the "
+                    "expiry timestamp — presence of cookies is NOT proof of liveness."
+                ),
+            )
+            auth_cmd.add_argument(
+                "--probe-url",
+                dest="probe_url",
+                help=(
+                    "URL to GET as the active identity for the --probe liveness check "
+                    "(e.g. an authed landing page). A redirect to a login/`/my.policy` "
+                    "location is classified DEAD; a 2xx is LIVE."
+                ),
+            )
         if auth_name == "export":
             auth_cmd.add_argument(
                 "--host",
@@ -559,6 +578,15 @@ def main(argv: list[str] | None = None) -> None:
                     "to get the right session — without it this only renders "
                     "the legacy flat cookie view, which can be empty even when "
                     "a proxy-captured session exists for that host."
+                ),
+            )
+            auth_cmd.add_argument(
+                "--method",
+                help=(
+                    "HTTP method the exported args will be used with. Pass a "
+                    "state-changing verb (POST/PUT/PATCH/DELETE) to also emit the "
+                    "identity's opt-in CSRF double-submit header, matching what "
+                    "`vigil assess kali --identity` injects. Safe methods omit it."
                 ),
             )
     auth_import = auth_sub.add_parser("import")
@@ -1445,10 +1473,23 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
     identity = getattr(args, "identity", None)
     if args.auth_command == "status":
         print(auth_module.status_line(engagement))
+        if getattr(args, "probe", False):
+            probe_url = getattr(args, "probe_url", None)
+            if not probe_url:
+                raise SystemExit("--probe requires --probe-url <url>")
+            result = auth_module.probe_liveness(engagement, probe_url, identity)
+            detail = f"http_status={result.get('http_status')}"
+            if result.get("location"):
+                detail += f" location={result['location']}"
+            if result.get("error"):
+                detail += f" error={result['error']}"
+            print(f"liveness={result['liveness']}\t{detail}")
     elif args.auth_command == "show":
         print(json.dumps(auth_module.read_auth(engagement), indent=2, sort_keys=True))
     elif args.auth_command == "export":
-        print(auth_module.export_curl_args(engagement, identity, host=getattr(args, "host", None)))
+        print(auth_module.export_curl_args(
+            engagement, identity, host=getattr(args, "host", None), method=getattr(args, "method", None)
+        ))
     elif args.auth_command == "edit":
         auth_module.edit_auth(engagement, identity)
     elif args.auth_command == "clear":
