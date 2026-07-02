@@ -23,6 +23,7 @@ from .engagements import (
     PROGRAM_HEADER_PRESETS,
     CreateEngagementOptions,
     add_out_of_scope,
+    clear_active_engagement,
     create_engagement,
     current_engagement_path,
     export_pdf,
@@ -30,10 +31,12 @@ from .engagements import (
     plan_engagement,
     print_shell_cd_init,
     remove_out_of_scope,
+    resolve_current_engagement,
     resolve_engagement_path,
     resolve_out_of_scope,
     resolve_rate_limit,
     resolve_required_headers,
+    set_active_engagement,
     set_engagement_header,
     start_engagement,
     unset_engagement_header,
@@ -170,6 +173,14 @@ def main(argv: list[str] | None = None) -> None:
     config_unset = config_sub.add_parser("unset")
     config_unset.add_argument("key")
     config_sub.add_parser("edit")
+
+    use_p = sub.add_parser(
+        "use",
+        help="Set the active engagement (persisted; honoured by `vigil` verbs and `vigil assess`).",
+    )
+    use_p.add_argument("key", nargs="?", help="Engagement key to activate")
+    use_p.add_argument("--select", action="store_true", help="Pick the engagement interactively")
+    use_p.add_argument("--clear", action="store_true", help="Unset the active-engagement pointer")
 
     engagement_p = sub.add_parser("engagement")
     engagement_sub = engagement_p.add_subparsers(dest="engagement_command", required=True)
@@ -328,6 +339,16 @@ def main(argv: list[str] | None = None) -> None:
     path_p = engagement_sub.add_parser("path")
     path_p.add_argument("key", nargs="?")
     path_p.add_argument("--select", action="store_true")
+    eng_use_p = engagement_sub.add_parser(
+        "use", help="Alias for `vigil use`: set the active-engagement pointer."
+    )
+    eng_use_p.add_argument("key", nargs="?")
+    eng_use_p.add_argument("--select", action="store_true")
+    eng_use_p.add_argument("--clear", action="store_true")
+    engagement_sub.add_parser(
+        "current",
+        help="Print the resolved active engagement and which tier won (flag/cwd/pointer/env).",
+    )
     cd_p = engagement_sub.add_parser("cd-init")
     cd_p.add_argument("shell", choices=["zsh", "bash"], default="zsh", nargs="?")
     start_p = engagement_sub.add_parser("start")
@@ -717,6 +738,8 @@ def main(argv: list[str] | None = None) -> None:
         _logs(args, install_root)
     elif args.command == "config":
         _config(args)
+    elif args.command == "use":
+        _use(args, install_root)
     elif args.command == "engagement":
         _engagement(args, install_root)
     elif args.command == "blue":
@@ -807,6 +830,54 @@ def _config(args: argparse.Namespace) -> None:
         config_module.edit_config()
 
 
+def _use(args: argparse.Namespace, install_root: Path) -> None:
+    """Set (or clear) the persisted active-engagement pointer.
+
+    Writes both ~/.config/vigil/config.json:active_engagement_dir and the
+    <engagements_root>/.active mirror. Ranked BELOW cwd walk-up in the resolver,
+    so it is a durable default, never an override of where you actually are.
+    """
+    if getattr(args, "clear", False):
+        clear_active_engagement(install_root)
+        print("[vigil] active-engagement pointer cleared.", file=sys.stderr)
+        return
+    key = getattr(args, "key", None)
+    select = getattr(args, "select", False)
+    if not key and not select:
+        raise SystemExit("Specify an engagement key, --select, or --clear.")
+    path = resolve_engagement_path(install_root, key=key, select=select)
+    resolved = set_active_engagement(install_root, path)
+    print(f"[vigil] active engagement: {resolved.name}", file=sys.stderr)
+    print(resolved)
+
+
+def _engagement_current(install_root: Path) -> None:
+    """Print the resolved active engagement and which tier won.
+
+    Authoritative answer to "which engagement is active right now" — ends the
+    guesswork and surfaces a stale $ENGAGEMENT_DIR mismatch.
+    """
+    env_dir = os.environ.get("ENGAGEMENT_DIR")
+    pointer = config_module.get_config_value("active_engagement_dir")
+    result = resolve_current_engagement()
+    if result is None:
+        print("No active engagement resolved.", file=sys.stderr)
+        print(f"  cwd walk-up: (no scope.json ancestor of {Path.cwd()})", file=sys.stderr)
+        print(f"  active pointer: {pointer or '(unset)'}", file=sys.stderr)
+        print(f"  $ENGAGEMENT_DIR: {env_dir or '(unset)'}", file=sys.stderr)
+        raise SystemExit(
+            "Set one with `vigil use <key>`, run from inside an engagement, or pass --engagement-dir."
+        )
+    path, tier = result
+    tier_label = {
+        "cwd": "cwd walk-up",
+        "pointer": "active pointer",
+        "env": "$ENGAGEMENT_DIR",
+    }.get(tier, tier)
+    print(f"[vigil] active engagement: {path.name}  (resolved from {tier_label})", file=sys.stderr)
+    print(path)
+
+
 def _logs(args: argparse.Namespace, install_root: Path) -> None:
     if args.target == "all":
         if args.follow:
@@ -865,6 +936,10 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         print(f"[vigil] {args.key} out_of_scope: {json.dumps(entries)}", file=sys.stderr)
     elif command == "path":
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
+    elif command == "use":
+        _use(args, install_root)
+    elif command == "current":
+        _engagement_current(install_root)
     elif command == "cd-init":
         print(print_shell_cd_init(args.shell), end="")
     elif command == "start":

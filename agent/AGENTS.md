@@ -506,10 +506,21 @@ Decision rows (scope / egress / dispatch-blocked — examples appear inline in P
 
 ## Phase Flow
 
-For the commands below, set:
+`vigil assess` resolves the engagement itself — precedence is `--engagement-dir`
+flag → **CWD walk-up to the nearest `scope.json`** → **persisted active pointer**
+(`vigil use <key>`) → `$ENGAGEMENT_DIR` (legacy fallback). So you no longer
+`export ENGAGEMENT_DIR=<path> &&` in front of every command: run `vigil use <key>`
+**once**, or simply work from inside the engagement dir, and all subsequent
+`vigil assess` commands target it. `vigil engagement current` prints the resolved
+engagement and which tier won; if a stale `$ENGAGEMENT_DIR` (e.g. a leftover
+shell-profile line) disagrees with the resolved engagement, the resolver prints a
+one-line warning naming both paths.
+
+For the commands below, `$DIR` is only a convenience for local file paths in the
+examples (it does not steer `vigil assess`, which self-resolves as above):
 
 ```bash
-DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
+DIR="$(vigil engagement path 2>/dev/null || echo "${ENGAGEMENT_DIR:-}")"
 DB="$DIR/cases.db"
 ```
 

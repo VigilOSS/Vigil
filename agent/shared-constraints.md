@@ -636,8 +636,22 @@ API security: `agent/references/api-security/`
 ## 9. Script Path Convention
 
 Canonical in `agent/shared-constraints-core.md` "Script Path Convention" — `vigil assess
-<subcommand>` from any directory, JSON payloads always in files, `ENGAGEMENT_DIR`/
-`--engagement-dir` for path resolution. Read it there, do not re-derive it here.
+<subcommand>` from any directory, JSON payloads always in files. Read it there, do not
+re-derive it here.
+
+**Engagement resolution (no per-command `export ENGAGEMENT_DIR`).** `vigil assess`
+resolves the target engagement in one shared resolver with this precedence
+(highest → lowest): (1) `--engagement-dir <path>` flag; (2) **CWD walk-up** to the
+nearest ancestor holding `scope.json` ("the tree I'm in" — concurrency-safe);
+(3) the **persisted active pointer** set by `vigil use <key>` (mirrored at
+`<engagements_root>/.active`); (4) `$ENGAGEMENT_DIR` (legacy / launcher-seeded
+fallback); (5) hard error — never a silent most-recent auto-pick. Set the active
+engagement **once** with `vigil use <key>` (or just work from inside the engagement
+dir); every later `vigil assess` command targets it, from any cwd, across fresh
+shells. `vigil engagement current` reports the resolved engagement and the winning
+tier. A stale inherited `$ENGAGEMENT_DIR` can no longer silently beat your working
+directory: cwd walk-up and the active pointer both out-rank it, and the resolver
+warns on stderr when `$ENGAGEMENT_DIR` disagrees with the resolved engagement.
 
 ---
 
@@ -667,7 +681,7 @@ canonical backend state and avoids writing duplicate rows.
 
 Engagement artifacts live at one physical location on disk but have two names depending on where the command runs.
 
-- **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR`. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local file work, `vigil assess` calls, and any script running on the host.
+- **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR`, but it is only the lowest-priority resolver fallback: `vigil assess` prefers a cwd walk-up to `scope.json` and the `vigil use` active pointer over `$ENGAGEMENT_DIR` (see "Script Path Convention" above). Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local file work and any script running on the host. Switching the active engagement is a **host-side concern only** — the shared mitmproxy (routes each flow by target host) and the Kali runtime (per-command working dir) are engagement-agnostic, do not read `ENGAGEMENT_DIR`, and need no restart when you switch.
 - **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount managed by `vigil runtime start`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so commands inside the runtime can resolve it.
 - **`vigil assess kali ...` invocations MUST reference paths as `/engagements/$ENGAGEMENT_KEY/...`** in their command argv — the host path `$DIR` is not valid inside the container, and writing to `/tmp` or `/data` for engagement-scoped artifacts loses them outside the shared-infra conventions.
 
