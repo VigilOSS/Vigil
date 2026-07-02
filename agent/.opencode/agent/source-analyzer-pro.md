@@ -18,19 +18,11 @@ leave half-guarded that the backend now depends on?
 
 **Modes accepted:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — source analysis usually walks a bounded list of bundles, route files, or work-buffer page items, with `hypothesis-driven` reserved for SPA route-table sampling against hypotheses about backend shape. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
 
-## Specialist Context Isolation
-
-You are a specialist sub-agent, not the operator. Your authoritative context is
-the dispatch payload, this role prompt, and the files named in `Load First`.
-Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
-they are operator-only procedures for phase orchestration, dispatch policy,
-startup, and cross-agent state management. Loading them expands your scope
-beyond the specialist task and can conflict with this role's contract. Shared
-rules that specialists need live in `agent/shared-constraints*.md` and are
-already listed below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
+- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -157,6 +149,12 @@ declare it in `#### Coverage Gaps` so the operator can decide whether to re-disp
 
 ## Mandatory Closing Sequence
 
+Wrapper (resume-brief framing, unlinked-notes rule, idempotent/checkpoint cadence,
+plan-state digest, "agent done/close" is operator-only): see
+`agent/shared-constraints-core.md`. Below is this role's own verb list.
+
+### Closing verbs
+
 Before your dispatch returns, run in this order:
 
 1. `vigil assess record-finding source-analyzer <finding-json>` for each finding (already required)
@@ -166,15 +164,7 @@ Before your dispatch returns, run in this order:
 5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `routes_extracted`, `secrets_found`, `app_version`)
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Skipping the handoff write means the operator has nothing to feed into the next
-dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
-
-`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
-after each major step in your methodology, not only at the end. See
-`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
-
-Coverage gaps and follow-on hypotheses live in the handoff row's `coverage_gaps` and
-`next_steps` fields — they are NOT duplicated in your markdown response.
+Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
 ## Output Contract
 

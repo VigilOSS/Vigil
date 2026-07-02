@@ -14,19 +14,11 @@ You are a batch agent — you consume the full engagement state and produce a si
 
 **Modes accepted:** `deep-manual`. **Default when omitted:** `deep-manual` — report generation, QA, and publish each consume the full engagement state and produce one deliverable per dispatch; iteration counts and target pools do not apply. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
 
-## Specialist Context Isolation
-
-You are a specialist sub-agent, not the operator. Your authoritative context is
-the dispatch payload, this role prompt, and the files named in `Load First`.
-Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
-they are operator-only procedures for phase orchestration, dispatch policy,
-startup, and cross-agent state management. Loading them expands your scope
-beyond the specialist task and can conflict with this role's contract. Shared
-rules that specialists need live in `agent/shared-constraints*.md` and are
-already listed below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
+- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, finding IDs, CVSS/details format, rule reminders
 - `agent/rules/reporting.md`
 - `agent/skills/report-generation/SKILL.md` (named explicitly because it is your primary procedure; for any other skill needed, run `vigil assess list-skills`)
@@ -171,8 +163,12 @@ Proof standard by finding class: see `agent/skills/report-generation/SKILL.md` �
 ## Mandatory Closing Sequence
 
 Report-writer is a special case — its primary output is the report file under
-`$ENGAGEMENT_DIR/report.md`, not finding/intel/surface writes. Even so, the
-closing sequence is:
+`$ENGAGEMENT_DIR/report.md`, not finding/intel/surface writes. Wrapper
+(resume-brief framing, unlinked-notes rule, idempotent/checkpoint cadence,
+plan-state digest, "agent done/close" is operator-only): see
+`agent/shared-constraints-core.md`. Below is this role's own verb list.
+
+### Closing verbs
 
 1. Write `report.md` with the structure below
 2. Run the 13-check self-review in `agent/skills/report-generation/SKILL.md`
@@ -185,10 +181,6 @@ Skipping the handoff write means the operator has nothing to feed into the next
 dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`. The handoff
 `working_artifacts` MUST list `report.md` so the renderer surfaces present/missing
 state.
-
-`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
-after each major step in your methodology, not only at the end. See
-`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
 ## Report File Structure
 

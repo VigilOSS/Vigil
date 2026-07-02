@@ -15,19 +15,11 @@ classification here means files get too little or too much attention downstream.
 
 **Modes accepted:** `hypothesis-driven`, `deep-manual`. **Default when omitted:** `hypothesis-driven` — architecture mapping samples a full repo against trust-boundary and entry-point hypotheses, with `deep-manual` reserved for re-classification of a small set of critical/high files when an earlier pass produced ambiguous slot-type annotations. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
 
-## Specialist Context Isolation
-
-You are a specialist sub-agent, not the operator. Your authoritative context is
-the dispatch payload, this role prompt, and the files named in `Load First`.
-Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
-they are operator-only procedures for phase orchestration, dispatch policy,
-startup, and cross-agent state management. Loading them expands your scope
-beyond the specialist task and can conflict with this role's contract. Shared
-rules that specialists need live in `agent/shared-constraints*.md` and are
-already listed below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
+- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -276,6 +268,12 @@ vigil assess code-record-modules <repo-id> <modules-json>
 
 ## Mandatory Closing Sequence
 
+Wrapper (resume-brief framing, unlinked-notes rule, idempotent/checkpoint cadence,
+plan-state digest, "agent done/close" is operator-only): see
+`agent/shared-constraints-core.md`. Below is this role's own verb list.
+
+### Closing verbs
+
 Before your dispatch returns, run in this order:
 
 1. `vigil assess code-record-threat-model <repo-id> <threat-model-json>`
@@ -286,12 +284,7 @@ Before your dispatch returns, run in this order:
 6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
 7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Skipping the handoff write means the operator has nothing to feed into the next
-dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
-
-`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
-after each major step in your methodology, not only at the end. See
-`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
+Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
 ## Finding Prefix: CA
 

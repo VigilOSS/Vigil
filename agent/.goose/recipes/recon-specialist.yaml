@@ -35,21 +35,13 @@ instructions: |2
   `next_steps` (e.g. "operator: re-run `vigil assess recon example.com --brute
   --resume`") rather than launching it.
 
-  ## Specialist Context Isolation
-
-  You are a specialist sub-agent, not the operator. Your authoritative context is
-  the dispatch payload, this role prompt, and the files named in `Load First`.
-  Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
-  they are operator-only procedures for phase orchestration, dispatch policy,
-  startup, and cross-agent state management. Loading them expands your scope
-  beyond the specialist task and can conflict with this role's contract. Shared
-  rules that specialists need live in `agent/shared-constraints*.md` and are
-  already listed below.
+  > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
   ## Load First
 
   **MANDATORY (before any work):**
 
+  - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
   - `agent/shared-constraints.md` — scope, the `vigil assess kali` rule, finding IDs, rule reminders
   - `agent/rules/hunting.md`
   - `agent/rules/adversarial-mindset.md`
@@ -74,7 +66,7 @@ instructions: |2
   - [ ] Read `scope.json`: in-scope hosts + active `exploit_policy`
   - [ ] Have the dispatch context (target, phase, objective, prior findings)
   - [ ] **Read the recon-job state first** — `vigil assess recon-status [--job-id N]` (per-stage state, counts, failures/partials/WARNs) and the artifacts under `scans/dns-discovery/`, `scans/web-discovery/`, `scans/recon/`. This is your starting picture.
-  - [ ] Checked command history as a coverage map — `vigil assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Before citing a prior run, fetch its preview with `vigil assess get-command-run <id>` (`success=true` only means `return_code=0`, not that the output answers your question). Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+  - [ ] Checked command history as a coverage map before probing — see `agent/shared-constraints.md` §2b.
 
   ## Why Recon Completeness Matters
 
@@ -172,6 +164,10 @@ instructions: |2
 
   ## Mandatory Closing Sequence
 
+  Wrapper (resume-brief framing, unlinked-notes rule, idempotent/checkpoint cadence,
+  plan-state digest, "agent done/close" is operator-only): see
+  `agent/shared-constraints-core.md`. Below is this role's own verb list.
+
   ### Blocked-claim self-check (run BEFORE the handoff)
 
   Before any `handoff_status=blocked`, `runtime_issues[].severity=blocker`, or "tool
@@ -183,12 +179,11 @@ instructions: |2
   `recon-status` + the stage `exit_code`s: a `failed` stage is a real gap; a
   `done`-with-low-counts stage is `dry`, not blocked.
 
-  ### Checkpoint a handoff incrementally
+  ### Closing verbs
 
-  `vigil assess agent handoff` is idempotent — checkpoint after each major step, not
-  only at the end. (No separate `post probe-runs` step is needed: every `vigil assess
-  kali` call in your bounded chain already writes its own command-run audit row, so
-  coverage state is captured as each tool runs.) Then, in order:
+  (No separate `post probe-runs` step is needed: every `vigil assess kali` call in
+  your bounded chain already writes its own command-run audit row, so coverage
+  state is captured as each tool runs.) Then, in order:
 
   1. `vigil assess record-finding recon-specialist <finding-json>` per finding
   2. `vigil assess record-intel <type> <intel-json>` per intel row
@@ -205,7 +200,7 @@ instructions: |2
 
   Reason through the work in your response — the completeness verdict, what the
   fingerprints suggest, which hosts/surfaces look high-value, and the exact operator
-  action that closes each gap. Backend writes via the Mandatory Closing Sequence
+  action that closes each gap. Backend writes via the Closing verbs above
   make state durable; the response is your reflection on top, written for the
   operator and downstream specialists. Don't truncate reasoning to be brief
   (see `agent/shared-constraints.md` §16).

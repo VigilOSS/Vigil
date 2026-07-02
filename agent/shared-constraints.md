@@ -18,10 +18,17 @@ enterprise behavior. Aggressive techniques are permitted within the declared sco
 Read `scope.json` before making target-facing decisions. Confirm:
 
 - In-scope hosts from the `hosts` array (includes `*.domain` entries for subdomain enum)
-- `exploit_policy` value (`pause` | `selected` | `full_send`)
+- `exploit_policy` value — `pause` (default) or `selected` require `exploit_review_state=approved`
+  plus a non-empty `approved_targets` list, set once via `approve-exploit`, before exploitation
+  proceeds (`pause` and `selected` are mechanically identical); `full_send` bypasses that review
+  gate entirely
 - Auth state from the engagement's backend credential store (`vigil auth status`) — use credentials only when a record is populated and marked active
 
-All testing stays within listed scope hosts. Exploit policy escalation requires operator approval.
+`exploit_policy` governs *exploitation*, and it is resolved once **before** dispatch — not a
+per-action approval you re-request mid-task. The invariants that hold regardless of its value: stay
+within the in-scope hosts above, honor the program's ROE, and make no persistent or destructive
+change to anything outside operator-owned infrastructure. §2d's human-reach preflight is the one
+gate that survives every `exploit_policy` value and still applies per-action.
 
 **Reachability is not scope.** The Kali runtime is shared infrastructure, so it may be able to route to hosts that are NOT your target — other engagements' services, neighbouring Docker/internal subnets, or the host itself. Only the hosts in this engagement's `scope.json` are in scope. Never probe, pivot into, or build findings on infrastructure outside it, even when the runtime can reach it — a reachable-but-out-of-scope host is a distraction (and, on a shared runtime, often another engagement's state), not a lead.
 
@@ -57,10 +64,7 @@ completion in-band — no `run_in_background`, no `vigil assess kali job start`,
 no dtach, and no watcher/poll loop. A specialist must never background target
 traffic and then halt waiting for a completion notification: the harness
 auto-resumes the halted agent, which launches the next detached job and halts
-again, producing unbounded relaunch thrash and duplicate probes — in past
-engagements this burned 80–210 K tokens per agent and produced duplicate httpx
-passes with near-zero net coverage (the failure mode that stalled multiple recon
-dispatches — see the engagement post-mortem).
+again, producing unbounded relaunch thrash, duplicate probes, and near-zero net coverage.
 A generous `--timeout` is the correct tool for a single long probe
 (`nmap+scripts`, `sqlmap`, `nuclei` sweep, `dirb`, `gobuster`, `ffuf` large
 wordlists): when it expires the audit pipeline cascades SIGTERM→SIGKILL into
@@ -77,8 +81,7 @@ synchronous probe must fit well under that ceiling (minutes, not tens of minutes
 and genuinely long enumeration — a full-apex `puredns` brute, bulk HTTP liveness
 over thousands of hosts, a deep crawl — belongs in the operator-owned, supervised,
 resumable `vigil assess recon` job that the operator polls, never a specialist's
-blocking call. (This SIGUSR1/exit-144 kill is the failure mode that produced the
-recon-dispatch thrash above.)
+blocking call.
 
 **"Synchronous" means awaited-in-band, NOT one-call-at-a-time and NOT
 no-parallelism.** The ban is on the backgrounding / `dtach` / fire-and-forget /
@@ -160,65 +163,37 @@ only the one you started:
 
 ### Command Metadata
 
-Every target-facing `vigil assess kali` call carries audit metadata as CLI flags.
-The CLI fails closed when required flags are missing — the audit row stays
-truthful instead of degrading to a stale env-var default.
+Every target-facing `vigil assess kali` call carries audit metadata as required CLI flags; the
+CLI fails closed when they're missing rather than degrading to a stale env-var default.
 
-- **`--technique <enum>`** — the vulnerability class this command tests. One of
-  `SSRF`, `XSS`, `XXE`, `SQLI`, `NOSQLI`, `SSTI`, `RCE`, `CMDI`, `IDOR`, `LFI`,
-  `RFI`, `OPEN-REDIRECT`, `AUTH`, `JWT`, `CSRF`, `CORS`, `REQUEST-SMUGGLING`,
-  `RATE-LIMIT`, `INFO-DISCLOSURE`, `RECON`, `DISCOVERY`, `FUZZ`, `OSINT`,
-  `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`, `HEALTH`, `LOG-READ`, `OTHER`. Derive it from the skill you
-  loaded: for skills whose name maps 1:1 to an enum value (`ssrf-testing` →
-  `SSRF`, `sqli-testing` → `SQLI`, `command-injection` → `CMDI`, etc.), use that
-  mapping. When the mapping isn't obvious (e.g. `aws-iam-privesc`,
-  `container-escape-detection`, `graphql-testing`), the skill file names the
-  correct value at the top. Use `HEALTH` for runtime/tool inventory commands
-  such as `which jadx apktool`. The CLI rejects unknown tags before writing an
-  audit row so bad prompt vocabulary does not pollute command-history filters.
-- **`--intent "<text>"`** — a ≤200-char one-liner describing what this specific
-  command is trying to accomplish. Replaces the `echo "=== label ==="` pattern.
-- **`--probe-kind <kind>`** — the kind of work this command represents:
-  - `fingerprint` — learning the target (versions, headers, tech stack), no payload
-  - `baseline` — vanilla control request against the target surface, for diff
-  - `payload` — crafted attack payload testing a hypothesis
-  - `exploit` — attacker-outcome proof (extract token, read a file, prove the impact)
-  - `replay` — captured primitive used against a new surface (lateral)
-  - `cleanup` — undoing target-side changes
-- **`--destructive`** — pass when the command attempts a write, edit, or delete
-  on the target (POST/PUT/PATCH/DELETE, file upload, account creation, config
-  change, shell exec that modifies state). Off for read-only probes. Used by
-  cleanup-tracking workflows.
-- **`--timeout <seconds>`** — wall-clock budget. Required. Synchronous calls hit
-  the timeout cleanly (SIGTERM→SIGKILL into the in-container PID), so raise the
-  budget for a heavy single probe rather than backgrounding it. A long budget is
-  not a reason to use `vigil assess kali job start` — that is operator-only (§2).
-- **`--phase <enum>`** — REQUIRED on every call. Pass the phase the dispatch was
-  authorized for, NOT `scope.json.current_phase`. The reason is that
-  `scope.json.current_phase` is operator state and updates only on phase
-  transitions, but engagements regularly operate **between phases** —
-  mid-Phase-3 recon on a newly-discovered host, Phase-5 exploit-developer
-  running additional fingerprinting, source-analyzer mid-engagement looking up
-  version intel. The audit row must reflect what the dispatch was for, not what
-  the engagement happened to be in at the time. The CLI rejects calls without
-  `--phase` so agents cannot silently rely on a stale env-var default. Allowed
-  values: `recon`, `collect`, `consume-test`, `verify`, `exploit`, `report`,
-  `code-ingest`, `code-classify`, `code-hunt`, `code-verify`, plus the
-  half-phase tags `recon-pivot` (mid-engagement recon on newly-surfaced host)
-  and `exploit-recon` (additional fingerprinting during exploit phase).
-- **`--force`** — suppress the dedup-warning log for an intentional retry.
-  The CLI hashes `(command, argv_json)` and warns when an identical command
-  ran within `KALI_AUDIT_DEDUP_WINDOW_SECONDS` (default 30s), but the new
-  command always executes — the backend records a fresh audit row regardless,
-  with `superseded_by_id` linking it to the predecessor when applicable. Pass
-  `--force` only to suppress the warning text; it does not change run
-  behavior or backend state.
+- **`--technique <enum>`** — the vulnerability class this command tests. Derive it from the
+  skill you loaded (`ssrf-testing` → `SSRF`, `sqli-testing` → `SQLI`, etc.); when the mapping
+  isn't obvious the skill file names the correct value at the top. Use `HEALTH` for
+  runtime/tool inventory commands.
+- **`--intent "<text>"`** — a ≤200-char one-liner describing what this specific command is
+  trying to accomplish. Replaces the `echo "=== label ==="` pattern.
+- **`--probe-kind <kind>`** — `fingerprint` | `baseline` | `payload` | `exploit` | `replay` | `cleanup`.
+- **`--destructive`** — pass when the command writes, edits, or deletes target state
+  (POST/PUT/PATCH/DELETE, upload, account creation, config change). Off for read-only probes.
+- **`--timeout <seconds>`** — required wall-clock budget. Synchronous calls hit it cleanly
+  (SIGTERM→SIGKILL into the in-container PID); raise it for a heavy single probe rather than
+  backgrounding it — a long budget is not a reason to use `vigil assess kali job start`
+  (operator-only, §2).
+- **`--phase <enum>`** — REQUIRED on every call. Pass the phase the dispatch was authorized
+  for, NOT `scope.json.current_phase` — engagements regularly operate **between** phases
+  (mid-Phase-3 recon on a newly-discovered host, Phase-5 exploit-developer fingerprinting), and
+  the audit row must reflect what the dispatch was for, not what the engagement happened to be
+  in.
+- **`--force`** — suppress the dedup-warning log for an intentional retry; the command always
+  executes and records a fresh audit row regardless (`superseded_by_id` links it to the
+  predecessor).
 
-`--engagement-key` is derived from `${ENGAGEMENT_DIR}/engagement.json`.
-`--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$VIGIL_AGENT_NAME`,
-then `operator`. Specialist dispatch wrappers must export `AGENT_NAME=<role>`;
-if that context is missing, pass `--agent-name <role>` explicitly because a
-silent `operator` attribution breaks coverage ownership.
+Full enum values (`--technique`, `--probe-kind`, `--phase`), per-verb defaults, and example
+payloads: `vigil assess list-commands` (phase-grouped catalog) and `vigil assess contract kali
+<verb>` (canonical schema). `--engagement-key` derives from `${ENGAGEMENT_DIR}/engagement.json`;
+`--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$VIGIL_AGENT_NAME`, then
+`operator` — dispatch wrappers must export `AGENT_NAME=<role>` or pass `--agent-name <role>`
+explicitly, because a silent `operator` attribution breaks coverage ownership.
 
 ---
 
@@ -229,13 +204,10 @@ signup, request-access, support/report/ticket, password-reset, contact-form, or 
 endpoint whose name or path suggests a write that notifies someone — run this
 procedure.
 
-**Posture change: this section moved from zero-fire to capped-live-fire.**
-Previously: "if yes, or if unknown: do not fire the probe" — permanent, no path to
-resolve a genuine unknown. Now: static-first (unlimited), then a hard, small,
-audited live-fire budget to resolve real ambiguity, gated by a durable recorded
-decision. This is a deliberate loosening of a global default, not a relaxation of
-caution — read the whole procedure, including the cross-dispatch rule, before
-relying on the budget.
+**Posture: capped live-fire, not zero-fire.** Static characterization (Step 1) is unlimited;
+genuine ambiguity gets a small, hard, audited live-fire budget (Step 3), gated by a durable
+recorded decision. This is a deliberate, bounded loosening, not routine live-fire license — read
+the whole procedure, including the cross-dispatch rule, before relying on the budget.
 
 ### Step 1 — mandatory-first, unlimited static characterization
 
@@ -395,21 +367,10 @@ Shared listener infrastructure belongs to the operator because a listener, tunne
 interactsh server is global runtime state that can break other specialists if it is
 started, restarted, or reconfigured mid-engagement.
 
-Agents do their own readiness and evidence checks through `vigil`:
-1. Inspect shared OOB state with `vigil oob status --json` before blind payload work.
-   `server=true` and `frpc=true` means shared OOB infrastructure is ready.
-2. Inspect infrastructure logs with `vigil logs oob --lines 80` when status is
-   partial, callbacks are missing, or FRP/auth health is unclear.
-3. Start, list, and stop named per-agent listener clients with `vigil oob client
-   start|list|stop`. Per-agent interactsh clients are correlation handles, not
-   shared tunnel infrastructure, so specialists can manage them directly.
-4. Get correlated callback hits with `vigil oob poll --client <name>` — mint a
-   nonce-tagged URL per payload with `vigil oob mint --client <name>` (it binds the
-   nonce under that running client's interactsh id and prints the exact host to
-   fire; pass `--client` to pick which one when several run), then `poll` matches
-   each probe to its callback. `vigil oob client logs <name> --lines 80` and `vigil
-   logs oob --lines 80` are raw listener-log tails for server/FRP debugging only,
-   never for correlation.
+Agent-side OOB readiness checks, named per-agent clients, and the mint→poll→correlate
+procedure are canonical in `agent/references/offensive-tactics/frp-tunneling.md`
+("Agent OOB Readiness Check" and "OOB Procedure (mint→poll→correlate)") — read those
+sections there; do not re-derive the workflow here.
 
 When exploitation requires a reverse-shell listener or tunnel exposure:
 1. Provide the exact listener or tunnel commands in your output using `# MANUAL:`
@@ -538,30 +499,9 @@ produce a finding in any output section, you MUST also call `vigil assess record
 task is complete. Findings that exist only in your output text and were not recorded via the
 script are considered lost data.
 
-| Agent | Prefix | Example |
-|-------|--------|---------|
-| exploit-developer | EX | EX-001 |
-| vulnerability-analyst | VA | VA-001 |
-| source-analyzer | SA | SA-001 |
-| recon-specialist | RE | RE-001 |
-| fuzzer | FZ | FZ-001 |
-| osint-analyst | OS | OS-001 |
-| surface-collector | SC | SC-001 |
-
-**Title formula:** `[Bug Class] in [endpoint] allows [attacker role] to [impact] [victim/scope]`
-Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous attacker to read any user's PII."
-
-**CVSS↔severity must match:**
-
-| Severity | CVSS range |
-|----------|------------|
-| critical | 9.0–10.0 |
-| high | 7.0–8.9 |
-| medium | 4.0–6.9 |
-| low | 0.1–3.9 |
-| info | 0.0 |
-
-If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
+Finding-ID prefix table, title formula, and the CVSS↔severity band table are canonical in
+`agent/shared-constraints-core.md` "Finding IDs and the `record-finding` Contract" — read it
+there, do not re-derive it here.
 
 **Deduplication:** Before recording, query existing findings via `vigil assess fetch findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
 
@@ -650,19 +590,23 @@ not prose descriptions.
 
 ## 7. Rule Reminders
 
-These are the most commonly violated rules — internalize them before you start:
+These are the most commonly violated rules — internalize them before you start. Bullets already
+covered in full in co-loaded `hunting.md`/`reporting.md` (no theoretical findings, kill weak leads
+fast, speculative language, filler/padding, the sibling rule, credentials require proof, validate
+before writing, evidence beats volume) are not restated here — see those files.
 
-- **No theoretical findings.** "Can an attacker do this right now with real harm?" — if no, not a finding yet.
-- **Kill weak leads fast.** Theory without a real request, more than two fragile preconditions stacked, or "might be chainable" without a proved chain → kill it.
-- **Severity follows proved impact.** Do not let recon hints, CVEs, or intuition inflate severity beyond what the evidence shows.
-- **Named limit bypass is not automatically High.** For request caps, buffer limits, decompression limits, timeouts, and protocol negotiation limits, prove the limit is a security boundary and prove downstream second-order impact. If equivalent default transports already accept the same logical stream and downstream work is bounded and linear, downgrade to Medium/hardening or docs.
-- **No speculative language.** Write `An attacker can [exact action] by [exact method]`, never `could potentially`, `may allow`, or `might be possible`.
-- **No filler or padding.** Do not use `Furthermore`, `Additionally`, `It should be noted`, or similar filler transitions. Do not restate titles in descriptions. Do not define standard vulnerability classes to a security audience. Every sentence must contribute new information.
 - **Severity by structured field, not shouting or slang.** Convey severity through the `severity` field and the CVSS vector plus calm, precise prose. Do not use ALL-CAPS for emphasis to signal criticality and do not use casual / "reddit" severity language ("this is insane", "game over", "pwned hard"). A critical finding reads as a measured, exact description of the attacker outcome — that is more credible to a triager than capitalized adjectives. (Literal CLI tokens, flags, and enum values written in caps — `REQUIRED`, `IDOR`, `--force` — are vocabulary, not emphasis, and are unaffected.)
-- **Sibling rule.** When one route or method is vulnerable, inspect its siblings before moving on.
-- **Credentials require proof.** Leaked tokens or keys only matter when you show what they actually grant.
-- **Validate before writing.** Do not draft report content before the lead is reproducible and worth a human reader's time.
-- **Evidence beats volume.** A few decisive requests and exact proofs outweigh broad noisy scanning.
+- **Precondition analysis governs severity** (essence; full table in `reporting.md` §3). Before
+  assigning severity, ask what the attacker needs to already have — every precondition not freely
+  available to an anonymous internet attacker reduces severity, and stacking enough of them turns
+  an impressive bug into low-impact. Defense-in-depth: if exploiting the finding requires already
+  possessing the secret or credential it bypasses, rate the bypass relative to how hard that
+  precondition is to satisfy independently, not as a standalone critical. Reduces severity: an
+  authenticated session, a non-iterable identifier (UUID/GUID/token) the attacker can't enumerate,
+  a second vulnerability supplying the input, source/CI access to extract a secret,
+  attacker-controlled infrastructure, dev/staging-only reproduction. Does NOT reduce severity: an
+  iterable integer ID, a free self-registration account, or a single crafted request with no prior
+  knowledge.
 
 Full rule sets: `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 
@@ -689,10 +633,9 @@ API security: `agent/references/api-security/`
 
 ## 9. Script Path Convention
 
-All assessment operations use `vigil assess <subcommand>` from any directory. JSON payloads are
-always in files, never inline shell arguments.
-
-Use `ENGAGEMENT_DIR` or `--engagement-dir` for path resolution — hardcoded absolute paths break across environments.
+Canonical in `agent/shared-constraints-core.md` "Script Path Convention" — `vigil assess
+<subcommand>` from any directory, JSON payloads always in files, `ENGAGEMENT_DIR`/
+`--engagement-dir` for path resolution. Read it there, do not re-derive it here.
 
 ---
 
@@ -781,23 +724,11 @@ Agents READ `.listener_url` (never write it). When `.listener_url` is missing
 and exploitation needs one, record a blocked technique via `vigil assess
 block-technique` instead of attempting to bind a port yourself.
 
-OOB callback domains are not engagement files. Get readiness and the configured
-base domain from `vigil oob status --json` (expect `health=ok`); create or reuse a
-named listener client with `vigil oob client start <name> --engagement <key>
---agent <agent>`; mint a nonce-tagged callback URL per payload with `vigil oob mint
---client <name>` (it binds the nonce under that client's interactsh id and prints
-the exact host) and embed the **exact host it prints** in the payload — never
-hand-build a bare `<nonce>.oob...` host, which would never reach `poll`; then
-correlate each probe to its callback with `vigil oob poll --client <name>`. `vigil oob client logs <name> --lines 80` is a raw tail
-of that client's listener log for infra debugging only — it does NOT correlate
-nonces to probes, so never read it for hits. If OOB is unavailable, fall back to
-time-based detection and note the substitution in your output.
-
-Hit-checking is handled through the CLI surfaces that own those logs:
-- OOB callback correlation / evidence: `vigil oob poll --client <name>` (matched probe<->callback pairs)
-- OOB raw listener-log tail (infra debugging only, not correlation): `vigil oob client logs <name> --lines 80`
-- OOB infrastructure debugging: `vigil logs oob --lines 80`
-- Shell listener session output: `vigil runtime shell-exec "tail -80 /data/shell-<name>.log"`
+OOB callback domains are not engagement files. The mint→poll→correlate workflow — readiness,
+named clients, minting the callback host, and correlating hits — is canonical in
+`agent/references/offensive-tactics/frp-tunneling.md` ("OOB Procedure (mint→poll→correlate)");
+do not re-derive it here. Shell listener session output is a separate surface: `vigil runtime
+shell-exec "tail -80 /data/shell-<name>.log"`.
 
 Record the result in the relevant finding, probe-run, or handoff after reading
 logs; the log command itself is infrastructure observation, while durable
@@ -857,39 +788,11 @@ Root: `scope.json`, `report.md`, and the transient worker buffer only. Credentia
 
 ---
 
-## 16. Output Hygiene — Backend Is Canonical
+## 16. Mandatory Closing Sequence
 
-The backend stores the canonical, queryable state of the engagement: findings in
-the findings table (`vigil assess record-finding`), intel rows in `intel_*` tables
-(`record-intel`), surface candidates in the surfaces table (`record-surface`),
-credentials and attack chains in their tables, and the cross-cutting handoff
-(summary / coverage gaps / next steps / runtime issues / working artifacts /
-open questions / specialty extras) in `assessment_dispatch_handoffs`
-(`vigil assess agent handoff --from-json <path>`).
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
-The operator queries those tables through bounded primitives — `resume-brief`,
-`render-handoff <agent-id>`, `artifact search/get`, `fetch findings`,
-`list-intel`, `list-clusters` — to assemble the next dispatch's context. The
-markdown response you return is your *reflection* on the work, not the canonical
-record of it.
-
-When the dispatch prompt includes a `resume-brief` block after Runtime Identity,
-treat it as the compact operating picture. Use its finding, command-run, handoff,
-and artifact IDs for drill-down; do not reconstruct state by reading unindexed
-local notes first.
-
-Write durable state to backend tables and linked artifacts immediately — hidden
-markdown notes break resume, report readiness, and cross-agent handoff because
-future agents cannot query or verify them. Any `.md` file under `notes/` that
-matters after the current command must be registered with `vigil assess artifact
-register <path> --finding <slug>` (or another entity link) before the dispatch
-closes. Unlinked markdown notes are scratch only and are not valid resume or
-report input — the operator can confirm a note is scratch with `vigil assess
-artifact mark-scratch <path>` (single) or `--under <prefix>` (bulk). A
-`check-phase-readiness --phase report` `unlinked_markdown_note` blocker names the exact fix
-per row.
-
-### Mandatory closing sequence (every specialist runs this before returning)
+Every specialist runs this before returning:
 
 1. `vigil assess record-finding <agent-name> <finding-json>` per finding.
 2. `vigil assess record-intel <type> <intel-json>` per intel row.
@@ -903,27 +806,3 @@ per row.
 5. `vigil assess agent render-handoff <agent_id>` — run after step 4 as a self-check.
    Exit only after the render succeeds. A 404 means the `agent_id` in step 4 did not
    match the registered dispatch.
-
-`agent done` / `agent close` are operator-only — do not call them; the operator
-marks the dispatch complete after your return so checkpointing stays separate
-from lifecycle closure.
-
-`agent handoff` is idempotent — call it as a checkpoint after each major step, not
-only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md` "Checkpointing".
-
-On long runs, at each handoff checkpoint — and also whenever the working context
-grows long mid-task, even between checkpoints — re-emit a compact plan-state
-digest in your response — objective / done so far / still pending / immediate
-next step (~3-5 lines) — so the objective does not drift to the bottom of a long
-context. This is additive to the handoff write, not a separate ceremony.
-
-### Reasoning quality > response brevity
-
-Reason fully through the work as you go — narrate observations between tool
-calls, work through hypotheses, summarize findings as you discover them. That's
-how Claude reasons well, and red-team work depends on careful reasoning. Don't
-truncate analysis to be brief.
-
-The point of §16 is not "be terse"; it's "don't let the markdown response
-*replace* the backend writes." Both can coexist: detailed reasoning in the
-response, structured state in the backend.

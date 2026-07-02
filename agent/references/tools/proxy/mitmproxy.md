@@ -208,22 +208,9 @@ telemetry) to the backend `POST .../assessment/http-flows` ingest route.
 **Raw-body capture is OFF by default.** Restarting the shared proxy never
 silently changes capture behavior; you must turn it on per engagement.
 
-```bash
-# Inspect the current policy
-vigil assess http policy
-
-# Enable raw-body capture (both sides), cap bodies at 256 KB
-vigil assess http policy set --enabled \
-  --capture-request-bodies --capture-response-bodies \
-  --max-body-bytes 262144
-
-# Scope which content types are stored (allow/deny substrings, repeatable)
-vigil assess http policy set --content-type-allow application/json \
-  --content-type-deny image/ --content-type-deny video/
-
-# Turn it back off
-vigil assess http policy set --no-enabled
-```
+For the full `vigil assess http policy` command reference (inspecting,
+enabling/scoping, and disabling raw-body capture), run `vigil assess contract
+http`.
 
 The policy is authoritative in the backend and mirrored to
 `capture-policy.json` next to `scope.json` in the engagement root, so the shared

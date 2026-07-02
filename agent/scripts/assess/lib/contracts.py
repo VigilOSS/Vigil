@@ -9,7 +9,35 @@ from pathlib import Path
 from typing import Any
 
 from .intel_types import INTEL_TYPES
+from .kali_audit import ALLOWED_PHASES
 from .schema_validation import load_schema
+
+
+# Canonical engagement-phase vocabulary for the per-phase command catalog. This
+# is the SAME enum the kali audit path validates `--phase` against — imported
+# from kali_audit, not re-declared — so `vigil assess list-commands --phase <N>`
+# and the audit gate can never drift to two divergent phase enums.
+CATALOG_PHASES: tuple[str, ...] = ALLOWED_PHASES
+
+# The readiness command (check_phase_readiness) labels the canonical persisted
+# "consume-test" phase with the short form "consume" internally. Accept both
+# spellings on a --phase filter so a caller who types either resolves to the
+# canonical value; this is the one explicit alias bridging the short readiness
+# labels to CATALOG_PHASES.
+_PHASE_FILTER_ALIASES: dict[str, str] = {
+    "consume": "consume-test",
+    "consume_test": "consume-test",
+}
+
+
+def canonical_phase(phase: str) -> str:
+    """Normalize a phase token to its CATALOG_PHASES spelling.
+
+    Lower-cases and resolves the ``consume``→``consume-test`` short alias so a
+    ``--phase`` filter written in either form matches the canonical tags.
+    """
+    key = (phase or "").strip().lower()
+    return _PHASE_FILTER_ALIASES.get(key, key)
 
 
 SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
@@ -374,11 +402,17 @@ class CommandContract:
     notes: tuple[str, ...] = ()
     common_mistakes: tuple[tuple[str, str], ...] = ()
     examples: tuple[dict[str, Any], ...] = ()
+    # Engagement phase(s) where this command is meaningful, drawn from the
+    # canonical CATALOG_PHASES vocabulary. Drives `vigil assess list-commands
+    # --phase <N>`. An empty tuple means a phase-agnostic utility (recorded /
+    # queried in any phase) — it is grouped separately, not under a phase.
+    phase: tuple[str, ...] = ()
 
 
 _CONTRACTS: dict[str, CommandContract] = {
     "record-intel": CommandContract(
         name="record-intel",
+        phase=("recon", "collect"),
         summary="Record one structured intel row through a type-specific intel schema.",
         schema_name="type-specific intel schema",
         preferred_invocations=(
@@ -410,6 +444,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "record-finding": CommandContract(
         name="record-finding",
+        phase=("consume-test", "verify", "exploit", "code-hunt"),
         summary="Create or upsert a finding through helper-normalized lifecycle defaults.",
         schema_name="finding-record.schema.json",
         preferred_invocations=(
@@ -555,6 +590,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "link-finding": CommandContract(
         name="link-finding",
+        phase=("verify", "report"),
         summary="Group findings by root cause, attach intel, or record a generic typed finding link (incl. the unblock path for blocked findings).",
         schema_name="backend RootCauseLinkRequest / FindingLinkRequest",
         preferred_invocations=(
@@ -590,6 +626,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "block-technique": CommandContract(
         name="block-technique",
+        phase=("consume-test", "exploit"),
         summary="Record a technique walled off on a target (account/device/credential/policy wall, WAF) so it is not silently re-attempted.",
         schema_name="backend BlockedTechniqueRecordRequest",
         preferred_invocations=(
@@ -653,6 +690,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "record-attempt": CommandContract(
         name="record-attempt",
+        phase=("consume-test", "exploit"),
         summary="Record a NON-covering probe attempt (attempted|blocked|no-signal|error) under a lens so a touched-but-inconclusive target is on the ledger without counting as coverage.",
         schema_name="backend ProbeRunRecordRequest (POST /probe-runs)",
         preferred_invocations=(
@@ -684,6 +722,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "list-finding-group": CommandContract(
         name="list-finding-group",
+        phase=("report",),
         summary="Inspect a root-cause finding group as the backend will present it to reporting and the UI.",
         schema_name="backend finding group projection",
         preferred_invocations=(
@@ -699,6 +738,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "list-report-findings": CommandContract(
         name="list-report-findings",
+        phase=("report",),
         summary="Fetch the grouped report finding projection that report-writer consumes.",
         schema_name="backend grouped report-findings projection",
         preferred_invocations=(
@@ -779,6 +819,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "verify-finding": CommandContract(
         name="verify-finding",
+        phase=("verify", "code-verify"),
         summary="Apply a verification transition to an existing finding through the audit ledger.",
         schema_name="backend FindingVerifyRequest",
         preferred_invocations=(
@@ -812,6 +853,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "kill-finding": CommandContract(
         name="kill-finding",
+        phase=("verify", "code-verify"),
         summary="Persist a false_positive verification with the required kill metadata.",
         schema_name="backend FindingVerifyRequest (false_positive)",
         preferred_invocations=(
@@ -913,6 +955,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "resolve-surface": CommandContract(
         name="resolve-surface",
+        phase=("collect", "consume-test"),
         summary="PATCH an assessment surface by id (set status + rationale).",
         schema_name="backend SurfaceUpdateRequest",
         preferred_invocations=(
@@ -1008,6 +1051,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-dispatch": CommandContract(
         name="code-dispatch",
+        phase=("code-classify", "code-hunt"),
         summary="Operate the backend code-analysis queue and cross-file trigger lifecycle.",
         schema_name="backend code-analysis queue / trigger request models",
         preferred_invocations=(
@@ -1046,6 +1090,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-index": CommandContract(
         name="code-index",
+        phase=("code-ingest",),
         summary="Build the structural index under the engagement analysis-state directory.",
         schema_name="structural-index aggregate manifest, per-repo manifest, and per-file index JSON",
         preferred_invocations=(
@@ -1077,6 +1122,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-classify": CommandContract(
         name="code-classify",
+        phase=("code-classify",),
         summary="Bulk-classify code files and persist architect-assigned analysis priority.",
         schema_name="code-file-classification.schema.json",
         preferred_invocations=(
@@ -1116,6 +1162,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-record-modules": CommandContract(
         name="code-record-modules",
+        phase=("code-ingest", "code-classify"),
         summary="Record repository module boundaries from the architecture mapping pass.",
         schema_name="backend CodeModuleRecord list",
         preferred_invocations=(
@@ -1145,6 +1192,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-record-threat-model": CommandContract(
         name="code-record-threat-model",
+        phase=("code-ingest", "code-classify"),
         summary="Record the repository threat model produced by code-architect.",
         schema_name="backend threat_model object",
         preferred_invocations=(
@@ -1165,6 +1213,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-record-analysis": CommandContract(
         name="code-record-analysis",
+        phase=("code-hunt", "code-verify"),
         summary="Record a code-vuln-hunter result against the claimed queue item that produced it.",
         schema_name="code-analysis-result.schema.json",
         preferred_invocations=(
@@ -1257,6 +1306,38 @@ def contract_names() -> list[str]:
     names.extend(f"agent {verb}" for verb in AGENT_VERBS)
     names.append("work-buffer")
     return sorted(names)
+
+
+def all_command_contracts() -> list[CommandContract]:
+    """Every helper-owned command contract, for the per-phase catalog.
+
+    Composes the static ``_CONTRACTS`` registry with the per-verb kali
+    contracts (``kali <verb>``), which is the surface ``vigil assess
+    list-commands`` groups by phase. The dynamically-derived per-intel-type
+    (``record-intel <type>``) and per-agent-verb (``agent <verb>``) detail
+    contracts are intentionally excluded — they are drill-down forms of the
+    ``record-intel`` / ``agent`` catalog rows, not separate commands.
+    """
+    contracts: list[CommandContract] = list(_CONTRACTS.values())
+    for verb in KALI_VERBS:
+        contract = _kali_verb_contract(verb)
+        if contract is not None:
+            contracts.append(contract)
+    return contracts
+
+
+def commands_by_phase(phase: str) -> list[CommandContract]:
+    """Return the command contracts tagged for a given engagement ``phase``.
+
+    ``phase`` is normalized to the canonical CATALOG_PHASES vocabulary (the
+    ``consume``→``consume-test`` short alias is resolved). Phase-agnostic
+    utilities (empty ``phase`` tuple) are never returned by a phase filter —
+    ``list-commands`` surfaces them in a separate group. Results are sorted by
+    command name for stable output.
+    """
+    target = canonical_phase(phase)
+    matched = [c for c in all_command_contracts() if target in c.phase]
+    return sorted(matched, key=lambda c: c.name)
 
 
 def get_contract(name: str) -> CommandContract | None:
@@ -1704,6 +1785,47 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
 }
 
 
+# Engagement phase(s) where each kali verb is meaningful, drawn from the
+# canonical CATALOG_PHASES / kali_audit.ALLOWED_PHASES vocabulary. Same
+# shape/location as _KALI_VERB_NOTES / _KALI_VERB_EXAMPLES: consumed by
+# `_kali_verb_contract` to stamp `CommandContract.phase`, which drives
+# `vigil assess list-commands --phase <N>`. An empty tuple marks a
+# phase-agnostic verb (raw runners + host-side maintenance that run in any
+# phase); a verb absent from this map defaults to phase-agnostic too.
+_KALI_VERB_PHASES: dict[str, tuple[str, ...]] = {
+    # --- target-facing probes ---
+    "nmap-scan": ("recon",),
+    "nuclei": ("recon", "collect"),
+    "httpx": ("recon", "collect"),
+    "wafw00f": ("recon",),
+    "ffuf": ("collect", "consume-test"),
+    "sqlmap": ("consume-test",),
+    "subfinder": ("recon", "recon-pivot"),
+    "puredns": ("recon", "recon-pivot"),
+    "dnsx": ("recon", "recon-pivot"),
+    "nikto": ("collect", "consume-test"),
+    "katana": ("collect",),
+    "gau": ("recon", "collect"),
+    "arjun": ("recon", "consume-test"),
+    "whatweb": ("recon",),
+    "cero": ("recon", "recon-pivot"),
+    "alterx": ("recon", "recon-pivot"),
+    "asnmap": ("recon", "recon-pivot"),
+    "bbot": ("recon",),
+    "browser": ("recon", "consume-test", "exploit-recon"),
+    "tlsx": ("recon", "recon-pivot"),
+    "dalfox": ("consume-test",),
+    "robots": ("recon",),
+    # exec + job are raw/long-running runners usable in any phase.
+    "exec": (),
+    "job": (),
+    # --- host-side maintenance (no target traffic, any phase) ---
+    "sweep-orphans": (),
+    "tool-help": (),
+    "gf": (),
+}
+
+
 def _kali_root_contract() -> CommandContract:
     return CommandContract(
         name="kali",
@@ -1746,6 +1868,7 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
     if verb == "sweep-orphans":
         return CommandContract(
             name="kali sweep-orphans",
+            phase=_KALI_VERB_PHASES.get(verb, ()),
             summary=(
                 "Reconcile assessment_command_runs rows stuck in status=running "
                 "past a threshold age by probing the in-container PID and "
@@ -1775,6 +1898,7 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
     if verb == "tool-help":
         return CommandContract(
             name="kali tool-help",
+            phase=_KALI_VERB_PHASES.get(verb, ()),
             summary=(
                 "Print a runtime tool's live -h/--help from inside the container "
                 "so you read the EXACT flags the installed version supports."
@@ -1800,6 +1924,7 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
     if verb == "gf":
         return CommandContract(
             name="kali gf",
+            phase=_KALI_VERB_PHASES.get(verb, ()),
             summary=(
                 "Pattern-bucket a URL corpus by vuln-param family (ssrf/idor/sqli/"
                 "lfi/redirect/xss/...). A local text filter — sends no target "
@@ -1851,6 +1976,7 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
         )
     return CommandContract(
         name=f"kali {verb}",
+        phase=_KALI_VERB_PHASES.get(verb, ()),
         summary=f"Run `{verb}` inside the runtime container with audit recording.",
         schema_name="argparse + CommandRunRecordRequest backend model",
         preferred_invocations=invocation,
