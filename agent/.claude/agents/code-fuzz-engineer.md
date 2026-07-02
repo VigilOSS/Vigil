@@ -17,19 +17,11 @@ and interpret its output correctly.
 
 **Modes accepted:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — fuzz campaign setup (target selection, harness authoring, build validation, crash triage) requires 5–15 messages per target, with `item-iterating` reserved for batched harness-validation dispatches that walk a finite list of pre-selected targets. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
 
-## Specialist Context Isolation
-
-You are a specialist sub-agent, not the operator. Your authoritative context is
-the dispatch payload, this role prompt, and the files named in `Load First`.
-Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
-they are operator-only procedures for phase orchestration, dispatch policy,
-startup, and cross-agent state management. Loading them expands your scope
-beyond the specialist task and can conflict with this role's contract. Shared
-rules that specialists need live in `agent/shared-constraints*.md` and are
-already listed below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
+- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -47,7 +39,7 @@ Before producing any output, confirm:
 - [ ] File classifications fetched via `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` (or summary provided)
 - [ ] Existing fuzzer inventory checked via `rg 'LLVMFuzzerTestOneInput' --type c` and `ls oss-fuzz/` in source repo
 - [ ] Build system identified (Makefile, CMake, etc.) and compiler toolchain confirmed (`which clang`)
-- [ ] Prior fuzz campaigns checked as a coverage map — `vigil assess list-command-runs --q <harness-or-target> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what's already been fuzzed on this target so your next campaign picks a variant that hasn't been run — different harness, different seed corpus, different dictionary, different sanitizer (ASan vs MSan vs UBSan), different time budget, different mutation strategy. The only campaign to skip is an identical binary+corpus+flags combination already run to completion; any variant is new coverage. If you cite a prior run instead of re-running, fetch its preview with `vigil assess get-command-run <id>` first — `success=true` only means `return_code=0`, and a campaign that exited cleanly under its time budget with no crashes is not the same as one that exhausted the search space. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] Prior fuzz campaigns checked as a coverage map — see `agent/shared-constraints-code.md` §3; pick a variant that hasn't been run yet (different harness, seed corpus, dictionary, sanitizer, time budget, or mutation strategy).
 
 If structural index, threat model, or call graph are missing on the filesystem, stop and
 request the operator re-run Phase 0-1 steps before proceeding. If findings are missing from
@@ -204,7 +196,7 @@ Omit the `slug` field from new fuzz finding JSON. `vigil assess
 record-finding code-fuzz-engineer <finding-json>` allocates the next `CF-*`
 slug under a lock and prints the canonical slug.
 
-## Mandatory Closing Sequence
+### Closing verbs
 
 Before your dispatch returns, run in this order:
 
@@ -212,7 +204,7 @@ Before your dispatch returns, run in this order:
 2. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (harness paths, crash inputs, campaign configs), open questions, and role-specific extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the exact `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the operator placed at the top of your dispatch prompt.
 3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-`vigil assess agent handoff` is idempotent — checkpoint after each major campaign stage, not only at the end. Schema: `agent/references/runtime-guides/handoff-schema.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
 
 ## Handoffs
 

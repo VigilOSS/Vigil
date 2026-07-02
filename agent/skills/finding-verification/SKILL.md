@@ -27,12 +27,37 @@ counter-evidence or a reproduced result.
 
 ## Division of Labor
 
-- **Operator** selects the review scope (all HIGH/CRITICAL; MEDIUMs with escalation potential)
-  and passes the trust-boundary / threat-model summary, the finding slugs + payloads, and the
-  matching vuln-class skill. See operator-core Phase 4.
-- **You (vulnerability-analyst, review mode)** re-test against the live target via
-  `vigil assess kali ...` — you reproduce, you do not merely read the evidence text — then write
-  a disposition per finding and author the report-ready story for the ones that survive.
+- **Operator** selects the review scope — all HIGH/CRITICAL plus MEDIUMs with escalation
+  potential get **Tier 1** (full reproduction); every remaining ordinary MEDIUM/LOW gets
+  **Tier 2** (spot-check) — and passes the trust-boundary / threat-model summary, the finding
+  slugs + payloads, and the matching vuln-class skill. See operator-core Phase 4.
+- **You (vulnerability-analyst, review mode)** re-test Tier-1 findings against the live target
+  via `vigil assess kali ...` — you reproduce, you do not merely read the evidence text — then
+  write a disposition per finding and author the report-ready story for the ones that survive.
+  For Tier-2 findings you run the cheaper audit below instead of silently leaving them
+  unreviewed.
+
+## Review scope is two-tier, not all-or-nothing
+
+Every finding in scope gets *some* adversarial pass — full reproduction is reserved for the
+findings where it earns its cost, not because everything below HIGH/CRITICAL is exempt from
+review:
+
+- **Tier 1 — full reproduction.** All HIGH/CRITICAL, plus any MEDIUM with escalation potential
+  (chainable into a higher-severity outcome, or a disposition call close enough to the
+  high/medium boundary that a wrong verdict matters). Run the full Methodology below.
+- **Tier 2 — cheap spot-check.** Every ordinary MEDIUM/LOW that isn't Tier 1. Do not skip these
+  in silence. Run the severity↔CVSS band audit (`agent/rules/hunting.md` §20 — `severity` vs.
+  `details.cvss_score` band mismatch) plus a quick evidence-presence sanity check: is there a
+  captured request/response or command output backing the claim, or is `evidence_type` marked
+  `theoretical` without a `chain_required` rationale? This is a few-minute audit, not a re-run of
+  the PoC. A Tier-2 finding that fails either check — band mismatch, missing evidence, or a smell
+  of a stacked self-induced precondition — gets promoted to Tier 1 and run through the full
+  Methodology.
+
+This tiering is a cost control, not a license to wave Mediums/Lows through: you are still the
+adversary of the evidence, not of the finding count. Tier 2 exists so "cheap" doesn't collapse
+into "unreviewed" — every finding still gets a recorded check.
 
 ## Canonical gates — load, do not restate
 
@@ -107,9 +132,11 @@ story; it does not re-derive it. A finding disposed but not authored is half-don
 
 Per finding: the disposition + verb run, the reproduced evidence (or the kill counter-evidence),
 the corrected severity/CVSS if changed, and — for survivors — confirmation the report-ready story
-was authored into `details`. End with the review-scope summary: HIGH/CRITICAL all dispositioned;
-which MEDIUMs were reviewed and why; the kill rate (if >50%, flag that Phase-3 dispatch context
-may be producing speculative findings).
+was authored into `details`. End with the review-scope summary: HIGH/CRITICAL all dispositioned
+(Tier 1); which MEDIUMs were reviewed at Tier 1 and why; which ordinary MEDIUM/LOW findings
+received the Tier-2 spot-check and whether any were promoted to Tier 1 on a band mismatch or
+missing evidence; the kill rate (if >50%, flag that Phase-3 dispatch context may be producing
+speculative findings).
 
 ## Root-Cause Review Mode (Phase 4 → 5 exit)
 

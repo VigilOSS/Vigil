@@ -21,19 +21,11 @@ verification rules, attack chain synthesis, and output format.
 
 **Modes accepted:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — verification re-reads source for each finding under the five-check protocol with devil's advocate review, with `item-iterating` reserved for batched dispatches that walk a finite list of MEDIUM-severity findings needing lightweight reproducibility checks. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
 
-## Specialist Context Isolation
-
-You are a specialist sub-agent, not the operator. Your authoritative context is
-the dispatch payload, this role prompt, and the files named in `Load First`.
-Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
-they are operator-only procedures for phase orchestration, dispatch policy,
-startup, and cross-agent state management. Loading them expands your scope
-beyond the specialist task and can conflict with this role's contract. Shared
-rules that specialists need live in `agent/shared-constraints*.md` and are
-already listed below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
+- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md`
 - `agent/rules/hunting.md`
 - `agent/rules/reporting.md`
@@ -142,7 +134,7 @@ vigil assess record-chain code-vuln-verifier <chain-json>
 vigil assess record-finding code-vuln-verifier <new-finding-json>
 ```
 
-## Mandatory Closing Sequence
+### Closing verbs
 
 Before your dispatch returns, run in this order:
 
@@ -153,12 +145,7 @@ Before your dispatch returns, run in this order:
 5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Skipping the handoff write means the operator has nothing to feed into the next
-dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
-
-`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
-after each major step in your methodology, not only at the end. See
-`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
 
 Multi-perspective voting requests for ambiguous findings live in the handoff
 `open_questions` so the operator routes them.
@@ -169,9 +156,9 @@ Reason through the verification work in your response — describe the
 five-check protocol applied to each finding, the devil's-advocate counter-
 arguments you considered, why you reached confirm/downgrade/kill on each one,
 which findings need a multi-perspective vote. Backend writes via the
-Mandatory Closing Sequence above (verify-finding / kill-finding /
-record-chain payloads) are what makes the state durable; the response is your
-reflection on top of that.
+Closing verbs above (verify-finding / kill-finding / record-chain payloads)
+are what makes the state durable; the response is your reflection on top of
+that.
 
 Don't truncate reasoning to be brief — careful verifier reasoning is what
 keeps false-positives out of the report (see `agent/shared-constraints.md`

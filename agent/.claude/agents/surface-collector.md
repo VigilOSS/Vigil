@@ -17,17 +17,11 @@ that guides Phase 3 dispatch ordering.
 
 ## Specialist Context Isolation
 
-You are a specialist sub-agent, not the operator. Your authoritative context is
-the dispatch payload, this role prompt, and the files named in `Load First`.
-Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
-they are operator-only procedures for phase orchestration, dispatch policy,
-startup, and cross-agent state management. Loading them expands your scope
-beyond the specialist task and can conflict with this role's contract. Shared
-rules that specialists need live in `agent/shared-constraints*.md` and are
-already listed below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
+- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/skills/surface-collection/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
@@ -42,7 +36,7 @@ Before starting any target-facing work, verify:
 - [ ] You read the skill's `## Extended Resources` section and loaded the listed references
 - [ ] You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, credential state (from `vigil auth status`)
 - [ ] You have `$DIR/cases.db` path and the engagement directory set
-- [ ] You checked command history as a coverage map — `vigil assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Read the results to see what surface collection has already run on this target so your next pass picks angles that haven't been tried — different crawl depth, different source (Katana vs gau vs waybackurls vs hakrawler), different extension filter, different auth context. The only crawl to skip is an identical command against identical input; any variant (new auth, wider scope, deeper depth) is new coverage. If you cite a prior run instead of re-running, fetch its preview with `vigil assess get-command-run <id>` first — `success=true` only means `return_code=0`, not that the output is complete. Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] You checked command history as a coverage map before probing — see `agent/shared-constraints.md` §2b.
 - [ ] You checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies to the collection source. If it does, load it and collect the browser-vs-baseline delta before declaring coverage complete.
 
 If any item is unchecked, STOP and load it now. Working without the skill means running
@@ -198,9 +192,7 @@ For any collection source you could NOT complete, declare it in `#### Coverage G
 - Why (tool error, TLS issue, timeout, target unreachable)
 - Recommended follow-up action for the operator
 
-## Mandatory Closing Sequence
-
-Before your dispatch returns, run in this order:
+### Closing verbs
 
 1. `vigil assess record-finding surface-collector <finding-json>` for each finding (already required)
 2. `vigil assess record-intel <type> <intel-json>` for each intel row
@@ -209,13 +201,6 @@ Before your dispatch returns, run in this order:
 5. `vigil assess ingest-candidates "$DIR/cases.db" surface-collector-curated "$DIR/scans/surface-collector/candidate_records.jsonl"` when you produced curated candidate records
 6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `urls_ingested`, `clusters`, `deferred_clusters`)
 7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
-
-Skipping the handoff write means the operator has nothing to feed into the next
-dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
-
-`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
-after each major step in your methodology, not only at the end. See
-`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
 
 The recommended Phase 3 ordering goes into the handoff `next_steps` field — each
 entry names the action ("dispatch fetch-by-priority on top N items"), target
@@ -226,7 +211,7 @@ entry names the action ("dispatch fetch-by-priority on top N items"), target
 Reason through the collection pass in your response — describe the cluster shape,
 which clusters are high-signal vs deferred, which URL patterns dominate, and
 which authentication contexts you re-crawled under. Backend writes via the
-Mandatory Closing Sequence above are what makes the state durable; the response
+Closing verbs above are what makes the state durable; the response
 is your reflection on top of that.
 
 Don't truncate reasoning to be brief — careful triage analysis directly improves

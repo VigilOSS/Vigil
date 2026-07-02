@@ -53,34 +53,9 @@ The instant you name the trust, you know what to test: break the assumption the 
 
 ## 3. Developers are not your adversaries. They are your collaborators — involuntarily.
 
-Developers introduce security flaws from predictable conditions, not malice. Read the code or
-behavior as evidence of *how the developer was thinking at the time they wrote it*:
-
-**Recognize these cognitive states:**
-
-- **Rushing past the happy path:** Auth checks exist on the main endpoint but are missing on the
-  export, bulk-action, or batch variant added later under deadline pressure. Test siblings.
-
-- **Trusting their own stack:** Developers assume ORM = no SQL injection, template engine = no XSS,
-  SDK = safe deserialization. Ask: where did they bypass the safe abstraction for performance or
-  flexibility?
-
-- **Implicit trust from proximity:** Internal microservices often have no auth because "nothing
-  outside reaches them." SSRF, open redirects, and header injection are the way in.
-
-- **Forgetting the adversarial caller:** Server-side validation often mirrors client-side
-  validation. Developers who added client-side validation frequently consider the server protected.
-  Send the request the client would never send.
-
-- **API versioning debt:** v2 got the security fixes. v1 was never decommissioned because it would
-  break existing integrations. Find v1.
-
-- **State machine shortcuts:** Multi-step workflows (signup, checkout, upgrade, account transfer)
-  were developed step-by-step. The state transitions may be validated individually but not
-  enforced — test step-skipping and out-of-order execution.
-
-When you see a behavior, ask: "What was the developer assuming when they wrote this?" The
-assumption is the attack surface.
+> This lens (cognitive-state patterns for reading code/behavior as developer-decision evidence) now
+> lives in `agent/rules/mindsets/developer.md` — load it when the dispatch calls for generating your
+> own hypotheses about where a codebase under-guarded.
 
 ---
 
@@ -108,27 +83,11 @@ assumption that happens to be wrong.
 
 ## 5. "That's weird" is the most important signal you have.
 
-Elite testers stop at anomalies. Non-elite testers rationalize them away.
-
-Train the anomaly reflex: when a response is *not quite what you expected*, pause before moving on.
-
-**Anomalies worth stopping for:**
-
-- Two identical requests return different status codes or different response bodies — the system
-  is maintaining state you did not expect it to maintain.
-- An error message is different on this endpoint than on the sibling endpoint — they are handled
-  by different backend systems with different trust assumptions.
-- A field appears in the response that was not in the request and is not in the documentation —
-  someone is leaking internal state.
-- The request succeeds when you expected it to fail — either your model of the auth system is
-  wrong, or the auth system has a gap.
-- A timing delta: the same endpoint takes 3s for one input and 50ms for another — it is doing
-  something different (database lookup, external call, file read) for the slow input.
-- Silent success on input that should be rejected — the application accepted something it wasn't
-  designed to accept, and "accepted" almost never means "safely discarded."
-
-When you see an anomaly, your first move is not to move on. It is to ask: "What would have to be
-true for this to happen?" Then test that hypothesis directly.
+Elite testers stop at anomalies. Non-elite testers rationalize them away. Train the reflex: when a
+response is *not quite what you expected*, pause before moving on — your first move is not to move
+on, it is to ask "what would have to be true for this to happen?" and test that hypothesis directly.
+For the concrete list of what counts as an anomaly worth stopping for, see `hunting.md §4`
+(push-harder signals) — this is the psychological trigger; that is the signal catalog.
 
 ---
 
@@ -196,50 +155,17 @@ A surface is "tested" when you have checked it from perspectives the developer d
 
 ## 9. Precision is not caution. It is efficiency.
 
-Elite offensive practitioners do not spray payloads. They construct one precise request that
-proves or disproves a hypothesis.
-
-The hypothesis-driven probe is faster than the shotgun approach because:
-
-- Each probe teaches you something about the system's model
-- A failed hypothesis narrows the space of remaining hypotheses
-- A successful hypothesis tells you exactly what to escalate
-
-Spray payloads when you have no hypothesis and need to generate one. Otherwise, think first: "What
-single request, if it returned X, would prove that Y is true?" Then send that request.
+Elite offensive practitioners do not spray payloads — they construct one precise request that
+proves or disproves a hypothesis. See `hunting.md §6` (evidence beats volume) and `§22` (smallest
+probe that answers the question) for the operational discipline this mindset motivates.
 
 ---
 
 ## 10. Dispatch one lens. Cycle across batches.
 
-When dispatching a specialist, name ONE developer-failure **lens** — a family of
-related developer assumptions that fail together:
-
-| Lens | What fails together |
-|---|---|
-| **Caching** | stale invalidation, shared-key leakage, cache-key injection |
-| **Data handling / over-trust** | caller-supplied values accepted without re-validation, over-broad deserialization |
-| **Business logic** | step-skip, out-of-order state, coupon/quota abuse |
-| **Race conditions** | TOCTOU, non-atomic credit/inventory, session-merge |
-| **Mass assignment** | unfiltered bind, hidden field promotion |
-| **Upload / file handling** | extension bypass, path traversal on store, content-type trust |
-| **Client-side trust** | server echoes client-controlled values, DOM sink injection |
-
-A lens is not a bug: it describes *how the developer was thinking*, so the
-specialist derives the right hypotheses rather than executing a pre-named
-checklist. Naming the bug caps depth at the operator's guess; naming the lens
-lets the specialist generalize to every surface the bug class touches.
-
-**Cadence rule:**
-- A winning lens on a worked surface → **re-run it on NEW surfaces** (the same
-  failure mode recurs wherever the same developer pattern exists).
-- A fresh lens on an already-worked surface → **dispatch it now**; a surface
-  proven clean under caching assumptions may still be vulnerable under race or
-  upload assumptions.
-
-Cycle lenses across batches. The operator names the surface and the lens; the
-specialist originates every hypothesis under it. This is the generative complement
-of the open-objective dispatch doctrine in `operator-core.md §DISPATCH`.
+> This is operator-only dispatch doctrine (which lens to name, cadence rule for cycling lenses
+> across batches) — it now lives in `agent/operator-core.md`'s dispatch doctrine, not the
+> specialist-facing baseline.
 
 ---
 

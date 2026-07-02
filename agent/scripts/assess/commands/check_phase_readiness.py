@@ -65,12 +65,28 @@ from assess.lib import coverage_checks as cc
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.exploit_targets import resolve_approved_target_slugs
+from assess.lib.kali_audit import ALLOWED_PHASES as _CANONICAL_PHASES
 from assess.lib.scope import load_scope
 
 
+# This command handles the WEB engagement phases and labels the canonical
+# persisted "consume-test" phase (the spelling in kali_audit.ALLOWED_PHASES —
+# the one enum both this command and the command catalog key off) with the
+# short internal form "consume". `_CANONICAL_CONSUME` names that canonical
+# spelling explicitly so the alias below is a documented bridge to the shared
+# enum rather than a second, silently-divergent phase vocabulary.
+_CANONICAL_CONSUME = "consume-test"
+assert _CANONICAL_CONSUME in _CANONICAL_PHASES, (
+    "check-phase-readiness consume alias drifted from kali_audit.ALLOWED_PHASES"
+)
+
 PHASES = ("recon", "collect", "consume", "verify", "exploit", "report")
 
-_PHASE_ALIASES = {"consume-test": "consume", "consume_test": "consume"}
+# Explicit consume↔consume-test alias: the canonical enum spells the phase
+# "consume-test", this command's internal short form is "consume". Keep the
+# legacy underscore variant too. Derived from `_CANONICAL_CONSUME` so the two
+# enums cannot diverge.
+_PHASE_ALIASES = {_CANONICAL_CONSUME: "consume", "consume_test": "consume"}
 
 _CLI_PHASE_CHOICES = (*PHASES, *_PHASE_ALIASES)
 

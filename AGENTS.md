@@ -459,6 +459,10 @@ If a change affects prompt generation, rerender and review the generated wrapper
 If a change affects CLI ownership or lifecycle behavior, run the relevant backend CLI and API tests,
 not markdown wording tests.
 
+Run the change against the **Prompt health ruleset** (`# Prompt Authoring Standards` below) as
+well — it is the standing checklist for Load-First budgets, MANDATORY-vs-LOAD-ON-FIRST-USE splits,
+duplication, and dispatch-field placement, and applies on top of the coherence pass above.
+
 ## Markdown prompt/doc testing policy
 
 Do not add or maintain repository tests that assert `.md` prompt/doc wording, headings, or exact
@@ -600,3 +604,95 @@ than as a prohibition on the operator.
 
 Instead of: "The operator must not evaluate guards or sinks."
 Write: "Guard and sink evaluation belong to code-vuln-hunter — the operator provides the context slices and records the results."
+
+## Prompt health ruleset
+
+The ten rules below are the standing health checklist for every prompt/doc edit — role files
+(`agent/agents/*.md`), shared layers (`agent/shared-constraints*.md`), rules (`agent/rules/*.md`),
+and operator doctrine (`agent/operator-core*.md`). They exist because a specialist's real context
+is not just its role file — it is the role file **plus every `## Load First` entry**, and that
+standing load grows silently whenever a rule gets re-authored in a second place instead of
+pointed to. Apply this checklist alongside the **Prompt edit checklist** above; it governs
+prompt-health quality, not the coherence pass that checklist runs.
+
+### 1. State a per-role Load-First budget
+
+A role's real context cost is its own body plus every file listed under **MANDATORY** in its
+`## Load First` section — not the role file's line count in isolation. When you add a role or a
+mandatory Load-First entry, note the resulting total against the role's stated budget (or set one
+if none exists). Growth past the budget is a signal to trim or hoist content out (per Rule 3),
+not to accept a creeping standing load.
+
+### 2. Split Load First into MANDATORY vs LOAD-ON-FIRST-USE
+
+Every role's `## Load First` section separates what is loaded unconditionally from what is loaded
+lazily, trigger-gated on the situation that needs it — see `agent/agents/recon-specialist.md`
+(`## Load First`) for the canonical shape: a **MANDATORY (before any work)** list and a
+**LOAD-ON-FIRST-USE (lazy)** list where each entry states the trigger inline (e.g. "when you run
+the L1 ffuf pass (step 6)"). A file that only a subset of dispatches ever need belongs in the lazy
+list with its trigger named, not in MANDATORY by default.
+
+### 3. DRY — a rule lives in one file
+
+Author a procedure, contract, or piece of judgment exactly once, in its owning file; every other
+site gets a short pointer, not a restatement. Duplication drifts (two copies of the same OOB
+mint→poll sequence, or a CVSS-table cross-reference that goes stale when the table moves) and each
+copy adds standing-load weight the specialist pays on every dispatch. Use a pointer, not a
+paraphrase — for example, the canonical cross-family pointer used by every offensive/code role for
+context-isolation, finding-recording format, and closing-sequence wrapper is:
+
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+
+### 4. Single responsibility, mode-gated
+
+A role prompt covers one specialist's job. Content that only applies in one operating mode (a
+review pass, a final-report run, an exploit-review gate) is gated behind an explicit mode check
+in the prompt, not always-loaded prose the specialist must mentally filter on every dispatch.
+Prefer "Modes accepted: ... **Default when omitted:** ..." framing (see
+`agent/agents/recon-specialist.md`'s "Modes accepted" line) over one role file quietly doing two
+jobs.
+
+### 5. Injected content gets a named top-of-dispatch field
+
+Position beats verbosity: content that is specific to one dispatch (a mindset lens, `hunt_scope`,
+coverage/ROE state) goes in a named field at the very TOP of the dispatch prompt, ahead of the
+~400-line role body. Content buried after a long fixed role body is the "lost in the middle"
+failure mode — the per-dispatch instruction that should govern the run gets out-competed by
+generic role prose the model read first.
+
+### 6. Must-reads are conditional pointers with a stated trigger
+
+When a role's Load First list points at another doc instead of inlining it, the pointer states the
+trigger condition, not just the filename — a bare filename forces the specialist to load it
+defensively (paying the cost anyway) or skip it wrongly. Model wording: *"load in full only
+immediately before authoring a confirmed/upgraded finding's report-ready details, in review mode,
+or when drafting an external submission — not for exploration/kill."*
+
+### 7. Every dispatch names its FP gate
+
+Any dispatch that produces or reviews a finding cites its false-positive/severity-downgrade gate
+by name — e.g. `agent/references/finding-fp-and-severity-gate.md` — so the specialist knows which
+document governs disposition before it writes a verdict, rather than inferring it from role prose
+scattered across the file.
+
+### 8. New per-dispatch dimensions extend the header, never fork a role
+
+When you add a new axis a dispatch can vary along (e.g. a depth split, a mindset selection), add
+it as a field in the existing Dispatch Context Template / Specialist Dispatch Contract header in
+`agent/operator-core.md`, and thread it through the existing role file. Do not fork a second role
+file to carry the new dimension — that reintroduces the duplication Rule 3 forbids and splits a
+single specialist's contract across two authoritative sources.
+
+### 9. Length changes restate the budget
+
+When a role file's or shared layer's line count changes meaningfully, restate its new total against
+the Rule 1 budget in the same change — a trim that isn't reflected in the stated budget, or a
+growth that silently blows past it, is exactly the drift this checklist exists to catch.
+
+### 10. No CI wording tests — advisory only
+
+Per the **Markdown prompt/doc testing policy** above, prompt/doc health (including any per-role
+line-count check) is enforced as a human authoring checklist plus, at most, an advisory WARN — never
+a blocking CI wording test. A wording or line-count assertion that fails the build turns normal
+prompt editing into fixture maintenance and rewards preserving stale phrasing over improving the
+instructions; keep any automated signal non-blocking.

@@ -204,85 +204,28 @@ When progress stalls, use this table to pick a concrete next action instead of g
 
 ## 18. Sub-Agent Dispatch Discipline
 
-The operator's value is *not* doing the testing — it is choosing the right
-specialist, framing the dispatch tightly, and judging the returned evidence.
-**Tight means a precise surface, scope, auth state, rules, and the outcome
-wanted — it does NOT mean a pre-chosen vulnerability or payload.** Naming the bug
-for the specialist anchors it to your guess and caps its depth at your
-imagination (§19's heuristics are the specialist's to run, not the operator's to
-pre-decide). When the operator does the hunting itself, two things break: the
-operator's context window fills with low-level transcripts that should have
-stayed in a specialist subagent, and the audit trail loses the per-role
-provenance that report-writer and later operators rely on.
-
-- **Default to dispatch.** When a task fits a named role (`recon-specialist`,
-  `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`,
-  `surface-collector`, `source-analyzer`, `report-writer`, or any
-  `code-*` role), launch that specialist instead of running the underlying
-  tools yourself. Specialists carry the role prompt, the matching skill
-  context, and the handoff schema the operator does not.
-- **Inline only for genuinely operator-scoped work.** A handful of actions
-  belong on the operator: scope and authorization decisions, dispatch
-  authoring, recording specialist handoffs, reviewing evidence, and the
-  occasional one-shot lookup that informs the next dispatch (a single
-  `vigil assess fetch ...` query, a `list-skills` call, a contract render).
-  Anything that walks a target, parses output, or iterates over a work-buffer
-  cluster is specialist work.
-- **One specialist, one objective, one skill set.** Each dispatch names the
-  role, the dispatch mode, and the explicit skill list (`--skills` on
-  `vigil assess agent start`). Bundling multiple objectives into one
-  dispatch defeats the role boundary and produces handoffs that report-writer
-  cannot map back to a coherent finding line.
-- **When in doubt, dispatch.** If the operator is about to run a Kali tool,
-  parse its output, and decide what to do next, that loop belongs in a
-  specialist. The cost of an extra dispatch is small; the cost of a polluted
-  operator context is large because it reduces the operator's ability to
-  judge the next dispatch.
+> **Sub-agent dispatch discipline** (default-to-dispatch, inline only for
+> operator-scoped work, one-specialist/one-objective/one-skill-set): moved to
+> `agent/operator-core.md`'s dispatch doctrine — operator-only content, not a
+> specialist read.
 
 ## 19. Developer psychology heuristics
 
-**Specialists: use these to generate *your own* hypotheses** about where this app's developers
-under-guarded. The operator tells you what's already covered, not which weakness to chase — these
-are the lens you bring to the surface you were handed:
-
-- **Feature-copy pattern**: Feature A has auth checks. Newly added Feature B was likely copied from A without the auth middleware — test B's auth boundary first.
-- **Flow-complexity pattern**: Multi-step workflows (checkout + coupon + refund + credits) have edge cases at every step boundary. Test step-skipping and out-of-order execution.
-- **API version drift**: `/api/v2/user` exists — does `/api/v1/user` still work with weaker or no auth? Old versions are rarely decommissioned properly.
-- **Naming anomaly signal**: If the API uses `userId` everywhere but one endpoint uses `user_id`, that endpoint was built by a different developer or team — it likely has different (weaker) security assumptions.
-- **Error response divergence**: Same 403 status code but different JSON structure on two endpoints = different backend systems with different trust boundaries. Test each independently.
-- **New feature window**: Features launched in the last 30 days have the lowest security maturity. Check changelogs and release notes for recent additions.
+> **Developer psychology heuristics** (feature-copy, flow-complexity, API
+> version drift, naming anomaly, error-response divergence, new-feature
+> window): moved to `agent/rules/mindsets/developer.md` — load it as your
+> generative lens for hypothesis generation.
 
 ## 20. Severity-CVSS alignment audit before report
 
-Before any report-writer dispatch, query `vigil assess list-findings` and verify
-each finding's `severity` matches its `details.cvss_score` band:
-
-- `high` requires `cvss_score >= 7.0`
-- `medium` requires `4.0 <= cvss_score <= 6.9`
-- `low` requires `cvss_score < 4.0`
-
-Fix mismatches via `vigil assess update-finding --inline '{"details":
-{"cvss_score": <n>, "cvss_vector": "..."}}'`. The JSON field is `details`,
-not `details_json`. A finding whose severity contradicts its CVSS makes the
-entire report look unverified to the triager, and mismatches are the single
-most common cleanup-time defect in this codebase. Run the audit before
-calling report-writer so the dispatch sees coherent state.
+> **Severity-CVSS alignment audit before report:** moved to
+> `agent/operator-core.md`'s dispatch doctrine — operator-only content, not a
+> specialist read.
 
 ## 21. Stale-text scrub before publishing
 
-Read each active finding's `summary` and `details` text fields and strip
-phrases that contradict the current state:
-
-- "severity adjusted from X to Y" when the severity is no longer Y
-- "originally rated as Z" when the rating has shifted twice since
-- "merged from W" when W has since been split off
-- "downgraded to medium" / "upgraded to high" / "previously low" against
-  the current severity field
-
-Stale narrative is invisible to backend status fields and ends up in
-report.md verbatim. The `vigil assess list-findings --json | jq -r .[].slug`
-loop in `agent/skills/report-generation/SKILL.md` (Review-and-Fix QA Mode)
-provides the executable recipe; this rule is the reason to run it.
+> **Stale-text scrub before publishing:** moved to `agent/operator-core.md`'s
+> dispatch doctrine — operator-only content, not a specialist read.
 
 ## 22. Smallest probe that answers the question
 
