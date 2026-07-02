@@ -23,6 +23,7 @@ Read `scope.json` before making target-facing decisions. Confirm:
   proceeds (`pause` and `selected` are mechanically identical); `full_send` bypasses that review
   gate entirely
 - Auth state from the engagement's backend credential store (`vigil auth status`) — use credentials only when a record is populated and marked active
+  - Liveness is ground truth: a populated/active record is NOT proof the session is live — never trust cookie presence or the `stale` flag. There is NO auto-detection of where a site handles auth; to confirm with `vigil auth status --probe --probe-url <authed-endpoint>` you MUST first declare `material.liveness = {expect_status, authed_marker, dead_marker}` (via `vigil auth import`/`edit`). Pick an `authed_marker` that appears ONLY when logged in (the logged-in username, an account/settings link, a per-user CSRF token field) and a `dead_marker` from the login page — the same logged-in/logged-out markers a DAST scanner (InsightAppSec/Burp) uses to validate a session. No signature ⇒ liveness stays `unknown`.
 
 `exploit_policy` governs *exploitation*, and it is resolved once **before** dispatch — not a
 per-action approval you re-request mid-task. The invariants that hold regardless of its value: stay

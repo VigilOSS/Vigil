@@ -148,30 +148,50 @@ def test_export_curl_args_includes_csrf_on_post_only(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------------------- #
 # Liveness classifier + probe (mirror of assess auth-status). Network-free: the
-# classifier is pure; the probe is exercised with a fake HTTP connection.
+# classifier is pure and operator-configured (material.liveness =
+# {expect_status, authed_marker, dead_marker}); the probe is exercised with a
+# fake HTTP connection. There is NO auto-detection of where auth lives.
 # --------------------------------------------------------------------------- #
 
 def test_classify_liveness_parity():
-    assert auth._classify_liveness(200, "") == "live"
-    assert auth._classify_liveness(204, "") == "live"
-    assert auth._classify_liveness(401, "") == "dead"
-    assert auth._classify_liveness(302, "https://portal/my.policy") == "dead"
-    assert auth._classify_liveness(303, "https://idp/authorize?redirect_uri=z") == "dead"
-    assert auth._classify_liveness(302, "https://app/home") == "unknown"  # non-login 3xx
-    assert auth._classify_liveness(403, "") == "unknown"  # WAF/authz, not proven dead
-    assert auth._classify_liveness(500, "") == "unknown"
+    cl = auth._classify_liveness
+    # (2) no liveness signature configured -> unknown (names the shape to set).
+    assert cl(200, "Sign out", None)[0] == "unknown"
+    assert cl(200, "Sign out", {})[0] == "unknown"
+    # (1) transport error (status None) wins even with a signature present.
+    assert cl(None, None, {"authed_marker": "Sign out"})[0] == "unknown"
+    # (3) dead_marker present in haystack -> dead.
+    assert cl(200, "Please sign in", {"dead_marker": "sign in"})[0] == "dead"
+    # (4) authed_marker absent -> dead.
+    assert cl(200, "anonymous page", {"authed_marker": "Sign out"})[0] == "dead"
+    # (5) expect_status mismatch -> dead (marker present, status wrong).
+    assert cl(302, "Sign out", {"authed_marker": "Sign out", "expect_status": 200})[0] == "dead"
+    # (6) all configured checks pass -> live.
+    assert cl(200, "Welcome — Sign out", {"authed_marker": "Sign out", "expect_status": 200})[0] == "live"
+    # marker-only configs each stand alone.
+    assert cl(200, "Sign out", {"authed_marker": "Sign out"})[0] == "live"
+    assert cl(200, "anon", {"authed_marker": "Sign out"})[0] == "dead"
+    assert cl(200, "welcome home", {"dead_marker": "Log in"})[0] == "live"
+    assert cl(200, "Log in to continue", {"dead_marker": "Log in"})[0] == "dead"
+    assert cl(200, "anything", {"expect_status": 200})[0] == "live"
+    assert cl(500, "anything", {"expect_status": 200})[0] == "dead"
+    # markers are case-sensitive substrings; a bool expect_status is not a real int.
+    assert cl(200, "sign out", {"authed_marker": "Sign out"})[0] == "dead"
+    assert cl(200, "x", {"expect_status": True})[0] == "unknown"  # bool != int status config
 
 
 class _FakeResp:
-    def __init__(self, status: int, location: str) -> None:
+    def __init__(self, status: int, headers: list[tuple[str, str]], body: bytes) -> None:
         self.status = status
-        self._location = location
+        self.reason = "OK"
+        self._headers = headers
+        self._body = body
 
-    def getheader(self, name: str):
-        return self._location if name.lower() == "location" else None
+    def getheaders(self) -> list[tuple[str, str]]:
+        return self._headers
 
     def read(self) -> bytes:
-        return b""
+        return self._body
 
 
 class _FakeConn:
@@ -180,7 +200,8 @@ class _FakeConn:
 
     requests: list[dict] = []
     status = 200
-    location = ""
+    headers: list[tuple[str, str]] = []
+    body: bytes = b""
 
     def __init__(self, host, port, timeout=None):
         self.host = host
@@ -190,26 +211,50 @@ class _FakeConn:
         _FakeConn.requests.append({"method": method, "path": path, "headers": headers})
 
     def getresponse(self):
-        return _FakeResp(_FakeConn.status, _FakeConn.location)
+        return _FakeResp(_FakeConn.status, _FakeConn.headers, _FakeConn.body)
 
     def close(self):
         pass
 
 
-def _install_fake_conn(monkeypatch, status: int, location: str = "") -> None:
+class _FailingConn:
+    """Raises on the request — models a transport error (connection refused)."""
+
+    def __init__(self, host, port, timeout=None):
+        pass
+
+    def request(self, method, path, headers=None):
+        raise OSError("connection refused")
+
+    def getresponse(self):  # pragma: no cover - request() raises first
+        raise OSError("connection refused")
+
+    def close(self):
+        pass
+
+
+def _install_fake_conn(monkeypatch, status, headers=None, body=b"") -> None:
     _FakeConn.requests = []
     _FakeConn.status = status
-    _FakeConn.location = location
+    _FakeConn.headers = headers or []
+    _FakeConn.body = body
     monkeypatch.setattr(auth.http.client, "HTTPSConnection", _FakeConn)
     monkeypatch.setattr(auth.http.client, "HTTPConnection", _FakeConn)
     monkeypatch.setattr("vigil_cli.paths.add_assess_import_path", lambda _root: None)
 
 
-def test_probe_liveness_live_on_2xx(tmp_path, monkeypatch):
+def _identity_with_liveness(**liveness):
+    return {"cookies": {"S": "1"}, "liveness": liveness}
+
+
+def test_probe_liveness_live_on_authed_marker_and_status(tmp_path, monkeypatch):
     eng = tmp_path / "agent" / "engagements" / "eng"
     eng.mkdir(parents=True)
-    monkeypatch.setattr(auth, "_active_material", lambda _d: {"cookies": {"S": "1"}})
-    _install_fake_conn(monkeypatch, 200)
+    monkeypatch.setattr(
+        auth, "_active_material",
+        lambda _d: _identity_with_liveness(authed_marker="Sign out", expect_status=200),
+    )
+    _install_fake_conn(monkeypatch, 200, body=b"<a href='/logout'>Sign out</a> Welcome")
 
     result = auth.probe_liveness(eng, "https://portal.example.com/home")
     assert result["liveness"] == "live"
@@ -223,8 +268,15 @@ def test_probe_liveness_live_on_2xx(tmp_path, monkeypatch):
 def test_probe_liveness_dead_on_login_redirect_not_followed(tmp_path, monkeypatch):
     eng = tmp_path / "agent" / "engagements" / "eng"
     eng.mkdir(parents=True)
-    monkeypatch.setattr(auth, "_active_material", lambda _d: {"cookies": {"S": "1"}})
-    _install_fake_conn(monkeypatch, 302, "https://portal.example.com/my.policy")
+    monkeypatch.setattr(
+        auth, "_active_material",
+        lambda _d: _identity_with_liveness(authed_marker="Sign out", expect_status=200),
+    )
+    # 302 to a login page: the authed_marker is absent from the header+body haystack.
+    _install_fake_conn(
+        monkeypatch, 302,
+        headers=[("Location", "https://portal.example.com/my.policy")], body=b"",
+    )
 
     result = auth.probe_liveness(eng, "https://portal.example.com/home")
     assert result["liveness"] == "dead"
@@ -232,14 +284,63 @@ def test_probe_liveness_dead_on_login_redirect_not_followed(tmp_path, monkeypatc
     assert len(_FakeConn.requests) == 1  # 302 classified, never chased
 
 
-def test_probe_liveness_unknown_on_403(tmp_path, monkeypatch):
+def test_probe_liveness_dead_on_dead_marker_in_body(tmp_path, monkeypatch):
     eng = tmp_path / "agent" / "engagements" / "eng"
     eng.mkdir(parents=True)
+    monkeypatch.setattr(
+        auth, "_active_material",
+        lambda _d: _identity_with_liveness(dead_marker="Please log in"),
+    )
+    _install_fake_conn(monkeypatch, 200, body=b"<h1>Please log in</h1>")
+
+    result = auth.probe_liveness(eng, "https://portal.example.com/home")
+    assert result["liveness"] == "dead"
+    assert result["http_status"] == 200
+
+
+def test_probe_liveness_dead_on_status_mismatch(tmp_path, monkeypatch):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    monkeypatch.setattr(
+        auth, "_active_material",
+        lambda _d: _identity_with_liveness(authed_marker="Sign out", expect_status=200),
+    )
+    # authed_marker present but the status is wrong -> dead.
+    _install_fake_conn(monkeypatch, 500, body=b"Sign out (but a 500)")
+
+    result = auth.probe_liveness(eng, "https://portal.example.com/home")
+    assert result["liveness"] == "dead"
+    assert result["http_status"] == 500
+
+
+def test_probe_liveness_unknown_without_liveness_signature(tmp_path, monkeypatch):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    # No material.liveness configured -> classifier cannot decide -> unknown.
     monkeypatch.setattr(auth, "_active_material", lambda _d: {"cookies": {"S": "1"}})
-    _install_fake_conn(monkeypatch, 403)
+    _install_fake_conn(monkeypatch, 200, body=b"anything at all")
 
     result = auth.probe_liveness(eng, "https://portal.example.com/home")
     assert result["liveness"] == "unknown"
+    assert result["http_status"] == 200
+    assert "no liveness signature" in result["reason"]
+
+
+def test_probe_liveness_unknown_on_transport_error(tmp_path, monkeypatch):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    monkeypatch.setattr(
+        auth, "_active_material",
+        lambda _d: _identity_with_liveness(authed_marker="Sign out"),
+    )
+    monkeypatch.setattr(auth.http.client, "HTTPSConnection", _FailingConn)
+    monkeypatch.setattr(auth.http.client, "HTTPConnection", _FailingConn)
+    monkeypatch.setattr("vigil_cli.paths.add_assess_import_path", lambda _root: None)
+
+    result = auth.probe_liveness(eng, "https://portal.example.com/home")
+    assert result["liveness"] == "unknown"  # never a false verdict on transport error
+    assert result["http_status"] is None
+    assert result["error"]
 
 
 def test_probe_liveness_rejects_non_http_url_without_network(tmp_path, monkeypatch):

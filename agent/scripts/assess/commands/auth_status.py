@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import Any
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
@@ -50,95 +51,132 @@ def register(subparsers) -> None:
         help=(
             "Actively verify session liveness: GET --probe-url through the kali "
             "runtime AS the active identity (its cookies are injected by the same "
-            "code the runtime uses). Presence of credentials is NOT liveness; "
-            "without --probe, liveness is reported as 'unknown'."
+            "code the runtime uses), then classify the response against the "
+            "identity's operator-configured material.liveness = "
+            "{expect_status, authed_marker, dead_marker} signature. Presence of "
+            "credentials is NOT liveness; without --probe, liveness is 'unknown'. "
+            "Without a material.liveness signature the probe stays 'unknown'."
         ),
     )
     p.add_argument(
         "--probe-url",
         dest="probe_url",
         help=(
-            "URL to GET as the active identity for the --probe liveness check. A "
-            "redirect to a login/`/my.policy` location is classified DEAD; a 2xx is LIVE."
+            "URL to GET as the active identity for the --probe liveness check. The "
+            "response (status line + headers incl. Location + body) is matched "
+            "case-sensitively against material.liveness = {expect_status, "
+            "authed_marker, dead_marker}; redirects are NOT followed."
         ),
     )
     p.set_defaults(func=run)
 
 
-# Location substrings that mark a redirect as a bounce back to authentication —
-# an authed request that lands here means the SESSION IS DEAD (F5 APM `/my.policy`,
-# a login/SSO/SAML redirect, an OAuth/OIDC authorize hop). Ambiguous 3xx to a
-# non-login page is left UNKNOWN rather than falsely called dead.
-_LOGIN_LOCATION_MARKERS = (
-    "/my.policy",
-    "/login",
-    "/signin",
-    "/sign-in",
-    "/saml",
-    "samlrequest",
-    "/idp",
-    "/authorize",
-    "/oauth2/authorize",
-    "/adfs/",
-    "/auth/realms",
-    "returnurl=",
-    "redirect_uri=",
-)
+def _classify_liveness(
+    status: int | None,
+    haystack: str | None,
+    liveness: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """Deterministic, operator-configured session-liveness classifier.
 
+    There is exactly ONE way to decide liveness: an operator-declared signature in
+    ``material['liveness'] = {expect_status, authed_marker, dead_marker}`` (each key
+    optional), matched against ``haystack`` — the probe response's status line +
+    headers (INCLUDING ``Location``) + body text. This mirrors how a DAST scanner
+    (InsightAppSec / Burp) validates a session with logged-in / logged-out markers;
+    NO auth/login location is auto-detected. Precedence (first match wins):
 
-def _classify_liveness(status: int | None, location: str | None) -> str:
-    """Classify an authed-probe response as ``live`` / ``dead`` / ``unknown``.
+      1. no response captured (transport error)         -> unknown
+      2. no liveness signature configured               -> unknown (names the shape to set)
+      3. dead_marker set AND present in haystack         -> dead
+      4. authed_marker set AND absent from haystack      -> dead
+      5. expect_status set AND status != expect_status   -> dead
+      6. otherwise                                       -> live
 
-    LOCKED rule: a 3xx redirect to a login/`/my.policy`-style location, or an
-    explicit 401, means the session is DEAD (the authed request was bounced to
-    re-auth). A 2xx is LIVE. Everything else — a transport error (status None), an
-    ambiguous 3xx to a non-login page, a 403 that may be WAF/authz rather than
-    session death — is UNKNOWN. Never assert a liveness we cannot prove. Pure
-    function: unit-tested in isolation from the live network call.
+    Marker matching is case-sensitive substring against the combined haystack.
+    Returns ``(verdict, reason)`` where ``reason`` names the rule that fired. Pure
+    function: unit-tested without a network, and kept in lockstep with its mirror
+    (``vigil_cli.auth`` <-> ``assess.commands.auth_status``) — the two must classify
+    identical inputs identically.
     """
     if status is None:
-        return "unknown"
-    loc = (location or "").lower()
-    if 200 <= status < 300:
-        return "live"
-    if status == 401:
-        return "dead"
-    if 300 <= status < 400:
-        if any(marker in loc for marker in _LOGIN_LOCATION_MARKERS):
-            return "dead"
-        return "unknown"
-    return "unknown"
+        return "unknown", "no response captured (transport error)"
+
+    cfg = liveness if isinstance(liveness, dict) else {}
+    raw_expect = cfg.get("expect_status")
+    expect_status = raw_expect if isinstance(raw_expect, int) and not isinstance(raw_expect, bool) else None
+    raw_authed = cfg.get("authed_marker")
+    authed_marker = raw_authed if isinstance(raw_authed, str) and raw_authed else None
+    raw_dead = cfg.get("dead_marker")
+    dead_marker = raw_dead if isinstance(raw_dead, str) and raw_dead else None
+
+    if expect_status is None and authed_marker is None and dead_marker is None:
+        return (
+            "unknown",
+            "no liveness signature configured; set "
+            "material.liveness = {expect_status, authed_marker, dead_marker}",
+        )
+
+    hay = haystack or ""
+    if dead_marker is not None and dead_marker in hay:
+        return "dead", f"dead_marker {dead_marker!r} present"
+    if authed_marker is not None and authed_marker not in hay:
+        return "dead", f"authed_marker {authed_marker!r} absent"
+    if expect_status is not None and status != expect_status:
+        return "dead", f"status {status} != expect {expect_status}"
+
+    confirmations: list[str] = []
+    if authed_marker is not None:
+        confirmations.append("authed_marker present")
+    if dead_marker is not None:
+        confirmations.append("dead_marker absent")
+    if expect_status is not None:
+        confirmations.append(f"status {status}")
+    return "live", ", ".join(confirmations)
 
 
-def _extract_marker(text: str, key: str) -> str | None:
-    """Return the value after the first line starting with ``key`` (or None)."""
-    for line in (text or "").splitlines():
-        if line.startswith(key):
-            return line[len(key):].strip()
-    return None
+def _build_liveness_haystack(
+    status: int,
+    reason: str,
+    headers: list[tuple[str, str]],
+    body: str,
+) -> str:
+    """Combine the status line + response headers (incl. ``Location``) + body into
+    the single case-sensitive haystack the liveness classifier matches against."""
+    status_line = f"HTTP {status} {reason}".rstrip()
+    header_text = "\n".join(f"{name}: {value}" for name, value in headers)
+    return "\n".join(part for part in (status_line, header_text, body) if part)
 
 
 def _run_identity_probe(
-    engagement_dir: str, identity: str | None, url: str, *, timeout: int = 15
-) -> dict:
+    engagement_dir: str,
+    identity: str | None,
+    url: str,
+    *,
+    liveness_cfg: dict[str, Any] | None,
+    timeout: int = 15,
+) -> dict[str, Any]:
     """GET ``url`` as ``identity`` through the kali-exec path and classify liveness.
 
     Shells the existing ``kali_exec`` runtime path with ``identity=<active>`` so the
     request carries the identity's cookies via ``_apply_identity_material`` — the
-    SAME injection code the runtime uses, never reinvented here. curl reports the
-    status + any redirect target via ``-w`` markers; redirects are not followed so a
-    302 to a login page is preserved as the dead-session signal. Any failure yields
-    ``liveness="unknown"`` with a populated ``error`` (never a false verdict).
+    SAME injection code the runtime uses, never reinvented here. curl runs with
+    ``-i`` (response status line + headers, INCLUDING ``Location``, + body) and no
+    ``-L`` so a 302 to a login page is preserved in the haystack as a signal rather
+    than chased. The numeric status is read from the trailing ``-w``
+    ``VIGIL_HTTP_CODE=`` marker; the remaining stdout IS the haystack matched
+    against the operator-configured ``material.liveness`` signature. Any exec /
+    transport failure or unparseable status yields ``liveness="unknown"`` with a
+    populated ``error`` (never a false verdict).
     """
     from pathlib import Path
 
     try:
         from assess.lib.kali import kali_exec
     except Exception as exc:  # noqa: BLE001 — import guarded so probe never hard-fails
-        return {"liveness": "unknown", "http_status": None, "location": None,
-                "error": f"probe unavailable: {exc}"}
-    wfmt = "VIGIL_HTTP_CODE=%{http_code}\nVIGIL_REDIRECT=%{redirect_url}\n"
-    cmd = ["curl", "-sS", "--max-time", str(timeout), "-o", "/dev/null", "-w", wfmt, url]
+        return {"liveness": "unknown", "reason": "probe unavailable",
+                "http_status": None, "error": f"probe unavailable: {exc}"}
+    cmd = ["curl", "-sS", "-i", "--max-time", str(timeout),
+           "-w", "\nVIGIL_HTTP_CODE=%{http_code}\n", url]
     try:
         result = kali_exec(
             cmd,
@@ -152,28 +190,46 @@ def _run_identity_probe(
             tool_name="curl",
         )
     except Exception as exc:  # noqa: BLE001 — a live probe must never crash auth-status
-        return {"liveness": "unknown", "http_status": None, "location": None,
-                "error": f"probe exec failed: {exc}"}
+        return {"liveness": "unknown", "reason": "probe exec failed",
+                "http_status": None, "error": f"probe exec failed: {exc}"}
+    # Match against the FULL response, not the 32K head+tail ``stdout_preview``:
+    # with ``curl -i`` a marker in the elided MIDDLE of a large body would be
+    # silently dropped, diverging from the CLI mirror (which matches the full
+    # ``resp.read()`` body) and risking a false verdict. Read the complete stdout
+    # file kali_exec streamed to; fall back to the preview if it is unreadable so
+    # the probe never crashes.
     out = getattr(result, "stdout_preview", "") or ""
-    raw_status = _extract_marker(out, "VIGIL_HTTP_CODE=")
-    location = _extract_marker(out, "VIGIL_REDIRECT=")
-    status: int | None
-    try:
-        status = int(raw_status) if raw_status else None
-    except ValueError:
-        status = None
+    stdout_path = getattr(result, "stdout_path", "") or ""
+    if stdout_path:
+        try:
+            out = Path(stdout_path).read_bytes().decode("utf-8", "replace")
+        except OSError:
+            pass
+    status: int | None = None
+    haystack_lines: list[str] = []
+    for line in out.splitlines():
+        if line.startswith("VIGIL_HTTP_CODE="):
+            raw = line[len("VIGIL_HTTP_CODE="):].strip()
+            try:
+                status = int(raw) if raw else None
+            except ValueError:
+                status = None
+        else:
+            haystack_lines.append(line)
+    haystack = "\n".join(haystack_lines)
     if status in (None, 0) or getattr(result, "transport_error", False):
         return {
             "liveness": "unknown",
+            "reason": "no HTTP status parsed from probe output",
             "http_status": status,
-            "location": location or None,
             "error": getattr(result, "transport_error_detail", "")
             or "no HTTP status parsed from probe output",
         }
+    verdict, reason = _classify_liveness(status, haystack, liveness_cfg)
     return {
-        "liveness": _classify_liveness(status, location),
+        "liveness": verdict,
+        "reason": reason,
         "http_status": status,
-        "location": location or None,
         "error": None,
     }
 
@@ -328,15 +384,16 @@ def run(args) -> None:
     if getattr(args, "probe", False):
         probe_url = getattr(args, "probe_url", None)
         if not probe_url:
-            liveness_detail = {"liveness": "unknown", "http_status": None,
-                               "location": None, "error": "--probe requires --probe-url <url>"}
+            liveness_detail = {"liveness": "unknown", "reason": "--probe requires --probe-url",
+                               "http_status": None, "error": "--probe requires --probe-url <url>"}
         elif not auth:
-            liveness_detail = {"liveness": "unknown", "http_status": None,
-                               "location": None, "error": "no active identity/session to probe"}
+            liveness_detail = {"liveness": "unknown", "reason": "no active identity",
+                               "http_status": None, "error": "no active identity/session to probe"}
         else:
             active_identity = auth.get("identity_name") if isinstance(auth, dict) else None
+            liveness_cfg = auth.get("liveness") if isinstance(auth, dict) else None
             liveness_detail = _run_identity_probe(
-                cfg.engagement_dir, active_identity, probe_url
+                cfg.engagement_dir, active_identity, probe_url, liveness_cfg=liveness_cfg
             )
         liveness = liveness_detail["liveness"]
 
@@ -381,8 +438,8 @@ def run(args) -> None:
         print("tokens:         (none detected)")
     if liveness_detail is not None:
         detail = f"http_status={liveness_detail.get('http_status')}"
-        if liveness_detail.get("location"):
-            detail += f" location={liveness_detail['location']}"
+        if liveness_detail.get("reason"):
+            detail += f" reason={liveness_detail['reason']}"
         if liveness_detail.get("error"):
             detail += f" error={liveness_detail['error']}"
         print(f"liveness:       {liveness}  ({detail})")

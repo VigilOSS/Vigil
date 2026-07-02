@@ -155,6 +155,23 @@ def test_raw_json_preserves_unmodeled_fields(client, isolate_settings):
     assert mat["notes"] == "n"
 
 
+def test_liveness_signature_round_trips(client, isolate_settings):
+    # `material.liveness` is the operator-set session-liveness signature consumed by
+    # `vigil auth status --probe` / assess auth-status. It is NOT a modeled column, so
+    # it must survive verbatim through upsert_material -> raw_json -> row_to_material
+    # (same passthrough as material.csrf). Lock the contract: if `liveness` were ever
+    # added to _MODELED_KEYS or otherwise mangled, this fails.
+    _seed(client, isolate_settings)
+    signature = {"expect_status": 200, "authed_marker": "Sign out", "dead_marker": "Log in"}
+    put = client.put(
+        f"/engagements/{KEY}/credentials/default",
+        json={"cookies": {"sid": "a"}, "liveness": signature},
+    ).json()
+    assert put.get("liveness") == signature
+    got = client.get(f"/engagements/{KEY}/credentials/default").json()
+    assert got.get("liveness") == signature
+
+
 def test_capture_preserves_existing_raw_json_extras(client, isolate_settings):
     # PR #40: a proxy capture (cookies/headers only) must NOT wipe previously
     # imported/edited raw_json extras — a benign cookie refresh used to reset the
