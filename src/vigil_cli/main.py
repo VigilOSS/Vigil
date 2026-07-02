@@ -578,7 +578,8 @@ def main(argv: list[str] | None = None) -> None:
                 help=(
                     "Actively verify session liveness with a lightweight authed GET "
                     "(requires --probe-url). Without it, `stale` reflects only the "
-                    "expiry timestamp — presence of cookies is NOT proof of liveness."
+                    "expiry timestamp — presence of cookies is NOT proof of liveness. "
+                    "Without a material.liveness signature the probe stays 'unknown'."
                 ),
             )
             auth_cmd.add_argument(
@@ -586,8 +587,10 @@ def main(argv: list[str] | None = None) -> None:
                 dest="probe_url",
                 help=(
                     "URL to GET as the active identity for the --probe liveness check "
-                    "(e.g. an authed landing page). A redirect to a login/`/my.policy` "
-                    "location is classified DEAD; a 2xx is LIVE."
+                    "(e.g. an authed landing page). The response (status line + headers "
+                    "incl. Location + body) is matched case-sensitively against "
+                    "material.liveness = {expect_status, authed_marker, dead_marker}; "
+                    "redirects are NOT followed."
                 ),
             )
         if auth_name == "export":
@@ -1553,11 +1556,11 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
             if not probe_url:
                 raise SystemExit("--probe requires --probe-url <url>")
             result = auth_module.probe_liveness(engagement, probe_url, identity)
-            detail = f"http_status={result.get('http_status')}"
-            if result.get("location"):
-                detail += f" location={result['location']}"
+            detail = f"reason={result.get('reason')}"
+            if result.get("http_status") is not None:
+                detail += f"\thttp_status={result['http_status']}"
             if result.get("error"):
-                detail += f" error={result['error']}"
+                detail += f"\terror={result['error']}"
             print(f"liveness={result['liveness']}\t{detail}")
     elif args.auth_command == "show":
         print(json.dumps(auth_module.read_auth(engagement), indent=2, sort_keys=True))

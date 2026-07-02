@@ -262,33 +262,87 @@ def test_apply_no_csrf_on_get() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# auth-status --probe liveness classifier (#3) — pure, unit-tested in isolation
+# auth-status --probe liveness classifier (#3) — deterministic and operator-
+# configured (material.liveness = {expect_status, authed_marker, dead_marker}).
+# Pure, unit-tested in isolation and kept byte-identical to the vigil_cli.auth
+# mirror; there is NO auto-detection of where a site handles auth.
 # --------------------------------------------------------------------------- #
 
-def test_classify_liveness_dead_on_login_redirect() -> None:
+def test_classify_liveness_unknown_without_signature() -> None:
     from assess.commands import auth_status
 
-    assert auth_status._classify_liveness(302, "https://portal.example.com/my.policy") == "dead"
-    assert auth_status._classify_liveness(302, "https://portal/login?ReturnUrl=/x") == "dead"
-    assert auth_status._classify_liveness(303, "https://idp/authorize?redirect_uri=z") == "dead"
+    # No liveness config (None or empty) -> unknown, and it names the shape to set.
+    verdict, reason = auth_status._classify_liveness(200, "Sign out", None)
+    assert verdict == "unknown"
+    assert "material.liveness" in reason
+    assert auth_status._classify_liveness(200, "Sign out", {})[0] == "unknown"
 
 
-def test_classify_liveness_live_on_2xx() -> None:
+def test_classify_liveness_unknown_on_transport_error() -> None:
     from assess.commands import auth_status
 
-    assert auth_status._classify_liveness(200, "") == "live"
-    assert auth_status._classify_liveness(204, None) == "live"
+    # status None (transport error) wins even with a signature present.
+    assert auth_status._classify_liveness(None, None, {"authed_marker": "Sign out"})[0] == "unknown"
 
 
-def test_classify_liveness_dead_on_401() -> None:
+def test_classify_liveness_dead_cases() -> None:
     from assess.commands import auth_status
 
-    assert auth_status._classify_liveness(401, "") == "dead"
+    cl = auth_status._classify_liveness
+    # dead_marker present in haystack.
+    assert cl(200, "Please sign in", {"dead_marker": "sign in"})[0] == "dead"
+    # authed_marker absent from haystack.
+    assert cl(200, "anonymous page", {"authed_marker": "Sign out"})[0] == "dead"
+    # expect_status mismatch (marker present, status wrong).
+    assert cl(302, "Sign out", {"authed_marker": "Sign out", "expect_status": 200})[0] == "dead"
 
 
-def test_classify_liveness_unknown_cases() -> None:
+def test_classify_liveness_live_when_all_checks_pass() -> None:
     from assess.commands import auth_status
 
-    assert auth_status._classify_liveness(None, None) == "unknown"  # transport error
-    assert auth_status._classify_liveness(302, "https://app/home") == "unknown"  # non-login 3xx
-    assert auth_status._classify_liveness(403, "") == "unknown"  # WAF/authz, not proven dead
+    cl = auth_status._classify_liveness
+    assert cl(200, "Welcome — Sign out", {"authed_marker": "Sign out", "expect_status": 200})[0] == "live"
+    # marker-only configs each stand alone.
+    assert cl(200, "Sign out", {"authed_marker": "Sign out"})[0] == "live"
+    assert cl(200, "welcome home", {"dead_marker": "Log in"})[0] == "live"
+    assert cl(200, "anything", {"expect_status": 200})[0] == "live"
+
+
+def test_classify_liveness_markers_case_sensitive() -> None:
+    from assess.commands import auth_status
+
+    # Case-sensitive substring: "sign out" != "Sign out".
+    assert auth_status._classify_liveness(200, "sign out", {"authed_marker": "Sign out"})[0] == "dead"
+
+
+def test_classify_liveness_mirror_parity_with_cli() -> None:
+    """The assess classifier and the vigil_cli.auth classifier are two copies of
+    ONE rule; they MUST return identical ``(verdict, reason)`` for identical
+    inputs. (The functions are kept byte-identical; this pins that behaviourally.)
+    """
+    import sys
+    from pathlib import Path
+
+    repo_src = Path(__file__).resolve().parents[4] / "src"
+    if str(repo_src) not in sys.path:
+        sys.path.insert(0, str(repo_src))
+
+    from assess.commands import auth_status
+    from vigil_cli import auth as cli_auth
+
+    cases = [
+        (200, "Welcome — Sign out", {"authed_marker": "Sign out", "expect_status": 200}),
+        (302, "Location: /my.policy", {"authed_marker": "Sign out", "expect_status": 200}),
+        (200, "Please log in", {"dead_marker": "log in"}),
+        (200, "body", None),
+        (200, "body", {}),
+        (None, None, {"authed_marker": "x"}),
+        (500, "Sign out", {"authed_marker": "Sign out", "expect_status": 200}),
+        (200, "Sign out", {"authed_marker": "Sign out"}),
+        (200, "anon", {"authed_marker": "Sign out"}),
+        (200, "sign out", {"authed_marker": "Sign out"}),  # case-sensitivity
+        (200, "x", {"expect_status": True}),  # bool is not a real int status
+    ]
+    for status, hay, cfg in cases:
+        assert cli_auth._classify_liveness(status, hay, cfg) == \
+            auth_status._classify_liveness(status, hay, cfg), (status, hay, cfg)
