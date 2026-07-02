@@ -157,6 +157,10 @@ def test_snapshot_treats_host_cookies_as_available_session(monkeypatch) -> None:
     assert snap["state"] == "available"
     assert snap["active_use"] is True
     assert snap["auth_context"] != "anonymous"
+    # Honesty (#3): material present ("available") is NOT proof the session is live.
+    # The snapshot never probes, so it must report liveness as "unknown" — never a
+    # false "fresh"/"live". A live verdict requires `auth-status --probe`.
+    assert snap["liveness"] == "unknown"
 
 
 def test_snapshot_no_session_material_still_missing(monkeypatch) -> None:
@@ -168,3 +172,123 @@ def test_snapshot_no_session_material_still_missing(monkeypatch) -> None:
     )
     snap = auth.auth_runtime_snapshot("/eng")
     assert snap["state"] == "missing"
+    assert snap["liveness"] == "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# CSRF double-submit — opt-in, method-gated (#4)
+# --------------------------------------------------------------------------- #
+
+def _csrf_material(**over):
+    base = {
+        "cookies": {"PORTAL-XSRF-TOKEN": "tok123", "SESSION": "s"},
+        "csrf": {"cookie": "PORTAL-XSRF-TOKEN", "header": "PORTAL-X-CSRF-TOKEN"},
+    }
+    base.update(over)
+    return base
+
+
+def test_request_is_state_changing_detects_methods_and_body() -> None:
+    sch = kali._request_is_state_changing
+    assert sch(["curl", "-X", "POST", "u"]) is True
+    assert sch(["curl", "-XPUT", "u"]) is True
+    assert sch(["curl", "--request", "DELETE", "u"]) is True
+    assert sch(["curl", "--request=PATCH", "u"]) is True
+    assert sch(["curl", "-d", "a=1", "u"]) is True
+    assert sch(["curl", "--data-raw", "x", "u"]) is True
+    assert sch(["curl", "--json", "{}", "u"]) is True
+    # Read-only / unclassifiable → False (fail-safe: no CSRF header).
+    assert sch(["curl", "-s", "u"]) is False
+    assert sch(["curl", "-X", "GET", "u"]) is False
+    assert sch(["curl", "-I", "u"]) is False
+    # -G/--get sends a GET with -d moved to the query string → NOT state-changing.
+    assert sch(["curl", "-G", "-d", "a=1", "u"]) is False
+    assert sch(["curl", "--get", "--data-urlencode", "q=x", "u"]) is False
+    # An explicit safe verb is authoritative even with a -d body attached.
+    assert sch(["curl", "-X", "GET", "-d", "a=1", "u"]) is False
+    assert sch(["curl", "-XHEAD", "-d", "a=1", "u"]) is False
+    # An explicit state-changing verb still wins even alongside -G.
+    assert sch(["curl", "-X", "POST", "-G", "-d", "a=1", "u"]) is True
+
+
+def test_csrf_header_absent_on_get() -> None:
+    pairs = kali._identity_header_pairs(_csrf_material(), request_host="", state_changing=False)
+    headers = dict(pairs)
+    assert "PORTAL-X-CSRF-TOKEN" not in headers
+    assert "PORTAL-XSRF-TOKEN=tok123" in headers["Cookie"]  # cookie still rides
+
+
+def test_csrf_header_present_on_post_from_named_cookie() -> None:
+    pairs = kali._identity_header_pairs(_csrf_material(), request_host="", state_changing=True)
+    assert dict(pairs)["PORTAL-X-CSRF-TOKEN"] == "tok123"
+
+
+def test_csrf_missing_named_cookie_no_header_no_crash() -> None:
+    mat = _csrf_material(cookies={"SESSION": "s"})  # the named XSRF cookie is absent
+    pairs = kali._identity_header_pairs(mat, request_host="", state_changing=True)
+    assert "PORTAL-X-CSRF-TOKEN" not in dict(pairs)
+
+
+def test_csrf_other_cookie_mapping_no_header() -> None:
+    # csrf maps a cookie name that this request's cookie view does not carry.
+    mat = _csrf_material(csrf={"cookie": "NOT-PRESENT", "header": "X-CSRF"})
+    pairs = kali._identity_header_pairs(mat, request_host="", state_changing=True)
+    assert "X-CSRF" not in dict(pairs)
+
+
+def test_csrf_mapping_absent_unchanged_behavior() -> None:
+    mat = {"cookies": {"SESSION": "s"}}  # no csrf mapping at all
+    pairs = kali._identity_header_pairs(mat, request_host="", state_changing=True)
+    assert dict(pairs) == {"Cookie": "SESSION=s"}
+
+
+def test_csrf_pre_existing_header_not_overwritten() -> None:
+    mat = _csrf_material(headers={"PORTAL-X-CSRF-TOKEN": "operator-set"})
+    pairs = kali._identity_header_pairs(mat, request_host="", state_changing=True)
+    values = [v for n, v in pairs if n.lower() == "portal-x-csrf-token"]
+    assert values == ["operator-set"]  # single, mirror of the Authorization guard
+
+
+def test_apply_injects_csrf_on_post() -> None:
+    cmd = ["curl", "-X", "POST", "-d", "x=1", "https://portal.example.com/api/write"]
+    assert kali._apply_identity_material(cmd, "curl", _csrf_material()) is True
+    assert "PORTAL-X-CSRF-TOKEN: tok123" in " ".join(cmd)
+
+
+def test_apply_no_csrf_on_get() -> None:
+    cmd = ["curl", "-s", "https://portal.example.com/api/read"]
+    kali._apply_identity_material(cmd, "curl", _csrf_material())
+    assert "PORTAL-X-CSRF-TOKEN" not in " ".join(cmd)
+
+
+# --------------------------------------------------------------------------- #
+# auth-status --probe liveness classifier (#3) — pure, unit-tested in isolation
+# --------------------------------------------------------------------------- #
+
+def test_classify_liveness_dead_on_login_redirect() -> None:
+    from assess.commands import auth_status
+
+    assert auth_status._classify_liveness(302, "https://portal.example.com/my.policy") == "dead"
+    assert auth_status._classify_liveness(302, "https://portal/login?ReturnUrl=/x") == "dead"
+    assert auth_status._classify_liveness(303, "https://idp/authorize?redirect_uri=z") == "dead"
+
+
+def test_classify_liveness_live_on_2xx() -> None:
+    from assess.commands import auth_status
+
+    assert auth_status._classify_liveness(200, "") == "live"
+    assert auth_status._classify_liveness(204, None) == "live"
+
+
+def test_classify_liveness_dead_on_401() -> None:
+    from assess.commands import auth_status
+
+    assert auth_status._classify_liveness(401, "") == "dead"
+
+
+def test_classify_liveness_unknown_cases() -> None:
+    from assess.commands import auth_status
+
+    assert auth_status._classify_liveness(None, None) == "unknown"  # transport error
+    assert auth_status._classify_liveness(302, "https://app/home") == "unknown"  # non-login 3xx
+    assert auth_status._classify_liveness(403, "") == "unknown"  # WAF/authz, not proven dead
