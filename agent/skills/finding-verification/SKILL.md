@@ -1,14 +1,14 @@
 ---
 name: finding-verification
-description: Adversarial Phase-4 verification of runtime/web findings produced by other agents — reproduce the PoC, ground severity in the trust boundary, run the C1-C6 FP & severity gate, and author the report-ready story. Loaded by vulnerability-analyst in review mode. The web analog of code-finding-verification.
+description: Adversarial Phase-5 verification of runtime/web findings produced by other agents — reproduce the PoC, ground severity in the trust boundary, run the C1-C6 FP & severity gate, and author the report-ready story. Loaded by vulnerability-analyst in review mode. The web analog of code-finding-verification.
 origin: Vigil
 ---
 
-# Finding Verification — adversarial Phase-4 review
+# Finding Verification — adversarial Phase-5 review
 
 ## When to Activate
 
-Load this skill when `vulnerability-analyst` is dispatched in **review mode** (Phase 4,
+Load this skill when `vulnerability-analyst` is dispatched in **review mode** (Phase 5,
 `mode=deep-manual` or `mode=root_cause_review`) to verify findings produced by other agents
 **before** exploitation investment. Catching a false positive, a severity inflation, or weak
 evidence here is far cheaper than discovering it after an exploit-developer pass.
@@ -30,7 +30,7 @@ counter-evidence or a reproduced result.
 - **Operator** selects the review scope — all HIGH/CRITICAL plus MEDIUMs with escalation
   potential get **Tier 1** (full reproduction); every remaining ordinary MEDIUM/LOW gets
   **Tier 2** (spot-check) — and passes the trust-boundary / threat-model summary, the finding
-  slugs + payloads, and the matching vuln-class skill. See operator-core Phase 4.
+  slugs + payloads, and the matching vuln-class skill. See operator-core Phase 5.
 - **You (vulnerability-analyst, review mode)** re-test Tier-1 findings against the live target
   via `vigil assess kali ...` — you reproduce, you do not merely read the evidence text — then
   write a disposition per finding and author the report-ready story for the ones that survive.
@@ -107,7 +107,7 @@ For each finding under review:
 ## Dispositions
 
 Write exactly one per reviewed finding (these are the operator-facing verbs, kept in
-operator-core Phase 4 — listed here so the reviewer self-serves them):
+operator-core Phase 5 — listed here so the reviewer self-serves them):
 
 - **Confirmed** — reproduced, severity accurate → `vigil assess verify-finding <slug> --disposition confirmed --reason "..."`
 - **Upgraded** — real, severity understated → `vigil assess update-finding <slug> --severity <higher> --reason "..."` then `verify-finding ... --disposition confirmed`
@@ -135,10 +135,10 @@ the corrected severity/CVSS if changed, and — for survivors — confirmation t
 was authored into `details`. End with the review-scope summary: HIGH/CRITICAL all dispositioned
 (Tier 1); which MEDIUMs were reviewed at Tier 1 and why; which ordinary MEDIUM/LOW findings
 received the Tier-2 spot-check and whether any were promoted to Tier 1 on a band mismatch or
-missing evidence; the kill rate (if >50%, flag that Phase-3 dispatch context may be producing
+missing evidence; the kill rate (if >50%, flag that Phase-4 dispatch context may be producing
 speculative findings).
 
-## Root-Cause Review Mode (Phase 4 → 5 exit)
+## Root-Cause Review Mode (Phase 5 → 6 exit)
 
 When dispatched as `mode=root_cause_review`, additionally run the operator's root-cause grouping
 intent: group intentional root/sibling relationships (`vigil assess link-finding`), picking the
@@ -149,5 +149,5 @@ root as the broadest attacker-controllable cause. See "Root-Cause Review Mode" i
 
 - `agent/agents/vulnerability-analyst.md` — 8-Question Gate, Four Validation Gates, Chain-Only List
 - `agent/references/finding-fp-and-severity-gate.md` — C1–C6 FP & severity gate
-- `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission gate that re-applies the overclaim catalog on the submission bytes (this skill is the in-context Phase-4 version)
+- `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission gate that re-applies the overclaim catalog on the submission bytes (this skill is the in-context Phase-5 version)
 - `agent/skills/code-finding-verification/SKILL.md` — the source-only analog (five-check protocol)

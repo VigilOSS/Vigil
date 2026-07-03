@@ -54,9 +54,10 @@ whose value must lead with a dash — the equals form `--extra-args=-X ...`.
 
 ## Synchronous vs. async decision
 
-**Specialists run synchronously — always.** One blocking `vigil assess kali
-<verb> ... --timeout N` at a time. No `run_in_background`, no `kali job start`,
-no dtach, no watcher/poll loop. Even heavy probes (nmap+scripts, full-tree
+**Specialists run synchronously — always.** Each `vigil assess kali
+<verb> ... --timeout N` call is awaited in-band — no `run_in_background`, no `kali job start`,
+no dtach, no watcher/poll loop. "Synchronous" means awaited-in-band, NOT one-call-at-a-time:
+issuing several blocking calls in parallel, each awaited in-band, is fine (see `agent/shared-constraints.md` §2). Even heavy probes (nmap+scripts, full-tree
 nuclei sweeps, `sqlmap --level 5 --risk 3`, dirb/gobuster on raft-large
 wordlists, ffuf on `directory-list-2.3-big.txt`) run as a single blocking call
 with a generous `--timeout`. A long synchronous call is killed cleanly on
