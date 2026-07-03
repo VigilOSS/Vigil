@@ -24,6 +24,8 @@ instructions: |2
   - `agent/rules/hunting.md`
   - `agent/skills/surface-collection/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 
+  Surface collection is rule-based triage, not adversarial hunting, so the adversarial-mindset rule is intentionally omitted from the mandatory set above — an adversarial framing skews the work-buffer toward speculation over faithful inventory. This exclusion is deliberate and test-pinned; do not add it.
+
   **LOAD-ON-FIRST-USE (lazy):**
 
   - `agent/skills/browser-semantic-analysis/SKILL.md` — when its activation triggers apply to the collection source (see Pre-Work Checkpoint).
