@@ -327,6 +327,55 @@ def test_binary_body_round_trips_export_import_via_base64(client, isolate_settin
     assert (droot / flow["response_body_artifact_path"]).read_bytes() == raw
 
 
+def test_vigil_har_import_rehydrates_foreign_body_sidecars(client, isolate_settings):
+    # A Vigil HAR exported from another engagement carries source-relative
+    # ``_vigil.*_body_artifact_path`` values. Importing it into a destination
+    # engagement must persist the inline HAR bodies under the destination root;
+    # trusting the source path alone leaves a missing sidecar and loses the body
+    # on the next detail/export read.
+    src = "2026-06-01-000014-vigil-src"
+    dst = "2026-06-01-000015-vigil-dst"
+    sroot = write_engagement(isolate_settings["engagements_dir"], src)
+    droot = write_engagement(isolate_settings["engagements_dir"], dst)
+    request_raw = b'{"user":"admin"}'
+    response_raw = b'{"ok":true}'
+    request_sha = hashlib.sha256(request_raw).hexdigest()
+    response_sha = hashlib.sha256(response_raw).hexdigest()
+    request_rel = f"traffic/mitmproxy/bodies/{request_sha}.bin"
+    response_rel = f"traffic/mitmproxy/bodies/{response_sha}.bin"
+    (sroot / request_rel).parent.mkdir(parents=True, exist_ok=True)
+    (sroot / request_rel).write_bytes(request_raw)
+    (sroot / response_rel).write_bytes(response_raw)
+
+    client.post(
+        BASE.format(key=src),
+        json=_flow_payload(
+            flow_uid="foreign-vigil-body",
+            method="POST",
+            request_content_type="application/json",
+            response_content_type="application/json",
+            request_body_artifact_path=request_rel,
+            request_body_bytes=len(request_raw),
+            request_body_sha256=request_sha,
+            response_body_artifact_path=response_rel,
+            response_body_bytes=len(response_raw),
+            response_body_sha256=response_sha,
+        ),
+    )
+    har = client.get(BASE.format(key=src) + "/export-har").json()
+    imported = client.post(BASE.format(key=dst) + "/import-har", json=har)
+    assert imported.status_code == 201, imported.text
+
+    flow = imported.json()["flows"][0]
+    assert (droot / flow["request_body_artifact_path"]).read_bytes() == request_raw
+    assert (droot / flow["response_body_artifact_path"]).read_bytes() == response_raw
+
+    reexported = client.get(BASE.format(key=dst) + "/export-har").json()
+    entry = reexported["log"]["entries"][0]
+    assert entry["request"]["postData"]["text"] == request_raw.decode()
+    assert entry["response"]["content"]["text"] == response_raw.decode()
+
+
 def test_capture_policy_default_off_and_put(client, isolate_settings):
     key = "2026-06-01-000007-flows"
     root = write_engagement(isolate_settings["engagements_dir"], key)
