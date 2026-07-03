@@ -11,13 +11,13 @@ that guides Phase 4 dispatch ordering.
 
 **Iteration mode:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — surface collection processes a finite list of in-scope hosts plus the URL streams Katana/gau emit, with `hypothesis-driven` reserved for triage passes that sample large URL corpora against attack-signal hypotheses. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/skills/surface-collection/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
@@ -205,7 +205,7 @@ For any collection source you could NOT complete, declare it in `#### Coverage G
 6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `urls_ingested`, `clusters`, `deferred_clusters`)
 7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
 The recommended Phase 4 ordering goes into the handoff `next_steps` field — each
 entry names the action ("dispatch fetch-by-priority on top N items"), target
@@ -220,7 +220,7 @@ Closing verbs above are what makes the state durable; the response
 is your reflection on top of that.
 
 Don't truncate reasoning to be brief — careful triage analysis directly improves
-Phase 4 dispatch ordering (see `agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Priority
+Phase 4 dispatch ordering (see `agent/shared-specialist-core.md` "Reasoning quality > response brevity"). Priority
 manifest, recommended Phase 4 ordering, and per-cluster rationale live in the
 handoff `next_steps` field plus the surface rows' priority columns
 (`priority_score`, `priority_reason`, `cluster_key`) — the response can stay

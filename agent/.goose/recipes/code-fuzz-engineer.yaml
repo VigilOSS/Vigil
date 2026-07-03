@@ -15,13 +15,13 @@ instructions: |2
 
   **Iteration mode:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — fuzz campaign setup (target selection, harness authoring, build validation, crash triage) requires 5–15 messages per target, with `item-iterating` reserved for batched harness-validation dispatches that walk a finite list of pre-selected targets. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-  > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+  > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
   ## Load First
 
   **MANDATORY (before any work):**
 
-  - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+  - `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
   - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
   - `agent/rules/hunting.md`
   - `agent/rules/adversarial-mindset.md`
@@ -208,7 +208,7 @@ instructions: |2
   2. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (harness paths, crash inputs, campaign configs), open questions, and role-specific extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the exact `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the operator placed at the top of your dispatch prompt.
   3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-  Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
+  Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
   ## Handoffs
 

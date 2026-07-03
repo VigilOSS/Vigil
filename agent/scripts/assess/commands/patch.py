@@ -17,12 +17,15 @@ def register(subparsers) -> None:
         help="PATCH /assessment/{endpoint} with a JSON file or inline JSON payload",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Examples:\n"
-            "  vigil assess patch coverage-items/42 payload.json\n"
-            "  vigil assess patch coverage-items/42 --inline '{\"status\":\"covered\"}'"
+            "Generic PATCH escape hatch for endpoints without a dedicated verb.\n"
+            "Dedicated verbs own the common targets — use those, not raw patch:\n"
+            "  coverage items  -> vigil assess resolve-coverage-item <id> --status covered --rationale \"...\"\n"
+            "  surfaces        -> vigil assess resolve-surface <id> --status covered --rationale \"...\"\n"
+            "  findings        -> vigil assess update-finding <slug> ...\n"
+            "(raw patch to coverage-items/{id} and findings/{slug} is redirected to those verbs)"
         ),
     )
-    p.add_argument("endpoint", help="e.g. coverage-items/42 or findings/VA-001")
+    p.add_argument("endpoint", help="e.g. intel/42 — an endpoint without a dedicated verb (coverage-items/findings/surfaces have dedicated verbs)")
     p.add_argument("payload", nargs="?", help="Path to JSON payload file or inline JSON object")
     p.add_argument("--inline", dest="inline_payload", help="Raw JSON payload text")
     p.set_defaults(func=run)

@@ -53,7 +53,7 @@ copy adds standing-load weight the specialist pays on every dispatch. Use a poin
 paraphrase — for example, the canonical cross-family pointer used by every offensive/code role for
 context-isolation, finding-recording format, and closing-sequence wrapper is:
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ### 4. Single responsibility, mode-gated
 

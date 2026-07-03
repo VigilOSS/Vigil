@@ -753,14 +753,48 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("lens", '"" (part of the probe key: a different lens is a distinct attempt)'),
         ),
         notes=(
-            "Non-covering by design: `tested`/`signal` (covering) verdicts are NOT accepted here — record those through the normal probe pipeline with real evidence. This verb exists so 'a non-conclusive response is a lead, not a verdict' attempts are captured for the resume-brief Attempts ledger.",
+            "Non-covering by design: `tested`/`signal` (covering) verdicts are NOT accepted here — record those through `record-probe`, which requires `--evidence-ref`. This verb exists so 'a non-conclusive response is a lead, not a verdict' attempts are captured for the resume-brief Attempts ledger.",
             "The same target under a DIFFERENT --lens is a distinct attempt (lens is hashed into the probe key), not a dedup collision — use it to record the mindset the probe ran under.",
+            "Name the specific input as `--input-slot slot:name` (e.g. `header:X-Forwarded-Host`, `query:uid`) so 'which input was probed' stays queryable; a bare slot is fine for whole-slot probes.",
             "--finding <slug> backfills the attempt→finding link (finding_id); it is COALESCE-backfilled on a re-run of the same probe, so a later record-attempt can attach the link an earlier one omitted.",
             "An out-of-vocab --attack-family WARNs but is stored verbatim (the backend persists TEXT for forward-compatibility).",
         ),
         common_mistakes=(
-            ("--result-status tested", "covering verdicts are recorded by the probe pipeline with evidence, not by record-attempt; use attempted/blocked/no-signal/error here"),
+            ("--result-status tested", "covering verdicts go to `record-probe` (evidence required), not record-attempt; use attempted/blocked/no-signal/error here"),
             ("recording a wall here instead of block-technique", "record-attempt logs a single probe attempt; a durable technique-level wall on a target belongs in `vigil assess block-technique`"),
+        ),
+    ),
+    "record-probe": CommandContract(
+        name="record-probe",
+        phase=("consume-test", "exploit"),
+        summary="Record a COVERING probe run (tested|signal) with required evidence, so a class actually exercised to a verdict advances the coverage map.",
+        schema_name="backend ProbeRunRecordRequest (POST /probe-runs)",
+        preferred_invocations=(
+            "vigil assess record-probe --result-status tested --attack-family idor --target-host app.example.com --target-path /orders/1001 --input-slot path:id --auth-context member --evidence-ref scans/idor-orders.txt --coverage-item-id 77",
+            "vigil assess record-probe --result-status signal --attack-family ssrf --target-host api.example.com --target-path /fetch --input-slot query:url --lens blind-oob --evidence-ref scans/ssrf-oob.txt --finding VA-047",
+        ),
+        author_supplied_fields=(
+            "--result-status (tested|signal — covering only)",
+            "--attack-family (a vuln_taxonomy class)",
+            "--evidence-ref (REQUIRED — a covering verdict without evidence is not coverage)",
+            "--target-host / --target-path / --input-slot / --auth-context as applicable",
+            "--request-variant-id / --service-id / --coverage-item-id from the fetched work-item (links the probe to the exact request/coverage item)",
+        ),
+        helper_defaults=(
+            ("tool_name", "manual"),
+            ("auth_context", "anonymous"),
+            ("input_slot", "unknown"),
+            ("lens", '"" (part of the probe key: a different lens is a distinct probe)'),
+        ),
+        notes=(
+            "The covering counterpart to record-attempt. Use record-attempt for a touched-but-inconclusive probe (attempted|blocked|no-signal|error); use this when the class was actually exercised to a verdict.",
+            "`--evidence-ref` is mandatory: a covering probe with no evidence is exactly the self-attested signal the doctrine forbids, and the depth ledger only counts covering probes with a real result.",
+            "Name the specific input as `--input-slot slot:name` (e.g. `header:X-Forwarded-Host`, `query:uid`) so per-input coverage stays queryable in the resume brief; a bare slot is fine for whole-slot probes.",
+            "Replaces the old raw `post probe-runs <json>` for the covering path (that raw form is now redirected here).",
+        ),
+        common_mistakes=(
+            ("--result-status blocked", "non-covering outcomes go to `record-attempt`; record-probe is for tested/signal only"),
+            ("omitting --evidence-ref", "a covering verdict requires evidence; without it, record it as a record-attempt or attach the evidence path"),
         ),
     ),
     "list-finding-group": CommandContract(
@@ -1059,6 +1093,31 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "rationale": "unauth path tested; admin path requires auth",
                 "followup_condition": "needs auth re-test once credentials are issued",
             },
+        ),
+    ),
+    "resolve-coverage-item": CommandContract(
+        name="resolve-coverage-item",
+        phase=("consume-test", "verify"),
+        summary="PATCH a class-typed coverage item by id (advance status + rationale) — the per-(surface × vuln-class) coverage verdict.",
+        schema_name="backend CoverageItemUpdateRequest",
+        preferred_invocations=(
+            'vigil assess resolve-coverage-item <id> --status covered --rationale "idor tested across two identities; user_b got 403"',
+            'vigil assess resolve-coverage-item <id> --status not_applicable --rationale "no id-bearing param; static render"',
+            'vigil assess resolve-coverage-item <id> --status deferred --rationale "low-signal; revisit after auth is issued"',
+        ),
+        author_supplied_fields=(
+            "status (pending|queued|deferred|covered|not_applicable|blocked)",
+            "rationale",
+        ),
+        notes=(
+            "Coverage items are seeded `pending` at ingest — one per implied vuln-class on a surface (the gf-bucket bridge). Resolve each implied class, not just the cluster winner: a surface's `covered` on one class does NOT cover its sibling classes.",
+            "--rationale is required for EVERY status (audit trail); the backend additionally rejects an empty rationale for `covered` / `not_applicable`. A resolved-positive verdict must state what was tested and why; a deferral must state why.",
+            "Rationale is appended to the item's existing notes, so the audit trail accumulates across resolutions.",
+            "Replaces the old raw `patch coverage-items/<id> <json>` (that raw form is now redirected here).",
+        ),
+        common_mistakes=(
+            ("--status covered with no --rationale", "covered means tested with a stated reason; the backend rejects an evidence-free covered"),
+            ("resolving only the cluster-winner class", "resolve every coverage item the surface accrued (one per implied class), or the depth ledger's signal_classes_uncovered stays open"),
         ),
     ),
     "update-intel": CommandContract(
@@ -1547,6 +1606,24 @@ _RAW_ENDPOINT_RULES = (
         "update-finding",
         (
             "Raw PATCH to findings/{slug} is disabled because update-finding owns finding patch operations.",
+        ),
+    ),
+    (
+        "POST",
+        re.compile(r"^probe-runs$"),
+        "record-probe",
+        (
+            "Raw POST to probe-runs is disabled because the probe-recording verbs own the flag set and evidence discipline.",
+            "Covering probe (tested|signal) → record-probe (requires --evidence-ref).",
+            "Non-covering probe (attempted|blocked|no-signal|error) → record-attempt.",
+        ),
+    ),
+    (
+        "PATCH",
+        re.compile(r"^coverage-items/[^/]+$"),
+        "resolve-coverage-item",
+        (
+            "Raw PATCH to coverage-items/{id} is disabled because resolve-coverage-item owns the status vocabulary and the rationale-on-covered rule.",
         ),
     ),
 )

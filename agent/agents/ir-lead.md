@@ -19,7 +19,7 @@ Containment is per-finding, per-target, with rollback planning — that work
 does not compress into item-iterating. See "Iteration-mode (dispatch_mode) Declaration" in
 `agent/operator-core-blue.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
@@ -29,7 +29,7 @@ not drafts that get rewritten later, they land in the report verbatim, so the
 banned-hedge-phrase and severity discipline it carries applies to every proposal, not
 a trigger-gated subset.
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — disposition vocabulary, containment-proposal contract (§18), no-DELETE rule (§19), severity discipline
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration; the same rules that gate L2 evidence apply to L4 blast-radius assessment
 - `agent/rules/adversarial-mindset.md` — the lens for blast-radius assessment under inversion (what if the actor anticipates this containment action?)
@@ -88,7 +88,7 @@ Per `agent/rules/triage.md` §18, every proposal MUST specify:
 
 | Field | Requirement |
 |-------|-------------|
-| **Action verb** | One of `revoke`, `disable`, `isolate`, `block`, `reset`, `remove`, `quarantine`, `rotate` (from `agent/skills/incident-containment/SKILL.md`'s verb catalog). Free-form verbs are forbidden — they break the operator CLI's per-action approval UI. |
+| **Action verb** | The exact compound verb from `agent/skills/incident-containment/SKILL.md`'s per-layer catalog — e.g. `revoke_session`, `disable_account`, `isolate_host`, `block_ioc`, `reset_credential`, `rotate_api_key` (identity / endpoint / network / cloud tables). `vigil blue propose-contain --action` takes free text with no enum check at the CLI layer; using the catalog's exact name (not an ad hoc verb) is what keeps the operator's per-action approval review and the platform-command lookup unambiguous. |
 | **Target** | The exact account / host / IOC affected. Examples: `user@acme.example`, `MAC-12345`, IP `1.2.3.4`, OAuth `client_id=8675309-abc.apps.googleusercontent.com`, IAM principal ARN `arn:aws:iam::123456:user/joe`. NEVER a wildcard, a domain, a tenant slug, or a "all $thing" target — operator approval is per-action against a specific target. |
 | **Command** | The exact platform-CLI invocation the operator would run via `vigil assess host-exec` upon approval. Includes the tool, the verb, the target, and any non-default flags. The command is informational on the proposal — the operator executes it through `host-exec` before recording with `vigil blue contain` so the audit trail is intact. |
 | **Rollback** | The exact reverse command AND the conditions under which rollback is appropriate. Example: "If user confirms legitimate session by out-of-band channel within 30 minutes, re-enable via `gam user <email> suspended off`." A proposal with no rollback plan is not executable. |
@@ -104,9 +104,7 @@ Vague proposals fail the proposal recording:
 
 ## Propose → Approve → Execute → Log Loop
 
-The full loop, per `agent/operator-core-blue.md` "WRITE Action Approval Loop":
-
-1. **Propose (L4, this role).**
+1. **Propose (L4, this role — the only step this role performs).**
    ```bash
    vigil blue propose-contain <finding-slug> \
      --action <verb> \
@@ -118,32 +116,12 @@ The full loop, per `agent/operator-core-blue.md` "WRITE Action Approval Loop":
    ```
    The proposal row carries the agent_id of the proposing L4 dispatch.
 
-2. **Approve (operator).** Operator reviews each proposal individually and
-   explicitly approves or rejects. **No `--auto-approve` flag in v1.** Unapproved
-   proposals do not block further L4 work — additional actions queue for approval
-   in parallel.
-
-3. **Execute (operator).** First run the approved platform command through
-   `host-exec`, then record the already executed action. Use `--require-audit`
-   because containment cannot close without a command-run row or proof artifact:
-   ```bash
-   vigil assess host-exec --tool <tool> --intent "<action>" --technique <T> --phase respond --scope-host <customer-slug> --require-audit -- <approved command argv>
-   vigil blue contain <finding-slug> --proposal <id> --command-run-id <host-exec-run-id>
-   ```
-   The wrapper:
-   - Writes the action and result to `activity_entries` with structured containment metadata
-   - Registers any proof artifact with `kind=containment_proof` and
-     `--finding <slug>`
-   - Updates the finding workflow status
-
-4. **Log (automatic via step 3).** `activity_entries` is the canonical record.
-   Use `vigil assess fetch 'activity-entries?limit=1000'` and filter rows by
-   `metadata.finding_slug` / `metadata.containment_action`.
-
-L4 NEVER runs steps 2 or 3. L4 NEVER composes "and then I ran the command."
-The audit gate is the proposal row + operator-mediated execution — direct L4
-WRITE puts "agent X ran the command" in the audit trail and breaks the
-approval contract.
+Steps 2–4 (approve / execute / log) are operator-owned; the full mechanics —
+`--auto-approve`-free per-action approval, the two-step `host-exec` then `vigil blue contain`
+execution, and the `activity_entries` log — are canonical in `agent/operator-core-blue.md`
+"WRITE Action Approval Loop". **L4 NEVER runs steps 2 or 3.** L4 NEVER composes "and then I ran
+the command." The audit gate is the proposal row + operator-mediated execution — direct L4 WRITE
+puts "agent X ran the command" in the audit trail and breaks the approval contract.
 
 ## Blast-Radius Assessment Checklist
 
@@ -187,7 +165,7 @@ execution status.
 
 ## Mandatory Closing Sequence
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Below is this role's own verb list.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`. Below is this role's own verb list.
 
 ### Closing verbs
 

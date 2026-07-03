@@ -3,7 +3,7 @@
 Load this file first -- before your role-specific skill and before any source code work.
 These rules apply to every code analysis specialist agent regardless of role.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ---
 
@@ -111,7 +111,7 @@ parallel dispatches risks collisions.
 
 **Title formula:** `[Bug Class] in [file:line or component] allows [attacker role] to [impact]`
 
-CVSS↔severity ranges and the matching-adjustment rule are in `agent/shared-constraints-core.md`
+CVSS↔severity ranges and the matching-adjustment rule are in `agent/shared-specialist-core.md`
 ("Finding IDs and the `record-finding` Contract"). A memory corruption primitive with
 attacker-controlled reachability needs the same severity discipline as a web auth bug because the
 report pipeline consumes one shared finding table.
@@ -264,7 +264,7 @@ Only improvise after confirming the reference set is genuinely insufficient for 
 
 The base convention (`vigil assess <subcommand>` from any directory, JSON payloads in files not
 inline shell arguments, `ENGAGEMENT_DIR`/`--engagement-dir` for path resolution) is in
-`agent/shared-constraints-core.md` "Script Path Convention". This section adds only the
+`agent/shared-specialist-core.md` "Script Path Convention". This section adds only the
 code-specific quoting and banner rules below.
 
 Shell-quote Java and Kotlin identifiers that contain `$` (anonymous classes, lambda
@@ -306,7 +306,7 @@ supplied as an optional consistency check.
 verified finding is missing `cvss_score`, `cvss_vector`, `steps_to_reproduce`,
 `remediation`, `impact`, or `evidence`. Include all six fields at recording time so
 findings pass readiness without a remediation loop. CVSS must align with severity per
-the ranges in `agent/shared-constraints-core.md` ("Finding IDs and the `record-finding`
+the ranges in `agent/shared-specialist-core.md` ("Finding IDs and the `record-finding`
 Contract").
 
 ---
@@ -315,7 +315,7 @@ Contract").
 
 The closing-sequence wrapper (resume-brief framing, unlinked-notes registration rule,
 `agent done`/`agent close` being operator-only, idempotent/checkpoint handoff framing, and the
-plan-state digest) is in `agent/shared-constraints-core.md`. This section adds only the
+plan-state digest) is in `agent/shared-specialist-core.md`. This section adds only the
 code-family closing verb order below.
 
 Before your dispatch returns, run in this order:

@@ -29,13 +29,13 @@ Every mindset — baseline or injected — is a generative lens, not a cage: it 
 candidates you sweep for, it does not bound the sibling set. A variant the lens didn't
 anticipate is still a variant if the pattern holds.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -158,7 +158,7 @@ Before your dispatch returns, run in this order:
 2. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (verifier dispatch on the new variants), runtime issues, working artifacts, open questions, and role-specific extras (`parent_finding`, `variants_found`, `files_scanned`)
 3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
 Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
@@ -173,7 +173,7 @@ on top of that.
 
 Don't truncate reasoning to be brief — careful variant-scanning analysis
 directly improves how systematically the codebase is covered (see
-`agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Per-file scan-result tables and
+`agent/shared-specialist-core.md` "Reasoning quality > response brevity"). Per-file scan-result tables and
 variant-by-variant detail live in the finding rows and handoff extras — so the
 response can stay focused on variant-pattern reasoning rather than restating
 canonical state.

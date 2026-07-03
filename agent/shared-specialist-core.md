@@ -1,4 +1,4 @@
-# Shared Constraints — Core
+# Shared Specialist Core
 
 Load this file first alongside your role file and the family's
 `shared-constraints*.md` (offensive: `agent/shared-constraints.md`; code:
@@ -10,7 +10,7 @@ Read it once; do not re-author any of this in a role file.
 **Canonical pointer string** — every role file references this content with
 this exact line (use verbatim so all call sites match):
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ---
 
