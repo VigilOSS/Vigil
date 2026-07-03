@@ -67,12 +67,22 @@ SUBMISSION_STATUSES: tuple[str, ...] = (
 )
 
 
+# Per-role default `--dispatch-mode` when the flag is omitted. MUST mirror the
+# per-role "Default when omitted" in each role file + operator-core.md's
+# "Iteration-mode (dispatch_mode) Declaration" list (single source of the docs).
 _DISPATCH_MODE_BY_ROLE: dict[str, str] = {
-    "vulnerability-analyst": "hypothesis-driven",
+    "vulnerability-analyst": "item-iterating",
+    "recon-specialist": "hypothesis-driven",
+    "surface-collector": "item-iterating",
+    "source-analyzer": "item-iterating",
+    "fuzzer": "variant-rotation",
     "exploit-developer": "deep-manual",
-    "recon-specialist": "item-iterating",
-    "osint-analyst": "item-iterating",
-    "code-vuln-hunter": "hypothesis-driven",
+    "osint-analyst": "hypothesis-driven",
+    "report-writer": "deep-manual",
+    "code-architect": "hypothesis-driven",
+    "code-vuln-hunter": "item-iterating",
+    "code-variant-hunter": "hypothesis-driven",
+    "code-vuln-verifier": "deep-manual",
 }
 
 _DEFAULT_DISPATCH_MODE = "hypothesis-driven"

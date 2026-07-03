@@ -277,7 +277,7 @@ hosts, TLS SAN expansions, vhost-fuzz live hits). The template set:
 ```
 
 Run nuclei reactively after the httpx pass so template hits become intel/finding
-candidates *before* Phase 3 specialists dispatch. Treat the recon-side nuclei sweep
+candidates *before* Phase 4 specialists dispatch. Treat the recon-side nuclei sweep
 as required, not as the optional "broad scan before exploitation" of older runbooks.
 
 ### Step 5 — Directory Fuzzing (mandatory L1 wordlist + tech extensions)
@@ -363,7 +363,7 @@ sub-procedures: Multi-time DNS resolution (split-VIP detection), Cross-host SAN
 collision detection, and vhost-cert mismatch detection. The cross-host view flags
 shared multi-tenant certs, vhost-cert mismatches, and split-VIP load-balanced
 clusters — none of which the per-host tools surface on their own. Run before leaving
-Phase 1 so SAN-discovered subdomains feed back into Phase 1a / Phase 3.
+Phase 1 so SAN-discovered subdomains feed back into Phase 1a / Phase 4.
 
 Methodology and recipes live in
 [`agent/skills/tls-vhost-correlation/SKILL.md`](../tls-vhost-correlation/SKILL.md).
@@ -527,7 +527,7 @@ downstream specialists can parse the output consistently.
 | `#### Surface Candidates` | Routes / endpoints / hosts evidenced by a real response or artifact, ready for `vigil assess record-surface`. |
 | `#### Intelligence` | Tech components (framework, CMS, server, WAF, CDN), TLS / SAN intel, rDNS vendor identification, version strings, vendor-template CSP / CORS placeholders, build-version constants — each row landed via `vigil assess record-intel <type>`. |
 | `#### Coverage Gaps` | Every mandatory step that did not complete, every conditional step that fired and why, every dispatch-mode-authorized skip with rationale, and every shared-frontend-trigger sub-procedure that was skipped because the trigger did not fire. The operator reads this section to decide whether to re-dispatch. |
-| `#### Recommended Phase 3 Ordering` | Risk-ranked surface clusters and the recommended specialist + skill for each. The handoff renderer feeds this to surface-collector and downstream specialists. |
+| `#### Recommended Phase 4 Ordering` | Risk-ranked surface clusters and the recommended specialist + skill for each. The handoff renderer feeds this to surface-collector and downstream specialists. |
 
 ## Extended Resources
 

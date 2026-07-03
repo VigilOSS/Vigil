@@ -72,7 +72,7 @@ vigil assess agent done <agent_id> --status completed --finding-slugs <slugs>
 | Skeleton field | Required / Optional | Source of truth in `operator-core.md` |
 |---|---|---|
 | `agent_id` / `agent_role` / `authorized_phase` | Required | § Runtime Identity Block — `authorized_phase` is also the "Current phase" field cited by § Dispatch Context Template; there is no separate `phase` field in Dispatch Context, it is not restated below |
-| `hunt_scope` | Required (VA); default `deep` for EX | § Subagent Dispatch phased-flow (Pass-1 WIDE / Pass-2 DEEP / Pass-3 EXPLOIT) — WIDE = open objective, baseline + `developer.md` only; DEEP = one family mindset + matching skill per signal/high-yield cell |
+| `hunt_scope` | Required (VA); default `deep` for EX | `agent/phases/phase-4-consume-test.md` "Phased mindset flow" (Pass-1 WIDE / Pass-2 DEEP / Pass-3 EXPLOIT) — WIDE = open objective, baseline + `developer.md` only; DEEP = one family mindset + matching skill per signal/high-yield cell |
 | `mindset lens` | Required | Role file's own `## Dispatch Mindset` slot (VA/EX) — the injected packet is MORE SPECIFIC than the role's baseline mindset and governs where the two compete |
 | resume-brief / render-handoff paste | Required when continuation or prior dispatch exists | § Runtime Identity Block ("If this is a continuation…") + § Dispatch Context Template "Cross-agent prior work" |
 | `target` | Required | § Dispatch Context Template "Agent identity and target URL" |

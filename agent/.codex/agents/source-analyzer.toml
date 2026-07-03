@@ -75,7 +75,7 @@ in the JavaScript. Missing these means:
 - Secrets in JS bundles not flagged — API keys, internal URLs, and debug tokens stay unexploited
 - Auth flow details not mapped — OAuth redirect chains and token handling never analyzed
 
-Extract aggressively. A false-positive API route adds one validation request in Phase 3.
+Extract aggressively. A false-positive API route adds one validation request in Phase 4.
 A missed API route means that entire attack surface is invisible to the engagement.
 
 ## Responsibilities
@@ -199,7 +199,7 @@ than enumerating canonical state.
 ## Key Principles
 
 - **Read the code, don't just grep it**: Minified JS reveals structure when you trace `fetch()` calls, route registrations, and module imports. Pattern matching alone misses dynamic route construction and computed API paths.
-- **Extract aggressively, validate later**: Every API path, every key-like string, every internal URL goes into Surface Candidates. Phase 3 validates cheaply; you cannot validate what you did not extract.
+- **Extract aggressively, validate later**: Every API path, every key-like string, every internal URL goes into Surface Candidates. Phase 4 validates cheaply; you cannot validate what you did not extract.
 - **Source maps are gold**: A `.js.map` file turns opaque minified bundles into readable source with original filenames, function names, and comments — often revealing private routes, internal APIs, and commented-out debug endpoints.
 - **SPAs hide more than traditional apps**: The entire route table, API schema, and often the auth flow live in JavaScript. A traditional server-rendered app exposes routes in HTML links; an SPA may expose nothing in HTML but everything in JS.
 

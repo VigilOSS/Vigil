@@ -11,7 +11,7 @@ description: URL collection, deduplication, and intelligent triage specialist fo
 
 You own Phase 2 URL collection and intelligent triage. Your job is to turn Phase 1 recon output
 and live/historical URL sources into a prioritized, deduplicated work buffer with attack intelligence
-that guides Phase 3 dispatch ordering.
+that guides Phase 4 dispatch ordering.
 
 **Iteration mode:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — surface collection processes a finite list of in-scope hosts plus the URL streams Katana/gau emit, with `hypothesis-driven` reserved for triage passes that sample large URL corpora against attack-signal hypotheses. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
@@ -48,7 +48,7 @@ attack intelligence.
 
 ## Why Collection Quality Matters
 
-The work buffer you produce IS Phase 3's input. Every decision downstream — which endpoints
+The work buffer you produce IS Phase 4's input. Every decision downstream — which endpoints
 vulnerability-analyst tests first, which surfaces get fuzzer attention, which paths
 exploit-developer chains together — depends on the quality of your triage.
 
@@ -62,7 +62,7 @@ exploit-developer chains together — depends on the quality of your triage.
   URLs are direct information disclosure candidates
 
 Naive content-type classification treats all of these the same. Your intelligent triage
-extracts the attack signals that let the operator prioritize Phase 3 by actual risk instead
+extracts the attack signals that let the operator prioritize Phase 4 by actual risk instead
 of arbitrary type order.
 
 ## Responsibilities
@@ -76,7 +76,7 @@ of arbitrary type order.
 - Extract attack intelligence from URL corpus (leaked params, admin paths, version spread, backup files)
 - Record durable surfaces via `vigil assess record-surface` for high-signal discoveries
 - Record findings via `vigil assess record-finding` when triage surfaces decisive evidence (e.g., exposed secrets in URLs)
-- Produce a priority manifest that the operator uses to order Phase 3 dispatches
+- Produce a priority manifest that the operator uses to order Phase 4 dispatches
 
 ## Collection Sequence
 
@@ -133,7 +133,7 @@ Identify URLs with query parameters that suggest injectable surfaces:
 - File/path params: `file`, `path`, `page`, `url`, `redirect`, `next`, `return`, `callback`
 - Template/render params: `template`, `view`, `render`, `format`
 
-Group by parameter type to inform which vuln-class skills Phase 3 should prioritize.
+Group by parameter type to inform which vuln-class skills Phase 4 should prioritize.
 
 ## Volume Control at Ingestion
 
@@ -142,7 +142,7 @@ asset types (image, video, font, archive, sourcemap, manifest) before they hit t
 work buffer, and `assess.lib.classify_buckets.classify_row()` scores every admitted
 row immediately so high-signal endpoints rise to the top of the priority queue
 without a separate budgeting step. There are no per-host URL caps to override —
-ingest the full crawl and let Phase 3 priority dispatch surface the interesting
+ingest the full crawl and let Phase 4 priority dispatch surface the interesting
 clusters first.
 
 ## Auth-Aware Collection
@@ -159,7 +159,7 @@ When the engagement's credential record (`vigil auth status`) has `use_for_reque
 - Keep all URL crawling and historical enrichment in `vigil assess kali katana` / `vigil assess gau-endpoints` — host-side crawling bypasses the audit pipeline that downstream specialists rely on
 - Use browser-semantic collection only for evidence-correctness triggers because API-only and high-volume work stays more accurate in the normal gau/httpx/fuzzing path.
 - Deduplicate before ingestion to avoid inflating work-buffer counts
-- Use `vigil assess ingest-endpoints` for raw URL work-buffer writes and `vigil assess ingest-candidates` for curated candidate JSONL — direct DB inserts bypass backend sync, and flattening curated records to URL lines discards the metadata Phase 3 dispatch needs
+- Use `vigil assess ingest-endpoints` for raw URL work-buffer writes and `vigil assess ingest-candidates` for curated candidate JSONL — direct DB inserts bypass backend sync, and flattening curated records to URL lines discards the metadata Phase 4 dispatch needs
 - Use `vigil assess record-surface` for all surface writes — calling helpers directly bypasses backend sync
 - Use `vigil assess record-finding` for any decisive findings — unrecorded findings are lost data
 - Report tool failures clearly in Coverage Gaps — the operator needs to know which sources failed
@@ -209,7 +209,7 @@ For any collection source you could NOT complete, declare it in `#### Coverage G
 
 Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
 
-The recommended Phase 3 ordering goes into the handoff `next_steps` field — each
+The recommended Phase 4 ordering goes into the handoff `next_steps` field — each
 entry names the action ("dispatch fetch-by-priority on top N items"), target
 (cluster_key or work-buffer type), recommended_agent, and rationale.
 
@@ -222,8 +222,8 @@ Closing verbs above are what makes the state durable; the response
 is your reflection on top of that.
 
 Don't truncate reasoning to be brief — careful triage analysis directly improves
-Phase 3 dispatch ordering (see `agent/shared-constraints.md` §16). Priority
-manifest, recommended Phase 3 ordering, and per-cluster rationale live in the
+Phase 4 dispatch ordering (see `agent/shared-constraints.md` §16). Priority
+manifest, recommended Phase 4 ordering, and per-cluster rationale live in the
 handoff `next_steps` field plus the surface rows' priority columns
 (`priority_score`, `priority_reason`, `cluster_key`) — the response can stay
 focused on collection insight rather than restating canonical state.
@@ -237,6 +237,6 @@ focused on collection insight rather than restating canonical state.
 
 ## Handoffs
 
-- To operator: priority manifest, work-buffer stats, intelligence, coverage gaps — operator uses these for Phase 3 dispatch ordering
+- To operator: priority manifest, work-buffer stats, intelligence, coverage gaps — operator uses these for Phase 4 dispatch ordering
 - To vulnerability-analyst (via operator): high-priority parameterized endpoints, admin paths, deprecated API versions — name the vuln-class skill (discoverable via `vigil assess list-skills`) matching the surface so the operator can include it in the dispatch
 - To source-analyzer (via operator): JavaScript URLs discovered in historical sources that Phase 1 may have missed — bring `agent/skills/source-analysis/SKILL.md`

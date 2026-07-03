@@ -18,7 +18,7 @@ source disclosure, credential leaks, and full-database downloads.
 
 - gau or Wayback returned URLs ending in `.bak`, `.old`, `.swp`, `.sql`, `.tar.gz`, or `.pem`
 - Nuclei's `exposures` templates flagged backup files — use this reference to widen the sweep
-- Operator is ranking which historical URLs to live-probe first before spinning up full Phase 3
+- Operator is ranking which historical URLs to live-probe first before spinning up full Phase 4
 
 ## Parameter keys that match
 

@@ -147,7 +147,11 @@ def test_engagement_create_blue_renders_blue_operator_prompt(
 
     render_script = install_root / "agent" / "scripts" / "render-operator-prompts.sh"
     assert render_calls == [[str(render_script), "repo", str(created.path), "--type", "blue"]]
-    assert (created.path / "AGENTS.md").read_text(encoding="utf-8") == "blue operator prompt\n"
+    # Blue engagements render the full blue operator prompt, then the per-engagement
+    # bootstrap appends the ENGAGEMENT.md ROE pointer (WS7 symmetry with the red path).
+    blue_agents = (created.path / "AGENTS.md").read_text(encoding="utf-8")
+    assert blue_agents.startswith("blue operator prompt\n")
+    assert "Read `ENGAGEMENT.md` in this directory if present" in blue_agents
     assert (created.path / ".codex" / "agents").is_dir()
     assert not (created.path / ".codex" / "agents").is_symlink()
 
@@ -8257,14 +8261,17 @@ def test_dispatch_register_defaults_missing_dispatch_mode_from_role(
         skills="idor-testing",
     )
     err = capsys.readouterr().err
-    assert fake.recorded[0]["dispatch_mode"] == "hypothesis-driven"
-    assert "dispatch_mode not set; defaulting to 'hypothesis-driven'" in err
+    # Canonical per-role default (role file "Default when omitted" + operator-core
+    # Iteration-mode Declaration): vulnerability-analyst -> item-iterating.
+    assert fake.recorded[0]["dispatch_mode"] == "item-iterating"
+    assert "dispatch_mode not set; defaulting to 'item-iterating'" in err
 
 
 def test_dispatch_register_defaults_mode_for_recon_role(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """L2-1: recon-specialist defaults to item-iterating."""
+    """L2-1: recon-specialist defaults to hypothesis-driven (canonical per-role
+    default from operator-core Iteration-mode Declaration)."""
     fake = _run_dispatch_verb(
         monkeypatch,
         "register",
@@ -8274,7 +8281,7 @@ def test_dispatch_register_defaults_mode_for_recon_role(
         skills="subdomain-enumeration",
     )
     capsys.readouterr()
-    assert fake.recorded[0]["dispatch_mode"] == "item-iterating"
+    assert fake.recorded[0]["dispatch_mode"] == "hypothesis-driven"
 
 
 def test_dispatch_register_allow_no_skills_proceeds_with_warning(

@@ -1,6 +1,6 @@
-# Root-Cause Review Mode (Phase 4 → 5 exit)
+# Root-Cause Review Mode (Phase 5 → 6 exit)
 
-This is a **separate mode** from the Phase 4 verification work above. Phase 4 verification validates individual findings (unreviewed → verified / disputed / downgraded / killed). The root-cause review runs AFTER verification, walks the confirmed-finding set as a group, and surfaces three things the per-finding verification cannot:
+This is a **separate mode** from the Phase 5 verification work above. Phase 5 verification validates individual findings (unreviewed → verified / disputed / downgraded / killed). The root-cause review runs AFTER verification, walks the confirmed-finding set as a group, and surfaces three things the per-finding verification cannot:
 
 1. Root-cause links that should be drawn between confirmed findings (so blast radius is visible to the report-writer)
 2. Findings whose PoC is missing the prerequisites exploit-developer will need (captured tokens, replayed credentials, intermediate state)
@@ -22,4 +22,4 @@ Review checklist (emit one line per gap, naming the finding slug + the missing e
 - [ ] Each finding's stated attacker outcome (per the Dispatch Completion Gate in `agent/operator-core.md`) is concrete enough that exploit-developer can build on it without re-deriving the exploitation step.
 - [ ] Every `details.chain_required=true` flag has an actual exploit-developer dispatch recorded against the slug — no orphan chain-required flags reaching the exploit phase.
 
-Output: backend handoff via `vigil assess agent handoff --from-json <path>` with per-finding gaps. Each `next_step` names the specific dispatch to fire (role, finding slug, capture target). Do NOT run `link-finding` or re-dispatch from inside review mode — those are operator decisions. Review mode is read-only assessment so the operator can sequence the missing dispatches deliberately before Phase 5.
+Output: backend handoff via `vigil assess agent handoff --from-json <path>` with per-finding gaps. Each `next_step` names the specific dispatch to fire (role, finding slug, capture target). Do NOT run `link-finding` or re-dispatch from inside review mode — those are operator decisions. Review mode is read-only assessment so the operator can sequence the missing dispatches deliberately before Phase 6.

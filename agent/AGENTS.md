@@ -33,11 +33,11 @@ When a session starts, display:
 | `recon-specialist` | Recon-completeness assessment over the `vigil assess recon` job + bounded per-host web fingerprinting. | Phase 1 (after the recon job). |
 | `source-analyzer` | Deep static analysis of HTML/JS/CSS for hidden routes, API endpoints, secrets. | Phase 1 (parallel with recon). |
 | `surface-collector` | URL collection, dedup, intelligent triage, work-buffer population. | Phase 2. |
-| `vulnerability-analyst` | Primary hunter — surveys wide then deep, confirms leads with targeted probes, produces durable evidence, reviews findings in Phase 4. | Phase 3 + Phase 4 verification. |
-| `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 5. |
+| `vulnerability-analyst` | Primary hunter — surveys wide then deep, confirms leads with targeted probes, produces durable evidence, reviews findings in Phase 5. | Phase 4 + Phase 5 verification. |
+| `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 6. |
 | `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
-| `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 5 (parallel with exploit). |
-| `report-writer` | Generates structured engagement report from durable backend finding state. | Phase 7 or on-demand. |
+| `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 6 (parallel with exploit). |
+| `report-writer` | Generates structured engagement report from durable backend finding state. | Phase 8 or on-demand. |
 
 ### Code Analysis Agents (operator-core-code.md mode)
 
@@ -338,7 +338,7 @@ Required fields per dispatch:
 | Field | Values |
 |---|---|
 | `role` | `recon-specialist` / `source-analyzer` / `surface-collector` / `vulnerability-analyst` / `exploit-developer` / `fuzzer` / `osint-analyst` / `report-writer` / `code-architect` / `code-vuln-hunter` / `code-variant-hunter` / `code-vuln-verifier` / `code-fuzz-engineer` |
-| `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Iteration-mode (dispatch_mode) Declaration" below) |
+| `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm` (see "Iteration-mode (dispatch_mode) Declaration" below) |
 | `skills` | Comma-separated skill names (e.g. `surface-collection,gau-triage`) the specialist must load. Names match the directory under `agent/skills/<name>/` — list-skills prints the canonical names. Required for every specialist role — pass via `--skills` on `vigil assess agent start` so the dispatch row is a truthful audit of which skill context the agent loaded. Operators are exempt because they coordinate phases rather than executing a single skill. |
 | `hunt_scope` | `wide` / `deep` — which pass in the "Phased mindset flow" (Depth Doctrine / Per-Domain VA Fan-Out, `agent/phases/phase-4-consume-test.md`) the dispatch belongs to. Required for `vulnerability-analyst`; defaults to `deep` for `exploit-developer` (Pass-3 is always convergent). |
 | `mindset lens` | Path to the injected mindset packet under `agent/rules/mindsets/` plus the one-line reason it fits the observed signal (e.g. `idor-bac.md — numeric object references with two named identities available`). Required for `vulnerability-analyst` and `exploit-developer` dispatches — filled into each role's own `## Dispatch Mindset` slot, which is MORE SPECIFIC than the role's baseline mindset and governs where the two compete. |

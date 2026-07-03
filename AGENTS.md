@@ -653,8 +653,8 @@ context-isolation, finding-recording format, and closing-sequence wrapper is:
 A role prompt covers one specialist's job. Content that only applies in one operating mode (a
 review pass, a final-report run, an exploit-review gate) is gated behind an explicit mode check
 in the prompt, not always-loaded prose the specialist must mentally filter on every dispatch.
-Prefer "Modes accepted: ... **Default when omitted:** ..." framing (see
-`agent/agents/recon-specialist.md`'s "Modes accepted" line) over one role file quietly doing two
+Prefer "Iteration mode: ... **Default when omitted:** ..." framing (see
+`agent/agents/recon-specialist.md`'s "Iteration mode:" line) over one role file quietly doing two
 jobs.
 
 ### 5. Injected content gets a named top-of-dispatch field
