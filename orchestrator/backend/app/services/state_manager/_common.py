@@ -42,6 +42,26 @@ class WorkflowStatus(enum.StrEnum):
     REPORTED = "reported"
 
 
+class SubmissionStatus(enum.StrEnum):
+    """External bug-bounty / program submission state for a finding.
+
+    Canonical single source of truth for the submission vocabulary. ORTHOGONAL
+    to ``WorkflowStatus`` (which tracks whether the finding is in report.md): a
+    finding can be ``workflow_status=reported`` AND ``submission_status=accepted``
+    independently, and neither axis derives from or mutates the other. The CLI
+    (``agent/scripts``) cannot import this package, so ``SUBMISSION_STATUSES`` is
+    mirrored in ``assess.lib.contracts``; ``test_submission_status`` pins the two
+    in sync (the ``dispatch_mode`` precedent). ``StrEnum`` so members serialize /
+    compare as their bare lowercase string (DB TEXT, JSON, f-strings)."""
+
+    NONE = "none"
+    SUBMITTED = "submitted"
+    ACCEPTED = "accepted"
+    NEEDS_INFO = "needs_info"
+    REJECTED = "rejected"
+    DUPLICATE = "duplicate"
+
+
 class VerificationState(enum.StrEnum):
     """Finding verification review state."""
 
@@ -55,6 +75,7 @@ class VerificationDisposition(enum.StrEnum):
 
     NONE = "none"
     PENDING_RUNTIME_PROOF = "pending_runtime_proof"
+    BLOCKED = "blocked"
     CONFIRMED = "confirmed"
     DOWNGRADED = "downgraded"
     FALSE_POSITIVE = "false_positive"
@@ -65,6 +86,11 @@ class VerificationDisposition(enum.StrEnum):
 # ``str in EnumClass`` edge. Members compare/hash equal to their str value, so
 # ``"draft" in WORKFLOW_STATUSES`` stays True.
 WORKFLOW_STATUSES = frozenset(WorkflowStatus)
+
+# Submission-status vocabulary as a derived membership set (mirrors the
+# WORKFLOW_STATUSES pattern). ``none`` is the default for a finding that has not
+# been submitted externally.
+SUBMISSION_STATUSES = frozenset(SubmissionStatus)
 
 WORKFLOW_STATUS_RANK = {
     WorkflowStatus.DRAFT: 0,
@@ -101,6 +127,16 @@ VERIFICATION_DISPOSITION_RANK = {
     # _coalesce_verification_disposition, so its -1 only matters for confidence
     # ordering in _finding_confidence_tuple.
     VerificationDisposition.PENDING_RUNTIME_PROOF: 1,
+    # "Blocked-for-provisioning" (hunting.md): the exploit attempt could not even
+    # start because a precondition is missing (no test account / line / device /
+    # credential / access). Sticky vs 'none' (rank 1 >= 0, so a later bare none in
+    # _coalesce_verification_disposition cannot clobber it), but yields to
+    # downgraded (2) / confirmed (3) so a later real proof supersedes the block,
+    # and false_positive is handled by the explicit early-returns in the coalesce.
+    # Shares rank 1 with pending_runtime_proof: both are non-report holding states
+    # that a real verdict outranks; the tie only affects confidence ordering in
+    # _finding_confidence_tuple, where they are equivalently weak-but-reviewed.
+    VerificationDisposition.BLOCKED: 1,
     VerificationDisposition.DOWNGRADED: 2,
     VerificationDisposition.CONFIRMED: 3,
     VerificationDisposition.FALSE_POSITIVE: -1,
@@ -233,6 +269,15 @@ def _normalize_workflow_status(value: str) -> WorkflowStatus:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid workflow status: {value}")
     return WorkflowStatus(status_value)
 
+def _normalize_submission_status(value: str | None) -> SubmissionStatus:
+    """Normalize/validate a submission status. ``None``/empty defaults to ``none``;
+    anything outside the canonical set is a 400 (the persistence-layer enforcement
+    seam, independent of the HTTP-model validator in ``assessment.py``)."""
+    submission_value = (value or "none").strip().lower()
+    if submission_value not in SUBMISSION_STATUSES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid submission status: {value}")
+    return SubmissionStatus(submission_value)
+
 def _normalize_verification_state(value: str) -> VerificationState:
     state_value = (value or "unreviewed").strip().lower()
     if state_value not in VERIFICATION_STATES:
@@ -302,6 +347,13 @@ def _serialize_finding_record(row: dict[str, Any] | Any) -> dict[str, Any]:
         record["verification_disposition"] = _row_verification_disposition(record)
     except HTTPException:
         record["verification_disposition"] = str(record.get("verification_disposition", "none") or "none").strip().lower()
+    # submission_status is a separate axis from workflow_status; surface it on
+    # every read projection, defaulting to 'none' when absent (legacy rows /
+    # synthetic dicts). Read path must not crash on an invalid DB value.
+    try:
+        record["submission_status"] = _normalize_submission_status(record.get("submission_status"))
+    except HTTPException:
+        record["submission_status"] = str(record.get("submission_status", "none") or "none").strip().lower()
     record.pop("status", None)
     return record
 

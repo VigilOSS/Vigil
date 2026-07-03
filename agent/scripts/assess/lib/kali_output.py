@@ -56,6 +56,14 @@ class KaliResult:
     # browser verb itself, so the recovery path never self-flags into a loop).
     waf_challenge: bool = False
     waf_challenge_detail: str = ""
+    # The fully-resolved argv that actually ran inside the container, AFTER
+    # kali_exec's transparent mutations (program attribution ``-H`` headers, the
+    # ``--resolve`` IP-pin, injected identity material, nuclei's default
+    # ``-exclude-tags``). Surfaced on the result so the operator/LLM sees what
+    # RAN, not just what it typed — the command written and the command executed
+    # can diverge, and that gap is the most common source of "why did this probe
+    # behave unexpectedly". Empty list only when a caller never populates it.
+    resolved_argv: list[str] = dataclasses.field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -226,22 +234,23 @@ def detect_transport_error(
 # recovery (``vigil assess kali browser``), it does not strand it.
 
 # (needle_lowercased, vendor) — substring match against the body+headers+stderr
-# haystack. Each is on its own a strong WAF/bot-challenge signal. Mix of
-# interstitial-page strings, challenge-form field names, and bot-manager
-# cookie/header names per vendor.
+# haystack. Each is on its own a strong WAF/bot-challenge signal: an
+# interstitial-page string, a challenge-form field name, or a challenge-only
+# resource path. Deliberately EXCLUDED here are the always-present session /
+# edge fingerprints (Akamai ``_abck``/``ak_bmsc``/``bm_sz``/``AkamaiGHost``,
+# Imperva ``incap_ses``/``visid_incap``/``reese84``/``x-iinfo``): a bot manager
+# sets those on ~every response it fronts, so their mere presence means "this
+# vendor is in front", NOT "this is a challenge". They are demoted to the
+# edge-marker tier (``_CDN_EDGE_MARKERS``) and flag ONLY alongside a real
+# challenge SHAPE. The Akamai challenge STATE that a header-only block DOES carry
+# lives in the ``_abck`` cookie VALUE and is recovered by
+# :func:`_abck_challenge_sentinel`, not by matching the cookie name.
 _WAF_NAMED_SIGNATURES: tuple[tuple[str, str], ...] = (
-    # Imperva / Incapsula
-    ("reese84", "imperva"),
-    ("incap_ses", "imperva"),
-    ("visid_incap", "imperva"),
+    # Imperva / Incapsula — challenge-specific needles only.
     ("_incapsula_resource", "imperva"),
     ("pardon our interruption", "imperva"),
-    ("x-iinfo", "imperva"),
-    # Akamai (Bot Manager / Ghost edge)
-    ("_abck", "akamai"),
-    ("ak_bmsc", "akamai"),
-    ("bm_sz", "akamai"),
-    ("akamaighost", "akamai"),
+    # Akamai — the Access-Denied reference-error body string only (the session
+    # cookies + AkamaiGHost banner are edge markers, see _CDN_EDGE_MARKERS).
     ("reference&#32;&#35;", "akamai"),
     # Cloudflare
     ("cf-chl", "cloudflare"),
@@ -253,13 +262,17 @@ _WAF_NAMED_SIGNATURES: tuple[tuple[str, str], ...] = (
     ("cf-mitigated", "cloudflare"),
     ("attention required! | cloudflare", "cloudflare"),
     ("challenge-platform", "cloudflare"),
-    # Other common bot-defense vendors (renamed-marker safety still applies via
-    # the generic-shape pass, but naming the common ones keeps reasons sharp).
-    ("datadome", "datadome"),
-    ("perimeterx", "perimeterx"),
-    ("_px", "perimeterx"),
-    ("x-sucuri-id", "sucuri"),
-    ("sucuri website firewall", "sucuri"),
+    # Other common bot-defense vendors — challenge/BLOCK-specific needles only.
+    # The always-present fingerprints for these vendors (the DataDome ``datadome``
+    # cookie + ``js.datadome.co`` sensor tag, the PerimeterX ``_px`` cookies +
+    # ``client.perimeterx.net`` sensor, the Sucuri ``x-sucuri-id`` proxy header)
+    # ride ~every response the vendor fronts — challenge or not — so, exactly like
+    # the Akamai/Imperva session cookies above, they are DEMOTED to the edge-marker
+    # tier and flag only alongside a real challenge SHAPE. What survives here is
+    # block-only: DataDome's captcha host (referenced only when it serves a
+    # challenge) and Sucuri's block-page title.
+    ("captcha-delivery.com", "datadome"),  # DataDome captcha/challenge host — block-only.
+    ("sucuri website firewall", "sucuri"),  # Sucuri block-page title — block-only.
 )
 
 # Generic block phrases that ALSO appear on legitimate origin 401/403 pages, so
@@ -278,16 +291,28 @@ _WAF_CORROBORATION_PHRASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 
 # CDN / edge / bot-defense fingerprints used by the generic-shape pass. Presence
 # of one of these (in a header dump or the body) is necessary — but NOT
-# sufficient — to call a JS-only shell a challenge.
+# sufficient — to call a JS-only shell a challenge. This tier ALSO owns the
+# always-present vendor session/edge fingerprints (Akamai ``_abck``/``ak_bmsc``/
+# ``bm_sz``, Imperva ``incap_ses``/``visid_incap``/``reese84``, DataDome
+# ``datadome``, PerimeterX ``_px``/``x-px``, Sucuri ``x-sucuri``) that were
+# previously (and inconsistently) treated as sufficient signatures: front ~every
+# response, they corroborate a challenge only when a real challenge SHAPE is
+# present, never on the name alone.
 _CDN_EDGE_MARKERS: tuple[str, ...] = (
     "cf-ray",
     "cloudflare",
     "akamaighost",
     "x-akamai",
     "akamai",
+    "_abck",
+    "ak_bmsc",
+    "bm_sz",
     "x-iinfo",
     "incapsula",
     "imperva",
+    "incap_ses",
+    "visid_incap",
+    "reese84",
     "x-cdn",
     "x-sucuri",
     "sucuri",
@@ -298,6 +323,7 @@ _CDN_EDGE_MARKERS: tuple[str, ...] = (
     "x-datadome",
     "datadome",
     "perimeterx",
+    "_px",
     "x-px",
 )
 
@@ -466,6 +492,36 @@ def _looks_like_generic_challenge(
     return False, ""
 
 
+# Akamai Bot Manager sets ``_abck`` on ~every response it fronts, so the mere
+# cookie NAME is an edge fingerprint (see ``_CDN_EDGE_MARKERS``), NOT a challenge.
+# The challenge STATE lives in the cookie VALUE: the sensor-validation field (the
+# second ``~``-delimited field) is held at ``-1`` until the client solves the
+# sensor check, so an ``_abck`` whose validation field is ``-1`` is a genuine
+# header-only BLOCK. A passed/normal Bot Manager ``_abck`` carries a non-``-1``
+# validation field (later ``-1`` fields are normal), so this recovers a true
+# block without flagging ordinary Bot Manager traffic. The value char class stops
+# at the cookie/attribute separators and at JSON/quote delimiters so a Set-Cookie
+# embedded in an httpx ``-json`` line is captured cleanly.
+_ABCK_SENTINEL_RE = re.compile(r"_abck=([^;,\s\"']+)")
+
+
+def _abck_challenge_sentinel(haystack: str) -> str:
+    """Return the offending ``_abck`` value when it carries Akamai's
+    sensor-unvalidated (``-1``) challenge sentinel, else ``""``.
+
+    ``haystack`` is the lowercased body+headers+stderr blob. This inspects the
+    cookie VALUE (not merely its name) and tests the SECOND ``~``-delimited field
+    — the sensor-validation slot Akamai pins at ``-1`` on a not-yet-passed
+    challenge/block. A normal (passed) Bot Manager cookie carries a non-``-1``
+    value there, so ordinary Bot Manager traffic is never flagged.
+    """
+    for match in _ABCK_SENTINEL_RE.finditer(haystack):
+        fields = match.group(1).split("~")
+        if len(fields) >= 2 and fields[1] == "-1":
+            return match.group(1)
+    return ""
+
+
 def detect_waf_challenge(
     stdout_preview: str,
     stderr_preview: str = "",
@@ -498,6 +554,17 @@ def detect_waf_challenge(
     for needle, vendor in _WAF_NAMED_SIGNATURES:
         if needle in haystack:
             return True, f"{vendor} WAF/bot-challenge signature: '{needle}'"
+
+    # Akamai header-only BLOCK: the _abck cookie VALUE carries the
+    # sensor-unvalidated (-1) sentinel. The cookie NAME alone is an always-present
+    # edge fingerprint (demoted to _CDN_EDGE_MARKERS); only the unvalidated VALUE
+    # is a genuine challenge, so normal Bot Manager traffic is not flagged.
+    abck = _abck_challenge_sentinel(haystack)
+    if abck:
+        return True, (
+            f"akamai WAF/bot-challenge signature: _abck sensor-unvalidated "
+            f"sentinel ('{abck}')"
+        )
 
     # Generic block phrases (e.g. "Access Denied") flag ONLY when a vendor marker
     # is also present, so a legitimate origin 401/403 carrying the phrase is
@@ -706,25 +773,50 @@ def _required_headers(engagement_dir: Path) -> dict[str, str]:
 
 
 # Program-mandated attribution headers (e.g. BugCrowd's ``X-Bug-Bounty: <handle>``)
-# must ride every in-scope HTTP probe. Three-way classifier:
+# must ride every in-scope HTTP probe. Four-way classifier:
 #   * INJECTABLE — HTTP-to-target tools that accept ``-H "Name: Val"``; inject.
+#   * FLAG-MAP   — HTTP-to-target tools whose header flag is NOT ``-H`` (whatweb
+#                  ``--header``, nikto ``-Add-header``, arjun ``--headers``);
+#                  inject via the tool's own flag (Layer 1, I-3).
 #   * SKIP       — passive / third-party-archive / DNS / L3-L4 tools that never
 #                  send HTTP to the in-scope target. Injecting here would LEAK
 #                  the researcher handle to web.archive.org/CommonCrawl/DNS APIs
 #                  or is meaningless, so silently skip (never warn).
-#   * else       — HTTP-to-target tools that can't take ``-H`` (nikto/whatweb/
-#                  wafw00f/httprobe) AND tools whose header flag is not ``-H``
-#                  (arjun uses a newline-separated ``--headers`` block, not
-#                  ``-H``): WARN (never block), since this argv can't carry the
-#                  header as ``-H`` — the operator injects it the tool's way.
+#   * else       — HTTP-to-target tools whose header flag can't carry an inline
+#                  value (wafw00f's ``-H``/``--headers`` reads a FILE, not a
+#                  string) or an unknown tool: WARN (never block). The Layer-2
+#                  fail-closed backstop (:func:`required_header_attribution_gap`)
+#                  is the safety net that REFUSES an un-attributed in-scope run.
 #
 # This classifier + injector lives here (rather than in kali.py) so BOTH the
 # container path (kali.kali_exec) AND the audited host path (the recon
 # host-dispatch wrappers in commands/web_discovery.py / dns_discovery.py) apply
 # the SAME injectable/skip rules. kali.py re-exports these names for back-compat.
 _REQUIRED_HEADER_INJECTABLE = frozenset(
-    {"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"}
+    # dalfox sends active XSS payloads to the in-scope target and takes the
+    # curl-style ``-H "Name: Value"`` (repeatable), so it injects via the same
+    # ``-H`` path as curl/httpx — never leave a dalfox probe un-attributed on a
+    # required-headers program.
+    {"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana", "dalfox"}
 )
+
+# Layer-1 extension (I-3) — HTTP-to-target tools whose attribution-header flag is
+# NOT the curl-style ``-H "Name: Value"``. Each entry maps a tool to
+# ``(inject_flag, single_newline_block)``:
+#   * whatweb ``--header "K: V"`` — repeatable, one header per flag occurrence;
+#   * nikto   ``-Add-header "K: V"`` — repeatable (nikto's ``-H`` is ``-Help``;
+#                  the real header flag is ``-Add-header``, verified in-container);
+#   * arjun   ``--headers "K: V"`` — a SINGLE flag whose value is newline-joined
+#                  for multiple headers (a second ``--headers`` would clobber the
+#                  first under argparse store), so ``single_newline_block=True``.
+# wafw00f is deliberately ABSENT: its ``-H``/``--headers`` reads a FILE path, not
+# an inline string, so it can't carry an inline marker and relies on the Layer-2
+# backstop instead.
+_REQUIRED_HEADER_FLAG_SPECS: dict[str, tuple[str, bool]] = {
+    "whatweb": ("--header", False),
+    "nikto": ("-Add-header", False),
+    "arjun": ("--headers", True),
+}
 _REQUIRED_HEADER_SKIP = frozenset(
     {
         "gau",
@@ -736,6 +828,12 @@ _REQUIRED_HEADER_SKIP = frozenset(
         "naabu",
         "masscan",
         "puredns",
+        # tlsx opens a raw TLS handshake to harvest cert SAN/CN/issuer fields;
+        # like nmap it is an L4-L6 connect that carries NO HTTP request, so an
+        # HTTP attribution header cannot ride it. Skip (don't WARN, don't let the
+        # Layer-2 backstop REFUSE a legitimate TLS cert grab) — same posture as
+        # nmap/naabu/masscan, which also reach the target without speaking HTTP.
+        "tlsx",
     }
 )
 
@@ -755,6 +853,69 @@ def _existing_header_names(cmd: list[str]) -> set[str]:
             if head:
                 names.add(head.lower())
     return names
+
+
+def _flag_header_names(cmd: list[str], flags: tuple[str, ...]) -> set[str]:
+    """Lower-cased header names already carried by any flag in ``flags``.
+
+    A single value may pack several newline-separated headers (arjun's
+    ``--headers`` block), so each line of every matching value is examined.
+    """
+    names: set[str] = set()
+    for idx, token in enumerate(cmd):
+        if token in flags and idx + 1 < len(cmd):
+            for line in cmd[idx + 1].splitlines():
+                head = line.split(":", 1)[0].strip()
+                if head:
+                    names.add(head.lower())
+    return names
+
+
+def _inject_tool_flag_headers(
+    cmd: list[str], tool: str, headers: dict[str, str]
+) -> str:
+    """Inject required header(s) into ``cmd`` via a non-``-H`` tool's own flag.
+
+    Returns ``"injected"`` when a missing header was added, ``"noop"`` when every
+    required header is already present. Idempotent on the header NAME.
+    """
+    inject_flag, single_block = _REQUIRED_HEADER_FLAG_SPECS[tool]
+    if single_block:
+        # arjun-style: one flag, newline-joined value; argparse keeps the LAST,
+        # so merge into the last existing block rather than append a second flag
+        # that would clobber an operator-supplied auth-headers block.
+        last_idx: Optional[int] = None
+        for idx in range(len(cmd) - 1):
+            if cmd[idx] == inject_flag:
+                last_idx = idx
+        existing: set[str] = set()
+        if last_idx is not None:
+            for line in cmd[last_idx + 1].splitlines():
+                head = line.split(":", 1)[0].strip()
+                if head:
+                    existing.add(head.lower())
+        missing = [(n, v) for n, v in headers.items() if n.lower() not in existing]
+        if not missing:
+            return "noop"
+        addition = "\n".join(f"{n}: {v}" for n, v in missing)
+        if last_idx is not None:
+            cmd[last_idx + 1] = f"{cmd[last_idx + 1]}\n{addition}"
+        else:
+            cmd.extend([inject_flag, addition])
+        return "injected"
+
+    # Repeatable flag (whatweb ``--header``, nikto ``-Add-header``). whatweb also
+    # accepts ``-H`` as an alias, so an operator ``-H`` counts as already-present.
+    recognized = (inject_flag, "-H") if tool == "whatweb" else (inject_flag,)
+    existing = _flag_header_names(cmd, recognized)
+    injected = False
+    for name, value in headers.items():
+        if name.lower() in existing:
+            continue
+        cmd.extend([inject_flag, f"{name}: {value}"])
+        existing.add(name.lower())
+        injected = True
+    return "injected" if injected else "noop"
 
 
 # --------------------------------------------------------------------------- #
@@ -931,9 +1092,13 @@ def _apply_required_headers(
                         injected the same header on an injectable tool).
       * ``"skipped"`` — passive/archive/DNS/L3-L4 tool that does not send HTTP
                         to the in-scope target; nothing applied, no warning.
-      * ``"injected"``— at least one header was appended as ``-H "Name: Val"``.
-      * ``"warned"``  — an HTTP-capable but non-injectable/unknown tool; cmd is
-                        left untouched and the caller warns.
+      * ``"injected"``— at least one header was appended, either as ``-H "Name:
+                        Val"`` (curl-shaped tools) or via a non-``-H`` tool's own
+                        flag (whatweb ``--header`` / nikto ``-Add-header`` / arjun
+                        ``--headers``; see ``_REQUIRED_HEADER_FLAG_SPECS``).
+      * ``"warned"``  — an HTTP-capable tool whose flag can't carry an inline
+                        header (wafw00f) or an unknown tool; cmd is left untouched
+                        and the caller warns. The Layer-2 backstop is the net.
 
     Idempotency: a header is skipped when an existing ``-H`` value already names
     it (case-insensitive on the header name, tolerating ``Name:`` and
@@ -968,6 +1133,8 @@ def _apply_required_headers(
     name_lower = tool_name.lower()
     if name_lower in _REQUIRED_HEADER_SKIP:
         return "skipped"
+    if name_lower in _REQUIRED_HEADER_FLAG_SPECS:
+        return _inject_tool_flag_headers(cmd, name_lower, headers)
     if name_lower not in _REQUIRED_HEADER_INJECTABLE:
         return "warned"
 
@@ -980,6 +1147,125 @@ def _apply_required_headers(
         existing.add(name.lower())
         injected = True
     return "injected" if injected else "noop"
+
+
+# --------------------------------------------------------------------------- #
+# Layer 2 — DYNAMIC fail-closed attribution backstop (ADR 0010)
+# --------------------------------------------------------------------------- #
+#
+# Layer 1 injects the program attribution header into the curated set of
+# HTTP-to-target tools. Layer 2 needs NO per-tool header knowledge: after the
+# FINAL argv (and any shell-script text) is assembled, a command that REACHES an
+# in-scope host WITHOUT the configured marker is REFUSED rather than sent
+# un-attributed — a missing attribution header on a federal/managed program is a
+# ban-risk, not merely a reduced reward (the prior best-effort posture; see ADR
+# 0010 for the reversal). This catches every gap Layer 1 leaves: a ``bash -c
+# "curl <in-scope>"`` whose script could not be injected, an unknown/future tool,
+# and a tool whose flag can't carry an inline value (wafw00f).
+#
+# Local/non-target commands, passive skip-set tools (which query the archive/DNS,
+# not the in-scope host), and engagements with no ``required_headers`` are
+# unaffected — the gate is fail-OPEN for everything but un-attributed in-scope
+# traffic.
+
+
+def _command_reaches_in_scope_host(
+    cmd: list[str], allow_entries: list[dict[str, str]]
+) -> str:
+    """Return the first in-scope host the command's tokens reach, or ``""``.
+
+    Each argv element is shell-lexed (so a ``sh -c`` script's inner tokens and
+    quoted multi-token args are examined too) and every resulting word is run
+    through the scope host extractor; the first word that yields an in-scope host
+    wins. Purely lexical — no DNS/HTTP — so it is safe inside the exec gate.
+    """
+    from . import scope
+
+    if not allow_entries:
+        return ""
+    for arg in cmd:
+        try:
+            words = shlex.split(arg)
+        except ValueError:
+            words = arg.split()
+        if not words:
+            words = [arg]
+        for word in words:
+            host = scope.host_from_token(word)
+            if host and scope.host_in_scope(host, allow_entries):
+                return host
+    return ""
+
+
+def required_header_attribution_gap(
+    cmd: list[str],
+    tool_name: str,
+    headers: dict[str, str],
+    allow_entries: list[dict[str, str]],
+) -> str:
+    """Layer-2 fail-closed attribution backstop (ADR 0010).
+
+    Return a non-empty REFUSAL reason when ALL of:
+      * the engagement configured ``required_headers`` (``headers`` non-empty);
+      * the derived tool is NOT a passive/archive/DNS/L3-L4 skip-set tool (those
+        never send attributable HTTP to the in-scope target, so the in-scope
+        host token is merely their query subject, not a host they connect to);
+      * the assembled command REACHES an in-scope host; AND
+      * at least one required marker's ``Name: Value`` literal is ABSENT from the
+        command text.
+    Otherwise return ``""`` — the run proceeds. The reason names the missing
+    marker(s) so the caller can tell the operator exactly what to add.
+    """
+    if not headers:
+        return ""
+    if (tool_name or "").strip().lower() in _REQUIRED_HEADER_SKIP:
+        return ""
+    reached = _command_reaches_in_scope_host(cmd, allow_entries)
+    if not reached:
+        return ""
+    haystack = " ".join(cmd).lower()
+    # Match name:value tolerating any whitespace after the colon, so a manually
+    # supplied ``-H "X-Bug-Bounty:handle"`` (no space) is recognized as present
+    # rather than mistakenly refused — Layer-1 idempotency is name-only and does
+    # not re-canonicalize an operator's own spacing.
+    missing = [
+        f"{name}: {value}"
+        for name, value in headers.items()
+        if not re.search(
+            re.escape(name.lower()) + r":\s*" + re.escape(value.lower()), haystack
+        )
+    ]
+    if not missing:
+        return ""
+    markers = ", ".join(f"'{m}'" for m in missing)
+    return (
+        f"command reaches in-scope host '{reached}' but is missing required "
+        f"attribution header(s) {markers}"
+    )
+
+
+def _in_scope_allow_entries(engagement_dir: Path) -> list[dict[str, str]]:
+    """In-scope host allow-entries for the Layer-2 backstop, or ``[]`` when scope
+    is absent/unreadable (the backstop then degrades to a no-op rather than block
+    a run on a config error). Reads ``scope.json`` directly — it does NOT call
+    ``scope.load_scope`` so the hot exec path neither rewrites the scope file nor
+    pays its normalization cost on every command.
+    """
+    from . import scope
+
+    scope_path = engagement_dir / "scope.json"
+    if not scope_path.is_file():
+        return []
+    try:
+        data = json.loads(scope_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    try:
+        return scope.scope_entries(data)
+    except SystemExit:
+        return []
 
 
 def _auth_context(engagement_dir: Path) -> str:

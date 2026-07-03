@@ -1,5 +1,6 @@
 ---
 description: Web technology fingerprinting
+skill: web-recon
 ---
 
 # whatweb

@@ -29,7 +29,7 @@ from app.api.assessment import (  # noqa: E402
     ProbeRunRecordRequest,
 )
 from app.api.code_analysis import AnalysisResultRecord, CodeFileClassification  # noqa: E402
-from app.services.state_manager._common import VerificationDisposition  # noqa: E402
+from app.services.state_manager._common import SubmissionStatus, VerificationDisposition  # noqa: E402
 from assess.lib.contracts import get_contract  # noqa: E402
 
 
@@ -38,6 +38,8 @@ from assess.lib.contracts import get_contract  # noqa: E402
 # /findings (e.g. ``pending_runtime_proof``). Enum iteration order is stable, so
 # this keeps the generated schema deterministic.
 _VERIFICATION_DISPOSITION_VALUES = [member.value for member in VerificationDisposition]
+# Likewise sourced from the canonical SubmissionStatus StrEnum.
+_SUBMISSION_STATUS_VALUES = [member.value for member in SubmissionStatus]
 
 
 @dataclass(frozen=True)
@@ -206,6 +208,36 @@ _FINDING_DETAIL_PROPERTIES = {
         "type": "array",
         "items": {"type": "string"},
         "description": "Concrete next steps needed to validate or complete the chain (e.g. 'Confirm reachable network caller for the URL parser').",
+    },
+    "roe_blocked": {
+        "type": "boolean",
+        "description": "Set true when the primitive is proved but the program's rules of engagement forbid the final proof step; grade at impact-if-true. Distinct from a provisioning/access wall (see block_reason) and from chain_required (which needs another bug).",
+    },
+    "block_reason": {
+        "type": "string",
+        "description": "Why the finding cannot be advanced right now — a provisioning/access wall blocking the next proof step (as opposed to an ROE policy wall or a missing-bug chain park). Surfaced in the resume-brief Attempts ledger.",
+    },
+    "unblock_requirements": {
+        "type": "object",
+        "description": "What must be provisioned to lift the block so the finding can be driven to proof. When the unblocker is another finding or chain, link it with `vigil assess link-finding <slug> --link-kind unblocked_by ...`.",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "description": "Category of what is needed: account | line | device | credential | access.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Concretely what to provision (e.g. 'a test account in the org-admin group with role-management entitlement').",
+            },
+            "requested_from": {
+                "type": "string",
+                "description": "Who can provide it (e.g. 'program contact', 'target admin').",
+            },
+        },
+    },
+    "attempts_summary": {
+        "type": "string",
+        "description": "One-line summary of what was tried and the result, for the resume-brief Attempts ledger (e.g. 'anonymous + member + billing-admin sessions all 403 at the function gate').",
     },
     "variant_of": {
         "type": "string",
@@ -516,7 +548,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "enum": ["info", "low", "medium", "high", "critical"],
                     },
                     "workflow_status": {
-                        "description": "Lifecycle state. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'.",
+                        "description": "Lifecycle state settable at record time. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'. NOTE: the blue-team/IR states (contained, eradicated, recovered) are intentionally NOT recordable here — they are applied only via `vigil assess update-finding`, so this record-finding enum is deliberately narrower than the full WorkflowStatus vocabulary.",
                         "enum": ["draft", "active", "exploited", "blocked", "false_positive", "merged", "reported"],
                     },
                     "verification_state": {
@@ -524,7 +556,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "enum": ["unreviewed", "verified", "disputed"],
                     },
                     "verification_disposition": {
-                        "description": "Verifier outcome. 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable.",
+                        "description": "Verifier outcome (stored field). 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'blocked': the attempt could not even start (missing provisioning); requires details.block_reason and is held OUT of the report. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable. NOTE: `vigil assess verify-finding --disposition` additionally accepts 'disputed', which is a verify ACTION that sets verification_state='disputed' and leaves this field at 'none' — 'disputed' is never persisted as a disposition, so it is intentionally absent from this stored enum.",
                         "enum": list(_VERIFICATION_DISPOSITION_VALUES),
                     },
                     "defect_family": {
@@ -585,9 +617,25 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     "evidence_type": {
                         "description": "Strength of evidence. 'network-confirmed': live exploit or observed response. 'code-inferred': static/dataflow analysis without runtime proof. 'theoretical': logic-based hypothesis, no code or traffic evidence. 'informational': non-exploitable observation.",
                     },
-                    "request_variant_id": {"type": "integer", "minimum": 1},
-                    "service_id": {"type": "integer", "minimum": 1},
-                    "surface_id": {"type": "integer", "minimum": 1},
+                    "submission_status": {
+                        "description": "External bug-bounty/program submission state, ORTHOGONAL to workflow_status (report-inclusion). 'none': not submitted. 'submitted': sent to the program. 'accepted'/'rejected'/'duplicate': program triage outcome. 'needs_info': program requested more detail. Omit to keep the default 'none'.",
+                        "enum": list(_SUBMISSION_STATUS_VALUES),
+                    },
+                    "request_variant_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "ID of the request variant this finding concerns. Recorded as a finding_link to that request-variant surface, not stored as a finding column. Omit when the finding is not tied to a specific request variant.",
+                    },
+                    "service_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "ID of the service this finding concerns. Recorded as a finding_link to that service surface, not stored as a finding column. Omit when the finding is not tied to a specific service.",
+                    },
+                    "surface_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "ID of the attack surface this finding concerns. Recorded as a finding_link to that surface, not stored as a finding column. Omit when the finding is not tied to a specific surface.",
+                    },
                     "links": {
                         "items": {
                             "type": "object",

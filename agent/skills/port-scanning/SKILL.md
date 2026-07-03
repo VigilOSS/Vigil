@@ -102,7 +102,7 @@ Use `-iL hosts.txt` rather than N parallel `nmap host` invocations. Nmap's paral
 
 Split-by-profile parallel sweeps are allowed up to the runtime-tier cap (Standard 2 / Heavy 4 / Comfortable 8 — read `vigil runtime resources`) when two disjoint scan profiles run against the same host list. If you need to split work across specialists for context-window reasons, split the host list into N files and run one `-iL` per specialist — never N per-host invocations.
 
-The trait-row table that drives the cap lives in `agent/references/recon/rate-calibration.md`; tier-pick prose is in `agent/operator-core.md` "Recon Dispatch Resource Policy".
+The trait-row table that drives the cap lives in `agent/references/recon/rate-calibration.md`; tier-pick prose is in `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy".
 
 ### 6. Per-host port-data presence assertion (mandatory before declaring batch complete)
 
@@ -355,5 +355,5 @@ specialists can parse the output consistently.
 
 ## Extended Resources
 
-- `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table (cautious tier, CDN-fronted, WAF-protected, vendor SaaS, origin)
+- `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table (cautious tier, CDN-fronted, WAF-protected, vendor SaaS, origin)
 - `agent/references/tools/recon/nmap.md` — nmap flags, scan types, NSE scripts, output formats, the cautious-tier profile, TLS SAN extraction, rDNS, multi-host `-iL`, the XML-closure trap and the correct port-data presence gate, and the "one process beats N processes" mechanism

@@ -19,11 +19,21 @@ object download.
 
 - The corpus contains `/s3/`, `/gcs/`, `/blob/`, `/bucket/` paths or Lotus/Domino `.nsf` document routes
 - Param keys `bucket`, `blob`, or `prefix` appear in query strings
+- Bucket-listing params (`list-type`, `marker`, `delimiter`, `continuation-token`)
+  appear, or the URL host is `*.s3.amazonaws.com`, `*.blob.core.windows.net`, or
+  `storage.googleapis.com`
 - Operator is checking for misconfigured cloud storage access or legacy Domino document exposure
 
 ## Parameter keys that match
 
-`bucket, blob, prefix`
+`bucket, blob, prefix, list-type, marker, delimiter, continuation-token`
+
+`bucket`, `blob`, and `prefix` are the original keys. `list-type`, `marker`,
+`delimiter`, and `continuation-token` were added (classify-context-and-surface
+2026-06, Part 3 §C.14): these are the S3/GCS/Azure bucket-LISTING query
+parameters (`list-type=2` selects the S3 ListObjectsV2 API; `marker` /
+`continuation-token` page a listing; `delimiter` / `prefix` scope it). Their
+presence on a request is a strong open-bucket object-enumeration signal.
 
 `key` and `object` were considered but rejected: they are too generic (HTTP caching, GraphQL
 object fields) and would generate substantial cross-bucket false positives.
@@ -42,6 +52,25 @@ front-end asset prefix on many frameworks. Only cloud-specific discriminators an
 Domino-specific token set are allowed to avoid flooding the queue with benign CDN paths.
 See override #2 in `classify_buckets.py`.
 
+## Host markers (full-URL regex, classify-context-and-surface 2026-06, Part 3 §C.14)
+
+Cloud-storage object URLs carry the bucket in the URL AUTHORITY, not the path, so
+these markers are matched by `_REGEX_BUCKET_RULES["object-storage"]` against the
+FULL `url` (authority + query). `object-storage` is one of the
+`_FULL_URL_REGEX_BUCKETS` (alongside `cloud_metadata`):
+
+- `.s3.amazonaws.com` — AWS S3 virtual-hosted / path-style bucket host
+- `blob.core.windows.net` — Azure Blob Storage host
+- `storage.googleapis.com` — Google Cloud Storage host
+
+`classify_row` lowercases the full `url` and runs these patterns against it,
+appending `gf:object-storage` (deduped against any url_path-side hit). They fire
+even when the url_path carries no `/s3/`/`/blob/` fragment, so a direct
+`https://acme-uploads.s3.amazonaws.com/?list-type=2` enumeration URL still
+clusters as `gf:object-storage`. The full-`url` pass is **boost-only**: when the
+classifier is called without a `url` (the default-kwarg test convention), the
+host-marker pass is skipped and path/param matching is unchanged.
+
 ## Weight and priority interpretation
 
 - Baseline priority score: 25
@@ -56,6 +85,12 @@ Cloud storage:
 - `https://target.example/s3/bucket/objects?prefix=reports/` — S3-proxy with listing prefix
 - `https://target.example/api/files?bucket=user-uploads&blob=avatar.jpg` — GCS blob reference
 - `https://target.example/storage/blob/container/file.dat` — Azure Blob path
+
+Bucket-host + listing (full-URL host markers, no path fragment required):
+
+- `https://acme-uploads.s3.amazonaws.com/?list-type=2&prefix=backups/` — S3 ListObjectsV2 enumeration (host marker `.s3.amazonaws.com` + `list-type`/`prefix` keys)
+- `https://acme.blob.core.windows.net/container?marker=...&restype=container&comp=list` — Azure Blob container listing (host marker fires; `marker` key reinforces)
+- `https://storage.googleapis.com/acme-bucket/?prefix=&delimiter=/` — GCS object listing (host marker + `prefix`/`delimiter` keys)
 
 Domino/Lotus Notes:
 
@@ -74,8 +109,10 @@ Domino/Lotus Notes:
 
 ## Attack classes
 
-- **Public bucket listing:** `GET /s3/bucket/?prefix=` or `HEAD /bucket/` returns object
-  inventory when ACLs are not scoped
+- **Public bucket listing / object enumeration:** `GET /s3/bucket/?prefix=`,
+  `?list-type=2`, or `HEAD /bucket/` returns object inventory when ACLs are not
+  scoped; `marker`/`continuation-token` then page the full inventory, and the
+  cloud host markers above expose the listing endpoint directly
 - **SSRF via presigned URL generation:** endpoint at `/s3/sign?key=user-data/...` generates
   signed URLs; SSRF if the `key` path traverses to another principal's prefix
 - **Unauthenticated Domino file access:** `$FILE` attachments in `.nsf` databases are

@@ -95,7 +95,7 @@ For Katana:
 
 ```bash
 vigil assess kali katana \
-  -u https://TARGET -d 3 -jc -jsl -headless \
+  -u https://TARGET -d 3 -headless \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_headless_TARGET.txt \
   --technique DISCOVERY --intent "browser-semantic crawl: <trigger>" \
   --probe-kind fingerprint --phase <recon|collect|consume-test> --timeout 1800

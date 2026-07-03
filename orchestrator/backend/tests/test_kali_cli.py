@@ -287,10 +287,14 @@ def test_verb_translates_argv_into_underlying_command(
                 "recon",
                 "--timeout",
                 "60",
+                # -H / -mc are now TYPED httpx flags; use unmodeled flags here so
+                # this case still exercises the --extra-args passthrough mechanism
+                # (and the quoted-segment shlex split) without colliding with a
+                # typed short flag.
                 "--extra-args",
-                "-H 'X-Forwarded-For: 127.0.0.1' -mc 200",
+                "-mr 'X-Forwarded-For: 127.0.0.1' -debug",
             ],
-            ["-H", "X-Forwarded-For: 127.0.0.1", "-mc", "200"],
+            ["-mr", "X-Forwarded-For: 127.0.0.1", "-debug"],
         ),
         (
             "ffuf",
@@ -309,10 +313,12 @@ def test_verb_translates_argv_into_underlying_command(
                 "consume-test",
                 "--timeout",
                 "1800",
+                # -H / -t are now TYPED ffuf flags; use an unmodeled flag here so
+                # this case still exercises the --extra-args passthrough.
                 "--extra-args",
-                "-H 'X-Real-IP: 127.0.0.1' -t 50",
+                "-mr 'X-Real-IP: 127.0.0.1' -v",
             ],
-            ["-H", "X-Real-IP: 127.0.0.1", "-t", "50"],
+            ["-mr", "X-Real-IP: 127.0.0.1", "-v"],
         ),
         (
             "sqlmap",
@@ -690,17 +696,6 @@ def _setup_fake_config(monkeypatch, eng_dir):
 
 def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engagement):
     kali = _setup_fake_config(monkeypatch, fake_engagement)
-    # auth_context is derived from the active identity's mode in the centralized
-    # credential store; stub the store so the derivation has material to read.
-    creds_client = importlib.import_module("assess.lib.creds_client")
-    monkeypatch.setattr(
-        creds_client,
-        "load_identities",
-        lambda _eng, **_kw: {
-            "identities": {"default": {"mode": "manual", "cookies": {"sid": "x"}}},
-            "active_identity": "default",
-        },
-    )
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
@@ -748,7 +743,7 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     assert payload["timeout_seconds_requested"] == 60
     assert payload["working_dir"] == f"/engagements/{fake_engagement.name}"
     assert payload["scope_version"]
-    assert payload["auth_context"] == "manual"
+    assert payload["auth_context"] == "anonymous"
     # P1 schema fix: the CLI must propagate its engagement-wide run_uuid into
     # the POST so the backend's `run_uuid` column matches the wrapper pid file
     # key (`/tmp/vigil-pid-<run_uuid>.pid`). Without this, sweep-orphans cannot
@@ -4587,10 +4582,9 @@ def test_probe_emit_best_effort_never_raises(monkeypatch, fake_engagement):
 def _write_multi_identity_auth(monkeypatch, eng_dir):
     """Stub the centralized credential store with two named identities.
 
-    Identities live in the orchestrator backend now; every identity/auth read in
-    kali routes through ``creds_client.load_identities`` (resolve_identity,
-    identity_names, and kali_output._auth_context -> active_material all funnel
-    through it), so a single stub covers -H injection + auth_context stamping.
+    Identities live in the orchestrator backend now. Explicit ``--identity``
+    reads route through ``creds_client.resolve_identity`` so tests stub that
+    narrow path instead of causing real backend calls.
     """
     creds_client = importlib.import_module("assess.lib.creds_client")
     data = {
@@ -4600,7 +4594,14 @@ def _write_multi_identity_auth(monkeypatch, eng_dir):
         },
         "active_identity": "user_a",
     }
-    monkeypatch.setattr(creds_client, "load_identities", lambda _eng, **_kw: data)
+    def _resolve(_eng, requested):
+        identities = data["identities"]
+        if requested is None:
+            active = data["active_identity"]
+            return (active, identities.get(active, {}))
+        return (requested, identities.get(requested, {}))
+
+    monkeypatch.setattr(creds_client, "resolve_identity", _resolve)
 
 
 def _command_posts(fake_client):
@@ -4645,8 +4646,14 @@ def test_kali_identity_stamps_auth_context_on_command_and_probe(monkeypatch, fak
     assert probes[0]["attack_family"] == "idor"
 
 
-def test_kali_without_identity_keeps_derived_auth_context(monkeypatch, fake_engagement):
+def test_kali_without_identity_uses_anonymous_context_without_credential_lookup(monkeypatch, fake_engagement):
     _write_multi_identity_auth(monkeypatch, fake_engagement)
+    creds_client = importlib.import_module("assess.lib.creds_client")
+    monkeypatch.setattr(
+        creds_client,
+        "resolve_identity",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("unexpected credential lookup")),
+    )
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
         json.dumps({"hostname": "example.com", "engagement_type": "web"})
@@ -4672,7 +4679,7 @@ def test_kali_without_identity_keeps_derived_auth_context(monkeypatch, fake_enga
     )
     probes = _probe_posts(fake_client)
     assert len(probes) == 1
-    assert probes[0]["auth_context"] != "user_a"
+    assert probes[0]["auth_context"] == "anonymous"
 
 
 def test_kali_unknown_identity_does_not_stamp_without_material(monkeypatch, fake_engagement, capsys):
@@ -4733,6 +4740,43 @@ def test_kali_identity_injects_credentials_into_http_command(monkeypatch, fake_e
     assert "Cookie: s=b" in argv_str, captured["argv"]
     assert _command_posts(fake_client)[0]["auth_context"] == "user_b"
     assert _probe_posts(fake_client)[0]["auth_context"] == "user_b"
+
+
+def test_kali_identity_injects_backend_access_token(monkeypatch, fake_engagement):
+    creds_client = importlib.import_module("assess.lib.creds_client")
+    monkeypatch.setattr(
+        creds_client,
+        "resolve_identity",
+        lambda _eng, requested: (
+            requested,
+            {"mode": "manual", "tokens": {"access_token": "token-123"}},
+        ),
+    )
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    (fake_engagement / "scope.json").write_text(
+        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+    )
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    captured = {}
+
+    def _fake_popen(argv, **kw):
+        captured["argv"] = argv
+        return _FakePopen(returncode=0)
+
+    monkeypatch.setattr(kali.subprocess, "Popen", _fake_popen)
+    kali.kali_exec(
+        ["curl", "-s", "https://shop.example.com/api/orders/1"],
+        technique="IDOR", intent="idor as bearer user", probe_kind="payload",
+        phase="consume-test", timeout=60, agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement, engagement_key=fake_engagement.name,
+        tool_name="curl", identity="api_user",
+    )
+    argv_str = " ".join(captured["argv"])
+    assert "Authorization: Bearer token-123" in argv_str, captured["argv"]
+    assert _command_posts(fake_client)[0]["auth_context"] == "api_user"
+    assert _probe_posts(fake_client)[0]["auth_context"] == "api_user"
 
 
 def test_kali_identity_non_http_tool_not_stamped(monkeypatch, fake_engagement, capsys):

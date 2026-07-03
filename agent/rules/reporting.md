@@ -1,6 +1,10 @@
 # Reporting Rules
 
-These rules keep reports human-first, evidence-backed, and severity-disciplined.
+Report-authoring rules: load these when authoring or finalizing a finding's
+report-ready details, in review mode, or drafting an external submission. They
+keep reports human-first, evidence-backed, and severity-disciplined. Hunters do
+not need this file at hunt time — the severity/precondition essence they need is
+carried by `agent/shared-constraints.md` §7 and `agent/rules/hunting.md` §2–§3.
 
 ## 1. State proven attacker outcomes directly
 
@@ -155,6 +159,12 @@ Background that materially matters goes into `Vulnerability Details`, not the op
 
 Preferred pattern: subject-verb-object. The endpoint does X. The attacker sends Y. The response contains Z.
 
+**Descriptors → name what the thing does.**
+
+| Instead of | Write |
+|---|---|
+| `robust` · `comprehensive` · `seamless` · `crucial` · `admirably honest` · `the crux of the matter` | Name what the thing does instead of rating it |
+
 **External submissions → focus on the finding, not the researcher.**
 
 Compliance is assumed. Restating it implies uncertainty:
@@ -271,3 +281,5 @@ External submissions (bug bounty, disclosure email) are read by humans. The patt
 **Header metadata lives in the header.** CWE, CVSS, and VRT declared in header fields need no in-body explanation. One field, one place.
 
 **Preferred phrase:** `this finding` (not `this submission`).
+
+**If flagged as AI-generated:** the correction is shorter, rougher, and more specific — never longer and more polished. Uniform polish is itself the tell.

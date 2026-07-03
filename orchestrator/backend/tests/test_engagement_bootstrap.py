@@ -348,6 +348,54 @@ def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path, monkey
     assert (claude_agents / "vulnerability-analyst.md").exists()
 
 
+def test_aith_engagement_create_writes_engagement_brief_stub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`create_engagement` seeds a STUB `ENGAGEMENT.md` program brief into the run
+    dir so the "no template scaffolded" gap is closed. The stub carries the
+    canonical program-brief section headings (PROMPT-TODO §2 / plan §3.10), points
+    operators at the `agent/references/_template-engagement.md` template, and stays
+    ENGAGEMENT-NEUTRAL — no host/program specifics are baked in at creation time."""
+    _isolate_orchestrator_url(monkeypatch)
+    repo_root = Path(__file__).resolve().parents[3]
+    install_root = tmp_path / "install"
+    sandbox_root = install_root / "agent"
+    sandbox_root.mkdir(parents=True)
+    _copy_agent_fixture(repo_root / "agent", sandbox_root, client="both")
+
+    created = create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="web",
+            target="https://app.example.com",
+            hosts=["app.example.com"],
+        )
+    )
+
+    brief = created.path / "ENGAGEMENT.md"
+    assert brief.exists(), "create_engagement must scaffold an ENGAGEMENT.md program brief"
+    text = brief.read_text(encoding="utf-8")
+
+    # Canonical program-brief section headings (PROMPT-TODO §2 / plan §3.10).
+    for heading in (
+        "## In-Scope / Out-of-Scope",
+        "## Required Request Headers / Deconfliction Marker",
+        "## Rate Cap",
+        "## No-Fire Endpoints",
+        "## Irreversible / Notifying Flows",
+        "## Exfiltration Limits",
+        "## Parked / Non-Submittable Findings",
+        "## Ban-Risk Rules",
+    ):
+        assert heading in text, f"missing program-brief heading: {heading}"
+
+    # Points operators at the structured template (P3-C: agent/references/_template-engagement.md).
+    assert "_template-engagement.md" in text
+
+    # ENGAGEMENT-NEUTRAL: no host/program specifics are seeded at creation time.
+    assert "app.example.com" not in text
+
+
 def test_repair_refreshes_stale_claude_hook_settings(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     install_root = tmp_path / "install"

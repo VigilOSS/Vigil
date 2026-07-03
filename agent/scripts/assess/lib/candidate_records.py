@@ -60,6 +60,27 @@ def signal_has(signals: set[str], *needles: str) -> bool:
     return any(needle in signal for signal in signals for needle in needles)
 
 
+def surface_refs(record: dict) -> list[int]:
+    """Extract candidate ``surface_refs`` as a list of backend surface ids.
+
+    A candidate record may name the backend surfaces its request variant
+    belongs to so ingest can auto-create the surface↔request-variant links.
+    Non-integer / non-positive entries are dropped defensively rather than
+    failing the whole record.
+    """
+    raw = record.get("surface_refs")
+    if isinstance(raw, (int, str)):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    refs: list[int] = []
+    for value in raw:
+        ref = int_value(value)
+        if ref is not None and ref > 0 and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
 def selected_by(record: dict, signals: list[str]) -> str | None:
     selected = record.get("selected_by") or record.get("selected_signal")
     if selected:

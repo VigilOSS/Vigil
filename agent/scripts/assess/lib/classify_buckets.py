@@ -23,10 +23,12 @@ Design notes:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import vuln_taxonomy
 
@@ -55,8 +57,27 @@ from . import vuln_taxonomy
 _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
     (
         "rce",
+        # Param set widened (classify-context-and-surface 2026-06, Part 6): add the
+        # upstream command-exec params our 6-key set lacked — `ping`,`exe`,`func`,
+        # `function`,`cli`,`daemon`. DELIBERATELY NOT `code`: rce(50) outranks
+        # oauth-oidc(35), so a bare `?code=` OAuth callback would mis-cluster as
+        # `gf:rce`. `query`/`load`/`read`/`download`/`upload`/`dir` are also skipped
+        # (owned by other buckets).
         50,
-        frozenset({"cmd", "exec", "command", "shell", "run", "execute"}),
+        frozenset({
+            "cmd", "exec", "command", "shell", "run", "execute",
+            "ping", "exe", "func", "function", "cli", "daemon",
+            # Curated command-exec compound families (Fix 4 precision layer; both
+            # snake_case and concatenated forms). A bare `?cmd_exec=` would
+            # otherwise only reach rce via the capped weak inner-token tier — these
+            # promote the common compound names to the full rce weight.
+            "cmd_exec", "cmdexec", "exec_cmd", "execcmd",
+            "run_cmd", "runcmd", "run_command", "runcommand",
+            "shell_cmd", "shellcmd", "shell_exec", "shellexec",
+            "system_cmd", "systemcmd", "system_command", "systemcommand",
+            "exec_command", "execcommand", "cmd_line", "cmdline",
+            "command_line", "commandline",
+        }),
         ("/exec/", "/cmd/", "/shell/"),
     ),
     (
@@ -73,6 +94,28 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         ),
     ),
     (
+        "secret_vault",
+        # NEW (classify-context-and-surface 2026-06, Part 3 §A.6) → class
+        # `secrets-exposure`. Credential-store / vault APIs: HashiCorp Vault
+        # (`/v1/secret`,`/v1/secrets`,`/v1/auth/token`,`/vault/`), AWS Secrets
+        # Manager (`/secretsmanager`), Azure Key Vault (`/keyvault`), and generic
+        # credential-proxy endpoints (`/credential-stores`,`/credentials/retrieve`,
+        # `/values/retrieve`,`/api/secrets`). Highest NON-RCE weight (45, tied
+        # with graphql and declared AFTER it) because an exposed credential store
+        # is a P1-class finding. Path-only — these surfaces have no single
+        # canonical parameter name. Fragments are boundary-anchored by
+        # `fragment_in_path` (`/vault/` -> core `/vault` + boundary), so
+        # `/v1/secret` matches `/v1/secret`,`/v1/secret/data` but NOT
+        # `/v1/secretstore`; `/v1/secrets` is therefore listed separately.
+        45,
+        frozenset(),
+        (
+            "/v1/secret", "/v1/secrets", "/credential-stores",
+            "/credentials/retrieve", "/values/retrieve", "/vault/",
+            "/keyvault", "/secretsmanager", "/api/secrets", "/v1/auth/token",
+        ),
+    ),
+    (
         "ssrf",
         # Reduced from 45 -> 40 during the upstream review-and-merge: the prior
         # generic key set (`data`, `path`, `view`, `src`) produced too many
@@ -81,27 +124,81 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # Key set NARROWED (§7, override #7): redirect/callback/continue/next/
         # link/dest moved OUT to `redirect`. ssrf still fires on those via its
         # `/proxy/`,`/fetch/` PATH fragments, not the param keys.
+        #
+        # Curated server-fetch compound families (Fix 4 precision layer, mirrors
+        # `redirect`): these name a URL the SERVER fetches (SSRF), as opposed to
+        # the `redirect` family which names a URL the BROWSER follows. Both
+        # `snake_case` and `concatenated` (camelCase-lowercased) forms are listed.
         40,
         frozenset({
             "url", "uri", "host", "port", "feed", "window",
+            "fetch_url", "fetchurl", "proxy_url", "proxyurl",
+            "remote_url", "remoteurl", "webhook_url", "webhookurl",
+            "feed_url", "feedurl", "dest_uri", "desturi",
+            "target_uri", "targeturi", "request_uri", "requesturi",
         }),
         ("/proxy/", "/fetch/"),
     ),
     (
+        "cloud_metadata",
+        # NEW (classify-context-and-surface 2026-06, Part 3 §B.10) → class `ssrf`.
+        # REGEX bucket (override #1): like `api-versioning`, its only match signal
+        # is the `_REGEX_BUCKET_RULES["cloud_metadata"]` alternation — it has NO
+        # key set and NO literal fragments. The patterns catch SSRF-to-IMDS
+        # payloads (Capital-One-class): the AWS link-local IMDS address
+        # `169.254.169.254`, GCP `metadata.google.internal`, the IMDS PATHS
+        # (`/latest/meta-data`, `/computeMetadata`, `/metadata/instance`), and the
+        # obfuscated decimal/hex forms of the link-local address
+        # (`2852039166`, `0xA9FEA9FE`). Because the address most often sits in a
+        # QUERY-PARAM VALUE or HOST of a proof URL (not the url_path), `classify_row`
+        # also runs these rules against the FULL `url` in the supplementary
+        # `_FULL_URL_REGEX_BUCKETS` pass (the regex still also runs against url_path
+        # in `bucket_matches`, catching the path-form IMDS literals). Weight 40
+        # (tied with `ssrf`); declared AFTER `ssrf` so a co-fire on a shared
+        # weight-40 SSRF surface keeps the existing cluster by the
+        # first-at-max-weight tie-break, with `cloud_metadata` additively recorded.
+        40,
+        frozenset(),
+        (),
+    ),
+    (
         "sqli",
+        # Param set widened (classify-context-and-surface 2026-06, Part 6): add the
+        # SQL-keyword-flavored params upstream carries — `where`,`select`,`table`,
+        # `column`,`field`,`from`,`row`,`sleep`,`fetch`. `where`/`select` also
+        # overlap the `nosqli` bucket via `$`-operators; both firing is fine (the
+        # reason chain is multi-bucket).
         40,
         frozenset({
             "id", "uid", "pid", "sid", "tid", "order", "sort", "filter",
             "q", "search", "query", "category",
+            "where", "select", "table", "column", "field", "from", "row",
+            "sleep", "fetch",
         }),
         (),
     ),
     (
         "lfi",
+        # Param set widened (classify-context-and-surface 2026-06, Part 6): add the
+        # directory/traversal params upstream carries that we lacked — `folder`,
+        # `root`, `dir`, `inc` (include shorthand), `conf` (config inclusion).
         40,
         frozenset({
             "file", "path", "doc", "document", "page", "pg", "template",
             "load", "include", "read",
+            "folder", "root", "dir", "inc", "conf",
+            # Curated file-inclusion / traversal compound families (Fix 4 precision
+            # layer; both snake_case and concatenated forms). A bare `?file_path=`
+            # would otherwise only reach lfi via the capped weak inner-token tier;
+            # these promote the common compound names to the full lfi weight.
+            "file_path", "filepath", "download_path", "downloadpath",
+            "include_path", "includepath", "config_path", "configpath",
+            "config_file", "configfile", "log_path", "logpath",
+            "log_file", "logfile", "doc_path", "docpath",
+            "local_path", "localpath", "root_path", "rootpath",
+            "base_path", "basepath", "template_path", "templatepath",
+            "read_file", "readfile", "load_file", "loadfile",
+            "include_file", "includefile",
         }),
         (),
     ),
@@ -138,6 +235,29 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         ),
     ),
     (
+        "dotnet_handler",
+        # NEW (classify-context-and-surface 2026-06, Part 3 §A.1) → class
+        # `deserialization`. ASP.NET / WCF handler surfaces that the typer would
+        # otherwise drop to `unknown` (Issue A, 835 rows). Catches:
+        # WebResource/ScriptResource padding oracle (CVE-2010-3332),
+        # ViewState/Telerik deserialization RCE (CVE-2019-18935), WCF/ASMX SOAP
+        # services, ELMAH log disclosure (`/elmah.axd`), SharePoint `_vti_bin`.
+        # Declared AFTER `deserialization` (both weight 40) so the shared
+        # `__viewstate` param resolves to `gf:deserialization` by the
+        # first-at-max-weight tie-break — the pinned `__VIEWSTATE`→gf:deserialization
+        # cluster (test_classify_buckets_storage_deser_debug) is preserved;
+        # dotnet_handler is recorded in the reason chain alongside it. The
+        # leading-dot extension fragments (`.axd`,`.ashx`,`.asmx`,`.svc`) are
+        # boundary-anchored by `fragment_in_path` exactly like interestingext's
+        # `.env`/`.bak`, so `/trace.axd` matches but `/report.axdx` does NOT.
+        40,
+        frozenset({"__viewstate", "__eventvalidation"}),
+        (
+            ".axd", ".ashx", ".asmx", ".svc", "/_vti_bin/", "/trace.axd",
+            "/elmah.axd",
+        ),
+    ),
+    (
         "img_traversal",
         # NEW (review-and-merge): image-serving endpoints that take a path
         # fragment are a classic LFI variant — `/img?src=../../etc/passwd`
@@ -157,6 +277,15 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # distinct from trust_surface's `/oauth` fragment — `/oauth/callback`
         # does NOT contain `/oauth2/` (the `2` is required), so trust_surface
         # keeps owning the bare callback (regression pin §10.5).
+        #
+        # Extended (classify-context-and-surface 2026-06, §C.11) with the Dynamic
+        # Client Registration endpoint `/connect/register` (DCR abuse — DEEPSEEK
+        # VA-707 surface). It is declared here, ahead of trust_surface's `/connect`
+        # fragment, so a DCR route clusters `gf:oauth-oidc`, not the generic
+        # callback bucket. `/oidc/register` is already subsumed by `/oidc/`. The
+        # PingFederate `/as/*.oauth2` fragments live in the `idp_admin` bucket
+        # (which models the IdP admin/realm surface) rather than being duplicated
+        # here.
         35,
         frozenset({
             "client_id", "redirect_uri", "response_type", "scope", "state",
@@ -167,6 +296,7 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             "/.well-known/oauth-authorization-server",
             "/oauth2/", "/oidc/",
             "/connect/authorize", "/connect/token", "/connect/userinfo",
+            "/connect/register",
             "/jwks.json", "/.well-known/jwks.json",
         ),
     ),
@@ -177,11 +307,25 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # (next char `2` is not a boundary) — `/saml2` is listed separately.
         # Declared before `trust_surface` (weight 35) for the same tie-break
         # reason as `oauth-oidc`.
+        #
+        # Fragment set widened (classify-context-and-surface 2026-06, Part 3 §C.12):
+        # add the ADFS federation-metadata endpoint `/federationmetadata` (SAML
+        # metadata disclosure / SP enumeration). It is a metadata-only surface with
+        # no auth-fragment sibling, so it cleanly raises previously-unmatched
+        # federationmetadata URLs from 0 to `gf:sso`. The other §C.12 entries are
+        # DELIBERATELY NOT added (see Part 3 §C.12 deviation note): `/saml/metadata`
+        # and `/adfs/ls` are already covered by the existing `/saml` and `/adfs/`
+        # fragments (no-ops), and `/simplesaml`/`/shibboleth.sso` are NOT added
+        # because the canonical product endpoints under them (`/Shibboleth.sso/Login`,
+        # `/Shibboleth.sso/Logout`, `/simplesaml/logout.php`) carry an auth fragment
+        # that `_suppress_auth_on_sso_route` would then suppress — DEMOTING those
+        # rows from `gf:auth` (40) to `gf:sso` (35), which is a non-additive score
+        # decrease, so they are left out.
         35,
         frozenset({"samlresponse", "samlrequest", "relaystate", "wctx", "wresult"}),
         (
             "/sso/", "/sso", "/saml", "/saml2", "/cas/", "/adfs/", "/fed/",
-            "/sts/",
+            "/sts/", "/federationmetadata",
         ),
     ),
     (
@@ -237,6 +381,86 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         (),
     ),
     (
+        "idp_admin",
+        # NEW (classify-context-and-surface 2026-06, Part 3 §A.5) → class
+        # `auth-bypass`. Identity-provider ADMIN / realm-config surfaces:
+        # Keycloak (`/auth/realms`,`/realms/` — v17+ dropped the `/auth` prefix,
+        # `/auth/admin`,`/admin/master/console`), PingFederate
+        # (`/as/authorization.oauth2`,`/as/token.oauth2`,`/as/clients.oauth2`),
+        # generic IdP (`/idp/`,`/nidp/`), and ADFS (`/adfs/ls`). Complements
+        # `oauth-oidc` (which models the FLOW) by modelling the admin/realm
+        # surface. Weight 35; declared AFTER `sso`/`trust_surface` (also 35) so a
+        # co-fire on a shared fragment keeps the EXISTING cluster by the
+        # first-at-max-weight tie-break — `/adfs/ls` stays `gf:sso` (sso's
+        # `/adfs/` fragment) and `/as/token.oauth2` stays `gf:trust_surface`
+        # (trust_surface's `/token` fragment), with `idp_admin` additively
+        # recorded in the reason chain. Path-only (no canonical param key).
+        35,
+        frozenset(),
+        (
+            "/auth/realms", "/realms/", "/auth/admin", "/admin/master/console",
+            "/as/authorization.oauth2", "/as/token.oauth2", "/as/clients.oauth2",
+            "/idp/", "/nidp/", "/adfs/ls",
+        ),
+    ),
+    (
+        "wordpress",
+        # NEW (classify-context-and-surface 2026-06, Part 3 §A.2) → class
+        # `user-enumeration`. WordPress surfaces the boundary matcher misses today
+        # (Issue 3): REST user/media enum (`/wp-json`,`/wp-json/wp/v2/users`),
+        # XML-RPC pingback SSRF/brute (`/xmlrpc.php`), WP-Cron (`/wp-cron.php`),
+        # the debug log (`/wp-content/debug.log`), and login/admin
+        # (`/wp-login.php`,`/wp-admin` — note `/wp-admin` carries `-admin`, NOT the
+        # `/admin` segment debug_logic looks for, so only this bucket catches it).
+        # Param keys: `author` (numeric -> user enum) and `rest_route`. Weight 35;
+        # declared BEFORE `cms_db_admin` (also 35) so the shared `/wp-admin`
+        # fragment clusters as `gf:wordpress` by the first-at-max-weight tie-break.
+        35,
+        frozenset({"author", "rest_route"}),
+        (
+            "/wp-json", "/wp-login.php", "/wp-admin", "/xmlrpc.php",
+            "/wp-cron.php", "/wp-content/debug.log", "/wp-json/wp/v2/users",
+        ),
+    ),
+    (
+        "cms_db_admin",
+        # NEW (classify-context-and-surface 2026-06, Part 3 §A.3) → class
+        # `auth-bypass`. CMS + DB admin panels that the `/admin` boundary matcher
+        # misses (Issue 3): Joomla (`/administrator`), Umbraco, Sitecore, TYPO3,
+        # Ghost, phpMyAdmin (`/phpmyadmin`,`/pma`), Adminer
+        # (`/adminer`,`/adminer.php`), generic DB admin (`/dbadmin`), Tomcat
+        # (`/manager/html`), and the `/admin-console`/`/wp-admin` consoles
+        # (hyphenated, so debug_logic's `/admin` segment never matches them).
+        # Weight 35; declared AFTER `wordpress` so `/wp-admin` clusters as
+        # `gf:wordpress`. Path-only.
+        35,
+        frozenset(),
+        (
+            "/administrator", "/umbraco", "/sitecore", "/typo3", "/ghost",
+            "/phpmyadmin", "/adminer", "/adminer.php", "/pma", "/dbadmin",
+            "/manager/html", "/admin-console", "/wp-admin",
+        ),
+    ),
+    (
+        "nosqli",
+        # NEW (classify-context-and-surface 2026-06, Part 3 §A.8) → class `nosqli`.
+        # Mongo/Elasticsearch operator-injection surfaces (gf had no NoSQL concept).
+        # The param keys are the Mongo/ES query operators (`$ne`,`$gt`,`$gte`,`$lt`,
+        # `$regex`,`$where`,`$in`,`$or`,`$exists`); a compound key such as
+        # `username[$ne]` is decomposed by `expand_compound_key` (which splits on
+        # `[`/`]`) into the `$ne` token, so the operator survives into the matcher.
+        # Path fragments are the ES/Mongo search/aggregation routes (`/_search`,
+        # `/aggregate`, `/_msearch`). `$where`/`$gt` also overlap the `sqli`
+        # SQL-keyword params (`where`,...) — both firing is fine (multi-bucket
+        # reason chain). Weight 35; declared AFTER `cms_db_admin` (also 35).
+        35,
+        frozenset({
+            "$ne", "$gt", "$gte", "$lt", "$regex", "$where", "$in", "$or",
+            "$exists",
+        }),
+        ("/_search", "/aggregate", "/_msearch"),
+    ),
+    (
         "upload_fields",
         # NEW (review-and-merge): parameter-level signal for upload surfaces
         # that may not match the `trust_surface` path heuristic (e.g.,
@@ -273,8 +497,13 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # existing fragments and ADD only compound/specific fragments. Bare
         # `/health`,`/info`,`/status`,`/version`,`/metrics`,`/env` are
         # deliberately NOT added (they flood content corpora).
+        #
+        # Param set added (classify-context-and-surface 2026-06, Part 6): this
+        # bucket was path-only; `?debug=1`/`?dbg=1`/`?test=1` toggles are a real
+        # debug-mode signal it missed. `admin`/`grant`/`access` are kept OUT of the
+        # debug params (those route to `privileged_action`).
         30,
-        frozenset(),
+        frozenset({"debug", "dbg", "test"}),
         (
             "/admin", "/debug", "/dbg", "/dev", "/staging", "/stage",
             "/test", "/internal", "/mgmt", "/manage", "/console",
@@ -285,6 +514,14 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             "/package.json", "/actuator/health", "/actuator/env",
             "/actuator/mappings", "/actuator/metrics", "/actuator/beans",
             "/prometheus",
+            # ADDED (classify-context-and-surface 2026-06, Part 3 §C.13): build /
+            # dependency manifests + Java deployment descriptor — source/dependency
+            # disclosure, mirroring the existing `/package.json` entry. Leading-slash
+            # form (not the plan's bare `composer.json` shorthand) for the same
+            # boundary precision as `/package.json` (so `/mycomposer.json` does NOT
+            # match). The VCS/IDE dotfiles (`.svn`,`.hg`,...) are in `interestingext`.
+            "/composer.json", "/composer.lock", "/yarn.lock",
+            "/package-lock.json", "/web-inf/web.xml",
         ),
     ),
     (
@@ -328,19 +565,129 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         ("/jwt", "/bearer", "/refresh-token"),
     ),
     (
+        "servicenow",
+        # NEW (classify-context-and-surface 2026-06, Part 3 §A.4) → class `idor`.
+        # ServiceNow guest Service Portal / GlideRecord / Struts `.do` surfaces
+        # (Issue B): REST table API (`/api/now`), UI actions (`/nav_to.do`,
+        # `auth_redirect.do`), `sys_*`/`x_*` scoped tables (`/sys_`,`/x_`), the
+        # GlideRecord `/$` and Service Portal `/sp?` entry points. Param keys are
+        # the ServiceNow `sysparm_*` family + `glide_sso_id`. Generic — ServiceNow
+        # is a ubiquitous enterprise SaaS, not a Acme artifact. Weight 30. The
+        # `auth_redirect.do?sysparm_url=` open-redirect/SSO surface clusters here
+        # via the `sysparm_url` WHOLE key (servicenow wins as the strong match);
+        # Fix 4's tiered inner-token mechanism (now landed) additionally exposes the
+        # inner `url` token, so the row ALSO carries `ssrf`/`redirect` as
+        # `secondary_buckets` (cross-routing), without disturbing the servicenow
+        # cluster.
+        30,
+        frozenset({
+            "sysparm_url", "sysparm_query", "sysparm_table", "glide_sso_id",
+        }),
+        (
+            "/api/now", "/nav_to.do", "auth_redirect.do", "/sys_", "/$",
+            "/sp?", "/x_",
+        ),
+    ),
+    (
+        "privileged_action",
+        # NEW (classify-context-and-surface 2026-06, Part 3 §A.9) → class `bfla`.
+        # Two complementary match signals:
+        #   1. The `path_has_privileged_action` predicate appended in `classify_row`
+        #      (mirroring the `path_has_object_ref`->idor append), which requires a
+        #      state-change verb SEGMENT (`/grant`,`/revoke`,`/approve`,... — see
+        #      `_PRIVILEGED_ACTION_VERBS`) GUARDED by an API/version sibling segment
+        #      or an embedded object reference. That precision override stops a
+        #      content slug like `/transfer-your-number` (rejected by the segment
+        #      split) or a bare `/transfer` page from firing.
+        #   2. The param-key form of those state verbs (added Part 6): `grant`,
+        #      `delete`, `create`, `disable`, `enable`, `toggle`, `reset`, `rename`,
+        #      `modify`, `alter`, `clone` — `?delete=`/`?grant=` reinforce the
+        #      path-based signal. (Upstream's catch-all `ssrf.json` is really a
+        #      "dangerous params" list; these are its state-change param NAMES.)
+        # The `path_has_privileged_action` append in `classify_row` is deduped
+        # against a param-key match so the reason chain never lists the bucket
+        # twice. Path fragments stay empty (the path signal is the predicate, not a
+        # literal fragment). Weight 30; declared after `servicenow` (30).
+        30,
+        frozenset({
+            "grant", "delete", "create", "disable", "enable", "toggle",
+            "reset", "rename", "modify", "alter", "clone",
+        }),
+        (),
+    ),
+    (
+        "devops_console",
+        # NEW (classify-context-and-surface 2026-06, Part 3 §A.7) → class
+        # `debug-exposure`. Ops dashboards / metrics & registry planes that are
+        # routinely deployed unauthenticated: Grafana (`/grafana`,
+        # `/api/datasources` — CVE-2026-27876 family), Jenkins (`/jenkins`),
+        # Jolokia (`/jolokia` — JMX RCE), Hystrix (`/hystrix`), the ELK stack
+        # (`/kibana`, `/_cat/`, `/solr/`, `/druid`), Go pprof (`/debug/pprof`),
+        # the Docker registry catalog (`/v2/_catalog`), and the GitLab projects
+        # API (`/api/v4/projects`). Path-only (no canonical param key). Weight 30;
+        # declared AFTER `debug_logic` (also 30) so `/debug/pprof` — which also
+        # matches debug_logic's `/debug` fragment — keeps cluster `gf:debug_logic`
+        # by the first-at-max-weight tie-break, with `devops_console` additively
+        # recorded in the reason chain.
+        30,
+        frozenset(),
+        (
+            "/grafana", "/api/datasources", "/jenkins", "/jolokia", "/hystrix",
+            "/kibana", "/_cat/", "/solr/", "/druid", "/debug/pprof",
+            "/v2/_catalog", "/api/v4/projects",
+        ),
+    ),
+    (
         "redirect",
+        # Param set widened (classify-context-and-surface 2026-06, Part 6): add the
+        # single-token open-redirect params `goto`,`rt`,`to`,`domain`,`site`.
+        # `to`/`domain`/`site` are mildly generic but only affect ordering.
+        #
+        # The compound `*_url`/`*_uri`/`*_to` open-redirect family is handled on TWO
+        # layers (Fix 4, LANDED — see DRIFT.md "Fix 4"): the curated whole-key
+        # members below match the common names STRONGLY and PRECISELY here, so a
+        # bare `?return_url=` clusters `gf:redirect` (NOT `gf:ssrf` — the inner
+        # `url` token alone would mis-route to ssrf@40 in the generic rescue); and
+        # `classify_row`'s tiered inner-token (`_weak_token_matches`) backstop
+        # catches novel compound names. This mirrors the `idor` bucket's enumerated
+        # `*_id` whole-key idiom (the codebase's established way to handle compound
+        # keys without naively tokenizing high-weight generics like `id`/`url`).
         25,
         frozenset({
             "redirect", "return", "returnto", "return_to", "next", "redir",
             "forward", "continue", "url", "rurl", "u", "target", "dest",
             "destination", "redirect_uri", "go",
+            "goto", "rt", "to", "domain", "site",
+            # Curated compound open-redirect families. Both `snake_case` and
+            # `concatenated` lowercased forms are listed because the typer
+            # lowercases keys before matching, so camelCase (`returnUrl`) arrives
+            # as the concatenated form (`returnurl`).
+            "return_url", "returnurl", "return_uri", "returnuri",
+            "redirect_url", "redirecturl", "redirect_to", "redirectto",
+            "callback_url", "callbackurl", "callback_uri", "callbackuri",
+            "next_url", "nexturl", "continue_url", "continueurl",
+            "goto_url", "gotourl", "success_url", "successurl",
+            "failure_url", "failureurl", "back_url", "backurl",
+            "forward_url", "forwardurl", "dest_url", "desturl",
+            "origin_url", "originurl", "return_path", "returnpath",
         }),
         (),
     ),
     (
         "ssti",
+        # Curated template-injection compound families (Fix 4 precision layer; both
+        # snake_case and concatenated forms). The render-flavored compounds live
+        # here; the path/file-flavored `template_path`/`template_file` go to `lfi`
+        # (file inclusion), which outranks ssti(25) anyway.
         25,
-        frozenset({"template", "tpl", "theme", "layout", "view"}),
+        frozenset({
+            "template", "tpl", "theme", "layout", "view",
+            "template_name", "templatename", "template_string", "templatestring",
+            "template_content", "templatecontent", "render_template", "rendertemplate",
+            "page_template", "pagetemplate", "email_template", "emailtemplate",
+            "custom_template", "customtemplate", "template_engine", "templateengine",
+            "template_code", "templatecode",
+        }),
         (),
     ),
     (
@@ -373,8 +720,20 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # `/files/*.pdf`). Use Domino-specific discriminators (`$file`,`.nsf`,
         # `files.nsf`,`docscat`,`didc`) PLUS cloud (`/s3/`,`/gcs/`,`/blob/`,
         # `/bucket/`). `key`/`object` dropped from the key set (too generic).
+        #
+        # Param set widened (classify-context-and-surface 2026-06, Part 3 §C.14):
+        # add the S3/GCS/Azure bucket-LISTING params (`list-type`, `marker`,
+        # `delimiter`, `continuation-token`; `prefix` was already present) so an
+        # open-bucket object-enumeration URL fires this bucket. The cloud HOST
+        # markers from §C.14 (`.s3.amazonaws.com`, `blob.core.windows.net`,
+        # `storage.googleapis.com`) live in the URL AUTHORITY, not the url_path, so
+        # they are matched via `_REGEX_BUCKET_RULES["object-storage"]` in the
+        # supplementary `_FULL_URL_REGEX_BUCKETS` full-`url` pass in `classify_row`.
         25,
-        frozenset({"bucket", "blob", "prefix"}),
+        frozenset({
+            "bucket", "blob", "prefix",
+            "list-type", "marker", "delimiter", "continuation-token",
+        }),
         (
             "$file", ".nsf", "files.nsf", "docscat", "didc",
             "/s3/", "/gcs/", "/blob/", "/bucket/",
@@ -418,12 +777,35 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # itself is the finding (a 200 on /backup.sql is the vuln); we
         # mainly want it in a `gf:interestingext` cluster instead of
         # buried in a `path:` bucket.
+        #
+        # Fragments widened (classify-context-and-surface 2026-06, Part 6): add the
+        # backup/cred/cert/db extensions from `1ndianl33t/interestingEXT.json` we
+        # lacked. DELIBERATELY EXCLUDE `.xml`/`.json`/`.csv`/`.yml`/`.pdf`/`.doc`/
+        # `.txt` — they are legitimate data files already typed `data` and would
+        # flood the bucket. Extension fragments are boundary-anchored by
+        # `fragment_in_path` exactly like `.bak`, so `/db.backup` matches `.backup`
+        # but `/notes.backupx` does NOT.
+        #
+        # Fragments widened (classify-context-and-surface 2026-06, Part 3 §C.13):
+        # add the VCS / IaC / IDE dotfile artifacts (`.svn`, `.hg`, `.gitlab-ci.yml`,
+        # `.ds_store`, `.terraform`, `.tfstate`) — source/config disclosure surfaces
+        # (`.git`/`.env` are already covered by debug_logic). The build-manifest
+        # FILENAMES from §C.13 (`composer.json`, `composer.lock`, `yarn.lock`,
+        # `package-lock.json`, `web-inf/web.xml`) are added to `debug_logic` instead,
+        # mirroring its existing `/package.json` entry. The specific name
+        # `.gitlab-ci.yml` does NOT reintroduce the generic `.yml` flood that Part 6
+        # deliberately excluded — boundary-anchoring requires the full distinctive
+        # token, so `/config.yml` still does NOT match.
         10,
         frozenset(),
         (
             ".bak", ".old", ".sql", ".swp", ".swo",
             ".config", ".env", ".conf", ".ini",
             ".pem", ".key", ".log",
+            ".backup", ".bkp", ".cfg", ".cnf", ".crt", ".csr",
+            ".passwd", ".pwd", ".mdb", ".rdp", ".dat", ".pac",
+            ".svn", ".hg", ".gitlab-ci.yml", ".ds_store", ".terraform",
+            ".tfstate",
         ),
     ),
 )
@@ -432,6 +814,14 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
 # path-object-reference rule in `classify_row` cannot drift from the declared
 # bucket weight if it is ever retuned.
 _IDOR_WEIGHT: int = next(weight for name, weight, _, _ in _BUCKETS if name == "idor")
+
+# Weight of the `privileged_action` bucket. Like `_IDOR_WEIGHT`, resolved from
+# the table so the `path_has_privileged_action` predicate (which appends the
+# match in `classify_row`, not via `bucket_matches`) cannot drift from the
+# declared bucket weight if it is ever retuned.
+_PRIVILEGED_ACTION_WEIGHT: int = next(
+    weight for name, weight, _, _ in _BUCKETS if name == "privileged_action"
+)
 
 
 # Regex-fragment rules (override #1), keyed by the bucket name they belong to.
@@ -447,9 +837,47 @@ _IDOR_WEIGHT: int = next(weight for name, weight, _, _ in _BUCKETS if name == "i
 # `/v3`, `/dhrp/rns/v3/actions`, `/api/v1/`; rejects `/version/1.0` (segment
 # `version`), `/v/1` (segment `v`, no digits), `/vue/app` (segment `vue`),
 # `/v1beta/x` (the lookahead rejects `beta` after the digits).
+#
+# `cloud_metadata` (§B.10) and `object-storage` (§C.14, host markers) are
+# FULL-URL regex buckets: their signal lives in the URL authority / query string,
+# not just the url_path. `bucket_matches` runs these rules against `url_path` like
+# any regex bucket (catching the path-form IMDS literals), and `classify_row`
+# additionally runs them against the FULL `url` for the buckets listed in
+# `_FULL_URL_REGEX_BUCKETS` so a `169.254.169.254` proof param or an
+# `*.s3.amazonaws.com` host also fires. The cloud_metadata path literals are
+# authored LOWERCASE and boundary-anchored: `regex_fragment_in_path` compiles
+# WITHOUT `re.IGNORECASE` and both match sites lowercase the haystack first, so a
+# literal-uppercase pattern could never match and an un-anchored substring would
+# false-positive (`/metadata/instance` on `/api/metadata/instances`). Hence
+# `/computemetadata` matches `/computeMetadata/...` after lowercasing, and the
+# `(?=[/?#]|$)` boundary keeps `/latest/meta-data` off `/.../meta-database` and
+# `/metadata/instance` off `/api/metadata/instances`. The obfuscated hex form
+# keeps its `[aA]`/`[fF]` classes as belt-and-suspenders.
 _REGEX_BUCKET_RULES: dict[str, tuple[str, ...]] = {
     "api-versioning": (r"/v[0-9]+(?=[/?#]|$)",),
+    "cloud_metadata": (
+        r"169\.254\.169\.254",
+        r"metadata\.google\.internal",
+        r"/latest/meta-data(?=[/?#]|$)",
+        r"/computemetadata(?=[/?#]|$)",
+        r"/metadata/instance(?=[/?#]|$)",
+        r"0x[aA]9[fF][eE][aA]9[fF][eE]",
+        r"\b2852039166\b",
+    ),
+    "object-storage": (
+        r"\.s3\.amazonaws\.com",
+        r"blob\.core\.windows\.net",
+        r"storage\.googleapis\.com",
+    ),
 }
+
+# Regex buckets whose `_REGEX_BUCKET_RULES` patterns must ALSO be tested against
+# the FULL `url` (authority + query), not only the url_path. `classify_row` runs
+# this supplementary pass after `bucket_matches`, appending a matched bucket
+# (deduped) exactly like the idor / privileged_action path-predicate appends.
+# Boost-only: a missing `url` (the default-kwarg test convention) skips the pass
+# entirely, so every pinned arithmetic / reason-chain test stays byte-identical.
+_FULL_URL_REGEX_BUCKETS: tuple[str, ...] = ("cloud_metadata", "object-storage")
 
 _regex_fragment_cache: dict[str, "re.Pattern[str]"] = {}
 
@@ -517,6 +945,12 @@ _TYPE_FLOOR: dict[str, tuple[str, int]] = {
     "debug_config": ("debug_logic", 35),
     "workflow": ("idor", 30),
     "event_feed": ("ssrf", 25),
+    # privileged_write (classify-context-and-surface 2026-06, Part 3 §D.16): the
+    # `privileged_write` surface_type already exists in SURFACE_TYPE_TO_CLASSES;
+    # floor a row a producer typed `privileged_write` to the `privileged_action`
+    # bucket (the bfla surface added in Phase 2a) at weight 30 so it routes to the
+    # bfla specialist even when no state-verb path predicate / param key fired.
+    "privileged_write": ("privileged_action", 30),
 }
 
 
@@ -604,6 +1038,50 @@ def path_has_object_ref(url_path_lower: str) -> bool:
             seen_context = True
     return False
 
+
+# Privileged-action verb SEGMENTS (classify-context-and-surface 2026-06, Part 3
+# §A.9). State-change verbs that, as a standalone path segment, signal a
+# function-level-authz / business-logic surface. Stored as the segment form (no
+# leading slash) since `path_has_privileged_action` matches against
+# `url_path.split("/")` segments — so `/assume-role/...` matches the
+# `"assume-role"` segment exactly, while the boundary-anchored `fragment_in_path`
+# semantics (which the predicate does NOT use) are unnecessary here.
+_PRIVILEGED_ACTION_VERBS: frozenset[str] = frozenset({
+    "grant", "revoke", "approve", "reject", "impersonate", "transfer",
+    "sendotp", "promote", "setrole", "disable", "deactivate", "sudo",
+    "assume-role",
+})
+# A bare version path segment (`v1`,`v2`,...). Together with a literal `api`
+# segment this is the API-route precision sibling that distinguishes a real
+# privileged endpoint from a content slug. (Distinct from the `api-versioning`
+# regex bucket rule, which matches the version segment WITHIN a path string; this
+# one is anchored to a SINGLE already-split segment.)
+_API_VERSION_SEG_RE = re.compile(r"^v[0-9]+$")
+
+
+def path_has_privileged_action(url_path_lower: str) -> bool:
+    """True if the RAW lowercased path embeds a state-change verb SEGMENT that is
+    GUARDED by an API/version sibling segment or an embedded object reference (§A.9).
+
+    Precision override (documented in the `privileged_action` `_BUCKETS` comment):
+    a state-change verb alone is NOT enough — a bare content page such as
+    `/transfer` (no API/version sibling, no object-ref) or the hyphenated content
+    slug `/transfer-your-number` (whose single segment is not the bare verb) does
+    NOT fire. A verb co-occurring with an `api`/`v<n>` sibling (`/api/users/grant`,
+    `/v2/accounts/transfer`) or with a path object-ref (`/users/1024/revoke`) DOES.
+    Runs on the RAW url only — normalization (§5) is never consulted here.
+    """
+    segments = [s for s in url_path_lower.split("/") if s]
+    if not any(seg in _PRIVILEGED_ACTION_VERBS for seg in segments):
+        return False
+    has_api_sibling = any(
+        seg == "api" or _API_VERSION_SEG_RE.match(seg) for seg in segments
+    )
+    if has_api_sibling:
+        return True
+    return path_has_object_ref(url_path_lower)
+
+
 BUCKET_SKILLS: dict[str, tuple[str, ...]] = vuln_taxonomy.derive_bucket_skills()
 
 
@@ -634,14 +1112,102 @@ INERT_TYPES: frozenset[str] = frozenset(
 _INERT_TYPES = INERT_TYPES
 
 
+# ---------------------------------------------------------------------------- #
+# Classifier version stamp (reclassification staleness).
+#
+# `CLASSIFIER_VERSION` is a short, cross-process-DETERMINISTIC digest of EVERY
+# module-level table/constant that `classify_row` (and the helpers it calls)
+# reads to produce a row's `priority_score` / `cluster_key` / `priority_reason`
+# / `terminal_reason` / `matched_buckets`. That is NOT just the four headline
+# tables (`_BUCKETS`, `_REGEX_BUCKET_RULES`, `_TYPE_FLOOR`, `INERT_TYPES`): it
+# also covers the path-predicate signals (`_PRIVILEGED_ACTION_VERBS`,
+# `_FULL_URL_REGEX_BUCKETS`, the object-ref / api-version / cluster regexes and
+# `_PLACEHOLDER_TOKENS` / `_CLUSTER_PLACEHOLDERS`), the boost-only context tables
+# (`_NONPROD_HOST_LABEL_RE`, `_NONDEFAULT_PORTS`, `_LIVE_STATUS_TOKENS`), the
+# dead-archive demotion tables (`_GAU_ARCHIVE_SOURCE`, `_DEAD_LIVE_STATUS_TOKENS`),
+# the weak-token cap / fragment boundary / camelCase splitter, the SAML-auth
+# fragments, the upload-shadow set, AND a hand-maintained `_CLASSIFIER_LOGIC_REVISION`
+# integer that maintainers MUST bump for any `classify_row` LOGIC change not
+# captured by one of those data tables (e.g. an edit to the +15/+5 context
+# weights or a branch reordering). Constants DERIVED from `_BUCKETS` via `next(...)`
+# (`_IDOR_WEIGHT`, `_PRIVILEGED_ACTION_WEIGHT`, `_INTERESTINGEXT_WEIGHT`,
+# `_AUTH_KEY_SET`, `_SSO_PATH_FRAGMENTS`) are covered transitively — they cannot
+# change without `_BUCKETS` itself changing — so they are not re-listed.
+# `db_insert_work_item()` stamps it inline at ingest and
+# `classify-work` re-stamps it on every re-classification, so a later
+# `classify-work --reclassify-stale` can tell rows scored under an OLD taxonomy
+# from rows already at the current one — restamping only the stale
+# ones instead of the all-or-nothing `--reclassify-all`. A taxonomy edit to ANY
+# of the above tables bumps the digest so `--reclassify-stale` picks up the rows
+# it changes; keeping this input set complete is what makes that guarantee hold.
+#
+# DETERMINISM IS LOAD-BEARING (do not "simplify" this). The digest MUST be
+# identical across separate Python processes (the ingest process and the
+# `--reclassify-stale` process compute it independently); if it were not, every
+# row would always look stale and every run would reclassify the whole corpus.
+# That rules out `repr(frozenset(...))`, `str(set(...))`, and the builtin
+# `hash()` — all three are PYTHONHASHSEED-randomized, so their output varies run
+# to run. The same trap is documented at
+# `src/vigil_cli/bench/factory/axes.py:116` (blake2s chosen over `hash()` for
+# exactly this reason).
+#
+# We instead CANONICALIZE the input: recursively turn every set/frozenset into a
+# SORTED list (order-independent), leave tuples/lists in declaration order
+# (order IS meaningful for `_BUCKETS` tie-breaks), sort dict keys, then hash the
+# `sort_keys=True` JSON. A comment/refactor edit that does not change the tables
+# leaves the digest byte-identical; a real taxonomy edit (new bucket, changed
+# weight, new inert type, new regex rule) bumps it.
+def _canonicalize(obj: Any) -> Any:
+    """Return a JSON-serializable, order-canonical mirror of ``obj``.
+
+    Sets/frozensets → sorted lists (membership, not iteration order, is what
+    matters). Dicts → key-sorted dicts with canonicalized values. Tuples/lists
+    → lists with canonicalized elements, order PRESERVED (declaration order is
+    semantically significant for `_BUCKETS`). Compiled ``re.Pattern`` objects →
+    their source `.pattern` string (a bare Pattern is NOT JSON-serializable and
+    would crash `json.dumps`; the digest inputs pass `.pattern` explicitly, but
+    this keeps a stray Pattern from silently breaking the stamp). Scalars pass
+    through unchanged.
+    """
+    if isinstance(obj, re.Pattern):
+        return obj.pattern
+    if isinstance(obj, (set, frozenset)):
+        return sorted(_canonicalize(item) for item in obj)
+    if isinstance(obj, dict):
+        return {key: _canonicalize(value) for key, value in sorted(obj.items())}
+    if isinstance(obj, (list, tuple)):
+        return [_canonicalize(item) for item in obj]
+    return obj
+
+
+# `_CLASSIFIER_VERSION_INPUTS` and `CLASSIFIER_VERSION` are assembled at the END
+# of this module (see "Classifier version stamp — digest assembly" below): the
+# input set intentionally spans tables/regexes/scalars declared throughout the
+# file (context/demotion tables, weak-token cap, cluster placeholders, ...), so
+# the dict cannot be built here without forward-referencing names that do not
+# exist yet. `_canonicalize` (above) is the only piece needed at this point.
+
+# Sentinel `classifier_version` value for rows an operator has hand-tuned. It is
+# NOT a real digest, so it never equals `CLASSIFIER_VERSION` and is protected
+# from `--reclassify-stale` (which excludes it explicitly). `work-buffer
+# mark-manual <id>` stamps it; `--reclassify-all` is the only path that
+# overwrites it. Single source of truth so `classify_work.py` and the
+# `mark-manual` verb reference the same string.
+MANUAL_CLASSIFIER_VERSION: str = "manual"
+
+
 # Structured reason tags for deferred/skipped work items. SINGLE SOURCE OF TRUTH
 # for the skip vocabulary so `defer-cluster`/`defer-items`, `work-buffer stats
 # --by reason`, and any future gate read the same set. The stored value is
 # ``skipped:<tag> | <free text>`` (or just ``skipped:<tag>``), which de-overloads
 # the `skipped` terminal state: a query can now distinguish a correct exclusion
-# (blackholed/dead/low-signal/duplicate/egress) from a bare, un-reasoned drop.
+# (out-of-scope/blackholed/dead/low-signal/duplicate/egress) from a bare,
+# un-reasoned drop. ``out-of-scope`` is stamped at ingest by `ingest-endpoints`
+# on a URL whose host is not admitted by scope.json — a reachable-but-
+# unauthorized host (gau/wayback historical URLs routinely surface these) is
+# recorded skipped instead of admitted to the work buffer.
 SKIP_REASON_TAGS: frozenset[str] = frozenset(
-    {"blackholed", "dead-host", "low-signal-cluster", "duplicate", "egress-blocked"}
+    {"out-of-scope", "blackholed", "dead-host", "low-signal-cluster", "duplicate", "egress-blocked"}
 )
 
 
@@ -681,7 +1247,119 @@ _INTERESTINGEXT_WEIGHT: int = next(
 )
 
 
-def classify_row(row: sqlite3.Row) -> dict[str, Any]:
+# Context-scoring layer (classify-context-and-surface 2026-06, Part 4 "Fix 1";
+# Issues 1/E/F/G). The classifier historically discarded the row's URL
+# authority, ingest `source`, and `live_status` before scoring, so a `host_root`
+# landing URL on a `dev.`/`admin.`/`internal.` host scored a hard 0 (677 such
+# rows) and a non-default management port (`:9443` Keycloak, 8,034 distinct
+# non-default authorities) played no role. `_context_bonus` reintroduces those
+# signals as a STRICTLY BOOST-ONLY layer: it returns a non-negative integer that
+# is applied as `priority_score = max(base, base + bonus)` on the relevant return
+# branches, so an absent/zero context can NEVER lower a score and a default
+# (no-kwargs) call stays byte-identical to the pre-context output. The bonus
+# touches ONLY `priority_score` — never `cluster_key`, `priority_reason`,
+# `terminal_reason`, or `matched_buckets`. It is GENERIC: only nonprod/admin host
+# *labels*, well-known non-default ports, and source/liveness signals — no
+# product/host/path literal.
+#
+# Host-label regex (boundary-anchored on the authority's host labels): a label
+# token like `dev`/`qa`/`stage`/`admin` must sit at a `.`/`-` boundary so
+# `dev.example.com`, `api-qa.example.com`, and `admin.corp.example.com` match
+# while `development.example.com` (no boundary after `dev`) does NOT.
+_NONPROD_HOST_LABEL_RE = re.compile(
+    r"(^|[.-])(dev|qa|test|stage|staging|uat|sit|preprod|nonprod|internal|"
+    r"intranet|admin|sandbox|dr|corp)([.-]|$)"
+)
+# Well-known non-default management / dev-server ports.
+_NONDEFAULT_PORTS: frozenset[str] = frozenset(
+    {"8080", "8443", "9443", "8000", "8888", "7001", "9000", "5000"}
+)
+# Live-status tokens that indicate a reachable surface (vs a dead/archive URL).
+_LIVE_STATUS_TOKENS: frozenset[str] = frozenset({"live", "200"})
+
+# Dead-archive demotion (classify-context-and-surface 2026-06, Part 4 "Fix 6";
+# Issue H). The work buffer is dominated by `gau-archive`-sourced URLs, much of
+# which is dead (404/gone) and matched no `gf:*` bucket — pure noise that still
+# competes with live surfaces in priority mode. `_is_dead_archive_noise`
+# identifies exactly that intersection (archive source AND not live AND no
+# bucket) so a STRICTLY OPT-IN demotion can park it. It is symmetric to the type
+# floor but in the demotion direction, so it stays behind a default-OFF flag
+# (`demote_dead_archive`): with the flag off, scoring is byte-identical.
+_GAU_ARCHIVE_SOURCE = "gau-archive"
+# `live_status` values that count as NOT-live for the demotion predicate. A
+# row is demotable only when its liveness is unknown/absent or explicitly dead —
+# never when it is live/200 (those keep their score, and also earn the +5 live
+# context bonus above).
+_DEAD_LIVE_STATUS_TOKENS: frozenset[str] = frozenset({"", "dead", "blackholed"})
+
+
+def _is_dead_archive_noise(source: str | None, live_status: str | None) -> bool:
+    """True when a row is dead `gau-archive` noise eligible for demotion (Fix 6).
+
+    The predicate is the AND of three signals the plan names:
+      * the ingest `source` is exactly ``gau-archive``;
+      * `live_status` is null/dead (absent, ``dead``, or ``blackholed``) — NOT
+        live/200;
+    The caller additionally gates on "matched NO ``gf:*`` bucket" (it only
+    consults this on the bucket-less fallback branch), so this helper does not
+    re-check the bucket condition. Generic: keys off the archive source label and
+    liveness only — no host/product/path literal.
+    """
+    if (source or "").strip().lower() != _GAU_ARCHIVE_SOURCE:
+        return False
+    return str(live_status or "").strip().lower() in _DEAD_LIVE_STATUS_TOKENS
+
+
+def _context_bonus(
+    url: str | None = None,
+    source: str | None = None,
+    live_status: str | None = None,
+) -> int:
+    """Return a STRICTLY non-negative context score bonus (Fix 1, boost-only).
+
+    Sums, independently (each signal stacks):
+      * +15 when the URL authority's host matches the nonprod/admin/internal
+        host-label regex;
+      * +5  when the URL authority carries a well-known non-default port;
+      * +5  when `source` is `source-analysis` or a `*-js-extract` producer;
+      * +5  when `live_status` is `live`/`200`.
+
+    The host/port signals are read from the FULL `url` authority (not the
+    url_path); when `url` is None/blank both are 0. The return value is always
+    `>= 0`, so callers can apply `max(base, base + bonus)` without ever lowering
+    a bucket-driven score.
+    """
+    bonus = 0
+    if url:
+        try:
+            parts = urlsplit(url)
+            host = (parts.hostname or "").lower()
+            port = parts.port
+        except ValueError:
+            host, port = "", None
+        if host and _NONPROD_HOST_LABEL_RE.search(host):
+            bonus += 15
+        if port is not None and str(port) in _NONDEFAULT_PORTS:
+            bonus += 5
+    if source:
+        s = source.strip().lower()
+        if s == "source-analysis" or s.endswith("-js-extract"):
+            bonus += 5
+    if live_status:
+        ls = str(live_status).strip().lower()
+        if ls in _LIVE_STATUS_TOKENS:
+            bonus += 5
+    return bonus
+
+
+def classify_row(
+    row: sqlite3.Row,
+    *,
+    url: str | None = None,
+    source: str | None = None,
+    live_status: str | None = None,
+    demote_dead_archive: bool = False,
+) -> dict[str, Any]:
     """Return the per-row assignment dict (always present, never None).
 
     Inert types (image/video/font/archive/manifest) are stamped with
@@ -689,6 +1367,15 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
     single predicate. For every other row the highest-weight matching bucket
     wins; the path fallback gives operators a coarse grouping when no bucket
     fires.
+
+    `demote_dead_archive` (Fix 6, Issue H) is a STRICTLY OPT-IN, default-OFF
+    flag. When True, a row that reaches the bucket-less `path:*` fallback AND is
+    dead `gau-archive` noise (`_is_dead_archive_noise`) is parked: its score is
+    forced to 0 and a structured `terminal_reason` is stamped with the existing
+    `low-signal-cluster` skip tag (no new terminal vocabulary). It only ever
+    touches the no-bucket / no-floor fallback, so it can never lower a
+    bucket-driven or floor-driven score; with the flag off scoring is
+    byte-identical.
     """
     case_type = (row["type"] or "").lower()
     if case_type in _INERT_TYPES:
@@ -698,6 +1385,7 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
             "cluster_key": f"type:{case_type}",
             "terminal_reason": "inert_type",
             "matched_buckets": [],
+            "secondary_buckets": [],
         }
 
     if case_type == "sourcemap":
@@ -707,20 +1395,32 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
             "cluster_key": "gf:interestingext",
             "terminal_reason": None,
             "matched_buckets": ["interestingext"],
+            "secondary_buckets": [],
         }
+
+    # Boost-only context layer (Fix 1). Computed AFTER the inert/sourcemap
+    # early-returns (those stay fixed — they never receive the bonus) and BEFORE
+    # host_root so the nonprod/admin/internal host_root rows can be rescued from
+    # a hard 0. `bonus >= 0` always, so every `max(base, base + bonus)` below is
+    # boost-only and a default (no-context) call stays byte-identical.
+    bonus = _context_bonus(url, source, live_status)
 
     if case_type == "host_root":
         # A bare scheme://host[/] landing URL: no exploitable surface on its own,
         # but a Phase-2 crawl seed. Stamp a stable, greppable cluster so the
         # operator can see "N hosts await crawling" instead of it hiding among
         # unrouted `unknown` / `path:/` rows. NOT inert — it must stay `pending`,
-        # not be skipped, so it is never silently dropped.
+        # not be skipped, so it is never silently dropped. The context bonus
+        # rescues nonprod/admin/internal host_root rows (e.g. a `dev.` host →
+        # 15) from priority 0 WITHOUT changing the stable `type:host_root`
+        # cluster.
         return {
-            "priority_score": 0,
+            "priority_score": max(0, 0 + bonus),
             "priority_reason": None,
             "cluster_key": "type:host_root",
             "terminal_reason": None,
             "matched_buckets": [],
+            "secondary_buckets": [],
         }
 
     url_path = row["url_path"] or ""
@@ -751,6 +1451,43 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
     ):
         matches.append(("idor", _IDOR_WEIGHT))
 
+    # Privileged-action surfaces (`/api/users/grant`, `/users/1024/revoke`): a
+    # state-change verb segment guarded by an API/version sibling or an embedded
+    # object reference (§A.9). Appended via the dedicated `path_has_privileged_action`
+    # predicate — exactly like the idor path-object-ref append above — rather than
+    # a naive path fragment, so a content slug (`/transfer-your-number`, a bare
+    # `/transfer` page) cannot fire it. Deduped against any existing
+    # `privileged_action` match: `bucket_matches` now CAN produce one (the bucket
+    # gained a state-verb param-key set in Part 6 — `?delete=`/`?grant=`), so this
+    # guard keeps the reason chain single-entry when both the path predicate and a
+    # param key fire on the same row.
+    if path_has_privileged_action(url_path_lower) and not any(
+        name == "privileged_action" for name, _ in matches
+    ):
+        matches.append(("privileged_action", _PRIVILEGED_ACTION_WEIGHT))
+
+    # Full-URL regex buckets (§B.10 cloud_metadata / §C.14 object-storage host
+    # markers). Their match signal lives in the URL authority or query string,
+    # which `bucket_matches` (url_path only) cannot see, so re-test their
+    # `_REGEX_BUCKET_RULES` against the FULL `url` here and append (deduped against
+    # a url_path-side hit). Declaration-ordered over `_BUCKETS` so the appended
+    # entries keep a stable reason-chain order. Boost-only: skipped entirely when
+    # `url` is absent (the default-kwarg test convention), so a no-context call is
+    # byte-identical. An appended bucket can only RAISE the score / add a chain
+    # entry; like every weight-driven match it never reorders the existing chain.
+    if url:
+        url_lower = url.lower()
+        for name, weight, _key_set, _path_fragments in _BUCKETS:
+            if name not in _FULL_URL_REGEX_BUCKETS:
+                continue
+            if any(existing == name for existing, _ in matches):
+                continue
+            rules = _REGEX_BUCKET_RULES.get(name)
+            if rules and any(
+                regex_fragment_in_path(rule, url_lower) for rule in rules
+            ):
+                matches.append((name, weight))
+
     # Producer-`type` floor (§2.2, override #4). Applied AFTER the
     # inert/sourcemap/host_root early-returns (those still win above). The floor
     # NEVER lowers a bucket-driven score (`score = max(match, floor)`); when a
@@ -761,6 +1498,30 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
     floor = _TYPE_FLOOR.get(_normalize_floor_type(case_type))
     floor_weight = floor[1] if floor else 0
 
+    # Compound-key inner-token ("weak") matches (Fix 4, landed as a TIERED signal).
+    # A param named `return_url` / `targetServer` / `cmd_exec` carries bucket
+    # signal in its inner tokens, but an inner token is WEAKER evidence than a
+    # whole key (see `WEAK_TOKEN_CAP` / `_weak_token_matches`). Computed once here
+    # and used two ways below, NEVER overriding a strong match:
+    #   * on a strong/floor row -> `secondary_buckets` (extra coverage routing so a
+    #     `?id=` + `?return_url=` row reaches BOTH the sqli and redirect specialists)
+    #     WITHOUT touching cluster_key / priority_reason / priority_score /
+    #     matched_buckets, so every pinned strong/floor row is byte-identical;
+    #   * when NO strong bucket and NO floor fired -> the weak match RESCUES the row
+    #     from the score-0 `path:*` fallback (deep coverage: a real `?return_url=`
+    #     surface is never left invisible). Precise routing for the COMMON compound
+    #     families is delivered by the curated whole-key members on `redirect`/`ssrf`
+    #     (strong path), so those never reach the weak rescue.
+    weak_matches = _weak_token_matches(
+        collect_weak_tokens(
+            row["query_params"], row["body_params"], row["path_params"]
+        )
+    )
+    weak_names: list[str] = []
+    for name, _ in weak_matches:
+        if name not in weak_names:
+            weak_names.append(name)
+
     if matches:
         best_weight = max(weight for _, weight in matches)
         top_buckets = [name for name, weight in matches if weight == best_weight]
@@ -770,12 +1531,14 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
         for name, _ in matches:
             if name not in matched_buckets:
                 matched_buckets.append(name)
+        base_score = max(best_weight, floor_weight)
         return {
-            "priority_score": max(best_weight, floor_weight),
+            "priority_score": max(base_score, base_score + bonus),
             "priority_reason": reason,
             "cluster_key": f"gf:{best_name}",
             "terminal_reason": None,
             "matched_buckets": matched_buckets,
+            "secondary_buckets": [n for n in weak_names if n not in matched_buckets],
         }
 
     if floor:
@@ -784,19 +1547,60 @@ def classify_row(row: sqlite3.Row) -> dict[str, Any]:
         # bridge / fetch-by-priority still route the row.
         floor_bucket = floor[0]
         return {
-            "priority_score": floor_weight,
+            "priority_score": max(floor_weight, floor_weight + bonus),
             "priority_reason": f"gf:{floor_bucket}",
             "cluster_key": f"gf:{floor_bucket}",
             "terminal_reason": None,
             "matched_buckets": [floor_bucket],
+            "secondary_buckets": [n for n in weak_names if n != floor_bucket],
+        }
+
+    if weak_matches:
+        # Inner-token RESCUE: no strong bucket and no floor fired, but a compound
+        # key's inner token matched. Promote the row out of the score-0 `path:*`
+        # fallback so the surface is triaged instead of dropped. Weights are capped
+        # (`WEAK_TOKEN_CAP`) so these guessed matches rank below confirmed strong
+        # matches across the buffer. Declaration-ordered tie-break (first weak
+        # bucket at the max capped weight) mirrors the strong path.
+        best_weak = max(weight for _, weight in weak_matches)
+        top_weak = next(name for name, weight in weak_matches if weight == best_weak)
+        reason = "+".join(f"gf:{name}" for name, _ in weak_matches)
+        return {
+            "priority_score": max(best_weak, best_weak + bonus),
+            "priority_reason": reason,
+            "cluster_key": f"gf:{top_weak}",
+            "terminal_reason": None,
+            "matched_buckets": weak_names,
+            "secondary_buckets": [],
+        }
+
+    # Bucket-less, floor-less, weak-less fallback. This is the ONLY branch the
+    # dead-archive demotion (Fix 6, default-OFF) can touch: by construction no
+    # `gf:*` bucket matched, no type floor fired, AND no weak inner-token matched
+    # here (the weak rescue above returns first), so the "matched NO gf:* bucket"
+    # condition holds. When the opt-in flag is set and the row is dead
+    # `gau-archive` noise, park it at 0 with the existing `low-signal-cluster`
+    # skip tag so the archive tail stops competing with live surfaces in
+    # priority mode. The bonus still applies otherwise (byte-identical when off).
+    if demote_dead_archive and _is_dead_archive_noise(source, live_status):
+        return {
+            "priority_score": 0,
+            "priority_reason": None,
+            "cluster_key": f"path:{normalize_path_for_cluster(url_path)}",
+            "terminal_reason": tagged_terminal_reason(
+                "low-signal-cluster", "gau-archive dead, no gf bucket"
+            ),
+            "matched_buckets": [],
+            "secondary_buckets": [],
         }
 
     return {
-        "priority_score": 0,
+        "priority_score": max(0, 0 + bonus),
         "priority_reason": None,
         "cluster_key": f"path:{normalize_path_for_cluster(url_path)}",
         "terminal_reason": None,
         "matched_buckets": [],
+        "secondary_buckets": [],
     }
 
 
@@ -840,12 +1644,22 @@ def collect_keys(*columns: str | None) -> set[str]:
 
 
 def expand_compound_key(key: str) -> set[str]:
-    """Expand a single parameter key into its matchable tokens.
+    """Expand a single parameter key into its STRONG matchable tokens.
 
     Forms (e.g., search frameworks) commonly send compound keys like
     `filter[user][id]` or `data.user.id`. We split on `.` / `[` / `]` so the
     inner tokens (`filter`, `user`, `id`, `data`) all participate in bucket
     matching alongside the original.
+
+    Splits ONLY on `.` / `[` / `]` by design — these are structural framework
+    delimiters where the inner token IS the parameter, so the inner token is
+    full-strength evidence (e.g. `username[$ne]` -> `$ne` for nosqli). The
+    weaker `_` / `-` / camelCase compounds (`return_url`, `returnUrl`) are
+    handled separately by `collect_weak_tokens` / `_weak_token_matches` at a
+    capped weight (`WEAK_TOKEN_CAP`), because the inner token there is a weaker
+    indicator of intent than the whole name (the `url` suffix of `return_url`
+    is weaker SSRF signal than a literal `url` param). Keeping this function
+    `.[]`-only is what makes the existing pinned reason chains byte-identical.
     """
     tokens = {key}
     for sep in (".", "[", "]"):
@@ -855,6 +1669,68 @@ def expand_compound_key(key: str) -> set[str]:
         if part:
             tokens.add(part)
     return tokens
+
+
+# Weight cap for inner-token ("weak") compound-key matches. A param literally
+# named `url` is a strong SSRF signal; the `url` SUFFIX of `return_url` is a
+# weaker one (the `return` prefix is the real intent). So inner tokens derived
+# from `_` / `-` / camelCase splitting are matched separately and capped here —
+# below every HIGH-VALUE strong bucket (35-50), so a guessed inner-token hit never
+# outranks a confirmed injection/auth/ssrf surface (precision), yet well above 0 so
+# a recognizable compound surface is never dropped to score 0 (deep coverage). It
+# can sit at or just above the lowest-confidence strong signals (`interestingext`
+# =10, `interestingparams`=15, `xss`/`api`=20), which is acceptable — those are
+# themselves low-confidence, and weight only orders triage, never gates.
+WEAK_TOKEN_CAP = 20
+
+# camelCase boundary: a lower-alnum char immediately followed by an upper char.
+# Applied to the ORIGINAL-case key BEFORE lowercasing so `returnUrl` splits into
+# `return` / `Url`; `_` and `-` are split afterwards.
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def weak_tokens_for_key(raw_key: str) -> set[str]:
+    """Inner tokens of a compound key via `_` / `-` / camelCase split (lowercased).
+
+    `returnUrl` -> {return, url}; `sysparm_url` -> {sysparm, url};
+    `glide-sso-id` -> {glide, sso, id}. These are WEAKER evidence than a whole
+    key — see `WEAK_TOKEN_CAP` and `_weak_token_matches`.
+    """
+    spaced = _CAMEL_BOUNDARY_RE.sub(" ", raw_key).replace("_", " ").replace("-", " ")
+    return {tok.lower() for tok in spaced.split() if tok}
+
+
+def collect_weak_tokens(*columns: str | None) -> set[str]:
+    """Collect inner ("weak") compound-key tokens across JSON-encoded columns."""
+    tokens: set[str] = set()
+    for raw in columns:
+        if not raw:
+            continue
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(decoded, dict):
+            continue
+        for k in decoded.keys():
+            tokens.update(weak_tokens_for_key(str(k)))
+    return tokens
+
+
+def _weak_token_matches(weak_keys: set[str]) -> list[tuple[str, int]]:
+    """Param-key buckets matched by compound inner tokens, at capped weak weight.
+
+    Declaration-ordered over `_BUCKETS` (preserving tie-break / reason-chain
+    order). Param-key buckets ONLY — path-only and regex buckets do not take part
+    in inner-token rescue. Each weight is capped at `WEAK_TOKEN_CAP`.
+    """
+    if not weak_keys:
+        return []
+    out: list[tuple[str, int]] = []
+    for name, weight, key_set, _path_fragments in _BUCKETS:
+        if key_set and (weak_keys & key_set):
+            out.append((name, min(weight, WEAK_TOKEN_CAP)))
+    return out
 
 
 # A literal path fragment must be followed by a segment boundary. `.` is in the
@@ -1042,6 +1918,10 @@ def classify_from_fields(
     query_params: str = "{}",
     body_params: str = "{}",
     path_params: str = "{}",
+    url: str | None = None,
+    source: str | None = None,
+    live_status: str | None = None,
+    demote_dead_archive: bool = False,
 ) -> dict[str, Any]:
     """Adapter for ingest paths that don't have a sqlite Row yet.
 
@@ -1049,6 +1929,14 @@ def classify_from_fields(
     write `priority_score` / `priority_reason` / `cluster_key` /
     `terminal_reason` in the same connection without round-tripping through
     a SELECT. Returns the same shape as `classify_row()`.
+
+    `url`/`source`/`live_status` are the optional boost-only context inputs
+    (Fix 1). They default to None so the legacy 5-keyword call convention (and
+    every pinned arithmetic test) stays byte-identical: with no context the
+    `_context_bonus` is 0 and `max(base, base + 0) == base`.
+
+    `demote_dead_archive` (Fix 6) is the optional, default-OFF dead-archive
+    demotion gate, passed straight through to `classify_row`.
     """
     fake_row: dict[str, Any] = {
         "type": case_type,
@@ -1057,4 +1945,72 @@ def classify_from_fields(
         "body_params": body_params,
         "path_params": path_params,
     }
-    return classify_row(fake_row)
+    return classify_row(
+        fake_row,
+        url=url,
+        source=source,
+        live_status=live_status,
+        demote_dead_archive=demote_dead_archive,
+    )
+
+
+# ---------------------------------------------------------------------------- #
+# Classifier version stamp — digest assembly.
+#
+# Assembled here, at the module's end, because a complete `classify_row` digest
+# must reference constants declared throughout the file (the context/demotion
+# tables, `WEAK_TOKEN_CAP`, `_CLUSTER_PLACEHOLDERS`, `_AUTH_SAML_FRAGMENTS`, ...).
+# See the "Classifier version stamp" comment near `_canonicalize` for the intent
+# and the determinism contract. Every entry below is a classification-affecting
+# module-level constant; compiled `re.Pattern` values are digested via their
+# `.pattern` source string (a bare Pattern is not JSON-serializable). Constants
+# derived from `_BUCKETS` (`_IDOR_WEIGHT`, `_PRIVILEGED_ACTION_WEIGHT`,
+# `_INTERESTINGEXT_WEIGHT`, `_AUTH_KEY_SET`, `_SSO_PATH_FRAGMENTS`) are covered
+# transitively by `buckets` and deliberately not re-listed.
+
+# Hand-maintained logic-revision counter. BUMP THIS whenever you change
+# `classify_row` / `_context_bonus` / a classification helper in a way NOT
+# captured by one of the data tables digested below — e.g. editing the +15/+5
+# context-bonus weights, reordering the return branches, or adding a new scalar
+# literal to the scoring logic. It is the escape hatch that keeps the stamp from
+# silently falling out of sync with a pure-logic edit; a data-table edit already
+# bumps the digest on its own, so this only needs a bump for logic-only changes.
+_CLASSIFIER_LOGIC_REVISION: int = 1
+
+_CLASSIFIER_VERSION_INPUTS: dict[str, Any] = {
+    # Headline bucket / floor / inert tables.
+    "buckets": _BUCKETS,
+    "regex_bucket_rules": _REGEX_BUCKET_RULES,
+    "type_floor": _TYPE_FLOOR,
+    "inert_types": INERT_TYPES,
+    # Path-predicate signals (`classify_row` appends these directly).
+    "privileged_action_verbs": _PRIVILEGED_ACTION_VERBS,
+    "full_url_regex_buckets": _FULL_URL_REGEX_BUCKETS,
+    "auth_saml_fragments": _AUTH_SAML_FRAGMENTS,
+    "upload_generic_shadows": _UPLOAD_GENERIC_SHADOWS,
+    # Object-ref / cluster-normalization tables + regexes.
+    "placeholder_tokens": _PLACEHOLDER_TOKENS,
+    "cluster_placeholders": _CLUSTER_PLACEHOLDERS,
+    "uuid_re": _UUID_RE.pattern,
+    "long_hex_re": _LONG_HEX_RE.pattern,
+    "year_re": _YEAR_RE.pattern,
+    "numeric_re": _NUMERIC_RE.pattern,
+    "opaque_token_re": _OPAQUE_TOKEN_RE.pattern,
+    "api_version_seg_re": _API_VERSION_SEG_RE.pattern,
+    # Weak-token rescue: cap + camelCase splitter + fragment boundary.
+    "weak_token_cap": WEAK_TOKEN_CAP,
+    "camel_boundary_re": _CAMEL_BOUNDARY_RE.pattern,
+    "fragment_boundary": _FRAGMENT_BOUNDARY,
+    # Boost-only context layer (`_context_bonus`).
+    "nonprod_host_label_re": _NONPROD_HOST_LABEL_RE.pattern,
+    "nondefault_ports": _NONDEFAULT_PORTS,
+    "live_status_tokens": _LIVE_STATUS_TOKENS,
+    # Dead-archive demotion path (`_is_dead_archive_noise`).
+    "gau_archive_source": _GAU_ARCHIVE_SOURCE,
+    "dead_live_status_tokens": _DEAD_LIVE_STATUS_TOKENS,
+    # Logic-revision escape hatch (see above).
+    "logic_revision": _CLASSIFIER_LOGIC_REVISION,
+}
+CLASSIFIER_VERSION: str = hashlib.sha256(
+    json.dumps(_canonicalize(_CLASSIFIER_VERSION_INPUTS), sort_keys=True).encode("utf-8")
+).hexdigest()[:12]

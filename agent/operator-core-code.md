@@ -23,8 +23,13 @@ Primary methodology reference:
 Always-active rules:
 - `agent/rules/resume.md`
 - `agent/rules/hunting.md`
-- `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
+
+`agent/rules/reporting.md` is specialist/Report-phase-loaded, not an operator
+always-active rule: do not load `reporting.md` CONTENT into operator context
+before the report dispatch; `report-writer` and the code specialists that draft
+report-bound text (`code-vuln-hunter`, `code-vuln-verifier`) still load it
+directly via their own Load-First lists.
 
 CLI path convention is owned by `agent/shared-constraints-code.md` §9.
 
@@ -59,6 +64,78 @@ analyzed or user signals stop:
 10. **RECORD SURFACES** -- `record-surface` uses the shared engagement surface taxonomy, not ad hoc code-only labels. Only use supported types: `account_recovery`, `api_documentation`, `auth_entry`, `dynamic_render`, `file_handling`, `object_reference`, `privileged_write`, `workflow_token`. If none apply, do not invent a new surface type.
 11. **TRACK COVERAGE** -- After each batch, run `vigil assess code-coverage`. During Phase 2B, use `vigil assess code-coverage --cwe-matrix` to check per-file CWE effort scores against thresholds. Before entering Phase 3 verification, verify the coverage gate passes with `vigil assess code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context, no unprocessed triggers, CWE effort thresholds met).
 12. **LOOP** -- Back to step 1.
+
+## Phased mindset flow (code) -- Dispatch-Mindset doctrine
+
+The code track carries the same three-axis dispatch layer the offensive core wires (see
+`agent/operator-core.md`, "Iteration-mode (dispatch_mode) Declaration" and "Phased mindset flow"),
+using the **same names**: `dispatch_mode` = HOW the agent traverses its inputs (unchanged tokens:
+`hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm`); `hunt_scope`
+(`wide` | `deep`) = the BREADTH of the pass; **mindset lens** = the analytic lens the agent hunts
+through, an injected packet under `agent/rules/mindsets/` that is MORE SPECIFIC than the role's
+baseline mindset. Three knobs; a full code dispatch sets `dispatch_mode` + `hunt_scope` and, on the
+lens-carrying roles below, the mindset lens.
+
+**Which code roles carry an injected mindset lens.** Every vuln-hunting role has its own
+`## Dispatch Mindset` slot; the pass decides which lens fills it:
+- **`code-architect` (Phase 1 CLASSIFY+MAP)** — the code-track survey role, analog of the offensive
+  `source-analyzer` wide pass. Carries the survey lens only: baseline (`agent/rules/adversarial-mindset.md`)
+  plus `agent/rules/mindsets/developer.md`, no family lens. It maps files/modules for per-family
+  **signal** (which vuln-class each file leans toward) rather than confirming anything.
+- **`source-analyzer`** — named here because a code-track engagement can run alongside web testing
+  (see "Integration with Web Engagement"); when `source-analyzer` is dispatched to map served source
+  for signal, it carries the same survey lens as a wide VA / `code-architect`, exactly as in the
+  offensive core.
+- **`code-vuln-hunter`** — carries the survey lens (baseline + `developer.md`) in the WIDE broad hunt
+  (Phase 2A); in the DEEP passes (Phase 2B CWE-directed re-analysis and Phase 2C adversarial reread)
+  it carries ONE family lens matching the flagged signal — `agent/rules/mindsets/injection-surface.md`,
+  `idor-bac.md`, or `business-logic.md`, or the closest fit — plus the matching CWE pattern refs; in
+  the Phase 2D system-level synthesis pass it carries `agent/rules/mindsets/chain-impact.md` (the
+  generative lens for which seam/chain to pursue and when to stop — it complements, does not replace,
+  the seam manifest and the exploit-developer A→B chain table it already references).
+- **`code-variant-hunter` (Phase 3, parallel with verify)** — carries the sibling/variant lens of the
+  confirmed family (the `agent/rules/mindsets/` packet whose developer assumption produced the
+  original finding), so it generalizes to every file the family touches rather than pattern-matching
+  one bug string.
+
+**Which pass sets the lens (wide → deep → synthesis).** The lens is set mechanically by the phase, not
+chosen from a flat menu: WIDE survey (Phase 1 map, Phase 2A broad hunt) = baseline + `developer.md`,
+no family lens; DEEP drill (Phase 2B/2C) = one family lens per dispatch matching the signal the wide
+pass recorded; SYNTHESIS (Phase 2D) = `chain-impact.md`; VARIANT (Phase 3) = the confirmed family's
+lens. Name exactly ONE lens per deep/variant dispatch — a lens describes *how the developer was
+thinking*, so the specialist derives its own hypotheses instead of running a pre-named checklist
+(naming the bug caps depth at the operator's guess).
+
+**`hunt_scope` in the code dispatch contract (breadth axis).** Set `hunt_scope` on every
+`code-vuln-hunter` dispatch: `wide` for Phase 1/2A (breadth-of-coverage), `deep` for Phase 2B/2C/2D
+(concentrated reread and cross-module synthesis). `code-variant-hunter` and `code-vuln-verifier` are
+always `deep` (Phase 3 is convergent). **Divergence, scoped out honestly:** the offensive
+`hunt_scope: wide → hypothesis-driven` pairing does NOT transfer to the code track. The code surface
+is an *enumerable file/queue* (structural index + analysis queue), not a hypothesis-sampled host pool,
+so the code WIDE pass is realized as the **queue-coverage broad hunt** (Phase 2A, `dispatch_mode:
+item-iterating` over the file queue), and the code DEEP pass as `deep-manual` (Phase 2C/2D). Keep the
+per-role `dispatch_mode` defaults from the "Agent Roster" — do not force a code wide pass onto
+`hypothesis-driven`.
+
+**Verification uses the verification-skeptic stance — by reference, not duplication.** The offensive
+core injects `agent/rules/mindsets/verification-skeptic.md` (burden-of-proof; **PASS and KILL cost the
+same** cited-evidence bar) into VA verification. The code track already realizes that exact stance in
+`code-vuln-verifier` via `agent/skills/code-finding-verification/SKILL.md` (PASS requires cited
+supporting evidence at the hunter's rigor bar; KILL requires cited counter-evidence at the same bar;
+absence of counter-evidence is not PASS, plausibility of counter-evidence is not KILL — see also
+Core Loop step 2 and the Multi-Perspective Voting Protocol). So `code-vuln-verifier` does NOT load a
+separate `verification-skeptic.md` packet — the skill IS the stance for this track. Reference it;
+do not duplicate.
+
+**Scoped out (does not apply to the code track), with reason:**
+- **`code-fuzz-engineer` (Phase 4)** carries no family mindset lens — its "lens" is the fuzz-harness /
+  memory-safety CWE refs, and Phase 4 is a mechanical campaign, not a lens-driven vuln-class hunt. A
+  **code-specific memory-safety lens** (the developer assumptions behind buffer-overflow / UAF /
+  integer-overflow / uninitialized-memory — how the C/C++ author reasoned about bounds and lifetimes)
+  is a genuine gap in `agent/rules/mindsets/` today; it is a **future library item**, deliberately NOT
+  invented here. Until it exists, Phase 4 dispatches carry only the memory-safety CWE pattern refs.
+- **`code-vuln-verifier`** carries the verification-skeptic *stance* (above) but no *family* lens — it
+  challenges an existing finding, it does not hunt a fresh vuln-class under a lens.
 
 ## Phase Flow
 
@@ -290,27 +367,11 @@ using the available subagent budget.
   batch share a module context, enabling cross-file reasoning within the batch.
 - **Slot types** -- the slot type annotations for each file from Phase 1 classification.
 - **Applicable vulnerability classes** -- use the `applicable_vuln_classes` list from the backend
-  queue fetch payload. The backend computes this canonically from slot types, role, and language.
-  The hunter must evaluate every applicable class, not just the ones named in hypotheses.
-  Reference mapping:
-
-  | Slot Type | Native (C/C++) | Managed (Python/JS/Java/Go) |
-  |---|---|---|
-  | NETWORK-INPUT | buffer-overflow, integer-overflow, format-string | web-app-injection, web-app-auth, ssrf, open-redirect, path-traversal |
-  | PROTOCOL-FIELD | buffer-overflow, integer-overflow, format-string | web-app-injection, web-app-auth, race-condition |
-  | URL-COMPONENT | injection, auth-bypass, ssrf, open-redirect, web-app-auth | (same) |
-  | FILE-CONTENT | injection, buffer-overflow, type-confusion, path-traversal, xxe, file-upload | (same) |
-  | CMD-ARGUMENT | injection, format-string, path-traversal | (same) |
-  | CALLBACK-DATA | use-after-free, race-condition, type-confusion, deserialization | (same) |
-  | ENV-VARIABLE | injection, path-traversal | (same) |
-  | SERIALIZED-DATA | buffer-overflow, integer-overflow, type-confusion, deserialization | deserialization |
-  | Role contains crypto | crypto-misuse | (always) |
-  | Role contains auth/session | auth-bypass, web-app-auth | (always) |
-  | Role contains error/exception | error-handling, null-dereference | error-handling, null-dereference |
-  | Role contains memory/allocator | uninitialized-memory, algorithmic-dos | algorithmic-dos |
-  | Role contains parser/decoder/deserializer | algorithmic-dos | algorithmic-dos |
-  | Role contains graphql/resolver/serializer/orm/controller/view | web-app-data-exposure | web-app-data-exposure |
-  | Role contains llm/prompt/rag/mcp | ai-ml-security | ai-ml-security |
+  queue fetch payload. The backend computes this canonically from slot types, role, and language
+  (`SLOT_VULN_CLASSES` in `orchestrator/backend/app/services/code_analysis.py`, derived from the
+  canonical taxonomy `agent/scripts/assess/lib/vuln_taxonomy.py`). Pass that computed list through;
+  do NOT transcribe a slot→class table here — a hand-copied one drifts from the backend. The hunter
+  must evaluate every class the payload names, not just the ones touched by hypotheses.
 
 - **Guidance hypotheses** -- labeled "check AFTER broad analysis" in the dispatch context.
   These are the attack hypotheses from Phase 1 that touch files in this batch. The hunter
@@ -1020,7 +1081,19 @@ The operator obtains `agent_id` by:
 - **Claude Code**: use the id printed by `vigil assess agent start` — choose or accept a unique string per dispatch (e.g. `hunt-b7c2`).
 - **Codex**: use the id returned by `spawn_agent`.
 
-Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. If this is a continuation or resumed engagement, include the relevant `vigil assess resume-brief` output immediately after the Runtime Identity block so the specialist starts from compact backend state instead of local-note reconstruction.
+On the lens-carrying roles (`code-architect`, `code-vuln-hunter`, `code-variant-hunter`, and
+`source-analyzer` when it runs alongside web testing), follow the Runtime Identity block with a
+Dispatch Mindset block so the specialist knows its breadth and lens for this pass (see "Phased mindset
+flow (code)" above for which pass sets which value):
+
+```
+## Dispatch Mindset
+hunt_scope: <wide|deep>
+mindset lens: <path under agent/rules/mindsets/> — <one-line reason it fits the observed signal>
+```
+
+Omit the lens line on WIDE survey dispatches (baseline + `developer.md` only, no family lens) and on
+`code-vuln-verifier`/`code-fuzz-engineer` (scoped out above). Pass this block verbatim at the top of the dispatch prompt. The specialist writes these values into the handoff JSON and runs `render-handoff <agent_id>` as a final self-check before exiting. If this is a continuation or resumed engagement, include the relevant `vigil assess resume-brief` output immediately after the Runtime Identity block so the specialist starts from compact backend state instead of local-note reconstruction.
 
 Require immediate backend/artifact linkage for durable notes: if a specialist creates a `.md` file under `notes/` that should matter after the current command, they must register it with `vigil assess artifact register <path>` and link it to a finding, chain, dispatch/agent, surface, request variant, or command run before closing. Unlinked markdown notes are scratch and cannot be used as resume or report input.
 
@@ -1038,6 +1111,7 @@ Before every dispatch, verify:
 - [ ] For Phase 2: CWE pattern references selected via slot-type mapping table
 - [ ] For Phase 2: guidance hypotheses included and labeled "check AFTER broad analysis"
 - [ ] For Phase 2: structural index excerpt or per-file JSON included, or `code-index` rerun before dispatch
+- [ ] For lens-carrying roles (`code-architect`/`code-vuln-hunter`/`code-variant-hunter`/`source-analyzer`): Dispatch Mindset block set — `hunt_scope` (`wide` for Phase 1/2A, `deep` for 2B/2C/2D/3) and, on DEEP/SYNTHESIS/VARIANT passes, exactly ONE `mindset lens` under `agent/rules/mindsets/` matching the flagged signal (`chain-impact.md` for Phase 2D). WIDE survey passes carry baseline + `developer.md`, no family lens.
 - [ ] For Phase 2: adversarial framing preamble included (with actual entry points and chains)
 - [ ] For Phase 2: effort score thresholds included for the file's classification tier
 - [ ] For Phase 2: unrelated fetched groups split into separate hunter dispatches so independent modules run in parallel

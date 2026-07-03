@@ -7,7 +7,7 @@ import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.contracts import render_contract_epilog
+from assess.lib.contracts import SUBMISSION_STATUSES, render_contract_epilog
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 
 
@@ -24,6 +24,17 @@ def register(subparsers) -> None:
     p.add_argument("--title")
     p.add_argument("--severity")
     p.add_argument("--workflow-status", "--status", dest="workflow_status")
+    p.add_argument(
+        "--submission-status",
+        dest="submission_status",
+        default=None,
+        choices=SUBMISSION_STATUSES,
+        help=(
+            "External bug-bounty/program submission state. ORTHOGONAL to "
+            "--workflow-status (report-inclusion): setting one never changes the "
+            "other. Allowed: " + ", ".join(SUBMISSION_STATUSES) + " (default 'none')."
+        ),
+    )
     p.add_argument("--defect-family")
     p.add_argument("--root-cause-key")
     p.add_argument("--auth-context")
@@ -120,6 +131,9 @@ def run(args) -> None:
             "title": args.title,
             "severity": args.severity,
             "workflow_status": args.workflow_status,
+            # getattr fallback so callers that build args via SimpleNamespace
+            # (test fixtures) don't AttributeError, mirroring evidence_type.
+            "submission_status": getattr(args, "submission_status", None),
             "defect_family": args.defect_family,
             "root_cause_key": args.root_cause_key,
             "auth_context": args.auth_context,

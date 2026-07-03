@@ -72,17 +72,19 @@ def _write_engagement(engagements_dir: Path, key: str = ENGAGEMENT_KEY) -> Path:
 
 
 def _schema_example_bodies() -> list[dict]:
-    """The two finding-record schema examples (finding-record.schema.json:413-515).
+    """The finding-record schema examples, used verbatim as POST bodies so the
+    seed exercises the real backend write path (which splits
+    ``details``/``provenance`` into ``*_json`` columns).
 
-    Used verbatim as POST bodies so the seed exercises the real backend write
-    path (which splits ``details``/``provenance`` into ``*_json`` columns).
+    Slugs every example (not a hardcoded count) so adding a canonical example to
+    the record-finding contract does not break these fixtures.
     """
     schema = load_schema("finding-record.schema.json")
     examples = [dict(ex) for ex in schema["examples"]]
     # Give each a distinct canonical slug (<PREFIX>-<>=3 digits>) so list
     # ordering + filters are exercisable.
-    examples[0]["slug"] = "VA-001"
-    examples[1]["slug"] = "VA-002"
+    for idx, example in enumerate(examples, start=1):
+        example["slug"] = f"VA-{idx:03d}"
     return examples
 
 
@@ -132,7 +134,7 @@ def test_raw_rows_carry_json_strings_and_db_columns(seeded_rows: list[dict]) -> 
     pre-parse details. If this fails, the transform is no longer being
     exercised against the documented #1-risk shape.
     """
-    assert len(seeded_rows) == 2
+    assert len(seeded_rows) == len(_schema_example_bodies())
     row = seeded_rows[0]
     assert isinstance(row.get("details_json"), str), "details_json must be a JSON string on the raw row"
     assert isinstance(row.get("provenance_json"), str)
@@ -141,7 +143,7 @@ def test_raw_rows_carry_json_strings_and_db_columns(seeded_rows: list[dict]) -> 
 
 def test_every_emitted_record_validates_and_is_clean(seeded_rows: list[dict]) -> None:
     records = eval_capture._capture_records(seeded_rows, _default_args())
-    assert len(records) == 2
+    assert len(records) == len(seeded_rows)
 
     schema = load_schema("finding-record.schema.json")
     leak_keys = {

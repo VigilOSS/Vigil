@@ -18,6 +18,8 @@ import { RelTime } from "./formatting";
 import { KV, ProseSection, SectionHead } from "./drawer/DrawerKit";
 import { TableSkeleton } from "./Skeletons";
 
+const SURFACE_RETRY_FETCH_LIMIT = 5000;
+
 // Severity palette + dot color, mirrored from FindingsTab so the linked-
 // findings list reads consistently with the Findings drawer's severity dots.
 const SEV_COLORS: Record<string, string> = {
@@ -209,7 +211,9 @@ export function SurfacesTab({
         const errorMessage =
           err instanceof Error ? err.message : "Failed to update surface status";
         try {
-          const fresh = await listAssessmentSurfaces(engagementKey);
+          const fresh = await listAssessmentSurfaces(engagementKey, {
+            limit: SURFACE_RETRY_FETCH_LIMIT,
+          });
           const refreshed = fresh.find((s) => s.id === selected.id) ?? null;
           if (refreshed) {
             const rationaleLanded =

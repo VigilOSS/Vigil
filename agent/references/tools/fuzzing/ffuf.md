@@ -1,5 +1,6 @@
 ---
 description: Web fuzzing (parameters, vhosts, targeted directory work)
+skill: directory-fuzzing
 ---
 
 # ffuf
@@ -76,7 +77,7 @@ backup hits) and the engagement budget allows the deeper sweep.
 
 Pick the rate from the wafw00f finding (full table in
 `agent/references/tools/recon/wafw00f.md` "WAF-tier rate adjustment table"; canonical
-per-target rate calibration in `agent/operator-core.md` "Recon Dispatch Resource Policy"):
+per-target rate calibration in `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy"):
 
 - **No WAF** → `-t 40` (default).
 - **Basic WAF** → `-t 20 -rate 50`.

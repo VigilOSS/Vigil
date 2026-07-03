@@ -1,5 +1,6 @@
 ---
 description: Secret scanner (filesystem mode, 800+ detectors, v3 positional-path syntax, `--no-verification` default)
+skill: source-analysis
 ---
 
 # TruffleHog

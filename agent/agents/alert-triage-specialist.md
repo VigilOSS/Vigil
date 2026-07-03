@@ -10,31 +10,29 @@ matches a cited tenant-ref pattern, hand everything else to L2 with the platform
 skill named and the tenant ref injected. You do not pull telemetry, build
 timelines, or flip `verification_state` — those belong to L2 and L3.
 
-**Modes accepted:** `item-iterating`, `deep-manual`. **Default when omitted:**
+**Iteration mode:** `item-iterating`, `deep-manual`. **Default when omitted:**
 `item-iterating` (30–100 alerts; typically one alert per dispatch in v1).
 Use `deep-manual` only for a mixed-platform alert payload that needs unpacking
-before normalization. See "Dispatch-Mode Declaration" in `agent/operator-core-blue.md`.
+before normalization. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core-blue.md`.
 
-## Specialist Context Isolation
-
-You are a specialist sub-agent, not the operator. Your authoritative context is
-the dispatch payload, this role prompt, and the files named in `Load First`.
-Do NOT load `agent/AGENTS.md` or `agent/CLAUDE.md` — those are operator-only
-procedures for phase orchestration, dispatch policy, and cross-agent state
-management. Cross-cutting blue rules that you do need live in
-`agent/shared-constraints-blue.md` and the always-active rules files, and are
-listed below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
+**MANDATORY (before any work):**
+
+- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — outcome-before-theory, severity discipline, disposition vocabulary, symmetric evidence bar, mechanical-auto-close rule
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, confidence-label semantics
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read
 - `agent/rules/resume.md` — universal resume hydration; `vigil assess resume-brief --finding <slug>` before any continuation
-- `agent/rules/reporting.md` — banned hedge phrases, severity discipline, section-length limits
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - `agent/skills/alert-triage/SKILL.md` — the alert normalization schema, the platform-skill-routing table, the mechanical-noise FP register format, the L1→L2 handoff contract (built in Unit 7)
 - **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** The tenant ref carries the known-benign register that gates every auto-close decision. Missing tenant ref → halt with a `blocked` handoff naming the path.
+
+**LOAD-ON-FIRST-USE (lazy):**
+
+- `agent/rules/reporting.md` — **conditional (banned hedge phrases + severity discipline).** L1 is a triager, not a report author: load it only when composing the `kill_reason` prose for a mechanical-noise auto-close — the one L1 output that lands in a finding record.
 
 ## Pre-Work Checkpoint
 
@@ -167,6 +165,10 @@ auto-close path fired.
 
 ## Mandatory Closing Sequence
 
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Below is this role's own verb list.
+
+### Closing verbs
+
 Before your dispatch returns, run in this order:
 
 1. **Confirm the alert-intake artifact.** The operator owns raw alert intake:
@@ -178,9 +180,8 @@ Before your dispatch returns, run in this order:
    vigil assess artifact search --kind alert_intake --limit 10
    ```
 
-   If no `alert_intake` artifact exists, return a `blocked` handoff. Do not
-   re-register the raw alert yourself because intake ownership belongs to the
-   operator and must happen before phase transition.
+   If no `alert_intake` artifact exists, return a `blocked` handoff. Intake
+   ownership belongs to the operator, not L1 — do not re-register it yourself.
 
 2. **Register the tenant-ref citation artifact** when an auto-close fired. The
    verbatim quoted pattern text lands under
@@ -193,11 +194,7 @@ Before your dispatch returns, run in this order:
      --agent-id <id>
    ```
 
-3. **Mark transient working notes as scratch.** Anything under `notes/scratch/`:
-
-   ```bash
-   vigil assess artifact mark-scratch --under notes/scratch/
-   ```
+3. **Mark transient working notes as scratch.** `vigil assess artifact mark-scratch --under notes/scratch/`.
 
 4. **Record the finding.**
    - Auto-close path: `vigil assess record-finding alert-triage-specialist
@@ -217,13 +214,6 @@ Before your dispatch returns, run in this order:
 
 7. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only
    after it succeeds (404 → `agent_id` mismatch).
-
-Skipping the handoff write leaves L2 with nothing to feed into the next dispatch.
-Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
-
-`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
-after artifact registration even before recording the finding so the operator
-sees in-flight progress via `vigil assess resume-brief`.
 
 ## Output Contract
 

@@ -18,7 +18,7 @@ origin: Vigil
 ## Tools
 
 - `vigil assess kali exec -- aws ...` (AWS CLI calls against IAM and STS — all target-facing AWS CLI must go through the kali exec wrapper; use `--technique AUTH --probe-kind fingerprint --phase consume-test --timeout 60` for enumeration, and add `--destructive` plus `--probe-kind exploit` for mutating calls like `create-access-key`, `attach-user-policy`, `put-role-policy`)
-- boto3 (Python scripts — run via `vigil assess kali exec --technique AUTH ... -- python3 ...`)
+- boto3 (Python scripts for authenticated/SigV4 AWS SDK flows — run via `vigil assess kali exec --technique AUTH ... -- python3 ...`. If boto3 is unavailable in the runtime image, this degrades gracefully for unauthenticated calls: e.g. Cognito Identity Pool `GetId`/`GetCredentialsForIdentity` against a pool that allows unauthenticated identities need no SigV4 signing at all and can be issued directly with `curl -X POST` against the `cognito-identity.<region>.amazonaws.com` endpoint. Prefer boto3 whenever the call requires signing or session/credential handling.)
 - Pacu (AWS exploitation framework — run via `vigil assess kali exec --technique AUTH --probe-kind exploit --phase consume-test --timeout 300 --destructive -- ...`)
 - Cloudsplaining (IAM policy analyzer — host-side analysis on downloaded policy JSON)
 - enumerate-iam (permission enumeration — run via kali exec)

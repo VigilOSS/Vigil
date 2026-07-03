@@ -69,7 +69,11 @@ def register(subparsers) -> None:
                    help="Skip the trufflehog secret scan (endpoint extraction still runs).")
     p.add_argument("--db", dest="db_path", default="",
                    help="cases.db path for endpoint ingest. Relative paths anchor to the engagement dir. "
-                        "When unset, extracted endpoints are written to disk but not ingested.")
+                        "When unset, DEFAULTS to the engagement's cases.db so extracted endpoints are "
+                        "never silently dropped — pass --no-ingest to opt out.")
+    p.add_argument("--no-ingest", dest="no_ingest", action="store_true",
+                   help="Extract + scan but do NOT ingest endpoints into the work buffer "
+                        "(overrides the default-to-cases.db behavior).")
     p.add_argument("--stage-timeout", dest="stage_timeout", type=int, default=900,
                    help="Per-tool --timeout seconds (default 900).")
     p.set_defaults(func=run)
@@ -85,6 +89,7 @@ _ARG_DEFAULTS = {
     "verify": False,
     "no_secrets": False,
     "db_path": "",
+    "no_ingest": False,
     "stage_timeout": 900,
 }
 
@@ -340,6 +345,21 @@ def run(args) -> None:
     # and scope filtering — see the resolved path instead of None (which would raise
     # in rate_caps_for_dir and silently no-op the default-on recon JS stage).
     args.engagement_dir = cfg.engagement_dir
+    # --db foot-gun guard: when unset, default the ingest target to the
+    # engagement's cases.db so a full mine never silently drops every extracted
+    # endpoint (written to disk but never reaching the work buffer). --no-ingest
+    # is the explicit opt-out.
+    if not args.db_path and not getattr(args, "no_ingest", False):
+        default_db = Path(cfg.engagement_dir) / "cases.db"
+        if default_db.is_file():
+            args.db_path = str(default_db)
+            print(f"js-mining: --db unset; defaulting endpoint ingest to {default_db}.",
+                  file=sys.stderr)
+        else:
+            _warn(
+                f"--db unset and no cases.db at {default_db}; extracted endpoints will be "
+                "written to disk but NOT ingested. Pass --db <path> to ingest."
+            )
     work_host, _ = _paths(cfg, "")
     work_host.parent.mkdir(parents=True, exist_ok=True)
 

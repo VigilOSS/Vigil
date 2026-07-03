@@ -7,6 +7,7 @@ import re
 import sqlite3
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 import sys
 from urllib.parse import parse_qs
 
@@ -34,7 +35,7 @@ def _load_proxy_addon_module():
     mitmproxy_module = ModuleType("mitmproxy")
     mitmproxy_module.http = SimpleNamespace(HTTPFlow=object)
     mitmproxy_module.ctx = SimpleNamespace(
-        options=SimpleNamespace(engagements_root="", engagement_dir="", registry_poll_seconds=30),
+        options=SimpleNamespace(engagements_root="", registry_poll_seconds=30),
         log=SimpleNamespace(info=lambda *a, **k: None, warn=lambda *a, **k: None, error=lambda *a, **k: None),
     )
     sys.modules["mitmproxy"] = mitmproxy_module
@@ -116,6 +117,161 @@ def test_get_command_run_accepts_json_flag(monkeypatch, tmp_path: Path, capsys) 
 
     assert captured_endpoints == ["command-runs/123"]
     assert json.loads(capsys.readouterr().out) == {"id": 123, "stdout_preview": "ok"}
+
+
+def test_fetch_auto_pages_bounded_assessment_lists(capsys) -> None:
+    module = _load_script_module(
+        "test_fetch_module_auto_pages",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    calls: list[str] = []
+
+    class FakeClient:
+        def get_all_pages(self, endpoint: str, *, page_size: int = 5000):
+            calls.append(endpoint)
+            assert page_size == 5000
+            return [{"id": i} for i in range(5001)]
+
+    rows = module._fetch_assessment_endpoint(FakeClient(), "surfaces")
+
+    assert len(rows) == 5001
+    assert calls == ["surfaces"]
+    err = capsys.readouterr().err
+    assert "auto-paging surfaces with page_size=5000" in err
+    assert "stdout will be one combined JSON array" in err
+    assert "fetched 5001 surfaces row(s) across all pages" in err
+
+
+def test_fetch_respects_explicit_pagination_query(capsys) -> None:
+    module = _load_script_module(
+        "test_fetch_module_explicit_page",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    calls: list[str] = []
+
+    class FakeClient:
+        def get(self, endpoint: str):
+            calls.append(endpoint)
+            return [{"id": 1}]
+
+    rows = module._fetch_assessment_endpoint(FakeClient(), "surfaces?limit=10&offset=20")
+
+    assert rows == [{"id": 1}]
+    assert calls == ["surfaces?limit=10&offset=20"]
+    assert capsys.readouterr().err == ""
+
+
+def test_assessment_client_get_all_pages_fetches_every_page() -> None:
+    _load_script_module(
+        "test_fetch_module_imports_client",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    client_module = importlib.import_module("assess.lib.client")
+    client = client_module.AssessmentClient("http://example.test", "eng")
+    calls: list[str] = []
+
+    def fake_get(endpoint: str):
+        calls.append(endpoint)
+        if endpoint == "surfaces?status=open&limit=2&offset=0":
+            return [{"id": 1}, {"id": 2}]
+        if endpoint == "surfaces?status=open&limit=2&offset=2":
+            return [{"id": 3}]
+        raise AssertionError(endpoint)
+
+    client.get = fake_get
+
+    rows = client.get_all_pages("surfaces?status=open", page_size=2)
+
+    assert rows == [{"id": 1}, {"id": 2}, {"id": 3}]
+    assert calls == [
+        "surfaces?status=open&limit=2&offset=0",
+        "surfaces?status=open&limit=2&offset=2",
+    ]
+
+
+def test_export_surfaces_fetches_all_pages(monkeypatch, tmp_path: Path) -> None:
+    module = _load_script_module(
+        "test_export_surfaces_module_all_pages",
+        "agent/scripts/assess/commands/export_surfaces.py",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def get_all_pages(self, endpoint: str):
+            calls.append(endpoint)
+            return [{"id": 1}, {"id": 2}]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(SimpleNamespace(engagement_dir=tmp_path))
+
+    assert calls == ["surfaces"]
+    assert (tmp_path / "surfaces.jsonl").read_text(encoding="utf-8").splitlines() == [
+        '{"id": 1}',
+        '{"id": 2}',
+    ]
+
+
+def test_check_phase_readiness_scope_gate_fetches_all_surfaces(monkeypatch, tmp_path: Path) -> None:
+    module = _load_script_module(
+        "test_check_phase_readiness_all_surfaces",
+        "agent/scripts/assess/commands/check_phase_readiness.py",
+    )
+    (tmp_path / "scope.json").write_text(
+        json.dumps({"hosts": ["example.test"]}),
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, str]] = []
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def get(self, endpoint: str):
+            calls.append(("get", endpoint))
+            if endpoint == "services":
+                return []
+            raise AssertionError(endpoint)
+
+        def get_all_pages(self, endpoint: str):
+            calls.append(("get_all_pages", endpoint))
+            return [{"id": 1, "target_descriptor": "https://example.test/"}]
+
+    def fake_build_scope_coverage_report(**kwargs):
+        captured.update(kwargs)
+        return {"ready": True}
+
+    monkeypatch.setattr(module.cc, "_vendor_saas_decided_hosts", lambda _client: set())
+    monkeypatch.setattr(module.cc, "_load_work_items_by_host", lambda _path: {})
+    monkeypatch.setattr(module.cc, "build_scope_coverage_report", fake_build_scope_coverage_report)
+
+    cfg = SimpleNamespace(engagement_key="eng", engagement_dir=str(tmp_path))
+    args = SimpleNamespace(strict_vendor_saas=False)
+    report, failed = module._run_scope_gate(cfg, FakeClient(), args, "enum")
+
+    assert report == {"ready": True}
+    assert failed is False
+    assert calls == [("get", "services"), ("get_all_pages", "surfaces")]
+    assert captured["surfaces"] == [
+        {"id": 1, "target_descriptor": "https://example.test/"}
+    ]
 
 
 def test_list_findings_pushes_filters_and_limit_to_backend(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -548,6 +704,12 @@ def test_ingest_candidates_preserve_metadata_and_route(
             self.engagement_key = engagement_key
 
         def post(self, endpoint: str, payload: dict[str, object]):
+            if endpoint == "request-observations/bulk":
+                records = []
+                for item in payload.get("items", []):
+                    posts.append(("request-observations", item))
+                    records.append({"request_variant": {"id": 701}})
+                return {"count": len(records), "records": records}
             posts.append((endpoint, payload))
             return {"request_variant": {"id": 701}}
 
@@ -698,6 +860,12 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
             self.next_id = 800
 
         def post(self, endpoint: str, payload: dict[str, object]):
+            if endpoint == "request-observations/bulk":
+                records = []
+                for _item in payload.get("items", []):
+                    self.next_id += 1
+                    records.append({"request_variant": {"id": self.next_id}})
+                return {"count": len(records), "records": records}
             self.next_id += 1
             return {"request_variant": {"id": self.next_id}}
 
@@ -2570,28 +2738,11 @@ def _agent_prompt_files() -> list[Path]:
     return files
 
 
-_C45_REVIEW_MODE_SECTIONS = {
-    "recon-specialist.md": "## Review Mode (Phase 1 → 2 exit)",
-    "exploit-developer.md": "## Review Mode (Phase 5 → 6 exit)",
-    "vulnerability-analyst.md": "## Root-Cause Review Mode (Phase 4 → 5 exit)",
-}
-
-
-@pytest.mark.parametrize(
-    "agent_file,heading",
-    sorted(_C45_REVIEW_MODE_SECTIONS.items()),
-)
-def test_c45_review_mode_section_present(agent_file: str, heading: str) -> None:
-    """C45: each of recon-specialist / exploit-developer / vulnerability-analyst
-    carries a review-mode section. The headings are exact so future renames
-    surface as a clear test failure. report-writer is intentionally NOT here —
-    it already has Review-and-Fix QA Mode in report-generation/SKILL.md."""
-    repo_root = Path(__file__).resolve().parents[3]
-    body = (repo_root / "agent" / "agents" / agent_file).read_text(encoding="utf-8")
-    assert heading in body, (
-        f"{agent_file} should carry the C45 review-mode section with heading "
-        f"'{heading}'"
-    )
+# (C45 review-mode heading-pin test removed: per the repository's
+# "Markdown prompt/doc testing policy" (root AGENTS.md), prompt/doc wording and
+# exact headings are not asserted in tests — brittle heading pins turn normal
+# prompt editing into fixture maintenance and reward stale phrasing. Review-mode
+# section presence is a prompt-authoring-checklist concern, not a CI gate.)
 
 
 def test_no_operator_prompt_invokes_update_finding_with_details_json() -> None:

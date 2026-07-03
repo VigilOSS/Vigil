@@ -51,6 +51,66 @@ def identity_names(engagement_dir: str | Path) -> list[str]:
     return creds_client.identity_names(engagement_dir)
 
 
+def host_cookies_for(material: dict[str, Any], host: str) -> dict[str, str]:
+    """Return the cookies captured for ``host`` from an identity's per-host jar.
+
+    The store keeps captured cookies in per-host buckets
+    (``host_cookies = [{"host": ..., "cookies": {...}}, ...]``). A browser sends a
+    cookie set on ``example.com`` to ``app.example.com`` too, so a bucket matches
+    when its host equals ``host`` OR ``host`` is a subdomain of it; the exact-host
+    bucket overlays a parent-domain bucket on key collisions (most-specific wins),
+    mirroring how a browser layers cookies. Returns ``{}`` when nothing matches or
+    no buckets exist — the caller then falls back to the flat ``cookies`` view.
+
+    This is the read side of the host-cookie jar (I-22): a cookie-session app on a
+    host other than the capture-time primary scope host would otherwise be sent
+    the flat (mismatched/empty) cookie view and read the request as "session
+    stale" — a fail-closed false negative.
+    """
+    raw = material.get("host_cookies")
+    target = (host or "").strip().rstrip(".").lower()
+    if not isinstance(raw, list) or not target:
+        return {}
+    # (specificity, cookies) — exact host = 2, parent domain = 1. Applied in
+    # ascending specificity so the exact-host bucket wins on key collisions.
+    matched: list[tuple[int, dict[str, str]]] = []
+    for bucket in raw:
+        if not isinstance(bucket, dict):
+            continue
+        bhost = str(bucket.get("host", "")).strip().rstrip(".").lower()
+        cookies = bucket.get("cookies")
+        if not bhost or not isinstance(cookies, dict):
+            continue
+        if target == bhost:
+            specificity = 2
+        elif target.endswith("." + bhost):
+            specificity = 1
+        else:
+            continue
+        matched.append((specificity, {str(k): str(v) for k, v in cookies.items()}))
+    out: dict[str, str] = {}
+    for _specificity, cookies in sorted(matched, key=lambda m: m[0]):
+        out.update(cookies)
+    return out
+
+
+def host_cookie_hosts(material: dict[str, Any]) -> list[str]:
+    """Host labels for which the identity carries a non-empty captured cookie
+    bucket. Used to WARN when a run's request host matches none of them."""
+    raw = material.get("host_cookies")
+    if not isinstance(raw, list):
+        return []
+    hosts: list[str] = []
+    for bucket in raw:
+        if not isinstance(bucket, dict):
+            continue
+        bhost = str(bucket.get("host", "")).strip().rstrip(".").lower()
+        cookies = bucket.get("cookies")
+        if bhost and isinstance(cookies, dict) and cookies:
+            hosts.append(bhost)
+    return hosts
+
+
 def resolve_identity(
     engagement_dir: str | Path, requested: str | None
 ) -> tuple[str | None, dict[str, Any]]:

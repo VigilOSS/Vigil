@@ -43,7 +43,7 @@ The recon-mandatory minimum is the L1 wordlist
 tech-extension variants — see `agent/skills/web-recon/SKILL.md` Step 5. Match the
 `--rate-limit` and `-t` settings to the wafw00f-determined WAF tier (full table in
 `agent/references/tools/recon/wafw00f.md` "WAF-tier rate adjustment table"; canonical
-per-target calibration in `agent/operator-core.md` "Recon Dispatch Resource Policy"):
+per-target calibration in `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy"):
 
 - **No WAF** → `-t 50` (default), no rate cap.
 - **Basic WAF** → `-t 25 --rate-limit 50`.

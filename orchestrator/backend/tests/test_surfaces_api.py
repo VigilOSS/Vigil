@@ -17,11 +17,19 @@ from tests.test_engagements_api import write_engagement
 
 ENGAGEMENT_KEY = "2026-04-17-120100-surfaces"
 ASSESSMENT_BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
+OTHER_ENGAGEMENT_KEY = "2026-04-17-120200-surfaces-other"
+OTHER_ASSESSMENT_BASE = f"/engagements/{OTHER_ENGAGEMENT_KEY}/assessment"
 
 
 def _seed_engagement(client, isolate_settings) -> None:
     write_engagement(isolate_settings["engagements_dir"], key=ENGAGEMENT_KEY)
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
+    assert response.status_code == 200, response.text
+
+
+def _seed_other_engagement(client, isolate_settings) -> None:
+    write_engagement(isolate_settings["engagements_dir"], key=OTHER_ENGAGEMENT_KEY)
+    response = client.get(f"/engagements/{OTHER_ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
 
 
@@ -31,6 +39,19 @@ def _create_surface(client) -> dict:
         "target_descriptor": "https://example.test/api/users/{id}",
         "source_name": "surface-collector",
         "rationale": "GET handler with numeric id parameter",
+        "evidence_ref": "scans/katana.txt:14",
+    }
+    response = client.post(f"{ASSESSMENT_BASE}/surfaces", json=payload)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _create_surface_with_descriptor(client, descriptor: str) -> dict:
+    payload = {
+        "surface_type": "object_reference",
+        "target_descriptor": descriptor,
+        "source_name": "surface-collector",
+        "rationale": "candidate parameter",
         "evidence_ref": "scans/katana.txt:14",
     }
     response = client.post(f"{ASSESSMENT_BASE}/surfaces", json=payload)
@@ -58,6 +79,21 @@ def test_patch_surface_resolves_to_covered_with_rationale(client, isolate_settin
     assert "vulnerability-analyst confirmed" in body["rationale"]
     # Original rationale is retained because update_surface appends.
     assert "GET handler with numeric id parameter" in body["rationale"]
+
+
+def test_list_surfaces_is_bounded_and_paginates(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    created = [
+        _create_surface_with_descriptor(client, f"https://example.test/api/{idx}")
+        for idx in range(3)
+    ]
+
+    response = client.get(f"{ASSESSMENT_BASE}/surfaces?limit=2&offset=1")
+
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    assert len(rows) == 2
+    assert [row["id"] for row in rows] == [created[1]["id"], created[0]["id"]]
 
 
 def test_patch_surface_rejects_unknown_id(client, isolate_settings):
@@ -141,6 +177,15 @@ def test_patch_surface_rejects_empty_evidence_ref(client, isolate_settings):
         json={"evidence_ref": ""},
     )
     assert response.status_code == 422, response.text
+
+
+def _create_request_variant(client, url: str) -> int:
+    response = client.post(
+        f"{ASSESSMENT_BASE}/request-observations",
+        json={"url": url, "discovery_source": "recon"},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["request_variant"]["id"]
 
 
 def test_patch_surface_blocks_regression_to_discovered_from_covered(
@@ -497,3 +542,342 @@ def test_patch_surface_partially_covered_to_discovered_blocked(client, isolate_s
         json={"status": "discovered", "rationale": "regress to undecided"},
     )
     assert response.status_code == 409, response.text
+
+
+# ──────────────────────────────────────────────────────────────
+# surface_request_variant_links — durable surface <-> request-variant link
+# ──────────────────────────────────────────────────────────────
+
+
+def test_create_surface_request_variant_link_success(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    surface = _create_surface(client)
+    variant_id = _create_request_variant(client, "https://example.test/api/users/1")
+
+    response = client.post(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links",
+        json={
+            "surface_id": surface["id"],
+            "request_variant_id": variant_id,
+            "relation": "primary-endpoint",
+            "evidence_ref": "scans/katana.txt:14",
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["surface_id"] == surface["id"]
+    assert body["request_variant_id"] == variant_id
+    assert body["relation"] == "primary-endpoint"
+    assert body["evidence_ref"] == "scans/katana.txt:14"
+
+
+def test_create_surface_request_variant_link_404_on_bad_surface_id(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    variant_id = _create_request_variant(client, "https://example.test/api/users/2")
+
+    response = client.post(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links",
+        json={"surface_id": 9999, "request_variant_id": variant_id},
+    )
+    assert response.status_code == 404, response.text
+    assert "surface" in response.json()["detail"].lower()
+
+
+def test_create_surface_request_variant_link_404_on_bad_request_variant_id(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    surface = _create_surface(client)
+
+    response = client.post(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links",
+        json={"surface_id": surface["id"], "request_variant_id": 9999},
+    )
+    assert response.status_code == 404, response.text
+    assert "request_variant" in response.json()["detail"].lower()
+
+
+def test_list_surface_request_variant_links_by_surface(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    surface = _create_surface(client)
+    other_surface = _create_surface_with_descriptor(client, "https://example.test/api/other")
+    variant_a = _create_request_variant(client, "https://example.test/api/users/3")
+    variant_b = _create_request_variant(client, "https://example.test/api/users/4")
+
+    for variant_id in (variant_a, variant_b):
+        response = client.post(
+            f"{ASSESSMENT_BASE}/surface-request-variant-links",
+            json={"surface_id": surface["id"], "request_variant_id": variant_id},
+        )
+        assert response.status_code == 201, response.text
+    # Link belonging to a different surface must not leak into the list below.
+    response = client.post(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links",
+        json={"surface_id": other_surface["id"], "request_variant_id": variant_a},
+    )
+    assert response.status_code == 201, response.text
+
+    listed = client.get(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links/by-surface/{surface['id']}"
+    )
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()
+    assert len(rows) == 2
+    assert {row["request_variant_id"] for row in rows} == {variant_a, variant_b}
+    assert all(row["surface_id"] == surface["id"] for row in rows)
+
+
+def test_list_surface_request_variant_links_by_request_variant(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    surface_a = _create_surface(client)
+    surface_b = _create_surface_with_descriptor(client, "https://example.test/api/another")
+    variant_id = _create_request_variant(client, "https://example.test/api/users/5")
+    other_variant_id = _create_request_variant(client, "https://example.test/api/users/6")
+
+    for surface in (surface_a, surface_b):
+        response = client.post(
+            f"{ASSESSMENT_BASE}/surface-request-variant-links",
+            json={"surface_id": surface["id"], "request_variant_id": variant_id},
+        )
+        assert response.status_code == 201, response.text
+    # Link belonging to a different request_variant must not leak into the list below.
+    response = client.post(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links",
+        json={"surface_id": surface_a["id"], "request_variant_id": other_variant_id},
+    )
+    assert response.status_code == 201, response.text
+
+    listed = client.get(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links/by-request-variant/{variant_id}"
+    )
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()
+    assert len(rows) == 2
+    assert {row["surface_id"] for row in rows} == {surface_a["id"], surface_b["id"]}
+    assert all(row["request_variant_id"] == variant_id for row in rows)
+
+
+def test_create_surface_request_variant_link_upsert_updates_evidence_ref(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    surface = _create_surface(client)
+    variant_id = _create_request_variant(client, "https://example.test/api/users/7")
+
+    first = client.post(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links",
+        json={
+            "surface_id": surface["id"],
+            "request_variant_id": variant_id,
+            "relation": "primary-endpoint",
+            "evidence_ref": "scans/katana-v1.txt:1",
+        },
+    )
+    assert first.status_code == 201, first.text
+    first_id = first.json()["id"]
+
+    second = client.post(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links",
+        json={
+            "surface_id": surface["id"],
+            "request_variant_id": variant_id,
+            "relation": "primary-endpoint",
+            "evidence_ref": "scans/katana-v2.txt:9",
+        },
+    )
+    assert second.status_code == 201, second.text
+    assert second.json()["id"] == first_id
+    assert second.json()["evidence_ref"] == "scans/katana-v2.txt:9"
+
+    listed = client.get(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links/by-surface/{surface['id']}"
+    )
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()
+    # The upsert must not create a second row for the same
+    # (surface_id, request_variant_id, relation) key.
+    assert len(rows) == 1
+    assert rows[0]["evidence_ref"] == "scans/katana-v2.txt:9"
+
+
+def test_create_surface_request_variant_link_distinct_relations_create_separate_rows(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+    surface = _create_surface(client)
+    variant_id = _create_request_variant(client, "https://example.test/api/users/8")
+
+    for relation in ("primary-endpoint", "related"):
+        response = client.post(
+            f"{ASSESSMENT_BASE}/surface-request-variant-links",
+            json={
+                "surface_id": surface["id"],
+                "request_variant_id": variant_id,
+                "relation": relation,
+            },
+        )
+        assert response.status_code == 201, response.text
+
+    listed = client.get(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links/by-surface/{surface['id']}"
+    )
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()
+    assert len(rows) == 2
+    assert {row["relation"] for row in rows} == {"primary-endpoint", "related"}
+
+
+def test_create_surface_request_variant_link_empty_evidence_ref_does_not_clobber(
+    client, isolate_settings
+):
+    """The upsert uses COALESCE(NULLIF(excluded.evidence_ref, ''), ...) — a
+    re-post with no evidence_ref (the CLI/ingest default) must not erase a
+    previously-recorded one."""
+    _seed_engagement(client, isolate_settings)
+    surface = _create_surface(client)
+    variant_id = _create_request_variant(client, "https://example.test/api/users/9")
+
+    first = client.post(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links",
+        json={
+            "surface_id": surface["id"],
+            "request_variant_id": variant_id,
+            "relation": "primary-endpoint",
+            "evidence_ref": "scans/katana.txt:14",
+        },
+    )
+    assert first.status_code == 201, first.text
+    first_id = first.json()["id"]
+
+    second = client.post(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links",
+        json={
+            "surface_id": surface["id"],
+            "request_variant_id": variant_id,
+            "relation": "primary-endpoint",
+            # evidence_ref omitted -> defaults to "" on the wire.
+        },
+    )
+    assert second.status_code == 201, second.text
+    assert second.json()["id"] == first_id
+    assert second.json()["evidence_ref"] == "scans/katana.txt:14"
+
+    listed = client.get(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links/by-surface/{surface['id']}"
+    )
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()
+    assert len(rows) == 1
+    assert rows[0]["evidence_ref"] == "scans/katana.txt:14"
+
+
+# ──────────────────────────────────────────────────────────────
+# surface_request_variant_links — cross-engagement scoping
+# ──────────────────────────────────────────────────────────────
+
+
+def test_create_surface_request_variant_link_404_on_foreign_surface_id(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    _seed_other_engagement(client, isolate_settings)
+
+    foreign_surface = _create_surface(client)  # belongs to ENGAGEMENT_KEY
+    # A request_variant_id that is genuinely VALID under OTHER_ENGAGEMENT_KEY,
+    # so the 404 below is attributable to the surface_id check alone, not a
+    # coincidental failure on both ids.
+    own_variant = client.post(
+        f"{OTHER_ASSESSMENT_BASE}/request-observations",
+        json={"url": "https://example-other.test/api/users/10", "discovery_source": "recon"},
+    )
+    assert own_variant.status_code == 201, own_variant.text
+    own_variant_id = own_variant.json()["request_variant"]["id"]
+
+    response = client.post(
+        f"{OTHER_ASSESSMENT_BASE}/surface-request-variant-links",
+        json={"surface_id": foreign_surface["id"], "request_variant_id": own_variant_id},
+    )
+    assert response.status_code == 404, response.text
+    assert "surface" in response.json()["detail"].lower()
+
+
+def test_create_surface_request_variant_link_404_on_foreign_request_variant_id(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+    _seed_other_engagement(client, isolate_settings)
+
+    foreign_variant_id = _create_request_variant(
+        client, "https://example.test/api/users/11"
+    )  # belongs to ENGAGEMENT_KEY
+
+    other_surface = client.post(
+        f"{OTHER_ASSESSMENT_BASE}/surfaces",
+        json={
+            "surface_type": "object_reference",
+            "target_descriptor": "https://example-other.test/api/users/{id}",
+            "source_name": "surface-collector",
+            "rationale": "candidate parameter",
+            "evidence_ref": "scans/katana.txt:1",
+        },
+    )
+    assert other_surface.status_code == 201, other_surface.text
+
+    response = client.post(
+        f"{OTHER_ASSESSMENT_BASE}/surface-request-variant-links",
+        json={
+            "surface_id": other_surface.json()["id"],
+            "request_variant_id": foreign_variant_id,
+        },
+    )
+    assert response.status_code == 404, response.text
+    assert "request_variant" in response.json()["detail"].lower()
+
+
+def test_list_surface_request_variant_links_by_surface_does_not_leak_across_engagements(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+    _seed_other_engagement(client, isolate_settings)
+
+    surface = _create_surface(client)  # ENGAGEMENT_KEY
+    variant_id = _create_request_variant(client, "https://example.test/api/users/12")
+    link = client.post(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links",
+        json={"surface_id": surface["id"], "request_variant_id": variant_id},
+    )
+    assert link.status_code == 201, link.text
+
+    # Same surface_id queried under the OTHER engagement must not see the
+    # ENGAGEMENT_KEY link — engagement scoping, not a global table scan.
+    leaked = client.get(
+        f"{OTHER_ASSESSMENT_BASE}/surface-request-variant-links/by-surface/{surface['id']}"
+    )
+    assert leaked.status_code == 200, leaked.text
+    assert leaked.json() == []
+
+    # Sanity: the link IS visible under its own engagement.
+    own = client.get(f"{ASSESSMENT_BASE}/surface-request-variant-links/by-surface/{surface['id']}")
+    assert own.status_code == 200, own.text
+    assert len(own.json()) == 1
+
+
+def test_list_surface_request_variant_links_by_request_variant_does_not_leak_across_engagements(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+    _seed_other_engagement(client, isolate_settings)
+
+    surface = _create_surface(client)  # ENGAGEMENT_KEY
+    variant_id = _create_request_variant(client, "https://example.test/api/users/13")
+    link = client.post(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links",
+        json={"surface_id": surface["id"], "request_variant_id": variant_id},
+    )
+    assert link.status_code == 201, link.text
+
+    leaked = client.get(
+        f"{OTHER_ASSESSMENT_BASE}/surface-request-variant-links/by-request-variant/{variant_id}"
+    )
+    assert leaked.status_code == 200, leaked.text
+    assert leaked.json() == []
+
+    own = client.get(
+        f"{ASSESSMENT_BASE}/surface-request-variant-links/by-request-variant/{variant_id}"
+    )
+    assert own.status_code == 200, own.text
+    assert len(own.json()) == 1

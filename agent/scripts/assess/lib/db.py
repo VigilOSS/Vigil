@@ -4,6 +4,7 @@ Kills the 19-positional-parameter db_insert_case() function and SQL injection su
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Any, Iterator
 # `_load_script_module` test loader (which also inserts the scripts dir on
 # sys.path before exec_module). A relative `from .classify_buckets` fails
 # in the test path because the file is loaded without a parent package.
-from assess.lib.classify_buckets import INERT_TYPES
+from assess.lib.classify_buckets import CLASSIFIER_VERSION, INERT_TYPES
 
 _SCHEMA_FILE = Path(__file__).resolve().parent.parent.parent / "schema.sql"
 
@@ -45,6 +46,10 @@ _WORK_ITEMS_PRIORITY_COLUMNS: tuple[tuple[str, str], ...] = (
     # an explicit 0/1.
     ("request_body_truncated", "INTEGER NOT NULL DEFAULT 0"),
     ("response_truncated", "INTEGER NOT NULL DEFAULT 0"),
+    # Reclassification staleness stamp. Legacy rows come back NULL (interpreted
+    # as "scored under an unknown/old bucket table") so `classify-work
+    # --reclassify-stale` picks them up on first run.
+    ("classifier_version", "TEXT"),
 )
 _CASES_TRUNCATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("request_body_truncated", "INTEGER NOT NULL DEFAULT 0"),
@@ -235,6 +240,98 @@ def db_connect(db_path: str) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def db_insert_out_of_scope_work_item(
+    db_path: str,
+    *,
+    method: str,
+    url: str,
+    url_path: str,
+    query_params=None,
+    body_params=None,
+    path_params=None,
+    cookie_params=None,
+    case_type: str = "unknown",
+    source: str = "",
+    params_key_sig: str = "",
+    auth_context: str = "anonymous",
+    host: str = "",
+) -> None:
+    """Record a URL whose host is NOT admitted by scope.json as a skipped row.
+
+    Shared by the URL-ingest commands (``ingest-endpoints``,
+    ``ingest-candidates``) so a reachable-but-out-of-scope host — gau/wayback
+    historical URLs, or a curated candidate carrying an OOS host — is recorded
+    auditable and reversible instead of admitted as probeable work. The row is
+    ``status='skipped'``, ``cluster_key='skipped:out-of-scope'``,
+    ``terminal_reason='skipped:out-of-scope | <host>'`` so
+    `work-buffer stats --by reason` / `list-clusters` group it and a later
+    scope.json fix + re-ingest re-admits it. The caller skips the backend
+    request-observation POST, so an out-of-scope host never creates a service or
+    surface either.
+
+    Mirrors ``ingest-endpoints``'s egress-blocked deferral shape, but uses
+    ``status='skipped'`` (out-of-scope is a hard "never test" exclusion, not a
+    resolve-later deferral).
+    """
+    if not url or url == "null":
+        return
+    from assess.lib.classify_buckets import tagged_terminal_reason
+
+    def _as_text(value) -> str:
+        if value is None:
+            return "{}"
+        return json.dumps(value) if isinstance(value, dict) else str(value)
+
+    queue_key = f"skipped:out-of-scope:{host}:{url}"
+    terminal_reason = tagged_terminal_reason("out-of-scope", host)
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        retired = conn.execute(
+            """UPDATE work_items
+            SET status = 'skipped',
+                assigned_agent = NULL,
+                consumed_at = NULL,
+                priority_score = 0,
+                priority_reason = NULL,
+                cluster_key = ?,
+                terminal_reason = ?
+            WHERE url = ?
+              AND status = 'pending'
+            """,
+            (
+                "skipped:out-of-scope",
+                terminal_reason,
+                url,
+            ),
+        ).rowcount
+        if retired == 0:
+            conn.execute(
+                """INSERT OR IGNORE INTO work_items (
+                    queue_key, auth_context, method, url, url_path,
+                    query_params, body_params, path_params, cookie_params,
+                    type, source, status, params_key_sig,
+                    cluster_key, terminal_reason
+                ) VALUES (
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?
+                )""",
+                (
+                    queue_key, auth_context, method, url, url_path,
+                    _as_text(query_params), _as_text(body_params),
+                    _as_text(path_params), _as_text(cookie_params),
+                    case_type, source, "skipped", params_key_sig,
+                    "skipped:out-of-scope",
+                    terminal_reason,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def db_insert_work_item(
     db_path: str,
     *,
@@ -271,6 +368,7 @@ def db_insert_work_item(
     selected_by: str | None = None,
     triage_rationale: str | None = None,
     live_status: str | None = None,
+    demote_dead_archive: bool = False,
     curated: bool = False,
     connection: sqlite3.Connection | None = None,
 ) -> None:
@@ -298,6 +396,19 @@ def db_insert_work_item(
         query_params=query_params,
         body_params=body_params,
         path_params=path_params,
+        # Boost-only context layer (classify-context-and-surface 2026-06,
+        # Fix 1): thread the full URL authority, ingest source, and liveness
+        # into scoring so nonprod/admin host_root rows and non-default-port /
+        # live / source-analysis surfaces are no longer hard-0. All three are
+        # already in scope as this function's params.
+        url=url,
+        source=source,
+        live_status=live_status,
+        # Fix 6 (Issue H): default-OFF dead-archive demotion. When the caller
+        # opts in, a dead `gau-archive` row that matched no gf bucket is parked
+        # at score 0 with a `low-signal-cluster` terminal_reason so the archive
+        # tail stops competing with live surfaces in priority mode.
+        demote_dead_archive=demote_dead_archive,
     )
     curated_metadata = curated or any(
         value is not None
@@ -402,6 +513,64 @@ def db_insert_work_item(
                     case_type, source, status, params_key_sig,
                 ),
             )
+        readmitted = conn.execute(
+            """UPDATE work_items
+            SET request_variant_id = ?,
+                service_id = ?,
+                coverage_item_id = ?,
+                auth_context = ?,
+                method = ?,
+                url = ?,
+                url_path = ?,
+                query_params = ?,
+                body_params = ?,
+                path_params = ?,
+                cookie_params = ?,
+                headers = ?,
+                body = ?,
+                content_type = ?,
+                content_length = ?,
+                request_body_truncated = ?,
+                response_status = ?,
+                response_headers = ?,
+                response_size = ?,
+                response_snippet = ?,
+                response_truncated = ?,
+                type = ?,
+                source = ?,
+                status = ?,
+                assigned_agent = NULL,
+                consumed_at = NULL,
+                params_key_sig = ?,
+                priority_score = ?,
+                priority_reason = ?,
+                cluster_key = ?,
+                terminal_reason = ?,
+                classifier_version = ?
+            WHERE queue_key = ?
+              AND status = 'skipped'
+              AND terminal_reason LIKE 'skipped:out-of-scope%'
+            """,
+            (
+                request_variant_id, service_id, coverage_item_id, auth_context,
+                method, url, url_path,
+                query_params, body_params, path_params, cookie_params,
+                headers, body, content_type, content_length,
+                1 if request_body_truncated else 0,
+                response_status, response_headers, response_size, response_snippet,
+                1 if response_truncated else 0,
+                case_type, source, status, params_key_sig,
+                assignment["priority_score"],
+                assignment["priority_reason"],
+                assignment["cluster_key"],
+                assignment["terminal_reason"],
+                CLASSIFIER_VERSION,
+                queue_key,
+            ),
+        ).rowcount
+        if readmitted and not curated_metadata:
+            conn.commit()
+            return
         if curated_metadata:
             # Candidate-record ingest is an explicit curated path. Apply its
             # metadata even when a URL was already inserted through a plain URL
@@ -413,6 +582,7 @@ def db_insert_work_item(
                     priority_reason = ?,
                     cluster_key = ?,
                     terminal_reason = ?,
+                    classifier_version = ?,
                     signals = COALESCE(?, signals),
                     selected_by = COALESCE(?, selected_by),
                     triage_rationale = COALESCE(?, triage_rationale),
@@ -424,6 +594,7 @@ def db_insert_work_item(
                     priority_reason if priority_reason is not None else assignment["priority_reason"],
                     cluster_key if cluster_key is not None else assignment["cluster_key"],
                     terminal_reason if terminal_reason is not None else assignment["terminal_reason"],
+                    CLASSIFIER_VERSION,
                     signals,
                     selected_by,
                     triage_rationale,
@@ -447,7 +618,8 @@ def db_insert_work_item(
             SET priority_score = ?,
                 priority_reason = ?,
                 cluster_key = ?,
-                terminal_reason = COALESCE(?, terminal_reason)
+                terminal_reason = COALESCE(?, terminal_reason),
+                classifier_version = ?
             WHERE queue_key = ?
               AND priority_score = 0
               AND cluster_key IS NULL
@@ -457,6 +629,7 @@ def db_insert_work_item(
                 assignment["priority_reason"],
                 assignment["cluster_key"],
                 assignment["terminal_reason"],
+                CLASSIFIER_VERSION,
                 queue_key,
             ),
         )

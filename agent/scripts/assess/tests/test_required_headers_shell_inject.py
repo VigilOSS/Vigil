@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import shlex
 
-import pytest
-
 from assess.lib import kali, kali_output
 
 
@@ -233,10 +231,103 @@ def test_direct_curl_argv_still_injected() -> None:
 
 
 def test_direct_non_injectable_still_warns() -> None:
+    # wafw00f IS an HTTP-to-target tool but its ``-H``/``--headers`` flag reads a
+    # FILE, not an inline ``Name: Value`` (verified: an inline value errors
+    # "Headers file ... does not exist"), so it cannot carry the attribution
+    # header on the argv — it WARNs (and the Layer-2 backstop is its safety net).
+    cmd = ["wafw00f", "https://example.com"]
+    status = kali_output._apply_required_headers(cmd, "wafw00f", dict(HDR))
+    assert status == "warned"
+    assert cmd == ["wafw00f", "https://example.com"]
+
+
+# --------------------------------------------------------------------------- #
+# Layer 1 — per-tool header-flag injection for non-``-H`` HTTP-to-target tools
+# (whatweb ``--header``, nikto ``-Add-header``, arjun ``--headers``). These are
+# verified-real flags (nikto's ``-H`` is ``-Help``; the real flag is
+# ``-Add-header``). wafw00f stays WARN — its flag takes a file, not a string.
+# --------------------------------------------------------------------------- #
+
+def test_direct_whatweb_injects_header_flag() -> None:
     cmd = ["whatweb", "https://example.com"]
     status = kali_output._apply_required_headers(cmd, "whatweb", dict(HDR))
-    assert status == "warned"
-    assert cmd == ["whatweb", "https://example.com"]
+    assert status == "injected"
+    assert cmd[-2:] == ["--header", "X-Bug-Bounty: vigiloss"]
+
+
+def test_direct_nikto_injects_add_header_flag() -> None:
+    cmd = ["nikto", "-h", "example.com"]
+    status = kali_output._apply_required_headers(cmd, "nikto", dict(HDR))
+    assert status == "injected"
+    assert cmd[-2:] == ["-Add-header", "X-Bug-Bounty: vigiloss"]
+
+
+def test_direct_arjun_injects_headers_flag() -> None:
+    cmd = ["arjun", "-u", "https://example.com"]
+    status = kali_output._apply_required_headers(cmd, "arjun", dict(HDR))
+    assert status == "injected"
+    assert cmd[-2:] == ["--headers", "X-Bug-Bounty: vigiloss"]
+
+
+def test_direct_arjun_multiple_headers_newline_joined_single_flag() -> None:
+    # arjun's --headers is store-once and newline-separated, so multiple required
+    # headers ride a SINGLE --headers value joined by newlines, never two flags
+    # (a second --headers would clobber the first under argparse store).
+    headers = {"X-Bug-Bounty": "vigiloss", "X-HackerOne": "h1user"}
+    cmd = ["arjun", "-u", "https://example.com"]
+    status = kali_output._apply_required_headers(cmd, "arjun", dict(headers))
+    assert status == "injected"
+    assert cmd.count("--headers") == 1
+    flag_idx = cmd.index("--headers")
+    assert cmd[flag_idx + 1] == "X-Bug-Bounty: vigiloss\nX-HackerOne: h1user"
+
+
+def test_direct_whatweb_two_headers_two_flags() -> None:
+    headers = {"X-Bug-Bounty": "vigiloss", "X-HackerOne": "h1user"}
+    cmd = ["whatweb", "https://example.com"]
+    status = kali_output._apply_required_headers(cmd, "whatweb", dict(headers))
+    assert status == "injected"
+    assert cmd.count("--header") == 2
+    assert "X-Bug-Bounty: vigiloss" in cmd
+    assert "X-HackerOne: h1user" in cmd
+
+
+def test_direct_whatweb_existing_header_is_noop() -> None:
+    # An operator-supplied --header (or -H alias) carrying the marker is honored —
+    # no double-inject.
+    cmd = ["whatweb", "--header", "X-Bug-Bounty: someoneelse", "https://example.com"]
+    status = kali_output._apply_required_headers(cmd, "whatweb", dict(HDR))
+    assert status == "noop"
+    assert cmd.count("--header") == 1
+
+
+def test_direct_whatweb_h_alias_existing_is_noop() -> None:
+    cmd = ["whatweb", "-H", "X-Bug-Bounty: x", "https://example.com"]
+    status = kali_output._apply_required_headers(cmd, "whatweb", dict(HDR))
+    assert status == "noop"
+    assert "--header" not in cmd
+
+
+def test_direct_arjun_merges_into_existing_headers_block() -> None:
+    # arjun already carries an auth --headers block (Authorization). The marker is
+    # MERGED into that same value (newline-appended) rather than added as a second
+    # --headers flag that would clobber the auth header under argparse store.
+    cmd = ["arjun", "-u", "https://example.com", "--headers", "Authorization: Bearer t"]
+    status = kali_output._apply_required_headers(cmd, "arjun", dict(HDR))
+    assert status == "injected"
+    assert cmd.count("--headers") == 1
+    flag_idx = cmd.index("--headers")
+    assert cmd[flag_idx + 1] == "Authorization: Bearer t\nX-Bug-Bounty: vigiloss"
+
+
+def test_direct_arjun_existing_marker_in_block_is_noop() -> None:
+    cmd = [
+        "arjun", "-u", "https://example.com",
+        "--headers", "Authorization: Bearer t\nX-Bug-Bounty: vigiloss",
+    ]
+    status = kali_output._apply_required_headers(cmd, "arjun", dict(HDR))
+    assert status == "noop"
+    assert cmd.count("--headers") == 1
 
 
 def test_direct_skip_tool_still_skipped() -> None:

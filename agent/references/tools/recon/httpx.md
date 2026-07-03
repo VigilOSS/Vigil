@@ -1,5 +1,6 @@
 ---
 description: HTTP probing, tech detection, live host confirmation
+skill: web-recon
 ---
 
 # httpx
@@ -7,7 +8,7 @@ description: HTTP probing, tech detection, live host confirmation
 **Purpose:** Fast multi-purpose HTTP toolkit — live host probing, tech detection, status codes, titles
 For live engagement targets, run httpx via `vigil assess kali httpx` (typed verb, audit-flag-aware).
 
-Per-target rate calibration (when probing in volume): `agent/operator-core.md` "Recon Dispatch Resource Policy". Pull `-rl` and `-timeout` values from the matching trait row before running large batches.
+Per-target rate calibration (when probing in volume): `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy". Pull `-rl` and `-timeout` values from the matching trait row before running large batches.
 
 ## Probing
 

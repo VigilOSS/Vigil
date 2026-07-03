@@ -23,7 +23,11 @@ wedge the userspace-proxy VM (engagement I-001); on native Linux / remote
 Docker they stay in the container (transparent no-op). Override with
 `--runtime {auto,host,container}`.
 
-Feed `resolved_hosts.txt` straight into `vigil assess web-discovery`.
+Feed `resolved_hosts.txt` straight into `vigil assess web-discovery`. An
+in-scope host that ENTERS the resolve but produces no A/AAAA (a CNAME pointing
+off-network / a dangling CNAME — a subdomain-takeover lead) is NOT silently
+dropped: it is logged and recorded to `resolution_failures.txt` as an explicit
+resolution-FAILURE signal (I-6 / I-006: could-not-resolve read as nothing).
 """
 from __future__ import annotations
 
@@ -39,7 +43,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from assess.commands import host_exec
-from assess.commands.kali_dnsx import DNSX_PROFILES, RESOLVER_PROFILES
+from assess.commands.kali_dnsx import DNSX_PROFILES, RESOLVER_PROFILES, resolution_failures
 from assess.lib.config import load_config
 from assess.lib.discovery import (
     cluster_productive_parents,
@@ -811,12 +815,14 @@ def _read_hosts(path: Path) -> list[str]:
 
 
 def _discover_once(args, cfg, apexes: list[str], seed_hosts: set[str],
-                   pass_no: int) -> tuple[set[str], list[str]]:
+                   pass_no: int) -> tuple[set[str], list[str], set[str]]:
     """One discover->merge->de-noise->wildcard-strip->resolve pass.
 
-    Returns (resolved_host_set, bruted_targets). On pass 1 it runs passive + CT +
-    the apex brute; later passes re-brute only the productive parents found so far
-    (those are passed in via *apexes* by the convergence loop).
+    Returns (resolved_host_set, bruted_targets, resolution_failures). On pass 1 it
+    runs passive + CT + the apex brute; later passes re-brute only the productive
+    parents found so far (those are passed in via *apexes* by the convergence
+    loop). The third element is the I-6 signal: in-scope hosts that ENTERED the
+    resolve but produced no A/AAAA (a silent dnsx ``-silent`` drop otherwise).
     """
     produced: list[Path] = []
     dnsx_route = _route_for(args, "dnsx")
@@ -872,7 +878,7 @@ def _discover_once(args, cfg, apexes: list[str], seed_hosts: set[str],
         merged_lines.extend(_read_hosts(path))
     clean, dropped = denoise_hosts(merged_lines)
     if not clean:
-        return set(), bruted
+        return set(), bruted, set()
 
     # --- CR-17 wildcard pre-strip (only meaningful when bruting/permuting) --
     if args.brute and not args.no_wildcard_strip:
@@ -894,7 +900,26 @@ def _discover_once(args, cfg, apexes: list[str], seed_hosts: set[str],
     resolved_arg = str(resolved_host) if dnsx_route == "host" else resolved_container
     _resolve_stage(args, cfg, merged_arg, resolved_arg, dnsx_route)
     resolved = set(denoise_hosts(_read_hosts(resolved_host))[0])
-    return resolved, bruted
+
+    # I-6: dnsx runs `-silent`, so an in-scope host that ENTERED the resolve but
+    # produced no A/AAAA (e.g. a CNAME pointing off-network, or a dangling CNAME —
+    # a subdomain-takeover lead) is omitted from `-o` with no trace. Diff the
+    # resolver INPUT set (`clean`) against the resolved OUTPUT set and surface the
+    # gap as an explicit failure signal rather than a silent drop. This is NOT the
+    # unbounded-permutation-brute hazard guard above — raw brute guesses never
+    # reach `clean` (puredns validates them first), so only observed/validated
+    # in-scope names are diffed here.
+    failures = set(resolution_failures(clean, resolved))
+    if failures:
+        sample = ", ".join(sorted(failures)[:5])
+        _warn(
+            f"pass {pass_no}: {len(failures)} in-scope host(s) entered the resolver but "
+            f"produced no A/AAAA (resolution failure, NOT a silent drop): {sample}"
+            f"{' …' if len(failures) > 5 else ''}. A dangling/off-network CNAME here is a "
+            "subdomain-takeover lead — investigate before treating these as "
+            "'does not exist' (I-6)."
+        )
+    return resolved, bruted, failures
 
 
 # --------------------------------------------------------------------------- #
@@ -1024,6 +1049,7 @@ def run(args) -> None:
 
     resolved_all: set[str] = set()
     bruted_apexes: set[str] = set()
+    failures_all: set[str] = set()
     zero_streak = 0
     max_passes = 1 if args.no_converge else max(1, int(args.max_passes))
 
@@ -1038,7 +1064,12 @@ def run(args) -> None:
                   f"{len(targets)} parent(s) with >= {args.parent_min_children} children (CR-20)",
                   file=sys.stderr)
 
-        new_resolved, bruted = _discover_once(args, cfg, targets, set(resolved_all), pass_no)
+        # _discover_once yields (resolved, bruted, resolution_failures). The
+        # failure set is read positionally and tolerated-absent so a 2-tuple test
+        # double (or any stub of this seam) still drives the convergence loop.
+        result = _discover_once(args, cfg, targets, set(resolved_all), pass_no)
+        new_resolved, bruted = result[0], result[1]
+        failures_all |= result[2] if len(result) > 2 else set()
         bruted_apexes.update(bruted)
         before = len(resolved_all)
         resolved_all |= new_resolved
@@ -1060,6 +1091,32 @@ def run(args) -> None:
         # axes already captured everything and re-resolving is a no-op — stop.
         if not _select_parent_targets(args, resolved_all, bruted_apexes):
             break
+
+    # I-6: persist the per-host resolution-FAILURE signal — in-scope hosts that
+    # entered the resolver but produced no A/AAAA. A host that resolved in ANY pass
+    # is not a failure (a later pass may resolve what an earlier one missed), so
+    # subtract the resolved union. Write the canonical artifact BEFORE the
+    # zero-resolved early-exit below: a run that resolved nothing because every
+    # in-scope host pointed off-network is the single most important case to
+    # surface, not bury. Always write (empty when none) so a prior run cannot leave
+    # a STALE failure list for follow-on automation to misread.
+    failures_all -= resolved_all
+    failures_host, _ = _paths(cfg, "resolution_failures.txt")
+    if failures_all:
+        ordered = sorted(failures_all)
+        failures_host.write_text("\n".join(ordered) + "\n", encoding="utf-8")
+        sample = ", ".join(ordered[:5]) + (" …" if len(ordered) > 5 else "")
+        print(
+            f"dns-discovery: {len(failures_all)} in-scope host(s) entered the resolver "
+            f"but produced no A/AAAA (resolution failures): {sample}\n"
+            f"  -> {failures_host}\n"
+            "  NOT silently dropped: a dangling/off-network CNAME here is a "
+            "subdomain-takeover lead — investigate before treating them as "
+            "'does not exist' (I-6).",
+            file=sys.stderr,
+        )
+    else:
+        failures_host.write_text("", encoding="utf-8")
 
     # Persist the union as the canonical resolved set. Always write the canonical
     # path (empty on a no-result run) so a prior run for a DIFFERENT apex — or an

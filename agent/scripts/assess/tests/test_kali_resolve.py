@@ -1,4 +1,4 @@
-"""W6 — kali_resolve correctness (I-11 IPv4-before-IPv6, I-10 ffuf un-pinnable).
+"""W6 — kali_resolve correctness (I-11 IPv4-before-IPv6, curl-only ``--resolve``).
 
 I-11: ``resolve_host_ips`` must return IPv4 (A) addresses BEFORE IPv6 (AAAA),
 regardless of the order ``socket.getaddrinfo`` happens to return them in. The
@@ -7,12 +7,15 @@ runtime makes the in-container HTTP request fail with http=000, which the
 false-negative guard would surface as a (suppressed) real surface. Keeping the
 first pinned address an IPv4 keeps the common case probe-able.
 
-I-10: the image's ffuf has NO ``--resolve host:port:ip`` flag (its Go flag
-parser rejects ``--resolve`` and aborts the run with exit 2 — the probe never
-fires). So ffuf must NOT be in ``RESOLVE_PIN_TOOLS``; injecting the pin would
-turn a recoverable Docker-Desktop resolver flap into a hard, silent total
-failure of every pinned ffuf run. ffuf STAYS an http-prober so the post-run
-http=000 false-negative guard still arms and records a transport error.
+curl-only ``--resolve`` (I-10 generalized): ``--resolve host:port:ip`` is a
+curl-specific feature. ffuf, httpx, nuclei, and katana all reject it ("flag
+provided but not defined: -resolve", exit 2 — the probe never fires), verified
+empirically against the shipped image (katana v1.5.0 / httpx v1.9.0 / nuclei
+v3.7.1). So ``RESOLVE_PIN_TOOLS`` is ``{"curl"}``; injecting the pin into any of
+the others turns a recoverable Docker-Desktop resolver flap into a hard, silent
+total failure of every pinned run (the reported katana ``-u`` breakage). They
+STAY http-probers so the post-run http=000 false-negative guard still arms and
+records a transport error.
 """
 from __future__ import annotations
 
@@ -138,25 +141,45 @@ def test_apply_resolve_pin_is_noop_for_ffuf(monkeypatch):
     assert "--resolve" not in cmd
 
 
-@pytest.mark.parametrize("tool", ["curl", "httpx", "nuclei", "katana"])
-def test_real_pin_tools_still_pin(tool, monkeypatch):
-    """Removing ffuf must not regress the tools that genuinely accept --resolve."""
+def test_only_curl_pins(monkeypatch):
+    """curl is the ONLY tool that accepts curl-style ``--resolve host:port:ip``."""
     monkeypatch.setattr(kali_resolve, "resolve_host_ips", lambda _h: ["93.184.216.34"])
-    if tool == "curl":
-        cmd = ["curl", "-sS", "https://example.com/"]
-    else:
-        cmd = [tool, "-u", "https://example.com/"]
+    cmd = ["curl", "-sS", "https://example.com/"]
 
     pinned = kali_resolve.apply_resolve_pin(
-        cmd, tool, runtime=_docker_desktop(), ips=["93.184.216.34"]
+        cmd, "curl", runtime=_docker_desktop(), ips=["93.184.216.34"]
     )
 
     assert pinned == "93.184.216.34"
     assert "--resolve" in cmd
 
 
-def test_ffuf_remains_http_prober_so_guard_still_arms():
-    """Safety net intact: ffuf is still an http-prober, so the post-run
-    http=000 false-negative guard arms for it and records a transport error
-    (not a target verdict) even though the pin is gone."""
-    assert is_http_prober("ffuf") is True
+@pytest.mark.parametrize("tool", ["httpx", "nuclei", "katana", "ffuf", "sqlmap"])
+def test_go_tools_are_not_pinned(tool, monkeypatch):
+    """httpx/nuclei/katana (and ffuf/sqlmap) reject curl-style ``--resolve``
+    ("flag provided but not defined: -resolve", exit 2) — verified empirically
+    against the shipped image (katana v1.5.0 / httpx v1.9.0 / nuclei v3.7.1). They
+    MUST be out of RESOLVE_PIN_TOOLS so the pin is never injected; otherwise the
+    CR-36 host-pin turns a recoverable Docker-Desktop resolver flap into a hard,
+    silent total failure of every single-target run (the katana ``-u`` failure an
+    operator reported). The no-op must come from the tool-set gate, not a
+    resolution miss, so resolution is stubbed to succeed."""
+    assert tool not in kali_resolve.RESOLVE_PIN_TOOLS
+    monkeypatch.setattr(kali_resolve, "resolve_host_ips", lambda _h: ["93.184.216.34"])
+    cmd = [tool, "-u", "https://example.com/"]
+
+    pinned = kali_resolve.apply_resolve_pin(
+        cmd, tool, runtime=_docker_desktop(), ips=["93.184.216.34"]
+    )
+
+    assert pinned is None
+    assert "--resolve" not in cmd
+
+
+@pytest.mark.parametrize("tool", ["ffuf", "httpx", "nuclei", "katana"])
+def test_unpinned_probers_keep_the_transport_error_safety_net(tool):
+    """Safety net intact: the un-pinned tools stay http-probers, so the post-run
+    http=000 false-negative guard arms for them and records a transport error
+    (not a target verdict) when the container resolver actually flaps — the
+    safety property holds without the broken pin."""
+    assert is_http_prober(tool) is True
