@@ -40,7 +40,6 @@ This repository contains the operator prompts, Kali runtime image, engagement sc
 - [Multi-Agent Workflow](#multi-agent-workflow)
 - [Durable Assessment State](#durable-assessment-state)
 - [Development](#development)
-- [Verification Commands](#verification-commands)
 - [Roadmap & TODO](#roadmap--todo)
 
 ## Documentation
@@ -352,7 +351,7 @@ you are the orchestrator brain. Track orchestration, prompt, and backend issues 
 Keep dispatching agents until [specify tools / objectives] have completed.
 
 Depth is the default. "Quick" is not desired — thorough and deep coverage is.
-Prefer claude-opus-4-7 / gpt-5.5 xhigh for substantial work; medium only for bounded sidecar tasks.
+Prefer claude-opus-4-8 / gpt-5.6 xhigh for substantial work; medium only for bounded sidecar tasks.
 Exploitation policy: <pause|selected|full_send> per scope.json.
 
 Previous agent context (paste only when continuing a specific dispatch):
@@ -793,31 +792,18 @@ The queue in `agent/scripts/schema.sql` is a transient work buffer and is not pa
 
 ## Development
 
-For repo-local development conventions used by Codex, see the root `AGENTS.md` — it carries the
-clone-to-first-dispatch newcomer walkthrough and step-by-step recipes for adding a skill, an
-`vigil assess` verb, a deterministic oracle, or an eval case.
+Extending or building on Vigil is a contributor workflow, documented in full in the root
+[`AGENTS.md`](AGENTS.md): the clone-to-first-dispatch walkthrough, step-by-step recipes for adding a
+skill, an `vigil assess` verb, a deterministic oracle, or an eval case, and the authoritative
+[test/verification matrix](AGENTS.md#tests--verification) — backend pytest scopes, the prompt
+render-check, the schema `--check`, lint/types, and the bench rungs, each with its own venv and cost.
 
-## Verification Commands
-
-Backend:
-
-```bash
-uv run --directory orchestrator/backend pytest orchestrator/backend/tests/test_assessment.py
-```
-
-Frontend:
+To confirm a running install is healthy — the user-facing check, not the contributor test suite —
+use the built-in diagnostics:
 
 ```bash
-cd orchestrator/frontend
-npm install
-npm run build
-```
-
-Runtime:
-
-```bash
-docker build -t vigil:latest -f agent/docker/runtime-full/Dockerfile .
-vigil runtime resources
+vigil doctor    # local prerequisites and host recon tools
+vigil status    # live service state
 ```
 
 ## Roadmap & TODO
