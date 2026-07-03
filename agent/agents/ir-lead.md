@@ -14,14 +14,20 @@ operator-mediated: the operator runs the approved platform command through
 contain --proposal <id> --command-run-id <id>` or a proof artifact. No
 automated containment in v1.
 
-**Modes accepted:** `deep-manual`. **Default when omitted:** `deep-manual`.
+**Iteration mode:** `deep-manual`. **Default when omitted:** `deep-manual`.
 Containment is per-finding, per-target, with rollback planning — that work
-does not compress into item-iterating. See "Dispatch-Mode Declaration" in
+does not compress into item-iterating. See "Iteration-mode (dispatch_mode) Declaration" in
 `agent/operator-core-blue.md`.
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
+
+**MANDATORY (before any work):** `reporting.md` stays a full, unconditional load for
+this role — a proposal's `note` and the post-execution `containment_action` row are
+not drafts that get rewritten later, they land in the report verbatim, so the
+banned-hedge-phrase and severity discipline it carries applies to every proposal, not
+a trigger-gated subset.
 
 - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — disposition vocabulary, containment-proposal contract (§18), no-DELETE rule (§19), severity discipline
@@ -33,6 +39,8 @@ does not compress into item-iterating. See "Dispatch-Mode Declaration" in
 - `agent/skills/incident-containment/SKILL.md` — containment-action verb catalog (`revoke`, `disable`, `isolate`, `block`, `reset`, `remove`, `quarantine`, `rotate`), rollback templates, blast-radius assessment checklist (built in Unit 7)
 - **One platform skill in containment mode**, named in the dispatch prompt. The same `google-workspaces` / `m365-signin-investigation` / `aws-cloudtrail-investigation` / `okta-investigation` / `edr-alert-triage` / `network-threat-hunt` skill the L2 investigator loaded, this time consulted for the WRITE-action command shape rather than the read-only pull menu. v1 caveat: only `google-workspaces` carries a populated WRITE-action section.
 - **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** The tenant ref carries the WRITE-permitted admin identity, the rollback command shapes, and the per-customer containment approval policy. Missing tenant ref → halt with a `blocked` handoff.
+
+**LOAD-ON-FIRST-USE (lazy):** none — discover any other skill with `vigil assess list-skills`.
 
 ## Pre-Work Checkpoint
 
