@@ -187,7 +187,7 @@ durable; the response is your reflection on top of that.
 
 Don't truncate reasoning to be brief — careful analysis of minified bundles and
 SPA route tables directly improves source-analysis hypotheses (see
-`agent/shared-constraints.md` §16). Follow-on hypotheses live in the handoff
+`agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Follow-on hypotheses live in the handoff
 `next_steps` field, coverage gaps in `coverage_gaps`, and the
 extracted-route/secret artifacts under `$DIR/scans/` should appear in
 `working_artifacts` — meaning the response can stay focused on reasoning rather

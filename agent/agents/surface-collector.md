@@ -218,7 +218,7 @@ Closing verbs above are what makes the state durable; the response
 is your reflection on top of that.
 
 Don't truncate reasoning to be brief — careful triage analysis directly improves
-Phase 4 dispatch ordering (see `agent/shared-constraints.md` §16). Priority
+Phase 4 dispatch ordering (see `agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Priority
 manifest, recommended Phase 4 ordering, and per-cluster rationale live in the
 handoff `next_steps` field plus the surface rows' priority columns
 (`priority_score`, `priority_reason`, `cluster_key`) — the response can stay
