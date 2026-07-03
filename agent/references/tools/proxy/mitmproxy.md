@@ -4,7 +4,7 @@ description: "Mitmproxy session capture: setup, CA cert install, FoxyProxy confi
 
 # Mitmproxy Session Capture
 
-Intercept browser traffic to capture authenticated sessions (cookies, tokens, headers) into the engagement's backend credential store for use by engagement agents.
+Intercept browser traffic to capture authenticated sessions (cookies, tokens, headers) into the engagement's backend credential store for use by engagement agents. Capture is append-only and multi-identity — each distinct login becomes its own identity row rather than overwriting whatever was captured before.
 
 ## Quick Start
 
@@ -70,12 +70,64 @@ vigil mitmproxy start
 2. Configure browser proxy (see above)
 3. Navigate to the target login page and authenticate
 4. Browse a few authenticated pages (admin, settings, API endpoints)
-5. The proxy addon auto-detects login flows and POSTs the captured cookies/tokens to the engagement's backend credential store (the `default` identity)
+5. The proxy addon auto-detects login flows and POSTs the captured cookies/tokens to the engagement's backend credential store, which derives an identity name from the session-anchor material and appends or refreshes accordingly (see "Multi-Identity Capture" below)
 6. Disable the proxy in FoxyProxy when done
 
 If auto-capture misses the session (addon error, non-standard login flow):
 - Check proxy logs: `vigil logs mitmproxy --lines 30`
 - Fall back to manual cookie extraction from browser DevTools
+
+To capture a second account for cross-account testing, repeat steps 2-5 logged
+in as the other user through the same proxy — the addon detects the different
+session-anchor material and appends a new identity instead of overwriting the
+first.
+
+## Multi-Identity Capture (append-only)
+
+Each captured login becomes its own identity in the credential store. The
+backend derives an opaque identity name server-side from the capture's
+session-anchor cookies (`sid`, `sessionid`, `jsessionid`, `connect.sid`,
+`laravel_session`, ... case-insensitive) or a JWT `sub`/`uid`/`user_id`/`email`
+claim — never from raw high-entropy cookies in general, since a shared
+per-CDN/load-balancer cookie (`AWSALB`) would otherwise merge two accounts and a
+rotating anti-CSRF cookie would otherwise churn a fresh identity on every
+reload. Reloading an already-captured login refreshes that one identity in
+place; logging in as a different account appends a new identity — the property
+cross-account IDOR/BOLA testing depends on. Anonymous/pre-login traffic (a
+consent-banner cookie, no session material yet) carries no anchor and is never
+captured.
+
+List what's stored for a host, and which identity is active:
+
+```bash
+vigil assess auth list --host <host> [--include-dead] [--json]
+```
+
+Each row shows the identity name, `auth_context`, `state`, liveness verdict,
+age, and cookie *names* only — never raw values; the active identity is marked
+`*`. A session with no fresh capture for 8h is flagged `stale` (advisory — not
+dead); one with no fresh capture for 5 days is purged. Age alone never marks an
+identity `dead` — only a proven-dead liveness probe does (next section).
+
+## Per-Identity Liveness
+
+Keepalives (below) defeat the *idle* clock; they don't tell you whether a
+session has already died (logout, absolute-lifetime expiry, server-side
+revocation). Prove liveness explicitly before trusting a captured identity and
+before recording a "dead"/"unreachable" verdict against it:
+
+```bash
+vigil assess auth-status --probe --identity <name> --probe-url <authed-url>
+```
+
+The probe never follows redirects and returns a real verdict only once that
+identity has a declared `material.liveness = {expect_status, authed_marker,
+dead_marker}` oracle (set via `vigil auth import`/`edit`) — a transport error
+or a missing signature returns `unknown`, never a false verdict. `live` clears
+a `stale` mark; `dead` is written only by this probe, never by hand and never
+by age alone. Liveness is per-identity and LLM/operator-owned: whoever takes an
+identity for a task probes it before trusting it, and re-probes on a
+401/403/redirect-to-login shape.
 
 ## Keeping a Captured Session Alive (Keepalives)
 
@@ -189,7 +241,7 @@ The proxy runs `mitmdump` with `proxy_addon.py`, which:
   selector.
 - Filters noise (analytics, CDNs, tracking pixels)
 - Classifies requests by type (API, form, page, JS, GraphQL, WebSocket, etc.)
-- Detects login flows and POSTs captured session material to the backend credential store
+- Detects login flows and POSTs captured session material to the backend credential store, which derives the identity name from the capture's session-anchor material so distinct logins append rather than overwrite (see "Multi-Identity Capture" above)
 - Records intercepted traffic to `cases.db` for work-buffer ingestion
 - Posts request observations to the orchestrator backend (when available)
 - When an engagement's capture policy is enabled, additionally persists the

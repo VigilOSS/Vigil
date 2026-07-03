@@ -24,7 +24,11 @@ from typing import Any
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.creds_client import active_material
+from assess.lib.creds_client import (
+    active_material,
+    persist_liveness,
+    resolve_identity,
+)
 
 
 def register(subparsers) -> None:
@@ -44,6 +48,19 @@ def register(subparsers) -> None:
         type=int,
         default=300,
         help="Seconds before expires_at to flag as 'expiring soon' (default: 300)",
+    )
+    p.add_argument(
+        "--identity",
+        dest="identity",
+        default=None,
+        help=(
+            "Target a SPECIFIC stored identity (opaque name from `vigil assess "
+            "auth list`) instead of the active one — the multi-identity store can "
+            "hold several sessions for one site (IDOR/BOLA). Without --probe this "
+            "just views that identity's state; with --probe it probes AS that "
+            "identity and PERSISTS the verdict (live->available, dead->dead). "
+            "Default (omitted) keeps the read-only active-identity behavior."
+        ),
     )
     p.add_argument(
         "--probe",
@@ -346,7 +363,13 @@ def _last_auth_probe(client: AssessmentClient | None) -> dict | None:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    auth = active_material(cfg.engagement_dir)
+    # --identity targets a SPECIFIC stored session (multi-identity store); without
+    # it we view/probe the active identity exactly as before.
+    requested_identity = getattr(args, "identity", None)
+    if requested_identity:
+        _resolved_name, auth = resolve_identity(cfg.engagement_dir, requested_identity)
+    else:
+        auth = active_material(cfg.engagement_dir)
     shapes = _token_shapes(auth) if auth else []
 
     expires_at_raw = auth.get("expires_at") if isinstance(auth, dict) else None
@@ -387,14 +410,41 @@ def run(args) -> None:
             liveness_detail = {"liveness": "unknown", "reason": "--probe requires --probe-url",
                                "http_status": None, "error": "--probe requires --probe-url <url>"}
         elif not auth:
-            liveness_detail = {"liveness": "unknown", "reason": "no active identity",
-                               "http_status": None, "error": "no active identity/session to probe"}
+            miss = (
+                f"no such identity to probe: {requested_identity}"
+                if requested_identity
+                else "no active identity/session to probe"
+            )
+            liveness_detail = {"liveness": "unknown", "reason": "no identity",
+                               "http_status": None, "error": miss}
         else:
-            active_identity = auth.get("identity_name") if isinstance(auth, dict) else None
+            probe_identity = requested_identity or (
+                auth.get("identity_name") if isinstance(auth, dict) else None
+            )
             liveness_cfg = auth.get("liveness") if isinstance(auth, dict) else None
             liveness_detail = _run_identity_probe(
-                cfg.engagement_dir, active_identity, probe_url, liveness_cfg=liveness_cfg
+                cfg.engagement_dir, probe_identity, probe_url, liveness_cfg=liveness_cfg
             )
+            # WS4 opt-in persistence: only when a SPECIFIC identity was targeted
+            # does auth-status write — it persists the classified verdict so a
+            # proven-dead session is hidden from the default list and a `live`
+            # probe clears a stale mark. The active-identity path stays read-only.
+            # A transport error / no-signature verdict is `unknown`, which
+            # set_liveness records WITHOUT marking the session dead (never a false
+            # verdict). Persistence must never crash the read-only status view.
+            if requested_identity and probe_identity:
+                probed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                try:
+                    persist_liveness(
+                        cfg.engagement_dir,
+                        str(probe_identity),
+                        liveness_detail["liveness"],
+                        probed_at,
+                    )
+                    liveness_detail["persisted"] = True
+                except Exception as exc:  # noqa: BLE001 — status view must not crash
+                    liveness_detail["persisted"] = False
+                    liveness_detail["persist_error"] = str(exc)
         liveness = liveness_detail["liveness"]
 
     state = {

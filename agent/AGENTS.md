@@ -572,14 +572,25 @@ When ANY agent discovers credentials, the operator coordinates these steps:
 4. **Dispatch exploit-developer** — to test authenticated surfaces discovered in step 3. The agent maps what authenticated access grants and tests for privilege escalation, IDOR, and auth-boundary issues across the newly discovered endpoints. This is the analysis work that requires a specialist.
 
 Auth handling rules:
-- Engagement credentials live in the orchestrator backend credential store (one record per `(engagement, named identity)`), managed via the `vigil auth` CLI — there is no `auth.json` file. Each record may contain cookies, headers, `auth_context`, `use_for_requests`, and optional `expires_at`. The shared mitmproxy (if running) POSTs captures to the matching engagement's credential store by scope, so concurrent engagements do not contend.
+- Engagement credentials live in the orchestrator backend credential store (one record per `(engagement, identity)`), managed via the `vigil auth` CLI — there is no `auth.json` file. Each record may contain cookies, headers, `auth_context`, `use_for_requests`, `state` (`available`/`stale`/`dead`/`expired`), and freshness fields (`created_at`, `last_seen_at`, `liveness_verdict`, `last_probed_at`).
+- The shared mitmproxy (if running) POSTs captures to the matching engagement's credential store by scope. Capture is **append-only and multi-identity**: the identity name is derived server-side from the capture's session-anchor cookies (or a JWT `sub`/`uid`/`user_id`/`email` claim), so two distinct logins on the same site land as two separate identities instead of the newer one clobbering the older — the property IDOR/BOLA testing depends on. Reloading an already-captured login refreshes that one identity in place; anonymous/pre-login traffic carries no anchor material and is not captured.
+- A session with no fresh capture for 8h is flagged `stale` (advisory — re-probe it before trusting it); one with no fresh capture for 5 days is purged. Age alone never marks a session `dead` — only a proven-dead liveness probe does (see Named identities below).
 - If a usable credential is present, surface-collector reads it from the backend, passes auth headers to Katana, and tags ingestion with the authenticated context automatically.
-- If credentials are missing material or marked expired, warn and continue anonymously rather than halting the engagement.
-- The operator may update credentials with `vigil auth edit`/`vigil auth import` or use mitmproxy-assisted login capture to refresh them.
+- If credentials are missing material or marked expired/dead, warn and continue anonymously rather than halting the engagement.
+- The operator may update credentials with `vigil auth edit`/`vigil auth import`, list every identity stored for a host with `vigil assess auth list --host <host>`, or use mitmproxy-assisted login capture to refresh them.
+- When a discovered credential (`status=discovered`) is recorded via `vigil assess post credentials`, Vigil automatically flags a candidate finding (severity left for the operator/specialist to confirm from what the credential unlocks) and, when the secret is itself a session artifact (a session-hint cookie or a bearer/JWT), mints a usable identity from it and cross-links the two records. A plain password is recorded as intel plus a candidate finding but mints nothing — it still needs the login-test-then-store flow above (steps 1-2) to become a replayable identity.
 
-### Named identities (cross-identity access-control depth)
+### Named identities (list, pick, and cross-identity access-control depth)
 
-Access-control depth (IDOR/BOLA/BFLA) is only **real** when measured across **≥2 named identities** — a cross-tenant pass needs two users. The credential store therefore holds **one record per named identity** per engagement, with one identity marked active. `vigil auth show <key>` dumps the identity map, e.g.:
+Access-control depth (IDOR/BOLA/BFLA) is only **real** when measured across **≥2 identities** — a cross-tenant pass needs two users. The credential store holds **one row per distinct identity** per engagement, with one identity marked active. Captures append rather than overwrite (see Auth handling rules above), so two accounts on one site coexist as two rows.
+
+List every stored identity for a host before picking one:
+
+```bash
+vigil assess auth list --host <host> [--include-dead] [--json]
+```
+
+Each row shows the identity name, `auth_context`, `state`, liveness verdict, age, the cookie names it holds (never raw values), and the hosts it covers; the active identity is marked with `*`. `stale` rows always show; `dead` rows only with `--include-dead`. `vigil auth show <key>` dumps the full identity map for manually-managed records, e.g.:
 
 ```json
 {
@@ -592,14 +603,23 @@ Access-control depth (IDOR/BOLA/BFLA) is only **real** when measured across **�
 }
 ```
 
-- A single imported credential lands under the `default` identity and is marked active for credential-store management, but ordinary `vigil assess kali ...` commands run as anonymous unless a dispatch explicitly passes `--identity`. This keeps audit labels honest and avoids a backend credential lookup on every unauthenticated recon probe.
+- A credential imported without `--identity` lands under the `default` identity and is marked active for credential-store management, but ordinary `vigil assess kali ...` commands run as anonymous unless a dispatch explicitly passes `--identity`. This keeps audit labels honest and avoids a backend credential lookup on every unauthenticated recon probe.
 - Specialists select an identity per request with **`vigil assess kali <tool> --identity <name>`** (e.g. `--identity user_a` / `--identity user_b`). The flag selects that identity's auth material and stamps the identity name as the probe's `auth_context` only when Vigil can inject that material into the tool invocation. For cross-identity depth, prefer direct injectable tools (`curl`, `httpx`, `nuclei`, `ffuf`, etc.) over shell wrappers or hand-pasted tokens; shell/manual-auth probes may be useful evidence, but they do not satisfy cross-identity depth unless the recorded `auth_context` reflects the identity that actually ran.
-- When you capture multiple test accounts, store each under its own identity name with `vigil auth import <key> --identity <name>`, so "which identity ran which probe" is recordable.
-- For two-user IDOR/BOLA replay, point specialists at `agent/skills/idor-testing/SKILL.md` and `agent/skills/split-brain-idor/SKILL.md`, which now drive the replay with `--identity` instead of hand-pasted tokens.
+- When you capture multiple test accounts by hand (outside mitmproxy), store each under its own identity name with `vigil auth import <key> --identity <name>`, so "which identity ran which probe" is recordable.
+- For two-user IDOR/BOLA replay, point specialists at `agent/skills/idor-testing/SKILL.md` and `agent/skills/split-brain-idor/SKILL.md`, which drive the replay with `--identity` instead of hand-pasted tokens.
+
+**Per-session liveness — the LLM/operator owns it.** A populated identity is not proof it's live. Whoever takes an identity for a task owns proving it's alive before trusting a result and before recording any "dead"/"unreachable" verdict against it:
+
+```bash
+vigil assess auth-status --probe --identity <name> --probe-url <authed-url>   # agent side
+vigil auth status --probe --identity <name> --probe-url <authed-url>         # operator side
+```
+
+The probe never follows redirects, and returns a real verdict only once that identity has a declared `material.liveness = {expect_status, authed_marker, dead_marker}` oracle (set via `vigil auth import`/`edit`). `live` clears a `stale` mark; `dead` is written only by a proven-dead probe — never set by hand, never by age alone; a transport error or a missing liveness signature returns `unknown`, never a false verdict. A `dead` verdict feeds the Auth-expiry recovery loop below.
 
 ### Auth-expiry recovery loop
 
-Authenticated dispatches fail in a recognizable shape (401/403 on formerly-200 routes, redirect-to-login, `invalid_token`); specialists surface it in handoff `runtime_issues`. On that signal, **recover auth before re-dispatching** (refresh the bearer/token, re-capture the session cookie via the mitmproxy login flow, or re-run the OAuth grant), validate with one `vigil assess kali exec --technique AUTH` login check, then re-dispatch with an "auth refreshed at <iso>; prior 401/403 issues are stale" note. Cap recovery at **two** attempts, then fall back to anonymous scope and record `vigil assess agent decision --kind dispatch_blocked --surfaced-to-user`. Full procedure → `agent/references/runtime-guides/auth-recovery.md`.
+Authenticated dispatches fail in a recognizable shape (401/403 on formerly-200 routes, redirect-to-login, `invalid_token`) — the same shape a `vigil assess auth-status --probe --identity <name>` verdict of `dead` confirms directly. Specialists surface the dispatch-side signal in handoff `runtime_issues`; on either signal, **recover auth before re-dispatching** (refresh the bearer/token, re-capture the session cookie via the mitmproxy login flow, or re-run the OAuth grant), validate with one `vigil assess kali exec --technique AUTH` login check, then re-dispatch with an "auth refreshed at <iso>; prior 401/403 issues are stale" note. The re-capture mints a fresh identity rather than overwriting the dead row — the dead identity stays visible via `--include-dead` until its 5-day purge, so prior evidence tied to it stays attributable. Cap recovery at **two** attempts, then fall back to anonymous scope and record `vigil assess agent decision --kind dispatch_blocked --surfaced-to-user`. Full procedure → `agent/references/runtime-guides/auth-recovery.md`.
 
 ## Kali Execution
 

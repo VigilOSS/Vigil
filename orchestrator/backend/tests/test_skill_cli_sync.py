@@ -419,7 +419,6 @@ def test_documented_oob_verbs_exist(oob_registries, doc_files):
 # caught by ``test_known_undocumented_allowlist_has_no_stale_entries``.
 _KNOWN_UNDOCUMENTED_ASSESS = {
     "approve-exploit",            # exploit-gate plumbing; operator uses review-exploits
-    "auth-status",                # internal auth probe
     "code-size-summary",          # code-track sizing helper
     "export-surfaces",            # surface export plumbing
     "launch-session",             # session bootstrap called by the orchestrator

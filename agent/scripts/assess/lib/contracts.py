@@ -665,6 +665,36 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Put the wall's provisioning need in details.unblock_requirements on the RELATED finding (kind ∈ account|line|device|credential|access, description, requested_from); the block-technique row carries the short reason + retry_state, and --notes is a one-line cue (also shown in the resume brief), not the durable home for unblock requirements.",
         ),
     ),
+    "auth": CommandContract(
+        name="auth",
+        phase=("consume-test", "exploit"),
+        summary="List the engagement's stored session identities (append-only multi-identity store) so you can pick one for cross-account IDOR/BOLA.",
+        schema_name="engagement_credentials table / GET /credentials[?host=&include_dead=]",
+        preferred_invocations=(
+            "vigil assess auth list",
+            "vigil assess auth list --host api.example.com",
+            "vigil assess auth list --include-dead --json",
+        ),
+        author_supplied_fields=(
+            "subcommand: list",
+            "list filters: --host / --include-dead / --json",
+        ),
+        helper_defaults=(
+            ("host", "unset (lists every stored identity)"),
+            ("include_dead", "false (probe-proven-dead sessions hidden; `stale` always shown)"),
+        ),
+        notes=(
+            "The store is append-only + multi-identity: logout-then-login on one host keeps BOTH sessions, so `auth list` can show two live identities for the same site — pick one with `vigil assess kali --identity <name>` (or auth-status --probe --identity) for the account you are testing as.",
+            "The list view shows cookie NAMES + hosts and metadata (auth_context, state, liveness, age, last_probed) but NEVER raw cookie VALUES — session material stays out of the enumeration view.",
+            "state: available | stale (8h age backstop — re-probe) | dead (probe-proven; hidden unless --include-dead) | missing. Only a failed liveness probe marks a session dead; age never does.",
+            "liveness is UNKNOWN until you actively probe: run `vigil assess auth-status --probe --identity <name> --probe-url <url>` to verify one session and persist the verdict.",
+            "The active identity is marked with a trailing `*` in the text view.",
+        ),
+        common_mistakes=(
+            ("--include-dead to see stale sessions", "stale sessions are always listed; --include-dead only un-hides probe-proven-dead ones"),
+            ("reading raw cookie values from the list", "the list view is names-only by design; the runtime injects values host-scoped via `kali --identity`"),
+        ),
+    ),
     "http": CommandContract(
         name="http",
         summary="Query, export, and configure captured full-flow HTTP traffic (the canonical mitmproxy flow store + per-engagement capture policy).",
