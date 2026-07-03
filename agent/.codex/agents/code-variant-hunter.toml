@@ -18,11 +18,15 @@ source code at scale.
 
 ## Load First
 
+**MANDATORY (before any work):**
+
 - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/code-variant-analysis/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
+- `agent/skills/code-variant-analysis/SKILL.md`
+
+**LOAD-ON-FIRST-USE (lazy):** none — this role loads no skill conditionally; discover any other skill with `vigil assess list-skills`.
 
 ## Pre-Work Checkpoint
 
@@ -129,17 +133,13 @@ vigil assess record-finding code-variant-hunter <finding-json>
 
 ## Mandatory Closing Sequence
 
-Wrapper (resume-brief framing, unlinked-notes rule, idempotent/checkpoint cadence,
-plan-state digest, "agent done/close" is operator-only): see
-`agent/shared-constraints-core.md`. Below is this role's own verb list.
-
-### Closing verbs
-
 Before your dispatch returns, run in this order:
 
 1. `vigil assess record-finding code-variant-hunter <finding-json>` per variant finding (each with `links.variant_of` pointing at the parent slug)
 2. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (verifier dispatch on the new variants), runtime issues, working artifacts, open questions, and role-specific extras (`parent_finding`, `variants_found`, `files_scanned`)
 3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
 
 Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 

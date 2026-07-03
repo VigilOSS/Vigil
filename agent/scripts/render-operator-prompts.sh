@@ -287,6 +287,23 @@ agent_prompt_body() {
   ' "$source"
 }
 
+# Specialist auto-load stop-sign. Claude Code (and other harnesses) auto-load
+# CLAUDE.md/AGENTS.md walking up the dir tree, so a DISPATCHED SPECIALIST subagent
+# inherits these operator pointers before it reaches its own Specialist-Context-Isolation
+# rule. This banner is the harness-injection stop-sign: authored ONCE here and reused
+# by every operator-prompt + pointer render below (DRY). See agent/shared-constraints-core.md
+# ("Specialist Context Isolation") for why.
+render_specialist_stop_sign() {
+  cat <<'EOF'
+<!-- STOP — DISPATCHED SPECIALIST: if you are a specialist subagent (recon, source,
+     surface, vuln, exploit, fuzzer, osint, report, or any code-* role), do NOT load
+     this file. It is the OPERATOR prompt and its startup/runtime banner must not bleed
+     into your context. Load ONLY your own role file and every entry in its `Load First`.
+     Auto-loaded CLAUDE.md/AGENTS.md pointers up the directory tree do not apply to you.
+     See agent/shared-constraints-core.md ("Specialist Context Isolation") for why. -->
+EOF
+}
+
 render_prompt_locality() {
   cat <<'EOF'
 ## Prompt Locality
@@ -345,6 +362,10 @@ render_operator_prompt() {
 <!-- Source: agent/operator-core.md (+ agent/agents/*.md for embedded specialist text) -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
 
+EOF
+    render_specialist_stop_sign
+    cat <<'EOF'
+
 # Vigil — Operator Instructions
 
 When a session starts, display:
@@ -388,6 +409,10 @@ render_operator_prompt_blue() {
 <!-- Source: agent/operator-core-blue.md (+ agent/agents/*.md for embedded specialist text) -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo --type blue -->
 
+EOF
+    render_specialist_stop_sign
+    cat <<'EOF'
+
 # Vigil — Blue Operator Instructions
 
 EOF
@@ -402,11 +427,16 @@ render_claude() {
   # Claude Code to load ~16.5k tokens 2-4x per turn (engagement wrapper +
   # agent/CLAUDE.md + agent/AGENTS.md). Keeping CLAUDE.md as a pointer
   # collapses that to a single load.
-  cat > "$CLAUDE_OUT" <<'EOF'
+  {
+    cat <<'EOF'
 <!-- GENERATED FILE — DO NOT EDIT. -->
 <!-- This file is intentionally a thin pointer to AGENTS.md so Claude Code -->
 <!-- does not load the same operator prompt twice. -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
+EOF
+    render_specialist_stop_sign
+    cat <<'EOF'
 
 # Vigil — Operator Instructions
 
@@ -415,6 +445,7 @@ Read `AGENTS.md` (in this same directory) for the complete operator prompt.
 Load `AGENTS.md` OR this file, not both — they would otherwise be identical.
 `AGENTS.md` is canonical.
 EOF
+  } > "$CLAUDE_OUT"
 }
 
 render_agents() {

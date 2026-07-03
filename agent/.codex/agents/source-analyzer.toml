@@ -20,12 +20,18 @@ leave half-guarded that the backend now depends on?
 
 ## Load First
 
+**MANDATORY (before any work):**
+
 - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/source-analysis/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
-- `agent/skills/browser-semantic-analysis/SKILL.md` — load on first use when its runtime-only client-behavior triggers apply.
+
+**LOAD-ON-FIRST-USE (lazy):**
+
+- `agent/skills/browser-semantic-analysis/SKILL.md` — when its runtime-only client-behavior triggers apply (static extraction cannot materialize the route set).
+- `agent/skills/vendor-platform-enum/SKILL.md` — when a source-map fingerprint or `sources[]` paths match a vendor multi-tenant platform (Salesforce/ServiceNow/Drupal/Pexip) AND an anonymous read primitive surfaces; see "Vendor-Platform Deep-Enumeration and CSP Re-baseline" below.
 
 ## Pre-Work Checkpoint
 
@@ -147,10 +153,6 @@ declare it in `#### Coverage Gaps` so the operator can decide whether to re-disp
 
 ## Mandatory Closing Sequence
 
-Wrapper (resume-brief framing, unlinked-notes rule, idempotent/checkpoint cadence,
-plan-state digest, "agent done/close" is operator-only): see
-`agent/shared-constraints-core.md`. Below is this role's own verb list.
-
 ### Closing verbs
 
 Before your dispatch returns, run in this order:
@@ -162,7 +164,7 @@ Before your dispatch returns, run in this order:
 5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `routes_extracted`, `secrets_found`, `app_version`)
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
 ## Output Contract
 

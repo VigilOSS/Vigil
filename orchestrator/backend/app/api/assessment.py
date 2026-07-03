@@ -611,7 +611,13 @@ class FindingRecordRequest(BaseModel):
 
     slug: str | None = Field(default=None, max_length=256)
     title: str = Field(min_length=1, max_length=512)
-    severity: str = Field(default="info", min_length=1, max_length=32)
+    # Default aligned to the CLI + record-finding contract (both `medium`): a
+    # not-yet-triaged finding is presumed real, not informational. `info` was the
+    # lone outlier here and produced a schema default that contradicted the CLI;
+    # since severity feeds report-inclusion, defaulting low risked silently
+    # under-rating untriaged findings. Only affects requests that OMIT severity;
+    # stored rows keep their own value (DB-read compat unaffected).
+    severity: str = Field(default="medium", min_length=1, max_length=32)
     workflow_status: str = Field(default="active", min_length=1, max_length=32)
     verification_state: str = Field(default="unreviewed", min_length=1, max_length=32)
     verification_disposition: str = Field(default="none", min_length=1, max_length=32)

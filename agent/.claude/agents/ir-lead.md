@@ -23,16 +23,11 @@ Containment is per-finding, per-target, with rollback planning — that work
 does not compress into item-iterating. See "Dispatch-Mode Declaration" in
 `agent/operator-core-blue.md`.
 
-## Specialist Context Isolation
-
-You are a specialist sub-agent, not the operator. Your authoritative context is
-the dispatch payload, this role prompt, and the files named in `Load First`.
-Do NOT load `agent/AGENTS.md` or `agent/CLAUDE.md` — those are operator-only
-procedures. Cross-cutting blue rules live in `agent/shared-constraints-blue.md`
-and the always-active rule files, and are listed below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
+- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — disposition vocabulary, containment-proposal contract (§18), no-DELETE rule (§19), severity discipline
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration; the same rules that gate L2 evidence apply to L4 blast-radius assessment
 - `agent/rules/adversarial-mindset.md` — the lens for blast-radius assessment under inversion (what if the actor anticipates this containment action?)
@@ -188,6 +183,10 @@ execution status.
 
 ## Mandatory Closing Sequence
 
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Below is this role's own verb list.
+
+### Closing verbs
+
 Before your dispatch returns, run in this order:
 
 1. **Capture pre-WRITE evidence** for every proposal whose execution would destroy evidence. Register each pre-WRITE pull as an `ir_log` artifact via `vigil assess artifact register ... --kind ir_log --finding <slug> --command-run-id <id>`. The pre-WRITE artifact ID goes on the proposal's `note` field as "Pre-WRITE evidence captured: artifact_id=<id>".
@@ -227,8 +226,6 @@ Before your dispatch returns, run in this order:
    - `next_steps[]` — names eradication and recovery proposals the operator should expect in subsequent L4 dispatches, plus any tenant-ref known-benign register update suggestions
 
 7. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only after it succeeds.
-
-`vigil assess agent handoff` is idempotent — checkpoint after each proposal lands so the operator sees in-flight progress.
 
 ## Output Contract
 

@@ -2677,6 +2677,54 @@ def test_oob_status_json_reports_effective_domain(
     assert payload["domain"] == "oob.example.test"
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["oob", "--help"],
+        ["oob", "start", "--help"],
+        ["oob", "stop", "--help"],
+        ["oob", "restart", "--help"],
+        ["oob", "status", "--help"],
+        ["oob", "test", "--help"],
+        ["oob", "mint", "--help"],
+        ["oob", "poll", "--help"],
+        ["oob", "client", "--help"],
+        ["oob", "client", "start", "--help"],
+        ["oob", "client", "logs", "--help"],
+        ["oob", "client", "stop", "--help"],
+        ["oob", "client", "list", "--help"],
+    ],
+)
+def test_oob_subcommands_have_help_text(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every `vigil oob` (sub)command must be self-describing so the role-file
+    OOB prose can collapse to one-liners. `--help` should print a non-trivial
+    usage/description block and exit 0."""
+    from vigil_cli import main as main_module
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(argv)
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    # More than the bare `usage:` + `-h/--help` boilerplate argparse always emits.
+    assert len(out.strip()) > 80
+
+
+def test_oob_top_level_help_teaches_mint_poll_ordering(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`vigil oob --help` alone must teach the mint -> poll -> correlate flow so
+    an operator does not need the role-file prose to learn the ordering."""
+    from vigil_cli import main as main_module
+
+    with pytest.raises(SystemExit):
+        main_module.main(["oob", "--help"])
+    out = capsys.readouterr().out
+    assert "mint" in out and "poll" in out
+    assert out.index("mint") < out.index("poll")
+
+
 def test_logs_routes_to_centralized_targets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from vigil_cli import main as main_module
 

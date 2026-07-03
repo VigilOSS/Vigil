@@ -429,13 +429,11 @@ agents cannot query unindexed local files.
    means the `agent_id` in step 6 did not match the registered dispatch — fix
    and re-handoff before returning.
 
-`agent done` / `agent close` are operator-only. Do not call them — the
-operator marks the dispatch complete after your return so checkpointing stays
-separate from lifecycle closure.
-
-`agent handoff` is idempotent. Checkpoint after each major step (after the
-initial audit pull, after the correlation pass, after the verifier's
-five-check completes), not only at the end.
+Wrapper rules — `agent done` / `agent close` are operator-only, and `agent
+handoff` is idempotent — live in `agent/shared-constraints-core.md`; the seven
+steps above are the blue-specific closing verbs. Checkpoint after each major
+step (after the initial audit pull, after the correlation pass, after the
+verifier's five-check completes), not only at the end.
 
 ---
 

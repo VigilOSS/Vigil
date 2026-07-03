@@ -225,5 +225,7 @@ traffic/mitmproxy/flows/<YYYY-MM-DD>.jsonl  # one JSON line per captured flow
 
 Bodies larger than `max-body-bytes` are truncated on disk with the truncation
 flag set honestly in both the JSONL index and the backend record. Query or
-export captured flows via the backend `GET .../assessment/http-flows` and
-`.../assessment/http-flows/export-har` routes.
+export captured flows with the `vigil assess http` verbs (`list` / `show` /
+`search` / `export-har` / `import-har`; run `vigil assess contract http` for the
+full reference) — these wrap the backend `GET .../assessment/http-flows` routes
+so query-string details stay out of operator instructions.

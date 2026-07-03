@@ -635,14 +635,46 @@ def main(argv: list[str] | None = None) -> None:
     backup_restore.add_argument("backup")
     backup_restore.add_argument("--force", action="store_true")
 
-    oob_p = sub.add_parser("oob")
+    oob_p = sub.add_parser(
+        "oob",
+        help="Out-of-band (OAST) callback infra for blind vulns (SSRF, blind XSS, cmdi, XXE).",
+        description=(
+            "Manage the out-of-band application security testing (OAST) callback "
+            "infrastructure and correlate blind-vuln callbacks to the requests that "
+            "triggered them.\n\n"
+            "Workflow (mint -> poll -> correlate):\n"
+            "  1. Bring up the shared server + tunnel once per host:  vigil oob start\n"
+            "  2. Start a per-agent listener:                         vigil oob client start <name> --engagement <key>\n"
+            "  3. Mint a unique callback URL and record the probe:    vigil oob mint --client <name> --technique ssrf ...\n"
+            "  4. Fire the payload carrying that URL at the target (via your normal request tooling).\n"
+            "  5. Read the listener log and correlate hits to probes: vigil oob poll --client <name>\n\n"
+            "`start/stop/restart/status/test` operate the shared server; `client` "
+            "manages per-agent listeners; `mint`/`poll` are the per-probe correlate loop."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     oob_sub = oob_p.add_subparsers(dest="oob_command", required=True)
-    oob_sub.add_parser("start")
-    oob_sub.add_parser("stop")
-    oob_sub.add_parser("restart")
-    oob_status_p = oob_sub.add_parser("status")
+    oob_sub.add_parser(
+        "start",
+        help="Start the shared OOB server + frp tunnel (idempotent; one per host).",
+    )
+    oob_sub.add_parser(
+        "stop",
+        help="Stop the shared OOB server sessions.",
+    )
+    oob_sub.add_parser(
+        "restart",
+        help="Stop then start the shared OOB server (e.g. to pick up config changes).",
+    )
+    oob_status_p = oob_sub.add_parser(
+        "status",
+        help="Report OOB server + client health and the effective callback domain.",
+    )
     oob_status_p.add_argument("--json", action="store_true")
-    oob_sub.add_parser("test")
+    oob_sub.add_parser(
+        "test",
+        help="Fire a self-test callback to confirm the OOB server is reachable end-to-end.",
+    )
     oob_mint = oob_sub.add_parser(
         "mint",
         help="Mint a unique OAST nonce callback URL and record a probe to the backend.",
@@ -675,20 +707,40 @@ def main(argv: list[str] | None = None) -> None:
     )
     oob_poll.add_argument("--lines", type=int, default=2000, help="Tail this many log lines (default 2000).")
     oob_poll.add_argument("--json", action="store_true", help="Emit matched/unmatched correlation result as JSON.")
-    oob_client = oob_sub.add_parser("client")
+    oob_client = oob_sub.add_parser(
+        "client",
+        help="Manage per-agent interactsh listeners that receive OOB callbacks.",
+        description=(
+            "Manage the named per-agent interactsh listeners. Each listener owns a "
+            "correlation id that `vigil oob mint --client <name>` binds nonces under "
+            "so `vigil oob poll --client <name>` can see and correlate the callbacks."
+        ),
+    )
     oob_client_sub = oob_client.add_subparsers(dest="oob_client_command", required=True)
-    oob_client_start = oob_client_sub.add_parser("start")
+    oob_client_start = oob_client_sub.add_parser(
+        "start",
+        help="Start a named interactsh listener (registers its callback host).",
+    )
     oob_client_start.add_argument("name")
     oob_client_start.add_argument("--engagement")
     oob_client_start.add_argument("--select", action="store_true")
     oob_client_start.add_argument("--agent")
-    oob_client_logs = oob_client_sub.add_parser("logs")
+    oob_client_logs = oob_client_sub.add_parser(
+        "logs",
+        help="Tail a listener's raw interaction log (use --follow to stream).",
+    )
     oob_client_logs.add_argument("name")
     oob_client_logs.add_argument("--follow", action="store_true")
     oob_client_logs.add_argument("--lines", default="80")
-    oob_client_stop = oob_client_sub.add_parser("stop")
+    oob_client_stop = oob_client_sub.add_parser(
+        "stop",
+        help="Stop a named interactsh listener.",
+    )
     oob_client_stop.add_argument("name")
-    oob_client_sub.add_parser("list")
+    oob_client_sub.add_parser(
+        "list",
+        help="List configured listeners and whether each is running.",
+    )
 
     assess_p = sub.add_parser("assess", add_help=False)
     assess_p.add_argument("assess_args", nargs=argparse.REMAINDER)

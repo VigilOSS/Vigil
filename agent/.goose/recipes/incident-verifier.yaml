@@ -21,16 +21,11 @@ instructions: |2
   without skipping checks. See "Dispatch-Mode Declaration" in
   `agent/operator-core-blue.md`.
 
-  ## Specialist Context Isolation
-
-  You are a specialist sub-agent, not the operator. Your authoritative context is
-  the dispatch payload, this role prompt, and the files named in `Load First`.
-  Do NOT load `agent/AGENTS.md` or `agent/CLAUDE.md` — those are operator-only
-  procedures. Cross-cutting blue rules live in `agent/shared-constraints-blue.md`
-  and the always-active rule files, and are listed below.
+  > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
   ## Load First
 
+  - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
   - `agent/rules/triage.md` — disposition vocabulary, symmetric evidence bar, devil's-advocate-is-mandatory rule, severity-↔-technique alignment audit
   - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, evidence-file conventions; the same rules L2 used, re-applied at the verifier bar
   - `agent/rules/adversarial-mindset.md` — the lens for re-reading the L2 finding under inversion
@@ -242,6 +237,10 @@ instructions: |2
 
   ## Mandatory Closing Sequence
 
+  Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Below is this role's own verb list.
+
+  ### Closing verbs
+
   Before your dispatch returns, run in this order:
 
   1. **Register devil's-advocate evidence as artifacts.** Every counter-evidence pull during the five-check (CA policy dump, change-ticket export, vendor maintenance-window confirmation, on-call calendar snapshot, known-benign register cite) must be registered:
@@ -282,10 +281,6 @@ instructions: |2
      - `cross_platform_correlation_notes` — non-empty when `platforms.length > 1`; explicitly states whether L2's correlation paragraph satisfied the Check-4 reproduction bar
 
   9. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only after it succeeds.
-
-  Skipping the handoff write means the operator has nothing to feed into L4
-  (respond) or report-writer. `vigil assess agent handoff` is idempotent —
-  checkpoint after each finding the dispatch verifies, not only at the end.
 
   ## Output Contract
 

@@ -20,7 +20,7 @@
       "description": "One-line finding name: vuln class + location (e.g. 'Blind SQL injection in /search?q')."
     },
     "severity": {
-      "default": "info",
+      "default": "medium",
       "maxLength": 32,
       "minLength": 1,
       "title": "Severity",
@@ -40,7 +40,7 @@
       "minLength": 1,
       "title": "Workflow Status",
       "type": "string",
-      "description": "Lifecycle state. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'.",
+      "description": "Lifecycle state settable at record time. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'. NOTE: the blue-team/IR states (contained, eradicated, recovered) are intentionally NOT recordable here — they are applied only via `vigil assess update-finding`, so this record-finding enum is deliberately narrower than the full WorkflowStatus vocabulary.",
       "enum": [
         "draft",
         "active",
@@ -70,7 +70,7 @@
       "minLength": 1,
       "title": "Verification Disposition",
       "type": "string",
-      "description": "Verifier outcome. 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable.",
+      "description": "Verifier outcome (stored field). 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'blocked': the attempt could not even start (missing provisioning); requires details.block_reason and is held OUT of the report. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable. NOTE: `vigil assess verify-finding --disposition` additionally accepts 'disputed', which is a verify ACTION that sets verification_state='disputed' and leaves this field at 'none' — 'disputed' is never persisted as a disposition, so it is intentionally absent from this stored enum.",
       "enum": [
         "none",
         "pending_runtime_proof",
@@ -386,19 +386,22 @@
       "type": "integer",
       "default": null,
       "title": "Request Variant Id",
-      "minimum": 1
+      "minimum": 1,
+      "description": "ID of the request variant this finding concerns. Recorded as a finding_link to that request-variant surface, not stored as a finding column. Omit when the finding is not tied to a specific request variant."
     },
     "service_id": {
       "type": "integer",
       "default": null,
       "title": "Service Id",
-      "minimum": 1
+      "minimum": 1,
+      "description": "ID of the service this finding concerns. Recorded as a finding_link to that service surface, not stored as a finding column. Omit when the finding is not tied to a specific service."
     },
     "surface_id": {
       "type": "integer",
       "default": null,
       "title": "Surface Id",
-      "minimum": 1
+      "minimum": 1,
+      "description": "ID of the attack surface this finding concerns. Recorded as a finding_link to that surface, not stored as a finding column. Omit when the finding is not tied to a specific surface."
     },
     "links": {
       "items": {

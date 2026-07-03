@@ -1647,6 +1647,28 @@ def _install_client_kind(agent_root: Path) -> str:
     return "both"
 
 
+# Specialist auto-load stop-sign. Claude Code (and other harnesses) auto-load
+# CLAUDE.md/AGENTS.md walking up the dir tree, so a DISPATCHED SPECIALIST subagent
+# inherits these per-engagement operator pointers before it reaches its own
+# Specialist-Context-Isolation rule. Authored ONCE and prepended to every per-engagement
+# pointer this writer emits (DRY). Kept in lock-step with the render-pipeline banner in
+# agent/scripts/render-operator-prompts.sh:render_specialist_stop_sign.
+_SPECIALIST_STOP_SIGN = (
+    "<!-- STOP — DISPATCHED SPECIALIST: if you are a specialist subagent (recon, source,\n"
+    "     surface, vuln, exploit, fuzzer, osint, report, or any code-* role), do NOT load\n"
+    "     this file. It is an OPERATOR pointer and its startup/runtime banner must not bleed\n"
+    "     into your context. Load ONLY your own role file and every entry in its `Load First`.\n"
+    "     Auto-loaded CLAUDE.md/AGENTS.md pointers up the directory tree do not apply to you.\n"
+    '     See agent/shared-constraints-core.md ("Specialist Context Isolation") for why. -->\n'
+)
+
+# Operator-only ROE pointer added to per-engagement wrappers. ENGAGEMENT.md carries this
+# engagement's ban-risk ROE (scope, required headers, rate cap, no-fire endpoints).
+_ENGAGEMENT_ROE_POINTER = (
+    "Read `ENGAGEMENT.md` in this directory if present (it carries ban-risk ROE for this engagement).\n"
+)
+
+
 def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *, engagement_type: str) -> None:
     install_root = agent_root.parent
     if engagement_type == "blue":
@@ -1655,6 +1677,12 @@ def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *,
             subprocess.run([str(render_script), "repo", str(eng_dir), "--type", "blue"], check=True)
         except FileNotFoundError as exc:
             raise SystemExit(f"prompt render script not found at {render_script}: {exc}") from exc
+        # The blue render writes the full blue operator prompt to eng_dir; append
+        # the per-engagement ROE pointer so blue matches the red path's WS7 coverage.
+        blue_agents = eng_dir / "AGENTS.md"
+        if blue_agents.exists():
+            with blue_agents.open("a", encoding="utf-8") as fh:
+                fh.write(f"\n{_ENGAGEMENT_ROE_POINTER}")
         return
 
     # Specialist context isolation invariant:
@@ -1689,15 +1717,19 @@ Artifacts:
     # turn (once via CLAUDE.md, once via AGENTS.md).
     if client_kind in {"codex", "claude", "both"}:
         (eng_dir / "AGENTS.md").write_text(
-            f"# Engagement Workspace\n\nLoad workspace operator instructions from:\n- {agent_root / 'AGENTS.md'}\n\n{common}",
+            f"{_SPECIALIST_STOP_SIGN}\n"
+            f"# Engagement Workspace\n\nLoad workspace operator instructions from:\n- {agent_root / 'AGENTS.md'}\n\n"
+            f"{_ENGAGEMENT_ROE_POINTER}\n{common}",
             encoding="utf-8",
         )
     if client_kind in {"claude", "both"}:
         (eng_dir / "CLAUDE.md").write_text(
+            f"{_SPECIALIST_STOP_SIGN}\n"
             "# Engagement Workspace\n\n"
             "Read `AGENTS.md` (in this same directory) for operator instructions.\n"
             "Do not also load this file — it is a pointer to AGENTS.md to avoid\n"
-            "double-loading the operator prompt.\n",
+            "double-loading the operator prompt.\n\n"
+            f"{_ENGAGEMENT_ROE_POINTER}",
             encoding="utf-8",
         )
 

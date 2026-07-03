@@ -463,6 +463,11 @@ Run the change against the **Prompt health ruleset** (`# Prompt Authoring Standa
 well — it is the standing checklist for Load-First budgets, MANDATORY-vs-LOAD-ON-FIRST-USE splits,
 duplication, and dispatch-field placement, and applies on top of the coherence pass above.
 
+If the change adds a primitive to a role (a Load-First shape, a dispatch field, a disposition
+vocabulary, a pointer form), it is not done until it is propagated and grep-verified across every
+role it applies to — see the **Propagation standard** in Rule 12 of the health ruleset. "Added to
+one role" is a prototype, not a landed change.
+
 ## Markdown prompt/doc testing policy
 
 Do not add or maintain repository tests that assert `.md` prompt/doc wording, headings, or exact
@@ -581,7 +586,7 @@ When a constraint is load-bearing (safety, correctness, or quality depends on it
 Examples from this prompt set:
 - "Use `vigil assess record-surface` for all surface writes — calling the library directly bypasses backend sync"
 - "Finding IDs are allocated by `vigil assess record-finding` under a lock — hand-allocating risks collisions"
-- "Route all in-scope target work through Kali MCP — host-side probes bypass the runtime's network isolation"
+- "Route all in-scope target work through the `vigil assess kali` CLI — host-side probes bypass the runtime's network isolation"
 
 ## Role clarity in agent prompts
 
@@ -607,7 +612,7 @@ Write: "Guard and sink evaluation belong to code-vuln-hunter — the operator pr
 
 ## Prompt health ruleset
 
-The ten rules below are the standing health checklist for every prompt/doc edit — role files
+The twelve rules below are the standing health checklist for every prompt/doc edit — role files
 (`agent/agents/*.md`), shared layers (`agent/shared-constraints*.md`), rules (`agent/rules/*.md`),
 and operator doctrine (`agent/operator-core*.md`). They exist because a specialist's real context
 is not just its role file — it is the role file **plus every `## Load First` entry**, and that
@@ -696,3 +701,23 @@ line-count check) is enforced as a human authoring checklist plus, at most, an a
 a blocking CI wording test. A wording or line-count assertion that fails the build turns normal
 prompt editing into fixture maintenance and rewards preserving stale phrasing over improving the
 instructions; keep any automated signal non-blocking.
+
+### 11. Root-cause every prohibition before writing a "do not"
+
+Before you write a "do not" / "never" / "must not," diagnose why the unwanted behavior happens —
+is it a **missing WHY** (the model doesn't know the reason, so state the reason and the positive
+action), a **structural problem** (the prompt makes the wrong thing easy or the right thing
+unavailable, so fix the structure), or a **division-of-labor issue** (the work belongs to a
+different role/command, so route it there per "Division of labor over prohibition" above)? Fix the
+cause; a bare prohibition is the last resort, used only when no root-cause fix applies. A prohibition
+that survives this pass keeps the mechanism it protects adjacent to it (see `agent/agents/ir-lead.md`'s
+prohibition + protected-mechanism shape) so a future editor can see what it guards.
+
+### 12. Propagate a primitive to every role it applies to, then grep-verify
+
+A primitive added to one role is a **prototype, not a direction, until it is propagated and
+grep-verified across every role it applies to. "Added to VA/EX" is never "done."** When you
+introduce a shared primitive (a new Load-First shape, a dispatch field, a disposition vocabulary,
+a pointer form), finish the change with an explicit list of the roles it applies to plus a grep
+pattern that must return **0 residual matches** (of the old form) across all `agent/agents/*.md` —
+otherwise the rollout re-creates the exact duplication Rule 3 exists to kill.

@@ -18,11 +18,15 @@ classification here means files get too little or too much attention downstream.
 
 ## Load First
 
+**MANDATORY (before any work):**
+
 - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-architecture-mapping/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
+
+**LOAD-ON-FIRST-USE (lazy):** none — this phase's methodology is fully covered by the mandatory set above.
 
 ## Pre-Work Checkpoint
 
@@ -267,10 +271,6 @@ vigil assess code-record-modules <repo-id> <modules-json>
 
 ## Mandatory Closing Sequence
 
-Wrapper (resume-brief framing, unlinked-notes rule, idempotent/checkpoint cadence,
-plan-state digest, "agent done/close" is operator-only): see
-`agent/shared-constraints-core.md`. Below is this role's own verb list.
-
 ### Closing verbs
 
 Before your dispatch returns, run in this order:
@@ -283,7 +283,7 @@ Before your dispatch returns, run in this order:
 6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
 7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
 ## Finding Prefix: CA
 

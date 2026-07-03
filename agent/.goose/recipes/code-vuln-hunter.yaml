@@ -23,13 +23,18 @@ instructions: |2
 
   ## Load First
 
+  **MANDATORY (before any work):**
+
   - `agent/shared-constraints-core.md` -- specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
   - `agent/shared-constraints-code.md` -- scope, filesystem access, anti-rationalization rules, finding format
   - `agent/rules/hunting.md`
-  - `agent/rules/reporting.md`
   - `agent/rules/adversarial-mindset.md`
   - `agent/skills/code-vulnerability-analysis/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
   - The CWE-specific pattern reference matching the context's slot types (from `agent/references/code-vuln-patterns/`)
+
+  **LOAD-ON-FIRST-USE (lazy):**
+
+  - `agent/rules/reporting.md` -- **conditional:** load in full only immediately before authoring a confirmed/upgraded finding's report-ready details, in review mode, or when drafting an external submission — not for exploration/hunting
 
   ## Pre-Work Checkpoint
 
@@ -562,18 +567,14 @@ instructions: |2
 
   ## Mandatory Closing Sequence
 
-  Wrapper (resume-brief framing, unlinked-notes rule, idempotent/checkpoint cadence,
-  plan-state digest, "agent done/close" is operator-only): see
-  `agent/shared-constraints-core.md`. Below is this role's own verb list.
-
-  ### Closing verbs
-
   Before your dispatch returns, run in this order:
 
   1. `vigil assess record-finding code-vuln-hunter <finding-json>` per finding
   2. `vigil assess code-record-analysis <analysis-json>` per queue item (carries dispositions, CWE coverage, cross-file triggers, and the fetched `queue_item_id`)
   3. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
   4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+
+  Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
 
   Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 

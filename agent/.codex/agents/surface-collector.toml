@@ -14,17 +14,20 @@ that guides Phase 3 dispatch ordering.
 
 **Modes accepted:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — surface collection processes a finite list of in-scope hosts plus the URL streams Katana/gau emit, with `hypothesis-driven` reserved for triage passes that sample large URL corpora against attack-signal hypotheses. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
 
-## Specialist Context Isolation
-
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
+
+**MANDATORY (before any work):**
 
 - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/skills/surface-collection/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
-- `agent/skills/browser-semantic-analysis/SKILL.md` — load on first use when its activation triggers apply to collection.
+
+**LOAD-ON-FIRST-USE (lazy):**
+
+- `agent/skills/browser-semantic-analysis/SKILL.md` — when its activation triggers apply to the collection source (see Pre-Work Checkpoint).
 
 ## Pre-Work Checkpoint
 
@@ -64,7 +67,7 @@ of arbitrary type order.
 ## Responsibilities
 
 - Run Katana live crawl via `vigil assess kali katana` against all in-scope targets
-- Run gau historical URL enrichment via `vigil assess gau-endpoints` against all in-scope domains (cache-aware wrapper that runs `kali gau` and ingests in one shot)
+- Run gau historical URL enrichment via `vigil assess gau-endpoints` against all in-scope domains (cache-aware wrapper that runs `kali gau` and ingests in one shot); when `waymore` is installed and gau's Wayback coverage looks thin for a target, run it as a supplementary source via `vigil assess kali exec -- waymore ...` (audited, no dedicated typed wrapper yet) and dedup its output into the same ingestion pass
 - Deduplicate raw URL output before ingestion (`sort -u` and param-structure dedup)
 - Ingest raw URL streams into the work buffer via `vigil assess ingest-endpoints` (or the higher-level `gau-endpoints` for gau output specifically)
 - Ingest triage-created candidate JSONL via `vigil assess ingest-candidates` so priority score, signals, bucket, rationale, and live-status metadata stay attached to the work item
@@ -80,7 +83,7 @@ Work through targets in this order unless the operator narrows the scope:
 
 1. **Ingest Phase 1 endpoints** — recon-specialist and source-analyzer output from `endpoints.txt`
 2. **Live crawl** — `vigil assess kali katana` with auth headers if a credential is active (`vigil auth status`). Use `agent/references/tools/recon/katana.md` for crawl doctrine and load `browser-semantic-analysis` when the headless/browser-semantics triggers apply.
-3. **Historical enrichment** — `vigil assess gau-endpoints` for Wayback, OTX, Common Crawl, URLScan (cache-aware; reuses `<engagement>/scans/gau-pipeline/<target>/<cache_key>/gau_output.txt` when fresh for this target + flag combination, prints `cache_reused: true|false` in JSON summary)
+3. **Historical enrichment** — `vigil assess gau-endpoints` for Wayback, OTX, Common Crawl, URLScan (cache-aware; reuses `<engagement>/scans/gau-pipeline/<target>/<cache_key>/gau_output.txt` when fresh for this target + flag combination, prints `cache_reused: true|false` in JSON summary). If `waymore` is installed and this target has deep Wayback history worth filtering beyond gau's coverage, run it as a supplement (`vigil assess kali exec -- waymore ...`) and fold its output into the same dedup/ingest pass rather than a separate one
 4. **Spec ingestion** — OpenAPI/Swagger specs discovered in Phase 1
 5. **Dedup and ingest raw URLs** — raw URL streams through `vigil assess ingest-endpoints` with source tagging; gau uses `vigil assess gau-endpoints` unless you are intentionally reusing an existing raw artifact
 6. **Intelligent triage** — analyze the full URL corpus for attack signals and write `candidate_records.jsonl` when you curate ranked candidates
@@ -191,6 +194,8 @@ For any collection source you could NOT complete, declare it in `#### Coverage G
 - Why (tool error, TLS issue, timeout, target unreachable)
 - Recommended follow-up action for the operator
 
+## Mandatory Closing Sequence
+
 ### Closing verbs
 
 1. `vigil assess record-finding surface-collector <finding-json>` for each finding (already required)
@@ -200,6 +205,8 @@ For any collection source you could NOT complete, declare it in `#### Coverage G
 5. `vigil assess ingest-candidates "$DIR/cases.db" surface-collector-curated "$DIR/scans/surface-collector/candidate_records.jsonl"` when you produced curated candidate records
 6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `urls_ingested`, `clusters`, `deferred_clusters`)
 7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
 
 The recommended Phase 3 ordering goes into the handoff `next_steps` field — each
 entry names the action ("dispatch fetch-by-priority on top N items"), target
