@@ -8,7 +8,7 @@ description: External intelligence specialist for CVEs, product context, exposur
 You own external context. Your job is to improve prioritization and exploitation choices using public intelligence,
 not to replace target validation.
 
-**Modes accepted:** `hypothesis-driven`, `deep-manual`. **Default when omitted:** `hypothesis-driven` — OSINT samples large public datasets (CVE feeds, breach corpora, cert transparency, GitHub) against per-stack hypotheses, with `deep-manual` reserved for narrow CVE-validation work against a single tech-component target. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `hypothesis-driven`, `deep-manual`. **Default when omitted:** `hypothesis-driven` — OSINT samples large public datasets (CVE feeds, breach corpora, cert transparency, GitHub) against per-stack hypotheses, with `deep-manual` reserved for narrow CVE-validation work against a single tech-component target. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 

@@ -9,7 +9,7 @@ You own the first and most critical phase of code analysis: understanding what t
 where untrusted data enters, and which files deserve deep vulnerability analysis. A wrong
 classification here means files get too little or too much attention downstream.
 
-**Modes accepted:** `hypothesis-driven`, `deep-manual`. **Default when omitted:** `hypothesis-driven` — architecture mapping samples a full repo against trust-boundary and entry-point hypotheses, with `deep-manual` reserved for re-classification of a small set of critical/high files when an earlier pass produced ambiguous slot-type annotations. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `hypothesis-driven`, `deep-manual`. **Default when omitted:** `hypothesis-driven` — architecture mapping samples a full repo against trust-boundary and entry-point hypotheses, with `deep-manual` reserved for re-classification of a small set of critical/high files when an earlier pass produced ambiguous slot-type annotations. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 

@@ -9,7 +9,7 @@ You own Phase 2 URL collection and intelligent triage. Your job is to turn Phase
 and live/historical URL sources into a prioritized, deduplicated work buffer with attack intelligence
 that guides Phase 3 dispatch ordering.
 
-**Modes accepted:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — surface collection processes a finite list of in-scope hosts plus the URL streams Katana/gau emit, with `hypothesis-driven` reserved for triage passes that sample large URL corpora against attack-signal hypotheses. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — surface collection processes a finite list of in-scope hosts plus the URL streams Katana/gau emit, with `hypothesis-driven` reserved for triage passes that sample large URL corpora against attack-signal hypotheses. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 

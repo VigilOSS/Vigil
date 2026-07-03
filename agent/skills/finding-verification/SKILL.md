@@ -67,7 +67,7 @@ This skill operationalizes gates that live elsewhere; read them rather than re-d
   `agent/agents/vulnerability-analyst.md`. These are your reviewer toolkit; they are part of
   your role prompt already.
 - **C1–C6 FP & severity-downgrade gate** — `agent/references/finding-fp-and-severity-gate.md`.
-  Run every confirmed data-exposure / write finding through it: it catches the real-world-impact
+  Run every confirmed debate-skipped runtime-proven finding through it (data-exposure, write, auth-bypass, race, business-logic): it catches the real-world-impact
   gaps a CVSS-band check misses (no-PII "reads", orphan writes, insider-only enumerability,
   inflated `S:C`/`I:H`).
 - **Severity ↔ CVSS bands** — `agent/shared-constraints.md §4` (the canonical band table).
@@ -100,7 +100,7 @@ For each finding under review:
    report-readiness until an exploit-developer runtime pass completes the extraction and re-verifies
    it `confirmed`/`downgraded`. This is the disposition that keeps blind injections — the class most
    dependent on slow extraction — from being silently dropped at the gate.
-4. **Run the C1–C6 FP & severity gate** (above) on data-exposure / write findings.
+4. **Run the C1–C6 FP & severity gate** (above) on any debate-skipped runtime-proven finding.
 5. **Recompute the CVSS vector** from the reproduced impact; correct `cvss_vector` / `cvss_score`
    if the band drifted.
 
