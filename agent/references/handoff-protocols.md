@@ -6,7 +6,7 @@ category: Shared Runtime References
 # Agent Handoff Protocols
 
 Quick-reference for processing each agent's return output. These rules are subordinate
-to the Phase Flow in `operator-core.md` — agent output is processed within the current
+to the phase docs (`agent/phases/`, via the Phase Index in `operator-core.md`) — agent output is processed within the current
 phase, then queued for later phases where appropriate. Exploit-developer dispatch is
 governed by `exploit_policy` in scope.json and belongs after Verify in Phase 5, not earlier phases.
 
@@ -90,7 +90,7 @@ Output: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED sig
 3. When a finding is real only as part of a chain, keep it in the normal finding table and set `details.chain_required`, `details.chain_rationale`, and `details.required_followup` via `record-finding`'s JSON payload or `vigil assess update-finding <slug> --details-inline '{"chain_required": true, "chain_rationale": "...", "required_followup": ["..."]}'`
 4. FUZZER_NEEDED → dispatch fuzzer within Phase 3 — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`**, feed results back through vuln-analyst
 5. Mark work-buffer batch done: `vigil assess work-buffer "$DB" done "id1,id2,..."`
-6. Continue the Phase 3 consumption loop (steps b–f in Phase Flow)
+6. Continue the Phase 3 consumption loop (steps b–f in `agent/phases/phase-4-consume-test.md`)
 
 ### FUZZER
 

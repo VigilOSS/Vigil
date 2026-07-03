@@ -392,7 +392,7 @@ Full coverage-vs-duplicate decision table and output-field interpretation:
 
 Active recon dispatches must declare candidate count, rate limit, thread count, retry,
 timeout, output mode, stop condition, and expected wall-clock in dispatch context. The
-Recon Dispatch Resource Policy in `agent/operator-core.md` is the calibration source of
+Recon Dispatch Resource Policy in `agent/references/runtime-guides/dispatch-resource-policy.md` is the calibration source of
 truth.
 
 ---

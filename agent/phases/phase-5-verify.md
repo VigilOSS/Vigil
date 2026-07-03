@@ -1,0 +1,27 @@
+# Phase 5 — Verify Findings
+
+**Read-on-phase-entry.** When you ENTER Phase 5, Read this doc; re-read it on a method re-anchor. It carries the adversarial review-mode dispatch, the triage-scope rule, the disposition set (confirmed / upgraded / downgraded / killed), the dedup + chain-primitive passes, the exit gate, and the `transition-phase exploit` checkpoint. The Mandatory Phase-Exit variant/sibling pass (Verify → Exploit) and the Phase-Exit Review Dispatches table stay in `AGENTS.md`. Cross-phase machinery stays in `AGENTS.md`.
+
+5. **VERIFY FINDINGS** → adversarial review of Phase 4 findings before investing in exploitation. This catches false positives, severity inflation, and weak evidence early — fixing a finding after exploitation wastes far more tokens than catching it here.
+   a. Fetch all active findings: `vigil assess fetch findings`
+   b. Triage the review scope:
+      - **Must review**: all HIGH and CRITICAL findings — these drive exploitation and dominate the report
+      - **Review by escalation potential, not a fixed quota**: review the MEDIUM findings that have *escalation potential* — chain potential (pairs with another finding into a high: info-disclosure + open-redirect, SSRF + token leak, IDOR + impersonation), auth / privilege-escalation relevance, or that sit on a high-value app unit (auth boundary, object-reference-heavy API, privileged-write surface). A medium on a throwaway static surface with no chain or auth angle can wait; a medium that could become the pivot of a high cannot. Cover the distinct vuln classes present rather than clustering the review on one. (This replaces an old fixed-percentage quota — a percentage is compliance-theater; escalation potential is what actually decides which mediums repay the review.)
+      - **Skip**: LOW and INFO findings — review cost exceeds downstream impact
+   c. Dispatch `vulnerability-analyst` in review mode. The dispatch context must include:
+      - The finding slugs, titles, and full payloads being reviewed
+      - Target access (the reviewer re-tests via `vigil assess kali ...`, not just reads the evidence text)
+      - **Trust-boundary / threat-model summary**: which entry points are unauthenticated vs privileged, which inputs are operator-trusted (config, internal callers), and the blast-radius tiers. Build it from what already exists — the host's auth tier in `scope.json`, the surface's `auth_context`, and recon/fingerprint intel about internal or trusted callers — sliced to the finding's host/module rather than dumped whole on large scope. The triager is overconfident without this grounding — reachability and auth-path severity calls depend on it.
+      - Explicit instruction: "You are reviewing findings produced by other agents. Your job is adversarial — challenge the evidence, reproduce the PoC, and verify the claimed severity. Confirm, upgrade, downgrade, or kill each finding with specific counter-evidence."
+      - Run the FP & severity-downgrade gate (`agent/references/finding-fp-and-severity-gate.md`, C1–C6) on each finding — it catches the real-world-impact gaps a CVSS-band check misses (no-PII "reads", orphan writes, insider-only enumerability, inflated `S:C`/`I:H`). The reviewer then **authors the report-ready story** into the finding's `details` (corrected `cvss_vector`/`cvss_score`, `evidence`, `impact`, `remediation`) so the report phase only formats — see the Four Validation Gates (Gate 3) in `agent/agents/vulnerability-analyst.md`.
+      - `finding-verification` (the adversarial Phase-4 verify procedure) plus the matching vuln-class skill (selected via `vigil assess list-skills`) for the findings under review
+   d. For each reviewed finding, the reviewer produces a disposition:
+      - **Confirmed** — evidence reproduced, severity accurate → `vigil assess verify-finding <slug> --disposition confirmed --reason "..."`
+      - **Upgraded** — real issue but severity is *understated* based on reproduced evidence → `vigil assess update-finding <slug> --severity <higher> --reason "severity upgrade: ..."` then `vigil assess verify-finding <slug> --disposition confirmed --reason "..."`
+      - **Downgraded** — real issue but severity overstated → `vigil assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity <lower>`
+      - **Killed** — false positive, unreproducible, or stacked preconditions → `vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-6>`
+   e. **Dedup pass**: check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker into the stronger:
+      `vigil assess merge-finding <source-slug> <target-slug> "<reason>"`
+   f. **Chain-only primitives stay in the normal finding table**: when a finding is real only as part of a proved or expected escalation path, update it with `vigil assess update-finding <slug> ...` so `details.chain_required`, `details.chain_rationale`, and `details.required_followup` are populated. Do not invent a chain-specific workflow status.
+   g. **Exit gate**: all HIGH/CRITICAL findings have a verification disposition. If the reviewer kills >50% of findings, review whether Phase 4 agents are producing speculative findings — tighten dispatch context for future engagements.
+   Transition phase: `vigil assess transition-phase exploit` (checks unverified high/critical findings).

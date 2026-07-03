@@ -49,7 +49,7 @@ The depth comes from the rate calibration — the default `-T4` profile trips th
 limit and leaves the SAN/rDNS data uncaptured.
 
 The canonical per-target rate calibration table lives in
-`agent/operator-core.md` "Recon Dispatch Resource Policy" — the values above pull from
+`agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" — the values above pull from
 that table. The same policy section caps concurrent nmap processes at 1 per dispatch
 (consolidate via `-iL`, see "Why one process beats N processes" below).
 

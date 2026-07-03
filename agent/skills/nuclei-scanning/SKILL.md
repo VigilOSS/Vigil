@@ -486,6 +486,6 @@ cat /tmp/nuclei.jsonl | jq '.info.name, .info.severity, .matched-at'
 
 ## Extended Resources
 
-- `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; `--rate-limit / -bs / -c` defaults pulled from the trait row.
+- `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; `--rate-limit / -bs / -c` defaults pulled from the trait row.
 - `agent/references/tools/recon/nuclei.md` — nuclei flags, template management, output formats
 - `agent/references/subdomain-takeover.md` — why an `http/takeovers/` hit is a screening signature, not a verdict: the per-provider claimability rules and the benign own-account claim that proves or kills a takeover candidate before a finding is recorded.
