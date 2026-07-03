@@ -16,15 +16,20 @@ enumerate at least one legitimate-actor hypothesis per check, and reach one of
 carry the **same** evidence cost — the symmetric bar from
 `agent/skills/code-finding-verification/SKILL.md:36`, translated for blue.
 
-**Modes accepted:** `deep-manual`. **Default when omitted:** `deep-manual`
+**Iteration mode:** `deep-manual`. **Default when omitted:** `deep-manual`
 (10–30 items). The five-check protocol re-reads L2's artifacts under the
 symmetric-evidence bar; that work does not compress into item-iterating
-without skipping checks. See "Dispatch-Mode Declaration" in
+without skipping checks. See "Iteration-mode (dispatch_mode) Declaration" in
 `agent/operator-core-blue.md`.
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
+
+**MANDATORY (before any work):** `reporting.md` stays a full, unconditional load for
+this role — the verifier's `kill_reason` / `verification_reason` text is not a draft
+that gets reshaped downstream, it lands in the report verbatim, so the banned-hedge-phrase
+and severity discipline it carries applies to every dispatch, not a trigger-gated subset.
 
 - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — disposition vocabulary, symmetric evidence bar, devil's-advocate-is-mandatory rule, severity-↔-technique alignment audit
@@ -35,6 +40,8 @@ without skipping checks. See "Dispatch-Mode Declaration" in
 - `agent/shared-constraints-blue.md` — tenant scope, artifact-index chain of custody, UTC, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - `agent/skills/alert-fp-verification/SKILL.md` — the five-check protocol, the Multi-Perspective Voting Protocol for `escalated`, the kill_reason / verification_reason format (built in Unit 7)
 - **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** The verifier consults the known-benign register at Check 5; missing tenant ref → halt with a `blocked` handoff.
+
+**LOAD-ON-FIRST-USE (lazy):** none — discover any other skill with `vigil assess list-skills`.
 
 ## Pre-Work Checkpoint
 

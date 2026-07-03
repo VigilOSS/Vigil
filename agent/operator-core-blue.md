@@ -418,6 +418,20 @@ returns, mark it complete with the slugs it produced:
 vigil assess agent done <agent-id> --status completed --finding-slugs <slugs>
 ```
 
+### Iteration-mode (dispatch_mode) Declaration
+
+Red/code dispatches set three axes (see `agent/operator-core.md`'s section of the same name):
+iteration mode, `hunt_scope`, and Dispatch Mindset. Blue dispatches set only the first —
+**iteration mode** (`dispatch_mode`) = HOW the tier traverses its inputs (one alert vs a
+30–100-item batch vs a 10–30-item deep dive re-reading artifacts under the symmetric bar) —
+per the mode table above and the per-role defaults declared in each role's own "Iteration
+mode:" line. Blue does **not** carry the offensive `hunt_scope` (wide/deep pass breadth) or
+**Dispatch Mindset** (`agent/rules/mindsets/` injected lens) axes — those encode red/code
+hunting cadence over an open attack surface, which has no blue analogue; tier (L1–L4) plus
+the platform skill named in the dispatch already narrow a blue specialist's task the way
+`hunt_scope`/mindset narrow a red one. (The field name stays `dispatch_mode` everywhere —
+persisted DB value and phase-gate key.)
+
 ### Runtime Identity Block
 
 Every blue dispatch prompt includes a Runtime Identity block so the specialist

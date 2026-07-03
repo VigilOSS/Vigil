@@ -76,7 +76,7 @@ The contract fields recorded on every `vigil assess agent start` / `POST /dispat
 
 | Field | Type | Values |
 |---|---|---|
-| `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" in `agent/operator-core.md`) |
+| `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`) |
 | `skills` | string | Comma-separated skill names loaded by the specialist; required for non-operator roles. |
 | `requested_model` | string (optional) | Intended model id from the operator |
 | `actual_model` | string (optional) | Model that actually executed |

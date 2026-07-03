@@ -14,24 +14,29 @@ matches a cited tenant-ref pattern, hand everything else to L2 with the platform
 skill named and the tenant ref injected. You do not pull telemetry, build
 timelines, or flip `verification_state` — those belong to L2 and L3.
 
-**Modes accepted:** `item-iterating`, `deep-manual`. **Default when omitted:**
+**Iteration mode:** `item-iterating`, `deep-manual`. **Default when omitted:**
 `item-iterating` (30–100 alerts; typically one alert per dispatch in v1).
 Use `deep-manual` only for a mixed-platform alert payload that needs unpacking
-before normalization. See "Dispatch-Mode Declaration" in `agent/operator-core-blue.md`.
+before normalization. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core-blue.md`.
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
+
+**MANDATORY (before any work):**
 
 - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — outcome-before-theory, severity discipline, disposition vocabulary, symmetric evidence bar, mechanical-auto-close rule
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, confidence-label semantics
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read
 - `agent/rules/resume.md` — universal resume hydration; `vigil assess resume-brief --finding <slug>` before any continuation
-- `agent/rules/reporting.md` — banned hedge phrases, severity discipline, section-length limits
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - `agent/skills/alert-triage/SKILL.md` — the alert normalization schema, the platform-skill-routing table, the mechanical-noise FP register format, the L1→L2 handoff contract (built in Unit 7)
 - **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** The tenant ref carries the known-benign register that gates every auto-close decision. Missing tenant ref → halt with a `blocked` handoff naming the path.
+
+**LOAD-ON-FIRST-USE (lazy):**
+
+- `agent/rules/reporting.md` — banned hedge phrases, severity discipline, section-length limits. L1 is a triager, not a report author — load only when the mechanical-noise auto-close path fires and you are composing the `kill_reason` text for `vigil assess kill-finding` (the one L1 output that lands in a closed finding's record), not during alert normalization, platform-skill routing, or the dispatch-to-L2 handoff, none of which author report-bound prose.
 
 ## Pre-Work Checkpoint
 
