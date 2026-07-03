@@ -83,6 +83,7 @@ _DISPATCH_MODE_BY_ROLE: dict[str, str] = {
     "code-vuln-hunter": "item-iterating",
     "code-variant-hunter": "hypothesis-driven",
     "code-vuln-verifier": "deep-manual",
+    "code-fuzz-engineer": "deep-manual",
 }
 
 _DEFAULT_DISPATCH_MODE = "hypothesis-driven"
