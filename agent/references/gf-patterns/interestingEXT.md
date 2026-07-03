@@ -18,7 +18,7 @@ source disclosure, credential leaks, and full-database downloads.
 
 - gau or Wayback returned URLs ending in `.bak`, `.old`, `.swp`, `.sql`, `.tar.gz`, or `.pem`
 - Nuclei's `exposures` templates flagged backup files — use this reference to widen the sweep
-- Operator is ranking which historical URLs to live-probe first before spinning up full Phase 3
+- Operator is ranking which historical URLs to live-probe first before spinning up full Phase 4
 
 ## Parameter keys that match
 
@@ -34,6 +34,33 @@ Classic extension list (from 1ndianl33t patterns):
 .cfg, .conf, .config, .ini, .json, .yaml, .yml, .xml, .env, .pem, .key, .pfx, .p12, .crt,
 .tar, .tar.gz, .tgz, .zip, .rar, .7z, .gz, .iso, .sh, .bash, .py, .rb, .pl, .php~, .inc,
 .git, .svn, .hg, .DS_Store, .htaccess, .htpasswd`
+
+### Shipped fragment set (`classify_buckets._BUCKETS` `interestingext`, weight 10)
+
+The boundary-anchored fragments the classifier actually matches are a curated
+subset of the classic list above plus two 2026-06 expansions. Each fragment is
+boundary-anchored by `fragment_in_path` exactly like `.bak`, so `/db.backup`
+matches `.backup` but `/notes.backupx` does **not**.
+
+- **Base set:** `.bak, .old, .sql, .swp, .swo, .config, .env, .conf, .ini, .pem,
+  .key, .log`
+- **Part 6 — backup / credential / cert / database extensions** (from
+  `1ndianl33t/interestingEXT.json`, previously absent):
+  `.backup, .bkp, .cfg, .cnf, .crt, .csr, .passwd, .pwd, .mdb, .rdp, .dat, .pac`
+- **Plan #13 — VCS / IaC / IDE artifacts** (source & config disclosure):
+  `.svn, .hg, .gitlab-ci.yml, .ds_store, .terraform, .tfstate`. The `.git` and
+  `.env` repo/secret artifacts are matched by the `debug_logic` bucket, not here.
+
+**Excluded on purpose (NOT in the shipped set):** `.xml, .json, .csv, .yml,
+.pdf, .doc, .txt`. These are legitimate data files already typed `data` and
+would flood the bucket. Boundary-anchoring requires the full distinctive token,
+so the specific `.gitlab-ci.yml` does not reintroduce the generic `.yml` flood —
+`/config.yml` still does not match.
+
+**Build-manifest FILENAMES are matched by `debug_logic`, not here.** Plan #13's
+`composer.json, composer.lock, yarn.lock, package-lock.json, web-inf/web.xml`
+live in the `debug_logic` bucket (mirroring its existing `/package.json` entry),
+because they are full path-segment filenames rather than trailing extensions.
 
 ## Weight and priority interpretation
 

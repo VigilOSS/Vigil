@@ -32,9 +32,21 @@ Flag semantics (master plan §6 "Consolidated-command flag semantics"):
     that does not fold it by default.
   * ``--strict-deep``     — gate on app-unit DETECTION (default OFF; detection is
     warm-first). Escalates an unsatisfied deep_required unit to a non-zero exit.
-  * ``--strict``          — CI-style: exit 1 on ANY open advisory item (preserves
-    the old ``check-intel-readiness --strict``). Does NOT imply ``--strict-deep``.
+  * ``--strict``          — CI-style: exit 1 on ANY open advisory item — an open
+    intel-closure item (preserves the old ``check-intel-readiness --strict``) OR
+    an open recon-pipeline stage gap (P-1, see below). Does NOT imply
+    ``--strict-deep``.
   * ``--json``            — emit the structured projection (the downstream contract).
+
+P-1 (item 2.1) — recon-pipeline stage-completion audit. On the pipeline phases
+(``recon``/``collect``) the backend folds a ``stage_audit`` block into the
+phase-readiness payload: it diffs the command-run ledger
+(``assessment_command_runs``) against a per-phase EXPECTED-STAGE checklist
+(subdomain/dns → httpx → katana → gau → trufflehog; collect → nuclei) and flags
+any stage that ``timed_out`` / produced ``partial_results`` / NEVER RAN. The gap
+report is ADVISORY by default (WARN/report only); ``--strict`` escalates an open
+stage gap to a non-zero exit. The EXPECTED-STAGE map lives backend-side in
+``state_manager.phase_readiness.PHASE_EXPECTED_STAGES``.
 
 The terminal ``report``/``complete`` hard block is INDEPENDENT of both ``--strict``
 and ``--strict-deep`` — it lives on the ``transition-phase`` precondition and is
@@ -53,12 +65,28 @@ from assess.lib import coverage_checks as cc
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.exploit_targets import resolve_approved_target_slugs
+from assess.lib.kali_audit import ALLOWED_PHASES as _CANONICAL_PHASES
 from assess.lib.scope import load_scope
 
 
+# This command handles the WEB engagement phases and labels the canonical
+# persisted "consume-test" phase (the spelling in kali_audit.ALLOWED_PHASES —
+# the one enum both this command and the command catalog key off) with the
+# short internal form "consume". `_CANONICAL_CONSUME` names that canonical
+# spelling explicitly so the alias below is a documented bridge to the shared
+# enum rather than a second, silently-divergent phase vocabulary.
+_CANONICAL_CONSUME = "consume-test"
+assert _CANONICAL_CONSUME in _CANONICAL_PHASES, (
+    "check-phase-readiness consume alias drifted from kali_audit.ALLOWED_PHASES"
+)
+
 PHASES = ("recon", "collect", "consume", "verify", "exploit", "report")
 
-_PHASE_ALIASES = {"consume-test": "consume", "consume_test": "consume"}
+# Explicit consume↔consume-test alias: the canonical enum spells the phase
+# "consume-test", this command's internal short form is "consume". Keep the
+# legacy underscore variant too. Derived from `_CANONICAL_CONSUME` so the two
+# enums cannot diverge.
+_PHASE_ALIASES = {_CANONICAL_CONSUME: "consume", "consume_test": "consume"}
 
 _CLI_PHASE_CHOICES = (*PHASES, *_PHASE_ALIASES)
 
@@ -176,8 +204,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         dest="strict",
         action="store_true",
         help=(
-            "CI-style: exit 1 on any open advisory item (preserves the old "
-            "check-intel-readiness --strict). Does NOT imply --strict-deep."
+            "CI-style: exit 1 on any open advisory item — an open intel-closure "
+            "item (preserves the old check-intel-readiness --strict) OR an open "
+            "recon-pipeline stage gap (timed_out/partial/never-ran). Does NOT "
+            "imply --strict-deep."
         ),
     )
     p.add_argument(
@@ -231,6 +261,20 @@ def run(args: argparse.Namespace) -> None:
         else:
             text_lines.extend(cov_blockers)
             if phase == "consume":
+                exit_nonzero = True
+
+        # P-1 (item 2.1) — recon-pipeline stage-completion audit. The backend
+        # folds a ``stage_audit`` block into the phase-readiness payload for the
+        # pipeline phases (recon/collect). It is ADVISORY by default (WARN/report
+        # only); --strict escalates an open stage gap to a non-zero exit,
+        # alongside the existing --strict intel-closure escalation below.
+        stage_audit = backend.get("stage_audit")
+        if isinstance(stage_audit, dict) and stage_audit.get("applicable"):
+            stage_has_open, stage_lines = cc.render_stage_audit(stage_audit)
+            projection["stage_audit"] = stage_audit
+            projection["stage_audit_open_gaps"] = bool(stage_has_open)
+            text_lines.extend(stage_lines)
+            if args.strict and stage_has_open:
                 exit_nonzero = True
 
         stage = _PHASE_REQUIRE_STAGE.get(phase)
@@ -363,7 +407,7 @@ def _run_scope_gate(
         print(f"check-phase-readiness: backend services fetch failed: {exc}", file=sys.stderr)
         sys.exit(1)
     try:
-        surfaces = client.get("surfaces")
+        surfaces = _get_all_pages(client, "surfaces")
     except AssessError as exc:
         print(f"check-phase-readiness: backend surfaces fetch failed: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -389,6 +433,13 @@ def _run_scope_gate(
         strict_vendor_saas=bool(args.strict_vendor_saas),
     )
     return report, (not report["ready"])
+
+
+def _get_all_pages(client: AssessmentClient, endpoint: str) -> Any:
+    pager = getattr(client, "get_all_pages", None)
+    if callable(pager):
+        return pager(endpoint)
+    return client.get(endpoint)
 
 
 def _run_by_host(

@@ -454,6 +454,14 @@ def _run_ingest(monkeypatch, tmp_path: Path, lines: list[str]) -> dict[str, str]
             pass
 
         def post(self, endpoint, payload):
+            if endpoint == "request-observations/bulk":
+                return {
+                    "count": len(payload.get("items", [])),
+                    "records": [
+                        {"request_variant": {"id": idx}, "service": {"id": idx}}
+                        for idx, _item in enumerate(payload.get("items", []), start=1)
+                    ],
+                }
             return {"request_variant": {"id": 1}, "service": {"id": 1}}
 
         def close(self) -> None:
@@ -533,3 +541,133 @@ def test_existing_typing_regressions() -> None:
     assert classify_type("GET", "/graphql", "", "") == "graphql"
     assert classify_type("GET", "/app.js", "", "") == "javascript"
     assert classify_type("GET", "/app.css", "", "") == "stylesheet"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 0 — ASP.NET / WCF handler extensions stop dropping to `unknown` (Issue A)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/trace.axd",
+        "/handler.ashx",
+        "/service.asmx",
+        "/data.svc",
+        "/elmah.axd",
+    ],
+)
+def test_dotnet_handler_terminal_extension_types_page(path: str) -> None:
+    # `.axd/.ashx/.asmx/.svc` are routed application surfaces, not `unknown`.
+    result = classify_type("GET", path, "", "")
+    assert result == "page", (path, result)
+    assert result != "unknown", (path, result)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/foo.svc?wsdl",
+        "/legacy/service.asmx?wsdl",
+        "/handlers/upload.ashx/op",
+    ],
+)
+def test_dotnet_handler_extension_with_boundary_types_page(path: str) -> None:
+    # `?`/`/` after the handler extension is a valid app-route boundary.
+    assert classify_type("GET", path, "", "") == "page", path
+
+
+def test_dotnet_handler_extension_segment_boundary_fp_guard() -> None:
+    # FP guard: `.axd` inside the literal segment `report.axdx` must NOT type as
+    # an app route (next char `x` is not a segment boundary).
+    result = classify_type("GET", "/report.axdx", "", "")
+    assert result != "page", result
+    assert result == "unknown", result
+
+
+# --------------------------------------------------------------------------- #
+# Phase 0 — extensioned auth-entry pages reach `auth_entry` (Issue C)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/wp-login.php",
+        "/WP-Login.php",
+        "/portal/user-signin.aspx",
+        "/auth/account-login.jsp",
+        "/foo-sign-in.aspx",
+        "/tenant-login.do",
+    ],
+)
+def test_extensioned_auth_pages_type_auth_entry(path: str) -> None:
+    # WordPress wp-login.php and the generic `*-login`/`*-signin` extensioned
+    # forms reach the floor-carrying `auth_entry` type instead of `page`.
+    assert classify_type("GET", path, "", "") == "auth_entry", path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/index.php",
+        "/default.aspx",
+        "/page.jsp",
+        "/cgi-bin/login.php/extra",
+        "/login-help.php",
+        "/blog-post.php",
+    ],
+)
+def test_extensioned_auth_fp_guards_stay_page(path: str) -> None:
+    # Ordinary pages (no `<prefix>-login`/`<prefix>-signin` keyword at a clean
+    # segment boundary before the extension) still type `page`.
+    assert classify_type("GET", path, "", "") == "page", path
+
+
+# --------------------------------------------------------------------------- #
+# Phase 0 — api-spec recall strengthened (Issue I backstop)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/swagger-resources",
+        "/redoc",
+        "/api-docs.json",
+        "/v3/api-docs",
+        "/swagger-ui",
+        "/swagger-ui.html",
+        "/api/v3/api-docs",
+    ],
+)
+def test_api_spec_paths_strengthened(path: str) -> None:
+    assert classify_type("GET", path, "", "") == "api-spec", path
+
+
+def test_api_spec_existing_forms_unchanged() -> None:
+    # Regression pin: the pre-existing api-spec forms must keep typing `api-spec`.
+    for path in (
+        "/api-docs",
+        "/openapi",
+        "/openapi.yaml",
+        "/swagger",
+        "/swagger.json",
+        "/v1/api-docs",
+    ):
+        assert classify_type("GET", path, "", "") == "api-spec", path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/redocument",
+        "/swagger-resources-guide",
+        "/redoc-tutorial",
+    ],
+)
+def test_api_spec_fp_guards(path: str) -> None:
+    # Segment-boundary guards: a longer slug that merely starts with an api-spec
+    # keyword must NOT be typed `api-spec`.
+    assert classify_type("GET", path, "", "") != "api-spec", path

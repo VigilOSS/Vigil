@@ -17,11 +17,21 @@ from typing import Any
 
 from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
-from .kali_runtime_exec import _cat_container_pid_file, _container_running
+from .kali_runtime_exec import (
+    _cat_container_pid_file,
+    _container_running,
+    _engagement_env_args,
+)
 
 _DEFAULT_DTACH_DIR = "/tmp/vigil-jobs"
 _JOB_PID_DIR = "/tmp/vigil-jobs"
 _JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
+
+# Grace between the deadline SIGTERM and the escalation SIGKILL in the async
+# job watchdog. Mirrors the synchronous exec path's `process.wait(timeout=5)`
+# window between SIGTERM and SIGKILL in kali.py, so both paths give a hung tool
+# the same 5s to unwind on its own before being force-killed.
+_JOB_KILL_GRACE_SECONDS = 5
 
 # ``_container_running`` is imported at module level so tests can patch it via
 # ``monkeypatch.setattr(kali_jobs, "_container_running", ...)``.
@@ -134,6 +144,48 @@ def _job_paths(engagement_dir: Path, job_uuid: str) -> tuple[Path, Path]:
     return out_dir / f"{job_uuid}.out", out_dir / f"{job_uuid}.err"
 
 
+def _coerce_timeout_budget(value: Any) -> int | None:
+    """Return a positive integer second-budget, or ``None`` when the caller did
+    not request a deadline (or requested a non-positive / unparseable value — in
+    which case the wrapper omits the watchdog rather than arming a zero/negative
+    deadline that would kill the tool immediately)."""
+    if value is None:
+        return None
+    try:
+        budget = int(value)
+    except (TypeError, ValueError):
+        return None
+    return budget if budget > 0 else None
+
+
+def _deadline_watchdog(budget_seconds: int) -> str:
+    """Background poll-loop watchdog shell that enforces a hard deadline on the
+    in-container TOOL pid (``$__child``).
+
+    Mirrors the synchronous exec path's cascade (kali.py): once ``budget_seconds``
+    elapse, SIGTERM the tool, then SIGKILL after ``_JOB_KILL_GRACE_SECONDS`` if it
+    ignored the term. Liveness is polled in 1s ticks so the watchdog exits the
+    instant the tool finishes on its own — no long ``sleep`` lingers after a
+    natural exit — and each signal is gated on a fresh ``kill -0`` so a tool that
+    dies in the poll window is never signalled at a pid the kernel has recycled.
+    It signals exactly ``$__child`` (the recorded tool pid), the same exact-PID
+    target ``job_stop`` uses, so the deadline kill and an operator stop converge
+    on identical semantics. ``$__watch`` records the watchdog pid so the wrapper
+    can reap it once the tool is gone."""
+    grace = _JOB_KILL_GRACE_SECONDS
+    return (
+        "( __i=0; "
+        f'while [ "$__i" -lt {int(budget_seconds)} ]; do '
+        'kill -0 "$__child" 2>/dev/null || exit 0; sleep 1; __i=$((__i+1)); done; '
+        'kill -0 "$__child" 2>/dev/null && kill -TERM "$__child" 2>/dev/null; '
+        "__i=0; "
+        f'while [ "$__i" -lt {int(grace)} ]; do '
+        'kill -0 "$__child" 2>/dev/null || exit 0; sleep 1; __i=$((__i+1)); done; '
+        'kill -0 "$__child" 2>/dev/null && kill -KILL "$__child" 2>/dev/null '
+        ") & __watch=$!;"
+    )
+
+
 def _build_job_wrapper(
     joined: str,
     *,
@@ -141,6 +193,7 @@ def _build_job_wrapper(
     stdout_path: str,
     stderr_path: str,
     exit_path: str,
+    timeout_seconds: int | None = None,
 ) -> str:
     """Build the dtach worker shell.
 
@@ -160,6 +213,16 @@ def _build_job_wrapper(
     poll loop (I-012). A kill is observed as a 128+signal wait status (SIGTERM=143
     / SIGKILL=137); job_stop treats rc>=128 as 'killed', rc<128 as a natural exit.
 
+    When ``timeout_seconds`` is a positive budget the wrapper also arms a hard-
+    deadline watchdog (the in-container analogue of the sync path's ``--timeout``
+    SIGTERM→SIGKILL cascade): the watchdog SIGTERMs the tool pid at the budget and
+    escalates to SIGKILL after the grace, so a hung run (e.g. nuclei stuck on
+    template load, 0-byte output for hours) is killed AT the deadline and self-
+    finalizes via the marker (the kill wait-status, which the lazy finalizer maps
+    to ``failed``) instead of surviving until a manual sweep-orphans (I-19). The
+    marker is published BEFORE the watchdog is reaped so the disposition lands
+    promptly; the trailing ``wait`` then reaps the watchdog so it never lingers.
+
     stdin is redirected from /dev/null — the in-container analogue of the sync
     exec path's ``stdin=subprocess.DEVNULL``: PD tools (httpx/katana/nuclei/dnsx/
     naabu) block on a non-EOF stdin when fd 0 is not a TTY, hanging at 0% CPU even
@@ -171,12 +234,21 @@ def _build_job_wrapper(
         f"2>>{shlex.quote(stderr_path)} </dev/null"
     )
     exit_tmp = f"{exit_path}.tmp"
-    return (
-        f"sh -c {shlex.quote(inner)} & "
-        f"__child=$!; echo \"$__child\" > {shlex.quote(pid_file)}; "
-        f"wait \"$__child\"; __rc=$?; "
+    publish = (
         f"printf '%s' \"$__rc\" > {shlex.quote(exit_tmp)} "
         f"&& mv -f {shlex.quote(exit_tmp)} {shlex.quote(exit_path)}"
+    )
+    spawn = (
+        f"sh -c {shlex.quote(inner)} & "
+        f"__child=$!; echo \"$__child\" > {shlex.quote(pid_file)}; "
+    )
+    budget = _coerce_timeout_budget(timeout_seconds)
+    if budget is None:
+        return f"{spawn}wait \"$__child\"; __rc=$?; {publish}"
+    return (
+        f"{spawn}{_deadline_watchdog(budget)} "
+        f"wait \"$__child\"; __rc=$?; "
+        f"{publish}; wait \"$__watch\" 2>/dev/null"
     )
 
 
@@ -253,17 +325,22 @@ def start_job(
             stdout_path=container_stdout,
             stderr_path=container_stderr,
             exit_path=container_exit,
+            # Hard deadline for the async run, sized from the operator's
+            # --timeout (carried in audit_metadata by `kali job start`). Without
+            # this the dtach worker had no deadline and a hung tool survived
+            # until a manual sweep-orphans (I-19).
+            timeout_seconds=audit_meta.get("timeout_seconds_requested"),
         )
         # ENGAGEMENT_KEY env mirrors the sync exec path in
-        # ``kali_runtime_exec._build_docker_exec`` so skill commands launched as
-        # background jobs see ``$ENGAGEMENT_KEY`` expand to the engagement name
-        # rather than the empty string.
+        # ``kali_runtime_exec._build_docker_exec`` (shared via
+        # ``_engagement_env_args`` so the two cannot drift) so skill commands
+        # launched as background jobs see ``$ENGAGEMENT_KEY`` expand to the
+        # engagement name rather than the empty string.
         dtach_argv = [
             "docker",
             "exec",
             "-d",
-            "--env",
-            f"ENGAGEMENT_KEY={cfg.engagement_key}",
+            *_engagement_env_args(cfg.engagement_key),
             "-w",
             f"/engagements/{cfg.engagement_key}",
             container_name,

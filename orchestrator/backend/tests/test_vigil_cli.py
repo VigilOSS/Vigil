@@ -147,7 +147,11 @@ def test_engagement_create_blue_renders_blue_operator_prompt(
 
     render_script = install_root / "agent" / "scripts" / "render-operator-prompts.sh"
     assert render_calls == [[str(render_script), "repo", str(created.path), "--type", "blue"]]
-    assert (created.path / "AGENTS.md").read_text(encoding="utf-8") == "blue operator prompt\n"
+    # Blue engagements render the full blue operator prompt, then the per-engagement
+    # bootstrap appends the ENGAGEMENT.md ROE pointer (WS7 symmetry with the red path).
+    blue_agents = (created.path / "AGENTS.md").read_text(encoding="utf-8")
+    assert blue_agents.startswith("blue operator prompt\n")
+    assert "Read `ENGAGEMENT.md` in this directory if present" in blue_agents
     assert (created.path / ".codex" / "agents").is_dir()
     assert not (created.path / ".codex" / "agents").is_symlink()
 
@@ -206,7 +210,8 @@ def test_engagement_create_emits_post_create_footer(
     captured = capsys.readouterr()
     assert "mitmproxy: stopped" in captured.err
     assert "oob:" in captured.err and "stopped" in captured.err
-    assert f"vigil mitmproxy start {created.key}" in captured.err
+    assert "vigil mitmproxy start" in captured.err
+    assert f"vigil mitmproxy start {created.key}" not in captured.err
     assert "vigil oob start" in captured.err
     assert f"vigil engagement start {created.key} --client codex" in captured.err
 
@@ -2676,6 +2681,54 @@ def test_oob_status_json_reports_effective_domain(
     assert payload["domain"] == "oob.example.test"
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["oob", "--help"],
+        ["oob", "start", "--help"],
+        ["oob", "stop", "--help"],
+        ["oob", "restart", "--help"],
+        ["oob", "status", "--help"],
+        ["oob", "test", "--help"],
+        ["oob", "mint", "--help"],
+        ["oob", "poll", "--help"],
+        ["oob", "client", "--help"],
+        ["oob", "client", "start", "--help"],
+        ["oob", "client", "logs", "--help"],
+        ["oob", "client", "stop", "--help"],
+        ["oob", "client", "list", "--help"],
+    ],
+)
+def test_oob_subcommands_have_help_text(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every `vigil oob` (sub)command must be self-describing so the role-file
+    OOB prose can collapse to one-liners. `--help` should print a non-trivial
+    usage/description block and exit 0."""
+    from vigil_cli import main as main_module
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(argv)
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    # More than the bare `usage:` + `-h/--help` boilerplate argparse always emits.
+    assert len(out.strip()) > 80
+
+
+def test_oob_top_level_help_teaches_mint_poll_ordering(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`vigil oob --help` alone must teach the mint -> poll -> correlate flow so
+    an operator does not need the role-file prose to learn the ordering."""
+    from vigil_cli import main as main_module
+
+    with pytest.raises(SystemExit):
+        main_module.main(["oob", "--help"])
+    out = capsys.readouterr().out
+    assert "mint" in out and "poll" in out
+    assert out.index("mint") < out.index("poll")
+
+
 def test_logs_routes_to_centralized_targets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from vigil_cli import main as main_module
 
@@ -2947,13 +3000,10 @@ def test_auth_without_engagement_context_requires_key_or_select(tmp_path: Path, 
         main_module.main(["--root", str(install_root), "auth", "status"])
 
 
-def test_mitmproxy_start_legacy_engagement_arg_is_ignored(
+def test_mitmproxy_start_rejects_legacy_engagement_arg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Legacy `vigil mitmproxy start <engagement>` is a no-op selector — the
-    proxy serves every active engagement. The CLI should accept it silently
-    (printing one notice) rather than error out.
-    """
+    """The proxy serves every active engagement; no engagement selector exists."""
     from vigil_cli import main as main_module
 
     _isolate_orchestrator_url(monkeypatch)
@@ -2968,10 +3018,12 @@ def test_mitmproxy_start_legacy_engagement_arg_is_ignored(
 
     monkeypatch.setattr(main_module, "start_proxy", fake_start_proxy)
 
-    main_module.main(["--root", str(install_root), "mitmproxy", "start", "eng-1"])
-    assert captured["engagements_root"] == install_root / "agent" / "engagements"
+    with pytest.raises(SystemExit) as exc:
+        main_module.main(["--root", str(install_root), "mitmproxy", "start", "eng-1"])
+    assert exc.value.code == 2
+    assert "engagements_root" not in captured
     err = capsys.readouterr().err
-    assert "ignoring engagement selector" in err
+    assert "unrecognized arguments: eng-1" in err
 
 
 def test_mitmproxy_reload_touches_sentinel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -8209,14 +8261,17 @@ def test_dispatch_register_defaults_missing_dispatch_mode_from_role(
         skills="idor-testing",
     )
     err = capsys.readouterr().err
-    assert fake.recorded[0]["dispatch_mode"] == "hypothesis-driven"
-    assert "dispatch_mode not set; defaulting to 'hypothesis-driven'" in err
+    # Canonical per-role default (role file "Default when omitted" + operator-core
+    # Iteration-mode Declaration): vulnerability-analyst -> item-iterating.
+    assert fake.recorded[0]["dispatch_mode"] == "item-iterating"
+    assert "dispatch_mode not set; defaulting to 'item-iterating'" in err
 
 
 def test_dispatch_register_defaults_mode_for_recon_role(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """L2-1: recon-specialist defaults to item-iterating."""
+    """L2-1: recon-specialist defaults to hypothesis-driven (canonical per-role
+    default from operator-core Iteration-mode Declaration)."""
     fake = _run_dispatch_verb(
         monkeypatch,
         "register",
@@ -8226,7 +8281,7 @@ def test_dispatch_register_defaults_mode_for_recon_role(
         skills="subdomain-enumeration",
     )
     capsys.readouterr()
-    assert fake.recorded[0]["dispatch_mode"] == "item-iterating"
+    assert fake.recorded[0]["dispatch_mode"] == "hypothesis-driven"
 
 
 def test_dispatch_register_allow_no_skills_proceeds_with_warning(

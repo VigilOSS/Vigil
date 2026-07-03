@@ -42,7 +42,7 @@ specific `agent/skills/<name>/SKILL.md` path named in their dispatch prompt.
   **Paired references:** `references/tools/recon/trufflehog.md`, `references/tools/recon/httpx.md`, `references/tools/recon/gau.md`
 
 - `agent/skills/case-dispatching/SKILL.md`
-  **Use when:** Operator needs to coordinate the Phase 3 work-buffer consumption loop (reset-stale → stats → fetch → dispatch → done → requeue).
+  **Use when:** Operator needs to coordinate the Phase 4 work-buffer consumption loop (reset-stale → stats → fetch → dispatch → done → requeue).
   **Paired references:** _(none — coordination logic only)_
 
 - `agent/skills/report-generation/SKILL.md`

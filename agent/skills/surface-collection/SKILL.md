@@ -10,7 +10,7 @@ origin: Vigil
 
 Guides surface-collector through the Phase 2 URL collection pipeline: live crawling, historical
 enrichment, deduplication, intelligent triage, and work-buffer population. The goal is to turn
-raw tool output into a prioritized, attack-signal-enriched work buffer that drives Phase 3.
+raw tool output into a prioritized, attack-signal-enriched work buffer that drives Phase 4.
 
 ## When to Activate
 
@@ -50,7 +50,7 @@ headless escalation, rate, exclusion, and ingestion doctrine.
 
 ```bash
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -c 10 -rl 20 \
+  -u https://target.example -d 3 -c 10 -rl 20 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_output.txt \
   --technique DISCOVERY --intent "live crawl of target.example" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -64,7 +64,7 @@ gau/httpx/fuzzing path.
 
 ```bash
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -headless -c 5 -rl 10 \
+  -u https://target.example -d 3 -headless -c 5 -rl 10 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_headless_output.txt \
   --technique DISCOVERY --intent "browser-semantic crawl of target.example" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -80,8 +80,8 @@ version-specific `--extra-args`.
 
 ```bash
 vigil assess kali katana \
-  -u URL -d 3 -jc -jsl -c 10 -rl 20 \
-  --extra-args '-H "Cookie: ..." -H "Authorization: Bearer ..."' \
+  -u URL -d 3 -c 10 -rl 20 \
+  -H "Cookie: ..." -H "Authorization: Bearer ..." \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_auth_output.txt \
   --technique DISCOVERY --intent "auth-aware crawl of URL" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -176,7 +176,7 @@ There is no per-host URL cap. Volume control happens at ingest:
 - **Classification runs inline at ingestion** so every URL gets a `cluster_key` and
   `priority_score` immediately. Run `vigil assess list-clusters "$DB"` to review the
   resulting cluster set and `vigil assess work-buffer "$DB" defer-cluster <key> --reason "…"`
-  to drop low-signal clusters before Phase 3.
+  to drop low-signal clusters before Phase 4.
 - **Egress-blocked hosts still defer** (see "Egress-blocked hosts" below) — that is a
   network-failure class, not a volume cap.
 
@@ -236,6 +236,16 @@ and produce the priority manifest. Then release them back:
 vigil assess work-buffer "$DB" reset-stale 0
 ```
 
+**Auth-gate redirect classification:** A URL that returns a 302 (or 301/307/308) redirect to a login page, SSO entry point, or policy wall is NOT a terminal "covered / gated" classification — it is a **bypass-test LEAD.** The redirect proves the route exists and is being enforced, which is exactly the signal the auth-bypass sweep needs. Emit a `bypass-lead` surface record for it rather than closing the work item:
+
+```bash
+vigil assess record-surface auth-bypass-lead "https://TARGET/protected" surface-collector \
+  --rationale "302 -> /login: gate confirmed; route exists and is enforced — bypass-test target" \
+  --status discovered
+```
+
+Triage must not consume the redirect signal and silently close the work item as "gated." Closing it ends the lead. The auth-bypass sweep (see `agent/skills/auth-bypass/SKILL.md` "Attack the Gate Itself") consumes these leads in Phase 2. See `agent/rules/hunting.md §23` for the general lead-not-verdict doctrine.
+
 **Triage categories** (see agent prompt for full pattern lists):
 
 1. **Leaked secrets in parameters** — credential-like query param names
@@ -247,7 +257,7 @@ vigil assess work-buffer "$DB" reset-stale 0
 For each category, produce:
 - Count of matching URLs
 - Representative examples (3-5 per category)
-- Recommended Phase 3 priority and vuln-class skill
+- Recommended Phase 4 priority and vuln-class skill
 
 ### Step 6.5: URL-shape body-field harvest (SSRF candidates)
 
@@ -262,7 +272,7 @@ vigil assess work-buffer "$DB" --json \
   | grep -iE '\b(url|uri|host|hostname|endpoint|callback|webhook|notify|postback|target|destination|return|redirect|next|continue|origin|fetch|import|source|metadata|discovery)\b\s*[:=]'
 ```
 
-For each hit, record the candidate so Phase 3 dispatching does not lose it:
+For each hit, record the candidate so Phase 4 dispatching does not lose it:
 
 ```bash
 vigil assess record-surface ssrf-candidate "<endpoint>" surface-collector-url-shape \
@@ -305,9 +315,9 @@ vigil assess ingest-arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target
 
 For more depth on a high-value endpoint, drop `-w` (full default list) and/or add `--passive`
 (it archive-augments the wordlist — note it still actively scans, so it adds traffic, not
-politeness; see `agent/skills/parameter-fuzzing/SKILL.md` and `references/tools/recon/arjun.md`).
+politeness; see `agent/skills/parameter-fuzzing/SKILL.md` and `agent/references/tools/recon/arjun.md`).
 Enriched rows carry `selected_by=arjun` and a `triage_rationale` (which names `kali sqlmap` for
-DB-class params), so Phase 3 dispatch picks them up like any other high-priority cluster.
+DB-class params), so Phase 4 dispatch picks them up like any other high-priority cluster.
 
 ### Step 7: Surface and Finding Recording
 
@@ -358,13 +368,13 @@ The surface-collector agent prompt defines the full output format. Key sections:
 | `#### Priority Attack Surfaces` | Ranked triage clusters — the key deliverable |
 | `#### Coverage Gaps` | Which sources failed and why |
 | `#### Intelligence` | Extracted attack signals |
-| `#### Recommended Phase 3 Ordering` | Risk-informed dispatch order |
+| `#### Recommended Phase 4 Ordering` | Risk-informed dispatch order |
 
 ## Extended Resources
 
 - `agent/references/tools/recon/katana.md` — live crawl doctrine, JS-aware defaults, headless escalation, and ingestion handoff
-- `references/tools/recon/gau.md` — gau CLI reference and pipeline patterns
-- `references/tools/recon/httpx.md` — HTTP probing reference for URL validation
+- `agent/references/tools/recon/gau.md` — gau CLI reference and pipeline patterns
+- `agent/references/tools/recon/httpx.md` — HTTP probing reference for URL validation
 - `agent/skills/browser-semantic-analysis/SKILL.md` — browser execution decision tree for JS-heavy apps, soft errors, browser-originated APIs, and headless/headed deltas
 - `agent/references/runtime-guides/browser-semantic-evidence.md` — evidence contract and headed-browser escalation rules
 - `agent/skills/gau-triage/SKILL.md` — deeper follow-up pass for large historical URL corpora: cluster review on top of inline-classified buffer, httpx body capture, and trufflehog secret scan

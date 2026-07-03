@@ -3,8 +3,15 @@ from __future__ import annotations
 
 import os
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+# Persisted active-engagement pointer key in ~/.config/vigil/config.json. Stored
+# as an ABSOLUTE engagement path so the assess side never has to resolve the
+# engagements_root first (sidesteps the chicken-and-egg). Written by
+# `vigil use <key>` and refreshed by the launcher; read here as resolver tier 3.
+ACTIVE_ENGAGEMENT_CONFIG_KEY = "active_engagement_dir"
 
 
 @dataclass
@@ -48,30 +55,130 @@ def _is_engagement_root(path: Path) -> bool:
     return path.is_dir() and (path / "scope.json").is_file()
 
 
+def _walk_up_for_scope(start: Path) -> Path | None:
+    """Nearest ancestor of *start* (inclusive) that is an engagement root.
+
+    Makes "being anywhere inside the engagement tree" resolve to the engagement,
+    and folds in the guard against the ``cd scans/ ; ENGAGEMENT_DIR=$(pwd)``
+    basename trap — walk-up lands on the parent that actually holds scope.json.
+    """
+    try:
+        current = start.resolve()
+    except OSError:
+        return None
+    for candidate in (current, *current.parents):
+        if _is_engagement_root(candidate):
+            return candidate
+    return None
+
+
+def _read_active_pointer() -> Path | None:
+    """Return the persisted active-engagement dir if it is a valid engagement
+    root, else None.
+
+    Reads ``active_engagement_dir`` from ~/.config/vigil/config.json (honouring
+    ``$VIGIL_CONFIG`` via :func:`_read_vigil_config_value`). A pointer at a
+    deleted/renamed engagement (no scope.json) is skipped with a one-line stderr
+    warning and resolution falls through — never a silent use, never a hard
+    failure.
+    """
+    raw = _read_vigil_config_value(ACTIVE_ENGAGEMENT_CONFIG_KEY)
+    if not raw:
+        return None
+    pointer = Path(raw).expanduser()
+    if _is_engagement_root(pointer):
+        return pointer.resolve()
+    print(
+        f"WARNING: active engagement pointer '{raw}' is not an engagement root "
+        "(no scope.json); ignoring it. Run `vigil use <key>` to re-point it.",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _warn_env_mismatch(resolved_dir: str, tier: str) -> None:
+    """One-line stderr warning when ``$ENGAGEMENT_DIR`` is set but a higher tier
+    resolved a *different* engagement.
+
+    This is the direct guard against a stale shell-profile ``export
+    ENGAGEMENT_DIR=`` line silently mis-targeting the wrong engagement (the
+    ~/.zshrc-leak class). No-op when env is unset or already agrees.
+    """
+    env_dir = os.environ.get("ENGAGEMENT_DIR", "")
+    if not env_dir:
+        return
+    try:
+        env_resolved = str(Path(env_dir).expanduser().resolve())
+    except OSError:
+        env_resolved = env_dir
+    if env_resolved == resolved_dir:
+        return
+    print(
+        f"WARNING: $ENGAGEMENT_DIR points at {env_dir} but resolved {resolved_dir} "
+        f"from {tier}; check your shell profile (e.g. a stale "
+        "`export ENGAGEMENT_DIR=` line).",
+        file=sys.stderr,
+    )
+
+
 def resolve_engagement_dir(cli_flag: str | None = None) -> str:
-    """Resolve engagement directory: CLI flag > $ENGAGEMENT_DIR > cwd.
+    """Resolve the engagement directory. See
+    :func:`resolve_engagement_dir_with_tier` for the precedence and behaviour.
+    """
+    return resolve_engagement_dir_with_tier(cli_flag)[0]
+
+
+def resolve_engagement_dir_with_tier(cli_flag: str | None = None) -> tuple[str, str]:
+    """Resolve the engagement directory and report which tier won.
+
+    Unified precedence (highest → lowest):
+
+    1. ``--engagement-dir`` flag — explicit per-command override   -> ``"flag"``
+    2. CWD walk-up to nearest scope.json ("the tree I'm in")       -> ``"cwd"``
+    3. Active pointer (persisted ``active_engagement_dir``)        -> ``"pointer"``
+    4. ``$ENGAGEMENT_DIR`` — legacy / launcher-seeded fallback     -> ``"env"``
+    5. error (SystemExit) — NO silent most-recent auto-pick.
 
     The engagement key is the basename of whatever directory this returns, so
-    every branch now requires a real engagement root (a dir with scope.json). A
-    flag/env that points at a real directory WITHOUT scope.json fails loud and
-    names the bad path, rather than silently deriving a key from a subdirectory
-    basename — the `cd scans/ ; ENGAGEMENT_DIR=$(pwd)` → key="scans" trap.
+    every branch requires a real engagement root (a dir with scope.json). A
+    flag/env pointing at a real directory WITHOUT scope.json fails loud and
+    names the bad path — the ``cd scans/ ; ENGAGEMENT_DIR=$(pwd)`` → key="scans"
+    trap. When ``$ENGAGEMENT_DIR`` is set but a higher tier wins with a
+    different engagement, a one-line stderr warning names both paths.
     """
+    # Tier 1 — explicit flag (unchanged contract).
     if cli_flag:
         if _is_engagement_root(Path(cli_flag)):
-            return str(Path(cli_flag).resolve())
+            resolved = str(Path(cli_flag).resolve())
+            _warn_env_mismatch(resolved, "flag")
+            return resolved, "flag"
         if Path(cli_flag).is_dir():
             raise SystemExit(
                 f"--engagement-dir '{cli_flag}' has no scope.json — it is not an "
                 "engagement root. Point it at the engagement directory itself, not "
                 "a subdirectory (e.g. scans/)."
             )
-        # Non-existent path: fall through to env/cwd (preserves prior behavior).
+        # Non-existent path: fall through to lower tiers (preserves prior behavior).
 
+    # Tier 2 — CWD walk-up to the nearest engagement root ("the tree I'm in").
+    walked = _walk_up_for_scope(Path.cwd())
+    if walked is not None:
+        resolved = str(walked)
+        _warn_env_mismatch(resolved, "cwd")
+        return resolved, "cwd"
+
+    # Tier 3 — persisted active pointer (survives fresh shells / cwd resets).
+    pointer = _read_active_pointer()
+    if pointer is not None:
+        resolved = str(pointer)
+        _warn_env_mismatch(resolved, "pointer")
+        return resolved, "pointer"
+
+    # Tier 4 — legacy / launcher-seeded $ENGAGEMENT_DIR (keeps its loud guard).
     env_dir = os.environ.get("ENGAGEMENT_DIR", "")
     if env_dir:
         if _is_engagement_root(Path(env_dir)):
-            return str(Path(env_dir).resolve())
+            return str(Path(env_dir).resolve()), "env"
         if Path(env_dir).is_dir():
             raise SystemExit(
                 f"$ENGAGEMENT_DIR '{env_dir}' has no scope.json — it is not an "
@@ -79,10 +186,7 @@ def resolve_engagement_dir(cli_flag: str | None = None) -> str:
                 "before setting ENGAGEMENT_DIR=$(pwd)? Point it at the engagement dir."
             )
 
-    cwd = Path.cwd()
-    if (cwd / "scope.json").is_file():
-        return str(cwd.resolve())
-
+    # Tier 5 — hard error (never a silent most-recent auto-pick).
     raise SystemExit("Cannot resolve engagement directory. Set --engagement-dir, $ENGAGEMENT_DIR, or run from a dir with scope.json.")
 
 

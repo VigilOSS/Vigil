@@ -28,6 +28,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from assess.lib.arjun_enrich import (
+    artifact_is_incomplete,
     build_signals,
     build_triage_rationale,
     merge_params_into_field,
@@ -349,6 +350,20 @@ def run(args: argparse.Namespace) -> None:
     auth_context = auth_active_context(cfg.engagement_dir)
 
     text = Path(json_file).read_text(encoding="utf-8")
+    # Finding 1: an artifact carrying the incomplete-run sentinel came from an
+    # arjun run that was killed/timed out before finishing its list — its 0
+    # records are NOT a "no hidden params" negative. Surface it loudly and tag the
+    # summary so a reader of the ingest output alone cannot misread the empty
+    # result as a clean verdict.
+    run_incomplete = artifact_is_incomplete(text)
+    if run_incomplete:
+        print(
+            "WARN ingest-arjun: this artifact is from an INCOMPLETE arjun run "
+            "(timed out / killed before finishing the target list). 0 records here "
+            "is NOT a negative — re-run on a smaller curated live list, sized to "
+            "finish, before treating the surface as clean.",
+            file=sys.stderr,
+        )
     records = parse_arjun_json(text, default_method=args.default_method)
 
     results: list[dict] = []
@@ -406,6 +421,9 @@ def run(args: argparse.Namespace) -> None:
         "enriched": enriched,
         "created": created,
         "skipped_empty": skipped_empty,
+        # True when the source artifact was the incomplete-run sentinel: 0 records
+        # here is a truncated run, not a clean "no params" verdict.
+        "run_incomplete": run_incomplete,
         # Rows whose target param column was corrupt JSON: preserved (not
         # overwritten) with the discovered params kept in signals. Non-zero here
         # means a column needs manual repair — it is surfaced, never silent.

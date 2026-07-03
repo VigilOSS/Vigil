@@ -23,6 +23,7 @@ from .engagements import (
     PROGRAM_HEADER_PRESETS,
     CreateEngagementOptions,
     add_out_of_scope,
+    clear_active_engagement,
     create_engagement,
     current_engagement_path,
     export_pdf,
@@ -30,10 +31,12 @@ from .engagements import (
     plan_engagement,
     print_shell_cd_init,
     remove_out_of_scope,
+    resolve_current_engagement,
     resolve_engagement_path,
     resolve_out_of_scope,
     resolve_rate_limit,
     resolve_required_headers,
+    set_active_engagement,
     set_engagement_header,
     start_engagement,
     unset_engagement_header,
@@ -170,6 +173,14 @@ def main(argv: list[str] | None = None) -> None:
     config_unset = config_sub.add_parser("unset")
     config_unset.add_argument("key")
     config_sub.add_parser("edit")
+
+    use_p = sub.add_parser(
+        "use",
+        help="Set the active engagement (persisted; honoured by `vigil` verbs and `vigil assess`).",
+    )
+    use_p.add_argument("key", nargs="?", help="Engagement key to activate")
+    use_p.add_argument("--select", action="store_true", help="Pick the engagement interactively")
+    use_p.add_argument("--clear", action="store_true", help="Unset the active-engagement pointer")
 
     engagement_p = sub.add_parser("engagement")
     engagement_sub = engagement_p.add_subparsers(dest="engagement_command", required=True)
@@ -328,6 +339,16 @@ def main(argv: list[str] | None = None) -> None:
     path_p = engagement_sub.add_parser("path")
     path_p.add_argument("key", nargs="?")
     path_p.add_argument("--select", action="store_true")
+    eng_use_p = engagement_sub.add_parser(
+        "use", help="Alias for `vigil use`: set the active-engagement pointer."
+    )
+    eng_use_p.add_argument("key", nargs="?")
+    eng_use_p.add_argument("--select", action="store_true")
+    eng_use_p.add_argument("--clear", action="store_true")
+    engagement_sub.add_parser(
+        "current",
+        help="Print the resolved active engagement and which tier won (flag/cwd/pointer/env).",
+    )
     cd_p = engagement_sub.add_parser("cd-init")
     cd_p.add_argument("shell", choices=["zsh", "bash"], default="zsh", nargs="?")
     start_p = engagement_sub.add_parser("start")
@@ -440,12 +461,11 @@ def main(argv: list[str] | None = None) -> None:
     mitm_sub = mitm_p.add_subparsers(dest="mitmproxy_command", required=True)
     mitm_start = mitm_sub.add_parser(
         "start",
-        help="Start (or restart) the proxy container; builds the image first if missing.",
+        help=(
+            "Start (or restart) the shared proxy container for all active "
+            "engagements; builds the image first if missing."
+        ),
     )
-    # Positional kept as a deprecated shim — one or two release cycles of grace
-    # so existing operator habits don't error out.
-    mitm_start.add_argument("engagement", nargs="?", help=argparse.SUPPRESS)
-    mitm_start.add_argument("--select", action="store_true", help=argparse.SUPPRESS)
     mitm_start.add_argument("--port", type=int, default=8080, help="Host port to bind (default 8080).")
     mitm_start.add_argument(
         "--build",
@@ -551,6 +571,48 @@ def main(argv: list[str] | None = None) -> None:
                 "--all", action="store_true",
                 help="Clear ALL identities (default: only the active identity)",
             )
+        if auth_name == "status":
+            auth_cmd.add_argument(
+                "--probe",
+                action="store_true",
+                help=(
+                    "Actively verify session liveness with a lightweight authed GET "
+                    "(requires --probe-url). Without it, `stale` reflects only the "
+                    "expiry timestamp — presence of cookies is NOT proof of liveness. "
+                    "Without a material.liveness signature the probe stays 'unknown'."
+                ),
+            )
+            auth_cmd.add_argument(
+                "--probe-url",
+                dest="probe_url",
+                help=(
+                    "URL to GET as the active identity for the --probe liveness check "
+                    "(e.g. an authed landing page). The response (status line + headers "
+                    "incl. Location + body) is matched case-sensitively against "
+                    "material.liveness = {expect_status, authed_marker, dead_marker}; "
+                    "redirects are NOT followed."
+                ),
+            )
+        if auth_name == "export":
+            auth_cmd.add_argument(
+                "--host",
+                help=(
+                    "Target host to scope captured per-host session cookies to "
+                    "(e.g. portal.acme-agency.example). Required on a multi-host engagement "
+                    "to get the right session — without it this only renders "
+                    "the legacy flat cookie view, which can be empty even when "
+                    "a proxy-captured session exists for that host."
+                ),
+            )
+            auth_cmd.add_argument(
+                "--method",
+                help=(
+                    "HTTP method the exported args will be used with. Pass a "
+                    "state-changing verb (POST/PUT/PATCH/DELETE) to also emit the "
+                    "identity's opt-in CSRF double-submit header, matching what "
+                    "`vigil assess kali --identity` injects. Safe methods omit it."
+                ),
+            )
     auth_import = auth_sub.add_parser("import")
     auth_import.add_argument("engagement", nargs="?")
     auth_import.add_argument("--source")
@@ -573,14 +635,46 @@ def main(argv: list[str] | None = None) -> None:
     backup_restore.add_argument("backup")
     backup_restore.add_argument("--force", action="store_true")
 
-    oob_p = sub.add_parser("oob")
+    oob_p = sub.add_parser(
+        "oob",
+        help="Out-of-band (OAST) callback infra for blind vulns (SSRF, blind XSS, cmdi, XXE).",
+        description=(
+            "Manage the out-of-band application security testing (OAST) callback "
+            "infrastructure and correlate blind-vuln callbacks to the requests that "
+            "triggered them.\n\n"
+            "Workflow (mint -> poll -> correlate):\n"
+            "  1. Bring up the shared server + tunnel once per host:  vigil oob start\n"
+            "  2. Start a per-agent listener:                         vigil oob client start <name> --engagement <key>\n"
+            "  3. Mint a unique callback URL and record the probe:    vigil oob mint --client <name> --technique ssrf ...\n"
+            "  4. Fire the payload carrying that URL at the target (via your normal request tooling).\n"
+            "  5. Read the listener log and correlate hits to probes: vigil oob poll --client <name>\n\n"
+            "`start/stop/restart/status/test` operate the shared server; `client` "
+            "manages per-agent listeners; `mint`/`poll` are the per-probe correlate loop."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     oob_sub = oob_p.add_subparsers(dest="oob_command", required=True)
-    oob_sub.add_parser("start")
-    oob_sub.add_parser("stop")
-    oob_sub.add_parser("restart")
-    oob_status_p = oob_sub.add_parser("status")
+    oob_sub.add_parser(
+        "start",
+        help="Start the shared OOB server + frp tunnel (idempotent; one per host).",
+    )
+    oob_sub.add_parser(
+        "stop",
+        help="Stop the shared OOB server sessions.",
+    )
+    oob_sub.add_parser(
+        "restart",
+        help="Stop then start the shared OOB server (e.g. to pick up config changes).",
+    )
+    oob_status_p = oob_sub.add_parser(
+        "status",
+        help="Report OOB server + client health and the effective callback domain.",
+    )
     oob_status_p.add_argument("--json", action="store_true")
-    oob_sub.add_parser("test")
+    oob_sub.add_parser(
+        "test",
+        help="Fire a self-test callback to confirm the OOB server is reachable end-to-end.",
+    )
     oob_mint = oob_sub.add_parser(
         "mint",
         help="Mint a unique OAST nonce callback URL and record a probe to the backend.",
@@ -613,20 +707,40 @@ def main(argv: list[str] | None = None) -> None:
     )
     oob_poll.add_argument("--lines", type=int, default=2000, help="Tail this many log lines (default 2000).")
     oob_poll.add_argument("--json", action="store_true", help="Emit matched/unmatched correlation result as JSON.")
-    oob_client = oob_sub.add_parser("client")
+    oob_client = oob_sub.add_parser(
+        "client",
+        help="Manage per-agent interactsh listeners that receive OOB callbacks.",
+        description=(
+            "Manage the named per-agent interactsh listeners. Each listener owns a "
+            "correlation id that `vigil oob mint --client <name>` binds nonces under "
+            "so `vigil oob poll --client <name>` can see and correlate the callbacks."
+        ),
+    )
     oob_client_sub = oob_client.add_subparsers(dest="oob_client_command", required=True)
-    oob_client_start = oob_client_sub.add_parser("start")
+    oob_client_start = oob_client_sub.add_parser(
+        "start",
+        help="Start a named interactsh listener (registers its callback host).",
+    )
     oob_client_start.add_argument("name")
     oob_client_start.add_argument("--engagement")
     oob_client_start.add_argument("--select", action="store_true")
     oob_client_start.add_argument("--agent")
-    oob_client_logs = oob_client_sub.add_parser("logs")
+    oob_client_logs = oob_client_sub.add_parser(
+        "logs",
+        help="Tail a listener's raw interaction log (use --follow to stream).",
+    )
     oob_client_logs.add_argument("name")
     oob_client_logs.add_argument("--follow", action="store_true")
     oob_client_logs.add_argument("--lines", default="80")
-    oob_client_stop = oob_client_sub.add_parser("stop")
+    oob_client_stop = oob_client_sub.add_parser(
+        "stop",
+        help="Stop a named interactsh listener.",
+    )
     oob_client_stop.add_argument("name")
-    oob_client_sub.add_parser("list")
+    oob_client_sub.add_parser(
+        "list",
+        help="List configured listeners and whether each is running.",
+    )
 
     assess_p = sub.add_parser("assess", add_help=False)
     assess_p.add_argument("assess_args", nargs=argparse.REMAINDER)
@@ -679,6 +793,8 @@ def main(argv: list[str] | None = None) -> None:
         _logs(args, install_root)
     elif args.command == "config":
         _config(args)
+    elif args.command == "use":
+        _use(args, install_root)
     elif args.command == "engagement":
         _engagement(args, install_root)
     elif args.command == "blue":
@@ -769,6 +885,54 @@ def _config(args: argparse.Namespace) -> None:
         config_module.edit_config()
 
 
+def _use(args: argparse.Namespace, install_root: Path) -> None:
+    """Set (or clear) the persisted active-engagement pointer.
+
+    Writes both ~/.config/vigil/config.json:active_engagement_dir and the
+    <engagements_root>/.active mirror. Ranked BELOW cwd walk-up in the resolver,
+    so it is a durable default, never an override of where you actually are.
+    """
+    if getattr(args, "clear", False):
+        clear_active_engagement(install_root)
+        print("[vigil] active-engagement pointer cleared.", file=sys.stderr)
+        return
+    key = getattr(args, "key", None)
+    select = getattr(args, "select", False)
+    if not key and not select:
+        raise SystemExit("Specify an engagement key, --select, or --clear.")
+    path = resolve_engagement_path(install_root, key=key, select=select)
+    resolved = set_active_engagement(install_root, path)
+    print(f"[vigil] active engagement: {resolved.name}", file=sys.stderr)
+    print(resolved)
+
+
+def _engagement_current(install_root: Path) -> None:
+    """Print the resolved active engagement and which tier won.
+
+    Authoritative answer to "which engagement is active right now" — ends the
+    guesswork and surfaces a stale $ENGAGEMENT_DIR mismatch.
+    """
+    env_dir = os.environ.get("ENGAGEMENT_DIR")
+    pointer = config_module.get_config_value("active_engagement_dir")
+    result = resolve_current_engagement()
+    if result is None:
+        print("No active engagement resolved.", file=sys.stderr)
+        print(f"  cwd walk-up: (no scope.json ancestor of {Path.cwd()})", file=sys.stderr)
+        print(f"  active pointer: {pointer or '(unset)'}", file=sys.stderr)
+        print(f"  $ENGAGEMENT_DIR: {env_dir or '(unset)'}", file=sys.stderr)
+        raise SystemExit(
+            "Set one with `vigil use <key>`, run from inside an engagement, or pass --engagement-dir."
+        )
+    path, tier = result
+    tier_label = {
+        "cwd": "cwd walk-up",
+        "pointer": "active pointer",
+        "env": "$ENGAGEMENT_DIR",
+    }.get(tier, tier)
+    print(f"[vigil] active engagement: {path.name}  (resolved from {tier_label})", file=sys.stderr)
+    print(path)
+
+
 def _logs(args: argparse.Namespace, install_root: Path) -> None:
     if args.target == "all":
         if args.follow:
@@ -827,6 +991,10 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         print(f"[vigil] {args.key} out_of_scope: {json.dumps(entries)}", file=sys.stderr)
     elif command == "path":
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
+    elif command == "use":
+        _use(args, install_root)
+    elif command == "current":
+        _engagement_current(install_root)
     elif command == "cd-init":
         print(print_shell_cd_init(args.shell), end="")
     elif command == "start":
@@ -1269,14 +1437,6 @@ def _runtime_shell_exec(command_parts: list[str]) -> None:
 def _mitmproxy(args: argparse.Namespace, install_root: Path) -> None:
     engagements_root = install_root / "agent" / "engagements"
     if args.mitmproxy_command == "start":
-        if args.engagement or args.select:
-            # The engagement positional / --select is a legacy shim. The proxy
-            # now serves every active engagement at once, so we silently ignore
-            # the value after printing one line so the operator knows.
-            print(
-                "[vigil] mitmproxy now serves all active engagements; ignoring engagement selector.",
-                file=sys.stderr,
-            )
         engagements_root.mkdir(parents=True, exist_ok=True)
         start_proxy(
             MitmproxyOptions(
@@ -1443,10 +1603,23 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
     identity = getattr(args, "identity", None)
     if args.auth_command == "status":
         print(auth_module.status_line(engagement))
+        if getattr(args, "probe", False):
+            probe_url = getattr(args, "probe_url", None)
+            if not probe_url:
+                raise SystemExit("--probe requires --probe-url <url>")
+            result = auth_module.probe_liveness(engagement, probe_url, identity)
+            detail = f"reason={result.get('reason')}"
+            if result.get("http_status") is not None:
+                detail += f"\thttp_status={result['http_status']}"
+            if result.get("error"):
+                detail += f"\terror={result['error']}"
+            print(f"liveness={result['liveness']}\t{detail}")
     elif args.auth_command == "show":
         print(json.dumps(auth_module.read_auth(engagement), indent=2, sort_keys=True))
     elif args.auth_command == "export":
-        print(auth_module.export_curl_args(engagement, identity))
+        print(auth_module.export_curl_args(
+            engagement, identity, host=getattr(args, "host", None), method=getattr(args, "method", None)
+        ))
     elif args.auth_command == "edit":
         auth_module.edit_auth(engagement, identity)
     elif args.auth_command == "clear":

@@ -21,15 +21,27 @@ The typed wrapper currently exposes:
 |---|---|
 | `-u <url>` | crawl one URL |
 | `-list <file>` | crawl newline-separated seed URLs |
-| `-jc` | JavaScript endpoint crawling |
-| `-jsl` | jsluice-based extraction |
-| `-d <n>` | maximum crawl depth |
-| `-c <n>` | concurrency |
-| `-rl <n>` | request rate limit |
+| `-d <n>` | maximum crawl depth — **default 5** (deep by default) |
+| `-fs <scope>` | field-scope — **default `fqdn`** (crawl only the exact seeded hosts); pass `rdn` only for wildcard-scoped roots |
+| `-rl <n>` | request rate (req/s) — **default 10, hard-capped at 20** unless `--allow-fast-crawl`; clamped DOWN to the program ceiling |
+| `--allow-fast-crawl` | permit `-rl` above the 20 req/s safety cap |
+| `-c <n>` | concurrency (default 5) |
+| `-kf <set>` | known-files expansion (e.g. `all` for robots/sitemap/well-known) |
+| `-cos <regex>` | crawl-out-of-scope path carve-out (scope.json cannot express path-level OOS) |
+| `-H <header>` | extra request header (repeatable); attribution headers auto-inject on top |
+| `--keep-bodies` | keep body+raw in `-jsonl` (default omits them via `-or -ob` to bound disk) |
+| `--include-static` | crawl static/binary assets too (default excludes them via `-ef`) |
+| `--no-jc` / `--no-jsl` | disable JS-endpoint / jsluice crawl (both **on by default**) |
 | `-headless` | browser-backed crawl path |
 | `-jsonl` | JSONL output |
 | `-o <file>` | output artifact path |
 | `--extra-args "<flags>"` | append version-specific Katana flags after typed flags |
+
+**The doctrine is now the DEFAULT.** A bare `vigil assess kali katana -u <host>` already enables
+JavaScript endpoint crawling and jsluice extraction, then applies `-d 5`, `-fs fqdn`, `-or -ob`,
+`-ef <static set>`, `-rl 10`, and `-c 5`. Override any of these with the typed flag above — you no
+longer hand-assemble them in `--extra-args`. The result's `resolved_argv` shows the exact command
+that ran after attribution-header / IP-pin injection.
 
 Check the live runtime before using long-tail flags:
 
@@ -45,15 +57,16 @@ Use this as the normal Phase 2 crawl posture for a single app-like host:
 
 ```bash
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -c 10 -rl 20 \
+  -u https://target.example -d 3 -c 10 -rl 20 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_target.txt \
   --technique DISCOVERY --intent "live Katana crawl of target.example" \
   --probe-kind fingerprint --phase collect --timeout 1800
 ```
 
-Depth `3` with `-jc -jsl` is the baseline. Depth `1` is a smoke test, not a
-coverage pass. Raise depth only for a named reason such as nested documentation,
-API explorer routes, or app sections discovered late in the crawl.
+Depth `3` with the default JavaScript endpoint and jsluice extraction is the
+baseline. Depth `1` is a smoke test, not a coverage pass. Raise depth only for a
+named reason such as nested documentation, API explorer routes, or app sections
+discovered late in the crawl.
 
 ## SPA / JS-Heavy Escalation
 
@@ -63,7 +76,7 @@ matrix; Katana only supplies the broad headless crawl.
 
 ```bash
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -headless -c 5 -rl 10 \
+  -u https://target.example -d 3 -headless -c 5 -rl 10 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_target_headless.txt \
   --technique DISCOVERY --intent "headless Katana crawl for JS-generated routes" \
   --probe-kind fingerprint --phase collect --timeout 1800
@@ -90,12 +103,12 @@ Keep crawls scoped and bounded:
   `agent/references/runtime-guides/cdn-edge-behavior.md`.
 - Prefer browser-like headers on CDN/Bot-Manager targets when the edge blocks
   scanner user agents.
-- Exclude static/binary extensions when the installed Katana supports an exclude
-  flag. Pass it via `--extra-args` only after checking `katana -h`; common
-  candidates are image/font/archive/media extensions.
-- Use known-file discovery such as `-kf all` through `--extra-args` when the
-  installed Katana version supports it and the dispatch needs robots/sitemap or
-  well-known route expansion.
+- Static/binary extensions are excluded by default (the wrapper injects an `-ef`
+  set); pass `--include-static` to crawl them, or `-ef <list>` via `--extra-args`
+  to override the set.
+- Known-file discovery is a typed flag: `-kf all` (robots/sitemap/well-known
+  expansion) — no `--extra-args` needed. `vigil assess kali tool-help katana`
+  confirms the installed version's `-kf` values.
 
 ### Field-scope: `-fs fqdn` is the scope-safe default for mixed-scope seed lists
 
@@ -115,9 +128,9 @@ separately via a scoped subdomain-enum pass and passive `gau --subs` collection 
 **not** by letting an active crawler wander the root domain. Use `-fs rdn` only
 when every seed root is itself a wildcard-scoped in-scope entry.
 
-The typed wrapper does not model `-fs`/`-cos`; pass them via `--extra-args`
-(`--extra-args "-fs fqdn -cos self-service-"`), or use the raw `katana` binary
-directly under `kali job start` for an all-day operator sweep.
+`-fs` and `-cos` are now **typed flags** — `-fs` defaults to `fqdn` (the scope-safe
+choice), and `-cos <regex>` is passed directly (e.g. `-cos self-service-`). No
+`--extra-args` assembly is needed for either.
 
 ### Exclude out-of-scope path patterns with `-cos`
 
@@ -134,12 +147,18 @@ to in-scope targets (e.g. Bugcrowd's `X-Bug-Bounty: BugCrowd-<username>`); a
 missing/incorrect value commonly incurs a bounty penalty. Inject it on every
 active probe via `-H`:
 
+Note: the program-attribution header is **auto-injected** by the wrapper from the
+engagement's `required_headers`, so you usually do not pass it by hand. When you
+do need an explicit header, `-H` is a **typed flag** (repeatable) — pass it
+directly, not via `--extra-args` (a `--extra-args` value beginning with `-H` is
+rejected by argparse):
+
 ```bash
 # raw binary (under kali job start) — exact program format, no space after colon:
 katana -list seeds.txt -H X-Bug-Bounty:BugCrowd-<username> ...
-# typed wrapper:
+# typed wrapper — -H is a typed, repeatable flag:
 vigil assess kali katana -u https://target.example \
-  --extra-args '-H "X-Bug-Bounty: BugCrowd-<username>"' ...
+  -H "X-Bug-Bounty: BugCrowd-<username>" ...
 ```
 
 This applies to **all active tools** (katana, httpx, nuclei, ffuf, curl). It does
@@ -158,6 +177,7 @@ JS file). For any deep/long crawl where you only need the discovered routes plus
 metadata, add **`-or`** (omit-raw) and **`-ob`** (omit-body):
 
 ```bash
+# Raw katana binary, not the typed wrapper: pass JS flags explicitly.
 katana -list seeds.txt -d 5 -jc -jsl -kf all -fs fqdn -j -or -ob -o out.jsonl ...
 ```
 
@@ -166,14 +186,18 @@ while dropping the page bodies (≈726 bytes/line in the same run). If you genui
 need bodies for source-analysis, capture them in a separate, bounded pass rather
 than the broad crawl.
 
+**The `vigil assess kali katana` wrapper now injects `-or -ob` by default**, so a
+deep crawl is disk-bounded without you remembering the flags. Pass `--keep-bodies`
+only for that deliberate, bounded body-capture pass.
+
 Example with version-dependent extras:
 
 ```bash
+# -kf is a typed flag; static-asset exclusion (-ef) is already the wrapper default.
 vigil assess kali katana \
-  -u https://target.example -d 3 -jc -jsl -c 8 -rl 15 \
+  -u https://target.example -kf all \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_target.txt \
-  --extra-args "-kf all -ef png,jpg,jpeg,gif,svg,css,woff,woff2,ttf,eot,ico,mp4,mp3,avi,zip,tar,gz,7z" \
-  --technique DISCOVERY --intent "bounded JS-aware crawl with known-file expansion" \
+  --technique DISCOVERY --intent "JS-aware crawl with known-file expansion" \
   --probe-kind fingerprint --phase collect --timeout 1800
 ```
 
@@ -188,10 +212,10 @@ When the engagement's credential store marks credentials as available
 pass only the needed headers:
 
 ```bash
+# -H is a typed, repeatable flag — pass auth headers directly, not via --extra-args.
 vigil assess kali katana \
   -u https://target.example/app \
-  -d 3 -jc -jsl -c 8 -rl 15 \
-  --extra-args '-H "Cookie: session=..." -H "Authorization: Bearer ..."' \
+  -H "Cookie: session=..." -H "Authorization: Bearer ..." \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_target_auth.txt \
   --technique DISCOVERY --intent "authenticated Katana crawl of target.example" \
   --probe-kind fingerprint --phase collect --timeout 1800

@@ -115,6 +115,7 @@ def _render_markdown(brief: dict) -> str:
             lines.append(f"  - … showing {len(shown)} of {len(rows)} (medium+ always shown)")
     _render_surfaces(lines, brief.get("surfaces") or {})
     _render_work_buffer(lines, brief.get("work_buffer") or {})
+    _render_attempts(lines, brief.get("attempts") or {})
     lines.extend(["", "## Dispatches"])
     dispatches = brief.get("dispatches") or {}
     for row in dispatches.get("stale_in_progress_dispatches") or []:
@@ -253,6 +254,77 @@ def _render_work_buffer(lines: list, work_buffer: dict) -> None:
         lines.append(f"  - {name}: {count}")
     if len(items) > _WORK_BUFFER_BUCKET_LIMIT:
         lines.append(f"  - … showing {_WORK_BUFFER_BUCKET_LIMIT} of {len(items)} buckets")
+
+
+_ATTEMPTS_RENDER_LIMIT = 8
+
+
+def _render_attempts(lines: list, attempts: dict) -> None:
+    """Render the ## Attempts do-today ledger (P1-C). No-op when the brief
+    carries no attempts block (older backend) or all three sources are empty —
+    a fresh engagement should not accrue a noise section.
+
+    Surfaces three previously resume-invisible signals so a re-dispatch reads
+    what was already tried-and-walled-off on a surface: recorded blocked
+    techniques, non-covering probe runs, and roe_blocked findings."""
+    if not attempts:
+        return
+    blocked = attempts.get("blocked_techniques") or []
+    probes = attempts.get("noncovering_probe_runs") or []
+    roe = attempts.get("roe_blocked_findings") or []
+    if not (blocked or probes or roe):
+        return
+    lines.extend(["", "## Attempts"])
+
+    blocked_count = attempts.get("blocked_techniques_count", len(blocked))
+    lines.append(f"- blocked techniques ({blocked_count}):")
+    if not blocked:
+        lines.append("  - none")
+    shown_blocked = blocked[:_ATTEMPTS_RENDER_LIMIT]
+    for row in shown_blocked:
+        target = f"{row.get('target_kind') or '-'}:{row.get('target_ref') or '-'}"
+        line = (
+            f"  - #{row.get('id')} {row.get('technique') or '-'} "
+            f"[{row.get('retry_state') or '-'}] {target} :: "
+            f"{_trim(row.get('reason') or '', 120)}"
+        )
+        notes = _trim(row.get("notes") or "", 120)
+        if notes:
+            line += f" — unblock: {notes}"
+        lines.append(line)
+    _render_attempts_more(lines, len(shown_blocked), blocked_count)
+
+    probes_count = attempts.get("noncovering_probe_runs_count", len(probes))
+    lines.append(f"- non-covering probe runs ({probes_count}):")
+    if not probes:
+        lines.append("  - none")
+    shown_probes = probes[:_ATTEMPTS_RENDER_LIMIT]
+    for row in shown_probes:
+        host_path = f"{row.get('target_host') or '-'}{row.get('target_path') or ''}"
+        lines.append(
+            f"  - #{row.get('id')} {row.get('attack_family') or '-'} "
+            f"[{row.get('result_status') or '-'}] {row.get('tool_name') or '-'} "
+            f"{_trim(host_path, 80)}"
+        )
+    _render_attempts_more(lines, len(shown_probes), probes_count)
+
+    roe_count = attempts.get("roe_blocked_findings_count", len(roe))
+    lines.append(f"- roe-blocked findings ({roe_count}):")
+    if not roe:
+        lines.append("  - none")
+    shown_roe = roe[:_ATTEMPTS_RENDER_LIMIT]
+    for row in shown_roe:
+        lines.append("  - " + _finding_line(row))
+    _render_attempts_more(lines, len(shown_roe), roe_count)
+
+
+def _render_attempts_more(lines: list, shown: int, total: int) -> None:
+    """Emit a truncation hint when the rendered (since-filtered, capped) list is
+    shorter than the absolute count. The counts are deliberate absolute totals
+    (like finding_counts), so shown < total is expected under --since or capping;
+    the hint keeps the reconciliation unambiguous, mirroring the Findings section."""
+    if shown < total:
+        lines.append(f"  - … showing {shown} of {total}")
 
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}

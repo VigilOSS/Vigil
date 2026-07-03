@@ -16,10 +16,27 @@ from ..services import activity as activity_service
 from ..services import assessment_memory
 from ..services import artifact_index
 from ..services import state_manager
+from ..services.state_manager.coverage import (
+    DEFAULT_PROBE_RUN_LIMIT,
+    DEFAULT_COVERAGE_ITEM_LIMIT,
+    DEFAULT_REQUEST_OBSERVATION_LIMIT,
+    DEFAULT_REQUEST_VARIANT_LIMIT,
+    DEFAULT_SURFACE_LIMIT,
+    MAX_ASSESSMENT_LIST_LIMIT,
+    MAX_PROBE_RUN_LIST_LIMIT,
+    MAX_REQUEST_LIST_LIMIT,
+)
+from ..services.state_manager.http_flows import (
+    DEFAULT_HTTP_FLOW_LIMIT,
+    MAX_HTTP_FLOW_LIST_LIMIT,
+)
 from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
 
 router = APIRouter(prefix="/engagements/{engagement_key}/assessment", tags=["assessment"])
+
+COMMAND_FINALIZE_PREVIEW_MAX_CHARS = 65_536
+MAX_BULK_ASSESSMENT_WRITE_ITEMS = 500
 
 _ALLOWED_PHASES: frozenset[str] = frozenset(
     {
@@ -69,6 +86,77 @@ class RequestObservationIngestRequest(BaseModel):
     auto_generate_coverage: bool = True
 
 
+class RequestObservationBulkIngestRequest(BaseModel):
+    items: list[RequestObservationIngestRequest] = Field(
+        min_length=1,
+        max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS,
+    )
+
+
+class HttpFlowIngestRequest(BaseModel):
+    """Full-flow metadata the mitmproxy addon POSTs per captured flow.
+
+    DELIBERATELY permissive: every field is optional with a default so a
+    well-formed flow can NEVER 422 (a 422 here would re-create the
+    silent-capture-loss class of bug). ``flow_uid`` is the addon-supplied stable
+    per-flow id; if omitted the service synthesizes one. Unknown extra keys are
+    ignored, not rejected.
+    """
+
+    flow_uid: str = Field(default="", max_length=256)
+    method: str = Field(default="", max_length=16)
+    scheme: str = Field(default="", max_length=16)
+    host: str = Field(default="", max_length=512)
+    port: int | None = None
+    # No max_length on url/path: a live flow can legitimately carry a very long
+    # URL/query, and the ingest invariant is to NEVER 422 a well-formed flow (that
+    # would re-introduce the silent-capture-loss class). The DB columns are
+    # unbounded TEXT and the only writer is the trusted local addon.
+    url: str = ""
+    path: str = ""
+    response_status: int | None = None
+    request_content_type: str = Field(default="", max_length=256)
+    response_content_type: str = Field(default="", max_length=256)
+    content_type_family: str = Field(default="unknown", max_length=64)
+    auth_context: str = Field(default="anonymous", max_length=128)
+    request_body_sha256: str = Field(default="", max_length=128)
+    response_body_sha256: str = Field(default="", max_length=128)
+    request_body_bytes: int = 0
+    response_body_bytes: int = 0
+    request_body_truncated: bool = False
+    response_body_truncated: bool = False
+    request_body_artifact_path: str | None = Field(default=None, max_length=1024)
+    response_body_artifact_path: str | None = Field(default=None, max_length=1024)
+    request_headers: dict[str, Any] = Field(default_factory=dict)
+    response_headers: dict[str, Any] = Field(default_factory=dict)
+    redaction_status: str = Field(default="none", max_length=64)
+    host_mismatch: bool = False
+    url_authority: str = Field(default="", max_length=512)
+    host_header: str = Field(default="", max_length=512)
+    sni: str = Field(default="", max_length=512)
+    timing_ms: int | None = None
+    started_at: str | None = Field(default=None, max_length=64)
+    request_variant_id: int | None = None
+    # Optional engagement-local JSONL flow-index sidecar the addon writes; the
+    # ingest route registers it in assessment_artifacts (kind='http_flow_index').
+    index_artifact_path: str | None = Field(default=None, max_length=1024)
+
+
+class CapturePolicyUpdateRequest(BaseModel):
+    """PUT body for the per-engagement capture policy. Fields left unset retain
+    their current stored value (partial update)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    capture_request_bodies: bool | None = None
+    capture_response_bodies: bool | None = None
+    max_body_bytes: int | None = Field(default=None, ge=0, le=1_073_741_824)
+    content_type_allow: list[str] | None = None
+    content_type_deny: list[str] | None = None
+    redaction_profile: str | None = Field(default=None, max_length=64)
+
+
 class ProbeRunRecordRequest(BaseModel):
     request_variant_id: int | None = None
     service_id: int | None = None
@@ -90,6 +178,13 @@ class ProbeRunRecordRequest(BaseModel):
     target_host: str = Field(default="", max_length=256)
     target_path: str = Field(default="", max_length=2048)
     target_port: int | None = None
+    # Free-text lens/mindset the probe ran under. Part of the probe_key so the
+    # same target under a different lens is a distinct attempt, not a dedup hit.
+    # Light-normalized (stripped) server-side; NOT hard-enumerated.
+    lens: str = Field(default="", max_length=128)
+    # Optional attempt→finding linkage. Validated to belong to the engagement
+    # (404 otherwise) and COALESCE-backfilled on a re-run of the same probe.
+    finding_id: int | None = None
 
 
 class CoverageItemRecordRequest(BaseModel):
@@ -108,6 +203,13 @@ class CoverageItemRecordRequest(BaseModel):
     attack_family: str = Field(min_length=1, max_length=64)
     status_value: str = Field(default="pending", min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)
+
+
+class CoverageItemBulkRecordRequest(BaseModel):
+    items: list[CoverageItemRecordRequest] = Field(
+        min_length=1,
+        max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS,
+    )
 
 
 class CommandRunRecordRequest(BaseModel):
@@ -169,6 +271,9 @@ class CommandRunRecordRequest(BaseModel):
     # verbs; the existing FTS `--q` search still matches those rows.
     target_host: str = Field(default="", max_length=512)
     timeout_seconds_requested: int | None = Field(default=None, ge=0)
+    # Optional link to the finding this command produced/supports. Validated to
+    # belong to the engagement (404 otherwise); nullable + back-compat default.
+    finding_id: int | None = None
     force: bool = False
 
     @model_validator(mode="after")
@@ -207,8 +312,8 @@ class CommandRunFinalize(BaseModel):
     return_code: int | None = None
     ended_at: datetime
     duration_ms: int | None = Field(default=None, ge=0)
-    stdout_preview: str | None = None
-    stderr_preview: str | None = None
+    stdout_preview: str | None = Field(default=None, max_length=COMMAND_FINALIZE_PREVIEW_MAX_CHARS)
+    stderr_preview: str | None = Field(default=None, max_length=COMMAND_FINALIZE_PREVIEW_MAX_CHARS)
     timed_out: bool = False
     partial_results: bool = False
     peak_rss_bytes: int | None = Field(default=None, ge=0)
@@ -321,6 +426,15 @@ class SurfaceUpdateRequest(BaseModel):
     source_name: str | None = Field(default=None, min_length=1, max_length=128)
     evidence_ref: str | None = Field(default=None, min_length=1, max_length=1024)
     followup_condition: str | None = Field(default=None, max_length=500)
+
+
+class SurfaceRequestVariantLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    surface_id: int = Field(ge=1)
+    request_variant_id: int = Field(ge=1)
+    relation: str = Field(default="", max_length=128)
+    evidence_ref: str = Field(default="", max_length=1024)
 
 
 class OobProbeRecordRequest(BaseModel):
@@ -441,7 +555,12 @@ class BlockedTechniqueRecordRequest(BaseModel):
     target_kind: str = Field(min_length=1, max_length=64)
     target_ref: str = Field(min_length=1, max_length=1024)
     reason: str = Field(min_length=1, max_length=4096)
-    retry_state: str = Field(default="no_retry", min_length=1, max_length=64)
+    # Align the API default with the SQL column default (db.py: assessment_
+    # blocked_techniques.retry_state DEFAULT 'pending'). Both are free TEXT with
+    # no CHECK; a mismatched default (was "no_retry") meant a create that omitted
+    # retry_state landed a different value depending on whether it went through
+    # the Pydantic model or a raw INSERT. Soft vocab: pending|retryable|no_retry.
+    retry_state: str = Field(default="pending", min_length=1, max_length=64)
     evidence_ref: str = Field(default="", max_length=1024)
     notes: str = Field(default="", max_length=4096)
     provenance: dict[str, Any] = Field(default_factory=dict)
@@ -474,12 +593,31 @@ class MergeFindingsRequest(BaseModel):
     source_name: str = Field(default="operator", min_length=1, max_length=128)
 
 
+def _reject_invalid_submission_status(value: str | None) -> None:
+    """HTTP enforcement seam for submission_status.
+
+    References the canonical ``state_manager.SUBMISSION_STATUSES`` set (owned in
+    the state-manager layer) so the vocabulary has a single backend source of
+    truth. ``None`` is allowed (means "unset" — default 'none' on create,
+    preserve on patch). Raises in a Pydantic validator → HTTP 422 at the API.
+    """
+    if value is not None and value not in state_manager.SUBMISSION_STATUSES:
+        allowed = ", ".join(sorted(state_manager.SUBMISSION_STATUSES))
+        raise ValueError(f"submission_status must be one of: {allowed}")
+
+
 class FindingRecordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     slug: str | None = Field(default=None, max_length=256)
     title: str = Field(min_length=1, max_length=512)
-    severity: str = Field(default="info", min_length=1, max_length=32)
+    # Default aligned to the CLI + record-finding contract (both `medium`): a
+    # not-yet-triaged finding is presumed real, not informational. `info` was the
+    # lone outlier here and produced a schema default that contradicted the CLI;
+    # since severity feeds report-inclusion, defaulting low risked silently
+    # under-rating untriaged findings. Only affects requests that OMIT severity;
+    # stored rows keep their own value (DB-read compat unaffected).
+    severity: str = Field(default="medium", min_length=1, max_length=32)
     workflow_status: str = Field(default="active", min_length=1, max_length=32)
     verification_state: str = Field(default="unreviewed", min_length=1, max_length=32)
     verification_disposition: str = Field(default="none", min_length=1, max_length=32)
@@ -499,6 +637,12 @@ class FindingRecordRequest(BaseModel):
     evidence_type: Literal[
         "network-confirmed", "code-inferred", "theoretical", "informational"
     ] | None = None
+    # External submission-tracking axis, ORTHOGONAL to workflow_status. Nullable
+    # with default None: a true create lands the 'none' default server-side, and
+    # a re-record upsert that omits it preserves the stored value (so external
+    # submission tracking is never clobbered by an unrelated record). Validated
+    # against the canonical state_manager.SUBMISSION_STATUSES set below.
+    submission_status: str | None = Field(default=None, min_length=1, max_length=32)
     request_variant_id: int | None = None
     service_id: int | None = None
     surface_id: int | None = None
@@ -508,6 +652,11 @@ class FindingRecordRequest(BaseModel):
     def _root_cause_links_use_helper(self) -> "FindingRecordRequest":
         if any(link.link_kind == state_manager.ROOT_CAUSE_LINK_KIND for link in self.links):
             raise ValueError("root_cause links must be created with link-finding / PUT /findings/{slug}/root-cause")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_submission_status(self) -> "FindingRecordRequest":
+        _reject_invalid_submission_status(self.submission_status)
         return self
 
 
@@ -538,9 +687,18 @@ class FindingPatchRequest(BaseModel):
     evidence_type: Literal[
         "network-confirmed", "code-inferred", "theoretical", "informational"
     ] | None = None
+    # Optional on patch: None preserves the stored submission_status (the
+    # workflow axis can move without disturbing the submission axis). Validated
+    # against the canonical state_manager.SUBMISSION_STATUSES set.
+    submission_status: str | None = Field(default=None, min_length=1, max_length=32)
     reason_code: str = Field(default="", max_length=128)
     reason_text: str = Field(default="", max_length=4096)
     artifact_ref: str = Field(default="", max_length=1024)
+
+    @model_validator(mode="after")
+    def _validate_submission_status(self) -> "FindingPatchRequest":
+        _reject_invalid_submission_status(self.submission_status)
+        return self
 
     @model_validator(mode="after")
     def _require_notes_when_replacing(self) -> "FindingPatchRequest":
@@ -560,7 +718,7 @@ class FindingPatchRequest(BaseModel):
 class FindingVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    disposition: Literal["confirmed", "downgraded", "pending_runtime_proof", "false_positive", "disputed"]
+    disposition: Literal["confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"]
     reason_code: str = Field(default="", max_length=128)
     reason_text: str = Field(min_length=1, max_length=4096)
     new_severity: str | None = Field(default=None, min_length=1, max_length=32)
@@ -572,7 +730,44 @@ class FindingVerifyRequest(BaseModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
+_SUMMARY_AFFECTING_RECORD_TYPES = frozenset(
+    {
+        "access_record",
+        "artifact",
+        "artifact_refresh",
+        "artifact_scratch",
+        "artifact_scratch_bulk",
+        "attack_chain",
+        "blocked_technique",
+        "coverage_item",
+        "coverage_item_bulk",
+        "credential",
+        "credential_test",
+        "dispatch",
+        "dispatch_decision",
+        "dispatch_handoff",
+        "finding",
+        "finding_link",
+        "finding_merge",
+        "finding_patch",
+        "finding_root_cause",
+        "finding_verify",
+        "host_liveness",
+        "probe_run",
+        "request_observation",
+        "request_observation_bulk",
+        "surface",
+    }
+)
+
+
 async def _broadcast(engagement_key: str, record_type: str, payload: dict[str, Any]) -> None:
+    if record_type in _SUMMARY_AFFECTING_RECORD_TYPES:
+        raw_engagement_id = payload.get("engagement_id")
+        if isinstance(raw_engagement_id, int):
+            state_manager.clear_assessment_summary_cache(raw_engagement_id)
+        else:
+            state_manager.clear_assessment_summary_cache()
     await broadcaster.publish(
         engagement_key,
         {
@@ -771,33 +966,51 @@ def post_host_liveness(
     request: HostLivenessUpsertRequest,
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.upsert_host_liveness(
+    result = state_manager.upsert_host_liveness(
         engagement.id, [row.model_dump() for row in request.rows]
     )
+    state_manager.clear_assessment_summary_cache(engagement.id)
+    return result
 
 
 @router.get("/request-variants")
-def get_request_variants(engagement_key: str) -> list[dict[str, Any]]:
+def get_request_variants(
+    engagement_key: str,
+    limit: int = Query(default=DEFAULT_REQUEST_VARIANT_LIMIT, ge=1, le=MAX_REQUEST_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_request_variants(engagement.id)
+    return state_manager.list_request_variants(engagement.id, limit=limit, offset=offset)
 
 
 @router.get("/request-observations")
-def get_request_observations(engagement_key: str) -> list[dict[str, Any]]:
+def get_request_observations(
+    engagement_key: str,
+    limit: int = Query(default=DEFAULT_REQUEST_OBSERVATION_LIMIT, ge=1, le=MAX_REQUEST_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_request_observations(engagement.id)
+    return state_manager.list_request_observations(engagement.id, limit=limit, offset=offset)
 
 
 @router.get("/coverage-items")
-def get_coverage_items(engagement_key: str) -> list[dict[str, Any]]:
+def get_coverage_items(
+    engagement_key: str,
+    limit: int = Query(default=DEFAULT_COVERAGE_ITEM_LIMIT, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_coverage_items(engagement.id)
+    return state_manager.list_coverage_items(engagement.id, limit=limit, offset=offset)
 
 
 @router.get("/probe-runs")
-def get_probe_runs(engagement_key: str) -> list[dict[str, Any]]:
+def get_probe_runs(
+    engagement_key: str,
+    limit: int = Query(default=DEFAULT_PROBE_RUN_LIMIT, ge=1, le=MAX_PROBE_RUN_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_probe_runs(engagement.id)
+    return state_manager.list_probe_runs(engagement.id, limit=limit, offset=offset)
 
 
 @router.get("/command-runs")
@@ -1074,9 +1287,13 @@ async def mark_artifacts_scratch_under(
 
 
 @router.get("/surfaces")
-def get_surfaces(engagement_key: str) -> list[dict[str, Any]]:
+def get_surfaces(
+    engagement_key: str,
+    limit: int = Query(default=DEFAULT_SURFACE_LIMIT, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_surfaces(engagement.id)
+    return state_manager.list_surfaces(engagement.id, limit=limit, offset=offset)
 
 
 @router.get("/oob-probes")
@@ -1246,6 +1463,189 @@ async def create_request_observation(engagement_key: str, request: RequestObserv
     return record
 
 
+@router.post("/request-observations/bulk", status_code=status.HTTP_201_CREATED)
+async def create_request_observations_bulk(
+    engagement_key: str,
+    request: RequestObservationBulkIngestRequest,
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    result = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.ingest_request_observations_bulk,
+            engagement.id,
+            [item.model_dump() for item in request.items],
+        )
+    )
+    await _broadcast(
+        engagement.key,
+        "request_observation_bulk",
+        {"engagement_id": engagement.id, "count": result["count"]},
+    )
+    return result
+
+
+def _register_http_flow_artifacts(engagement_id: int, request: HttpFlowIngestRequest) -> None:
+    """Register the addon-reported body/index sidecars in assessment_artifacts.
+
+    Best-effort: an artifact-registry failure must never fail the flow ingest
+    (silent-data-loss > redaction). ``register_artifact`` hashes/sizes the file
+    if present and records present=0 otherwise — the backend never has to READ
+    the sidecar here."""
+    registrations = (
+        (request.request_body_artifact_path, "http_flow_body"),
+        (request.response_body_artifact_path, "http_flow_body"),
+        (request.index_artifact_path, "http_flow_index"),
+    )
+    for path_value, kind in registrations:
+        if not path_value:
+            continue
+        try:
+            artifact_index.register_artifact(engagement_id, path=path_value, kind=kind)
+        except Exception:
+            continue
+
+
+@router.get("/http-flows")
+def get_http_flows(
+    engagement_key: str,
+    host: str = "",
+    method: str = "",
+    response_status: int | None = None,
+    content_type_family: str = "",
+    auth_context: str = "",
+    truncated: bool | None = None,
+    q: str = "",
+    limit: int = Query(default=DEFAULT_HTTP_FLOW_LIMIT, ge=1, le=MAX_HTTP_FLOW_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_http_flows(
+        engagement.id,
+        host=host,
+        method=method,
+        response_status=response_status,
+        content_type_family=content_type_family,
+        auth_context=auth_context,
+        truncated=truncated,
+        q=q,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/http-flows/export-har")
+def export_http_flows_har(
+    engagement_key: str,
+    host: str = "",
+    method: str = "",
+    response_status: int | None = None,
+    content_type_family: str = "",
+    auth_context: str = "",
+    truncated: bool | None = None,
+    q: str = "",
+    limit: int = Query(default=MAX_HTTP_FLOW_LIST_LIMIT, ge=1, le=MAX_HTTP_FLOW_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Build a HAR 1.2 log from the filtered flows. Body sidecars under the
+    engagement root are inlined into postData/content when present (size-capped);
+    Vigil routing/auth/truncation metadata rides on each entry's ``_vigil`` field."""
+    engagement = get_engagement_or_404(engagement_key)
+    flows = state_manager.list_http_flows(
+        engagement.id,
+        host=host,
+        method=method,
+        response_status=response_status,
+        content_type_family=content_type_family,
+        auth_context=auth_context,
+        truncated=truncated,
+        q=q,
+        limit=limit,
+        offset=offset,
+    )
+    root = Path(engagement.engagement_root).resolve()
+    return state_manager.har_from_flows(flows, root=root)
+
+
+@router.get("/http-flows/{flow_uid}")
+def get_http_flow_detail(engagement_key: str, flow_uid: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    record = state_manager.get_http_flow(engagement.id, flow_uid)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="http flow not found")
+    return record
+
+
+@router.post("/http-flows", status_code=status.HTTP_201_CREATED)
+async def create_http_flow(engagement_key: str, request: HttpFlowIngestRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    fields = request.model_dump(exclude={"index_artifact_path"})
+    record = await anyio.to_thread.run_sync(
+        functools.partial(state_manager.insert_http_flow, engagement.id, **fields)
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(_register_http_flow_artifacts, engagement.id, request)
+    )
+    await _broadcast(engagement.key, "http_flow", record)
+    return record
+
+
+class HarImportRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    log: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/http-flows/import-har", status_code=status.HTTP_201_CREATED)
+async def import_http_flows_har(engagement_key: str, request: HarImportRequest) -> dict[str, Any]:
+    """Parse a HAR log and insert each entry as a full-flow record. Round-trips
+    an export from this engagement: export-har then import-har reconstructs the
+    flow metadata (flow_uid/auth/truncation/routing) from each entry's ``_vigil``
+    field."""
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    har_payload = {"log": request.log}
+    root = Path(engagement.engagement_root).resolve()
+    flow_kwargs_list = await anyio.to_thread.run_sync(
+        functools.partial(state_manager.flows_from_har, har_payload, root=root)
+    )
+
+    def _insert_all() -> list[dict[str, Any]]:
+        return [
+            state_manager.insert_http_flow(engagement.id, **kwargs)
+            for kwargs in flow_kwargs_list
+        ]
+
+    records = await anyio.to_thread.run_sync(_insert_all)
+    result = {"engagement_id": engagement.id, "count": len(records), "flows": records}
+    await _broadcast(
+        engagement.key,
+        "http_flow_import",
+        {"engagement_id": engagement.id, "count": len(records)},
+    )
+    return result
+
+
+@router.get("/capture-policy")
+def get_capture_policy(engagement_key: str) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_capture_policy(engagement.id)
+
+
+@router.put("/capture-policy")
+async def put_capture_policy(
+    engagement_key: str, request: CapturePolicyUpdateRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.set_capture_policy,
+            engagement.id,
+            **request.model_dump(exclude_unset=True),
+        )
+    )
+    await _broadcast(engagement.key, "capture_policy", {**record, "engagement_id": engagement.id})
+    return record
+
+
 @router.post("/probe-runs", status_code=status.HTTP_201_CREATED)
 async def create_probe_run(engagement_key: str, request: ProbeRunRecordRequest) -> dict[str, Any]:
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
@@ -1264,6 +1664,27 @@ async def create_coverage_item(engagement_key: str, request: CoverageItemRecordR
     )
     await _broadcast(engagement.key, "coverage_item", record)
     return record
+
+
+@router.post("/coverage-items/bulk", status_code=status.HTTP_201_CREATED)
+async def create_coverage_items_bulk(
+    engagement_key: str,
+    request: CoverageItemBulkRecordRequest,
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    result = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_coverage_items_bulk,
+            engagement.id,
+            [item.model_dump() for item in request.items],
+        )
+    )
+    await _broadcast(
+        engagement.key,
+        "coverage_item_bulk",
+        {"engagement_id": engagement.id, "count": result["count"]},
+    )
+    return result
 
 
 @router.post("/command-runs", status_code=status.HTTP_201_CREATED)
@@ -1530,6 +1951,52 @@ async def update_surface_endpoint(
     return record
 
 
+@router.post("/surface-request-variant-links", status_code=status.HTTP_201_CREATED)
+async def create_surface_request_variant_link_endpoint(
+    engagement_key: str,
+    request: SurfaceRequestVariantLinkRequest,
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.create_surface_request_variant_link,
+            engagement.id,
+            surface_id=request.surface_id,
+            request_variant_id=request.request_variant_id,
+            relation=request.relation,
+            evidence_ref=request.evidence_ref,
+        )
+    )
+    await _broadcast(engagement.key, "surface_request_variant_link", record)
+    return record
+
+
+@router.get("/surface-request-variant-links/by-surface/{surface_id}")
+def get_surface_request_variant_links_by_surface(
+    engagement_key: str,
+    surface_id: int,
+    limit: int = Query(default=DEFAULT_SURFACE_LIMIT, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_surface_request_variant_links_by_surface(
+        engagement.id, surface_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/surface-request-variant-links/by-request-variant/{request_variant_id}")
+def get_surface_request_variant_links_by_variant(
+    engagement_key: str,
+    request_variant_id: int,
+    limit: int = Query(default=DEFAULT_SURFACE_LIMIT, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_surface_request_variant_links_by_variant(
+        engagement.id, request_variant_id, limit=limit, offset=offset
+    )
+
+
 class AppUnitOverrideRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1674,6 +2141,7 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
             details=request.details,
             provenance=request.provenance,
             evidence_type=request.evidence_type,
+            submission_status=request.submission_status,
             request_variant_id=request.request_variant_id,
             service_id=request.service_id,
             surface_id=request.surface_id,
@@ -1723,6 +2191,7 @@ async def patch_finding(
             details_mode=request.details_mode,
             provenance=request.provenance,
             evidence_type=request.evidence_type,
+            submission_status=request.submission_status,
             transition_reason_code=request.reason_code,
             transition_reason_text=request.reason_text,
             transition_artifact_ref=request.artifact_ref,

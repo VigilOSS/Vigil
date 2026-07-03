@@ -8,11 +8,13 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from assess.lib.auth import auth_active_context
+from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE, post_request_observations_bulk
 from assess.lib.classify import classify_type
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.db import db_init, db_insert_work_item
 from assess.lib.params import extract_url_path, generate_params_sig
+from assess.lib.scope import host_admitted, ingest_scope_filter
 
 _HTTP_METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "trace")
 
@@ -307,6 +309,34 @@ def run(args) -> None:
     count = 0
     skipped = 0
 
+    # Scope admission gate (defense-in-depth). Every operation in this spec shares
+    # one base host, so a single check suffices. A spec that declares an ABSOLUTE
+    # `servers`/`host` url (used as-is by _resolve_base_url) bypasses the
+    # _engagement_fallback_base scope check — so an out-of-scope spec host would
+    # otherwise ingest every operation as probeable work. Reachability is not
+    # scope (shared-constraints §1): refuse the whole spec. Composes with the
+    # relative/empty-base refusal below — spec_host is "" for a relative base, so
+    # this check is skipped and that case falls through to the existing handler.
+    # Inactive when scope.json has no allowlist (see scope.ingest_scope_filter).
+    scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
+    spec_host = (urlparse(base_url).hostname or "").rstrip(".").lower()
+    if (
+        scope_filter_active
+        and spec_host
+        and not host_admitted(spec_host, scope_allow, scope_deny)
+    ):
+        _warn(
+            f"spec base host '{spec_host}' is out of scope (no scope.json allowlist "
+            f"match, or matched an out_of_scope carve-out). Refusing to ingest any of "
+            f"this spec's {len(paths)} path(s) — reachability is not scope. Add the "
+            f"host to scope.json and re-run, or fetch a spec whose servers url is in scope."
+        )
+        print(
+            f"[ingest] Ingested 0 endpoints from spec (version {spec_version}); "
+            f"refused {len(paths)} path(s): base host out of scope (see warning above)"
+        )
+        return
+
     if not base_url.startswith(("http://", "https://")):
         _warn(
             f"spec base URL is relative/empty ('{base_url}') and no host could be "
@@ -322,6 +352,94 @@ def run(args) -> None:
         return
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        pending_rows: list[dict] = []
+        pending_observations: list[dict] = []
+
+        def _record_response(row: dict, response: dict) -> bool:
+            nonlocal count, skipped
+            request_variant_id = None
+            service_id = None
+            try:
+                request_variant_id = response.get("request_variant", {}).get("id")
+            except (AttributeError, TypeError):
+                pass
+            try:
+                service_id = response.get("service", {}).get("id")
+            except (AttributeError, TypeError):
+                pass
+
+            if not request_variant_id and not service_id:
+                skipped += 1
+                _warn(
+                    f"backend response missing request_variant.id/service.id for "
+                    f"{row['url']}; skipping this operation"
+                )
+                return False
+
+            queue_key = ""
+            if request_variant_id:
+                queue_key = f"variant:{request_variant_id}:{row['case_type']}"
+            elif service_id:
+                queue_key = f"service:{service_id}:{row['case_type']}"
+
+            db_insert_work_item(
+                db_path,
+                queue_key=queue_key,
+                method=row["method"],
+                url=row["url"],
+                url_path=row["url_path"],
+                query_params=json.dumps(row["query_params"]),
+                body_params=json.dumps(row["body_params"]),
+                path_params=json.dumps(row["path_params"]),
+                cookie_params=json.dumps(row["cookie_params"]),
+                case_type=row["case_type"],
+                source="api-spec",
+                params_key_sig=row["params_sig"],
+                request_variant_id=int(request_variant_id) if request_variant_id else None,
+                service_id=int(service_id) if service_id else None,
+                auth_context=auth_context,
+            )
+            count += 1
+            return True
+
+        def _flush_observations() -> None:
+            nonlocal skipped
+            if not pending_observations:
+                return
+            rows = list(pending_rows)
+            observations = list(pending_observations)
+            pending_rows.clear()
+            pending_observations.clear()
+
+            try:
+                responses = post_request_observations_bulk(
+                    client,
+                    observations,
+                    warn_prefix="ingest-spec",
+                    fallback_individual=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve per-operation resilience
+                _warn(
+                    f"bulk backend ingest rejected {len(observations)} operation(s): "
+                    f"{exc}; retrying individually"
+                )
+                for row, observation in zip(rows, observations, strict=True):
+                    try:
+                        response = client.post("request-observations", observation)
+                    except Exception as row_exc:  # noqa: BLE001 - one bad op must not drop the spec
+                        skipped += 1
+                        _warn(f"backend rejected {row['method']} {row['url']}: {row_exc}; skipping this operation")
+                        continue
+                    _record_response(row, response)
+                return
+
+            for row, response in zip(rows, responses, strict=True):
+                if isinstance(response, Exception):
+                    skipped += 1
+                    _warn(f"backend rejected {row['method']} {row['url']}: {response}; skipping this operation")
+                    continue
+                _record_response(row, response)
+
         for path_key, path_item in paths.items():
             if not isinstance(path_item, dict):
                 continue
@@ -385,6 +503,7 @@ def run(args) -> None:
                 url_path = extract_url_path(url_with_query)
                 case_type = classify_type(method, url_path, "", "")
                 params_sig = generate_params_sig(query_params, body_params)
+                evidence_ref = str(operation.get("evidence_ref") or "")
 
                 parsed = urlparse(url_with_query)
                 observation = {
@@ -401,7 +520,7 @@ def run(args) -> None:
                     "discovery_source": "api-spec",
                     "notes": "Derived from accessible API specification.",
                     "response_status": None,
-                    "evidence_ref": "",
+                    "evidence_ref": evidence_ref,
                     "observation_payload": {"source": "api-spec"},
                     "target_identity": parsed.hostname or "",
                     "target_kind": "host",
@@ -413,56 +532,23 @@ def run(args) -> None:
                     "auto_generate_coverage": True,
                 }
 
-                try:
-                    response = client.post("request-observations", observation)
-                except Exception as exc:  # noqa: BLE001 - resilience: one bad op must not drop the spec
-                    skipped += 1
-                    _warn(f"backend rejected {method} {url_with_query}: {exc}; skipping this operation")
-                    continue
-
-                request_variant_id = None
-                service_id = None
-                try:
-                    request_variant_id = response.get("request_variant", {}).get("id")
-                except (AttributeError, TypeError):
-                    pass
-                try:
-                    service_id = response.get("service", {}).get("id")
-                except (AttributeError, TypeError):
-                    pass
-
-                if not request_variant_id and not service_id:
-                    skipped += 1
-                    _warn(
-                        f"backend response missing request_variant.id/service.id for "
-                        f"{url_with_query}; skipping this operation"
-                    )
-                    continue
-
-                queue_key = ""
-                if request_variant_id:
-                    queue_key = f"variant:{request_variant_id}:{case_type}"
-                elif service_id:
-                    queue_key = f"service:{service_id}:{case_type}"
-
-                db_insert_work_item(
-                    db_path,
-                    queue_key=queue_key,
-                    method=method,
-                    url=url_with_query,
-                    url_path=url_path,
-                    query_params=json.dumps(query_params),
-                    body_params=json.dumps(body_params),
-                    path_params=json.dumps(path_params),
-                    cookie_params=json.dumps(cookie_params),
-                    case_type=case_type,
-                    source="api-spec",
-                    params_key_sig=params_sig,
-                    request_variant_id=int(request_variant_id) if request_variant_id else None,
-                    service_id=int(service_id) if service_id else None,
-                    auth_context=auth_context,
+                pending_rows.append(
+                    {
+                        "method": method,
+                        "url": url_with_query,
+                        "url_path": url_path,
+                        "query_params": query_params,
+                        "body_params": body_params,
+                        "path_params": path_params,
+                        "cookie_params": cookie_params,
+                        "case_type": case_type,
+                        "params_sig": params_sig,
+                    }
                 )
-                count += 1
+                pending_observations.append(observation)
+                if len(pending_observations) >= DEFAULT_BULK_WRITE_SIZE:
+                    _flush_observations()
+        _flush_observations()
 
     print(f"[ingest] Ingested {count} endpoints from spec (version {spec_version})")
     if skipped:

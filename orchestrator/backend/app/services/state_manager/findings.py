@@ -11,7 +11,7 @@ from ..search import (
 )
 
 from . import _common
-from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, VERIFICATION_DISPOSITION_RANK, VERIFICATION_STATE_RANK, WORKFLOW_STATUS_RANK, VerificationDisposition, VerificationState, WorkflowStatus, _finding_confidence_tuple, _finding_not_found, _json_object, _json_text, _merge_object_text, _normalize_severity, _normalize_verification_disposition, _normalize_verification_state, _normalize_workflow_status, _require_canonical_finding_slug, _resolve_existing_finding_slug, _row_verification_disposition, _row_verification_state, _row_workflow_status, _serialize_finding_record, _slugify, _stronger_severity
+from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, VERIFICATION_DISPOSITION_RANK, VERIFICATION_STATE_RANK, WORKFLOW_STATUS_RANK, VerificationDisposition, VerificationState, WorkflowStatus, _finding_confidence_tuple, _finding_not_found, _json_object, _json_text, _merge_object_text, _normalize_severity, _normalize_submission_status, _normalize_verification_disposition, _normalize_verification_state, _normalize_workflow_status, _require_canonical_finding_slug, _resolve_existing_finding_slug, _row_verification_disposition, _row_verification_state, _row_workflow_status, _serialize_finding_record, _slugify, _stronger_severity
 from .links import _is_root_cause_link, _upsert_finding_link
 
 
@@ -84,6 +84,48 @@ def _raise_stale_finding_conflict() -> None:
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail="finding changed since it was loaded; refetch and retry",
+    )
+
+
+# I-21 (clobber guard): the dedup UPSERT in ``_semantic_finding_match`` matches a
+# net-new record onto an existing finding by the
+# ``(defect_family + root_cause_key + auth_context + canonical_location)`` tuple
+# (excluding ``merged``), NOT by slug. When that match lands on a load-bearing
+# finding (already ``reported`` or ``active``) under a DIFFERENT slug, a silent
+# overwrite destroys a reported finding. Refuse unless the caller named that
+# exact existing slug — the ``--update <slug>`` CLI opt-in, or an explicit slug
+# on the raw POST. ``draft`` (still being shaped) and ``false_positive`` /
+# ``merged`` (intentionally sticky) stay outside the guard so the historical
+# dedup upsert behavior is preserved for them. Mirrored CLI-side in
+# ``record_finding.py`` so a CLI bypass cannot defeat this HTTP enforcement.
+_CLOBBER_GUARDED_WORKFLOW_STATUSES: frozenset[WorkflowStatus] = frozenset(
+    {WorkflowStatus.ACTIVE, WorkflowStatus.REPORTED}
+)
+
+
+def _raise_finding_clobber_conflict(
+    existing: dict[str, Any],
+    *,
+    defect_family: str,
+    root_cause_key: str,
+    auth_context: str,
+    canonical_location: str,
+) -> None:
+    existing_slug = str(existing.get("slug", ""))
+    existing_status = _row_workflow_status(existing)
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"Refusing to clobber {existing_status} finding '{existing_slug}': this record's "
+            f"dedup tuple (defect_family={defect_family!r}, root_cause_key={root_cause_key!r}, "
+            f"auth_context={auth_context!r}, canonical_location={canonical_location!r}) matches "
+            f"it under a different slug, and merging would silently overwrite a {existing_status} "
+            f"finding. If this is a distinct sibling on the same root cause, give it a DISTINCT "
+            f"root_cause_key/defect_family and attach it with "
+            f"`vigil assess link-finding <new-slug> --root-cause {existing_slug}`; to "
+            f"intentionally modify '{existing_slug}', re-record with --update {existing_slug} "
+            f"(or POST with slug={existing_slug!r})."
+        ),
     )
 
 
@@ -176,6 +218,8 @@ def _default_transition_reason(action: str, after: dict[str, str]) -> str:
         return "Verification downgraded the finding severity."
     if action == "verified_false_positive":
         return "Verification marked the finding as a false positive."
+    if action == "verified_blocked":
+        return "Verification recorded the finding as blocked-for-provisioning; held out of the report."
     if action == "verification_disputed":
         return "Verification disputed the current finding assessment."
     if action == "workflow_reported":
@@ -360,11 +404,13 @@ def create_finding(
     details: dict[str, Any] | None,
     provenance: dict[str, Any] | None,
     evidence_type: str | None = None,
+    submission_status: str | None = None,
     request_variant_id: int | None,
     service_id: int | None,
     surface_id: int | None,
     links: list[dict[str, Any]] | None,
     explicit_workflow_override: bool = False,
+    explicit_submission_override: bool = False,
     explicit_verification_state_override: bool = False,
     explicit_verification_disposition_override: bool = False,
     explicit_severity_override: bool = False,
@@ -387,6 +433,11 @@ def create_finding(
     incoming_verification_state = _normalize_verification_state(verification_state)
     incoming_verification_disposition = _normalize_verification_disposition(verification_disposition)
     incoming_severity = _normalize_severity(severity)
+    # submission_status is its own axis: validate + default to 'none' on a true
+    # INSERT. On an UPDATE (upsert match), only overwrite when the caller
+    # explicitly set it — otherwise preserve the stored value so a re-record /
+    # an unrelated workflow patch never clobbers external submission tracking.
+    incoming_submission_status = _normalize_submission_status(submission_status)
     with _common.get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         existing = _semantic_finding_match(
@@ -399,6 +450,37 @@ def create_finding(
             auth_context=auth_context,
             title=title,
         )
+        if existing is not None:
+            # I-21: the operator "named" this exact finding only when the
+            # incoming slug resolves to it (matched by slug in
+            # ``_semantic_finding_match``'s first tier). A tuple/title dedup
+            # match onto a DIFFERENT (or unnamed) slug is the silent-clobber
+            # path — refuse it for load-bearing reported/active findings.
+            named_existing_slug = bool(slug) and str(existing["slug"]) == slug
+            if (
+                not named_existing_slug
+                and _row_workflow_status(existing) in _CLOBBER_GUARDED_WORKFLOW_STATUSES
+            ):
+                _raise_finding_clobber_conflict(
+                    existing,
+                    defect_family=defect_family,
+                    root_cause_key=root_cause_key,
+                    auth_context=auth_context,
+                    canonical_location=canonical_location,
+                )
+        # A ``blocked`` disposition REQUIRES a ``block_reason`` on the create/record
+        # path too — not only via /verify. Without this guard, POST /findings with
+        # verification_disposition='blocked' and no block_reason would 201 and then
+        # be silently excluded from the report (report-readiness drops 'blocked'),
+        # producing a reasonless, invisible finding. Mirror verify_finding's invariant
+        # (the reason may arrive in this record's details OR already be on the finding).
+        if incoming_verification_disposition == "blocked":
+            _validate_blocked_verification_details(
+                incoming_details=details or {},
+                existing_details=(
+                    _json_object(existing["details_json"]) if existing is not None else {}
+                ),
+            )
         before_state = _finding_state_snapshot(existing) if existing is not None else None
         if existing is None:
             # CR-31: allocate the slug + INSERT under the (engagement_id, slug)
@@ -415,9 +497,9 @@ def create_finding(
                         """
                         INSERT INTO assessment_findings (
                             engagement_id, slug, title, severity, status, verification_state, verification_disposition, defect_family, root_cause_key, auth_context,
-                            canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type
+                            canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type, submission_status
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             engagement.id,
@@ -438,6 +520,7 @@ def create_finding(
                             _json_text(details),
                             _json_text(provenance),
                             evidence_type,
+                            incoming_submission_status,
                         ),
                     )
                     break
@@ -485,6 +568,7 @@ def create_finding(
                     details_json = ?,
                     provenance_json = ?,
                     evidence_type = COALESCE(?, evidence_type),
+                    submission_status = COALESCE(?, submission_status),
                     last_seen_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
@@ -527,6 +611,9 @@ def create_finding(
                     _json_text(details) if details_mode == "replace" else _merge_object_text(existing["details_json"], details),
                     _merge_object_text(existing["provenance_json"], provenance),
                     evidence_type,
+                    # None => COALESCE preserves the stored submission_status; a
+                    # value => an explicit operator override of the submission axis.
+                    incoming_submission_status if explicit_submission_override else None,
                     existing["id"],
                 ),
             )
@@ -642,6 +729,7 @@ def update_finding(
     details: dict[str, Any] | None,
     provenance: dict[str, Any] | None,
     evidence_type: str | None = None,
+    submission_status: str | None = None,
 ) -> dict[str, Any]:
     # severity / workflow_status / verification_state / verification_disposition
     # are partial-update fields: ``None`` means "preserve the existing value".
@@ -673,11 +761,13 @@ def update_finding(
         details=details,
         provenance=provenance,
         evidence_type=evidence_type,
+        submission_status=submission_status,
         request_variant_id=None,
         service_id=None,
         surface_id=None,
         links=None,
         explicit_workflow_override=workflow_status is not None,
+        explicit_submission_override=submission_status is not None,
         explicit_verification_state_override=verification_state is not None,
         explicit_verification_disposition_override=verification_disposition is not None,
         explicit_severity_override=severity is not None,
@@ -705,6 +795,7 @@ def patch_finding(
     details: dict[str, Any] | None = None,
     provenance: dict[str, Any] | None = None,
     evidence_type: str | None = None,
+    submission_status: str | None = None,
     transition_action: str | None = None,
     transition_reason_code: str = "",
     transition_reason_text: str = "",
@@ -793,11 +884,13 @@ def patch_finding(
         details=details,
         provenance=provenance,
         evidence_type=evidence_type,
+        submission_status=submission_status,
         request_variant_id=None,
         service_id=None,
         surface_id=None,
         links=None,
         explicit_workflow_override=workflow_status is not None,
+        explicit_submission_override=submission_status is not None,
         explicit_verification_state_override=verification_state is not None,
         explicit_verification_disposition_override=verification_disposition is not None,
         explicit_severity_override=severity is not None,
@@ -811,6 +904,66 @@ def patch_finding(
         notes_mode=notes_mode,
         details_mode=details_mode,
     )
+
+# Documented (not hard-enforced) vocabulary for what a blocked finding is
+# waiting on. hunting.md: unblock_requirements.kind names the class of the
+# missing precondition; a light type check only — an unknown kind is NOT a 400
+# (mirrors the free-text/forward-compatible posture of probe result_status).
+_UNBLOCK_REQUIREMENT_KINDS = frozenset({"account", "line", "device", "credential", "access"})
+
+
+def _validate_unblock_requirements(value: Any) -> None:
+    """Light shape check for ``details.unblock_requirements`` on a blocked finding.
+
+    Optional. When present it must be an object; ``kind`` (if present) must be a
+    string, but its VALUE is not enum-enforced so a new kind does not require a
+    backend redeploy. ``description`` / ``requested_from`` are advisory free-text.
+    """
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="details.unblock_requirements must be an object",
+        )
+    kind = value.get("kind")
+    if kind is not None and not isinstance(kind, str):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="details.unblock_requirements.kind must be a string",
+        )
+
+
+def _validate_blocked_verification_details(
+    *,
+    incoming_details: dict[str, Any],
+    existing_details: dict[str, Any],
+) -> None:
+    """A ``blocked`` verification disposition REQUIRES a ``block_reason``.
+
+    Mirrors the intel precedent (``intel._validate_cve_attempted_blocked``): the
+    reason (why the exploit attempt could not even start) may arrive in this
+    verify's ``details`` OR already exist on the finding, but it must be present
+    (non-empty, <=500 chars) after the verify applies. This is a genuine
+    validation invariant — a hard 400 — not an advisory heuristic.
+    """
+    block_reason = incoming_details.get("block_reason")
+    if not (isinstance(block_reason, str) and block_reason.strip()):
+        block_reason = existing_details.get("block_reason")
+    if not isinstance(block_reason, str) or not block_reason.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="details.block_reason is required when disposition='blocked'",
+        )
+    if len(block_reason) > 500:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="details.block_reason exceeds 500 characters",
+        )
+    _validate_unblock_requirements(
+        incoming_details.get("unblock_requirements", existing_details.get("unblock_requirements"))
+    )
+
 
 def verify_finding(
     engagement_id: int,
@@ -870,6 +1023,19 @@ def verify_finding(
             )
         target_workflow = "false_positive"
         transition_action = "verified_false_positive"
+    elif normalized_disposition == "blocked":
+        # Blocked-for-provisioning (hunting.md): the attempt could not even start
+        # (missing account/line/device/credential/access). Requires a
+        # block_reason (present in this verify OR already on the finding). Marked
+        # verified so it leaves the unreviewed DoD queue, but report-readiness /
+        # the report projection exclude it on disposition ('blocked' is neither
+        # confirmed nor downgraded), keeping it OUT of the report until unblocked.
+        _validate_blocked_verification_details(
+            incoming_details=details_payload,
+            existing_details=_json_object(existing["details_json"]),
+        )
+        target_verification_state = "verified"
+        transition_action = "verified_blocked"
     elif normalized_disposition == "confirmed":
         transition_action = "verified_confirmed"
     elif normalized_disposition == "pending_runtime_proof":

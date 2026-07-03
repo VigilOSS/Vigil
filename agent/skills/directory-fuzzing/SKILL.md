@@ -16,6 +16,20 @@ origin: Vigil
 
 `ffuf` (primary — parameter/vhost fuzzing), `feroxbuster` (recursive content discovery), `curl` (verification)
 
+## Rate-of-Business (RoB) Calibration
+
+A self-imposed "never enumerate" restriction is a **methodology choice, not a target fact.** Light, targeted, low-rate content-discovery of *known* protected resources (login panels, admin paths, API prefixes) is "identifying an indicator of vulnerability" under standard bug-bounty RoB definitions — it is not active exploitation. The honest constraint is three-dimensional:
+
+| Dimension | Compliant | Non-compliant |
+|---|---|---|
+| **Rate** | `--rate 20` or below; respect 429 back-off | Unbounded `-t 200` against a production target |
+| **Wordlist size** | Curated / targeted lists (`dirb/common.txt`, `raft-medium-directories.txt`, known-good tech-specific lists) | Raft-large or custom-brute against a production API |
+| **Stop condition** | Stop on first sensitive-data response; do not harvest bulk PII | Running to exhaustion after a credential-bearing endpoint appears |
+
+When a prior dispatch rejected or soft-capped a content-discovery run on RoB grounds without evidence of the above violations, **re-dispatch with the self-imposed restriction relaxed** before accepting a coverage gap or a downgraded severity. A "maybe gated" verdict from a never-run fuzz pass is not a finding disposition — it is a coverage gap.
+
+See `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" for the per-target rate column and `agent/rules/hunting.md` for the RoB doctrine that governs what a "minimal testing" restriction actually bars.
+
 ## Methodology
 
 ### 1. Baseline Response
@@ -217,6 +231,6 @@ vigil assess kali exec --technique DISCOVERY \
 
 ## Extended Resources
 
-- `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; the dir-fuzz column drives `-rate / -t / --rate-limit` per trait row.
+- `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; the dir-fuzz column drives `-rate / -t / --rate-limit` per trait row.
 - `agent/references/tools/fuzzing/ffuf.md` — ffuf flags, filter/matcher options, wordlist selection
 - `agent/references/tools/fuzzing/feroxbuster.md` — feroxbuster recursive scanning, auto-tune, smart mode

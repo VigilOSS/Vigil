@@ -123,7 +123,7 @@ vigil assess kali arjun -u "https://TARGET/high-value" --passive --stable --rate
 vigil assess ingest-arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
 ```
 
-Use raw `arjun -u …` only for a one-off manual check; the verb path is what feeds Phase 3. Full reference: `references/tools/recon/arjun.md`.
+Use raw `arjun -u …` only for a one-off manual check; the verb path is what feeds Phase 4. Full reference: `agent/references/tools/recon/arjun.md`.
 
 ### 9. ParamSpider (Historical Parameter Mining)
 ```bash

@@ -58,7 +58,7 @@ records traffic to `cases.db`. This is the clean path *when the edge tolerates
 the proxy* — you get engagement-pipeline capture for free.
 
 ```bash
-vigil mitmproxy start "$ENGAGEMENT_KEY"
+vigil mitmproxy start
 # launch the Playwright script with PROXY=http://127.0.0.1:8080 (see skeleton)
 ```
 

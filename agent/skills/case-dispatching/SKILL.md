@@ -12,7 +12,7 @@ This skill is coordination-only. Use it to inspect the work buffer, route batche
 
 ## When to Activate
 
-- Phase 3 (Consume & Test) after surface-collector has populated the work buffer
+- Phase 4 (Consume & Test) after surface-collector has populated the work buffer
 - When pending work items exist in the work buffer
 - When a producer has added new work items
 
@@ -179,6 +179,17 @@ vigil assess resolve-surface <id> --status not_applicable \
 Triage these BEFORE the dispatching pass, not during. A specialist that opens an out-of-scope candidate runs the full skill methodology before realising the scope error, then writes a handoff explaining why it stopped — the operator could have prevented all of that with one `resolve-surface` call.
 
 This step pairs with `agent/scripts/assess/lib/contracts.py` `validate_specialist_dispatch_contract`, which gates active-probing dispatches (vulnerability-analyst, exploit-developer) on `scope_host` membership in `scope.json` `hosts`. The validator catches mistakes at register time; this step catches them before they reach the validator.
+
+## Linking Surfaces to Work-Buffer Clusters
+
+When a recorded surface (`vigil assess record-surface`) corresponds to a cluster of work-buffer items already ingested with a durable `request_variant_id`, link them on the backend so the surface's coverage trail points at the exact requests that back it:
+
+```bash
+vigil assess link-surface-work-items "$DB" --cluster <cluster_key> --surface-id <id> \
+  --relation primary-endpoint --evidence-ref "<artifact path>"
+```
+
+Selection is by `--cluster` (the work buffer's `cluster_key`) or `--queue-key`; a work item that never successfully posted to the backend (no `request_variant_id`) is skipped with a warning rather than failing the whole run.
 
 ## Key Rules
 

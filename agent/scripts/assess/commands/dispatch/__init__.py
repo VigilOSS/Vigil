@@ -44,6 +44,7 @@ from assess.commands.dispatch.work_items import (
     _fetch_by_priority,
     _defer_cluster,
     _defer_items,
+    _mark_manual,
     _done,
     _error,
     _reset_stale,
@@ -233,6 +234,16 @@ def run(args) -> None:
         reason_tag = (getattr(args, "reason_tag", "") or "").strip()
         stored = tagged_terminal_reason(reason_tag, reason) if reason_tag else reason
         _defer_items(db_path, extra, stored)
+    elif action == "mark-manual":
+        if not extra:
+            print(
+                "Usage: work-buffer <db> mark-manual <id> [<id> ...]\n"
+                "       work-buffer <db> mark-manual <id1,id2,...>\n"
+                "  Stamps classifier_version='manual' so --reclassify-stale skips these rows.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _mark_manual(db_path, extra)
     elif action == "done":
         if not extra:
             print("Usage: work-buffer <db> done <id> [<id> ...]", file=sys.stderr)

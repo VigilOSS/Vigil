@@ -93,6 +93,22 @@ def _cat_container_pid_file(container_name: str, pid_file: str) -> tuple[int | N
         return None, "pid-file-invalid"
 
 
+def _engagement_env_args(engagement_key: str | None) -> list[str]:
+    """Canonical ``--env ENGAGEMENT_KEY=<key>`` docker-exec argument pair.
+
+    Single source for the env mirror shared by the synchronous exec wrapper
+    (:func:`_build_docker_exec`) and the async dtach job argv
+    (``kali_jobs.start_job``) — CODE-MAP flags this as a deliberate coupling, so
+    they must not drift. Surfacing ``ENGAGEMENT_KEY`` inside the runtime lets
+    skill examples like ``nuclei -l /engagements/$ENGAGEMENT_KEY/scans/...``
+    expand to the engagement name rather than the empty string. Returns ``[]``
+    for an empty key so the sync path's prior ``if engagement_key`` guard is
+    preserved verbatim."""
+    if not engagement_key:
+        return []
+    return ["--env", f"ENGAGEMENT_KEY={engagement_key}"]
+
+
 def _build_docker_exec(
     cmd: list[str],
     *,
@@ -139,9 +155,9 @@ def _build_docker_exec(
     # Surface ENGAGEMENT_KEY inside the runtime so skill examples like
     # `nuclei -l /engagements/$ENGAGEMENT_KEY/scans/...` expand correctly
     # under the wrapper shell. Without this, the variable expanded to the
-    # empty string and output landed at `/engagements//scans/...`.
-    if engagement_key:
-        docker_argv.extend(["--env", f"ENGAGEMENT_KEY={engagement_key}"])
+    # empty string and output landed at `/engagements//scans/...`. Shared with
+    # the async dtach argv via _engagement_env_args so the two cannot drift.
+    docker_argv.extend(_engagement_env_args(engagement_key))
     if working_dir:
         docker_argv.extend(["-w", working_dir])
     docker_argv.extend(

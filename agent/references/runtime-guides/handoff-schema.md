@@ -31,7 +31,7 @@ prompt by `vigil assess agent render-handoff <agent-id>`.
 |---|---|---|---|
 | `agent_id` | string | yes | The dispatching agent_id (the same id passed to `vigil assess agent start` / `POST /dispatches`). |
 | `agent_role` | string | yes | The role file the dispatch ran under (`recon-specialist`, `vulnerability-analyst`, etc.). |
-| `phase` | string | yes | The phase tag the dispatch was authorized for (`recon`, `consume-test`, `verify`, `exploit`, `report`, `code-hunt`, ..., plus half-phase tags `recon-pivot` / `exploit-recon`). |
+| `phase` | string | yes | The phase tag the dispatch was authorized for (canonical enum via `vigil assess list-commands --phase`; e.g. `recon`, `consume-test`, `exploit`, plus half-phase tags `recon-pivot` / `exploit-recon`). |
 | `summary` | string | yes | ≤2000 chars; one paragraph; what was done in your own words. |
 | `confidence` | enum | yes | `low` / `medium` / `high` based on what you proved vs. inferred. |
 | `finding_slugs` | string[] | optional | Slug strings only — the rich data lives in the findings table. The renderer fetches title + severity from the backend per slug. |
