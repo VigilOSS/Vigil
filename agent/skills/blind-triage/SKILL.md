@@ -27,6 +27,8 @@ submission in place:
 
 - format and structure,
 - AI-tells (Rule 20 human-voice check),
+- PoC script hygiene (`bugbounty-submission-format.md` § "PoC Script Authoring" — minimal,
+  de-harnessed, no decorative banners or agent-env handling),
 - CVSS stated exactly once and consistent with the claimed severity,
 - repro-step correctness,
 - overclaim language ("I" vs "H" — impact-claimed vs impact-proven).
@@ -130,10 +132,15 @@ on any of them should **not** get an `Accept`:
 7. **By-design behavior called a vuln** — anonymous/public-by-design flows (public
    intake, self-registration, password-reset *request*, public search) where the anonymity
    is the intended UX, not a bug.
+8. **Documented capability with no proven boundary break** — the vendor's own docs
+   describe the exact behavior demonstrated, and the submission does not show a
+   boundary the docs mark as protected actually being crossed (C7). "The docs say
+   this is possible, and it sounds dangerous" is not the same as "the docs say
+   this must not happen, and it happened."
 
 ## Cross-references
 
-- `agent/references/finding-fp-and-severity-gate.md` — the in-context C1–C6
+- `agent/references/finding-fp-and-severity-gate.md` — the in-context C1–C7
   FP/severity-downgrade gate the vulnerability-analyst runs at Phase-4
   verification (the same overclaim catalog, applied earlier in the lifecycle and
   *with* context). This blind gate is the late, zero-context safety net before

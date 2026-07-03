@@ -103,6 +103,64 @@ Rules for the PoC block:
 - Use the actual file extension. Do not normalize everything to `.sh`.
 - If setup requires manual prerequisites (running a server, creating a test account), document them with `# SETUP:` comments inside the script, not in the PoC block.
 
+## PoC Script Authoring
+
+The attached PoC is a standalone artifact a stranger reads cold. It is **not** the internal
+exploit playbook (`tools/exploit-state/playbook-<slug>.sh`, `agent/skills/exploit-playbook-authoring/SKILL.md`)
+copied verbatim — that playbook is written for the operator to replay inside the engagement and is
+allowed to be verbose, annotated, and full of engagement-specific plumbing. The submission PoC is
+written for a triager who has none of that context and is actively looking for reasons to distrust
+it. Write it separately, minimal, and clean, even when it reproduces the same steps.
+
+**Minimal by default.** Fewest lines that still produce the decisive observable — a busy triager
+runs a 25-line script and is suspicious of a 90-line one. Scale to what the vulnerability actually
+needs: a single injected payload needs a handful of lines; a race condition, a multi-step auth
+chain, or a blind OOB confirmation legitimately needs more. Match the length to the proof, not to
+how thorough the investigation felt while building it — cut every step, retry loop, or diagnostic
+that does not change what the triager sees at the end.
+
+**No decorative harness.** No ANSI color codes, no `hdr()`/`pass()`/`fail()`/`note()`-style banner
+helper functions, no boxed section dividers, no emoji status markers. A plain `print`/`echo` of the
+observed value is enough — the narration belongs in the submission's Evidence section, not in the
+script's own stdout theater. Colorized, banner-heavy output is a CTF-harness convention; a human
+proving a bug to a stranger does not build a test framework first.
+
+**No docstring or self-summary.** Do not open the script with a multi-paragraph comment block
+restating the vulnerability class, the CWE, the attack flow design rationale, or a copy of the
+submission's own Summary section. One line naming what the script does is enough — the submission
+body already carries the narrative; repeating it in the script reads as a template being filled in,
+not a script someone wrote to check something.
+
+**De-harness: strip anything that reveals the PoC was authored or run inside an AI-agent sandbox.**
+This is the single most damaging provenance leak, because it directly answers "who/what produced
+this" rather than merely reading as stylistically odd:
+- No code that inspects, unsets, or branches on agent-identifying environment variables
+  (`CLAUDECODE`, `CURSOR_AGENT`, `CURSOR_TRACE_ID`, `GEMINI_CLI`, `CODEX_SANDBOX`, `CODEX_CI`,
+  `COPILOT_*`, `OPENCODE_CLIENT`, `REPL_ID`, or equivalents from any harness). A human running this
+  from their own terminal has none of these set and no reason to ever reference them — a script that
+  strips them proves someone anticipated an agent-detection check, which itself proves an agent wrote
+  it.
+- No tool-hint comments, plugin banners, or references to the harness that built or ran it (agent
+  names, dispatch IDs, "MANUAL:" operator-handoff annotations, container/runtime paths specific to
+  this engagement).
+- If the target's own agent-detection logic is genuinely part of the mechanism (e.g., the app
+  branches on an `isAgent` signal and the PoC must reach the human-path branch to trigger), name that
+  **once**, as a single mechanism sentence in the submission body ("run outside an agent harness to
+  reach the default interactive code path") — do not leave the strip-list itself inside the shipped
+  script.
+
+**Default to one file.** Don't split into a script plus `README.md` plus `REPRODUCE.md` plus
+`OPERATOR-INSTRUCTIONS.md` — that bundling belongs in the internal report, not the submission. Use a
+second file only when the exploit genuinely requires a second running component (a callback stub
+server, a payload the target must fetch) — never to hold instructions or narrative that the PoC block's
+`**Run:**` line and the submission body already carry.
+
+**Prove it in a clean environment.** Before attaching, re-run the PoC in a fresh shell/clone/account
+outside of any agent session, and confirm the submission's output matches that run rather than a
+cached one (see the pre-submission checklist below). This is both a correctness check — it proves the
+PoC does not silently depend on agent-harness state — and a provenance check: a script that only
+works inside the sandbox that wrote it is a script that leaks its own origin.
+
 ## Section budgets
 
 These are hard ceilings. A section that exceeds its budget needs to be cut, not wrapped.
@@ -171,7 +229,13 @@ Verify every item before handing the submission file to the operator. Any failin
 - [ ] No internal finding slugs, engagement paths, or tool run IDs anywhere in the body
 - [ ] Remediation names a specific technology and control, not generic advice — ≤3 items, no "validate the fix" item
 - [ ] PoC form matches the reproduction: inline-only → no block; script → PoC block with correct extension, `**Run:**` command, and one-line `**Pass if:**`; multi-file → all files listed in the block
-- [ ] The PoC was re-run in a clean environment (fresh clone or fresh account) and the submission's output matches that run, not a cached result
+- [ ] The PoC was re-run in a clean environment (fresh clone or fresh account, outside any agent session) and the submission's output matches that run, not a cached result
+- [ ] PoC script is minimal — no line exists that does not contribute to the decisive observable; a reviewer unfamiliar with the finding could read it end to end in under a minute
+- [ ] No ANSI colors, banner/box-drawing output, or `hdr()`/`pass()`/`fail()`-style status helper functions in the PoC script
+- [ ] No docstring-style header block restating the vulnerability class, CWE, or summary at the top of the PoC script
+- [ ] No code in the PoC script inspects, unsets, or branches on agent-identifying environment variables (`CLAUDECODE`, `CURSOR_AGENT`, `GEMINI_CLI`, `CODEX_SANDBOX`, `COPILOT_*`, or equivalent) or references the harness/agent that produced it
+- [ ] The submission is one script by default; a second file exists only if the exploit requires a second running component, never to hold instructions or narrative
+- [ ] Safety framing ("offline", "FAKE token", "localhost-only") appears once, in the setup — not restated at every step; it is kept separate from sentences explaining the vulnerability's mechanism
 
 **Human voice — AI tell elimination (Rule 20)**
 - [ ] No "Defender-positive", "Dead ends", "Negative findings", or "What was ruled out" section or sub-section exists anywhere in the submission
