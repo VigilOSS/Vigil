@@ -31,6 +31,8 @@ DB="$DIR/cases.db"
    - **Cross-lane politeness = disjoint hosts.** Assign lanes **disjoint hosts** wherever possible, and cap target-facing concurrency at **≤1 active target-facing tool per host across all lanes** (the I-013 disjoint-host concurrency rule: concurrent in-container probes against the same host thrash the resolver and risk false negatives). Tie this to the per-target rate calibration (`agent/references/runtime-guides/dispatch-resource-policy.md`) and the named-identity `--identity` disjointness (Credential Auto-Use → Named identities). This is a politeness/safety CUE, not a CLI-enforced gate.
    - **Bookend the fan-out.** Each focused target's fan-out is bracketed by the two Mandatory Phase-Exit Passes: the per-finding variant/sibling pass (Verify → Exploit) per confirmed finding, and the cross-target chain-construction pass (Exploit → Report), which runs **across** targets after each target's fan-out completes. See "Mandatory Phase-Exit Passes".
 
+   ### Lens Vocabulary — Finer-Grained Failure-Family Lenses
+
    **Dispatch one mindset lens per specialist; cycle across batches.** Name exactly ONE mindset lens per Pass-2/Pass-3 dispatch — a family of related developer assumptions that fail together — never a menu the specialist chooses from. A lens is not a bug: it describes *how the developer was thinking*, so the specialist derives its own hypotheses instead of executing a pre-named checklist; naming the bug caps depth at the operator's guess, naming the lens lets the specialist generalize to every surface the family touches. Beyond the current `agent/rules/mindsets/` library files, these finer-grained failure-family lenses remain valid to name explicitly when the signal is more specific than a family file — most map onto `developer.md`'s cognitive-state patterns or `business-logic.md`'s state-machine lens:
 
    | Lens | What fails together |
@@ -44,11 +46,14 @@ DB="$DIR/cases.db"
 
    **Lens rotation:** a winning lens on a worked surface → re-run it on NEW surfaces (the same failure mode recurs wherever the same developer pattern exists); a fresh lens on an already-worked surface → dispatch it now (a surface proven clean under caching assumptions may still be vulnerable under race or upload assumptions). Cycle mindsets/lenses across batches — the operator names the surface and the mindset/lens, the specialist originates every hypothesis under it.
 
+   ### Mid-Phase Cadence
+
    **Run the readiness check every few batches, not just at the end.** Run `check-phase-readiness` (the consolidated readiness command) every few dispatch batches during the phase — it is an advisory, EV-ranked view of what is under-covered and where the depth is thin, and it steers the next batch toward the gaps. Treating it as an end-of-phase gate only surfaces the gaps after the cheap moment to fill them has passed.
 
    **Read the coverage ledger to spot uncovered real-app hosts.** `vigil assess coverage` is the read-only, per-host coverage **LEDGER** — a reporting projection, NOT a gate. For each in-scope host it shows the live `route_count`, whether it is a `real_app?` (≥ `--route-threshold` distinct LIVE routes OR an exposed API/auth/GraphQL surface, OR-included even under the threshold), whether it has a `recorded-verdict?`, and the computed **coverage-state**. A host counts as **covered** ONLY with a *recorded verdict* — a finding, or an evidence-backed-negative such as a `false_positive` decision — NOT a merely completed dispatch. The ledger surfaces the gaps the later `check-phase-readiness` gate will block on: `uncovered` real-app hosts that still need a lane, and hosts flagged `needs_browser_reprobe` (curl undercounts routes behind a WAF, so re-probe with a browser before treating the host as thin/dead). Use it as the at-a-glance "which in-scope host has no verdict yet" view between batches; pass `--json` for the structured ledger.
 
-   Steps:
+   ### Steps
+
    a. **Nuclei coverage audit** (once, before the work-buffer loop) — audit what Phase 1/2 reactive sweeps already covered and run nuclei only against gaps. Do not blindly re-sweep: if every in-scope live host already received the reactive template set, this step prints a coverage summary and advances.
       1. Build the coverage set: `vigil assess list-command-runs --q nuclei --tool-bin nuclei` → jq-extract each prior run's input-list path and template tag(s).
       2. Compute gaps: live targets ∖ covered hosts (and/or template sets the reactive passes did not exercise).

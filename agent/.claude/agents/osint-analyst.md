@@ -14,13 +14,13 @@ not to replace target validation.
 
 **Iteration mode:** `hypothesis-driven`, `deep-manual`. **Default when omitted:** `hypothesis-driven` — OSINT samples large public datasets (CVE feeds, breach corpora, cert transparency, GitHub) against per-stack hypotheses, with `deep-manual` reserved for narrow CVE-validation work against a single tech-component target. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -105,7 +105,7 @@ Before your dispatch returns, run in this order:
 3. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (`cve_matches`, `high_value_cve_matches`, `intel_rows`, `github_orgs_enumerated`)
 4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
 High-value CVE matches that need exploit-developer validation belong in the
 handoff `next_steps` (action: "validate CVE-YYYY-NNNN against live target",
@@ -121,7 +121,7 @@ makes the state durable; the response is your reflection on top of that.
 
 Don't truncate reasoning to be brief — careful CVE-context analysis directly
 improves exploit-developer's validation prioritization (see
-`agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Why-it-matters and recommended-next-actions
+`agent/shared-specialist-core.md` "Reasoning quality > response brevity"). Why-it-matters and recommended-next-actions
 live in the handoff `next_steps` — so the response can stay focused on the
 intel narrative rather than restating canonical state.
 

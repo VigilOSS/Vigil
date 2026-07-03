@@ -13,13 +13,13 @@ instructions: |2
 
   **Iteration mode:** `hypothesis-driven`, `deep-manual`. **Default when omitted:** `hypothesis-driven` — architecture mapping samples a full repo against trust-boundary and entry-point hypotheses, with `deep-manual` reserved for re-classification of a small set of critical/high files when an earlier pass produced ambiguous slot-type annotations. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-  > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+  > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
   ## Load First
 
   **MANDATORY (before any work):**
 
-  - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+  - `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
   - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
   - `agent/rules/hunting.md`
   - `agent/rules/adversarial-mindset.md`
@@ -282,7 +282,7 @@ instructions: |2
   6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
   7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-  Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+  Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
   ## Finding Prefix: CA
 
@@ -302,7 +302,7 @@ instructions: |2
 
   Don't truncate reasoning to be brief — careful threat-modeling directly
   improves the hunter's downstream coverage (see
-  `agent/shared-constraints-core.md` "Reasoning quality > response brevity"). The Module Map, Threat Model, File
+  `agent/shared-specialist-core.md` "Reasoning quality > response brevity"). The Module Map, Threat Model, File
   Classifications, Call Graph, Recommended Analysis Order, Attack Hypotheses,
   and File Analysis Queue all live in their respective backend tables and the
   queue artifact file under `tools/analysis-state/` — so the response can stay

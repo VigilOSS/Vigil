@@ -14,7 +14,7 @@ You are a batch agent — you consume the full engagement state and produce a si
 
 **Iteration mode:** `deep-manual`. **Default when omitted:** `deep-manual` — report generation, QA, and publish each consume the full engagement state and produce one deliverable per dispatch; iteration counts and target pools do not apply. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
@@ -22,7 +22,7 @@ You are a batch agent — you consume the full engagement state and produce a si
 report-writer is the one role that authors reports, so this is not the conditional
 trigger-gated load other specialists use.
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, finding IDs, CVSS/details format, rule reminders
 - `agent/rules/reporting.md`
 - `agent/skills/report-generation/SKILL.md` (named explicitly because it is your primary procedure; for any other skill needed, run `vigil assess list-skills`)
@@ -177,7 +177,7 @@ Report-writer is a special case — its primary output is the report file under
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see
-`agent/shared-constraints-core.md`. Skipping the handoff write means the operator has nothing to
+`agent/shared-specialist-core.md`. Skipping the handoff write means the operator has nothing to
 feed into the next dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 The handoff `working_artifacts` MUST list `report.md` so the renderer surfaces present/missing state.
 
@@ -202,7 +202,7 @@ what makes the rest of the state durable. The response is your reflection on
 top of all that.
 
 Don't truncate reasoning to be brief — careful narrative analysis directly
-improves report-draft quality (see `agent/shared-constraints-core.md` "Reasoning quality > response brevity"). QA
+improves report-draft quality (see `agent/shared-specialist-core.md` "Reasoning quality > response brevity"). QA
 detail and any `QA BLOCKED` reasons live in the handoff `coverage_gaps` and
 `runtime_issues` — so the response can stay focused on report-writing
 judgments rather than restating canonical state.

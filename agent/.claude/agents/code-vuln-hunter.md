@@ -35,13 +35,13 @@ Every mindset — baseline or injected — is a generative lens, not a cage: it 
 it does not enumerate the full list of what you'll find. The bug class the lens didn't name is
 still yours to pursue if the code shows it.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-constraints-core.md` -- specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` -- specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` -- scope, filesystem access, anti-rationalization rules, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -590,7 +590,7 @@ Before your dispatch returns, run in this order:
 3. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
 4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
 Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
@@ -609,7 +609,7 @@ are what makes the state durable; the response is your reflection on top of
 that.
 
 Don't truncate reasoning to be brief — careful vulnerability-hunting analysis
-is the core of TOB-style audit quality (see `agent/shared-constraints-core.md` "Reasoning quality > response brevity").
+is the core of TOB-style audit quality (see `agent/shared-specialist-core.md` "Reasoning quality > response brevity").
 Per-file dispositions, CWE coverage breakdowns, and cross-file trigger lists
 all live in the analysis rows — so the response can stay focused on hunt
 narrative rather than restating canonical state.

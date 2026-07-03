@@ -27,13 +27,13 @@ The injected lens is a generative frame, not a cage: it primes which payload fam
 rotating first, it does not enumerate the full set you're allowed to try. The sibling wordlist,
 encoding variant, or adjacent parameter family the lens didn't name is still yours to fuzz.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -89,7 +89,7 @@ Before your dispatch returns, run in this order:
 4. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at the raw fuzzer hit log under `$DIR/scans/fuzzer/`), and role-specific extras (`payloads_tried`, `hits`, `hit_ratio`)
 5. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
 Anomalies that need vulnerability-analyst follow-up belong in the handoff
 `next_steps` (action: "validate the N anomalous responses", recommended_agent:
@@ -106,7 +106,7 @@ the response is your reflection on top of that.
 
 Don't truncate reasoning to be brief — careful anomaly-signal analysis directly
 improves vulnerability-analyst's downstream validation work (see
-`agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Hit details live in the raw hit log under
+`agent/shared-specialist-core.md` "Reasoning quality > response brevity"). Hit details live in the raw hit log under
 `$DIR/scans/fuzzer/` (linked via `working_artifacts`) and anomaly-triage actions
 live in `next_steps` — so the response can stay focused on signal interpretation
 rather than restating canonical state.

@@ -111,8 +111,7 @@ vigil assess artifact register <path> \
   --finding <finding-slug> \
   --agent-id <id> \
   --command-run-id <id> \
-  [--sensitive] \
-  [--scratch]
+  [--sensitive]
 ```
 
 Register each durable output explicitly — explicit registration preserves the
@@ -122,13 +121,15 @@ The backend computes SHA-256, FTS-indexes a preview, and links the artifact to
 its producer agent (`producer_agent_id`, `producer_agent_role`), the originating
 command run (`producer_command_run_id`), and the finding it substantiates
 (`related_finding_slug`). The `assessment_artifacts` table at
-`orchestrator/backend/app/db.py:1652` is the schema source of truth.
+`orchestrator/backend/app/db.py:1766` is the schema source of truth.
 
 Use `--sensitive` for PII-bearing exports (mailbox content, full sign-in
 history, IAM principal listings) so the FTS preview is suppressed but the
-hash + linkage remain auditable. Use `--scratch` (or
-`vigil assess artifact mark-scratch --under notes/scratch/` for bulk) on
-transient working notes that should not appear in resume briefs or reports.
+hash + linkage remain auditable. `register` has no inline scratch flag — mark
+transient working notes as scratch in a separate call, either
+`vigil assess artifact mark-scratch <artifact-id>` for one artifact or
+`vigil assess artifact mark-scratch --under notes/scratch/` for bulk, so they
+do not appear in resume briefs or reports.
 
 **Manual `shasum -a 256 ... > SHA256SUMS.txt` is deprecated.** The backend
 computes SHA-256 on register/refresh into `assessment_artifacts.sha256`. The
@@ -157,20 +158,11 @@ strings, and JSON payloads.
 
 ## 5. 30-day default look-back
 
-Initial-access events routinely precede user-visible symptoms by 7–30 days.
-Default audit window: **T-30d from the earliest plausible trigger**, not from
-"when the user noticed."
-
-Extend on boundary: if anomalous events cluster near 30 days, push to T-60d.
-Trigger sources in priority:
-
-1. Earliest log event the alert cites
-2. Earliest related event in the same actor's session timeline
-3. Earliest related event in the same target's session timeline
-4. User-reported observation timestamp (lower bound only — never the upper bound)
-
-Short look-back misses initial-access. Explaining a finding without its
-entry point to the client costs more than 30 days of audit pulls upfront.
+Full rule (the trigger-source priority order, the T-60d boundary extension, the
+initial-access rationale) is canonical in `agent/rules/triage.md` §6 — every blue
+specialist already loads that file as an always-active rule, so it is not restated
+here. The one number to carry into every telemetry pull: default audit window is
+**T-30d from the earliest plausible trigger**, not from "when the user noticed."
 
 ---
 
@@ -429,7 +421,7 @@ agents cannot query unindexed local files.
    means the `agent_id` in step 6 did not match the registered dispatch — fix
    and re-handoff before returning.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 The seven steps above are the blue-specific closing verbs. Checkpoint after
 each major step (after the initial audit pull, after the correlation pass,

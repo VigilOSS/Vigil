@@ -117,6 +117,19 @@ def test_record_attempt_rejects_covering_status(tmp_path, monkeypatch, capsys):
     assert fake.posts == []
 
 
+def test_record_attempt_rejects_covering_only_link_flags(tmp_path, monkeypatch, capsys):
+    """FK-link flags (--coverage-item-id etc.) are covering-only (record-probe);
+    record-attempt registers with include_links=False, so argparse rejects them."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    with pytest.raises(SystemExit):
+        _parse(
+            ["record-attempt", "--result-status", "blocked", "--attack-family", "ssrf", "--coverage-item-id", "77"],
+            str(tmp_path),
+        )
+    assert fake.posts == []
+
+
 def test_record_attempt_resolves_finding_slug(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(findings={"VA-047": {"id": 91, "slug": "VA-047"}})
     _install(monkeypatch, tmp_path, fake)
