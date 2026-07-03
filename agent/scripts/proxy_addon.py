@@ -1088,15 +1088,18 @@ class CaseCollector:
         headers: dict,
         tokens: dict,
     ) -> None:
-        """POST a captured credential delta to the backend, which merges it into
-        the engagement's ``default`` identity (host-cookie buckets, flat cookie
-        recompute, header/token merge). Mirrors ``_post_request_observation``.
+        """POST a captured credential delta to the backend, which DERIVES the
+        session identity server-side from the delta's session-anchor material
+        (session-hint cookies + JWT/bearer sub) and merges into that identity —
+        appending a new row for a distinct login, refreshing the row for the same
+        login (host-cookie buckets, flat cookie recompute, header/token merge).
+        The addon stays a thin client and posts no identity_name. Mirrors
+        ``_post_request_observation``.
         """
         if not self._backend_configured():
             self._warn_backend_unavailable()
             return
         payload = {
-            "identity_name": "default",
             "host": host,
             "scope_host": scope_host,
             "cookies": cookies,

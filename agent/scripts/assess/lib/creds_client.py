@@ -200,6 +200,27 @@ def put_identity(
     return result
 
 
+def persist_liveness(
+    engagement_dir: str | Path,
+    identity_name: str,
+    verdict: str,
+    probed_at: str | None = None,
+) -> dict[str, Any]:
+    """Persist an LLM-owned per-session liveness verdict (WS4).
+
+    POSTs to ``/credentials/{identity}/liveness`` so the backend reconciles the
+    session's ``state`` (dead->dead, live->available clearing a stale flag,
+    unknown->state untouched). Invalidates the per-process cache so a subsequent
+    read reflects the new verdict. Returns the updated material.
+    """
+    payload = {"verdict": verdict, "probed_at": probed_at}
+    result = _client(engagement_dir).post_engagement(
+        f"credentials/{quote(str(identity_name), safe='')}/liveness", payload
+    )
+    invalidate_cache(engagement_dir)
+    return result
+
+
 def set_active(engagement_dir: str | Path, identity_name: str) -> dict[str, Any]:
     result = _client(engagement_dir).post_engagement(
         f"credentials/{identity_name}/activate", {}

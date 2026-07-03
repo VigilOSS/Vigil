@@ -506,9 +506,9 @@ A lightweight runtime also exists at `agent/docker/runtime-lightweight/Dockerfil
 
 ### Authentication
 
-A new engagement starts with no stored credentials (anonymous). Engagement credentials live in the orchestrator backend (the `engagement_credentials` table, one record per `(engagement, named identity)`) and are managed entirely through the `vigil auth` CLI — there is no `auth.json` file on disk. Three ways to add an authenticated session later:
+A new engagement starts with no stored credentials (anonymous). Engagement credentials live in the orchestrator backend (the `engagement_credentials` table, one record per `(engagement, identity)`) and are managed entirely through the `vigil auth` CLI — there is no `auth.json` file on disk. Three ways to add an authenticated session later:
 
-- Run `vigil mitmproxy start` (one proxy serves every active engagement) and browse through `127.0.0.1:8080` — `proxy_addon.py` matches the captured host against each engagement's `scope.json` and POSTs the captured cookies/headers to THAT engagement's credential store (the `default` identity). No engagement context is required at proxy-start time; multiple engagements can be authenticated in parallel without restarting the proxy.
+- Run `vigil mitmproxy start` (one proxy serves every active engagement) and browse through `127.0.0.1:8080` — `proxy_addon.py` matches the captured host against each engagement's `scope.json` and POSTs the captured cookies/headers to THAT engagement's credential store. Capture is append-only and multi-identity: the identity name is derived server-side from the login's session-anchor cookies (or a JWT `sub`), so a second, distinct login on the same host appends a new identity instead of overwriting the first, while reloading the same login refreshes that one identity in place. No engagement context is required at proxy-start time; multiple engagements can be authenticated in parallel without restarting the proxy.
 - Run `vigil auth import <key> --source cookies-and-headers.json`.
 - Run `vigil auth edit <key>` to fetch the current identity, edit it in `$EDITOR`, and save it back.
 
@@ -517,9 +517,10 @@ Each credential record carries:
 - `use_for_requests`: whether crawling/recollection should apply the stored auth
 - `auth_context`: the label used for authenticated request variants
 - `expires_at`: optional ISO8601 expiry timestamp
+- `state` (`available`/`stale`/`dead`/`expired`) and freshness fields (`created_at`, `last_seen_at`, `liveness_verdict`, `last_probed_at`)
 - `cookies` and `headers`
 
-If auth is expired or missing, the workflow warns and continues anonymously.
+A session with no fresh capture for 8h is flagged `stale` (advisory — re-probe it); one with no fresh capture for 5 days is purged. Age never marks a session `dead` — only a proven-dead liveness probe does. If auth is expired, dead, or missing, the workflow warns and continues anonymously.
 
 CLI helpers operate on the backend credential store for an engagement:
 
@@ -531,6 +532,14 @@ vigil auth import <engagement-key> --source cookies-and-headers.json
 vigil auth set-active <engagement-key> --identity user_a
 vigil auth clear <engagement-key>
 ```
+
+Agents list every stored identity for a host — name, `auth_context`, `state`,
+liveness verdict, age, and cookie names (never raw values), with the active
+identity marked `*` — via `vigil assess auth list --host <host>
+[--include-dead] [--json]`, and prove a specific identity's liveness before
+trusting it with `vigil assess auth-status --probe --identity <name>
+--probe-url <authed-url>` (operator equivalent: `vigil auth status --probe
+--identity <name> --probe-url <authed-url>`).
 
 ## Optional Tool Activation
 
@@ -547,13 +556,14 @@ These capabilities are intentionally present but not always started automaticall
 `vigil engagement create` prints whether mitmproxy is running and the start command if it is not. This subsection is the deep reference.
 
 1. `vigil mitmproxy start` — the CLI builds the Docker image if needed, bind-mounts the install's `agent/engagements/` directory at `/engagements` (so the addon sees every engagement at once), persists the mitmproxy CA in a Docker volume, and verifies the local proxy port. No engagement context is required.
-2. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow against any scoped host, then confirm that the matching engagement's stored credentials were refreshed (`vigil auth status <key>`). Continue with authenticated recollection and testing. Use `vigil logs mitmproxy` for capture logs.
+2. Route the browser or test device through `http://127.0.0.1:8080`, complete the login flow against any scoped host, then confirm that the matching engagement's stored credentials were refreshed (`vigil auth status <key>`, or `vigil assess auth list --host <host>` for the full identity list). Continue with authenticated recollection and testing. Use `vigil logs mitmproxy` for capture logs.
+3. To hold a second identity for cross-account (IDOR/BOLA) testing, log in as the other account through the same proxy — the addon detects the different session-anchor material and appends a new identity rather than overwriting the first.
 
 The addon routes each captured response to the engagement whose `scope.json` best matches the hostname (precedence: literal host > narrower wildcard > engagement `scope_priority` > most-recently-updated). After creating or scope-editing an engagement, `vigil mitmproxy reload` forces the addon to refresh its registry; `vigil mitmproxy routes` prints the current mapping for verification.
 
 If you need HTTPS interception, install the mitmproxy CA certificate in the browser or device before logging in.
 
-In the engagement flow, this usually happens during `recon` or `collect` when anonymous coverage is insufficient, or later when a previously working authenticated session has expired.
+In the engagement flow, this usually happens during `recon` or `collect` when anonymous coverage is insufficient, or later when a previously working authenticated session has expired or gone `dead` (proven with `vigil auth status --probe --identity <name> --probe-url <authed-url>`).
 
 ### ctags for code analysis
 
@@ -634,7 +644,7 @@ actually saying. Override the wait via the `frpc_ready_timeout` argument to
 | `vigil engagement create \| list \| start \| path \| cd-init` | Create and drive engagements. |
 | `vigil assess ...` | Operator assessment surface (recon/findings/artifacts/kali tool verbs/resume). |
 | `vigil blue ...` | Blue incident-response surface (customers, tenant init, engage, dispatch, contain, closeout, report). |
-| `vigil auth status \| show \| import \| edit \| clear \| export \| set-active` | Manage engagement credentials in the backend store. |
+| `vigil auth status [--probe --identity <name> --probe-url <url>] \| show \| import \| edit \| clear \| export \| set-active` | Manage engagement credentials in the backend store; `status --probe` proves a specific identity's liveness. |
 | `vigil mitmproxy start \| reload \| routes` | Manage the shared MITM proxy. |
 | `vigil oob start \| status \| client \| test` | Manage shared OOB (frp + interactsh). |
 | `vigil config get \| set` | Read/write persistent CLI config (including OOB/FRP settings). |

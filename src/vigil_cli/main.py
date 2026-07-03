@@ -1613,6 +1613,15 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
                 detail += f"\thttp_status={result['http_status']}"
             if result.get("error"):
                 detail += f"\terror={result['error']}"
+            # WS4 opt-in persistence: when a SPECIFIC identity is probed, persist
+            # the classified verdict (live->available, dead->dead, unknown leaves
+            # state untouched — never a false verdict). The active-identity probe
+            # (no --identity) stays read-only.
+            if identity:
+                persisted = auth_module.persist_liveness(
+                    engagement, identity, result["liveness"]
+                )
+                detail += f"\tpersisted={bool(persisted)}"
             print(f"liveness={result['liveness']}\t{detail}")
     elif args.auth_command == "show":
         print(json.dumps(auth_module.read_auth(engagement), indent=2, sort_keys=True))

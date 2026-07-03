@@ -23,7 +23,7 @@ Read `scope.json` before making target-facing decisions. Confirm:
   proceeds (`pause` and `selected` are mechanically identical); `full_send` bypasses that review
   gate entirely
 - Auth state from the engagement's backend credential store (`vigil auth status`) — use credentials only when a record is populated and marked active
-  - Liveness is ground truth: a populated/active record is NOT proof the session is live — never trust cookie presence or the `stale` flag. There is NO auto-detection of where a site handles auth; to confirm with `vigil auth status --probe --probe-url <authed-endpoint>` you MUST first declare `material.liveness = {expect_status, authed_marker, dead_marker}` (via `vigil auth import`/`edit`). Pick an `authed_marker` that appears ONLY when logged in (the logged-in username, an account/settings link, a per-user CSRF token field) and a `dead_marker` from the login page — the same logged-in/logged-out markers a DAST scanner (InsightAppSec/Burp) uses to validate a session. No signature ⇒ liveness stays `unknown`.
+  - Liveness is ground truth: a populated/active record is NOT proof the session is live — never trust cookie presence or the `stale` flag. Enumerate what's stored for a host with `vigil assess auth list --host <host> [--include-dead] [--json]` (identity name, `auth_context`, `state`, liveness verdict, age, cookie names only — never raw values; active identity marked `*`). Whoever takes an identity for a task owns proving it live: there is NO auto-detection of where a site handles auth, so first declare `material.liveness = {expect_status, authed_marker, dead_marker}` on that identity (via `vigil auth import`/`edit`), then probe it BY NAME with `vigil assess auth-status --probe --identity <name> --probe-url <authed-endpoint>` before trusting any result or recording a "dead"/"unreachable" verdict. Pick an `authed_marker` that appears ONLY when logged in (the logged-in username, an account/settings link, a per-user CSRF token field) and a `dead_marker` from the login page — the same logged-in/logged-out markers a DAST scanner (InsightAppSec/Burp) uses to validate a session. Redirects are never followed; `live` clears a `stale` mark, `dead` is set only by a proven-dead probe, and no signature or a transport error ⇒ liveness stays `unknown` — never a false verdict.
 
 `exploit_policy` governs *exploitation*, and it is resolved once **before** dispatch — not a
 per-action approval you re-request mid-task. The invariants that hold regardless of its value: stay
@@ -579,7 +579,7 @@ warns on stderr when `$ENGAGEMENT_DIR` disagrees with the resolved engagement.
 Record state immediately using `vigil assess` with JSON files:
 
 - **Attack chains:** `vigil assess record-chain <agent-name> <chain-json-file>`
-- **Credentials:** `vigil assess post credentials <credential-json-file>`
+- **Credentials:** `vigil assess post credentials <credential-json-file>` — recording a discovered credential (`status=discovered`) automatically flags a candidate finding and, when the secret is a session artifact (a session-hint cookie or a bearer/JWT), mints a usable identity from it and cross-links the two; a plain password records as intel plus a candidate finding only. List every identity a host holds with `vigil assess auth list --host <host> [--include-dead] [--json]`.
 - **Credential tests:** `vigil assess post credential-tests <json-file>`
 - **Access records:** `vigil assess post access-records <json-file>`
 - **Coverage updates:** `vigil assess patch coverage-items/<id> <json-file>`

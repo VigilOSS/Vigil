@@ -654,6 +654,20 @@ def _create_core_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+# Additive column spec for engagement_credentials (multi-identity session store,
+# 2026-07). New freshness/liveness columns are appended here so an existing DB
+# created before they existed upgrades cleanly via the same _table_columns
+# pattern used for assessment_http_flows. All nullable — populated by upsert
+# (created_at/last_seen_at) or by the liveness probe (liveness_verdict/
+# last_probed_at); the age sweep tolerates NULL last_seen_at.
+_CREDENTIAL_ADDITIVE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("created_at", "TEXT"),
+    ("last_seen_at", "TEXT"),
+    ("liveness_verdict", "TEXT"),
+    ("last_probed_at", "TEXT"),
+)
+
+
 def _create_credentials_table(connection: sqlite3.Connection) -> None:
     """Centralized per-engagement credential store (replaces auth.json).
 
@@ -686,12 +700,30 @@ def _create_credentials_table(connection: sqlite3.Connection) -> None:
                 raw_json TEXT NOT NULL DEFAULT '{}',
                 notes TEXT NOT NULL DEFAULT '',
                 expires_at TEXT,
+                created_at TEXT,
+                last_seen_at TEXT,
+                liveness_verdict TEXT,
+                last_probed_at TEXT,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, identity_name),
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
             )
             """
     )
+    # Additive migration for pre-existing DBs (mirrors the assessment_http_flows
+    # pattern): ALTER-in any freshness/liveness column absent from an older
+    # on-disk schema. Fresh DBs already have every column via CREATE TABLE above,
+    # so this only backfills. All new columns are nullable (no backfill value):
+    # created_at/last_seen_at populate on the next upsert, and the age-backstop
+    # sweep skips rows whose last_seen_at is NULL (no false hard-delete of a row
+    # that predates the column).
+    credential_columns = _table_columns(connection, "engagement_credentials")
+    if credential_columns:
+        for column_name, column_ddl in _CREDENTIAL_ADDITIVE_COLUMNS:
+            if column_name not in credential_columns:
+                connection.execute(
+                    f"ALTER TABLE engagement_credentials ADD COLUMN {column_name} {column_ddl}"
+                )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_engagement_credentials_engagement "
         "ON engagement_credentials(engagement_id)"
@@ -699,6 +731,11 @@ def _create_credentials_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_engagement_credentials_active "
         "ON engagement_credentials(engagement_id, is_active DESC, identity_name)"
+    )
+    # Ordering + the age-backstop sweep both scan by (engagement, last_seen_at).
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_engagement_credentials_last_seen "
+        "ON engagement_credentials(engagement_id, last_seen_at DESC)"
     )
 
 
@@ -3408,6 +3445,79 @@ def get_engagement_by_key(key: str) -> Engagement | None:
 # Engagement credentials (centralized auth store — replaces auth.json)
 # ---------------------------------------------------------------------------
 
+# Age backstops (multi-identity session store, 2026-07). Mirrors the
+# host_liveness TTL-on-read pattern (command_runs._HOST_LIVENESS_TTL_SECONDS):
+# a lazy sweep runs at the start of every credential read. Age NEVER marks a
+# session `dead` (only a failed liveness probe does) — it soft-flags `stale`
+# (LLM must re-probe) then hard-deletes.
+_CRED_STALE_TTL_SECONDS = 8 * 3600           # 8h since last_seen -> stale
+_CRED_HARD_DELETE_TTL_SECONDS = 5 * 24 * 3600  # 5 days since last_seen -> delete
+
+
+def _parse_cred_timestamp(value: Any) -> datetime | None:
+    """Parse a credential timestamp to an aware UTC datetime, or None.
+
+    Tolerates both the canonical capture/upsert format written here
+    (``YYYY-MM-DDTHH:MM:SSZ``) and the SQLite ``CURRENT_TIMESTAMP`` default
+    (``YYYY-MM-DD HH:MM:SS``) that older ``updated_at`` values carry, so the age
+    sweep never trips on a legacy timestamp shape.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    v = value.strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(v, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    try:
+        parsed = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _sweep_credential_age(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Lazy age-backstop sweep, run at the start of every credential read.
+
+    ``now - last_seen_at > 8h`` and state not already ``dead`` -> persist
+    ``stale`` (advisory; the row stays listed so the LLM re-probes it).
+    ``> 5 days`` -> hard-DELETE the row. Rows with a NULL/unparseable
+    ``last_seen_at`` (predate the column) are left untouched — no backstop
+    rather than a false purge. Operates on the caller's (thread-local)
+    connection so it commits with the surrounding read.
+    """
+    now_dt = now or datetime.now(timezone.utc)
+    rows = connection.execute(
+        "SELECT id, last_seen_at, state FROM engagement_credentials "
+        "WHERE engagement_id = ?",
+        (engagement_id,),
+    ).fetchall()
+    to_delete: list[tuple[int]] = []
+    to_stale: list[tuple[int]] = []
+    for row in rows:
+        seen = _parse_cred_timestamp(row["last_seen_at"])
+        if seen is None:
+            continue
+        age = (now_dt - seen).total_seconds()
+        if age > _CRED_HARD_DELETE_TTL_SECONDS:
+            to_delete.append((row["id"],))
+        elif age > _CRED_STALE_TTL_SECONDS and row["state"] != "dead" and row["state"] != "stale":
+            to_stale.append((row["id"],))
+    if to_delete:
+        connection.executemany(
+            "DELETE FROM engagement_credentials WHERE id = ?", to_delete
+        )
+    if to_stale:
+        connection.executemany(
+            "UPDATE engagement_credentials SET state = 'stale' WHERE id = ?", to_stale
+        )
+
 
 def _credential_row_to_material(row: sqlite3.Row) -> dict[str, Any]:
     """Project a credentials row to the identity-material dict consumers expect.
@@ -3440,24 +3550,99 @@ def _credential_row_to_material(row: sqlite3.Row) -> dict[str, Any]:
             "host_cookies": _loads(row["host_cookies_json"], []),
             "notes": row["notes"],
             "expires_at": row["expires_at"],
+            "created_at": row["created_at"],
+            "last_seen_at": row["last_seen_at"],
+            "liveness_verdict": row["liveness_verdict"],
+            "last_probed_at": row["last_probed_at"],
             "updated_at": row["updated_at"],
         }
     )
     return material
 
 
-def list_credentials(engagement_id: int) -> list[dict[str, Any]]:
+def _material_matches_host(material: dict[str, Any], host: str) -> bool:
+    """True if the identity is USABLE at ``host`` — mirrors the replay injection
+    path (kali ``_identity_header_pairs``) so ``--host`` lists exactly the
+    sessions replay would actually carry there:
+
+    * a ``host_cookies`` bucket matches when its host equals ``host`` OR ``host``
+      is a subdomain of it (a parent-domain cookie is sent to the subdomain);
+    * ``headers`` or a bearer token (``token``/``bearer``/``tokens[...]``) are
+      injected on ANY host — so a bearer/JWT identity (no cookie bucket) is usable
+      everywhere, and must list for every host;
+    * flat ``cookies`` are a fallback ONLY for identities that carry no per-host
+      buckets at all (manual/legacy) — the same bleed-avoidance rule replay uses.
+    """
+    target = (host or "").strip().rstrip(".").lower()
+    if not target:
+        return True
+    raw = material.get("host_cookies")
+    buckets = raw if isinstance(raw, list) else []
+    usable_bucket_exists = False
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            continue
+        bhost = str(bucket.get("host", "")).strip().rstrip(".").lower()
+        cookies = bucket.get("cookies")
+        if not bhost or not isinstance(cookies, dict) or not cookies:
+            continue
+        usable_bucket_exists = True
+        if target == bhost or target.endswith("." + bhost):
+            return True
+    # Host-agnostic material: replay injects these on any request host.
+    headers = material.get("headers")
+    if isinstance(headers, dict) and any(str(k).strip() for k in headers):
+        return True
+    for key in ("token", "bearer"):
+        if isinstance(material.get(key), str) and material[key].strip():
+            return True
+    tokens = material.get("tokens")
+    if isinstance(tokens, dict) and any(
+        isinstance(v, str) and v.strip() for v in tokens.values()
+    ):
+        return True
+    # Flat-cookie fallback: only when NO per-host buckets exist (else bleed).
+    if not usable_bucket_exists:
+        cookies = material.get("cookies")
+        if isinstance(cookies, dict) and any(
+            str(v).strip() for v in cookies.values()
+        ):
+            return True
+    return False
+
+
+def list_credentials(
+    engagement_id: int,
+    *,
+    host: str | None = None,
+    include_dead: bool = False,
+) -> list[dict[str, Any]]:
+    """List an engagement's credential identities, freshest first.
+
+    Applies the lazy age-backstop sweep first (stale-flag / hard-delete). Rows in
+    state ``dead`` are excluded unless ``include_dead``; ``stale`` rows are NOT
+    excluded (the LLM must re-probe them). When ``host`` is given, only sessions
+    with a matching host_cookies bucket are returned (subdomain-aware). Ordered by
+    ``last_seen_at`` DESC (falling back to ``updated_at``), then identity_name.
+    """
     with get_connection() as connection:
+        _sweep_credential_age(connection, engagement_id)
         rows = connection.execute(
             "SELECT * FROM engagement_credentials WHERE engagement_id = ? "
-            "ORDER BY identity_name",
+            "ORDER BY COALESCE(last_seen_at, updated_at) DESC, identity_name",
             (engagement_id,),
         ).fetchall()
-    return [_credential_row_to_material(row) for row in rows]
+    materials = [_credential_row_to_material(row) for row in rows]
+    if not include_dead:
+        materials = [m for m in materials if m.get("state") != "dead"]
+    if host:
+        materials = [m for m in materials if _material_matches_host(m, host)]
+    return materials
 
 
 def get_credential(engagement_id: int, identity_name: str) -> dict[str, Any] | None:
     with get_connection() as connection:
+        _sweep_credential_age(connection, engagement_id)
         row = connection.execute(
             "SELECT * FROM engagement_credentials "
             "WHERE engagement_id = ? AND identity_name = ?",
@@ -3470,6 +3655,7 @@ def get_active_credential(engagement_id: int) -> dict[str, Any] | None:
     """Return the active identity's material, or the first one if none is
     explicitly active, or None when the engagement has no credentials."""
     with get_connection() as connection:
+        _sweep_credential_age(connection, engagement_id)
         row = connection.execute(
             "SELECT * FROM engagement_credentials WHERE engagement_id = ? "
             "ORDER BY is_active DESC, identity_name LIMIT 1",
@@ -3500,6 +3686,10 @@ def upsert_credential(
     UNIQUE(engagement_id, identity_name) makes this idempotent. When
     ``make_active`` is set, all other identities for the engagement are
     deactivated so at most one row is active.
+
+    ``created_at`` is set to ``now`` on INSERT and PRESERVED on CONFLICT (a
+    refresh of the same derived identity does not reset its first-capture time);
+    ``last_seen_at`` is set to ``now`` on both paths and drives the age backstop.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with get_connection() as connection:
@@ -3513,8 +3703,9 @@ def upsert_credential(
             INSERT INTO engagement_credentials (
                 engagement_id, identity_name, mode, state, use_for_requests,
                 auth_context, is_active, cookies_json, headers_json, tokens_json,
-                host_cookies_json, raw_json, notes, expires_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                host_cookies_json, raw_json, notes, expires_at,
+                created_at, last_seen_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(engagement_id, identity_name) DO UPDATE SET
                 mode = excluded.mode,
                 state = excluded.state,
@@ -3528,19 +3719,62 @@ def upsert_credential(
                 raw_json = excluded.raw_json,
                 notes = excluded.notes,
                 expires_at = excluded.expires_at,
+                last_seen_at = excluded.last_seen_at,
                 updated_at = excluded.updated_at
             """,
             (
                 engagement_id, identity_name, mode, state, 1 if use_for_requests else 0,
                 auth_context, 1 if make_active else 0,
                 json.dumps(cookies), json.dumps(headers), json.dumps(tokens),
-                json.dumps(host_cookies), json.dumps(raw), notes, expires_at, now,
+                json.dumps(host_cookies), json.dumps(raw), notes, expires_at,
+                now, now, now,
                 1 if make_active else 0,
             ),
         )
     result = get_credential(engagement_id, identity_name)
     assert result is not None  # just written
     return result
+
+
+def set_liveness(
+    engagement_id: int,
+    identity_name: str,
+    verdict: str,
+    probed_at: str | None,
+) -> dict[str, Any] | None:
+    """Record a liveness-probe result for one identity.
+
+    Sets ``liveness_verdict`` and ``last_probed_at``, and reconciles ``state``:
+    ``verdict == 'dead'`` -> ``state='dead'`` (only a proven-dead probe kills a
+    session; a 401/403 on a scanned endpoint is an authz finding, not a dead
+    session); ``verdict == 'live'`` -> ``state='available'`` (a live probe clears
+    an age-backstop ``stale`` mark, and revives a session probed with
+    ``--include-dead``); ``unknown`` leaves ``state`` untouched (never a false
+    verdict). Returns the updated material, or None when no such identity exists.
+    """
+    with get_connection() as connection:
+        if verdict == "dead":
+            connection.execute(
+                "UPDATE engagement_credentials "
+                "SET liveness_verdict = ?, last_probed_at = ?, state = 'dead' "
+                "WHERE engagement_id = ? AND identity_name = ?",
+                (verdict, probed_at, engagement_id, identity_name),
+            )
+        elif verdict == "live":
+            connection.execute(
+                "UPDATE engagement_credentials "
+                "SET liveness_verdict = ?, last_probed_at = ?, state = 'available' "
+                "WHERE engagement_id = ? AND identity_name = ?",
+                (verdict, probed_at, engagement_id, identity_name),
+            )
+        else:
+            connection.execute(
+                "UPDATE engagement_credentials "
+                "SET liveness_verdict = ?, last_probed_at = ? "
+                "WHERE engagement_id = ? AND identity_name = ?",
+                (verdict, probed_at, engagement_id, identity_name),
+            )
+    return get_credential(engagement_id, identity_name)
 
 
 def set_active_identity(engagement_id: int, identity_name: str) -> bool:
