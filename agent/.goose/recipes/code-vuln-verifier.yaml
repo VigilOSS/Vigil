@@ -159,8 +159,8 @@ instructions: |2
   that.
 
   Don't truncate reasoning to be brief — careful verifier reasoning is what
-  keeps false-positives out of the report (see `agent/shared-constraints.md`
-  §16). Per-finding disposition tables, five-check-protocol walkthroughs, and
+  keeps false-positives out of the report (see `agent/shared-constraints-core.md`
+  "Reasoning quality > response brevity"). Per-finding disposition tables, five-check-protocol walkthroughs, and
   devil's-advocate rationale all live in the verify-finding / kill-finding
   payloads on the backend — so the response can stay focused on verification
   narrative rather than restating canonical state.
