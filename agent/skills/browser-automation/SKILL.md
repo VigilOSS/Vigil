@@ -59,7 +59,7 @@ npm i playwright && npx playwright install chromium
 
 ### 2. Pick the capture mode
 
-- **Mode A — through-proxy auto-capture.** `vigil mitmproxy start "$ENGAGEMENT_KEY"`,
+- **Mode A — through-proxy auto-capture.** `vigil mitmproxy start`,
   then launch the browser with `PROXY=http://127.0.0.1:8080`. The proxy addon
   auto-detects login and POSTs the captured credentials to the backend store /
   records traffic to `cases.db`. Use when the edge tolerates the proxy.

@@ -1,6 +1,10 @@
 # Reporting Rules
 
-These rules keep reports human-first, evidence-backed, and severity-disciplined.
+Report-authoring rules: load these when authoring or finalizing a finding's
+report-ready details, in review mode, or drafting an external submission. They
+keep reports human-first, evidence-backed, and severity-disciplined. Hunters do
+not need this file at hunt time — the severity/precondition essence they need is
+carried by `agent/shared-constraints.md` §7 and `agent/rules/hunting.md` §2–§3.
 
 ## 1. State proven attacker outcomes directly
 

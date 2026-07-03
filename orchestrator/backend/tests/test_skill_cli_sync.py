@@ -189,6 +189,7 @@ def _doc_files() -> list[Path]:
     files += sorted((_REPO_ROOT / "agent" / "skills").glob("*/SKILL.md"))
     files += sorted((_REPO_ROOT / "agent" / "skills").glob("*/templates/*.md"))
     files += sorted(_REPO_ROOT.glob("agent/operator-core*.md"))
+    files += sorted((_REPO_ROOT / "agent" / "phases").glob("*.md"))
     files += sorted((_REPO_ROOT / "agent" / "agents").glob("*.md"))
     files += sorted(_REPO_ROOT.glob("agent/shared-constraints*.md"))
     files += sorted((_REPO_ROOT / "agent" / "references").rglob("*.md"))

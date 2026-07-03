@@ -27,7 +27,7 @@ sits on the reputation list, the edge serves a hard 403 (often with a vendor
 reference code header) or drops the TCP connection on geoblock-style policies.
 Specialists hitting that wall produce no signal and burn a full context
 window per dispatch. The Egress reputation checkpoint catches the failure
-once and routes the operator to a fix instead of letting every Phase 3
+once and routes the operator to a fix instead of letting every Phase 4
 specialist rediscover it.
 
 ## Detection signals
@@ -223,12 +223,12 @@ proxied through a browser; in that case fall back to option 1 or 2.
 **When to choose.** When the program does not allowlist, no clean egress
 is available, and the JA3 block is layered behind WAF policy that the
 browser path also fails. The engagement records the egress block as a
-Phase-3 blocker and ships the report with the documented gap; this is a
+Phase-4 blocker and ships the report with the documented gap; this is a
 real failure mode for some heavily-CDN-fronted programs.
 
 **How to set up.** Record the decision via
 `vigil assess agent decision --kind egress_decision --choice accept-gap --payload-json '{"blocked_pct": N}' --surfaced-to-user`,
-write the gap into `agent/skills/report-generation` Phase-3 coverage notes via
+write the gap into `agent/skills/report-generation` Phase-4 coverage notes via
 `vigil assess record-intel note` so the report-writer surfaces it. Mark
 affected scope entries `status=deferred` in `scope.json` so the scope
 coverage gate accepts them as terminal.

@@ -918,12 +918,22 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
                 target_host TEXT NOT NULL DEFAULT '',
                 target_path TEXT NOT NULL DEFAULT '',
                 target_port INTEGER,
+                -- Free-text lens/mindset the probe was run under (e.g. an attack
+                -- persona or hypothesis label). Part of _probe_key in coverage.py
+                -- so the SAME target probed under a DIFFERENT lens does not
+                -- collide on UNIQUE(engagement_id, probe_key). NOT hard-enumerated.
+                lens TEXT NOT NULL DEFAULT '',
+                -- Optional finding this attempt supports/backfills. Nullable +
+                -- ON DELETE SET NULL (mirrors coverage_item_id); NOT part of
+                -- _probe_key, so a re-run of the same probe COALESCE-backfills it.
+                finding_id INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, probe_key),
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(request_variant_id) REFERENCES assessment_request_variants(id) ON DELETE CASCADE,
                 FOREIGN KEY(service_id) REFERENCES assessment_services(id) ON DELETE CASCADE,
-                FOREIGN KEY(coverage_item_id) REFERENCES assessment_coverage_items(id) ON DELETE SET NULL
+                FOREIGN KEY(coverage_item_id) REFERENCES assessment_coverage_items(id) ON DELETE SET NULL,
+                FOREIGN KEY(finding_id) REFERENCES assessment_findings(id) ON DELETE SET NULL
             )
             """
     )
@@ -939,6 +949,20 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
     if probe_columns and "target_port" not in probe_columns:
         connection.execute(
             "ALTER TABLE assessment_probe_runs ADD COLUMN target_port INTEGER"
+        )
+    # lens (Wave 5 / S6): free-text mindset the probe ran under, part of
+    # _probe_key so a different lens does not collide on UNIQUE(probe_key).
+    # Additive, NOT NULL DEFAULT '' so legacy rows read back as the empty lens.
+    if probe_columns and "lens" not in probe_columns:
+        connection.execute(
+            "ALTER TABLE assessment_probe_runs ADD COLUMN lens TEXT NOT NULL DEFAULT ''"
+        )
+    # finding_id: optional attempt→finding linkage. SQLite cannot ALTER a column
+    # to add a REFERENCES constraint, so legacy DBs get a plain nullable INTEGER
+    # (the application enforces the link); fresh DBs pick up the FK from CREATE.
+    if probe_columns and "finding_id" not in probe_columns:
+        connection.execute(
+            "ALTER TABLE assessment_probe_runs ADD COLUMN finding_id INTEGER"
         )
     _dedupe_coverage_items(connection)
     connection.execute(
@@ -965,6 +989,10 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_probe_runs_created "
         "ON assessment_probe_runs(engagement_id, created_at DESC, id DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_probe_runs_finding "
+        "ON assessment_probe_runs(engagement_id, finding_id)"
     )
     connection.execute(
         """
@@ -1396,6 +1424,12 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
                 superseded_by_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
                 timeout_seconds_requested INTEGER,
                 partial_results INTEGER NOT NULL DEFAULT 0,
+                -- Optional link to the finding this command produced/supports.
+                -- Nullable + ON DELETE SET NULL so the audit row survives the
+                -- finding's deletion (a command run is durable evidence in its
+                -- own right); back-compat default NULL for rows written before
+                -- the writer threaded finding_id.
+                finding_id INTEGER REFERENCES assessment_findings(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
             )
@@ -1499,6 +1533,12 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE assessment_command_runs ADD COLUMN partial_results INTEGER NOT NULL DEFAULT 0"
         )
+    # Optional finding linkage. As with superseded_by_id above, SQLite cannot
+    # ALTER a column to add a REFERENCES constraint, so legacy DBs get a plain
+    # nullable INTEGER (the application enforces the link); fresh DBs pick up the
+    # REFERENCES ... ON DELETE SET NULL from CREATE TABLE.
+    if cmdrun_columns and "finding_id" not in cmdrun_columns:
+        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN finding_id INTEGER")
     if not _has_unique_index_on_columns(
         connection, "assessment_command_runs", ("run_uuid",)
     ):
@@ -1525,6 +1565,12 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_hash "
         "ON assessment_command_runs(engagement_id, command_hash)"
+    )
+    # Command runs are queried by finding for the "commands behind this finding"
+    # view; index the linkage (engagement-scoped, NULLs skipped by the planner).
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_command_runs_finding "
+        "ON assessment_command_runs(engagement_id, finding_id)"
     )
     # Chip-filter indexes for the four command-metadata fields. Scoped by
     # engagement_id so they stay useful in per-engagement queries (which
@@ -1858,6 +1904,143 @@ def _create_jobs_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_jobs_command_run "
         "ON assessment_jobs(parent_command_run_id)"
+    )
+
+
+# Additive column spec for assessment_http_flows. New table columns are
+# appended here (name -> column DDL fragment) so an existing DB created before a
+# column existed upgrades cleanly via the same _table_columns pattern used for
+# assessment_command_runs / assessment_probe_runs. Fresh DBs get every column
+# via CREATE TABLE below; this list only backfills older on-disk schemas.
+_HTTP_FLOW_ADDITIVE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("request_variant_id", "INTEGER REFERENCES assessment_request_variants(id) ON DELETE SET NULL"),
+    ("method", "TEXT NOT NULL DEFAULT ''"),
+    ("scheme", "TEXT NOT NULL DEFAULT ''"),
+    ("host", "TEXT NOT NULL DEFAULT ''"),
+    ("port", "INTEGER"),
+    ("url", "TEXT NOT NULL DEFAULT ''"),
+    ("path", "TEXT NOT NULL DEFAULT ''"),
+    ("response_status", "INTEGER"),
+    ("request_content_type", "TEXT NOT NULL DEFAULT ''"),
+    ("response_content_type", "TEXT NOT NULL DEFAULT ''"),
+    ("content_type_family", "TEXT NOT NULL DEFAULT 'unknown'"),
+    ("auth_context", "TEXT NOT NULL DEFAULT 'anonymous'"),
+    ("request_body_sha256", "TEXT NOT NULL DEFAULT ''"),
+    ("response_body_sha256", "TEXT NOT NULL DEFAULT ''"),
+    ("request_body_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("response_body_bytes", "INTEGER NOT NULL DEFAULT 0"),
+    ("request_body_truncated", "INTEGER NOT NULL DEFAULT 0"),
+    ("response_body_truncated", "INTEGER NOT NULL DEFAULT 0"),
+    ("request_body_artifact_path", "TEXT"),
+    ("response_body_artifact_path", "TEXT"),
+    # Header maps are small and load-bearing for HAR export/import (which the
+    # named column set could not otherwise reconstruct). Stored as JSON objects,
+    # NOT raw bodies — raw bodies stay engagement-local artifacts per the plan.
+    ("request_headers_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("response_headers_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("redaction_status", "TEXT NOT NULL DEFAULT 'none'"),
+    ("host_mismatch", "INTEGER NOT NULL DEFAULT 0"),
+    ("url_authority", "TEXT NOT NULL DEFAULT ''"),
+    ("host_header", "TEXT NOT NULL DEFAULT ''"),
+    ("sni", "TEXT NOT NULL DEFAULT ''"),
+    ("timing_ms", "INTEGER"),
+    ("started_at", "TEXT"),
+)
+
+
+def _create_http_flow_tables(connection: sqlite3.Connection) -> None:
+    # assessment_http_flows is the canonical, compact, searchable full-flow
+    # record written by the mitmproxy addon (Phase 5). Raw request/response
+    # bodies stay on disk as engagement-local artifacts; the row carries only
+    # the artifact relative_path + sha256 + byte counts + truncation flags plus
+    # the (small) header maps needed to reconstruct a HAR entry. flow_uid is a
+    # stable per-flow id supplied by the addon; INSERT OR IGNORE on
+    # UNIQUE(engagement_id, flow_uid) makes ingest idempotent under retries.
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS assessment_http_flows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                request_variant_id INTEGER REFERENCES assessment_request_variants(id) ON DELETE SET NULL,
+                flow_uid TEXT NOT NULL,
+                method TEXT NOT NULL DEFAULT '',
+                scheme TEXT NOT NULL DEFAULT '',
+                host TEXT NOT NULL DEFAULT '',
+                port INTEGER,
+                url TEXT NOT NULL DEFAULT '',
+                path TEXT NOT NULL DEFAULT '',
+                response_status INTEGER,
+                request_content_type TEXT NOT NULL DEFAULT '',
+                response_content_type TEXT NOT NULL DEFAULT '',
+                content_type_family TEXT NOT NULL DEFAULT 'unknown',
+                auth_context TEXT NOT NULL DEFAULT 'anonymous',
+                request_body_sha256 TEXT NOT NULL DEFAULT '',
+                response_body_sha256 TEXT NOT NULL DEFAULT '',
+                request_body_bytes INTEGER NOT NULL DEFAULT 0,
+                response_body_bytes INTEGER NOT NULL DEFAULT 0,
+                request_body_truncated INTEGER NOT NULL DEFAULT 0,
+                response_body_truncated INTEGER NOT NULL DEFAULT 0,
+                request_body_artifact_path TEXT,
+                response_body_artifact_path TEXT,
+                request_headers_json TEXT NOT NULL DEFAULT '{}',
+                response_headers_json TEXT NOT NULL DEFAULT '{}',
+                redaction_status TEXT NOT NULL DEFAULT 'none',
+                host_mismatch INTEGER NOT NULL DEFAULT 0,
+                url_authority TEXT NOT NULL DEFAULT '',
+                host_header TEXT NOT NULL DEFAULT '',
+                sni TEXT NOT NULL DEFAULT '',
+                timing_ms INTEGER,
+                started_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, flow_uid)
+            )
+            """
+    )
+    # Additive migration for pre-existing DBs (mirrors the assessment_command_runs
+    # pattern): ALTER-in any column absent from an older on-disk schema.
+    http_flow_columns = _table_columns(connection, "assessment_http_flows")
+    if http_flow_columns:
+        for column_name, column_ddl in _HTTP_FLOW_ADDITIVE_COLUMNS:
+            if column_name not in http_flow_columns:
+                connection.execute(
+                    f"ALTER TABLE assessment_http_flows ADD COLUMN {column_name} {column_ddl}"
+                )
+    for column, direction in (
+        ("created_at", "DESC"),
+        ("host", ""),
+        ("method", ""),
+        ("response_status", ""),
+        ("content_type_family", ""),
+        ("auth_context", ""),
+    ):
+        suffix = f" {direction}" if direction else ""
+        connection.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_assessment_http_flows_{column} "
+            f"ON assessment_http_flows(engagement_id, {column}{suffix}, id DESC)"
+        )
+
+    # Per-engagement capture policy. Dedicated table (keyed UNIQUE by
+    # engagement_id) rather than a column on engagements, so the row survives
+    # the filesystem→DB engagement identity re-sync that rewrites engagement
+    # columns, and mirrors the engagement_credentials per-engagement typed-state
+    # pattern. Raw-body capture is OFF by default (enabled DEFAULT 0) per plan
+    # item 1 so restarting the shared proxy never silently starts capturing.
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS assessment_capture_policy (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL UNIQUE REFERENCES engagements(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                capture_request_bodies INTEGER NOT NULL DEFAULT 0,
+                capture_response_bodies INTEGER NOT NULL DEFAULT 0,
+                max_body_bytes INTEGER NOT NULL DEFAULT 102400,
+                content_type_allow_json TEXT NOT NULL DEFAULT '[]',
+                content_type_deny_json TEXT NOT NULL DEFAULT '[]',
+                redaction_profile TEXT NOT NULL DEFAULT 'none',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
     )
 
 
@@ -2906,6 +3089,7 @@ def init_db() -> None:
         _create_assessment_finding_tables(connection)
         _create_command_runs_table_and_fts(connection)
         _create_artifacts_table_and_fts(connection)
+        _create_http_flow_tables(connection)
         _create_jobs_table(connection)
         _create_code_analysis_tables(connection)
         _apply_additive_migrations(connection)

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import Any
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
@@ -44,7 +45,193 @@ def register(subparsers) -> None:
         default=300,
         help="Seconds before expires_at to flag as 'expiring soon' (default: 300)",
     )
+    p.add_argument(
+        "--probe",
+        action="store_true",
+        help=(
+            "Actively verify session liveness: GET --probe-url through the kali "
+            "runtime AS the active identity (its cookies are injected by the same "
+            "code the runtime uses), then classify the response against the "
+            "identity's operator-configured material.liveness = "
+            "{expect_status, authed_marker, dead_marker} signature. Presence of "
+            "credentials is NOT liveness; without --probe, liveness is 'unknown'. "
+            "Without a material.liveness signature the probe stays 'unknown'."
+        ),
+    )
+    p.add_argument(
+        "--probe-url",
+        dest="probe_url",
+        help=(
+            "URL to GET as the active identity for the --probe liveness check. The "
+            "response (status line + headers incl. Location + body) is matched "
+            "case-sensitively against material.liveness = {expect_status, "
+            "authed_marker, dead_marker}; redirects are NOT followed."
+        ),
+    )
     p.set_defaults(func=run)
+
+
+def _classify_liveness(
+    status: int | None,
+    haystack: str | None,
+    liveness: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """Deterministic, operator-configured session-liveness classifier.
+
+    There is exactly ONE way to decide liveness: an operator-declared signature in
+    ``material['liveness'] = {expect_status, authed_marker, dead_marker}`` (each key
+    optional), matched against ``haystack`` — the probe response's status line +
+    headers (INCLUDING ``Location``) + body text. This mirrors how a DAST scanner
+    (InsightAppSec / Burp) validates a session with logged-in / logged-out markers;
+    NO auth/login location is auto-detected. Precedence (first match wins):
+
+      1. no response captured (transport error)         -> unknown
+      2. no liveness signature configured               -> unknown (names the shape to set)
+      3. dead_marker set AND present in haystack         -> dead
+      4. authed_marker set AND absent from haystack      -> dead
+      5. expect_status set AND status != expect_status   -> dead
+      6. otherwise                                       -> live
+
+    Marker matching is case-sensitive substring against the combined haystack.
+    Returns ``(verdict, reason)`` where ``reason`` names the rule that fired. Pure
+    function: unit-tested without a network, and kept in lockstep with its mirror
+    (``vigil_cli.auth`` <-> ``assess.commands.auth_status``) — the two must classify
+    identical inputs identically.
+    """
+    if status is None:
+        return "unknown", "no response captured (transport error)"
+
+    cfg = liveness if isinstance(liveness, dict) else {}
+    raw_expect = cfg.get("expect_status")
+    expect_status = raw_expect if isinstance(raw_expect, int) and not isinstance(raw_expect, bool) else None
+    raw_authed = cfg.get("authed_marker")
+    authed_marker = raw_authed if isinstance(raw_authed, str) and raw_authed else None
+    raw_dead = cfg.get("dead_marker")
+    dead_marker = raw_dead if isinstance(raw_dead, str) and raw_dead else None
+
+    if expect_status is None and authed_marker is None and dead_marker is None:
+        return (
+            "unknown",
+            "no liveness signature configured; set "
+            "material.liveness = {expect_status, authed_marker, dead_marker}",
+        )
+
+    hay = haystack or ""
+    if dead_marker is not None and dead_marker in hay:
+        return "dead", f"dead_marker {dead_marker!r} present"
+    if authed_marker is not None and authed_marker not in hay:
+        return "dead", f"authed_marker {authed_marker!r} absent"
+    if expect_status is not None and status != expect_status:
+        return "dead", f"status {status} != expect {expect_status}"
+
+    confirmations: list[str] = []
+    if authed_marker is not None:
+        confirmations.append("authed_marker present")
+    if dead_marker is not None:
+        confirmations.append("dead_marker absent")
+    if expect_status is not None:
+        confirmations.append(f"status {status}")
+    return "live", ", ".join(confirmations)
+
+
+def _build_liveness_haystack(
+    status: int,
+    reason: str,
+    headers: list[tuple[str, str]],
+    body: str,
+) -> str:
+    """Combine the status line + response headers (incl. ``Location``) + body into
+    the single case-sensitive haystack the liveness classifier matches against."""
+    status_line = f"HTTP {status} {reason}".rstrip()
+    header_text = "\n".join(f"{name}: {value}" for name, value in headers)
+    return "\n".join(part for part in (status_line, header_text, body) if part)
+
+
+def _run_identity_probe(
+    engagement_dir: str,
+    identity: str | None,
+    url: str,
+    *,
+    liveness_cfg: dict[str, Any] | None,
+    timeout: int = 15,
+) -> dict[str, Any]:
+    """GET ``url`` as ``identity`` through the kali-exec path and classify liveness.
+
+    Shells the existing ``kali_exec`` runtime path with ``identity=<active>`` so the
+    request carries the identity's cookies via ``_apply_identity_material`` — the
+    SAME injection code the runtime uses, never reinvented here. curl runs with
+    ``-i`` (response status line + headers, INCLUDING ``Location``, + body) and no
+    ``-L`` so a 302 to a login page is preserved in the haystack as a signal rather
+    than chased. The numeric status is read from the trailing ``-w``
+    ``VIGIL_HTTP_CODE=`` marker; the remaining stdout IS the haystack matched
+    against the operator-configured ``material.liveness`` signature. Any exec /
+    transport failure or unparseable status yields ``liveness="unknown"`` with a
+    populated ``error`` (never a false verdict).
+    """
+    from pathlib import Path
+
+    try:
+        from assess.lib.kali import kali_exec
+    except Exception as exc:  # noqa: BLE001 — import guarded so probe never hard-fails
+        return {"liveness": "unknown", "reason": "probe unavailable",
+                "http_status": None, "error": f"probe unavailable: {exc}"}
+    cmd = ["curl", "-sS", "-i", "--max-time", str(timeout),
+           "-w", "\nVIGIL_HTTP_CODE=%{http_code}\n", url]
+    try:
+        result = kali_exec(
+            cmd,
+            technique="AUTH",
+            intent="auth liveness probe (auth-status --probe)",
+            probe_kind="fingerprint",
+            phase="recon",
+            timeout=timeout + 10,
+            engagement_dir=Path(engagement_dir),
+            identity=identity,
+            tool_name="curl",
+        )
+    except Exception as exc:  # noqa: BLE001 — a live probe must never crash auth-status
+        return {"liveness": "unknown", "reason": "probe exec failed",
+                "http_status": None, "error": f"probe exec failed: {exc}"}
+    # Match against the FULL response, not the 32K head+tail ``stdout_preview``:
+    # with ``curl -i`` a marker in the elided MIDDLE of a large body would be
+    # silently dropped, diverging from the CLI mirror (which matches the full
+    # ``resp.read()`` body) and risking a false verdict. Read the complete stdout
+    # file kali_exec streamed to; fall back to the preview if it is unreadable so
+    # the probe never crashes.
+    out = getattr(result, "stdout_preview", "") or ""
+    stdout_path = getattr(result, "stdout_path", "") or ""
+    if stdout_path:
+        try:
+            out = Path(stdout_path).read_bytes().decode("utf-8", "replace")
+        except OSError:
+            pass
+    status: int | None = None
+    haystack_lines: list[str] = []
+    for line in out.splitlines():
+        if line.startswith("VIGIL_HTTP_CODE="):
+            raw = line[len("VIGIL_HTTP_CODE="):].strip()
+            try:
+                status = int(raw) if raw else None
+            except ValueError:
+                status = None
+        else:
+            haystack_lines.append(line)
+    haystack = "\n".join(haystack_lines)
+    if status in (None, 0) or getattr(result, "transport_error", False):
+        return {
+            "liveness": "unknown",
+            "reason": "no HTTP status parsed from probe output",
+            "http_status": status,
+            "error": getattr(result, "transport_error_detail", "")
+            or "no HTTP status parsed from probe output",
+        }
+    verdict, reason = _classify_liveness(status, haystack, liveness_cfg)
+    return {
+        "liveness": verdict,
+        "reason": reason,
+        "http_status": status,
+        "error": None,
+    }
 
 
 def _parse_iso8601(value: str | None) -> datetime | None:
@@ -189,6 +376,27 @@ def run(args) -> None:
         if client is not None:
             client.close()
 
+    # Liveness is UNKNOWN unless actively probed: a stored credential's presence
+    # (cookies/headers) is NOT proof the session is still valid. --probe runs a
+    # real authed GET to confirm live vs dead.
+    liveness = "unknown"
+    liveness_detail: dict | None = None
+    if getattr(args, "probe", False):
+        probe_url = getattr(args, "probe_url", None)
+        if not probe_url:
+            liveness_detail = {"liveness": "unknown", "reason": "--probe requires --probe-url",
+                               "http_status": None, "error": "--probe requires --probe-url <url>"}
+        elif not auth:
+            liveness_detail = {"liveness": "unknown", "reason": "no active identity",
+                               "http_status": None, "error": "no active identity/session to probe"}
+        else:
+            active_identity = auth.get("identity_name") if isinstance(auth, dict) else None
+            liveness_cfg = auth.get("liveness") if isinstance(auth, dict) else None
+            liveness_detail = _run_identity_probe(
+                cfg.engagement_dir, active_identity, probe_url, liveness_cfg=liveness_cfg
+            )
+        liveness = liveness_detail["liveness"]
+
     state = {
         "engagement_key": cfg.engagement_key,
         "auth_context": auth.get("auth_context") or "anonymous",
@@ -199,6 +407,8 @@ def run(args) -> None:
         "expires_state": expires_state,
         "expires_in_seconds": expires_in_seconds,
         "tokens": shapes,
+        "liveness": liveness,
+        "liveness_probe": liveness_detail,
         "last_auth_probe": last_probe,
         "recommend": _refresh_recommendation(auth, shapes),
     }
@@ -226,6 +436,15 @@ def run(args) -> None:
             print(f"  - {s}")
     else:
         print("tokens:         (none detected)")
+    if liveness_detail is not None:
+        detail = f"http_status={liveness_detail.get('http_status')}"
+        if liveness_detail.get("reason"):
+            detail += f" reason={liveness_detail['reason']}"
+        if liveness_detail.get("error"):
+            detail += f" error={liveness_detail['error']}"
+        print(f"liveness:       {liveness}  ({detail})")
+    else:
+        print(f"liveness:       {liveness}  (not probed; presence != live — pass --probe)")
     if last_probe:
         print(
             f"last_auth_probe: run_id={last_probe.get('run_id')} "

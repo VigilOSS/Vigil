@@ -118,6 +118,13 @@ CREATE TABLE IF NOT EXISTS work_items (
     cluster_key TEXT,
     terminal_reason TEXT,
 
+    -- Digest of the classification tables (classify_buckets.CLASSIFIER_VERSION)
+    -- that scored this row, or the 'manual' sentinel for hand-tuned rows. NULL
+    -- on legacy rows scored before the stamp existed. `classify-work
+    -- --reclassify-stale` restamps rows whose version is NULL or != current
+    -- (skipping 'manual').
+    classifier_version TEXT,
+
     -- Curated candidate metadata from metadata-preserving ingest paths.
     signals TEXT,
     selected_by TEXT,

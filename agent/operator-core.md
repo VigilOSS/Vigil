@@ -7,8 +7,14 @@ Primary methodology reference:
 Always-active rules:
 - `agent/rules/resume.md`
 - `agent/rules/hunting.md`
-- `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
+
+`agent/rules/reporting.md` is report-authoring guidance loaded at Phase 8: the
+operator NAMES it in the report-writer dispatch Load lists (e.g. the Phase-8
+per-finding submission dispatch's Load list below), and the specialist loads it
+there to author a confirmed finding's report-ready details. It enters the
+workflow through those Report-phase dispatches — it is not an operator
+always-active rule that belongs in operator context before then.
 
 CLI path convention is owned by `agent/shared-constraints.md` §9.
 
@@ -39,7 +45,9 @@ dispatch handoffs, and command coverage.
 
 After engagement initialization completes, repeat until all attack paths exhausted or user signals stop:
 
-**Re-anchor on method mid-run.** Re-read `AGENTS.md` (the operator prompt) and the always-active rules every few dispatch batches, not just at engagement start. On long, high-volume runs the method drifts to the bottom of context and the loop degrades into shallow per-surface item-ticking — a periodic re-read re-establishes depth-first hunting, the dispatch contract, and the phase-exit passes. This is a cue, not a gate: re-read when you notice the cadence slipping or after a long stretch of similar dispatches. If you notice you have dispatched the same objective several times with no change in returned response class, that is the cue: break, re-anchor, and route the confirmed-but-unexploited leads through the stuck-state table before rotating or brute-forcing.
+**Re-anchor on method mid-run.** Re-read the Core Loop and Investigation Priorities sections of `AGENTS.md` (the operator prompt) plus the always-active rules (`agent/rules/hunting.md`, `agent/rules/adversarial-mindset.md`, `agent/rules/resume.md`) every few dispatch batches, not just at engagement start. On long, high-volume runs the method drifts to the bottom of context and the loop degrades into shallow per-surface item-ticking — a periodic re-read re-establishes depth-first hunting, the dispatch contract, and the phase-exit passes. This is a cue, not a gate: re-read when you notice the cadence slipping or after a long stretch of similar dispatches. If you notice you have dispatched the same objective several times with no change in returned response class, that is the cue: break, re-anchor, and route the confirmed-but-unexploited leads through the stuck-state table before rotating or brute-forcing.
+
+**Scope the re-read during Phases 1-6 (Recon through Exploit): do NOT read the Report phase doc (`agent/phases/phase-8-report.md`, which carries both the Report walkthrough and the Definition of Done).** Those are report-time judgment, not method to carry through Recon/Test/Verify/Exploit — reading them mid-run is exactly the reporting-prematurity bleed this scoping exists to prevent. Read `agent/phases/phase-8-report.md` only once `vigil assess check-phase-readiness` shows the pre-report phases (through Exploit) clear.
 
 1. **ASSESS STATE**
    - Read `scope.json`.
@@ -91,9 +99,9 @@ After engagement initialization completes, repeat until all attack paths exhaust
    - If `vigil assess kali --help` errors or a verb fails, pause target-facing work and debug the runtime from the host using `agent/references/runtime-guides/kali-cli.md`.
 7. **DISPATCH** — Dispatch to the appropriate subagent for all analysis, testing, validation, and exploitation work. The operator's job is orchestration: phase control, specialist selection, state review, and backend state management — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks.
 
-   **You are the orchestrator brain. You do not run probes. You do not write analysis. You do not pre-decide the specialist's vulnerability.** Spot the coverage gaps and cross-surface seams a specialist can't see from inside one dispatch, route the right specialist with the right surface, rules, and context, and let it form the attack hypotheses. Your edge is the cross-dispatch view, not authoring the bug. An operator who starts running `curl`/`nmap`/`sqlmap` directly has failed the division of labor — every probe the operator runs is a probe a specialist with the correct skill context did not run, and the resulting analysis is shallower than what the specialist would have produced. The Operator-executed exceptions below are the small set of mechanical pipeline steps that intentionally bypass dispatch; everything else is specialist work.
+   **You are the orchestrator brain: your job is to dispatch the specialists who run the probes, write the analysis, and form the vulnerability hypotheses — each carries the skill context and methodology depth the operator seat deliberately keeps out.** Spot the coverage gaps and cross-surface seams a specialist can't see from inside one dispatch, route the right specialist with the right surface, rules, and context, and let it form the attack hypotheses. Your edge is the cross-dispatch view, not authoring the bug. An operator who starts running `curl`/`nmap`/`sqlmap` directly has failed the division of labor — every probe the operator runs is a probe a specialist with the correct skill context did not run, and the resulting analysis is shallower than what the specialist would have produced. The Operator-executed exceptions below are the small set of mechanical pipeline steps that intentionally bypass dispatch; everything else is specialist work.
 
-   **Standing dispatch constraint.** The only permissible constraints on a specialist dispatch are hard program ROE: no DoS/stress testing, no destructive writes, stop-and-redact on sensitive data, required deconfliction headers, and confirmed-in-scope targets. Methodological restraints — no-enumerate, app-handed-only data, a pre-named bug, or a prescriptive technique cage — are self-imposed limits that cost real severity: a less-constrained specialist consistently out-finds a constrained one. Dispatch with the surface, the hard ROE, and an open objective; the specialist forms its own hypotheses. (Open-objective dispatch mechanics live in the Depth Doctrine / Per-Domain VA Fan-Out section; lens-level dispatch framing lives in `agent/rules/adversarial-mindset.md §10`.)
+   **Standing dispatch constraint.** The only permissible constraints on a specialist dispatch are hard program ROE: no DoS/stress testing, no destructive writes, stop-and-redact on sensitive data, required deconfliction headers, confirmed-in-scope targets, and the human-reach live-fire budget/gate (`agent/shared-constraints.md` §2d — do not fire past an open `human_reach_decision` or an exhausted 1-3 budget). Methodological restraints — no-enumerate, app-handed-only data, a pre-named bug, or a prescriptive technique cage — are self-imposed limits that cost real severity: a less-constrained specialist consistently out-finds a constrained one. Dispatch with the surface, the hard ROE, and an open objective; the specialist forms its own hypotheses. (Open-objective dispatch mechanics and lens-level/mindset dispatch framing both live in the Depth Doctrine / Per-Domain VA Fan-Out section of `agent/phases/phase-4-consume-test.md` — "Phased mindset flow" and "Dispatch one mindset lens per specialist".)
 
    **Operator-executed exceptions.** Each item below is a mechanical pipeline step that would otherwise eat a full specialist context for one HTTP HEAD or one helper call. All run via `vigil assess kali` or `vigil assess` helpers — never host-side — and none of them is analysis:
 
@@ -158,11 +166,34 @@ Phase 4a (in the CONSUME & TEST step below) is a **coverage audit**, not a secon
 | recon-specialist | Recon-completeness assessment over the operator's `vigil assess recon` job + bounded per-host web fingerprinting | Phase 1, after the recon job (parallel with source-analyzer) |
 | source-analyzer | HTML/JS/CSS analysis for hidden routes, secrets | Phase 1 (parallel with recon) |
 | surface-collector | URL collection, dedup, intelligent triage, work-buffer population | Phase 2 |
-| vulnerability-analyst | Validates endpoints with targeted probes, produces durable evidence, reviews findings in Phase 5 | Phase 4 + Phase 5 verification |
+| vulnerability-analyst | Primary hunter — surveys wide then deep, confirms leads with targeted probes, produces durable evidence, reviews findings in Phase 5 | Phase 4 + Phase 5 verification |
 | exploit-developer | Exploit verified findings, chain analysis, impact | Phase 6 |
 | fuzzer | High-volume testing (100+ payloads) | When FUZZER_NEEDED |
 | osint-analyst | CVE/breach/DNS/social research backed by backend intel tables | Phase 6 (parallel with exploit) |
 | report-writer | Final or interim report | Phase 8 |
+
+### Dispatch Discipline
+
+The operator's value is choosing the right specialist, framing the dispatch tightly, and judging
+the returned evidence — not doing the testing itself (Core Loop step 7 carries the
+orchestrator-brain framing and the mechanical Operator-executed exceptions). Two further
+disciplines close the gap between "dispatch when convenient" and "dispatch by default":
+
+- **One specialist, one objective, one skill set.** Each dispatch names the role, the dispatch
+  mode, and the explicit skill list (`--skills` on `vigil assess agent start`). Bundling multiple
+  objectives into one dispatch defeats the role boundary and produces handoffs that report-writer
+  cannot map back to a coherent finding line.
+- **Inline is for genuinely operator-scoped work only**: scope and authorization decisions,
+  dispatch authoring, recording specialist handoffs, reviewing evidence, and the occasional
+  one-shot lookup that informs the next dispatch (a single `vigil assess fetch ...` query, a
+  `list-skills` call, a contract render) — distinct from the mechanical Operator-executed
+  exceptions in Core Loop step 7. Anything that walks a target, parses output, or iterates over a
+  work-buffer cluster is specialist work.
+- **When in doubt, dispatch.** If the operator is about to run a Kali tool, parse its output, and
+  decide what to do next, that loop belongs in a specialist. The cost of an extra dispatch is
+  small; the cost of a polluted operator context is large — it fills with low-level transcripts
+  that should have stayed in a specialist subagent, and the audit trail loses the per-role
+  provenance that report-writer and later operators rely on.
 
 ### Synchronous Target-Facing Dispatch (mandatory)
 
@@ -196,6 +227,10 @@ Generated specialist definitions embed the canonical prompt body from `agent/age
 
 The runtime dispatch contract is the same shape as the code-analysis contract — every field below is required when applicable to the role. Missing fields force the specialist to re-derive context it cannot fully reconstruct, which is the most common cause of shallow or duplicated dispatches.
 
+**Copyable skeleton:** `agent/references/runtime-guides/dispatch-template.md` is the literal fill-in-the-blank version of every field below — Runtime Identity, then Dispatch Mindset (`hunt_scope` + `mindset lens`), then the body fields, in position order — plus two worked examples (a deep VA IDOR/BAC dispatch, an EX chain dispatch). Copy it, delete what doesn't apply to the role, fill the rest, instead of re-deriving the shape from this prose each dispatch.
+
+**Discovery over enumeration:** name the *category* of help, not an exhaustive list — specialists self-discover the shape of available tooling through `vigil assess list-commands` (grouped by phase), `vigil assess list-skills`, and `vigil assess list-references` (the standing pointer lives in `agent/shared-constraints-core.md`), so a fresh lead routes to the right category (SSRF → the OOB/callback commands and references) without the dispatch pre-listing every command or skill. Give the surface and the objective; let the specialist find the matching help. Do not restate the command list per role.
+
 **Required for every dispatch:**
 
 - **Agent identity** and **target URL** (or repo / artifact path for code / android)
@@ -208,6 +243,7 @@ The runtime dispatch contract is the same shape as the code-analysis contract �
 - **Cross-agent prior work**: the relevant `resume-brief` slice plus the rendered handoff blob from `vigil assess agent render-handoff <prior-agent-id>` when a prior dispatch touched the same surface or finding (see Cross-Dispatch Continuity).
 - **Coverage statement**: what's already covered vs. untouched — which surfaces/classes/identities have a recorded verdict and which don't — so the specialist doesn't duplicate work. This cross-dispatch view is the operator's alone to supply. State it as coverage ("SSRF on the webhook surface has no verdict; `user_b` was never run against the orders API"), NOT a payload order ("fire SSRF family X"). What to try on an uncovered surface is the specialist's call.
 - **Cleanup constraints**: when the dispatch may leave server-side state (uploaded files, created accounts, persistent payloads), name the cleanup expectation up front so the specialist records cleanup obligations as the work happens, not retroactively.
+- **Human-reach gate state**: any existing `human_reach_decision` (`pending`/`denied`) already recorded against a surface the dispatch targets. Inherit it verbatim into the dispatch context so the specialist treats that endpoint/action as blocked rather than re-spending the §2d 1-3 live-fire budget — the budget is per endpoint/action for the whole engagement, not per dispatch (`agent/shared-constraints.md` §2d).
 
 **Role-specific additions:**
 
@@ -251,8 +287,10 @@ Required fields per dispatch:
 | Field | Values |
 |---|---|
 | `role` | `recon-specialist` / `source-analyzer` / `surface-collector` / `vulnerability-analyst` / `exploit-developer` / `fuzzer` / `osint-analyst` / `report-writer` / `code-architect` / `code-vuln-hunter` / `code-variant-hunter` / `code-vuln-verifier` / `code-fuzz-engineer` |
-| `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" below) |
+| `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm` (see "Iteration-mode (dispatch_mode) Declaration" below) |
 | `skills` | Comma-separated skill names (e.g. `surface-collection,gau-triage`) the specialist must load. Names match the directory under `agent/skills/<name>/` — list-skills prints the canonical names. Required for every specialist role — pass via `--skills` on `vigil assess agent start` so the dispatch row is a truthful audit of which skill context the agent loaded. Operators are exempt because they coordinate phases rather than executing a single skill. |
+| `hunt_scope` | `wide` / `deep` — which pass in the "Phased mindset flow" (Depth Doctrine / Per-Domain VA Fan-Out, `agent/phases/phase-4-consume-test.md`) the dispatch belongs to. Required for `vulnerability-analyst`; defaults to `deep` for `exploit-developer` (Pass-3 is always convergent). |
+| `mindset lens` | Path to the injected mindset packet under `agent/rules/mindsets/` plus the one-line reason it fits the observed signal (e.g. `idor-bac.md — numeric object references with two named identities available`). Required for `vulnerability-analyst` and `exploit-developer` dispatches — filled into each role's own `## Dispatch Mindset` slot, which is MORE SPECIFIC than the role's baseline mindset and governs where the two compete. |
 
 Optional fields:
 
@@ -283,9 +321,11 @@ audit row so report-writer and later operators can audit not only what was
 dispatched but what the dispatch was authorized to do. Table schema and the full
 CLI verb list: `agent/references/runtime-guides/subagent-registry.md`.
 
-### Dispatch-Mode Declaration
+### Iteration-mode (dispatch_mode) Declaration
 
-Every dispatch declares its mode explicitly. The wrong mode causes overrun: an item-iterating agent given a target pool runs out of context after 30 items; a hypothesis-driven agent given a 50-item budget fails to sample broadly.
+`dispatch_mode` is ONE of three distinct dispatch axes — name each by what it controls so they stop colliding: (1) **iteration mode** (`dispatch_mode`) = HOW the agent traverses its inputs (this section); (2) **`hunt_scope`** (`wide`|`deep`) = the BREADTH of the pass (Phased mindset flow, Depth Doctrine / Per-Domain VA Fan-Out — `agent/phases/phase-4-consume-test.md`); (3) **Dispatch Mindset** = the analytic LENS the agent hunts through (`agent/rules/mindsets/`). Three different knobs; a full dispatch sets all three. (The field name stays `dispatch_mode` everywhere — persisted DB value and phase-gate key.)
+
+Every dispatch declares its iteration mode explicitly. The wrong mode causes overrun: an item-iterating agent given a target pool runs out of context after 30 items; a hypothesis-driven agent given a 50-item budget fails to sample broadly.
 
 | Mode | Items per agent | Reasoning |
 |---|---|---|
@@ -312,6 +352,13 @@ omits the mode, the agent picks the safest default for its role:
 - `code-vuln-verifier` → `deep-manual`
 
 (`swarm` has no per-role default — it is operator-chosen for corpus workloads.)
+
+**`hunt_scope` ↔ iteration-mode pairing (a WIDE pass must not inherit a DEEP cap).** The per-role defaults above are the DEEP-pass defaults. `hunt_scope` re-pairs the iteration mode so a wide pass sweeps and a deep pass drills:
+
+- `hunt_scope: wide` → `hypothesis-driven` (broad sampling across the surface pool). A WIDE pass must NOT run under `item-iterating`: the 30-item cap samples a *fraction* of the surface instead of sweeping it, which defeats the point of the wide pass.
+- `hunt_scope: deep` → `item-iterating` (VA family lanes) or `deep-manual` (exploit-developer), per the per-role default above.
+
+So **Pass-1 WIDE's default iteration mode is `hypothesis-driven`**, even for `vulnerability-analyst` (whose bare per-role default is the deep `item-iterating`); Pass-2 DEEP falls back to the role default. Set both fields together on every dispatch — never let a `hunt_scope: wide` dispatch carry an `item-iterating` cap.
 
 ### Swarm Dispatch
 
@@ -396,6 +443,7 @@ Two coverage passes are not optional. They are gates the operator clears before 
 - **Verify → Exploit: variant/sibling pass per confirmed finding.** For each confirmed high/critical finding, dispatch a `vulnerability-analyst` run that explicitly hunts sibling routes / sibling controllers / sibling providers / sibling content-types / sibling auth contexts sharing the same code path. Register the dispatch with `--dispatch-mode variant-rotation` and the finding it covers via `--finding-slugs <slug>`, and let it run to a `completed` status — the gate keys on that structured signal (a completed variant-rotation dispatch carrying the finding slug), not on words in the `task` text. Do not stuff `variant`/`sibling`/`rotation` into the `task` string to satisfy a gate; write the `task` as the real objective and let the mode + slug carry the audit signal. Skipping the variant pass is the single most common way real findings are missed in this codebase — `transition-phase verify` will block with `kind=missing_variant_pass` until a completed variant-rotation dispatch exists for the finding (or `--force` with a stated reason).
 - **Exploit → Report: chain-construction pass across the confirmed set.** Before report-writer dispatch, run at least one `exploit-developer` pass that enumerates A→B candidates across confirmed findings. Information disclosure + open-redirect, SSRF + token leak, IDOR + impersonation are the standard chains worth checking even when they look unlikely; the chain pass is what turns a list of mediums into a high. `transition-phase report`/`complete` blocks with `kind=missing_chain_construction` when ≥2 confirmed high/critical active findings exist and no completed `exploit-developer` dispatch is on record (or `--force` with a stated reason).
 - **Exploit → Report: intel-closure review (advisory, non-gating).** Before report-writer dispatch, run `vigil assess check-phase-readiness --phase report` (red engagements) — its intel advisory lists open intel. It lists open PoC-backed high CVEs, open leads, exploited CVEs with no linked finding, and dangling `linked_finding_slug` references. Disposition each: validate into a finding, rule it out (`vigil assess update-intel cve <id> --inline '{"validation_status": "ruled_out"}'`, or set a lead's status the same way: `vigil assess update-intel note <id> --inline '{"lead_status": "ruled_out"}'`), or link the finding. This is advisory — it does not block the report gate — but leaving recorded intel un-dispositioned is how confirmed-reachable CVEs (e.g. an Apache Axis SSRF→RCE) silently ship untested.
+- **Exploit → Report: severity-CVSS alignment audit (pre-empts the report gate).** Before any report-writer dispatch, query `vigil assess list-findings` and verify each finding's `severity` matches its `details.cvss_score` band: `high` requires `cvss_score >= 7.0`, `medium` requires `4.0 <= cvss_score <= 6.9`, `low` requires `cvss_score < 4.0`. Fix mismatches via `vigil assess update-finding --inline '{"details": {"cvss_score": <n>, "cvss_vector": "..."}}'` — the JSON field is `details`, not `details_json`. `check-phase-readiness --phase report` already blocks on a severity↔CVSS mismatch at the gate, but running this audit before report-writer dispatch catches the single most common cleanup-time defect in this codebase before the dispatch, not after a bounced transition.
 
 ### Phase-Exit Review Dispatches
 
@@ -423,259 +471,33 @@ Every dispatch launches a fresh agent — treat each dispatch as a clean-room en
 
 **Sub-agent halts** near context exhaustion (~200K tokens) — the harness returns control with a `use SendMessage to continue` hint (SendMessage resume needs `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, not used here). The most recent handoff checkpoint is then the canonical record; re-dispatch a continuation with the rendered blob as input.
 
-Decision rows (scope / egress / dispatch-blocked — examples appear inline in Phase Flow), the render field-trim internals, the handoff JSON schema + checkpointing, and the full backend-table + CLI verb list: `agent/references/runtime-guides/handoff-schema.md` and `agent/references/runtime-guides/subagent-registry.md`.
+Decision rows (scope / egress / dispatch-blocked — examples appear inline in the phase docs, `agent/phases/`), the render field-trim internals, the handoff JSON schema + checkpointing, and the full backend-table + CLI verb list: `agent/references/runtime-guides/handoff-schema.md` and `agent/references/runtime-guides/subagent-registry.md`.
 
-## Phase Flow
+## Phase Index
 
-For the commands below, set:
+The per-phase walkthrough — sub-steps, exit gates, `check-phase-readiness` calls, and dispatch shapes — lives in `agent/phases/phase-N-*.md`, Read on demand rather than carried in operator context at all times. This index is the map; the phase docs are the method. The phase docs are runtime-loaded (they sit outside the render path, like `agent/operator-core-code.md`).
 
-```bash
-DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
-DB="$DIR/cases.db"
-```
+**Read-on-phase-entry (per-phase load, modeled on the specialist per-phase load pattern).** When you ENTER a phase, `Read` its `agent/phases/phase-N-*.md` doc before dispatching that phase's work, and re-read it on a method re-anchor (Core Loop "Re-anchor on method mid-run") whenever the cadence slips or the current phase changes. Each phase doc carries that phase's full sub-steps, exit gates, `check-phase-readiness` calls, and dispatch shapes verbatim — do not run a phase from memory. Per the Core Loop re-anchor scoping, the Report doc (`agent/phases/phase-8-report.md`, which also carries the Definition of Done) is read-scoped to Phase 8: do NOT read it during Phases 1–6 — that mid-run re-read is the reporting-prematurity bleed the scoping exists to prevent.
 
-1. **Phase 1 — Reconnaissance**
+| Phase | Doc | Purpose |
+|---|---|---|
+| 1 — Recon | `agent/phases/phase-1-recon.md` | Operator-owned subdomain/host enum job (1a), recon + source-analysis dispatch (1b), reactive nuclei sweep (1c); Phase-1 exit gate + per-host outcome audit. |
+| 2 — Collect (+ 3 Perimeter) | `agent/phases/phase-2-collect.md` | surface-collector dispatch, on-return recording steps, Phase-2 exit gate + per-host audit, `transition-phase consume-test`; folds **Phase 3** perimeter / auth-gate bypass. |
+| 4 — Consume & Test | `agent/phases/phase-4-consume-test.md` | Depth Doctrine / Per-Domain VA fan-out, Phased mindset flow, nuclei coverage audit (step a), per-type consumption loop (steps b–h), system-level cross-surface synthesis (step i). |
+| 5 — Verify | `agent/phases/phase-5-verify.md` | Adversarial review of Phase-4 findings, disposition set (confirmed/upgraded/downgraded/killed), dedup + chain-primitive passes, exit gate, `transition-phase exploit`. |
+| 6 — Exploit (+ 7 Athena) | `agent/phases/phase-6-exploit.md` | osint-analyst dispatch, `exploit_policy` resolution + invariants, exploit-state recording, CVE-validation gating; folds **Phase 7** Athena / log investigation. |
+| 8 — Report | `agent/phases/phase-8-report.md` | Draft → QA → blind pre-submission triage → publish gate, per-finding submission mode, and the **Definition of Done** (judgment-only closeout no command can check). |
 
-   **The operator owns the long recon enumeration; specialists do the bounded, judgment work.** 1a subdomain/host enumeration runs as the operator-owned supervised job `vigil assess recon` (the operator launches it and polls `vigil assess recon-status`) — never a specialist's blocking call, because a >~5-min blocking enum gets the dispatched agent SIGUSR1-killed mid-run (`agent/shared-constraints.md` §2). Only 1b (per-host web fingerprint assessment) and 1c (reactive nuclei) are dispatched to `recon-specialist` and `source-analyzer`. The operator handles scope prep, resource thresholds, the recon-job lifecycle, and durable-state recording. Operator carve-outs (mechanical pipeline checks): (1) credential auto-use validation — single login test; (2) tier-pick smoke — one `wafw00f` or `httpx` HEAD per host; (3) runtime health smoke — `vigil assess kali --help`, version probes, container-status; (4) backend-write helpers — `record-finding`, `supersede-intel`, `resolve-surface`, etc. Everything else target-facing is specialist work. If a specialist cannot be launched (missing skill, missing wrapper, runtime down), record the blocker via `vigil assess agent decision --kind dispatch_blocked --phase 1b --reason "..." --surfaced-to-user` (the row carries `kind=dispatch_blocked` plus `surfaced_to_user=true`) and surface to the user — never silently move analysis work back into the operator loop.
+(Tiny-phase folds: **Phase 3 Perimeter / Auth-Gate Bypass** → `phase-2-collect.md`; **Phase 7 Athena / Log Investigation** → `phase-6-exploit.md`. The Recon Dispatch Resource Policy that used to sit at the end of Phase Flow now lives at `agent/references/runtime-guides/dispatch-resource-policy.md`.)
 
-   **1a. Subdomain/host enumeration — the operator-owned recon job (when scope.json `hosts` contains `*.domain` entries)** — launch `vigil assess recon <apexes> --background` (stages dns-discovery → web-discovery → js-mining → gau; checkpointed/resumable) and poll `vigil assess recon-status` to completion BEFORE the 1b recon+source pass, because 1b's per-host assessment and 1c's reactive nuclei both consume the live-host set the job produces — running them against the apex alone misses the enumerated surface. Run it as the supervised job (not a specialist dispatch) so the long enumeration survives a harness timeout; the pipeline ingests resolved live hosts into the work buffer itself. Add `--brute` / `--resume` for a deeper pass when the recon-status digest shows the surface is incomplete.
-   Before launching the `vigil assess recon` job, run `vigil assess kali exec --technique HEALTH --intent "verify subdomain-enum runtime binaries" --probe-kind fingerprint --phase recon --timeout 30 -- which alterx asnmap bbot cero dnsx github-subdomains massdns puredns shuffledns subfinder tlsx` to confirm tooling. Missing binaries → fix the runtime, do not silently degrade — puredns silently fails when massdns is missing (zero output, no error, exit code 0), and a dnsx fallback against a typical bruteforce wordlist will spike container CPU before stabilizing. Recon-specialist dispatches scanning multiple hosts MUST use `nmap -iL hosts.txt`. The operator never asks a specialist to loop nmap per-host; always consolidate with `-iL`. If the specialist generates `for h in hosts; do vigil assess kali nmap-scan --target $h ...`, the operator catches it in dispatch review and re-dispatches with the consolidated command.
-   Skip 1a when scope.json contains only bare hosts — there is nothing to expand, so launching the recon job adds no surface.
-   - **Register out-of-scope carve-outs in `scope.json` `out_of_scope` BEFORE enum runs.** Wildcard expansion routinely surfaces hosts the program excluded (telecom-PTR space, a vendor apex, an explicitly carved-out subdomain). The `vigil assess recon` pipeline scope-filters the resolved set between the dns and web stages (the same `host_admitted` allow-AND-not-deny primitive `filter-scope` uses), so authoring the deny-list up front keeps the bulk httpx/katana passes — and downstream buffer — off out-of-scope hosts from the first probe. Carve-outs added after a run only take effect on the next `--resume`.
-   - **Vendor-SaaS scope checkpoint.** When the first Phase 1 recon dispatch returns wafw00f / nmap rDNS / httpx fingerprint output that flags a host's underlying application as vendor-managed SaaS (strict-subdomain match on CNAME or rDNS), warn once per host and record the flag via `vigil assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user`. The detection requires recon output, so the checkpoint fires AFTER the first recon dispatch returns, not before — surfacing it pre-dispatch is circular (vendor-SaaS detection needs the dispatch's output). The default policy is permissive: warn and continue. The checkpoint blocks Phase 1 advance only when the operator opts in via `vigil assess check-phase-readiness --phase recon --strict-vendor-saas`. The flagged options for the user are: (1) in-scope per VDP — proceed with recon; (2) out-of-scope per VDP — skip and exclude from buffer; (3) partial scope — test the asset's surface but not the underlying vendor platform. Hosts authored as an explicit literal in `scope.json` (bare host or URL entry, NOT wildcard expansion) skip the gate entirely — the literal is already the operator's in-scope decision.
-   - **Egress reputation checkpoint.** Run `vigil assess egress-check --hosts <in-scope hosts> --control example.com --emit-blocked-hosts <file>` for the robust automated version: it probes a sample + a known-good control, uses the shared reachability verdict (a bare `connect=000` is not treated as blocked — it must show no TCP connect AND no IP, and a TLS-1.3 reset is retried with `--tls-max 1.2`), and records an **advisory** `egress_decision` only when the controls still connect but the in-scope sample is overwhelmingly blackholed. It emits the blocked-hosts file for `ingest-endpoints --egress-blocked-hosts` directly. The legacy bash procedure (below) remains the manual reference. The operator runs this check after the recon job's dns/web stages populate the live-host set (procedure in `agent/references/runtime-guides/cdn-ip-blocking.md`; the legacy bash form reads `live_hosts.txt`). When `egress_block_pct > 50`, the operator re-samples after five minutes and only surfaces the four-option checkpoint when the second sample stays >50%. Most >50% block-rate is transient rate-limit shape, not IP reputation; the re-sample loop catches the false-positive case. The four mitigation options: (1) request IP allowlisting from the target program (standard for authorized VDP); (2) route through a residential proxy or clean-IP VPS; (3) use a browser-based tool inside the runtime (presents a legitimate JA3/JA4 TLS fingerprint); (4) accept the limited coverage and document the gap as a Phase-4 blocker. Record the choice via `vigil assess agent decision --kind egress_decision --choice <option> --payload-json '{"blocked_pct": N}'`. Hosts identified by the check feed into `vigil assess ingest-endpoints --egress-blocked-hosts <file>` so URLs to them defer with `cluster_key=deferred:egress-blocked` instead of polluting the work buffer.
+**Phase-transition checkpoint (mechanical backstop).** After each phase, use the guarded transition helper — the semi-mechanical backstop that pairs with the Read-on-entry directive above and with each phase doc's own `check-phase-readiness --phase <phase>` exit gate:
 
-   **1b. Recon + source analysis** — dispatch `recon-specialist` + `source-analyzer`. On a **dedicated** runtime run them in parallel (their work is independent and sequential dispatch doubles wall time for no coverage gain). On a **shared / Standard-tier** runtime, default to the sequential monitored pipeline instead (see "Recon Dispatch Resource Policy → Phase-1 dispatch shape"): N concurrent heavy-enum agents on a shared VM is what caused the load-36 near-crash. `recon-specialist` reads the completed `vigil assess recon-status` digest (it does not generate the host list — the 1a job did), judges recon completeness, and runs the bounded per-host web fingerprint chain via `agent/skills/web-recon/SKILL.md` (continuing non-web triage when a meaningful service is exposed). `source-analyzer` loads `agent/skills/source-analysis/SKILL.md` and focuses on HTML/JS/CSS extraction. If recon finds a non-web service that needs deeper follow-up and a relevant skill/reference exists, dispatch the most suitable worker before leaving Phase 1 — leaving non-web triage on the operator loses the skill's methodology depth.
-
-   **1c. Reactive nuclei sweep against Phase 1 URL delta** — before leaving Phase 1, fire a reactive nuclei sweep via `vigil assess kali nuclei` against the URL delta from the recon job (1a) and the recon-specialist assessment (1b) (methodology + dedup in `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Running it in-phase — instead of holding every URL until Phase 4 — turns template hits into `record-intel` / `record-finding` writes *before* Phase 4 specialists dispatch, so specialists inherit the signal as intel and findings. The dedup pattern (`list-command-runs` + jq) ensures this pass and the Phase-2 reactive pass below do not re-scan the same host+template combo.
-
-   **Phase 1 exit gate.** Before leaving Phase 1, run `vigil assess check-phase-readiness --phase recon`. The gate checks whether each scope entry has downstream evidence — live services, recorded surfaces, or work-buffer rows under the entry's host. Also audit that every expected pipeline stage COMPLETED (none `timed_out` / `partial` / never-ran) — `check-phase-readiness` surfaces this as a stage-completion audit; the how lives in `agent/skills/phase-qc/SKILL.md`. Bare hosts and URL entries pass trivially; wildcards fail when enumeration produced nothing real. If a wildcard fails, re-run or extend the recon job (`vigil assess recon … --brute --resume`) or mark the entry deferred in `scope.json` before advancing, because entering Phase 2 with empty scope branches leaves whole subtrees of the attack surface untested.
-
-   **Per-host outcome audit (WARN-only).** Pair the scope-entry gate with `vigil assess check-phase-readiness --phase recon --by-host` to surface a per-host outcome table: WAF tier, service inventory, directory-fuzz coverage, tech fingerprint, OSINT. The audit reads outcome tables (`intel_tech_components`, `assessment_services`, `assessment_surfaces`, `assessment_dispatch_decisions`) — never `assessment_command_runs` — so any tool that wrote the durable row satisfies the corresponding objective. Unmet objectives WARN with an actionable dispatch hint but do not block phase advance. When an objective is intentionally skipped (scope brief forbids brute-force, vendor confirms WAF tier out-of-band, OSINT carve-out), record an explicit deferral: `vigil assess agent decision --kind coverage_deferral --payload-json '{"host": "api.example.com", "deferred_objectives": ["directory_fuzz"], "reason": "scope brief forbids brute-force"}' --surfaced-to-user`. The deferral row is queryable post-engagement via `vigil assess agent list --kind coverage_deferral`, so gaming the gate is audited rather than invisible.
-2. **COLLECT** → dispatch surface-collector with `agent/skills/surface-collection/SKILL.md`.
-   Provide: targets from scope.json, Phase 1 endpoint artifacts (paths to `endpoints.txt` and any source-analyzer output in `scans/`), credential state (from `vigil auth status`), and `$DIR/cases.db` path.
-   On return:
-   - Intelligence from `#### Intelligence` sections must be recorded via `vigil assess record-intel <type> <json-file>` — one call per structured row (tech-component, person, email, domain, dns-record, org-fact, note, etc.). Run `vigil assess contract record-intel <type>` first for the canonical field list — intel schemas are strict and reject unknown fields. Verify the counts with `vigil assess list-intel` (summary view).
-   - Review `#### Priority Attack Surfaces` for Phase 4 dispatch ordering — surface-collector's triage signals override the default type-based dispatch order when risk-informed prioritization is available
-   - Inspect work-buffer stats: `vigil assess work-buffer "$DIR/cases.db" stats`
-   - Inspect coverage gaps: `vigil assess fetch summary`
-   - Fire a reactive nuclei sweep against the Katana/gau URLs just ingested (see "Reactive Nuclei on URL Discovery" above and `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Surface-collector-ingested URLs are the largest URL injection of the engagement, so running the reactive sweep here maximizes the CVE/misconfig/exposure signal before Phase 4 dispatch.
-   - **Classification is automatic at ingestion** — `db_insert_work_item()` calls `assess.lib.classify_buckets.classify_row()` inline so `priority_score`, `priority_reason`, and `cluster_key` are populated on every row write. Use `vigil assess classify-work` only to re-apply a bucket-table change against an already-ingested buffer; do not run it as part of the normal phase flow.
-   - **Review clusters, defer low-signal ones** — `vigil assess list-clusters "$DIR/cases.db"` prints cluster counts, max/avg priority, and representative URLs. Any cluster that is clearly not worth specialist attention (e.g., 10k static-asset URLs, out-of-scope-adjacent paths, already-covered admin endpoints) gets deferred with `vigil assess work-buffer "$DIR/cases.db" defer-cluster <cluster_key> --reason "…"` before Phase 4 begins — leaving low-signal clusters pending pollutes the priority queue and forces specialists to re-triage what the operator already judged.
-   Surface-collector records surfaces via `vigil assess record-surface` and findings via `vigil assess record-finding` before returning.
-   **Phase 2 exit gate.** Run `vigil assess check-phase-readiness --phase collect`. Every scoped entry must have collection evidence — a recorded surface or a work-buffer row under its host. If an entry has neither, redispatch surface-collector against it or mark the entry deferred in `scope.json` before advancing. Skipping this gate lets scope-entries drift into Phase 4 with zero work in the buffer. Also audit that every expected pipeline stage COMPLETED (none `timed_out` / `partial` / never-ran) — `check-phase-readiness` surfaces this as a stage-completion audit; the how lives in `agent/skills/phase-qc/SKILL.md`.
-
-   **Per-host outcome audit (WARN-only).** Run the per-host audit alongside the scope-entry gate: `vigil assess check-phase-readiness --phase collect --by-host`. The per-host view catches hosts that have squeaked through the scope-entry gate without one of the five Phase-1/2 outcomes (WAF tier, service inventory, directory-fuzz coverage, tech fingerprint, OSINT). Same WARN-only contract as Phase 1 exit; record a `coverage_deferral` decision when an objective is intentionally skipped.
-   Transition phase: `vigil assess transition-phase consume-test` (checks work-buffer, scope coverage).
-3. **PERIMETER / AUTH-GATE BYPASS** — For every auth gate discovered in Phases 1–2 (login forms, SSO endpoints, reverse-proxy auth walls, redirect-to-login surfaces), dispatch a focused bypass-technique sweep against the **gate itself** — not the resources behind it — before any test traffic crosses the gate. Pre-load a product-specific OSINT brief (vendor docs, public CVE history, known bypass patterns for the identified technology) so the specialist can apply gate-specific technique families (static-extension exemptions, path/normalization confusion, routing-header injection, verb tampering, desync). This is trigger-based, not a fixed batch: fire it for each newly discovered gate as collection surfaces them, not as a single end-of-phase sweep. The gate-itself sweep mechanics and OSINT-brief pre-load procedure live in `agent/skills/auth-bypass/SKILL.md`.
-4. **CONSUME & TEST** → operator-orchestrated. Load `agent/skills/case-dispatching/SKILL.md`.
-
-   **Depth framing — a surface can be a whole application.** A single surface or URL is frequently an entire application that warrants its own deep campaign, not a one-probe item: katana crawl, content discovery, a parameter sweep, an IDOR sweep across its object references, JS/secret extraction, and a dedicated specialist dispatch (or several) scoped to that one app. The most common way real bugs are missed on large runs is treating a high-value surface as a quick tick instead of going deep on it. When a surface looks like an app — an authenticated portal, an API root, an admin console — dispatch a campaign against it, not a single check.
-
-   ### Depth Doctrine — Per-Domain VA Fan-Out
-
-   **Breadth-bias is the dominant failure mode at scale.** The operator's pull toward breadth — covering everything, resolving each surface to a status, advancing the phase — silently degrades the hunt: it favors quicker checks, which means fewer vuln-class checks per surface, which means shallow depth, premature closure, and missed vulnerabilities. The countervailing doctrine for Phase 4 is depth, expressed as a *concentrated* fan-out, not a swarm. This is the operator-side complement of the Re-anchor cue (Core Loop, top of file) and Core-Loop step 2's Phase-4 prioritization — re-read both when the cadence drifts back toward item-ticking.
-
-   - **Focus 1-2 TARGETS at a time; a SURFACE can BE a target.** At any moment, concentrate the active fan-out on one or two targets — where a "target" may be a single high-value surface (an auth portal, an API root, an admin console), not necessarily a whole apex. Set `--scope-host` to the focused domain for every dispatch in the batch. When a hot lead emerges, converge concurrent disjoint-host lanes on it; once the lead is resolved, **re-widen back to breadth** — converge and release, not permanent narrowing.
-   - **Fan VA lanes at DEPTH, not a swarm.** Partition the focused target's surfaces into lanes keyed on **(surface-group × vuln-class)** — e.g. lane A = the API surface group × access-control/IDOR, lane B = upload/form surfaces × injection + file-upload, lane C = auth/session surfaces × auth-logic — one `vulnerability-analyst` per lane, each loading the matching vuln-class skill and running a real campaign at `item-iterating`/`hypothesis-driven` depth. This is **deep** fan-out: it is the opposite of the corpus `swarm` mode (which is many shallow `low`/`medium` scans over a corpus — see Dispatch-Mode Declaration). Do not use `swarm` here.
-   - **Exploit-developer fan-out for high-value targets (low-bias, chain-synthesizing).** On a rich, high-value target where slow+thorough beats breadth, fan **`exploit-developer`** (deep-manual) across the same surface lanes — but give each lane the **full surface + intel context with a deliberately OPEN objective** ("find and prove P1/P2 impact on this surface"), NOT a pre-named bug. Pre-pointing biases the hunt and hides chains; the exploit-developer self-serves the full endpoint map and is told to "start with the landscape, then narrow." The operator's job is **cross-dispatch chain synthesis**: after each batch, read the lanes' handoffs together, look for A→B primitives across them (auth-bypass + IDOR, reset-poisoning + takeover, info-leak + SSRF), and only THEN dispatch chain-directed follow-ups. Run several under-directed lanes first; let the chain context accumulate across dispatches before you start steering. This complements (does not replace) the VA fan-out — use VA for breadth-of-vuln-class discovery, exploit-developer fan-out when the target warrants concentrated deep manual hunting.
-   - **Scale lane count to surface count — within the runtime-tier ceiling.** Thin surface = 1 VA lane; a broad, app-like target = 3-4 lanes. The Heavy/Comfortable concurrency floor (4-6 specialists; see "Aggregate concurrency + shared-VM ceiling") is the budget on a dedicated runtime. **But the runtime tier caps the lane count regardless of surface breadth:** the Standard tier handles ~2-3 concurrent lanes on a small target (see "Resource sizing" / "Aggregate concurrency"); do not fan 5-7 lanes into a VM that cannot absorb them. Size the fan-out to the smaller of (surface breadth, VM capacity).
-   - **The "very little attack surface" exception.** Breadth-style coverage of many surfaces at once is acceptable in exactly one case: the target genuinely has very little attack surface — operationally, a handful of routes, no object references, no privileged features, no auth boundary, and no useful source intel *after a thorough pass* (not after a quick look). This is the only exception to 1-2-target focus; rotate to breadth only when the focused target is genuinely dry, per `agent/rules/hunting.md` (rules 5 and 15, "rotate only when genuinely dry").
-   - **Closed-surface dead-vs-unfinished re-audit.** Before any phase exit, re-audit every surface previously resolved `covered`/`deferred`/`not_applicable` and separate genuinely **DEAD** surfaces (truly exhausted — varied probes across multiple vuln classes produced nothing) from **UNFINISHED** ones (resolved on a timer, a single quick pass, or one status-code check). Re-open the unfinished ones and fan a lane at them. The Phase-4 exit step `h` (`check-phase-readiness --phase consume`) resolves surfaces to a status but does not, by itself, distinguish dead from prematurely-closed — that judgment is this re-audit.
-   - **Cross-lane politeness = disjoint hosts.** Assign lanes **disjoint hosts** wherever possible, and cap target-facing concurrency at **≤1 active target-facing tool per host across all lanes** (the I-013 disjoint-host concurrency rule: concurrent in-container probes against the same host thrash the resolver and risk false negatives). Tie this to the per-target rate calibration ("Recon Dispatch Resource Policy") and the named-identity `--identity` disjointness (Credential Auto-Use → Named identities). This is a politeness/safety CUE, not a CLI-enforced gate.
-   - **Bookend the fan-out.** Each focused target's fan-out is bracketed by the two Mandatory Phase-Exit Passes: the per-finding variant/sibling pass (Verify → Exploit) per confirmed finding, and the cross-target chain-construction pass (Exploit → Report), which runs **across** targets after each target's fan-out completes. See "Mandatory Phase-Exit Passes".
-
-   **Run the readiness check every few batches, not just at the end.** Run `check-phase-readiness` (the consolidated readiness command) every few dispatch batches during the phase — it is an advisory, EV-ranked view of what is under-covered and where the depth is thin, and it steers the next batch toward the gaps. Treating it as an end-of-phase gate only surfaces the gaps after the cheap moment to fill them has passed.
-
-   **Read the coverage ledger to spot uncovered real-app hosts.** `vigil assess coverage` is the read-only, per-host coverage **LEDGER** — a reporting projection, NOT a gate. For each in-scope host it shows the live `route_count`, whether it is a `real_app?` (≥ `--route-threshold` distinct LIVE routes OR an exposed API/auth/GraphQL surface, OR-included even under the threshold), whether it has a `recorded-verdict?`, and the computed **coverage-state**. A host counts as **covered** ONLY with a *recorded verdict* — a finding, or an evidence-backed-negative such as a `false_positive` decision — NOT a merely completed dispatch. The ledger surfaces the gaps the later `check-phase-readiness` gate will block on: `uncovered` real-app hosts that still need a lane, and hosts flagged `needs_browser_reprobe` (curl undercounts routes behind a WAF, so re-probe with a browser before treating the host as thin/dead). Use it as the at-a-glance "which in-scope host has no verdict yet" view between batches; pass `--json` for the structured ledger.
-
-   Steps:
-   a. **Nuclei coverage audit** (once, before the work-buffer loop) — audit what Phase 1/2 reactive sweeps already covered and run nuclei only against gaps. Do not blindly re-sweep: if every in-scope live host already received the reactive template set, this step prints a coverage summary and advances.
-      1. Build the coverage set: `vigil assess list-command-runs --q nuclei --tool-bin nuclei` → jq-extract each prior run's input-list path and template tag(s).
-      2. Compute gaps: live targets ∖ covered hosts (and/or template sets the reactive passes did not exercise).
-      3. If gaps exist, run nuclei via `vigil assess kali nuclei` against the gap list only:
-         `vigil assess kali nuclei -l /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap.txt -t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/ -severity medium,high,critical -as -stream -jsonl -rate-limit 150 -c 25 -bs 25 -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.jsonl --technique CVE-VALIDATION --intent "Phase 4a gap-only nuclei coverage audit" --probe-kind fingerprint --phase consume-test --timeout 1800`
-      4. If no gaps, record `vigil assess log operator "Phase 4a coverage audit" "check-phase-readiness --phase consume" "Reactive sweeps covered all in-scope hosts, no rerun needed." --actor-kind operator`.
-      See `agent/skills/nuclei-scanning/SKILL.md` "Coverage Audit Mode" for the detailed procedure. Triage policy is unchanged: critical/high hits → work-buffer priority entries or findings (after manual validation); medium → intelligence.
-
-      **Substrate-sweep scoping.** A broad nuclei substrate sweep is not politely completable at host-scale (templates × hosts blows up — a curated tag selection can still resolve to >1,500 templates × every live host). Scope it:
-      - **Severity + cheap subset.** Default to high+critical plus the curated cheap directory subset above (medium hits route to intel, not findings). Scope by template **DIRECTORIES** (`-t http/cves/,http/exposures/,http/default-logins/,http/exposed-panels/`), not broad `-tags`. The wrapper now default-excludes the destructive/noisy classes (`dos`/`fuzz`/`intrusive`/`brute-force`) — you do not pass `-etags` for those yourself.
-      - **Host-scale guard.** At ~25-50+ live hosts, do NOT sweep all in-scope live hosts. Bound the substrate sweep to a small dedicated/origin (non-CDN) subset — identify it from the recon origin-IP axis (asnmap → cero on resolved origin IPs) and the Cloud-fronted-vs-Origin trait rows in `agent/references/recon/rate-calibration.md`. On high-friction/large-host-count surfaces, prefer OSINT version→CVE matching (`osint-analyst` → `record-intel cve` + targeted `exploit-developer` validation, see Phase 6) over a broad CVE-template host-scale sweep — it delivers most of nuclei's CVE-detection value without the per-host request volume.
-      - **OOB-up-before-blind-testing.** Confirm shared OOB/interactsh is ready (`vigil oob status --json`) before any nuclei templates that fire blind/OOB payloads.
-      - **gf-tags-are-leads.** gf buckets only classify; their hits are leads requiring downstream validation, never findings on their own.
-      - **Operator-sweep-vs-VA-lane collision rule.** Either run the substrate sweep to **completion before** any VA lane touches those hosts, OR fold the scoped per-host-subset nuclei call into the VA lane that owns that subset. Do not run an operator-wide nuclei sweep concurrently against hosts a VA lane is actively probing (it violates the ≤1-target-facing-tool-per-host politeness rule and double-loads the host). The nuclei-scanning skill holds the mechanics; this is the scoping decision.
-   b. Reset stale work items: `vigil assess work-buffer "$DB" reset-stale 10`
-   c. Check stats: `vigil assess work-buffer "$DB" stats`
-   d. Fetch and route — dispatch mode depends on pending-item volume:
-      - **Pending < 2000 → type-based dispatch.** Independent types run in parallel:
-        - `api`, `api-spec`, `form`, `upload`, `graphql`, `websocket`, `auth_entry`, `workflow`, `api_route`, `event_feed`, `debug_config`, `portal_session` → vulnerability-analyst (pick matching vuln-class skill via `vigil assess list-skills`)
-        - `page`, `javascript`, `stylesheet`, `data` → source-analyzer (load `source-analysis` skill)
-        `vigil assess work-buffer "$DB" fetch <type> 10 <agent-name>`
-      - **Pending ≥ 2000 → priority-first dispatch.** Type-based fetch orders only by id within a type, so at 2000+ pending items specialists churn through low-signal work before reaching the high-signal clusters `classify-work` already scored. Switch to priority mode. `fetch-by-priority` is route-aware: it only ever claims rows whose type maps to a specialist route, and rejects free-form agent names so stray labels can't silently mix work types.
-        - `vigil assess work-buffer "$DB" fetch-by-priority 10 auto` — claim the highest-signal routable rows globally and stamp each with its canonical owner (`vulnerability-analyst` for API/auth/workflow/debug/portal/event types, `source-analyzer` for page/javascript/stylesheet/data). Use this when dispatching both specialists in parallel off one queue.
-        - `vigil assess work-buffer "$DB" fetch-by-priority 10 vulnerability-analyst` (or `source-analyzer`, or any `vulnerability-analyst-N` / `source-analyzer-N` instance label) — claim only the types that specialist can handle. Use this when you want parallel instances of one role without handing any of them work outside its route.
-        Rows come back sorted by `priority_score DESC, cluster_key, id`. Run `vigil assess list-clusters "$DB"` between batches to decide whether new clusters warrant `defer-cluster` before they reach specialists — cluster keys carry a prefix (`gf:` for vuln-class buckets like `gf:ssrf` / `gf:debug_logic`, `path:` for the two-segment fallback); see `agent/skills/case-dispatching/SKILL.md` for the full weight table.
-      Pass the raw fetched JSON rows into the dispatch context. They carry canonical ids such as `request_variant_id`, `service_id`, and sometimes `coverage_item_id`, which subagents need for durable probe and coverage writes.
-      For blind testing, tell specialists to use `vigil oob status --json` to confirm shared infrastructure, start a named listener with `vigil oob client start <name> --engagement <key> --agent <agent>`, mint a nonce-tagged correlation URL with `vigil oob mint`, and correlate hits with `vigil oob poll --client <name>` (NOT `vigil oob client logs`, which is a raw listener tail for infra debugging only).
-      If `$DIR/.listener_url` exists, include the tunnel address for agents that need a callback target.
-   e. On subagent return: `vigil assess work-buffer "$DB" done "id1,id2,..."`
-      Mark a batch done only after the subagent has written durable state for any findings, significant probe runs, and coverage updates its work satisfied. Verify that EVERY pending coverage_item the surface accrued moved out of `pending`/`queued`/`deferred` — one per implied vuln-class, NOT just the cluster winner's. A single surface carries one coverage_item per matched gf bucket (a surface clustered `gf:ssrf` whose params also imply `sqli` accrues both an `ssrf` and a `sqli` item); closing it after testing only the cluster class is the breadth-bias failure mode that leaves the true class untested. `check-phase-readiness --phase consume`/`verify` surfaces the residual as the depth ledger's `signal_classes_uncovered` — the specific high-signal classes a surface's gf coverage_items implied that still lack a CLASS-SPECIFIC probe (a family being "covered" by a sibling class does NOT satisfy a distinct class in it). Drain those before closing. If the agent skipped durable recording, send it back to write the state instead of silently duplicating it from the operator. Record surfaces via `vigil assess record-surface`. Re-ingest new endpoints via `vigil assess ingest-endpoints`.
-   f. If vulnerability-analyst signals FUZZER_NEEDED for a parameter or directory, dispatch fuzzer with `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md` and a bounded objective (target URL, parameter name, max payloads).
-   g. Repeat b-f until pending=0 for all consumable types.
-   h. Before leaving: `vigil assess check-phase-readiness --phase consume`. If it fails, resolve each remaining surface as `covered`, `deferred`, or `not_applicable`. High-risk surfaces (`account_recovery`, `dynamic_render`, `object_reference`, `privileged_write`) must be resolved as `covered` or `not_applicable` before leaving this phase — deferring high-risk surfaces means they become invisible to the report.
-      `check-phase-readiness --phase consume` relays the surface-level coverage gate AND the broader scope-entry-level consumption gate (a whole scope host is fully consumed or explicitly deferred, not just individual surfaces), plus the depth ledger and intel advisory.
-   i. **System-level synthesis (cross-surface).** Per-type consumption is surface-local. Some findings exist only *between* surfaces: an auth boundary one host enforces and a sibling host does not, or a capability chain across findings (info-disclosure + open-redirect, SSRF + token leak, IDOR + impersonation). Build seams the same way as code Phase 2D — **structural** (findings/surfaces sharing an auth context, host, or trust boundary) and **capability** (pair findings by primitive, bucketed by capability so it stays O(capabilities²) not O(findings²)) — and scale the dispatch to the seam count: one `vulnerability-analyst` in `hypothesis-driven` mode for small scope, or a `vigil assess agent start-swarm` fan-out (one worker per 1-3 seams) for large multi-host scope, then a reduce pass for multi-hop chains. Tokens are not the constraint; coverage is (`agent/rules/hunting.md §16`).
-5. **VERIFY FINDINGS** → adversarial review of Phase 4 findings before investing in exploitation. This catches false positives, severity inflation, and weak evidence early — fixing a finding after exploitation wastes far more tokens than catching it here.
-   a. Fetch all active findings: `vigil assess fetch findings`
-   b. Triage the review scope:
-      - **Must review**: all HIGH and CRITICAL findings — these drive exploitation and dominate the report
-      - **Review by escalation potential, not a fixed quota**: review the MEDIUM findings that have *escalation potential* — chain potential (pairs with another finding into a high: info-disclosure + open-redirect, SSRF + token leak, IDOR + impersonation), auth / privilege-escalation relevance, or that sit on a high-value app unit (auth boundary, object-reference-heavy API, privileged-write surface). A medium on a throwaway static surface with no chain or auth angle can wait; a medium that could become the pivot of a high cannot. Cover the distinct vuln classes present rather than clustering the review on one. (This replaces an old fixed-percentage quota — a percentage is compliance-theater; escalation potential is what actually decides which mediums repay the review.)
-      - **Skip**: LOW and INFO findings — review cost exceeds downstream impact
-   c. Dispatch `vulnerability-analyst` in review mode. The dispatch context must include:
-      - The finding slugs, titles, and full payloads being reviewed
-      - Target access (the reviewer re-tests via `vigil assess kali ...`, not just reads the evidence text)
-      - **Trust-boundary / threat-model summary**: which entry points are unauthenticated vs privileged, which inputs are operator-trusted (config, internal callers), and the blast-radius tiers. Build it from what already exists — the host's auth tier in `scope.json`, the surface's `auth_context`, and recon/fingerprint intel about internal or trusted callers — sliced to the finding's host/module rather than dumped whole on large scope. The triager is overconfident without this grounding — reachability and auth-path severity calls depend on it.
-      - Explicit instruction: "You are reviewing findings produced by other agents. Your job is adversarial — challenge the evidence, reproduce the PoC, and verify the claimed severity. Confirm, upgrade, downgrade, or kill each finding with specific counter-evidence."
-      - Run the FP & severity-downgrade gate (`agent/references/finding-fp-and-severity-gate.md`, C1–C6) on each finding — it catches the real-world-impact gaps a CVSS-band check misses (no-PII "reads", orphan writes, insider-only enumerability, inflated `S:C`/`I:H`). The reviewer then **authors the report-ready story** into the finding's `details` (corrected `cvss_vector`/`cvss_score`, `evidence`, `impact`, `remediation`) so the report phase only formats — see the Four Validation Gates (Gate 3) in `agent/agents/vulnerability-analyst.md`.
-      - `finding-verification` (the adversarial Phase-4 verify procedure) plus the matching vuln-class skill (selected via `vigil assess list-skills`) for the findings under review
-   d. For each reviewed finding, the reviewer produces a disposition:
-      - **Confirmed** — evidence reproduced, severity accurate → `vigil assess verify-finding <slug> --disposition confirmed --reason "..."`
-      - **Upgraded** — real issue but severity is *understated* based on reproduced evidence → `vigil assess update-finding <slug> --severity <higher> --reason "severity upgrade: ..."` then `vigil assess verify-finding <slug> --disposition confirmed --reason "..."`
-      - **Downgraded** — real issue but severity overstated → `vigil assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity <lower>`
-      - **Killed** — false positive, unreproducible, or stacked preconditions → `vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-6>`
-   e. **Dedup pass**: check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker into the stronger:
-      `vigil assess merge-finding <source-slug> <target-slug> "<reason>"`
-   f. **Chain-only primitives stay in the normal finding table**: when a finding is real only as part of a proved or expected escalation path, update it with `vigil assess update-finding <slug> ...` so `details.chain_required`, `details.chain_rationale`, and `details.required_followup` are populated. Do not invent a chain-specific workflow status.
-   g. **Exit gate**: all HIGH/CRITICAL findings have a verification disposition. If the reviewer kills >50% of findings, review whether Phase 4 agents are producing speculative findings — tighten dispatch context for future engagements.
-   Transition phase: `vigil assess transition-phase exploit` (checks unverified high/critical findings).
-6. **EXPLOIT** →
-   a. Dispatch osint-analyst with `agent/skills/osint-recon/SKILL.md` — intelligence gathering is always permitted regardless of `exploit_policy`. Feed the tech stack, domains, and people data via `vigil assess list-intel tech-component`, `vigil assess list-intel domain`, and `vigil assess list-intel person` (or `vigil assess fetch intel` for the summary).
-   b. Respect `exploit_policy` from `scope.json` for exploit-developer dispatch. Use `vigil assess review-exploits` to inspect the current backend candidate set and `vigil assess check-phase-readiness --phase exploit` (its exploit projection prints `full_send` / the approved-target slug list / `*`) before launching work:
-      - `pause`: present backend exploit candidates to the human and ask which are approved for exploitation.
-      - `selected`: exploit only the approved target slugs recorded in scope metadata and still allowed by the backend exploit-candidate gate.
-      - `full_send`: dispatch all current backend exploit candidates immediately. Human approval is skipped, backend readiness is not.
-
-      **Exploit authorization is operator-and-specialist honored, not wrapper-enforced.** The approved-target set — `scope.exploit_policy` plus the approved target slugs, surfaced as a projection by `check-phase-readiness --phase exploit` — is honored by the operator and by specialists as a matter of dispatch discipline. It is **NOT** enforced inside the per-tool `vigil assess kali` wrapper: kali will run an exploit-grade payload against any in-scope host regardless of whether that host is in the approved exploit set, because the wrapper gates on engagement scope, not on exploit authorization. So a specialist must not exploit a target outside the approved set even though kali will not block the command. Name the approved target set explicitly in the exploit-developer dispatch context so the specialist constrains itself; do not rely on the tool to refuse.
-   c. Exploit-developer owns durable exploit-state recording. If it proves a chain, credential, access record, or credential test, it should write the JSON payloads under `$DIR/tools/exploit-state/` and record them before task completion with `vigil assess` helpers.
-   d. On return, verify canonical exploit state via `vigil assess fetch attack-chains`, `credentials`, `access-records`, and `credential-tests`. Do not create duplicate operator-side rows unless you are explicitly merging a proposal-based exploit session with `vigil assess merge-session`.
-   e. After osint-analyst returns: read the recorded CVE intel via `vigil assess list-intel cve`. **Do not promote CVE matches to findings yet.** If HIGH-value CVEs with public PoCs were identified, dispatch exploit-developer to validate each against the live target — backported patches, missing binaries, and disabled modules routinely invalidate version-only matches. Only record a CVE-based finding via `record-finding` after exploit-developer confirms exploitability or proves partial signal.
-7. **ATHENA / LOG INVESTIGATION (OPTIONAL)** → when Athena or equivalent logs are available, investigate whether discovered paths, payloads, or chains show evidence of prior exploitation. Use `agent/skills/athena-log-investigation/SKILL.md`.
-8. **REPORT** → keep reporting inside the existing `report` phase; use a draft → QA → publish gate so the report is reviewed before lifecycle state changes.
-   a. **Draft:** for a final report, run `vigil assess check-phase-readiness --phase report` first and resolve blockers before dispatch. Dispatch `report-writer` in draft-generation mode. Report-writer queries the backend through `vigil assess list-report-findings --mode final --json` on final reports or `vigil assess list-report-findings --mode draft --json` on interim reports, plus `attack-chains`, `credentials`, `access-records`, `surfaces`, and `summary` — let it self-serve rather than manually assembling findings context, since manual assembly risks stale or incomplete data. Draft-generation mode writes `report.md`, runs the 13-check self-review in `agent/skills/report-generation/SKILL.md`, fixes any local report issues it finds, and returns the completed checklist. It does not emit `report.generated` or mark findings `reported`.
-   b. **QA and fix (Pass 1 — in-context):** dispatch a fresh `report-writer` in review-and-fix mode with `$DIR/report.md` plus the same backend context. The QA writer checks every item in the 13-check post-generation checklist against the rendered report and backend grouped report-findings output, fixes report-local issues directly, and returns `QA PASS` only when every checklist item passes. If a failure requires new evidence or backend finding changes, it returns `QA BLOCKED` with exact finding slugs and required operator action. This is the first of a two-pass pre-submission gate: it has full engagement context and fixes the report; it does not reliably catch whether impact was actually demonstrated.
-   b2. **Blind pre-submission triage (Pass 2 — zero-context, decisive):** every **Medium-or-above** submission gets a BLIND triage before publish/submission — the operator runs this review pattern using `agent/skills/blind-triage/SKILL.md`. Dispatch a **non-specialist general agent** (strongest model, no engagement skills, no engagement context) and give it ONLY the program brief facts (in-scope assets, triage bar, severity-band policy) plus the submission bytes — under hard isolation: it reads ONLY the submission `.md` and runs no repo file read, no `vigil`/CLI/curl command, and no `cases.db` access. It judges the bytes like a real Bugcrowd triager and returns a structured verdict (`Accept@P1..P5` / `Need-More-Info` / `Not-Applicable-Informational` / `Out-of-Scope` / `Duplicate`), priority-vs-claimed-severity, triage reasoning, and weak points. **Record the verdict before publish** — the verdict is durable, not advisory: for each Medium-or-above finding, persist it with `vigil assess agent decision --kind blind_triage_verdict --payload-json '{"finding_slug":"<slug>","verdict":"<Accept@Px|Need-More-Info|Not-Applicable|Out-of-Scope|Duplicate>","claimed_severity":"<sev>","weak_points":"..."}'`. `transition-phase report`/`complete` reads these rows and blocks (`kind=missing_blind_triage`) for any Medium-or-above active finding lacking a recorded `Accept` verdict, so an un-recorded verdict is treated as no triage at all. **Gating rule:** anything other than `Accept` blocks submission — route the finding back to the report-writer/operator, fix the gap, and re-run the blind pass (recording the new verdict); only `Accept` clears it. This is an operator-run review pattern, not a roster role — the zero-context blindness is the whole point, so it stays operator-run rather than a registered specialist that would carry engagement context.
-   c. **Publish:** only after `QA PASS` (Pass 1) AND a recorded `Accept` blind verdict (Pass 2 — persisted via `vigil assess agent decision --kind blind_triage_verdict`) on every Medium-or-above finding, emit the `report.generated` event, update included findings to `reported`, and transition phase: `vigil assess transition-phase complete --track web`. The transition gate enforces the recorded-verdict requirement (`kind=missing_blind_triage`); publication before both passes clear creates false workflow state, so keep `reported` transitions behind this gate.
-   d. **Per-finding bug bounty / disclosure submissions (lighter dispatch):** internal `report.md` and external per-finding submissions are coordinate output types — `report.md` serves the operator/client; per-finding submissions serve the program triage queue. Each is an independent dispatch; they do not depend on each other. For a single finding submission, dispatch `report-writer` in bug bounty submission mode with a MINIMAL context load — DO NOT pull the full report-generation machinery:
-
-      **Load:** `agent/shared-constraints.md` + `agent/rules/reporting.md` + `agent/references/bugbounty-submission-format.md` + the single finding's evidence (`vigil assess fetch findings/<slug>`)
-
-      **Skip:** `vigil assess fetch attack-chains`, `vigil assess fetch summary`, `vigil assess list-report-findings` full projection, executive summary, and attack-path narrative — none apply to a single-finding program submission.
-
-      The output stages to `$ENGAGEMENT_DIR/submissions/<slug>/submission.md`. After the operator submits to the program, update the finding's submission status:
-
-      ```bash
-      vigil assess update-finding <slug> --submission-status submitted --reason "Submitted to <program> on <date>"
-      ```
-
-      Update as the program responds: `accepted` / `needs_info` / `rejected` / `duplicate`. This is independent of `workflow_status` — the finding stays `reported` in the internal record regardless of program outcome. See "Submission Status Lifecycle" in `agent/skills/report-generation/SKILL.md` for the full transition sequence.
-
-After each phase, use the guarded transition helper:
 ```bash
 vigil assess transition-phase <next-phase>
 ```
 The helper validates preconditions (scope coverage, work-buffer state, verification completeness,
 report readiness) and refuses the transition when blockers exist. Pass `--force` to override
 when the operator has reviewed and accepted the gap. Raw `jq` phase edits bypass these checks.
-
-## Recon Dispatch Resource Policy
-
-Every active recon dispatch passes through this policy before the operator hands the
-work to a specialist. The policy is the single source of truth for per-target rate
-calibration; specialists pull values from this table rather than guessing, and the
-operator catches dispatch-context drift before it reaches the runtime.
-
-### Resource-safety preflight rule
-
-Active recon dispatches must declare in dispatch context: candidate count, rate limit,
-thread count, retry count, timeout, output mode (line / JSON / `-omit-raw`), stop
-condition, and expected wall-clock. Specialists do not guess these — operators set them.
-
-### Per-target rate calibration table
-
-The trait-row table (Cloud-fronted / Origin / WAF-protected / High-friction / Vendor SaaS) and the runtime-tier × DNS-profile matrix live in `agent/references/recon/rate-calibration.md` (extracted from `shared-constraints.md` §14 to keep the every-specialist load lighter). Recon-class specialists pull values from there; this section covers tier selection and step-down rules.
-
-### Picking a tier
-
-Run `wafw00f` first; if a CDN/WAF is detected, pick the matching trait row. If httpx
-fingerprint shows a known vendor SaaS host pattern, use the Vendor SaaS row. If neither,
-default to **Origin / single-server** (the most cautious non-vendor row). Never default
-to Cloud-fronted just because the apex looks bursty-friendly — wildcards and subdomains
-often sit on origin servers.
-
-### When to step down a tier
-
-Watch for: 429s, sudden response-time degradation, or a CAPTCHA challenge served on
-probes. Step down one tier (e.g., Cloud-fronted → WAF-protected) and rerun the
-calibration. Do not step UP a tier mid-engagement.
-
-### DNS bruteforce gating
-
-The DNS-brute column is the rate ceiling for puredns/shuffledns invocations. Cross-reference
-`agent/skills/subdomain-enumeration/SKILL.md` "Host-CPU note" — DNS bruteforce is the
-dominant host-CPU and host-network spike in the engagement runtime, and aggressive
-profiles have crashed Docker on standard laptop hardware. The runtime-tier matrix above is
-what gates the `bursty-OK` profile: Standard tier never picks `bursty-OK`; Heavy tier may
-opt in via `--intent`; Comfortable tier may use it by default for trait rows that allow it.
-When in doubt, default to `polite-residential` for puredns/shuffledns and let the trait row pick the tier. For dnsx, the typed wrapper (`vigil assess kali dnsx`) defaults to `--dnsx-profile polite-cdn --resolver-profile public-tcp`; step up only after assessing the target.
-
-### Aggregate concurrency + shared-VM ceiling
-
-The per-target rate calibration above bounds a *single* probe. It does NOT bound the
-*aggregate* load of several heavy operations running at once — which is what actually
-crashed the runtime in past engagements (host load 36 on a 12-core host; 4 parallel recon
-agents each running `subfinder -all -recursive` + `amass`). The aggregate limits below are
-the **Standard-tier (shared-runtime) safety policy** — they exist to protect a co-tenant
-shared VM, not to throttle the operator by default. On a Heavy or Comfortable (dedicated)
-tier they do not apply; see the concurrency floor below.
-
-**Standard-tier (shared runtime) — serialize heavy work:**
-
-- **One heavy enum op at a time (engagement-wide).** "Heavy" = DNS brute
-  (puredns/shuffledns/massdns), bulk `httpx`/`dnsx` liveness over large lists, full-template
-  `nuclei` sweeps, and large-wordlist fuzzing. Serialize these — never run two concurrently
-  on a Standard-tier (shared) runtime.
-- **Concurrent-heavy-agent cap = 1 (Standard tier only).** On a Standard-tier shared runtime,
-  at most one specialist runs a heavy enum op at a time; additional recon agents are dispatched
-  sequentially or restricted to light/passive work. This `cap=1` is a shared-runtime safety
-  measure — it is **not** the default operating mode and does **not** apply on Heavy/Comfortable.
-  (The per-tool `Concurrent nmap procs cap` in `agent/references/recon/rate-calibration.md` is
-  the narrower in-tool limit; this is the cross-agent limit.)
-- **Shared-VM memory ceiling.** Before launching heavy enum, confirm the runtime is not
-  co-tenant-starved: a shared Docker VM hosting other (especially production) containers must
-  stay well under its `MemTotal`. Do not launch heavy enum when the shared VM is near its
-  memory ceiling — prefer a dedicated runtime. (`vigil runtime start` performs a code-side
-  shared-VM preflight; this policy is the human-judgment companion to it.)
-
-**Heavy / Comfortable tier — run 4–6 specialists in parallel (concurrency FLOOR, not ceiling):**
-
-On a dedicated Heavy or Comfortable runtime the operator SHOULD run **4–6 specialists
-concurrently** — that is the floor for a properly-utilized dedicated box, not a limit to stay
-under. The `cap=1` / one-at-a-time guidance above is Standard-tier-only; do not carry it onto
-the Heavy tier and throttle to a single specialist. Under-utilizing a dedicated runtime by
-running 1–2 agents is itself a failure mode (the long-tail-write-off pattern from the origin
-engagement was driven in part by only ~2 specialists running at a time). Fan the swarm to 4–6,
-size each specialist's per-target rate from the calibration table, and only step back from the
-floor if the dedicated box's own health-check shows genuine saturation — not preemptively.
-
-### Phase-1 dispatch shape: sequential on shared runtimes
-
-The default "fan out `recon-specialist` + `source-analyzer` (+ OSINT) in parallel" shape is
-correct only on a **dedicated** runtime (Heavy/Comfortable tier or a single-engagement VM).
-On a shared/constrained **Standard-tier** runtime, default to a **sequential, monitored recon
-pipeline**: run one heavy op (the `vigil assess recon` job is the heavy one to serialize), watch host load and the daemon health-check, then start the
-next. Fan out only once you have confirmed the runtime can absorb concurrent heavy work. This
-preserves the parallel-throughput win where the box can take it without reproducing the
-load-36 near-crash on a shared box.
 
 ## Credential Auto-Use
 
@@ -772,7 +594,7 @@ interpretation.
 
 ## Finding and Intel Recording
 
-Use `vigil assess record-finding <agent-name> <finding-json-file>` for findings (the prefix table, payload schema, severity↔CVSS rules, and lifecycle helpers live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `vigil assess contract record-finding`. Use the lifecycle helpers — `verify-finding` / `kill-finding` for verification outcomes, `reset-finding` to reopen a previously verified or false-positive finding, `update-finding` for non-verification metadata — instead of raw `post` / `patch`.
+Use `vigil assess record-finding <agent-name> <finding-json-file>` for findings (the prefix table and severity↔CVSS band table are canonical in `agent/shared-constraints-core.md` "Finding IDs and the `record-finding` Contract"; the payload schema and dedup rules live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `vigil assess contract record-finding`. Use the lifecycle helpers — `verify-finding` / `kill-finding` for verification outcomes, `reset-finding` to reopen a previously verified or false-positive finding, `update-finding` for non-verification metadata — instead of raw `post` / `patch`.
 
 Use `vigil assess record-intel <type> <json-file>` for `#### Intelligence` rows (intel types and dedup keys in §13). report-writer uses `vigil assess list-report-findings --mode <final|draft> --json`, which returns grouped root-cause findings with sequential `001~N` report IDs.
 
@@ -792,11 +614,11 @@ Phases: [x] Recon  [x] Collect  [>] Bypass  [ ] Test  [ ] Verify  [ ] Exploit  [
 [work-buffer] 120/495 done (24%) | findings: 5
 ```
 - Every output: `[operator]` prefix. Log entries chronological.
-- **Severity is conveyed by the structured field and calm, precise prose — not by shouting or slang.** Do not use ALL-CAPS for emphasis to signal criticality, and do not use casual / "reddit" severity language ("this is insane", "absolutely brutal", "game over", "pwned hard"). The `severity` field and the CVSS vector carry the rating; the prose states the attacker outcome plainly. A critical finding reads as a measured, exact description of impact, which is more credible to a triager than capitalized adjectives. (CAPS is still fine for the literal CLI tokens, flags, and enum values that are written that way — `REQUIRED`, `HEALTH`, `--force` — this rule is about emphasis and tone, not vocabulary.)
+- **Severity by structured field, not shouting or slang** — the canonical rule lives in `agent/shared-constraints.md` §7 (which specialists load); apply it to operator prose too.
 
 ## Subdomain Enumeration
 
-Runs as Phase 1a (see Phase Flow) when `scope.json` `hosts` has `*.domain` entries — as the operator-owned `vigil assess recon` job (poll `vigil assess recon-status`), not a specialist dispatch. `agent/skills/subdomain-enumeration/SKILL.md` and `agent/references/subdomain-enumeration.md` are the completeness / prioritization references the recon-specialist uses to assess the job's output.
+Runs as Phase 1a (see `agent/phases/phase-1-recon.md`) when `scope.json` `hosts` has `*.domain` entries — as the operator-owned `vigil assess recon` job (poll `vigil assess recon-status`), not a specialist dispatch. `agent/skills/subdomain-enumeration/SKILL.md` and `agent/references/subdomain-enumeration.md` are the completeness / prioritization references the recon-specialist uses to assess the job's output.
 
 ## Handoff Reference
 
@@ -804,27 +626,3 @@ See `agent/references/handoff-protocols.md` for detailed agent-to-agent handoff 
 
 Each agent's Handoffs section specifies **which skill to bring** when passing work downstream.
 Summary: recon→source-analyzer (bring source-analysis skill) + vuln-analyst (bring matching vuln-class skill), source→vuln-analyst+fuzzer (bring matching skill), vuln-analyst→exploit-developer (bring matching finding-class skill) / fuzzer (bring fuzzing skill), exploit→report-writer (bring report-generation skill) / osint-analyst (bring osint-recon skill), osint→exploit-developer (bring matching skill), report←backend API (self-service via `list-report-findings` helper).
-
-## Definition of Done
-
-The command-checkable readiness gates — Phase-4 verification/workflow queues cleared, severity↔CVSS bands aligned, coverage and root-cause/chain-review state, theoretical-finding disposition — are all enforced by the readiness commands. **Do not re-walk them here by hand.** Run:
-
-- `check-phase-readiness` (the consolidated readiness command) for the per-phase coverage / queue / disposition picture, and
-- `vigil assess check-phase-readiness --phase report` for the terminal report gate (it blocks on unreviewed findings, severity↔CVSS mismatch, root-cause groupings, chain-review state, theoretical-without-`chain_required` disposition, and unlinked-markdown blockers).
-
-Resolve every blocker those two report. Restating their checks as a manual checklist was duplicated bureaucracy — the commands are the source of truth, and a hand-checklist drifts from them.
-
-What remains below is **only the judgment that no command can check** — the load-bearing rigor that a passing `check-phase-readiness --phase report` does not, by itself, guarantee. These stay because they are the difference between a clean readiness response and a thorough engagement:
-
-**Run the `phase-qc` skill (`agent/skills/phase-qc/SKILL.md`) at each phase / wind-down boundary — before declaring a surface done, before lifting an account deferral, and before generating the report — to surface these judgment misses systematically.** It is a low-context, ADVISORY critic: it reasons against the coverage ledger (`vigil assess coverage`), the lanes' rendered handoffs, and the findings list (it does NOT recompute coverage or block a transition) and emits a structured miss-list — `{host_or_surface, expected, observed, miss_kind ∈ [coverage, depth, grading, chain, waf-blind], suggested_redispatch}`. It catches the judgment a binary gate cannot ("only the obvious endpoints were hit", "this P4 is impact-if-true a P2", "account-gated but the gate self-mints", "a verdict came off a WAF challenge page"). Consume its miss-list, re-dispatch / re-grade / record-deferral for each row, then re-run it; the judgment boxes below are the misses it is built to find, applied to the report boundary.
-
-- [ ] **Sibling/variant pass per confirmed finding (judgment: was the hunt real).** For each confirmed finding, a completed `variant-rotation` `vulnerability-analyst` dispatch exists against the finding slug (see "Mandatory Phase-Exit Passes"). The command can confirm the dispatch row exists; only you can confirm the pass *actually hunted* sibling routes / controllers / providers / content-types / auth contexts rather than going through the motions. Skipping or faking the variant pass is the single most common way real findings are missed in this codebase.
-- [ ] **Chain-construction pass run (judgment: were the chains genuinely sought).** At least one `exploit-developer` pass enumerated A→B candidates across the confirmed set (info-disclosure + open-redirect, SSRF + token leak, IDOR + impersonation are standard checks even when they look unlikely). The `transition-phase report`/`complete` gate confirms a completed `exploit-developer` dispatch exists (`kind=missing_chain_construction`) when ≥2 confirmed high/critical findings are present; the pass is what turns a list of mediums into a high, and only you can confirm the chains were genuinely constructed rather than a dispatch row going through the motions.
-- [ ] **Stale-text scrub clean (judgment: prose vs. current state).** Per `agent/rules/hunting.md` §21, no active finding's `summary` or `details` text references a state that no longer applies ("adjusted from X to Y" when severity is no longer Y, "originally rated as Z" after the rating shifted). The recipe lives in `agent/skills/report-generation/SKILL.md` Review-and-Fix QA Mode. A CVSS-band check passes this; reading the prose is the only way to catch it.
-- [ ] **Data-exposure / write findings passed the FP & severity gate (judgment: real-object impact).** Per `agent/references/finding-fp-and-severity-gate.md`, every confirmed data-exposure or write-impact finding has a recompute-checked CVSS vector, a proven real-object impact (a read-back, not an orphan write), and a recorded enumerability assessment in `details`. This is the C1–C6 judgment a band check cannot make.
-- [ ] **Blind pre-submission triage passed AND recorded (judgment: would an outside triager accept it).** Every Medium-or-above submission cleared the BLIND Pass-2 triage (`agent/skills/blind-triage/SKILL.md`) with an `Accept` verdict, and that verdict is **recorded** via `vigil assess agent decision --kind blind_triage_verdict --payload-json '{"finding_slug":"<slug>","verdict":"Accept@Px",...}'` before publish — see the Report phase step `b2`. The `transition-phase report`/`complete` gate blocks (`kind=missing_blind_triage`) on any Medium-or-above active finding without a recorded `Accept` verdict, so an un-recorded verdict reads as no triage at all. A non-`Accept` blind verdict is a block, not an advisory; only you can confirm the zero-context reviewer actually judged the bytes rather than being fed engagement context.
-- [ ] **Backend reflects submissions (external reality).** Findings actually submitted to the program (or marked accepted/duplicate) have a workflow status that matches reality; nothing remains "draft" if it was sent out. No command can observe the program's side — only you can reconcile it.
-
-**Wind-down re-collection cue.** Before declaring the hunt done and entering the report phase, re-run collection (a fresh `vigil assess recon` / `surface-collector` pass over the apexes) rather than trusting the stale work buffer — a fresh pass is cheap relative to a missed finding; stale buffers hide live handler paths that surfaced after the Phase 2 crawl.
-
-When `check-phase-readiness --phase report` is clean AND the judgment items above hold, dispatch `report-writer` for the final pass and then close the engagement.

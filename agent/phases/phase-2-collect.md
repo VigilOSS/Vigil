@@ -1,0 +1,27 @@
+# Phase 2 — Collect (+ Phase 3 Perimeter / Auth-Gate Bypass)
+
+**Read-on-phase-entry.** When you ENTER Phase 2, Read this doc; re-read it on a method re-anchor. It carries the surface-collector dispatch, the on-return recording steps, the Phase 2 exit gate + per-host audit, the `transition-phase consume-test` checkpoint, and the folded **Phase 3 — Perimeter / Auth-Gate Bypass** step (tiny phase folded here because its gate-bypass sweeps fire *as collection surfaces the gates*). Cross-phase machinery stays in `AGENTS.md`.
+
+For the commands below, set:
+
+```bash
+DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
+DB="$DIR/cases.db"
+```
+
+2. **COLLECT** → dispatch surface-collector with `agent/skills/surface-collection/SKILL.md`.
+   Provide: targets from scope.json, Phase 1 endpoint artifacts (paths to `endpoints.txt` and any source-analyzer output in `scans/`), credential state (from `vigil auth status`), and `$DIR/cases.db` path.
+   On return:
+   - Intelligence from `#### Intelligence` sections must be recorded via `vigil assess record-intel <type> <json-file>` — one call per structured row (tech-component, person, email, domain, dns-record, org-fact, note, etc.). Run `vigil assess contract record-intel <type>` first for the canonical field list — intel schemas are strict and reject unknown fields. Verify the counts with `vigil assess list-intel` (summary view).
+   - Review `#### Priority Attack Surfaces` for Phase 4 dispatch ordering — surface-collector's triage signals override the default type-based dispatch order when risk-informed prioritization is available
+   - Inspect work-buffer stats: `vigil assess work-buffer "$DIR/cases.db" stats`
+   - Inspect coverage gaps: `vigil assess fetch summary`
+   - Fire a reactive nuclei sweep against the Katana/gau URLs just ingested (see "Reactive Nuclei on URL Discovery" in `agent/operator-core.md` and `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"). Surface-collector-ingested URLs are the largest URL injection of the engagement, so running the reactive sweep here maximizes the CVE/misconfig/exposure signal before Phase 4 dispatch.
+   - **Classification is automatic at ingestion** — `db_insert_work_item()` calls `assess.lib.classify_buckets.classify_row()` inline so `priority_score`, `priority_reason`, and `cluster_key` are populated on every row write. Use `vigil assess classify-work` only to re-apply a bucket-table change against an already-ingested buffer; do not run it as part of the normal phase flow.
+   - **Review clusters, defer low-signal ones** — `vigil assess list-clusters "$DIR/cases.db"` prints cluster counts, max/avg priority, and representative URLs. Any cluster that is clearly not worth specialist attention (e.g., 10k static-asset URLs, out-of-scope-adjacent paths, already-covered admin endpoints) gets deferred with `vigil assess work-buffer "$DIR/cases.db" defer-cluster <cluster_key> --reason "…"` before Phase 4 begins — leaving low-signal clusters pending pollutes the priority queue and forces specialists to re-triage what the operator already judged.
+   Surface-collector records surfaces via `vigil assess record-surface` and findings via `vigil assess record-finding` before returning.
+   **Phase 2 exit gate.** Run `vigil assess check-phase-readiness --phase collect`. Every scoped entry must have collection evidence — a recorded surface or a work-buffer row under its host. If an entry has neither, redispatch surface-collector against it or mark the entry deferred in `scope.json` before advancing. Skipping this gate lets scope-entries drift into Phase 4 with zero work in the buffer. Also audit that every expected pipeline stage COMPLETED (none `timed_out` / `partial` / never-ran) — `check-phase-readiness` surfaces this as a stage-completion audit; the how lives in `agent/skills/phase-qc/SKILL.md`.
+
+   **Per-host outcome audit (WARN-only).** Run the per-host audit alongside the scope-entry gate: `vigil assess check-phase-readiness --phase collect --by-host`. The per-host view catches hosts that have squeaked through the scope-entry gate without one of the five Phase-1/2 outcomes (WAF tier, service inventory, directory-fuzz coverage, tech fingerprint, OSINT). Same WARN-only contract as Phase 1 exit; record a `coverage_deferral` decision when an objective is intentionally skipped.
+   Transition phase: `vigil assess transition-phase consume-test` (checks work-buffer, scope coverage).
+3. **PERIMETER / AUTH-GATE BYPASS** — For every auth gate discovered in Phases 1–2 (login forms, SSO endpoints, reverse-proxy auth walls, redirect-to-login surfaces), dispatch a focused bypass-technique sweep against the **gate itself** — not the resources behind it — before any test traffic crosses the gate. Pre-load a product-specific OSINT brief (vendor docs, public CVE history, known bypass patterns for the identified technology) so the specialist can apply gate-specific technique families (static-extension exemptions, path/normalization confusion, routing-header injection, verb tampering, desync). This is trigger-based, not a fixed batch: fire it for each newly discovered gate as collection surfaces them, not as a single end-of-phase sweep. The gate-itself sweep mechanics and OSINT-brief pre-load procedure live in `agent/skills/auth-bypass/SKILL.md`.

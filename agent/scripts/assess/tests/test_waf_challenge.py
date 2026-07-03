@@ -62,6 +62,19 @@ _AKAMAI_HEADERS = {
     "Mime-Version": "1.0",
 }
 
+# NEGATIVE: normal Akamai Bot Manager session cookies on a benign, non-challenge
+# response. ak_bmsc/bm_sz/_abck (and the AkamaiGHost banner) ride ~every
+# Akamai-fronted response, challenge or not, so their mere presence must NOT
+# flag. The _abck validation field (2nd ~-field) here is 0 = PASSED sensor; the
+# later -1 fields are normal and must not trip the sensor-unvalidated sentinel.
+_AKAMAI_BENIGN_SESSION_HEADERS = {
+    "Server": "AkamaiGHost",
+    "Set-Cookie": (
+        "ak_bmsc=7F3C9A21D4B8E6; bm_sz=8B2Eopaquevalue; "
+        "_abck=7A4C8D~0~YWJjZGVm~-1~-1~1700000000~2; Path=/"
+    ),
+}
+
 # Imperva/Incapsula 'Pardon Our Interruption' + reese84 / incap_ses / X-Iinfo.
 _IMPERVA_BODY = """<html style="height:100%"><head><META NAME="ROBOTS" CONTENT="NOINDEX, NOFOLLOW">
 <title>Pardon Our Interruption</title>
@@ -203,12 +216,134 @@ def test_access_denied_corroborated_by_akamai_edge_header_is_flagged():
     assert "access denied" in reason.lower()
 
 
-def test_detect_akamai_marker_in_headers_only_is_flagged():
-    # _abck / AkamaiGHost ride the headers; the body alone is generic. The
-    # header haystack must still surface the named signature.
-    is_waf, reason = ko.detect_waf_challenge("<html><body>ok</body></html>", "", _AKAMAI_HEADERS)
+def test_detect_akamai_session_cookie_only_is_not_flagged():
+    # Akamai Bot Manager sets ak_bmsc/bm_sz/_abck (and the AkamaiGHost banner) on
+    # ~every response it fronts. Their mere presence means "Akamai is in front",
+    # NOT "this is a challenge". With a benign body and a normal (passed) _abck
+    # validation field, the response must NOT be flagged — it is a genuine origin
+    # answer, not a challenge interstitial. (This test previously encoded the bug
+    # by asserting the bare cookie NAME flagged.)
+    is_waf, reason = ko.detect_waf_challenge(
+        "<html><body>ok</body></html>", "", _AKAMAI_BENIGN_SESSION_HEADERS
+    )
+    assert is_waf is False
+    assert reason == ""
+
+
+def test_api_gateway_403_json_with_akamai_session_cookie_is_not_flagged():
+    # Reporter's exact false positive: a genuine API-Gateway 403 JSON verdict that
+    # happens to sit behind Akamai (ak_bmsc session cookie set, benign Server). The
+    # cookie NAME alone must not suppress a real origin 403 as a challenge — the
+    # JSON body is a real verdict, not a JS-only challenge shell.
+    body = '{"message":"Missing Authentication Token"}'
+    headers = {
+        "Server": "openresty",
+        "Set-Cookie": "ak_bmsc=7F3C9A21D4B8E6G7H8; Domain=.api.example.com; Path=/",
+        "status_code": "403",
+    }
+    is_waf, _ = ko.detect_waf_challenge(body, "", headers)
+    assert is_waf is False
+
+
+def test_abck_sensor_unvalidated_sentinel_is_flagged():
+    # Higher-fidelity Akamai signal (the header-only BLOCK recovery): the _abck
+    # cookie VALUE carries the sensor-unvalidated sentinel (-1 in the 2nd ~-field)
+    # Akamai holds until the client solves the sensor check. A benign body must
+    # still be caught as a challenge via the cookie VALUE, not merely its name.
+    headers = {
+        "Server": "AkamaiGHost",
+        "Set-Cookie": "_abck=8FD2A1B3~-1~xY9zAbC~-1~1700000000~2~0; Path=/",
+    }
+    is_waf, reason = ko.detect_waf_challenge("<html><body>ok</body></html>", "", headers)
     assert is_waf is True
     assert "akamai" in reason.lower()
+    assert "_abck" in reason.lower()
+
+
+# --------------------------------------------------------------------------- #
+# DataDome / PerimeterX / Sucuri — same always-present-fingerprint demotion as
+# Akamai/Imperva (consistency: presence != challenge). Their sensor tags/cookies/
+# proxy headers ride ~every response, so the NAME alone must not flag; a real
+# BLOCK still flags via a block-only needle or the generic challenge SHAPE.
+# --------------------------------------------------------------------------- #
+
+def test_datadome_session_cookie_only_is_not_flagged():
+    # DataDome sets the `datadome` cookie + `js.datadome.co` sensor on ~every
+    # protected response. On a benign page (real content, 200) that presence must
+    # NOT flag — it means "DataDome is in front", not "this is a challenge".
+    body = (
+        "<html><head><script src='https://js.datadome.co/tags.js'></script></head>"
+        "<body>" + ("Real application content. " * 30) + "</body></html>"
+    )
+    headers = {"Server": "nginx", "Set-Cookie": "datadome=AbC123opaque; Path=/"}
+    is_waf, reason = ko.detect_waf_challenge(body, "", headers)
+    assert is_waf is False
+    assert reason == ""
+
+
+def test_datadome_403_json_verdict_is_not_flagged():
+    # A genuine origin 403 JSON that happens to sit behind DataDome (cookie set,
+    # benign Server) must not be suppressed as a challenge — no challenge shape,
+    # no block-only needle.
+    body = '{"message":"Forbidden"}'
+    headers = {"Server": "openresty", "Set-Cookie": "datadome=Zz9opaque; Path=/", "status_code": "403"}
+    is_waf, _ = ko.detect_waf_challenge(body, "", headers)
+    assert is_waf is False
+
+
+def test_datadome_captcha_block_is_flagged():
+    # A real DataDome BLOCK references its captcha host — a block-only needle that
+    # is kept in the named table, so the block is still caught.
+    body = '{"url":"https://geo.captcha-delivery.com/captcha/?initialCid=abc"}'
+    headers = {"Server": "nginx", "Set-Cookie": "datadome=Zz9opaque; Path=/", "status_code": "403"}
+    is_waf, reason = ko.detect_waf_challenge(body, "", headers)
+    assert is_waf is True
+    assert "datadome" in reason.lower()
+
+
+def test_perimeterx_cookie_only_is_not_flagged():
+    # PerimeterX `_px*` cookies + `client.perimeterx.net` sensor ride ~every
+    # protected response; the bare presence on a benign page must not flag.
+    body = (
+        "<html><head><script src='https://client.perimeterx.net/PXxxxx/main.min.js'></script></head>"
+        "<body>" + ("Genuine content here. " * 30) + "</body></html>"
+    )
+    headers = {"Server": "cloudfront", "Set-Cookie": "_pxvid=abc; _pxhd=def; Path=/"}
+    is_waf, reason = ko.detect_waf_challenge(body, "", headers)
+    assert is_waf is False
+    assert reason == ""
+
+
+def test_perimeterx_block_shape_is_flagged():
+    # A real PerimeterX block is a small JS-only shell at a hard block status; the
+    # generic-shape pass catches it (edge marker not even required at 403/429/503).
+    body = (
+        "<html><head><script>window.location.href='/px/captcha';</script></head>"
+        "<body></body></html>"
+    )
+    headers = {"Server": "cloudfront", "Set-Cookie": "_px3=blockedopaque; Path=/", "status_code": "403"}
+    is_waf, _ = ko.detect_waf_challenge(body, "", headers)
+    assert is_waf is True
+
+
+def test_sucuri_proxy_header_only_is_not_flagged():
+    # Sucuri's `x-sucuri-id` cache/proxy header is on ~every proxied response; a
+    # benign page carrying it must not flag.
+    body = "<html><body>" + ("Normal page body. " * 30) + "</body></html>"
+    headers = {"Server": "Sucuri/Cloudproxy", "X-Sucuri-ID": "12007", "X-Sucuri-Cache": "HIT"}
+    is_waf, reason = ko.detect_waf_challenge(body, "", headers)
+    assert is_waf is False
+    assert reason == ""
+
+
+def test_sucuri_website_firewall_block_page_is_flagged():
+    # The Sucuri block page carries its firewall title — a block-only needle kept
+    # in the named table.
+    body = "<html><head><title>Sucuri WebSite Firewall - Access Denied</title></head><body>Access Denied</body></html>"
+    headers = {"Server": "Sucuri/Cloudproxy", "X-Sucuri-ID": "12007", "status_code": "403"}
+    is_waf, reason = ko.detect_waf_challenge(body, "", headers)
+    assert is_waf is True
+    assert "sucuri" in reason.lower()
 
 
 def test_detect_imperva_pardon_our_interruption_is_flagged():
@@ -509,9 +644,11 @@ def test_kali_exec_waf_challenge_blocks_verdict(monkeypatch, fake_engagement, ca
 
 
 def test_kali_exec_header_only_akamai_via_httpx_json_is_flagged(monkeypatch, fake_engagement):
-    """PRODUCTION PATH: a header-only Akamai challenge (markers in the httpx -json
-    structured header map / webserver field, NOT in any HTML body) is caught
-    because kali_exec now threads the real response headers parsed from stdout."""
+    """PRODUCTION PATH: a header-only Akamai BLOCK (a true challenge, carried by
+    the _abck sensor-unvalidated ``~-1~`` value in the httpx -json structured
+    header map, NOT by the bare AkamaiGHost/cookie NAME) is caught because
+    kali_exec threads the real response headers parsed from stdout. Mere Akamai
+    presence (Server: AkamaiGHost + a passed cookie) would NOT flag."""
     kali, client = _setup(monkeypatch, fake_engagement)
     result = _run_with_stdout(
         monkeypatch, kali, _HTTPX_AKAMAI_JSON,
@@ -594,10 +731,12 @@ def test_kali_exec_browser_tool_never_waf_flagged(monkeypatch, fake_engagement):
 def test_kali_exec_curl_sS_header_only_marker_is_acknowledged_blind_spot(
     monkeypatch, fake_engagement
 ):
-    """LIMITATION (documented): a HEADER-ONLY Akamai challenge whose BODY is benign
-    is undetectable over a bare curl -sS probe — the marker bytes are simply not
-    in stdout. The SAME challenge IS caught when the probe surfaces headers
-    (curl -i), proving the gap is the invocation, not the detector."""
+    """LIMITATION (documented): a HEADER-ONLY Akamai BLOCK whose BODY is benign is
+    undetectable over a bare curl -sS probe — the marker bytes (the _abck
+    sensor-unvalidated ``~-1~`` value) are simply not in stdout. The SAME block IS
+    caught when the probe surfaces headers (curl -i), proving the gap is the
+    invocation, not the detector. It is the ``~-1~`` challenge STATE, not the bare
+    AkamaiGHost/_abck NAME, that flags it."""
     kali, _client = _setup(monkeypatch, fake_engagement)
     benign_body = "<html><body>ok</body></html>"
 
@@ -609,7 +748,8 @@ def test_kali_exec_curl_sS_header_only_marker_is_acknowledged_blind_spot(
     )
     assert res_sS.waf_challenge is False  # acknowledged blind spot
 
-    # curl -i: the same challenge with the header block present IS caught.
+    # curl -i: the same block with the header block present IS caught — via the
+    # _abck sensor-unvalidated ``~-1~`` value (2nd ~-field is -1), not the name.
     dump = (
         "HTTP/2 403\r\nServer: AkamaiGHost\r\n"
         "Set-Cookie: _abck=ABCD~-1~deadbeef~-1; Path=/\r\n\r\n" + benign_body
