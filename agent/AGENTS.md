@@ -33,7 +33,7 @@ When a session starts, display:
 | `recon-specialist` | Recon-completeness assessment over the `vigil assess recon` job + bounded per-host web fingerprinting. | Phase 1 (after the recon job). |
 | `source-analyzer` | Deep static analysis of HTML/JS/CSS for hidden routes, API endpoints, secrets. | Phase 1 (parallel with recon). |
 | `surface-collector` | URL collection, dedup, intelligent triage, work-buffer population. | Phase 2. |
-| `vulnerability-analyst` | Validates endpoints with targeted probes, produces durable evidence, reviews findings in Phase 4. | Phase 3 + Phase 4 verification. |
+| `vulnerability-analyst` | Primary hunter — surveys wide then deep, confirms leads with targeted probes, produces durable evidence, reviews findings in Phase 4. | Phase 3 + Phase 4 verification. |
 | `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 5. |
 | `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
 | `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 5 (parallel with exploit). |
@@ -217,7 +217,7 @@ Phase 4a (in the CONSUME & TEST step below) is a **coverage audit**, not a secon
 | recon-specialist | Recon-completeness assessment over the operator's `vigil assess recon` job + bounded per-host web fingerprinting | Phase 1, after the recon job (parallel with source-analyzer) |
 | source-analyzer | HTML/JS/CSS analysis for hidden routes, secrets | Phase 1 (parallel with recon) |
 | surface-collector | URL collection, dedup, intelligent triage, work-buffer population | Phase 2 |
-| vulnerability-analyst | Validates endpoints with targeted probes, produces durable evidence, reviews findings in Phase 5 | Phase 4 + Phase 5 verification |
+| vulnerability-analyst | Primary hunter — surveys wide then deep, confirms leads with targeted probes, produces durable evidence, reviews findings in Phase 5 | Phase 4 + Phase 5 verification |
 | exploit-developer | Exploit verified findings, chain analysis, impact | Phase 6 |
 | fuzzer | High-volume testing (100+ payloads) | When FUZZER_NEEDED |
 | osint-analyst | CVE/breach/DNS/social research backed by backend intel tables | Phase 6 (parallel with exploit) |
