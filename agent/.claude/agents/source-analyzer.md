@@ -15,7 +15,21 @@ operator gives you the surface and what's already covered, not a list of bugs to
 client like the developers who wrote it (`adversarial-mindset.md`): what did they expose, trust, or
 leave half-guarded that the backend now depends on?
 
-**Modes accepted:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — source analysis usually walks a bounded list of bundles, route files, or work-buffer page items, with `hypothesis-driven` reserved for SPA route-table sampling against hypotheses about backend shape. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `item-iterating`, `hypothesis-driven`. **Default when omitted:** `item-iterating` — source analysis usually walks a bounded list of bundles, route files, or work-buffer page items, with `hypothesis-driven` reserved for SPA route-table sampling against hypotheses about backend shape. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
+
+## Dispatch Mindset
+
+Your dispatch prompt may carry an injected `## Dispatch Mindset` block naming a `hunt_scope`
+(`wide`/`deep`) and a `mindset lens` — a path under `agent/rules/mindsets/`. When present, load
+the named file: it is MORE SPECIFIC than your baseline reading posture (`hunting.md`,
+`adversarial-mindset.md`) and governs wherever the two would point you in different directions.
+It sharpens what you're looking for in the client — e.g. an IDOR/BAC lens directs you toward
+object-reference and role-check patterns in the routes and API calls you extract, over other
+equally-plausible reads of the same bundle.
+
+Every mindset — baseline or injected — is a generative lens, not a cage: it primes what you look
+for, it does not bound what counts as a hypothesis. A trust-boundary clue the lens didn't name is
+still yours to surface if the source shows it.
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 

@@ -7,7 +7,7 @@ description: Literal fill-in-the-blank operator dispatch skeleton (Runtime Ident
 Every field below maps 1:1 onto a required field in `agent/operator-core.md`'s **Dispatch
 Context Template**, **Runtime Identity Block**, and **Specialist Dispatch Contract**. This file
 adds no new rules — it is the copyable shape those three sections describe, plus the two new
-per-dispatch fields (`hunt_scope`, `mindset lens`) that carry the L3 injected content named in
+per-dispatch fields (`hunt_scope`, `mindset lens`) that carry the injected mindset packet named in
 `operator-core.md` § Subagent Dispatch. Point of this doc: stop re-deriving the dispatch shape
 from prose every time; copy the skeleton, delete what doesn't apply to the role, fill the rest.
 
@@ -34,14 +34,13 @@ mindset lens: <agent/rules/mindsets/<name>.md> — <one line: why this lens fits
 
 ## Dispatch Context
 target: <URL, or repo/artifact path for code/android>
-phase: <current phase name/number, matches authorized_phase>
 outcome objective: <the surface to hunt + the result wanted — NOT a pre-named vuln/payload>
 skills:
   - <skill-name> — full path: agent/skills/<skill-name>/SKILL.md
     "You MUST read and follow agent/skills/<skill-name>/SKILL.md before beginning work.
      If a skill contradicts this prompt, the skill wins for procedural steps."
 depth expectation: thorough and deep is the default; "quick" is never implied unless stated
-rate-limit budget: <e.g. `nuclei -rate-limit 4 -c 2` for a 5 req/s program>
+rate-limit budget: <e.g. `rate=4` for a 5 req/s program>
 oob: <`vigil oob status --json` snapshot, or "not needed for this surface">
 auth_context: <anonymous | authenticated | authenticated-admin | named identity, e.g. user_a>
 credential_id: <id from the credential store, if the dispatch operates under captured material>
@@ -72,12 +71,11 @@ vigil assess agent done <agent_id> --status completed --finding-slugs <slugs>
 
 | Skeleton field | Required / Optional | Source of truth in `operator-core.md` |
 |---|---|---|
-| `agent_id` / `agent_role` / `authorized_phase` | Required | § Runtime Identity Block |
+| `agent_id` / `agent_role` / `authorized_phase` | Required | § Runtime Identity Block — `authorized_phase` is also the "Current phase" field cited by § Dispatch Context Template; there is no separate `phase` field in Dispatch Context, it is not restated below |
 | `hunt_scope` | Required (VA); default `deep` for EX | § Subagent Dispatch phased-flow (Pass-1 WIDE / Pass-2 DEEP / Pass-3 EXPLOIT) — WIDE = open objective, baseline + `developer.md` only; DEEP = one family mindset + matching skill per signal/high-yield cell |
 | `mindset lens` | Required | Role file's own `## Dispatch Mindset` slot (VA/EX) — the injected packet is MORE SPECIFIC than the role's baseline mindset and governs where the two compete |
 | resume-brief / render-handoff paste | Required when continuation or prior dispatch exists | § Runtime Identity Block ("If this is a continuation…") + § Dispatch Context Template "Cross-agent prior work" |
 | `target` | Required | § Dispatch Context Template "Agent identity and target URL" |
-| `phase` | Required | § Dispatch Context Template "Current phase" |
 | `outcome objective` | Required | § Dispatch Context Template "specific outcome objective" |
 | `skills` | Required | § Dispatch Context Template "Which skill(s) to load" + Pre-Dispatch Checklist |
 | `depth expectation` | Required | § Dispatch Context Template "Depth expectation" |
@@ -106,7 +104,7 @@ named identities captured). This is the Pass-2 DEEP dispatch converging on that 
 ## Runtime Identity
 agent_id: va-idor-b7c2
 agent_role: vulnerability-analyst
-authorized_phase: 4
+authorized_phase: 4 (consume-test)
 
 ## Dispatch Mindset
 hunt_scope: deep
@@ -125,7 +123,6 @@ mindset lens: agent/rules/mindsets/idor-bac.md — Pass-1 wide sweep flagged num
 
 ## Dispatch Context
 target: https://saas.acme.example/api/v1/orders/{id} and /api/v1/invoices/{id}
-phase: consume-test (4)
 outcome objective: hunt the orders/invoices surface for access-control and object-reference
   weaknesses across the two named identities; prove any attacker outcome you find (read, write,
   or enumerate another tenant's order/invoice data) — do not stop at "IDOR exists," replay the
@@ -142,7 +139,7 @@ depth expectation: thorough and deep — exhaust the ID space pattern (sequentia
   encoded) across BOTH route families and BOTH identity directions (user_a→user_b's objects,
   user_b→user_a's objects) before calling either family clean; "no findings" is credible only
   after that full cross-product
-rate-limit budget: `ffuf -rate 4` / one request in flight per identity (5 req/s program cap)
+rate-limit budget: rate=4 / one request in flight per identity (5 req/s program cap)
 oob: not needed for this surface
 auth_context: named identities user_a and user_b (both active in the credential store)
 credential_id: 17 (user_a), 18 (user_b) — captured by surface-collector's post-auth re-collection
@@ -182,7 +179,7 @@ Context: Phase 6. `vulnerability-analyst` confirmed two findings independently
 ## Runtime Identity
 agent_id: ex-chain-d4e1
 agent_role: exploit-developer
-authorized_phase: 6
+authorized_phase: 6 (exploit)
 
 ## Dispatch Mindset
 hunt_scope: deep
@@ -204,7 +201,6 @@ mindset lens: agent/rules/mindsets/chain-impact.md — two confirmed findings on
 
 ## Dispatch Context
 target: https://saas.acme.example (repo n/a)
-phase: exploit (6)
 outcome objective: find and prove P1/P2 impact across the confirmed set on this target — start
   with the full endpoint map and coverage gaps (self-serve via `vigil assess fetch`), then
   narrow to whether the admin SSO auth-bypass and the orders IDOR compose into a single chain
@@ -217,7 +213,7 @@ skills:
 depth expectation: thorough and deep — walk the full A→B chain table for this surface, not just
   the one candidate pairing named above; a chain dispatch that stops at the first plausible pivot
   has not done the job
-rate-limit budget: `curl` sequential, 1 req/s — chain steps are low-volume, precision work
+rate-limit budget: rate=1 sequential — chain steps are low-volume, precision work
 oob: `vigil oob status --json` snapshot attached — not expected to be needed for this chain, but
   the admin SSO callback is OOB-capable if the bypass requires a blind callback confirmation
 auth_context: authenticated as user_b (session), stepping to authenticated-admin if the SSO
@@ -232,9 +228,8 @@ human_reach_decision: none open on this surface
 
 Finding slugs being exploited: VULN-2026-06-30-004, VULN-2026-06-30-011. Pull the full endpoint
 map via `vigil assess fetch endpoints` and all B candidates — do not pre-filter, pre-filtering
-hides chain opportunities. On CHAIN PRIMITIVE or CHAIN DEAD disposition for either leg, run
-`vigil assess update-finding <slug> --severity <base> --reason "..."` before closing — do not
-leave an unproven chain hypothesis recorded at chain-escalated severity.
+hides chain opportunities. Chain disposition and the severity-revert rule that follows from it
+are `exploit-developer.md`'s own doctrine — this template does not restate them.
 ```
 
 ```bash

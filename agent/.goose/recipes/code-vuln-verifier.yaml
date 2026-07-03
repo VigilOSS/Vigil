@@ -16,7 +16,7 @@ instructions: |2
   it before starting work — it contains the five-check protocol, voting procedure, variant
   verification rules, attack chain synthesis, and output format.
 
-  **Modes accepted:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — verification re-reads source for each finding under the five-check protocol with devil's advocate review, with `item-iterating` reserved for batched dispatches that walk a finite list of MEDIUM-severity findings needing lightweight reproducibility checks. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+  **Iteration mode:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — verification re-reads source for each finding under the five-check protocol with devil's advocate review, with `item-iterating` reserved for batched dispatches that walk a finite list of MEDIUM-severity findings needing lightweight reproducibility checks. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
   > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 

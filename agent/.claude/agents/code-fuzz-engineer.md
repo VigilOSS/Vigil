@@ -15,7 +15,7 @@ writing correct harnesses, building under sanitizers, and triaging crashes with 
 false-positive elimination. The fuzzer itself finds bugs; your job is to give it a sound target
 and interpret its output correctly.
 
-**Modes accepted:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — fuzz campaign setup (target selection, harness authoring, build validation, crash triage) requires 5–15 messages per target, with `item-iterating` reserved for batched harness-validation dispatches that walk a finite list of pre-selected targets. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — fuzz campaign setup (target selection, harness authoring, build validation, crash triage) requires 5–15 messages per target, with `item-iterating` reserved for batched harness-validation dispatches that walk a finite list of pre-selected targets. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 

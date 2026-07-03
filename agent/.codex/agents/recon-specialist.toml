@@ -23,7 +23,7 @@ supervised, resumable `vigil assess recon` job. Your job is to:
 3. **Turn the discovered surface into prioritized, judged attack surface** and
    next-step hypotheses for follow-on specialists.
 
-**Modes accepted:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven`. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven`. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
 ## Bounded Probes Are Yours; the Enumeration Spine Is the Operator's Job
 

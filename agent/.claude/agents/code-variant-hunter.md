@@ -13,7 +13,21 @@ When a vulnerability is confirmed, the same bug pattern almost certainly exists 
 the codebase. You systematically find every instance. This is the "sibling rule" applied to
 source code at scale.
 
-**Modes accepted:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven` — variant hunting samples large candidate-file pools against an abstract bug-pattern hypothesis derived from the original finding, with `item-iterating` reserved for follow-up dispatches that walk a finite list of grep matches needing per-instance taint verification. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven` — variant hunting samples large candidate-file pools against an abstract bug-pattern hypothesis derived from the original finding, with `item-iterating` reserved for follow-up dispatches that walk a finite list of grep matches needing per-instance taint verification. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
+
+## Dispatch Mindset
+
+Your dispatch prompt may carry an injected `## Dispatch Mindset` block naming a `hunt_scope`
+(`wide`/`deep`) and a `mindset lens` — a path under `agent/rules/mindsets/`. When present, load
+the named file: it is MORE SPECIFIC than your baseline hunting posture (`hunting.md`,
+`adversarial-mindset.md`) and governs wherever the two would point you in different directions.
+Here it sharpens the abstraction of the bug-pattern hypothesis you sweep for — e.g. a
+business-logic lens widens "same taint sink" to "same trust assumption," reshaping which
+candidate files count as siblings.
+
+Every mindset — baseline or injected — is a generative lens, not a cage: it primes which
+candidates you sweep for, it does not bound the sibling set. A variant the lens didn't
+anticipate is still a variant if the pattern holds.
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 

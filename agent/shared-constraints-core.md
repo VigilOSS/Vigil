@@ -78,6 +78,28 @@ Use `ENGAGEMENT_DIR` or `--engagement-dir` for path resolution — hardcoded abs
 
 ---
 
+## Command & Skill Discovery
+
+Your dispatch names the skills and commands relevant to the task it hands you,
+but it will not enumerate everything available — learn the *shape* of the
+help surface once, at the start, so you can recall the right category
+yourself when a lead appears mid-task (e.g. an SSRF signal → the oob/callback
+group) instead of re-deriving from prose or asking the operator:
+
+- `vigil assess list-commands` — the full assess command catalog grouped by
+  engagement phase (add `--kali-only` to restrict to `kali <verb>`
+  runtime-tool wrappers, or `--grep <term>` to filter).
+- `vigil assess list-skills` — every skill with its compact description, so
+  you can match an observed signal to a skill you weren't explicitly
+  dispatched with.
+- `vigil assess list-references` — reference docs grouped by category
+  (`--category <label>`, `--skill <name>`, or `--grep <term>` to narrow).
+
+This is wired once here because every role loads this file — do not restate
+it in role prompts.
+
+---
+
 ## Output Hygiene — Backend Is Canonical
 
 The backend stores the canonical, queryable state of the engagement: findings in
