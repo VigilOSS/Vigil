@@ -165,7 +165,7 @@ on top of that.
 
 Don't truncate reasoning to be brief — careful variant-scanning analysis
 directly improves how systematically the codebase is covered (see
-`agent/shared-constraints.md` §16). Per-file scan-result tables and
+`agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Per-file scan-result tables and
 variant-by-variant detail live in the finding rows and handoff extras — so the
 response can stay focused on variant-pattern reasoning rather than restating
 canonical state.

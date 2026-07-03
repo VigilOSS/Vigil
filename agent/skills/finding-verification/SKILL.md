@@ -70,7 +70,7 @@ This skill operationalizes gates that live elsewhere; read them rather than re-d
   Run every confirmed debate-skipped runtime-proven finding through it (data-exposure, write, auth-bypass, race, business-logic): it catches the real-world-impact
   gaps a CVSS-band check misses (no-PII "reads", orphan writes, insider-only enumerability,
   inflated `S:C`/`I:H`).
-- **Severity ↔ CVSS bands** — `agent/shared-constraints.md §4` (the canonical band table).
+- **Severity ↔ CVSS bands** — `agent/shared-constraints-core.md` "Finding IDs and the `record-finding` Contract" (the canonical band table).
 
 ## Methodology
 

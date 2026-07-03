@@ -605,7 +605,7 @@ are what makes the state durable; the response is your reflection on top of
 that.
 
 Don't truncate reasoning to be brief — careful vulnerability-hunting analysis
-is the core of TOB-style audit quality (see `agent/shared-constraints.md` §16).
+is the core of TOB-style audit quality (see `agent/shared-constraints-core.md` "Reasoning quality > response brevity").
 Per-file dispositions, CWE coverage breakdowns, and cross-file trigger lists
 all live in the analysis rows — so the response can stay focused on hunt
 narrative rather than restating canonical state.

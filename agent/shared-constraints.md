@@ -680,8 +680,8 @@ running active enumeration) load **`agent/references/recon/rate-calibration.md`*
 on first use — that file owns the trait-row table (Cloud-fronted / Origin /
 WAF-protected / High-friction / Vendor SaaS), the runtime-tier × DNS-profile
 matrix, and the concurrent-nmap-procs cap. Tier-selection prose and the
-step-down rules live in `agent/operator-core.md` "Recon Dispatch Resource
-Policy"; the operator picks the trait row before dispatch and the specialist
+step-down rules live in `agent/references/runtime-guides/dispatch-resource-policy.md`;
+the operator picks the trait row before dispatch and the specialist
 applies it.
 
 Non-recon roles (vulnerability-analyst, source-analyzer, fuzzer,
