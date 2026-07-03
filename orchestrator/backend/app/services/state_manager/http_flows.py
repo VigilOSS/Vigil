@@ -19,8 +19,11 @@ round-trip reconstructs the flow metadata.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -51,6 +54,12 @@ DEFAULT_CAPTURE_POLICY: dict[str, Any] = {
 # Hard cap on inlined HAR body text so an export of a large corpus can't balloon
 # unbounded regardless of the per-flow byte counts recorded.
 HAR_BODY_INLINE_CAP = 262144
+
+# Engagement-root-relative directory for body sidecars, mirroring the mitmproxy
+# addon's layout (``proxy_addon.TRAFFIC_BODIES_DIR``) so a body imported from a
+# plain (non-Vigil) HAR is persisted, deduped, and re-inlined on export exactly
+# like a live-captured one.
+TRAFFIC_BODIES_DIR = "traffic/mitmproxy/bodies"
 
 # Columns whose bare presence in the row maps 1:1 into the serialized dict. The
 # two ``*_headers_json`` columns are parsed to objects; the four INTEGER flags
@@ -497,7 +506,20 @@ def _har_to_headers(entries: Any) -> dict[str, str]:
     return result
 
 
-def _read_body_text(root: Path | None, artifact_path: str | None, cap: int) -> str | None:
+def _read_body_text(
+    root: Path | None, artifact_path: str | None, cap: int
+) -> tuple[str, str] | None:
+    """Read a body sidecar and return ``(text, encoding)``.
+
+    ``encoding`` is ``""`` for a clean strict-UTF-8 decode, or ``"base64"`` when
+    the raw bytes are NOT valid UTF-8 — a binary body (PDF/zip/octet-stream that a
+    ``capture_response_bodies`` policy with no content-type filter stored). In the
+    base64 case ``text`` is the base64 of the raw bytes and the caller sets
+    ``encoding=base64`` on the HAR ``postData``/``content`` object (HAR spec) so
+    the export round-trips the binary faithfully instead of silently corrupting it
+    via ``errors="replace"``. Returns ``None`` when the sidecar is absent/unreadable
+    or escapes the engagement root.
+    """
     if not root or not artifact_path:
         return None
     candidate = (root / artifact_path).resolve(strict=False)
@@ -511,7 +533,62 @@ def _read_body_text(root: Path | None, artifact_path: str | None, cap: int) -> s
         raw = candidate.read_bytes()[: max(0, cap)]
     except OSError:
         return None
-    return raw.decode("utf-8", errors="replace")
+    try:
+        return raw.decode("utf-8"), ""
+    except UnicodeDecodeError:
+        # Non-UTF-8 (or a cap that sliced a multibyte char): base64-encode so the
+        # exact bytes survive the HAR round-trip rather than being mojibake'd.
+        return base64.b64encode(raw).decode("ascii"), "base64"
+
+
+def _har_body_raw(obj: dict[str, Any]) -> bytes:
+    """Decode a HAR ``postData``/``content`` object's inline body to raw bytes.
+
+    Honors the HAR ``encoding`` field: ``"base64"`` bodies are base64-decoded (so
+    a binary body exported by :func:`_read_body_text` round-trips); everything else
+    is treated as UTF-8 text. Returns ``b""`` when there is no inline body.
+    """
+    if not isinstance(obj, dict):
+        return b""
+    text = obj.get("text")
+    if not isinstance(text, str) or not text:
+        return b""
+    if str(obj.get("encoding") or "").strip().lower() == "base64":
+        try:
+            return base64.b64decode(text, validate=True)
+        except (binascii.Error, ValueError):
+            return text.encode("utf-8")
+    return text.encode("utf-8")
+
+
+def _persist_har_body_sidecar(
+    root: Path | None, raw: bytes
+) -> tuple[str | None, str, int]:
+    """Persist an imported HAR body under ``traffic/mitmproxy/bodies/<sha>.bin``.
+
+    Returns ``(relative_path, sha256, byte_count)``. Mirrors the mitmproxy addon's
+    content-addressed, atomic write (identical bodies dedupe on their sha). When
+    no ``root`` is available or the write fails we return ``(None, "", 0)`` — i.e.
+    we do NOT record a positive byte count that points at a body no one can
+    recover (the flat-count-with-no-sidecar bug this fix closes).
+    """
+    if not raw:
+        return None, "", 0
+    sha = hashlib.sha256(raw).hexdigest()
+    if root is None:
+        return None, "", 0
+    rel_path = f"{TRAFFIC_BODIES_DIR}/{sha}.bin"
+    try:
+        bodies_dir = root / TRAFFIC_BODIES_DIR
+        bodies_dir.mkdir(parents=True, exist_ok=True)
+        target = bodies_dir / f"{sha}.bin"
+        if not target.exists():
+            tmp = target.with_name(f"{sha}.bin.{os.getpid()}.tmp")
+            tmp.write_bytes(raw)
+            tmp.rename(target)
+    except OSError:
+        return None, "", 0
+    return rel_path, sha, len(raw)
 
 
 def har_from_flows(
@@ -544,10 +621,14 @@ def har_from_flows(
         }
         request_body = _read_body_text(root, flow.get("request_body_artifact_path"), max_body_bytes)
         if request_body is not None:
-            request["postData"] = {
+            request_body_text, request_body_encoding = request_body
+            post_data: dict[str, Any] = {
                 "mimeType": str(flow.get("request_content_type") or ""),
-                "text": request_body,
+                "text": request_body_text,
             }
+            if request_body_encoding:
+                post_data["encoding"] = request_body_encoding
+            request["postData"] = post_data
         response: dict[str, Any] = {
             "status": int(flow["response_status"]) if flow.get("response_status") is not None else 0,
             "statusText": "",
@@ -564,7 +645,10 @@ def har_from_flows(
         }
         response_body = _read_body_text(root, flow.get("response_body_artifact_path"), max_body_bytes)
         if response_body is not None:
-            response["content"]["text"] = response_body
+            response_body_text, response_body_encoding = response_body
+            response["content"]["text"] = response_body_text
+            if response_body_encoding:
+                response["content"]["encoding"] = response_body_encoding
         entries.append(
             {
                 "startedDateTime": str(flow.get("started_at") or flow.get("created_at") or ""),
@@ -611,12 +695,21 @@ def har_from_flows(
     }
 
 
-def flows_from_har(har: dict[str, Any]) -> list[dict[str, Any]]:
+def flows_from_har(
+    har: dict[str, Any], *, root: Path | None = None
+) -> list[dict[str, Any]]:
     """Parse a HAR ``log`` into a list of ``insert_http_flow`` kwargs dicts.
 
     Vigil metadata is read back from each entry's ``_vigil`` object when present
     (so an export→import round-trip is lossless for flow metadata); otherwise the
     fields are derived from the standard HAR request/response shape.
+
+    When ``root`` is given and a plain (non-Vigil) HAR supplies an inline
+    ``postData``/``content`` body but no ``_vigil.*_body_artifact_path``, the body
+    is written to an engagement-local sidecar and its artifact path recorded — so
+    :func:`har_from_flows` (which only re-inlines from artifact paths) can recover
+    the body on the next export/detail view instead of losing it while still
+    reporting a positive byte count.
     """
     log = har.get("log") if isinstance(har, dict) else None
     entries = log.get("entries") if isinstance(log, dict) else None
@@ -654,12 +747,36 @@ def flows_from_har(har: dict[str, Any]) -> list[dict[str, Any]]:
         flow_uid = str(vigil.get("flow_uid") or "").strip()
         if not flow_uid:
             flow_uid = _synthesize_flow_uid(method, url, started_at or str(index), response_status)
+        # Body bytes / sha / artifact path. A Vigil HAR carries these on ``_vigil``
+        # (round-trip). A plain HAR carries only the inline ``postData``/``content``
+        # text: persist it to a sidecar so ``har_from_flows`` can re-inline it on
+        # the next export, and record the resulting path/sha. Without a writable
+        # ``root`` (or on write failure) we record ZERO bytes rather than a phantom
+        # count pointing at a body no one can recover.
+        request_body_artifact_path = vigil.get("request_body_artifact_path")
+        request_body_sha256 = str(vigil.get("request_body_sha256") or "")
         request_body_bytes = vigil.get("request_body_bytes")
         if request_body_bytes is None:
-            request_body_bytes = len(str(post_data.get("text") or "").encode("utf-8"))
+            if request_body_artifact_path is None:
+                request_body_artifact_path, sha, request_body_bytes = (
+                    _persist_har_body_sidecar(root, _har_body_raw(post_data))
+                )
+                if sha:
+                    request_body_sha256 = sha
+            else:
+                request_body_bytes = len(_har_body_raw(post_data))
+        response_body_artifact_path = vigil.get("response_body_artifact_path")
+        response_body_sha256 = str(vigil.get("response_body_sha256") or "")
         response_body_bytes = vigil.get("response_body_bytes")
         if response_body_bytes is None:
-            response_body_bytes = len(str(content.get("text") or "").encode("utf-8"))
+            if response_body_artifact_path is None:
+                response_body_artifact_path, sha, response_body_bytes = (
+                    _persist_har_body_sidecar(root, _har_body_raw(content))
+                )
+                if sha:
+                    response_body_sha256 = sha
+            else:
+                response_body_bytes = len(_har_body_raw(content))
         results.append(
             {
                 "flow_uid": flow_uid,
@@ -674,14 +791,14 @@ def flows_from_har(har: dict[str, Any]) -> list[dict[str, Any]]:
                 "response_content_type": response_content_type,
                 "content_type_family": str(vigil.get("content_type_family") or "unknown"),
                 "auth_context": str(vigil.get("auth_context") or "anonymous"),
-                "request_body_sha256": str(vigil.get("request_body_sha256") or ""),
-                "response_body_sha256": str(vigil.get("response_body_sha256") or ""),
+                "request_body_sha256": request_body_sha256,
+                "response_body_sha256": response_body_sha256,
                 "request_body_bytes": int(request_body_bytes or 0),
                 "response_body_bytes": int(response_body_bytes or 0),
                 "request_body_truncated": bool(vigil.get("request_body_truncated")),
                 "response_body_truncated": bool(vigil.get("response_body_truncated")),
-                "request_body_artifact_path": vigil.get("request_body_artifact_path"),
-                "response_body_artifact_path": vigil.get("response_body_artifact_path"),
+                "request_body_artifact_path": request_body_artifact_path,
+                "response_body_artifact_path": response_body_artifact_path,
                 "request_headers": request_headers,
                 "response_headers": response_headers,
                 "redaction_status": str(vigil.get("redaction_status") or "none"),

@@ -119,7 +119,7 @@ instructions: |2
 
   Don't truncate reasoning to be brief — careful CVE-context analysis directly
   improves exploit-developer's validation prioritization (see
-  `agent/shared-constraints.md` §16). Why-it-matters and recommended-next-actions
+  `agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Why-it-matters and recommended-next-actions
   live in the handoff `next_steps` — so the response can stay focused on the
   intel narrative rather than restating canonical state.
 

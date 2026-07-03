@@ -10,7 +10,6 @@ its 404, and the WARN-first behavior on an out-of-vocab attack family.
 from __future__ import annotations
 
 import argparse
-import json
 
 import pytest
 

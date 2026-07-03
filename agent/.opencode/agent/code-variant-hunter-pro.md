@@ -42,7 +42,11 @@ anticipate is still a variant if the pattern holds.
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-variant-analysis/SKILL.md`
 
-**LOAD-ON-FIRST-USE (lazy):** none — this role loads no skill conditionally; discover any other skill with `vigil assess list-skills`.
+**LOAD-ON-FIRST-USE (lazy):**
+
+- `agent/rules/reporting.md` — **conditional:** load only immediately before authoring a confirmed variant finding's report-ready `details` prose (evidence / impact / remediation) — the hunt-time severity/outcome essence is already in `agent/rules/hunting.md` §2–§3; not for scanning or triage.
+
+Discover any other skill with `vigil assess list-skills`.
 
 ## Pre-Work Checkpoint
 
@@ -170,7 +174,7 @@ on top of that.
 
 Don't truncate reasoning to be brief — careful variant-scanning analysis
 directly improves how systematically the codebase is covered (see
-`agent/shared-constraints.md` §16). Per-file scan-result tables and
+`agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Per-file scan-result tables and
 variant-by-variant detail live in the finding rows and handoff extras — so the
 response can stay focused on variant-pattern reasoning rather than restating
 canonical state.

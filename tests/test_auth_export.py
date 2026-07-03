@@ -1,15 +1,20 @@
-"""`vigil auth export` host-scoped cookie overlay (I-22, multi-host engagements).
+"""`vigil auth export` host-scoped cookie selection (I-22, multi-host engagements).
 
-`export_curl_args(host=...)` overlays the per-host `host_cookies` bucket on top of
-the legacy flat `cookies` view, the same host-scoped lookup the proxy applies at
-injection time. Without `--host`, only the flat view is rendered — which on a
-multi-host engagement can be the wrong (or empty) session for the target host.
+`export_curl_args(host=...)` selects the per-host `host_cookies` bucket and uses it
+ALONE, the same host-scoped lookup the proxy applies at injection time. The flat
+`cookies` field is a UNION across every captured host, so it is used only as a
+fallback for identities with NO per-host buckets — blending it in when a bucket
+matches (or falling back to it when buckets exist but none match the target host)
+would leak another host's session cookies (cross-host session bleed). Without
+`--host`, only the flat view is rendered — which on a multi-host engagement can be
+the wrong (or empty) session for the target host.
 
 The per-host *selection* logic (`assess.lib.identity.host_cookies_for`) is covered
 by `agent/scripts/assess/tests/test_identity_cookies.py`; these tests cover the CLI
-wiring — that `--host` reaches the overlay and its absence leaves the flat view
-untouched. The dynamic assess import is stubbed so the test is decoupled from the
-install-root layout `export_curl_args` resolves at runtime.
+wiring — that `--host` reaches the selection and honors the bucket-alone / gated-
+fallback invariant (and that `_authed_request_headers`, backing `auth status
+--probe`, does the same). The dynamic assess import is stubbed so the test is
+decoupled from the install-root layout the CLI resolves at runtime.
 """
 from __future__ import annotations
 
@@ -34,8 +39,10 @@ def _material() -> dict[str, object]:
 
 
 def _stub_assess_identity(monkeypatch) -> None:
-    """No-op the install-root path insert and inject a faithful stub of
-    ``assess.lib.identity.host_cookies_for`` (returns a host's bucket)."""
+    """No-op the install-root path insert and inject faithful stubs of
+    ``assess.lib.identity.host_cookies_for`` (returns a host's bucket) and
+    ``host_cookie_hosts`` (hosts with a non-empty captured bucket) — the pair the
+    bucket-alone / gated-fallback invariant is built on."""
     monkeypatch.setattr("vigil_cli.paths.add_assess_import_path", lambda _root: None)
 
     def host_cookies_for(material: dict, host: str) -> dict[str, str]:
@@ -44,8 +51,16 @@ def _stub_assess_identity(monkeypatch) -> None:
                 return dict(bucket.get("cookies", {}))
         return {}
 
+    def host_cookie_hosts(material: dict) -> list[str]:
+        return [
+            b["host"]
+            for b in material.get("host_cookies", [])
+            if b.get("host") and b.get("cookies")
+        ]
+
     identity_mod = types.ModuleType("assess.lib.identity")
     identity_mod.host_cookies_for = host_cookies_for  # type: ignore[attr-defined]
+    identity_mod.host_cookie_hosts = host_cookie_hosts  # type: ignore[attr-defined]
     lib_mod = types.ModuleType("assess.lib")
     assess_mod = types.ModuleType("assess")
     monkeypatch.setitem(sys.modules, "assess", assess_mod)
@@ -65,7 +80,7 @@ def test_export_without_host_renders_only_flat_cookie_view(tmp_path, monkeypatch
     assert "-H 'X-Api: K'" in out
 
 
-def test_export_with_host_overlays_that_hosts_captured_session(tmp_path, monkeypatch):
+def test_export_with_host_uses_that_hosts_bucket_alone(tmp_path, monkeypatch):
     eng = tmp_path / "agent" / "engagements" / "eng"
     eng.mkdir(parents=True)
     monkeypatch.setattr(auth, "_active_material", lambda _d: _material())
@@ -73,12 +88,16 @@ def test_export_with_host_overlays_that_hosts_captured_session(tmp_path, monkeyp
 
     out = auth.export_curl_args(eng, host="b.example.com")
 
-    # b's captured session is overlaid on top of the flat view.
+    # b's captured session is used ALONE — the flat union is NOT blended in
+    # (blending would leak cookies unique to other hosts).
     assert "bsess=B" in out
-    assert "flat=F" in out
+    assert "flat=F" not in out
 
 
-def test_export_with_host_that_has_no_bucket_keeps_flat_view(tmp_path, monkeypatch):
+def test_export_with_host_that_has_no_bucket_omits_cookies(tmp_path, monkeypatch):
+    # BUG 2 regression: buckets EXIST (for b) but none match the target host (c).
+    # The flat ``cookies`` union must NOT be routed onto c — cookies are omitted
+    # entirely rather than leaked cross-host.
     eng = tmp_path / "agent" / "engagements" / "eng"
     eng.mkdir(parents=True)
     monkeypatch.setattr(auth, "_active_material", lambda _d: _material())
@@ -86,8 +105,100 @@ def test_export_with_host_that_has_no_bucket_keeps_flat_view(tmp_path, monkeypat
 
     out = auth.export_curl_args(eng, host="c.example.com")
 
-    assert "flat=F" in out  # no bucket for c → flat view unchanged, no crash
+    assert "flat=F" not in out  # display-only union NOT routed onto unrelated host
     assert "bsess=B" not in out
+    assert "-H 'Cookie:" not in out  # no Cookie header at all
+    assert "-H 'X-Api: K'" in out  # non-cookie headers still exported
+
+
+def test_export_with_no_buckets_falls_back_to_flat_view(tmp_path, monkeypatch):
+    # Legacy/manual identity with NO per-host buckets: the flat view is the only
+    # cookie view, so the gated fallback still renders it (backwards compatible).
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    monkeypatch.setattr(
+        auth, "_active_material", lambda _d: {"cookies": {"flat": "F"}, "headers": {}}
+    )
+    _stub_assess_identity(monkeypatch)
+
+    out = auth.export_curl_args(eng, host="anything.example.com")
+
+    assert "flat=F" in out  # no buckets → flat fallback fires
+
+
+def test_export_with_host_drops_other_hosts_union_cookies(tmp_path, monkeypatch):
+    # BUG 2 regression (sharpest form): the flat ``cookies`` field is a UNION
+    # across hosts a and b. Exporting for host a must carry ONLY a's cookie; b's
+    # uniquely-named cookie must not survive from the union into the printed
+    # ``-H 'Cookie: …'``.
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    material = {
+        "cookies": {"asess": "A", "bsess": "B"},  # capture-time UNION across a + b
+        "host_cookies": [
+            {"host": "a.example.com", "cookies": {"asess": "A"}},
+            {"host": "b.example.com", "cookies": {"bsess": "B"}},
+        ],
+        "headers": {},
+    }
+    monkeypatch.setattr(auth, "_active_material", lambda _d: material)
+    _stub_assess_identity(monkeypatch)
+
+    out = auth.export_curl_args(eng, host="a.example.com")
+
+    assert "asess=A" in out
+    assert "bsess=B" not in out  # b's cookie must NOT bleed onto a
+
+
+# --------------------------------------------------------------------------- #
+# `_authed_request_headers` (backs `vigil auth status --probe`) — the probe must
+# host-scope cookies the same way export/injection do: the matching bucket ALONE,
+# flat-union fallback ONLY when the identity has no buckets, omit on bucket-miss.
+# --------------------------------------------------------------------------- #
+
+def _multi_host_material() -> dict:
+    return {
+        "cookies": {"asess": "A", "bsess": "B"},  # capture-time UNION across a + b
+        "host_cookies": [
+            {"host": "a.example.com", "cookies": {"asess": "A"}},
+            {"host": "b.example.com", "cookies": {"bsess": "B"}},
+        ],
+    }
+
+
+def test_authed_probe_headers_use_matching_bucket_alone(tmp_path, monkeypatch):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    _stub_assess_identity(monkeypatch)
+
+    headers = auth._authed_request_headers(eng, _multi_host_material(), "a.example.com")
+
+    assert "asess=A" in headers["Cookie"]
+    assert "bsess=B" not in headers["Cookie"]  # b's cookie must not ride an a probe
+
+
+def test_authed_probe_headers_omit_cookies_on_bucket_miss(tmp_path, monkeypatch):
+    # BUG 1 regression: buckets EXIST (a, b) but none match the probed host (c).
+    # The flat union must NOT be injected — no Cookie header at all.
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    _stub_assess_identity(monkeypatch)
+
+    headers = auth._authed_request_headers(eng, _multi_host_material(), "c.example.com")
+
+    assert "Cookie" not in headers  # cross-host union NOT leaked onto c
+
+
+def test_authed_probe_headers_flat_fallback_without_buckets(tmp_path, monkeypatch):
+    # Legacy/manual identity (no per-host buckets): flat view is the only cookie
+    # source, so the gated fallback still injects it (backwards compatible).
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    _stub_assess_identity(monkeypatch)
+
+    headers = auth._authed_request_headers(eng, {"cookies": {"S": "1"}}, "any.example.com")
+
+    assert headers["Cookie"] == "S=1"
 
 
 # --------------------------------------------------------------------------- #

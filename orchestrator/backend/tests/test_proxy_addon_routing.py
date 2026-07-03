@@ -1197,7 +1197,7 @@ def test_request_body_saved_when_response_is_binary(tmp_path: Path):
     collector = module.CaseCollector()
     collector.engagements_root = root
     collector._reload_registry(force=True)
-    entry = collector._match_engagement("a.example.com")
+    collector._match_engagement("a.example.com")
 
     captured: dict = {}
     collector._capture_auth = lambda *a, **k: None

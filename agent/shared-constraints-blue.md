@@ -429,11 +429,11 @@ agents cannot query unindexed local files.
    means the `agent_id` in step 6 did not match the registered dispatch — fix
    and re-handoff before returning.
 
-Wrapper rules — `agent done` / `agent close` are operator-only, and `agent
-handoff` is idempotent — live in `agent/shared-constraints-core.md`; the seven
-steps above are the blue-specific closing verbs. Checkpoint after each major
-step (after the initial audit pull, after the correlation pass, after the
-verifier's five-check completes), not only at the end.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+
+The seven steps above are the blue-specific closing verbs. Checkpoint after
+each major step (after the initial audit pull, after the correlation pass,
+after the verifier's five-check completes), not only at the end.
 
 ---
 

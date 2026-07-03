@@ -210,7 +210,7 @@ instructions: |2
   action that closes each gap. Backend writes via the Closing verbs above
   make state durable; the response is your reflection on top, written for the
   operator and downstream specialists. Don't truncate reasoning to be brief
-  (see `agent/shared-constraints.md` §16).
+  (see `agent/shared-constraints-core.md` "Reasoning quality > response brevity").
 
   ## Handoffs
 
