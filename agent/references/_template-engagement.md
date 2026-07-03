@@ -65,9 +65,10 @@ OOS notes:
 ### Program-Mandated Headers
 
 ```bash
-# Register these before any probing:
-vigil engagement set-header <engagement-key> "X-Bug-Bounty-Researcher" "<handle>"
-vigil engagement set-header <engagement-key> "User-Agent" "BugBountyResearcher/<handle>"
+# Register these before any probing. set-header takes the engagement key plus a
+# single "Name: Value" string (NOT separate name and value arguments):
+vigil engagement set-header <engagement-key> "X-Bug-Bounty-Researcher: <handle>"
+vigil engagement set-header <engagement-key> "User-Agent: BugBountyResearcher/<handle>"
 ```
 
 | Header | Value | Injection method |
@@ -102,8 +103,8 @@ Placement decision (fill in one):
 | Authenticated flows | `[FILL]` | `[FILL]` | [FILL: e.g., "session invalidates on rapid reuse"] |
 
 Back-off rule: on a 429, pause `[FILL: e.g., 60]` seconds before retrying. Do not bypass
-the rate limit — `agent/operator-core.md` §201 makes this explicit; the program may revoke
-scope on violation.
+the rate limit — `agent/operator-core.md` "Recon Dispatch Resource Policy" makes this explicit;
+the program may revoke scope on violation.
 
 ---
 
@@ -200,10 +201,16 @@ Known non-submittable classes for this program:
 - [ ] Self-XSS (requires victim interaction not achievable by attacker)
 - [ ] `[FILL: any program-specific not-applicable class]`
 
-Finding lifecycle for parked findings:
-1. Record normally via `vigil assess record-finding` with `status=parked`
-2. Add a `parked_reason` to `details.notes`
-3. Re-evaluate after each engagement phase — a chain may promote it
+Finding lifecycle for parked findings (there is no `parked` status — use the real
+holding-area mechanism):
+1. Record normally via `vigil assess record-finding`. For informational / not-applicable-by-policy
+   classes, set `evidence_type=informational`; for a strong-but-unproven finding or chain primitive,
+   set `evidence_type=theoretical` and `details.chain_required=true` (with `details.chain_rationale`).
+2. Move it into the holding area so it stays OUT of the report until proven, rather than leaving it
+   report-ready: `vigil assess verify-finding <slug> --disposition pending_runtime_proof --reason "parked: <why not yet submittable>"`.
+   The park reason lives in that verification reason / `details.chain_rationale`, not a non-existent `parked_reason`.
+3. Review the holding area with `vigil assess list-findings --holding` and re-evaluate after each
+   engagement phase — a chain may promote it to submittable.
 
 ---
 
@@ -241,7 +248,7 @@ export SUBFINDER_GITHUB_TOKEN="[FILL: personal token, read:packages scope]"
 After setting the keys, re-run the dns-discovery stage:
 
 ```bash
-vigil assess dns-discovery --engagement-key <key>
+vigil assess dns-discovery <apex-domain> --engagement-dir <engagement-dir>
 # OR if already ran subfinder:
 vigil assess kali subfinder -d <apex-domain> -all -recursive \
   -o /engagements/<key>/scans/subs_passive_refresh.txt \

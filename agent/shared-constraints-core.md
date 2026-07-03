@@ -2,12 +2,10 @@
 
 Load this file first alongside your role file and the family's
 `shared-constraints*.md` (offensive: `agent/shared-constraints.md`; code:
-`agent/shared-constraints-code.md`). It holds the universal layer that used to
-be copied byte-for-byte into every offensive and code role file — Specialist
-Context Isolation (13 role files), the closing-sequence wrapper (10 role
-files), and the finding-recording contract restated from
-`agent/shared-constraints.md` §4. Read it once; do not re-author any of this
-in a role file.
+`agent/shared-constraints-code.md`). It holds the universal layer shared across
+roles — Specialist Context Isolation, the closing-sequence wrapper, and the
+finding-recording contract (restated from `agent/shared-constraints.md` §4).
+Read it once; do not re-author any of this in a role file.
 
 **Canonical pointer string** — every role file references this content with
 this exact line (use verbatim so all call sites match):
@@ -30,6 +28,11 @@ already listed below.
 ---
 
 ## Finding IDs and the `record-finding` Contract
+
+> **Offensive/code roles only.** Blue/IR roles use the IR-evidence confidence
+> model and `record-finding` fields in `agent/shared-constraints-blue.md` (§8 +
+> the Artifact-Registration closing step) — no CVSS score, no letter prefix. The
+> prefix table and CVSS↔severity mapping below do not apply to you.
 
 | Agent | Prefix | Example |
 |-------|--------|---------|

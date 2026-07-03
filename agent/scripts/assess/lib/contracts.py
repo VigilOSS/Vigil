@@ -364,7 +364,9 @@ _KALI_COMMON_NOTES: tuple[str, ...] = (
     "Every target-facing kali verb requires --technique, --intent, --probe-kind, --phase, and --timeout. The CLI rejects a call missing any of these before it reaches the backend.",
     "--technique must be one of TECHNIQUE_ENUM: use HEALTH for runtime/tool inventory, META for operator-side metadata, LOG-READ for artifact reads, OTHER only when no specific class fits.",
     "--agent-name resolves from the flag, then $AGENT_NAME, $VIGIL_AGENT_NAME, then `operator`. Specialists must export AGENT_NAME in their wrapper or pass --agent-name <role>.",
-    "--phase is REQUIRED — pass the phase the dispatch was authorized for, NOT scope.json.current_phase. Allowed: recon, collect, consume-test, verify, exploit, report, code-ingest, code-classify, code-hunt, code-verify, plus half-phase tags recon-pivot and exploit-recon.",
+    "--phase is REQUIRED — pass the phase the dispatch was authorized for, NOT scope.json.current_phase. Allowed (from kali_audit.ALLOWED_PHASES; the two half-phase tags recon-pivot and exploit-recon are the trailing entries): "
+    + ", ".join(ALLOWED_PHASES)
+    + ".",
     "--destructive marks a write/edit/delete on the target (POST/PUT/PATCH/DELETE, file upload, account creation). Leave off for read-only probes.",
     "--force bypasses the dedup window. Use only when re-running an identical command is intentional.",
     "--extra-args \"<string>\" (optional, every typed verb): shlex-split and appended to the tool argv after the typed-flag args. Use sparingly for long-tail flags the verb does not model; the audit row records the full final argv. Set --destructive too if the extra args toggle a destructive mode.",
@@ -1286,6 +1288,195 @@ _CONTRACTS: dict[str, CommandContract] = {
                 ],
                 "cross_file_triggers": [],
             },
+        ),
+    ),
+    # --- Discovery / navigation / read-query utilities (phase-agnostic) ---
+    # These orient a specialist across the CLI surface and are usable in ANY
+    # phase, so they carry no `phase` tag and group under "phase-agnostic" in
+    # `vigil assess list-commands`. They are first-class catalog rows so the
+    # catalog is a COMPLETE index of what a specialist reaches for — not only
+    # the write/probe verbs. `vigil assess contract <name>` resolves each via
+    # `get_contract` -> `_CONTRACTS.get(name)` with no extra wiring.
+    "list-commands": CommandContract(
+        name="list-commands",
+        summary="Per-phase catalog of helper-owned assess commands (this command); each row points at `vigil assess contract <verb>`.",
+        schema_name="assess.lib.contracts registry (CommandContract + kali verb table)",
+        preferred_invocations=(
+            "vigil assess list-commands",
+            "vigil assess list-commands --phase consume-test",
+            "vigil assess list-commands --kali-only --grep sqlmap",
+            "vigil assess list-commands --json",
+        ),
+        author_supplied_fields=(),
+        helper_defaults=(
+            ("--phase", "unset (show every phase group plus the phase-agnostic utilities)"),
+        ),
+        notes=(
+            "Discovery command — the commands analogue of `list-skills` / `list-references`. Sourced from the contract registry, so a new command with a `phase` tag is picked up automatically (never hand-maintained).",
+            "`--phase <N>` accepts the canonical kali_audit.ALLOWED_PHASES vocabulary; the `consume` short alias resolves to `consume-test`.",
+            "`--kali-only` restricts to `kali <verb>` wrappers; `--grep <s>` substring-filters name/summary; `--json` emits the structured rows (the downstream contract).",
+            "Phase-agnostic utilities (empty phase tuple) group separately at the bottom and are omitted from a `--phase` filter.",
+        ),
+    ),
+    "list-skills": CommandContract(
+        name="list-skills",
+        summary="List available skills with compact descriptions.",
+        schema_name="agent/skills/*/SKILL.md frontmatter",
+        preferred_invocations=(
+            "vigil assess list-skills",
+            "vigil assess list-skills --json",
+        ),
+        author_supplied_fields=(),
+        notes=(
+            "Discovery command — the skills analogue of `list-commands` / `list-references`. Name a skill from here in a dispatch's `skills` list.",
+            "--skills-dir overrides the default agent/skills lookup for non-standard checkouts.",
+        ),
+    ),
+    "list-references": CommandContract(
+        name="list-references",
+        summary="List available reference docs with compact descriptions.",
+        schema_name="agent/references/**/*.md frontmatter",
+        preferred_invocations=(
+            "vigil assess list-references",
+            "vigil assess list-references --skill kali-exec",
+            "vigil assess list-references --category recon --grep subdomain",
+            "vigil assess list-references --json",
+        ),
+        author_supplied_fields=(),
+        notes=(
+            "Discovery command. Filter by `--skill <name>` (references whose `skill:` frontmatter includes it), `--category <label>`, or `--grep <s>`.",
+        ),
+    ),
+    "contract": CommandContract(
+        name="contract",
+        summary="Show schema, defaults, and examples for a helper-owned CLI contract.",
+        schema_name="assess.lib.contracts.render_contract",
+        preferred_invocations=(
+            "vigil assess contract record-finding",
+            "vigil assess contract kali sqlmap",
+            "vigil assess contract record-intel tech-component",
+        ),
+        author_supplied_fields=(
+            "name (a contract name from `vigil assess list-commands` / contract_names)",
+            "variant (optional, e.g. the intel type for `record-intel <type>` or the verb for `kali <verb>`)",
+        ),
+        notes=(
+            "The detail half of the discovery pair: `list-commands` finds the command, `contract` shows its full schema (preferred invocations, helper defaults, author-supplied fields, common mistakes, JSON examples).",
+            "Generated from the same source as the CLI's argparse, so it never drifts from the real command.",
+        ),
+    ),
+    "check-phase-readiness": CommandContract(
+        name="check-phase-readiness",
+        summary="Phase-aware readiness gate: per-phase coverage/scope/depth/exploit/intel checks before a phase transition (read-only).",
+        schema_name="backend readiness aggregates (coverage/scope/depth/exploit/intel)",
+        preferred_invocations=(
+            "vigil assess check-phase-readiness --phase consume-test",
+            "vigil assess check-phase-readiness --phase report",
+            "vigil assess check-phase-readiness --phase consume-test --depth --by-host",
+        ),
+        author_supplied_fields=(
+            "--phase (required; accepts the persisted `consume-test` and its `consume` short alias)",
+        ),
+        notes=(
+            "Consolidates the former check-coverage / check-scope-coverage / check-report-readiness / check-exploit-gate / check-intel-readiness commands into one phase-aware gate. Pair with `transition-phase` as the phase-boundary checkpoint.",
+            "Read-only: it reports blockers, it does not move the engagement. `--depth` / `--by-host` / `--by-app-unit` expand the ledger; `--auto-redispatch` suggests follow-up coverage dispatches.",
+        ),
+    ),
+    "transition-phase": CommandContract(
+        name="transition-phase",
+        summary="Guarded phase transition for scope.json (checks blockers, then advances current_phase).",
+        schema_name="scope.json current_phase (guarded write)",
+        preferred_invocations=(
+            "vigil assess transition-phase consume-test",
+            "vigil assess transition-phase report --reason 'coverage + verification complete'",
+            "vigil assess transition-phase exploit --force --reason '...'",
+        ),
+        author_supplied_fields=(
+            "target_phase (positional)",
+            "--reason (recommended; recorded with the transition)",
+        ),
+        notes=(
+            "The write counterpart to `check-phase-readiness`: run the readiness check first, then transition. `--force` proceeds past blockers with warnings.",
+            "`--track {auto|web|code|blue}` selects the phase track for `both` engagements (default: infer from the target phase).",
+        ),
+        common_mistakes=(
+            ("transitioning past blockers silently", "run check-phase-readiness first; use --force only with an explicit --reason"),
+        ),
+    ),
+    "coverage": CommandContract(
+        name="coverage",
+        summary="Per-host coverage ledger: route count, real_app, dedicated lane, finding verdict, and computed coverage-state (read-only).",
+        schema_name="backend per-host coverage projection",
+        preferred_invocations=(
+            "vigil assess coverage",
+            "vigil assess coverage --route-threshold 6",
+            "vigil assess coverage --json",
+        ),
+        author_supplied_fields=(),
+        helper_defaults=(
+            ("--route-threshold", "6 (distinct LIVE url_path count at/above which a host counts as a real_app on routes alone)"),
+        ),
+        notes=(
+            "Read-only orientation for where coverage stands per host. `--json` is the machine form for dispatch planning.",
+        ),
+    ),
+    "list-findings": CommandContract(
+        name="list-findings",
+        summary="List findings with common CLI-side filters (severity, workflow/verification state, root-cause group, free-text search).",
+        schema_name="GET /assessment/findings",
+        preferred_invocations=(
+            "vigil assess list-findings",
+            "vigil assess list-findings --workflow-status active --severity high",
+            "vigil assess list-findings --root-cause VA-047",
+            "vigil assess list-findings --search 'sql injection' --json",
+        ),
+        author_supplied_fields=(),
+        notes=(
+            "Read-only. Filters: --severity, --workflow-status/--status, --verification-state, --verification-disposition, --source-name, --slug, --root-cause <slug> (root plus linked siblings), --search.",
+            "--limit / --offset / --all page the result set; --json is the machine form.",
+        ),
+    ),
+    "list-intel": CommandContract(
+        name="list-intel",
+        summary="List intel records per-type or via full-text search.",
+        schema_name="GET /assessment/intel (+ /intel/search)",
+        preferred_invocations=(
+            "vigil assess list-intel",
+            "vigil assess list-intel tech-component",
+            "vigil assess list-intel --q nginx --json",
+        ),
+        author_supplied_fields=(),
+        notes=(
+            "Read-only. Pass an intel type positionally to list that type, or --q for an FTS query across types. --limit caps search rows.",
+        ),
+    ),
+    "list-command-runs": CommandContract(
+        name="list-command-runs",
+        summary="Search the `vigil assess kali` command-run audit ledger for this engagement.",
+        schema_name="GET /assessment/command-runs",
+        preferred_invocations=(
+            "vigil assess list-command-runs",
+            "vigil assess list-command-runs --q sqlmap --show-matches",
+            "vigil assess list-command-runs --target-host api.example.com --technique SSRF",
+        ),
+        author_supplied_fields=(),
+        notes=(
+            "Read-only audit search. `--q` is a fuzzy keyword search over command/tool/previews/metadata/finding-aliases; `--sort {relevance|recent|distant}` (distant surfaces coverage-gap candidates); filters include --agent-name / --phase / --tool-name / --tool-bin / --target-host / --technique / --route.",
+            "Drill into a single row with `vigil assess get-command-run <id>`.",
+        ),
+    ),
+    "get-command-run": CommandContract(
+        name="get-command-run",
+        summary="Fetch a single kali command-run record by id, including previews and artifact refs.",
+        schema_name="GET /assessment/command-runs/{id}",
+        preferred_invocations=(
+            "vigil assess get-command-run <id>",
+        ),
+        author_supplied_fields=(
+            "command_run_id (positional int, from list-command-runs)",
+        ),
+        notes=(
+            "Read-only drill-down for `list-command-runs` / `resume-brief`. Always emits JSON (the `--json` flag is a no-op accepted for symmetry).",
         ),
     ),
 }

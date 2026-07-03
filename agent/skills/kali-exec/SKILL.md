@@ -102,7 +102,7 @@ A non-HTTP raw tool that the program still requires tagging on is the operator's
 
 ## Phase tags (including half-phase tags)
 
-`--phase` accepts the canonical phases (`recon`, `collect`, `consume-test`, `verify`, `exploit`, `report`, `code-ingest`, `code-classify`, `code-hunt`, `code-verify`) plus two half-phase tags, `recon-pivot` and `exploit-recon`. Full enumeration: `vigil assess contract kali <verb>` or `vigil assess list-commands --phase <N>` (the latter also validates that a given phase token is canonical).
+`--phase` accepts the canonical engagement phases plus two half-phase tags, `recon-pivot` and `exploit-recon` (explained below). The authoritative, drift-free enumeration is generated from `kali_audit.ALLOWED_PHASES` — list it with `vigil assess list-commands --phase <N>` (which also validates that a given phase token is canonical) or `vigil assess contract kali <verb>`. Do not restate the full phase list here.
 
 Pass the phase the dispatch was authorized for — `scope.json.current_phase` is operator state and updates only on phase transitions, but engagements regularly operate **between phases**. The half-phase tags exist because the audit row must reflect what the dispatch was for, not what `scope.json` happened to say at the time. Source-analyzer mid-engagement looking up version intel uses `recon-pivot`. An exploit-developer fingerprinting a binary before exploitation uses `exploit-recon`. The CLI rejects calls without `--phase` so agents cannot silently rely on a stale env-var default.
 

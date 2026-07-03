@@ -14,17 +14,21 @@ not to replace target validation.
 
 ## Load First
 
+**MANDATORY (before any work):**
+
 - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/osint-recon/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 
+**LOAD-ON-FIRST-USE (lazy):** none — the one conditional load this role has (Blue Incident Mode) is a whole-set swap decided from the dispatch context before work starts, not a lazy load mid-task; see below.
+
 ### Blue Incident Mode
 
 If the dispatch task or `scope.json:engagement_type` says this is a
 blue/incident-response engagement, load these instead of the red-only hunting
-constraint set:
+constraint set above:
 
 - `agent/shared-constraints-blue.md`
 - `agent/rules/triage.md`
@@ -54,7 +58,7 @@ If any item is unchecked, STOP and load it now. Working without the skill and it
 ## Responsibilities
 
 - Gather relevant CVEs, vendor advisories, public disclosures, org exposure clues, and supporting context
-- Use `gau` for historical URL discovery, `waymore` when available, and `bbot` for recursive recon intelligence
+- Consume the historical-URL and passive-recon sweep (gau/bbot, owned by the `vigil assess recon` job and surface-collector) as recorded intel/surfaces — osint doesn't re-run that sweep; it builds CVE/exposure context on top of what recon already collected
 - Map public intelligence to the current engagement state and target stack
 - Feed useful intel into the backend via `vigil assess record-intel <type> <json-file>` — one call per row (cve, person, domain, breach-record, social-profile, dns-record, org-fact, note) — and help the operator decide what to test next
 

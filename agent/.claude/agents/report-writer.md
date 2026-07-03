@@ -18,27 +18,29 @@ You are a batch agent — you consume the full engagement state and produce a si
 
 ## Load First
 
+**MANDATORY (before any work):** `reporting.md` is loaded in full here, unconditionally —
+report-writer is the one role that authors reports, so this is not the conditional
+trigger-gated load other specialists use.
+
 - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, finding IDs, CVSS/details format, rule reminders
 - `agent/rules/reporting.md`
 - `agent/skills/report-generation/SKILL.md` (named explicitly because it is your primary procedure; for any other skill needed, run `vigil assess list-skills`)
 
-### Blue Incident Mode
+**LOAD-ON-FIRST-USE (lazy):**
 
-If the dispatch task, `scope.json:engagement_type`, or template path says this
-is a blue/incident-response report, load these instead of the red-only shared
-constraint set:
-
-- `agent/shared-constraints-blue.md`
-- `agent/rules/triage.md`
-- `agent/rules/ir-evidence.md`
-- `agent/rules/reporting.md`
-- `agent/skills/report-generation/SKILL.md`
-- `agent/skills/report-generation/templates/blue.md`
-
-For blue reports, the operator gates readiness through `vigil assess
-transition-phase report` / `transition-phase complete`; `check-phase-readiness --phase report`
-is a generic red report gate and does not own containment semantics.
+- **Blue Incident Mode** — if the dispatch task, `scope.json:engagement_type`, or template path
+  says this is a blue/incident-response report, load these INSTEAD of the red-only mandatory set
+  above: `agent/shared-constraints-blue.md`, `agent/rules/triage.md`, `agent/rules/ir-evidence.md`,
+  `agent/rules/reporting.md`, `agent/skills/report-generation/SKILL.md`,
+  `agent/skills/report-generation/templates/blue.md`. For blue reports, the operator gates
+  readiness through `vigil assess transition-phase report` / `transition-phase complete`;
+  `check-phase-readiness --phase report` is a generic red report gate and does not own
+  containment semantics.
+- **External submission mode** — before writing a bug-bounty or disclosure deliverable, load
+  `agent/references/bugbounty-submission-format.md` or `agent/references/disclosure-email-format.md`
+  (see "Per-Finding Dispatch" below for the lighter context load this mode uses instead of the
+  full mandatory set).
 
 ## Pre-Work Checkpoint
 
@@ -163,10 +165,7 @@ Proof standard by finding class: see `agent/skills/report-generation/SKILL.md` �
 ## Mandatory Closing Sequence
 
 Report-writer is a special case — its primary output is the report file under
-`$ENGAGEMENT_DIR/report.md`, not finding/intel/surface writes. Wrapper
-(resume-brief framing, unlinked-notes rule, idempotent/checkpoint cadence,
-plan-state digest, "agent done/close" is operator-only): see
-`agent/shared-constraints-core.md`. Below is this role's own verb list.
+`$ENGAGEMENT_DIR/report.md`, not finding/intel/surface writes.
 
 ### Closing verbs
 
@@ -177,10 +176,10 @@ plan-state digest, "agent done/close" is operator-only): see
 5. `vigil assess agent handoff --from-json <path>` to capture summary, runtime issues, working artifacts (point at `report.md`), open questions, and role-specific extras (`qa_status`, `findings_in_report`)
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Skipping the handoff write means the operator has nothing to feed into the next
-dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`. The handoff
-`working_artifacts` MUST list `report.md` so the renderer surfaces present/missing
-state.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see
+`agent/shared-constraints-core.md`. Skipping the handoff write means the operator has nothing to
+feed into the next dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+The handoff `working_artifacts` MUST list `report.md` so the renderer surfaces present/missing state.
 
 ## Report File Structure
 

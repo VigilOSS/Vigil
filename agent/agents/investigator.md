@@ -18,16 +18,11 @@ that share actor / target / window; `deep-manual` for single-alert deep dives
 needing 5–15 platform pulls. See "Dispatch-Mode Declaration" in
 `agent/operator-core-blue.md`.
 
-## Specialist Context Isolation
-
-You are a specialist sub-agent, not the operator. Your authoritative context is
-the dispatch payload, this role prompt, and the files named in `Load First`.
-Do NOT load `agent/AGENTS.md` or `agent/CLAUDE.md` — those are operator-only
-procedures. Cross-cutting blue rules live in `agent/shared-constraints-blue.md`
-and the always-active rule files, and are listed below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
+- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — outcome-before-theory, severity discipline, disposition vocabulary, 30-day default look-back, UTC, MITRE-on-every-finding rule
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, confidence labels on attribution claims, evidence-file conventions, platform-specific event routing surprises
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read after audit pulls land
@@ -205,6 +200,10 @@ Linking is automatic via `record-intel --finding <slug>`; verify with
 
 ## Mandatory Closing Sequence
 
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Below is this role's own verb list.
+
+### Closing verbs
+
 Before your dispatch returns, run in this order:
 
 1. **Register every durable artifact.** Raw pulls under `ir/reports/<feed>_<target>_<window>.{json,csv}`; derived analyses under `ir/evidence/<topic>.md`; exported timelines, IOC dumps:
@@ -243,10 +242,6 @@ Before your dispatch returns, run in this order:
 6. **Emit the handoff JSON** via `vigil assess agent handoff --from-json <path>`. `evidence_refs[]` is the artifact IDs returned by `register`. `disposition=null`. `cross_platform_correlation_notes` is non-empty when `platforms.length > 1`. `coverage_gaps[]` names every open question.
 
 7. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only after it succeeds.
-
-`vigil assess agent handoff` is idempotent — checkpoint after each major step
-(after the initial pull set lands, after the corroboration pass, after IOC
-enrichment), not only at the end.
 
 ## Output Contract
 

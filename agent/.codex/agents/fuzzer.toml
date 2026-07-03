@@ -16,11 +16,15 @@ You own bounded high-volume testing once another specialist has already identifi
 
 ## Load First
 
+**MANDATORY (before any work):**
+
 - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/directory-fuzzing/SKILL.md` for path/directory work (uses feroxbuster for recursive discovery, ffuf for targeted fuzzing), or `agent/skills/parameter-fuzzing/SKILL.md` for parameter work — load both if the objective spans both surface types (for any other skill, run `vigil assess list-skills` to discover it)
+
+**LOAD-ON-FIRST-USE (lazy):** none — this role's methodology is fully covered by the mandatory set above; see "OOB Callback Confirmation" below for the pointer used only when blind-injection payloads come up.
 
 ## Pre-Work Checkpoint
 
@@ -94,11 +98,7 @@ rather than restating canonical state.
 
 ## OOB Callback Confirmation
 
-When fuzzing blind injection surfaces with OOB payloads, run the canonical
-mint → fire → poll → correlate loop after each batch — do not eyeball the raw
-listener log. See `agent/references/offensive-tactics/frp-tunneling.md` §
-"OOB Procedure (mint→poll→correlate)" for the exact commands, readiness
-check, and time-based fallback.
+Blind-injection payloads use the canonical mint→poll→correlate loop after each batch, not a raw listener-log eyeball — run `vigil oob --help` for the workflow, or see `agent/references/offensive-tactics/frp-tunneling.md` § "OOB Procedure (mint→poll→correlate)" for the exact commands, readiness check, and time-based fallback.
 
 ## Handoffs
 

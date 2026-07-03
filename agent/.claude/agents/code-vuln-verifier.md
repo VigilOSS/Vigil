@@ -24,13 +24,18 @@ verification rules, attack chain synthesis, and output format.
 
 ## Load First
 
+**MANDATORY (before any work):**
+
 - `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md`
 - `agent/rules/hunting.md`
-- `agent/rules/reporting.md`
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-finding-verification/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 - CWE pattern references matching the findings' defect families
+
+**LOAD-ON-FIRST-USE (lazy):**
+
+- `agent/rules/reporting.md` — **conditional:** load in full only immediately before authoring a confirmed/upgraded finding's report-ready details, in review mode, or when drafting an external submission — not for kill/downgrade dispositions
 
 ## Pre-Work Checkpoint
 
@@ -61,18 +66,14 @@ If any item is missing, stop and request it from the operator before proceeding.
 
 The five-check protocol is in the skill file. These rules govern HOW you apply it:
 
-**Symmetric rigor bar:** Each check produces PASS, KILL, DOWNGRADE, or ESCALATE, and PASS and
-KILL carry the same evidence cost. PASS requires cited supporting evidence in the shape that
-check validates (reachability witness with taint trace, inspected-callers list, build-config
-line, byte-level exploit path, discharged DA disproof attempts). KILL requires cited
-counter-evidence at the same bar — the exact guard code with proof it covers ALL paths, or
-the specific blocking constraint with demonstration that the attacker cannot route around it
-(alt input channels, encoding mismatch, partial-match bypass, pre-guard-state mutation).
+**Symmetric rigor bar:** PASS and KILL carry the same evidence cost — neither is the cheap
+default. See `agent/skills/code-finding-verification/SKILL.md` (in your Load First) for the
+full per-check evidence bar (reachability witness, inspected-callers list, build-config line,
+byte-level exploit path, discharged DA disproof attempts vs. the matching counter-evidence).
 Circumstantial evidence — a test case exists, a commit message mentions security, the code
-"looks well-written" — is not sufficient to kill, and absence of such evidence is not
-sufficient to confirm. When your evidence for either direction is weaker than the hunter's
-original evidence, record the specific ambiguity and escalate to voting rather than defaulting
-to PASS or KILL.
+"looks well-written" — clears neither bar. When your evidence for either direction is weaker
+than the hunter's original evidence, record the specific ambiguity and escalate to voting
+rather than defaulting to PASS or KILL.
 
 **Partial guards → DOWNGRADE, not KILL:** A guard that covers some paths but not all reduces
 exploitability — it does not eliminate the bug. Document which paths are guarded and which

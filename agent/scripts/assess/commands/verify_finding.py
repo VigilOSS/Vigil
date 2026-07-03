@@ -24,8 +24,14 @@ def register(subparsers) -> None:
     p.add_argument("--inline", dest="inline_payload", help="Raw JSON verification payload")
     p.add_argument(
         "--disposition",
-        choices=("confirmed", "downgraded", "pending_runtime_proof", "false_positive", "disputed"),
-        help="Verification disposition when building the payload from flags",
+        choices=("confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"),
+        help=(
+            "Verification action when building the payload from flags. 'blocked' "
+            "requires a block_reason (pass via --details-inline '{\"block_reason\": \"...\"}' "
+            "or already present on the finding) and holds the finding out of the report. "
+            "'disputed' sets verification_state=disputed and leaves verification_disposition "
+            "at 'none' (it is never stored as a disposition)."
+        ),
     )
     p.add_argument("--reason", dest="reason_text", help="Required verification rationale when building payload from flags")
     p.add_argument("--reason-code", default="", help="Optional machine-readable reason code")
@@ -50,7 +56,7 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-_KNOWN_DISPOSITIONS = frozenset({"confirmed", "downgraded", "pending_runtime_proof", "false_positive", "disputed"})
+_KNOWN_DISPOSITIONS = frozenset({"confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"})
 
 
 def run(args) -> None:

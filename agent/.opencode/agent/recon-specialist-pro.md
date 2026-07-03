@@ -27,16 +27,18 @@ supervised, resumable `vigil assess recon` job. Your job is to:
 
 **Modes accepted:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven`. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
 
-## Don't run — or launch — the long enumeration spine
+## Bounded Probes Are Yours; the Enumeration Spine Is the Operator's Job
 
 Run only short, bounded synchronous probes (`agent/shared-constraints.md` §2). The
 long enumeration spine (a `puredns` brute, a full-apex `dns-discovery`, a bulk
-`web-discovery`) is the operator's `vigil assess recon` job — you neither hold it as
-a blocking call **nor launch it as a `--background` job** (a dispatched specialist
-that backgrounds and polls is SIGUSR1-killed mid-wait). Read the job's `recon-status`
-result; when more enumeration is needed, **recommend it** in your handoff
-`next_steps` (e.g. "operator: re-run `vigil assess recon example.com --brute
---resume`") rather than launching it.
+`web-discovery`) is the operator's supervised, resumable `vigil assess recon` job —
+it is built to outlive a single dispatch, which is exactly what a dispatched
+specialist cannot do: a specialist that holds it as a blocking call, or launches it
+as a `--background` job and polls, gets SIGUSR1-killed mid-wait. That's the
+division of labor this boundary protects. Read the job's `recon-status` result;
+when more enumeration is needed, **recommend it** in your handoff `next_steps`
+(e.g. "operator: re-run `vigil assess recon example.com --brute --resume`") rather
+than launching it.
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
@@ -89,6 +91,10 @@ completeness against the `subdomain-enumeration` bound rules:
 - **dns:** resolved-host count plausible for the apex set? Did the brute run
   (`--brute`)? Did wildcard pre-strip fire (telecom/CDN sink)? Did convergence
   stop on the two-zero-pass rule or hit `--max-passes`?
+- **bbot:** ran as the opt-in passive mop-up (`--bbot`) when the subfinder set
+  looked thin, or explicitly not warranted for this apex? Its `DNS_NAME` events
+  only count once the convergence resolve pass DNS-validates them — raw bbot
+  output is unconfirmed until then.
 - **web:** live-probe count vs. resolved hosts; did the crawl run or was it
   `--no-crawl`? Any hosts blackholed (egress) that need deferral?
 - **gau:** ran (default) or dropped (`--no-gau` for a brand-new site)? Any apexes
@@ -145,6 +151,7 @@ means every item is verified, not assumed.
 
 **From the recon job (assess, don't re-run):**
 - [ ] Subdomain enumeration reached convergence (or its stop reason is recorded) — not silently truncated by a WARN.
+- [ ] bbot passive mop-up (`--bbot`) run when the subfinder set was thin, or explicitly not warranted — its `DNS_NAME` events DNS-validated before being counted.
 - [ ] Wildcard / telecom-PTR sinks detected + pre-stripped; raw enum treated as candidates, not hosts.
 - [ ] Live HTTP set established; blackholed hosts deferred, not dropped.
 - [ ] Historical URLs mined (gau) unless `--no-gau` was justified.
@@ -167,9 +174,9 @@ means every item is verified, not assumed.
 
 ## Mandatory Closing Sequence
 
-Wrapper (resume-brief framing, unlinked-notes rule, idempotent/checkpoint cadence,
-plan-state digest, "agent done/close" is operator-only): see
-`agent/shared-constraints-core.md`. Below is this role's own verb list.
+Closing-sequence wrapper (resume-brief framing, idempotent/checkpoint cadence,
+plan-state digest): see `agent/shared-constraints-core.md`. Below is this role's
+own verb list.
 
 ### Blocked-claim self-check (run BEFORE the handoff)
 
@@ -184,9 +191,9 @@ the image, target unreachable, hard WAF lockout). For the recon JOB, read
 
 ### Closing verbs
 
-(No separate `post probe-runs` step is needed: every `vigil assess kali` call in
-your bounded chain already writes its own command-run audit row, so coverage
-state is captured as each tool runs.) Then, in order:
+Every `vigil assess kali` call in your bounded chain already writes its own
+command-run audit row as it runs, so coverage state is captured automatically —
+there is no separate probe-run recording step for you to run here. In order:
 
 1. `vigil assess record-finding recon-specialist <finding-json>` per finding
 2. `vigil assess record-intel <type> <intel-json>` per intel row
