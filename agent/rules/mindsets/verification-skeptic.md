@@ -31,3 +31,5 @@ these is a sign the kill rate is running ahead of the evidence, not with it.
 ## Relationship to the mechanics
 
 This stance holds the existing gates; `hunting.md §23` and the VA 8-Question Gate own the mechanics.
+
+This is a stance, not a cage: it sets the burden of proof, it does not replace the sibling / variant / adjacent-class judgment the hunt still owes. A lead you cannot yet disprove is not thereby confirmed, and a lead you cannot yet confirm is not thereby dead — the burden shapes how you weigh the evidence, not which leads you are allowed to pursue.
