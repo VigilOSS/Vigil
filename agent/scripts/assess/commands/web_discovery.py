@@ -35,7 +35,7 @@ from assess.commands.ingest_httpx import ingest_httpx_results
 from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.discovery import denoise_hosts
-from assess.lib.kali import kali_exec
+from assess.lib.kali import kali_exec, resolve_crawl_rate_limit
 from assess.lib.kali_output import _apply_required_headers, _required_headers
 from assess.lib import runtime_route, scope
 
@@ -96,7 +96,13 @@ def register(subparsers) -> None:
              "amplifies httpx memory and was an OOM (RC137) trigger on large lists.",
     )
     p.add_argument("--no-crawl", dest="no_crawl", action="store_true", help="Skip the katana crawl stage.")
-    p.add_argument("--katana-depth", dest="katana_depth", default="2", help="katana -d crawl depth (default 2)")
+    p.add_argument("--katana-depth", dest="katana_depth", default="4",
+                   help="katana -d crawl depth (default 4; the fleet crawl fans the whole live "
+                        "set through one blocking call — raise to 5 for a focused re-crawl).")
+    p.add_argument("--katana-rate", dest="katana_rate", default="",
+                   help="katana -rl req/s for the crawl. Default 10, hard-capped at 20, clamped "
+                        "DOWN to the program rate ceiling — so a deep crawl never rides katana's "
+                        "built-in 150 req/s.")
     p.add_argument(
         "--katana-extra-args",
         dest="katana_extra_args",
@@ -111,6 +117,27 @@ def register(subparsers) -> None:
              "buffer (gf-bucketed) via ingest-endpoints. Relative paths anchor to the engagement dir.",
     )
     p.add_argument("--stage-timeout", dest="stage_timeout", type=int, default=1800, help="Per-tool --timeout seconds (default 1800)")
+    # Fix 2 (Issue 2) — seat the httpx liveness verdicts as prioritized work
+    # items. SAFE DEFAULT: tri-state (None) so an absent flag resolves to ON
+    # only when `--db` is set (no db → nothing to seat). `--seat-liveness`
+    # forces it on; `--no-seat-liveness` forces it off.
+    p.add_argument(
+        "--seat-liveness",
+        dest="seat_liveness",
+        action="store_true",
+        default=None,
+        help="Seat each LIVE httpx result as a work item (gf-bucketed) via "
+             "ingest-endpoints, in addition to the host-liveness ledger. "
+             "Default ON when --db is set. Revalidation hits on non-standard "
+             "ports (:8080/:8443/:9443/…) are seated FIRST.",
+    )
+    p.add_argument(
+        "--no-seat-liveness",
+        dest="seat_liveness",
+        action="store_false",
+        help="Do NOT seat httpx liveness verdicts as work items (override the "
+             "--db default).",
+    )
     p.set_defaults(func=run)
 
 
@@ -256,6 +283,78 @@ def _extract_live_urls(httpx_jsonl: Path) -> list[str]:
     return sorted(set(urls))
 
 
+# Default HTTP(S) ports — a URL on any OTHER explicit port is treated as a
+# non-standard / revalidation-recovered surface and seated FIRST (Fix 2).
+_DEFAULT_HTTP_PORTS: frozenset[int] = frozenset({80, 443})
+
+
+def _has_nondefault_port(url: str) -> bool:
+    """True when *url* carries an explicit, non-default (not 80/443) port.
+
+    Used to float the I-6 revalidation hits (`:8080/:8443/:9443/:8000/:8888`) to
+    the front of the seated batch — those rescued management surfaces are the
+    highest-value liveness verdicts to enter the work buffer first."""
+    from urllib.parse import urlsplit
+
+    try:
+        port = urlsplit(url).port
+    except ValueError:
+        return False
+    return port is not None and port not in _DEFAULT_HTTP_PORTS
+
+
+def _seat_liveness_work_items(httpx_jsonl: Path) -> list[dict]:
+    """Build prioritized work-item JSON rows from LIVE httpx results (Fix 2).
+
+    One row per ANSWERED (non-failed) httpx record, deduped on URL, in the
+    ingest-endpoints JSON-line shape: ``{url, method:"GET", content_type,
+    response_status, type, source:"web-discovery", live_status:"live",
+    signals:["httpx-live"]}``. `type` is emitted as ``unknown`` so the row falls
+    through to `classify_type` (Fix 5 override-align) where the threaded
+    `content_type` can recover a real type. Non-standard-port (revalidation)
+    rows sort FIRST so the rescued management surfaces lead the batch."""
+    rows: list[dict] = []
+    if not httpx_jsonl.is_file():
+        return rows
+    seen: set[str] = set()
+    with httpx_jsonl.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict) or obj.get("failed"):
+                continue
+            url = obj.get("url") or obj.get("final_url") or obj.get("input")
+            if not url:
+                continue
+            url = str(url)
+            if url in seen:
+                continue
+            seen.add(url)
+            status = obj.get("status_code")
+            rows.append({
+                "url": url,
+                "method": "GET",
+                # httpx only carries content_type when invoked with
+                # -content-type; absent here, classify_type falls back to
+                # path-shape (no regression). Threaded forward if present.
+                "content_type": str(obj.get("content_type") or ""),
+                "response_status": status if isinstance(status, int) else None,
+                "type": "unknown",
+                "source": "web-discovery",
+                "live_status": "live",
+                "signals": ["httpx-live"],
+            })
+    # Stable sort: non-default-port (revalidation) hits first, original order
+    # preserved within each group.
+    rows.sort(key=lambda r: 0 if _has_nondefault_port(r["url"]) else 1)
+    return rows
+
+
 def _bare_host(token: str) -> str:
     """Normalize an httpx ``input`` token (host or URL, maybe with :port) to a bare
     lowercased host, so a default-pass row and a candidate line compare equal."""
@@ -320,12 +419,15 @@ _ARG_DEFAULTS = {
     "revalidate_ports": _REVALIDATE_PORTS,
     "tech_detect": False,
     "no_crawl": False,
-    "katana_depth": "2",
+    "katana_depth": "4",
+    "katana_rate": "",
     "katana_extra_args": "",
     "db_path": "",
     "stage_timeout": 1800,
     "runtime": "auto",
     "no_thread_clamp": False,
+    # Fix 2 — tri-state; None resolves to ON only when --db is set (see run()).
+    "seat_liveness": None,
 }
 
 
@@ -503,6 +605,28 @@ def run(args) -> None:
     by_class = " ".join(f"{k}={v}" for k, v in sorted(summary["by_class"].items()))
     print(f"web-discovery: liveness ledger upserted {summary['upserted']} hosts ({by_class or 'none'})", file=sys.stderr)
 
+    # --- Stage 2b: (optional) seat httpx live results as work items (Fix 2) -
+    # The ledger upsert above answers "is this host live now"; it does NOT enter
+    # the work buffer, so an httpx hit on a non-standard management port
+    # (:9443/auth/admin) only ever became a work item if katana later re-crawled
+    # it. Seat each LIVE httpx result directly as a gf-bucketed work item through
+    # the ingest-endpoints JSON-line path (which threads `content_type` into
+    # classify_type). Revalidation hits on non-standard ports lead the batch.
+    # SAFE DEFAULT: on only when --db is set (resolve the tri-state flag here).
+    seat_liveness = getattr(args, "seat_liveness", None)
+    if seat_liveness is None:
+        seat_liveness = bool(args.db_path)
+    if seat_liveness and args.db_path:
+        seated = _seat_liveness_work_items(live_host)
+        if seated:
+            seat_host, _ = _paths(cfg, "httpx_worklive.jsonl")
+            seat_host.write_text(
+                "".join(json.dumps(r) + "\n" for r in seated), encoding="utf-8"
+            )
+            ingest_endpoints.run(_ingest_args(args, str(seat_host)))
+            print(f"web-discovery: seated {len(seated)} live httpx results as work items "
+                  "(revalidation/non-standard-port hits first)", file=sys.stderr)
+
     # --- Stage 3: katana crawl of the live subset --------------------------
     katana_host, katana_container = _paths(cfg, "katana.jsonl")
     if not args.no_crawl:
@@ -514,21 +638,25 @@ def run(args) -> None:
             # not blow up the engagement disk with every fetched page (the crawl
             # only needs the discovered URL graph here; bodies are fetched
             # selectively downstream by gau-secrets / js-mining).
+            # `-jsl` adds jsluice endpoint extraction (real coverage, not just the
+            # link graph); `-fs fqdn` keeps the active crawler on the exact seeded
+            # in-scope hosts (it never probes an out-of-scope sibling subdomain it
+            # finds in a link). `-or -ob` already omit body/raw to bound disk.
             katana_cmd = [
-                "katana", "-list", seed_container, "-jc", "-d", str(args.katana_depth),
+                "katana", "-list", seed_container, "-jc", "-jsl",
+                "-d", str(args.katana_depth), "-fs", "fqdn",
                 "-or", "-ob",
                 "-jsonl", "-silent", "-o", katana_container,
             ]
-            # Rate cap (stage 3): clamp katana's per-second / per-minute request
-            # rate to the configured GLOBAL ceiling. katana -rl is req/s and
-            # -rlm is req/min (both single global token buckets); set both so
-            # neither dimension exceeds the cap. The cap bounds per-host only as a
-            # side effect. An unset cap leaves katana's own default pacing (no
-            # hard gate). int() truncates a fractional cap DOWN; the max(1, …)
-            # floor only guards a hand-edited sub-1 scope (rejected at create).
-            if rate_cap is not None:
-                katana_rl = max(1, int(rate_cap))
-                katana_cmd.extend(["-rl", str(katana_rl), "-rlm", str(katana_rl * 60)])
+            # Safe-by-default crawl rate (stage 3): resolve_crawl_rate_limit
+            # defaults to 10 req/s, hard-caps at 20, and clamps DOWN to the
+            # program ceiling (rate_cap) when configured — so an uncapped fleet
+            # crawl never rides katana's built-in 150 req/s. -rl is req/s and -rlm
+            # is req/min (both single global token buckets); set both.
+            katana_rl = resolve_crawl_rate_limit(
+                args.katana_rate, rate_cap=rate_cap, warn=_warn,
+            )
+            katana_cmd.extend(["-rl", str(katana_rl), "-rlm", str(katana_rl * 60)])
             if args.katana_extra_args:
                 katana_cmd.extend(shlex.split(args.katana_extra_args))
             kres = kali_exec(
@@ -539,34 +667,47 @@ def run(args) -> None:
             if getattr(kres, "return_code", 0) not in (0, None):
                 print(f"web-discovery: katana exited {kres.return_code}; crawl output may be partial.", file=sys.stderr)
             print(f"web-discovery: crawled {len(live_urls)} live URLs with katana", file=sys.stderr)
+            _rargv = getattr(kres, "resolved_argv", None)
+            if _rargv:
+                print(f"web-discovery: katana argv: {' '.join(_rargv)}", file=sys.stderr)
         else:
             print("web-discovery: no live URLs to crawl; skipping katana.", file=sys.stderr)
 
     # --- Stage 4: (optional) ingest crawled URLs into the work buffer ------
+    # Fix 3 (Issue 6): emit {url, content_type, ...} JSON lines (not a bare URL
+    # list) so ingest-endpoints can thread the crawled response's Content-Type
+    # into classify_type. Bare-URL lines still parse downstream, so this stays
+    # backward-compatible.
     if args.db_path and katana_host.is_file():
-        urls = _katana_urls(katana_host)
-        if urls:
-            urls_host, _ = _paths(cfg, "katana_urls.txt")
-            urls_host.write_text("\n".join(urls) + "\n", encoding="utf-8")
+        records = _katana_records(katana_host)
+        if records:
+            urls_host, _ = _paths(cfg, "katana_urls.jsonl")
+            urls_host.write_text(
+                "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8"
+            )
             ingest_endpoints.run(_ingest_args(args, str(urls_host)))
-            print(f"web-discovery: ingested {len(urls)} crawled URLs into the work buffer", file=sys.stderr)
+            print(f"web-discovery: ingested {len(records)} crawled URLs into the work buffer", file=sys.stderr)
 
     print("web-discovery: done. Liveness in the backend ledger; "
           "run `vigil assess fetch host-liveness` or coverage rollup to review.", file=sys.stderr)
 
 
-def _katana_urls(katana_jsonl: Path) -> list[str]:
-    # TODO(typing P1): emit {url, content_type} JSON lines (instead of a bare
-    # URL list) so ingest-endpoints can thread the crawled response's
-    # Content-Type into `classify_type` — the typer is extension/path-shape-only
-    # without it. Deferred deliberately: katana only records response headers
-    # when the crawl is invoked with response storage enabled (see the katana
-    # config in web_discovery), the `response.headers` jsonl shape is not pinned
-    # by a schema doc here, and the `katana_urls.txt` writer + `_ingest_args`
-    # text-file contract would all have to move to JSONL. Scoping that safely is
-    # a separate change; the ingest-endpoints JSON `content_type` wiring is in
-    # place, so any producer already emitting JSON rows benefits today.
-    urls: list[str] = []
+def _katana_records(katana_jsonl: Path) -> list[dict]:
+    """Crawled work-item rows from a katana -jsonl file (Fix 3, resolves the old
+    TODO(typing P1)).
+
+    Emits ``{url, content_type}`` JSON rows (plus ``response_status``/``tech``
+    when the crawl stored the response) so ingest-endpoints can thread the
+    crawled Content-Type into `classify_type` — the typer was
+    extension/path-shape-only without it. Dedups on URL, enriching the first
+    record seen for a URL with the first non-empty metadata, and returns the
+    rows sorted by URL (stable, mirrors the prior `sorted(set(...))`).
+
+    Metadata is OPTIONAL by construction: the crawl runs with `-or -ob` (omit
+    response + body) so the response block is usually absent and only ``url`` is
+    emitted — that bare-shape row still parses downstream. When a crawl IS run
+    with response storage, `content_type`/`status`/`tech` flow through."""
+    records: dict[str, dict] = {}
     with katana_jsonl.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
@@ -576,16 +717,51 @@ def _katana_urls(katana_jsonl: Path) -> list[str]:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(obj, dict):
+                continue
             # katana -jsonl: {"request": {"endpoint": "..."}} or {"endpoint": "..."}.
             endpoint = ""
-            if isinstance(obj, dict):
-                req = obj.get("request")
-                if isinstance(req, dict):
-                    endpoint = req.get("endpoint") or req.get("url") or ""
-                endpoint = endpoint or obj.get("endpoint") or obj.get("url") or ""
-            if endpoint:
-                urls.append(str(endpoint))
-    return sorted(set(urls))
+            req = obj.get("request")
+            if isinstance(req, dict):
+                endpoint = req.get("endpoint") or req.get("url") or ""
+            endpoint = endpoint or obj.get("endpoint") or obj.get("url") or ""
+            if not endpoint:
+                continue
+            endpoint = str(endpoint)
+            # Pull response metadata when the crawl stored it (absent under
+            # the default -or/-ob disk-saving flags; threaded forward if set).
+            content_type = ""
+            status = None
+            tech = ""
+            resp = obj.get("response")
+            if isinstance(resp, dict):
+                headers = resp.get("headers")
+                if isinstance(headers, dict):
+                    content_type = (
+                        headers.get("content_type")
+                        or headers.get("content-type")
+                        or ""
+                    )
+                content_type = content_type or resp.get("content_type") or ""
+                sc = resp.get("status_code")
+                if isinstance(sc, int):
+                    status = sc
+                techs = resp.get("technologies") or obj.get("tech")
+                if isinstance(techs, list):
+                    tech = ",".join(str(t) for t in techs)
+                elif techs:
+                    tech = str(techs)
+            rec = records.get(endpoint)
+            if rec is None:
+                rec = {"url": endpoint}
+                records[endpoint] = rec
+            if content_type and not rec.get("content_type"):
+                rec["content_type"] = str(content_type)
+            if status is not None and rec.get("response_status") is None:
+                rec["response_status"] = status
+            if tech and not rec.get("tech"):
+                rec["tech"] = tech
+    return [records[key] for key in sorted(records)]
 
 
 def _ingest_args(args, urls_file: str):

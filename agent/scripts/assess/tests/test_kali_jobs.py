@@ -227,6 +227,174 @@ def test_wrapper_marker_captures_real_tool_exit(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# 1b. Hard deadline + finalize-on-death (I-19): the async dtach worker has no
+#     hard deadline, so a hung run (nuclei stuck on template load, 0-byte output
+#     for hours) survives until a manual sweep-orphans. The wrapper now arms a
+#     budget-sized watchdog that kills the tool AT the deadline and self-
+#     finalizes via the marker, mirroring the sync exec path's --timeout cascade.
+# --------------------------------------------------------------------------- #
+
+
+def test_build_job_wrapper_embeds_deadline_watchdog():
+    """The constructed wrapper carries a hard-deadline watchdog sized from the
+    requested timeout: SIGTERM the TOOL pid at the budget, escalate to SIGKILL
+    after the fixed grace (sync-path parity). A hung run is killed at the
+    deadline instead of surviving until sweep-orphans (I-19)."""
+    wrapper = kali_jobs._build_job_wrapper(
+        "nuclei -l targets.txt",
+        pid_file="/tmp/j.pid",
+        stdout_path="/e/j.out",
+        stderr_path="/e/j.err",
+        exit_path="/e/j.exit",
+        timeout_seconds=1800,
+    )
+    # Budget sized from the requested timeout; grace from the sync-path constant.
+    assert "1800" in wrapper
+    assert str(kali_jobs._JOB_KILL_GRACE_SECONDS) in wrapper
+    # The cascade targets the TOOL pid ($__child) — the same exact-PID target
+    # job_stop signals, never a supervisor — TERM then escalate to KILL.
+    assert 'kill -TERM "$__child"' in wrapper
+    assert 'kill -KILL "$__child"' in wrapper
+    # B1 preserved: the recorded/awaited pid is still the tool, not the watchdog.
+    assert "__child=$!" in wrapper
+    assert 'wait "$__child"' in wrapper
+
+
+def test_build_job_wrapper_no_deadline_when_timeout_absent():
+    """Backward-compatible: with no requested timeout the wrapper is the plain
+    no-watchdog form, so callers that do not size a budget keep today's exact
+    behavior (the existing real-sh B1 tests rely on this path)."""
+    wrapper = kali_jobs._build_job_wrapper(
+        "echo hi",
+        pid_file="/tmp/j.pid",
+        stdout_path="/e/j.out",
+        stderr_path="/e/j.err",
+        exit_path="/e/j.exit",
+    )
+    assert "kill -TERM" not in wrapper
+    assert "kill -KILL" not in wrapper
+    assert "__watch" not in wrapper
+
+
+@pytest.mark.parametrize("bad", [None, 0, -5, "", "nope"])
+def test_build_job_wrapper_omits_deadline_for_nonpositive_budget(bad):
+    """A missing / non-positive / unparseable budget arms no watchdog rather than
+    a zero/negative deadline that would kill the tool immediately."""
+    wrapper = kali_jobs._build_job_wrapper(
+        "echo hi",
+        pid_file="/tmp/j.pid",
+        stdout_path="/e/j.out",
+        stderr_path="/e/j.err",
+        exit_path="/e/j.exit",
+        timeout_seconds=bad,
+    )
+    assert "__watch" not in wrapper
+
+
+def test_start_job_sizes_deadline_from_requested_timeout(monkeypatch, tmp_path):
+    """start_job threads audit_metadata['timeout_seconds_requested'] into the
+    wrapper as the hard deadline, so `kali job start --timeout N` actually bounds
+    the async run (it was audit-only metadata before I-19)."""
+    fake = FakeClient(post_value={"id": 8})
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = list(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kali_jobs.subprocess, "run", fake_run)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda *a, **k: True)
+    monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake)
+
+    kali_jobs.start_job(
+        ["sleep", "9000"],
+        audit_meta={"technique": "RECON", "timeout_seconds_requested": 600},
+        engagement_dir=tmp_path,
+        container_name="vigil",
+        config=_cfg(tmp_path),
+    )
+    wrapped_shell = captured["argv"][-1]
+    assert "600" in wrapped_shell
+    assert 'kill -TERM "$__child"' in wrapped_shell
+
+
+def test_wrapper_deadline_kills_hung_tool_and_finalizes(tmp_path):
+    """End-to-end through the host sh: a tool that would hang well past its budget
+    is SIGTERM'd by the watchdog AT the deadline, the wrapper publishes the kill
+    wait-status to the marker, and the marker-finalize path drives the row
+    terminal (failed). This is the finalize-on-death guarantee (I-19): a hung run
+    no longer survives to a manual sweep-orphans."""
+    jobs = _jobs_dir(tmp_path)
+    exit_path = jobs / "hung.exit"
+    wrapper = kali_jobs._build_job_wrapper(
+        "sleep 30",
+        pid_file=str(jobs / "hung.pid"),
+        stdout_path=str(jobs / "hung.out"),
+        stderr_path=str(jobs / "hung.err"),
+        exit_path=str(exit_path),
+        timeout_seconds=1,
+    )
+    start = time.monotonic()
+    subprocess.run(["sh", "-c", wrapper], timeout=30, check=False)  # noqa: S603,S607
+    elapsed = time.monotonic() - start
+    # Killed at ~budget (1s) + a poll tick — NOT after the tool's natural 30s.
+    assert elapsed < 15, f"watchdog did not enforce the deadline (took {elapsed:.1f}s)"
+    marker = ""
+    for _ in range(60):
+        try:
+            marker = exit_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            marker = ""
+        if marker:
+            break
+        time.sleep(0.05)
+    rc = int(marker)
+    # A deadline kill is observed as a 128+signal wait status (SIGTERM=143).
+    assert rc >= 128, f"expected a kill wait-status >=128, got {rc}"
+    # finalize-on-death: the marker drives the backend row terminal (failed, not
+    # left hanging at running until sweep-orphans).
+    rec = {"id": 99, "status": "running", "stdout_path": str(jobs / "hung.out")}
+    client = FakeClient()
+    out = kali_jobs._finalize_if_marker_present(client, rec)
+    assert out["status"] == "failed"
+    assert out["exit_code"] == rc
+    assert out["ended_at"]
+
+
+def test_wrapper_natural_exit_is_prompt_under_deadline(tmp_path):
+    """A tool that finishes well within its budget is NOT delayed by the watchdog:
+    the poll-loop watchdog exits the instant the tool is gone (no long sleep
+    lingers), so the marker publishes its real exit code right away."""
+    jobs = _jobs_dir(tmp_path)
+    exit_path = jobs / "quick.exit"
+    wrapper = kali_jobs._build_job_wrapper(
+        "sh -c 'exit 0'",
+        pid_file=str(jobs / "quick.pid"),
+        stdout_path=str(jobs / "quick.out"),
+        stderr_path=str(jobs / "quick.err"),
+        exit_path=str(exit_path),
+        timeout_seconds=600,
+    )
+    start = time.monotonic()
+    subprocess.run(["sh", "-c", wrapper], timeout=30, check=False)  # noqa: S603,S607
+    elapsed = time.monotonic() - start
+    # Returns in ~a poll tick, not the 600s budget — the watchdog never lingers.
+    assert elapsed < 10, f"natural exit was delayed by the watchdog (took {elapsed:.1f}s)"
+    marker = ""
+    for _ in range(60):
+        try:
+            marker = exit_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            marker = ""
+        if marker:
+            break
+        time.sleep(0.05)
+    assert marker == "0"
+
+
+# --------------------------------------------------------------------------- #
 # 2. _read_exit_marker / _finalize_if_marker_present
 # --------------------------------------------------------------------------- #
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shlex
 import sys
@@ -175,8 +176,8 @@ def add_required_kali_flags(parser) -> None:
             "Named identity from the credential store to run AND stamp as (e.g. user_a, "
             "user_b, admin). Selects that identity's auth material and records "
             "it as the probe's auth_context so cross-identity access-control "
-            "(IDOR/BOLA/BFLA) depth is measurable. Omit for the active identity "
-            "/ legacy single-identity behavior."
+            "(IDOR/BOLA/BFLA) depth is measurable. Omit for anonymous/no "
+            "credential injection."
         ),
     )
     # Resolve VIGIL_RUNTIME_CONTAINER once at parse time (not bound to a frozen
@@ -298,9 +299,299 @@ def emit_result(result: KaliResult) -> None:
                 "peak_rss_bytes": result.peak_rss_bytes,
                 "timed_out": result.timed_out,
                 "partial_results": result.partial_results,
+                # The argv that ACTUALLY ran inside the container, after the
+                # transparent header / --resolve-pin / exclude-tags injections —
+                # so the operator sees what executed, not just what it typed.
+                "resolved_argv": result.resolved_argv,
                 "stdout_preview": result.stdout_preview,
                 "stderr_preview": result.stderr_preview,
             },
             ensure_ascii=False,
         )
     )
+
+
+# Safe-by-default crawler rate. A deep crawl (katana -d 5) must NOT ride the
+# tool's built-in 150 req/s default, which is the "depth 5 at a stupid rate"
+# foot-gun. These bound the request rate so depth and politeness stay decoupled:
+# go as deep as you like, but never faster than CRAWL_RATE_HARD_CAP unless the
+# operator opts in explicitly, and always under any program ceiling.
+CRAWL_RATE_DEFAULT = 10
+CRAWL_RATE_HARD_CAP = 20
+
+
+def resolve_crawl_rate_limit(
+    requested,
+    *,
+    rate_cap: float | None,
+    default: int = CRAWL_RATE_DEFAULT,
+    hard_cap: int = CRAWL_RATE_HARD_CAP,
+    allow_fast: bool = False,
+    warn=None,
+) -> int:
+    """Resolve a crawler's ``-rl`` (req/s) for a deep, safe crawl.
+
+    Precedence (most-binding wins):
+      1. A configured program ceiling (``scope.rate_limit`` → ``rate_cap``)
+         ALWAYS clamps DOWN — it is the program's legal/politeness hard ceiling.
+      2. An unset ``requested`` resolves to ``default`` (10): a deep crawl must
+         never inherit the tool's built-in 150 req/s default.
+      3. An operator value above ``hard_cap`` (20) is clamped to ``hard_cap``
+         with a warning, UNLESS ``allow_fast`` (the operator deliberately opted
+         into a faster crawl via ``--allow-fast-crawl``).
+
+    ``warn`` is an optional ``(str) -> None`` sink for the clamp notices (stderr
+    in production). Returns an int ≥ 1.
+    """
+    try:
+        base = int(requested) if requested not in (None, "") else default
+    except (TypeError, ValueError):
+        base = default
+    if base < 1:
+        base = default
+
+    resolved = base
+    if not allow_fast and resolved > hard_cap:
+        if warn is not None:
+            warn(
+                f"crawl rate -rl {resolved} exceeds the {hard_cap} req/s safety cap; "
+                f"clamping to {hard_cap}. A deep crawl stays polite by capping rate, "
+                "not depth. Pass --allow-fast-crawl to override, or lower -rl."
+            )
+        resolved = hard_cap
+
+    if rate_cap is not None:
+        capped = max(1, min(resolved, int(rate_cap)))
+        if capped < resolved and warn is not None:
+            warn(
+                f"crawl rate -rl {resolved} clamped DOWN to the engagement's "
+                f"configured program ceiling ({int(rate_cap)} req/s)."
+            )
+        resolved = capped
+
+    return max(1, resolved)
+
+
+# A list-based tool (arjun -i, nuclei -l, httpx -l, sqlmap -m, ...) given ONE
+# wall-clock --timeout silently truncates when the list is large or per-target
+# cost is high: it is SIGTERM-killed after a fraction of the list, and an empty
+# or partial result then reads as a clean negative — which it is NOT. These two
+# helpers convert that silent partial into an explicit "incomplete, re-run"
+# signal so a timed-out run is never mistaken for "tested, found nothing".
+_LIST_PROGRESS_RE = re.compile(
+    r"(?:scanning|processing|progress|target)[^0-9]{0,12}(\d+)\s*/\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _anchor_list_path(path, engagement_dir) -> str:
+    """Map a tool's -i/-l value to a HOST-readable path.
+
+    The value the operator passes is the path the tool sees INSIDE the container —
+    typically ``/engagements/<key>/scans/...`` or an engagement-relative path. Read
+    host-side, that path does not exist, so a naive read returns 0 lines and
+    silently disables the incompleteness guard for the very container-path case
+    that motivated it. With ``engagement_dir`` known, translate it; a bare
+    host-absolute path or an unknown engagement is returned unchanged.
+    """
+    s = str(path or "")
+    if not s or not engagement_dir:
+        return s
+    if s.startswith("/engagements/"):
+        parts = s.split("/")
+        # /engagements/<key>/<rest...> -> <engagement_dir>/<rest...>
+        return str(Path(engagement_dir).joinpath(*parts[3:])) if len(parts) >= 4 else s
+    if not s.startswith("/"):
+        return str(Path(engagement_dir) / s)
+    return s
+
+
+def safe_engagement_dir(args) -> str | None:
+    """Best-effort resolve the engagement dir for path-anchoring; never raises."""
+    try:
+        from assess.lib.config import load_config
+
+        return load_config(getattr(args, "engagement_dir", None)).engagement_dir
+    except (Exception, SystemExit):  # noqa: BLE001 — anchoring is best-effort
+        return None
+
+
+def count_list_targets(path, engagement_dir=None) -> int:
+    """Count non-empty, non-comment lines in a tool's -i/-l list file.
+
+    Pass ``engagement_dir`` so a container/relative path is anchored to the host
+    before reading (see :func:`_anchor_list_path`); without it the guard silently
+    no-ops on the in-container path the tool actually receives. Returns 0 when the
+    path is empty/unreadable, so the caller skips the incompleteness check rather
+    than asserting a wrong target count.
+    """
+    try:
+        text = Path(_anchor_list_path(path, engagement_dir)).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except (OSError, TypeError, ValueError):
+        return 0
+    return sum(1 for line in text.splitlines() if line.strip() and not line.strip().startswith("#"))
+
+
+def parse_list_progress(text: str) -> tuple[int, int] | None:
+    """Best-effort ``(processed, total)`` from a list tool's progress output.
+
+    Matches ``Scanning 12/134``, ``Processing: 3 / 50`` and similar; returns the
+    LAST (highest) processed count seen, or None when no marker is present.
+    """
+    best: tuple[int, int] | None = None
+    for m in _LIST_PROGRESS_RE.finditer(text or ""):
+        done, total = int(m.group(1)), int(m.group(2))
+        if best is None or done > best[0]:
+            best = (done, total)
+    return best
+
+
+def incomplete_list_run_warning(
+    *,
+    tool: str,
+    total_targets: int,
+    timed_out: bool,
+    return_code,
+    stdout_preview: str = "",
+    stderr_preview: str = "",
+) -> str:
+    """Return a loud INCOMPLETE-run warning, or ``""`` when the run looks complete.
+
+    Fires only when (a) the run did NOT finish cleanly (timed_out, or killed /
+    non-zero rc) AND (b) the list held >1 target — a single-target timeout is a
+    different problem the operator already sees. When the tool's progress output
+    is parseable, the message names ``~K of N`` actually processed.
+    """
+    killed = bool(timed_out) or (return_code not in (0, None))
+    if not killed or total_targets <= 1:
+        return ""
+    progress = parse_list_progress(f"{stdout_preview or ''}\n{stderr_preview or ''}")
+    if progress is not None:
+        done, total = progress
+        scope = f"~{done} of {total or total_targets} targets"
+    else:
+        scope = f"a list of {total_targets} targets"
+    return (
+        f"INCOMPLETE: {tool} did not finish — it was timed-out/killed after "
+        f"processing {scope}. An empty or partial result is NOT a clean negative; "
+        "the list was not fully scanned (and any 'not found' / 'dead' verdict for "
+        "the unscanned remainder is unsafe). Re-run on a smaller/curated list "
+        "and/or with a larger --timeout (or a faster per-tool config) sized to "
+        "actually finish before treating any absence as a verdict."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Pre-flight internal-budget vs --timeout guard (I-9b#1 + I-20(b)).
+#
+# The POST-run guard above turns a *finished* truncation into an explicit
+# signal. This is the complementary PRE-flight check: a crawl/discovery/param-
+# sweep whose OWN runtime budget already exceeds the wrapper --timeout is going
+# to be SIGTERM-killed mid-run, and its truncated output then reads as a clean
+# negative — so catch the self-contradiction at DISPATCH, before the run, not in
+# the audit row afterward (the I-9 katana run 36937 was `--timeout 180` while its
+# own crawl budget was 10 min; the I-20 arjun run did 2 of 134 targets before the
+# kill). Two flavors, chosen by the caller:
+#   * a verb with an EXACT declared budget — a real tool flag that caps total
+#     runtime (katana -crawl-duration, ffuf -maxtime) — auto-RAISES --timeout to
+#     fit it (boost-only) and warns, so the run can actually finish.
+#   * a verb whose runtime can only be ESTIMATED (arjun/nuclei list sweeps,
+#     sqlmap heavy configs) WARNs with a sizing hint and never silently changes
+#     the budget — a worst-case estimate is a heads-up, not a contract.
+# --------------------------------------------------------------------------- #
+
+
+def coerce_float(value, default: float = 0.0) -> float:
+    """Best-effort float of a CLI flag string; ``default`` when empty/unparseable.
+
+    Verb knobs arrive as argparse strings (``""`` when unset). This resolves a
+    knob to a number with its per-tool default so the estimators below get clean
+    inputs without each call site re-implementing the try/except.
+    """
+    try:
+        if value in (None, ""):
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def estimate_list_sweep_seconds(
+    *,
+    targets: int,
+    passes: int,
+    per_request_seconds: float,
+    workers: int = 1,
+    rate_limit: float | None = None,
+) -> float:
+    """Worst-case seconds for a per-target list sweep (arjun ``-i`` / nuclei ``-l``).
+
+    Models the I-9b/I-20 truncation failure: each of ``targets`` targets needs
+    ``passes`` request-rounds, a dead/slow target burns the FULL
+    ``per_request_seconds`` each round (the dominant cost on a junk list — a dead
+    .nsf 301 eats the whole -T), and the run retires those rounds across at most
+    ``effective`` workers in parallel. Parallelism is bounded BOTH by the worker
+    pool (``workers`` — arjun ``-t`` / nuclei ``-c``) AND the politeness rate
+    (``rate_limit`` req/s), whichever is smaller — a ``--rate-limit 6`` cannot
+    sustain more than ~6 concurrent retirements regardless of the thread count.
+
+    Returns ``0.0`` for ≤1 target (a single slow target is a different, already-
+    visible problem — same skip the post-run guard uses) so the caller no-ops.
+    """
+    if targets <= 1 or passes <= 0 or per_request_seconds <= 0:
+        return 0.0
+    effective = max(1, int(workers))
+    if rate_limit and rate_limit > 0:
+        effective = max(1, min(effective, int(math.ceil(rate_limit))))
+    return targets * passes * float(per_request_seconds) / effective
+
+
+def preflight_timeout_guard(
+    *,
+    verb: str,
+    internal_budget_s: float,
+    timeout,
+    warn,
+    auto_raise: bool = False,
+    exact: bool = False,
+    sizing_hint: str = "",
+):
+    """Compare a verb's internal runtime budget to the wrapper ``--timeout``.
+
+    Returns the (possibly raised) timeout so the caller can write it back. When
+    ``internal_budget_s`` exceeds ``timeout``: emit a WARN through ``warn`` and,
+    only when ``auto_raise``, return ``ceil(internal_budget_s)`` so a DECLARED
+    budget is never truncated by a smaller wall-clock (boost-only; it never
+    shrinks the budget). With ``auto_raise`` False the timeout is returned
+    unchanged (warn-only). ``exact`` only tunes the wording (declared vs
+    estimated). A missing/unparseable ``timeout`` (e.g. a unit-test namespace
+    with no ``--timeout``) is returned untouched and never warns.
+    """
+    try:
+        budget = float(internal_budget_s)
+        wall = int(timeout)
+    except (TypeError, ValueError):
+        return timeout
+    if budget <= 0 or wall <= 0 or budget <= wall:
+        return timeout
+    needed = int(math.ceil(budget))
+    kind = "declared" if exact else "estimated worst-case"
+    hint = sizing_hint or (
+        f"Raise --timeout to ≥{needed}s, or shrink the run so it finishes in time."
+    )
+    if auto_raise:
+        warn(
+            f"{verb}: {kind} internal runtime budget ≈ {needed}s exceeds --timeout "
+            f"{wall}s — the run would be SIGTERM-killed mid-flight and its truncated "
+            f"output misread as a clean negative. Auto-raising --timeout to {needed}s "
+            f"(boost-only) so the run can finish. {hint}"
+        )
+        return needed
+    warn(
+        f"{verb}: {kind} internal runtime budget ≈ {needed}s exceeds --timeout "
+        f"{wall}s — this run will likely be SIGTERM-killed before it finishes, and a "
+        f"partial/empty result is NOT a clean negative. {hint}"
+    )
+    return wall

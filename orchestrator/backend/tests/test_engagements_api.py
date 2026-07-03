@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from app import db as db_module
 from app.services import engagements as engagement_service
+from app.services import events as events_service
 
 
 def legacy_finding_slug(suffix: str = "VA-001") -> str:
@@ -197,6 +199,69 @@ def test_list_engagements_filters_by_status(client, isolate_settings):
     assert completed_dir.name not in active_only
 
 
+def test_list_engagements_uses_single_db_connection_after_sync(client, isolate_settings, monkeypatch):
+    """The proxy polls `/engagements?status=in_progress`; avoid an N+1 SQLite
+    connection fan-out that forces each request to repeatedly parse the schema.
+    """
+    engagements_dir = isolate_settings["engagements_dir"]
+    for index in range(4):
+        write_engagement(engagements_dir, key=f"2026-04-02-100{index}00-active")
+
+    assert client.get("/engagements?status=in_progress").status_code == 200
+
+    original_get_connection = db_module.get_connection
+    open_count = 0
+
+    @contextmanager
+    def counted_connection():
+        nonlocal open_count
+        open_count += 1
+        with original_get_connection() as connection:
+            yield connection
+
+    monkeypatch.setattr(db_module, "get_connection", counted_connection)
+    engagement_service.clear_list_engagements_cache()
+
+    response = client.get("/engagements?status=in_progress")
+
+    assert response.status_code == 200
+    assert len(response.json()) == 4
+    assert open_count == 1
+
+
+def test_list_engagements_cache_hit_skips_signature_scan(client, isolate_settings, monkeypatch):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    response = client.get("/engagements?status=in_progress")
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+
+    def fail_signature_scan():
+        raise AssertionError("cached registry poll should not stat engagement files")
+
+    monkeypatch.setattr(engagement_service, "_engagements_signature", fail_signature_scan)
+
+    cached_response = client.get("/engagements?status=in_progress")
+    assert cached_response.status_code == 200
+    assert len(cached_response.json()) == 1
+
+
+def test_tombstoned_engagement_is_hidden_from_active_registry(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    response = client.get("/engagements?status=in_progress")
+    assert response.status_code == 200
+    assert [row["key"] for row in response.json()] == ["2026-03-30-120000-example"]
+
+    engagement = db_module.get_engagement_by_key("2026-03-30-120000-example")
+    assert engagement is not None
+    engagement_service.mark_engagement_deleted(engagement)
+
+    response = client.get("/engagements?status=in_progress")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
 def test_list_engagements_surfaces_and_filters_blue_customer_platform(client, isolate_settings):
     engagements_dir = isolate_settings["engagements_dir"]
     blue_dir = engagements_dir / "2026-05-20-120000-acme-gws"
@@ -264,6 +329,7 @@ def test_maybe_sync_engagements_skips_repeated_resync_without_filesystem_changes
     assert call_count == 1
 
     write_engagement(isolate_settings["engagements_dir"], key="2026-03-30-120500-example")
+    monkeypatch.setattr(engagement_service, "_last_sync_checked_at", 0.0)
     engagement_service.maybe_sync_engagements()
 
     assert call_count == 2
@@ -314,6 +380,7 @@ def test_maybe_sync_engagements_resyncs_when_assignment_json_changes(isolate_set
     stat = assignment_path.stat()
     os.utime(assignment_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
 
+    monkeypatch.setattr(engagement_service, "_last_sync_checked_at", 0.0)
     engagement_service.maybe_sync_engagements()
 
     assert call_count == 2
@@ -820,6 +887,176 @@ def test_coverage_item_endpoint_records_class_typed_item(client, isolate_setting
     assert "idor" in families
 
 
+def test_coverage_item_bulk_endpoint_records_class_typed_items(client, isolate_settings):
+    """Bulk coverage ingestion keeps the gf-bucket bridge from POSTing one
+    coverage item per matched bucket under high-volume recon."""
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment"
+
+    created = client.post(
+        f"{base}/coverage-items/bulk",
+        json={
+            "items": [
+                {
+                    "attack_family": "idor",
+                    "auth_context": "anonymous",
+                    "input_slot": "endpoint",
+                    "status_value": "pending",
+                    "notes": "gf bucket 'idor' matched at ingest",
+                },
+                {
+                    "attack_family": "ssrf",
+                    "auth_context": "anonymous",
+                    "input_slot": "endpoint",
+                    "status_value": "pending",
+                    "notes": "gf bucket 'ssrf' matched at ingest",
+                },
+            ]
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    payload = created.json()
+    assert payload["count"] == 2
+    assert [row["attack_family"] for row in payload["records"]] == ["idor", "ssrf"]
+
+    covered = client.post(
+        f"{base}/coverage-items",
+        json={
+            "attack_family": "idor",
+            "auth_context": "anonymous",
+            "input_slot": "endpoint",
+            "status_value": "covered",
+            "notes": "operator already tested this family",
+        },
+    )
+    assert covered.status_code == 201, covered.text
+
+    repeated_pending = client.post(
+        f"{base}/coverage-items/bulk",
+        json={
+            "items": [
+                {
+                    "attack_family": "idor",
+                    "auth_context": "anonymous",
+                    "input_slot": "endpoint",
+                    "status_value": "pending",
+                    "notes": "repeat gf ingest",
+                },
+            ]
+        },
+    )
+    assert repeated_pending.status_code == 201, repeated_pending.text
+    assert repeated_pending.json()["records"][0]["status"] == "covered"
+
+    items = client.get(f"{base}/coverage-items")
+    assert items.status_code == 200
+    families = {row["attack_family"] for row in items.json()}
+    assert {"idor", "ssrf"} <= families
+
+
+def test_coverage_item_list_is_bounded_and_paginates(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment"
+    created: list[dict] = []
+    for idx in range(3):
+        response = client.post(
+            f"{base}/coverage-items",
+            json={
+                "attack_family": f"family-{idx}",
+                "auth_context": "anonymous",
+                "input_slot": "endpoint",
+                "status_value": "pending",
+                "notes": "pagination test",
+            },
+        )
+        assert response.status_code == 201, response.text
+        created.append(response.json())
+
+    items = client.get(f"{base}/coverage-items?limit=2&offset=1")
+
+    assert items.status_code == 200, items.text
+    rows = items.json()
+    assert len(rows) == 2
+    assert [row["id"] for row in rows] == [created[1]["id"], created[0]["id"]]
+
+
+def test_assessment_summary_is_cached_until_assessment_write(client, isolate_settings, monkeypatch):
+    import importlib
+
+    write_engagement(isolate_settings["engagements_dir"])
+    summary_module = importlib.import_module("app.services.state_manager.assessment_summary")
+    summary_module.clear_assessment_summary_cache()
+
+    first = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
+    assert first.status_code == 200
+
+    calls = 0
+    original_report_readiness = summary_module.report_readiness
+
+    def counted_report_readiness(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_report_readiness(*args, **kwargs)
+
+    monkeypatch.setattr(summary_module, "report_readiness", counted_report_readiness)
+
+    second = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
+    assert second.status_code == 200
+    assert calls == 0
+
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/coverage-items",
+        json={
+            "attack_family": "idor",
+            "auth_context": "anonymous",
+            "input_slot": "endpoint",
+            "status_value": "pending",
+            "notes": "invalidate summary cache",
+        },
+    )
+    assert created.status_code == 201
+
+    third = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
+    assert third.status_code == 200
+    assert calls == 1
+
+
+def test_assessment_summary_singleflights_concurrent_cache_miss(client, isolate_settings, monkeypatch):
+    import concurrent.futures
+    import importlib
+    import threading
+    import time
+
+    write_engagement(isolate_settings["engagements_dir"])
+    engagement = client.get("/engagements/2026-03-30-120000-example").json()
+    summary_module = importlib.import_module("app.services.state_manager.assessment_summary")
+    summary_module.clear_assessment_summary_cache()
+
+    calls = 0
+    calls_lock = threading.Lock()
+    start = threading.Barrier(5)
+
+    def fake_build_summary(engagement_id):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.05)
+        return {"engagement_id": engagement_id}
+
+    monkeypatch.setattr(summary_module, "_build_assessment_summary", fake_build_summary)
+
+    def fetch_summary():
+        start.wait()
+        return summary_module.assessment_summary(engagement["id"])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(lambda _: fetch_summary(), range(5)))
+
+    assert results == [{"engagement_id": engagement["id"]}] * 5
+    assert calls == 1
+
+
 def test_probe_run_endpoint_records_target_anchor(client, isolate_settings):
     """Wave 5 / S6: probe-runs accept and persist target_host/path/port, and two
     probes against DISTINCT hosts no longer collide on probe_key."""
@@ -853,6 +1090,14 @@ def test_probe_run_endpoint_records_target_anchor(client, isolate_settings):
     assert probes.status_code == 200
     hosts = {row["target_host"] for row in probes.json()}
     assert {"a.example.com", "b.example.com"} <= hosts
+
+    first_page = client.get(f"{base}/probe-runs?limit=1")
+    assert first_page.status_code == 200
+    assert len(first_page.json()) == 1
+    second_page = client.get(f"{base}/probe-runs?limit=1&offset=1")
+    assert second_page.status_code == 200
+    assert len(second_page.json()) == 1
+    assert first_page.json()[0]["id"] != second_page.json()[0]["id"]
 
 
 def test_findings_endpoint_filters_and_paginates_server_side(client, isolate_settings):
@@ -1096,6 +1341,46 @@ def test_events_synthesizes_legacy_log_artifact_timeline(client, isolate_setting
     assert "task.completed" in event_types
 
 
+def test_events_summary_uses_targeted_latest_queries(client, isolate_settings, monkeypatch):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    create_phase = client.post(
+        "/engagements/2026-03-30-120000-example/events",
+        json={
+            "event_type": "phase.started",
+            "phase": "exploit",
+            "task_name": "exploit",
+            "agent_name": "operator",
+            "summary": "Exploit phase started",
+        },
+    )
+    assert create_phase.status_code == 201
+    create_task = client.post(
+        "/engagements/2026-03-30-120000-example/events",
+        json={
+            "event_type": "task.started",
+            "phase": "exploit",
+            "task_name": "exploit-developer",
+            "agent_name": "exploit-developer",
+            "summary": "Exploit task started",
+        },
+    )
+    assert create_task.status_code == 201
+
+    def fail_full_timeline(*_args, **_kwargs):
+        raise AssertionError("summary must not build the full timeline")
+
+    monkeypatch.setattr(db_module, "list_events_for_engagement", fail_full_timeline)
+    monkeypatch.setattr(events_service, "_load_activity_signals", fail_full_timeline)
+
+    response = client.get("/engagements/2026-03-30-120000-example/events/summary")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["latest_phase"]["phase"] == "exploit"
+    assert payload["latest_task"]["task_name"] == "exploit-developer"
+
+
 def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
@@ -1283,6 +1568,95 @@ def test_coverage_patch_covered_with_rationale_refreshes_service_status(client, 
     summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
     assert summary.status_code == 200
     assert summary.json()["service_coverage_gaps"] == []
+
+
+def test_request_capture_lists_are_bounded_and_ordered(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+
+    for index in range(4):
+        ingest = client.post(
+            "/engagements/2026-03-30-120000-example/assessment/request-observations",
+            json={
+                "url": f"https://example.com/path-{index}",
+                "discovery_source": "proxy",
+                "observation_payload": {"index": index},
+            },
+        )
+        assert ingest.status_code == 201, ingest.text
+
+    observations = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/request-observations?limit=2"
+    )
+    variants = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/request-variants?limit=2&offset=1"
+    )
+
+    assert observations.status_code == 200, observations.text
+    observed_urls = [row["observed_url"] for row in observations.json()]
+    assert observed_urls == ["https://example.com/path-3", "https://example.com/path-2"]
+    assert variants.status_code == 200, variants.text
+    variant_paths = [row["normalized_path"] for row in variants.json()]
+    assert variant_paths == ["/path-2", "/path-1"]
+
+
+def test_request_observation_bulk_endpoint_maps_rows_and_preserves_status(client, isolate_settings):
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment"
+
+    bulk = client.post(
+        f"{base}/request-observations/bulk",
+        json={
+            "items": [
+                {
+                    "url": "https://example.com/search?q=test",
+                    "query_schema": {"q": {"type": "string"}},
+                    "discovery_source": "recon",
+                },
+                {
+                    "url": "https://example.com/api/users",
+                    "discovery_source": "recon",
+                },
+            ]
+        },
+    )
+
+    assert bulk.status_code == 201, bulk.text
+    payload = bulk.json()
+    assert payload["count"] == 2
+    assert len(payload["records"]) == 2
+    first, second = payload["records"]
+    assert first["request_variant"]["canonical_url"] == "https://example.com/search?q=test"
+    assert second["request_variant"]["canonical_url"] == "https://example.com/api/users"
+    assert first["service"]["id"] == second["service"]["id"]
+    assert first["request_observation"]["observed_url"] == "https://example.com/search?q=test"
+
+    coverage_items = client.get(f"{base}/coverage-items")
+    assert coverage_items.status_code == 200
+    query_item = next(item for item in coverage_items.json() if item["input_slot"] == "query")
+    patched = client.patch(
+        f"{base}/coverage-items/{query_item['id']}",
+        json={"status": "covered", "notes": "Operator validated this coverage item."},
+    )
+    assert patched.status_code == 200, patched.text
+
+    repeat = client.post(
+        f"{base}/request-observations/bulk",
+        json={
+            "items": [
+                {
+                    "url": "https://example.com/search?q=test",
+                    "query_schema": {"q": {"type": "string"}},
+                    "discovery_source": "recon",
+                }
+            ]
+        },
+    )
+    assert repeat.status_code == 201, repeat.text
+
+    refreshed_items = client.get(f"{base}/coverage-items")
+    assert refreshed_items.status_code == 200
+    refreshed_by_slot = {item["input_slot"]: item for item in refreshed_items.json()}
+    assert refreshed_by_slot["query"]["status"] == "covered"
 
 
 def test_summary_vendor_saas_decision_reads_dispatch_decisions(client, isolate_settings):

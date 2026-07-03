@@ -40,7 +40,7 @@ from types import SimpleNamespace
 from . import vuln_taxonomy
 from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
-from .identity import identity_names, resolve_identity
+from .identity import host_cookie_hosts, host_cookies_for, resolve_identity
 
 # Re-exports — keep this block ordered by source module so the public surface
 # is grep-friendly. Tests patch a number of these via the legacy
@@ -65,12 +65,19 @@ from .kali_audit import (
     _write_failed_audit_marker,
 )
 from .kali_cli import (
+    CRAWL_RATE_DEFAULT,
+    CRAWL_RATE_HARD_CAP,
     ScopedErrorParser,
     add_passthrough_args_flag,
     add_required_kali_flags,
+    count_list_targets,
     emit_result,
     extend_cmd_with_extra_args,
+    incomplete_list_run_warning,
     kali_args_to_kwargs,
+    parse_list_progress,
+    resolve_crawl_rate_limit,
+    safe_engagement_dir,
 )
 from .kali_output import (
     _REQUIRED_HEADER_INJECTABLE,
@@ -80,6 +87,7 @@ from .kali_output import (
     _auth_context,
     _engagement_type,
     _existing_header_names,
+    _in_scope_allow_entries,
     _peak_rss_kilobytes_to_bytes,
     _read_proc_peak_rss,
     _read_safely,
@@ -90,6 +98,7 @@ from .kali_output import (
     detect_waf_challenge,
     extract_probe_response_headers,
     is_http_prober,
+    required_header_attribution_gap,
 )
 from . import kali_resolve
 from .kali_runtime_exec import (
@@ -201,12 +210,130 @@ def _emit_probe_run(
 
 _IDENTITY_INJECTABLE_TOOLS = frozenset({"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"})
 
+# HTTP verbs that mutate server state. A CSRF double-submit token is only
+# meaningful on these — a GET/HEAD is read-only and never needs it (and a
+# framework that rejects an unexpected header on a safe request would be
+# needlessly tripped).
+_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
-def _identity_header_pairs(material: dict) -> list[tuple[str, str]]:
+
+def _request_is_state_changing(cmd: list[str]) -> bool:
+    """True when the argv describes a state-changing HTTP request (curl-style).
+
+    Derived from the argv the same way the target host is (see
+    ``kali_resolve.target_host_port``). Precedence — and the reason we scan the
+    WHOLE argv before deciding rather than returning on the first hit:
+
+      1. An explicit ``-X/--request <verb>`` (attached ``-XPOST`` / ``--request=POST``
+         or a separate value) is AUTHORITATIVE — it sets the method. If that verb
+         is GET/HEAD the request is read-only even with a ``-d`` body attached, so
+         we must not let an earlier ``-d`` short-circuit us into "state-changing".
+      2. ``-G``/``--get`` forces curl to send a GET and move any ``-d`` data into the
+         query string, so ``-G -d k=v`` is a GET — the CSRF header must NOT inject
+         (a ``-d`` body no longer implies POST once ``-G`` is present).
+      3. Otherwise a request-body flag (``-d`` / ``--data`` / ``--data-*`` / ``--json``)
+         is curl's implicit POST → state-changing.
+
+    GET/HEAD — and anything we cannot positively classify (including bundled short
+    clusters like ``-sd`` we do not attempt to split) — are read-only, so the CSRF
+    header stays off by default (fail-safe: never stamp a header we are not sure
+    the request needs; a missed injection is harmless, a false one is not).
+    """
+    tokens = [str(t) for t in (cmd or [])]
+    n = len(tokens)
+    explicit_method: str | None = None
+    force_get = False
+    has_body_flag = False
+    for idx, tok in enumerate(tokens):
+        # -X POST / --request POST (verb as a separate token).
+        if tok in ("-X", "--request"):
+            if idx + 1 < n:
+                explicit_method = tokens[idx + 1].strip().upper()
+            continue
+        # -XPOST (attached short form) / --request=POST.
+        if tok.startswith("-X") and len(tok) > 2:
+            explicit_method = tok[2:].strip().upper()
+            continue
+        if tok.startswith("--request="):
+            explicit_method = tok.split("=", 1)[1].strip().upper()
+            continue
+        # -G / --get: curl sends a GET and appends -d data to the query string.
+        if tok in ("-G", "--get"):
+            force_get = True
+            continue
+        # Request-body flags imply a body → curl's implicit POST (unless -G/-X overrides).
+        if tok in ("-d", "--json"):
+            has_body_flag = True
+            continue
+        if tok.startswith("--data"):  # --data / --data-raw / --data-binary / --data-urlencode / --data=...
+            has_body_flag = True
+            continue
+        if tok.startswith("-d") and len(tok) > 2:  # -d@file / -dvalue (attached short form)
+            has_body_flag = True
+            continue
+    # Explicit method is authoritative; -G forces GET; else a body implies POST.
+    if explicit_method is not None:
+        return explicit_method in _STATE_CHANGING_METHODS
+    if force_get:
+        return False
+    return has_body_flag
+
+
+def _csrf_double_submit_pair(
+    material: dict, cookie_map: dict[str, str]
+) -> tuple[str, str] | None:
+    """Resolve an opt-in CSRF double-submit ``(header, value)`` from identity material.
+
+    The mapping is APP-SPECIFIC and OPT-IN — the header name and its source cookie
+    vary per target, so nothing is hardcoded::
+
+        material["csrf"] = {"cookie": "<cookie-name>", "header": "<header-name>"}
+
+    The value is mirrored from the named cookie in the ALREADY-BUILT ``cookie_map``
+    (the same host-scoped view that becomes the ``Cookie`` header), so the header
+    carries exactly the token the request also sends as a cookie — the double-submit
+    invariant. Returns ``None`` when the mapping is absent/malformed or the named
+    cookie is not present in this request's cookie view (no crash, no header).
+    """
+    csrf = material.get("csrf")
+    if not isinstance(csrf, dict):
+        return None
+    cookie_name = str(csrf.get("cookie") or "").strip()
+    header_name = str(csrf.get("header") or "").strip()
+    if not cookie_name or not header_name:
+        return None
+    value = cookie_map.get(cookie_name)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return (header_name, value)
+
+
+def _identity_header_pairs(
+    material: dict, *, request_host: str = "", state_changing: bool = False
+) -> list[tuple[str, str]]:
     """Flatten an identity's auth material into ``(header, value)`` pairs.
 
-    Supports a ``headers`` map, a ``cookies`` map (joined into one ``Cookie``
-    header), and an optional bearer ``token``. Order is deterministic.
+    Supports a ``headers`` map, a ``cookies`` map plus the request-host-scoped
+    ``host_cookies`` jar (joined into one ``Cookie`` header the way a browser
+    sends it), an optional bearer ``token``, and an opt-in CSRF double-submit
+    header derived from a named cookie. Order is deterministic.
+
+    ``request_host`` selects the matching ``host_cookies`` bucket(s) (I-22): a
+    cookie-session app on a host other than the capture-time primary scope host
+    would otherwise be sent the flat (mismatched/empty) cookie view and read the
+    request as "session stale". When a per-host bucket matches, it is used ALONE:
+    the flat ``cookies`` view is a UNION across every captured host, so blending it
+    in would leak another host's uniquely-named session cookies into this request
+    (cross-host session bleed). We fall back to the flat view ONLY for identities
+    that carry no per-host buckets at all (manual/legacy identities with no
+    ``host_cookies``); when buckets exist but none match this request host, we omit
+    cookies entirely rather than route the display-only union onto an unrelated
+    target.
+
+    ``state_changing`` gates the CSRF double-submit header: on a POST/PUT/PATCH/
+    DELETE the ``material["csrf"]`` mapping (if present) mirrors the named cookie's
+    value into the configured header so writes aren't CSRF-rejected and misread as
+    an auth gate (a false-negative BFLA risk). GET/HEAD never inject it.
     """
     pairs: list[tuple[str, str]] = []
     headers = material.get("headers")
@@ -214,14 +341,57 @@ def _identity_header_pairs(material: dict) -> list[tuple[str, str]]:
         for key, value in headers.items():
             if str(key).strip():
                 pairs.append((str(key), str(value)))
-    cookies = material.get("cookies")
-    if isinstance(cookies, dict) and cookies:
-        cookie = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    cookie_map: dict[str, str] = {}
+    host_scoped = host_cookies_for(material, request_host)
+    if host_scoped:
+        # Authoritative per-host bucket: use it alone (no flat-union blend), so a
+        # cookie captured for a DIFFERENT host never rides this request.
+        cookie_map.update(host_scoped)
+    elif not host_cookie_hosts(material):
+        # This identity has NO captured per-host buckets at all (a manual/legacy
+        # identity whose only cookies live in the flat ``cookies`` view): fall
+        # back to that flat view. When per-host buckets DO exist but none match
+        # this request host (or a list-mode run left ``request_host`` empty) we
+        # deliberately OMIT cookies rather than fall back — ``material["cookies"]``
+        # is a DISPLAY-ONLY union across every captured host, so injecting it here
+        # would bleed another host's uniquely-named session cookies into this
+        # unrelated target (cross-host session bleed).
+        cookies = material.get("cookies")
+        if isinstance(cookies, dict):
+            cookie_map.update({str(k): str(v) for k, v in cookies.items()})
+    if cookie_map:
+        cookie = "; ".join(f"{k}={v}" for k, v in cookie_map.items())
         pairs.append(("Cookie", cookie))
-    token = material.get("token") or material.get("bearer")
+        # CSRF double-submit (opt-in, method-gated). Only on a state-changing
+        # request, only when the app-specific mapping resolves against a cookie
+        # this request actually carries, and never clobbering an operator-set
+        # header (mirrors the Authorization guard below).
+        if state_changing:
+            csrf_pair = _csrf_double_submit_pair(material, cookie_map)
+            if csrf_pair is not None:
+                header_name, header_value = csrf_pair
+                if not any(name.lower() == header_name.lower() for name, _ in pairs):
+                    pairs.append((header_name, header_value))
+    token = _identity_bearer_token(material)
     if token and not any(name.lower() == "authorization" for name, _ in pairs):
         pairs.append(("Authorization", f"Bearer {token}"))
     return pairs
+
+
+def _identity_bearer_token(material: dict) -> str:
+    """Return a bearer token from either legacy top-level fields or backend
+    credential ``tokens`` material.
+    """
+    for value in (material.get("token"), material.get("bearer")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    tokens = material.get("tokens")
+    if isinstance(tokens, dict):
+        for key in ("access_token", "accessToken", "bearer", "token", "id_token", "idToken"):
+            value = tokens.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
 
 
 def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> bool:
@@ -236,11 +406,33 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
     """
     if not isinstance(material, dict):
         return False
-    pairs = _identity_header_pairs(material)
-    if not pairs:
-        return False
     exe = os.path.basename(str(cmd[0])).lower() if cmd else ""
     if exe not in _IDENTITY_INJECTABLE_TOOLS:
+        return False
+    request_host = kali_resolve.target_host_port(tool_name, cmd)[0]
+    state_changing = _request_is_state_changing(cmd)
+    pairs = _identity_header_pairs(
+        material, request_host=request_host, state_changing=state_changing
+    )
+    # WARN when the identity carries captured host_cookies that did NOT make it
+    # into this request — a request to a host with no matching bucket (or a
+    # list-mode run with no single request host) — so a cookie-session app isn't
+    # silently probed without its session and read as "session stale" (I-22).
+    # Emitted BEFORE the empty-``pairs`` short-circuit: when the identity's only
+    # material is per-host cookies and none match this host, we now correctly omit
+    # the cross-host flat-union fallback, which can leave ``pairs`` empty — but the
+    # operator still needs to know the session did not ride this run.
+    bucket_hosts = host_cookie_hosts(material)
+    if bucket_hosts and not host_cookies_for(material, request_host):
+        print(
+            "warning: identity carries captured host_cookies for "
+            f"{', '.join(sorted(set(bucket_hosts)))} but none match this run's "
+            f"request host '{request_host or '(none / list-mode)'}' — the request "
+            "runs without that host session and a cookie-session app may read it "
+            "as stale; target a single host this identity has a session for.",
+            file=sys.stderr,
+        )
+    if not pairs:
         return False
     for name, value in pairs:
         cmd.extend(["-H", f"{name}: {value}"])
@@ -314,7 +506,12 @@ def kali_exec(
     started_at_iso = _utcnow_iso()
     started_monotonic = time.monotonic()
     scope_version = _scope_version(eng_dir)
-    auth_context = _auth_context(eng_dir)
+    # A plain kali exec does not apply credential material. Keep its audit label
+    # anonymous unless the caller explicitly asks for an identity and that
+    # identity is actually injected into the command below. This avoids a
+    # credentials backend read on every recon probe and prevents unauthenticated
+    # commands from being counted as active-identity coverage.
+    auth_context = "anonymous"
     _identity_name: str | None = None
     _identity_material: dict = {}
     if identity is not None:
@@ -322,8 +519,7 @@ def kali_exec(
         if not _identity_material:
             print(
                 f"warning: --identity '{identity}' not found in the credential "
-                f"store (known: {', '.join(identity_names(eng_dir)) or 'none'}); "
-                "no auth material to apply.",
+                "store or temporarily unavailable; no auth material to apply.",
                 file=sys.stderr,
             )
 
@@ -342,6 +538,7 @@ def kali_exec(
             stderr_preview="",
             timed_out=False,
             partial_results=False,
+            resolved_argv=list(cmd),
         )
 
     _check_container_running(container_name)
@@ -366,10 +563,12 @@ def kali_exec(
     # IP-pin/exec — so the injected ``-H`` args land in the recorded audit argv.
     # For a ``sh -c``/``bash -c`` wrapper the header is BEST-EFFORT injected into
     # the curl/wget sub-commands inside the script TEXT (W5); a plain argv append
-    # would land on the shell, not the inner tool. WARN (never block) only when
-    # no safe -H injection is possible — a missing attribution header is a
-    # reduced reward, not a ban-risk, so a hard block (which would stall a
-    # legitimate multi-curl probe mid-hunt) is never the right call.
+    # would land on the shell, not the inner tool. This Layer-1 injection only
+    # WARNs when no safe -H injection is possible (an unknown tool, or a script we
+    # could not rewrite) — it does not itself block. The Layer-2 backstop just
+    # below is the hard stop: per ADR 0010, an un-attributed request that REACHES
+    # an in-scope host on a required-headers engagement is a ban-risk, so it is
+    # REFUSED rather than sent. Local / non-target commands stay unaffected.
     _req_headers = _required_headers(eng_dir)
     if _req_headers:
         status = _apply_required_headers(cmd, derived_tool_name, _req_headers)
@@ -383,13 +582,52 @@ def kali_exec(
                 file=sys.stderr,
             )
 
+        # Layer-2 fail-closed attribution backstop (ADR 0010). After every
+        # transparent mutation (identity, Layer-1 required-header injection) the
+        # assembled command is inspected one last time: when it REACHES an
+        # in-scope host WITHOUT carrying the marker, REFUSE the run rather than
+        # send un-attributed traffic to a program-governed host (a ban-risk on
+        # federal/managed programs). This catches the gaps Layer 1 leaves — a
+        # `bash -c "curl <in-scope>"` whose script couldn't be injected, an
+        # unknown tool, or wafw00f. Local/non-target commands and passive skip-set
+        # tools are unaffected (the gate is fail-OPEN for everything else).
+        gap = required_header_attribution_gap(
+            cmd, derived_tool_name, _req_headers, _in_scope_allow_entries(eng_dir)
+        )
+        if gap:
+            refusal = (
+                f"RUNTIME ERROR: refusing to run — {gap}. Program-required "
+                "attribution headers must ride every in-scope HTTP request "
+                "(missing attribution is a ban-risk on federal/managed programs). "
+                "Add the marker the tool's own way (curl/httpx -H, whatweb "
+                "--header, nikto -Add-header, arjun --headers) or call curl "
+                "directly instead of wrapping it in bash -c, then re-run."
+            )
+            print(refusal, file=sys.stderr)
+            return KaliResult(
+                run_id=None,
+                status="refused",
+                return_code=None,
+                stdout_path=str(stdout_path),
+                stderr_path=str(stderr_path),
+                duration_ms=int((time.monotonic() - started_monotonic) * 1000),
+                peak_rss_bytes=None,
+                stdout_preview="",
+                stderr_preview=refusal,
+                timed_out=False,
+                partial_results=False,
+                resolved_argv=list(cmd),
+            )
+
     # CR-36 — host-resolve + --resolve IP-pin. On macOS Docker Desktop the
     # container resolver flaps (I-013), so a container HTTP probe can return
     # http=000 for a name that resolves fine on the host. Pin the host-resolved
-    # IP into the argv (curl/httpx/nuclei/ffuf/katana) so target HTTP never
-    # depends on the broken container resolver. Transparent no-op off Docker
-    # Desktop and when the operator opts out (VIGIL_NO_RESOLVE_PIN) — pinning is
-    # idempotent (skipped if a --resolve for this host is already present).
+    # IP into the argv (curl ONLY — httpx/nuclei/katana/ffuf reject the
+    # curl-style --resolve flag and abort; see kali_resolve.RESOLVE_PIN_TOOLS) so
+    # target HTTP never depends on the broken container resolver. Transparent
+    # no-op off Docker Desktop and when the operator opts out
+    # (VIGIL_NO_RESOLVE_PIN) — pinning is idempotent (skipped if a --resolve for
+    # this host is already present).
     pinned_ip: str | None = None
     pin_host, pin_port = kali_resolve.target_host_port(derived_tool_name, cmd)
     _pin_eligible = (
@@ -864,6 +1102,9 @@ def kali_exec(
             transport_error_detail=transport_error_detail,
             waf_challenge=waf_challenge,
             waf_challenge_detail=waf_challenge_detail,
+            # ``cmd`` has been mutated in place by the identity / required-header /
+            # --resolve-pin injectors above, so it is the ACTUAL argv that ran.
+            resolved_argv=list(cmd),
         )
     finally:
         client.close()
@@ -894,6 +1135,13 @@ __all__ = [
     "extend_cmd_with_extra_args",
     "kali_args_to_kwargs",
     "emit_result",
+    "resolve_crawl_rate_limit",
+    "CRAWL_RATE_DEFAULT",
+    "CRAWL_RATE_HARD_CAP",
+    "count_list_targets",
+    "parse_list_progress",
+    "incomplete_list_run_warning",
+    "safe_engagement_dir",
     # Output + RSS (from kali_output)
     "KaliResult",
     "_REQUIRED_HEADER_INJECTABLE",
@@ -902,6 +1150,7 @@ __all__ = [
     "_auth_context",
     "_engagement_type",
     "_existing_header_names",
+    "_in_scope_allow_entries",
     "_peak_rss_kilobytes_to_bytes",
     "_read_proc_peak_rss",
     "_read_safely",
@@ -912,6 +1161,7 @@ __all__ = [
     "detect_waf_challenge",
     "extract_probe_response_headers",
     "is_http_prober",
+    "required_header_attribution_gap",
     # Runtime exec + kill cascade (from kali_runtime_exec)
     "_build_docker_exec",
     "_check_container_running",

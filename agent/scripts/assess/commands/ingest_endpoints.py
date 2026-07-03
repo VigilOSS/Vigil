@@ -13,41 +13,49 @@ from urllib.parse import urlparse
 
 from assess.lib import vuln_taxonomy
 from assess.lib.auth import auth_active_context
+from assess.lib.bulk_ingest import (
+    DEFAULT_BULK_WRITE_SIZE,
+    post_coverage_items_bulk,
+    post_request_observations_bulk,
+)
+from assess.lib.candidate_records import int_value, json_text
 from assess.lib.classify import classify_type
-from assess.lib.classify_buckets import classify_from_fields
+from assess.lib.classify_buckets import classify_from_fields, weak_tokens_for_key
 from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
-from assess.lib.db import db_init, db_insert_work_item
+from assess.lib.db import db_init, db_insert_out_of_scope_work_item, db_insert_work_item
 from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
+from assess.lib.scope import host_admitted, ingest_scope_filter
 
 
-def _bridge_gf_coverage_items(
-    client,
+def _gf_coverage_item_payloads(
     *,
     request_variant_id: int,
     case_type: str,
+    url: str,
     url_path: str,
     query_params,
     body_params,
     path_params,
     auth_context: str,
-) -> None:
-    """Bridge classified gf buckets -> backend class-typed coverage_items (2b/S14).
+) -> list[dict]:
+    """Return class-typed coverage_items for matched gf buckets (2b/S14).
 
     For a row with a resolvable ``request_variant_id`` and matched gf buckets,
-    POST one ``coverage_item`` per matched bucket with the canonical
+    build one ``coverage_item`` per matched bucket with the canonical
     ``attack_family = GF_BUCKET_TO_CLASS[bucket]`` (skipping generic buckets
     whose map value is None). This is ADDITIVE to the generic baseline
     ``_auto_request_coverage_candidates`` (which still runs server-side) — it
     gives the depth ledger a real vuln-class obligation per endpoint, and per
     S14 it bridges EVERY matched bucket, not just the cluster winner.
 
-    Best-effort per row (no-silent-drop doctrine): a failed POST WARNs and
-    continues so one coverage failure never aborts the ingest batch.
+    Posting is handled in batches by the caller so one endpoint corpus does not
+    become one HTTP request per matched bucket.
     """
     try:
         assignment = classify_from_fields(
             case_type=case_type,
+            url=url,
             url_path=url_path,
             query_params=json.dumps(query_params) if isinstance(query_params, dict) else str(query_params or "{}"),
             body_params=json.dumps(body_params) if isinstance(body_params, dict) else str(body_params or "{}"),
@@ -59,30 +67,100 @@ def _bridge_gf_coverage_items(
             f"{request_variant_id}: {exc}; skipping class-typed coverage.",
             file=sys.stderr,
         )
-        return
+        return []
 
-    for bucket in assignment.get("matched_buckets", []):
+    emitted_families: set[str] = set()
+    payloads: list[dict] = []
+    primary_buckets = assignment.get("matched_buckets", [])
+
+    def _iter_param_keys(value) -> list[str]:
+        if isinstance(value, dict):
+            return [str(k) for k in value.keys()]
+        if not value:
+            return []
+        try:
+            decoded = json.loads(str(value))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if not isinstance(decoded, dict):
+            return []
+        return [str(k) for k in decoded.keys()]
+
+    def _has_redirect_family_url_suffix() -> bool:
+        redirect_family_tokens = {
+            "back",
+            "callback",
+            "continue",
+            "dest",
+            "destination",
+            "failure",
+            "forward",
+            "goto",
+            "next",
+            "origin",
+            "redirect",
+            "return",
+            "success",
+        }
+        for key in (
+            _iter_param_keys(query_params)
+            + _iter_param_keys(body_params)
+            + _iter_param_keys(path_params)
+        ):
+            tokens = weak_tokens_for_key(key)
+            if tokens & {"url", "uri"} and tokens & redirect_family_tokens:
+                return True
+        return False
+
+    def _skip_weak_secondary(bucket: str) -> bool:
+        if bucket != "ssrf":
+            return False
+        if not ({"redirect", "oauth-oidc"} & set(primary_buckets)):
+            return False
+        return _has_redirect_family_url_suffix()
+
+    def _emit_coverage(bucket: str, *, weak: bool) -> None:
+        if weak and _skip_weak_secondary(bucket):
+            return
         attack_family = vuln_taxonomy.GF_BUCKET_TO_CLASS.get(bucket)
         if attack_family is None:
-            continue
-        try:
-            client.post(
-                "coverage-items",
-                {
-                    "request_variant_id": int(request_variant_id),
-                    "auth_context": auth_context or "anonymous",
-                    "input_slot": "endpoint",
-                    "attack_family": attack_family,
-                    "status_value": "pending",
-                    "notes": f"gf bucket '{bucket}' matched at ingest",
-                },
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort, never abort the batch
-            print(
-                f"WARN ingest-endpoints: coverage-item POST failed for variant "
-                f"{request_variant_id} bucket '{bucket}' ({attack_family}): {exc}; continuing.",
-                file=sys.stderr,
-            )
+            return
+        # A weak (secondary) bucket whose attack_family is already covered by a
+        # primary (or earlier-emitted) bucket adds nothing — skip it so a row with
+        # primary `ssrf` + secondary `webhook` (both -> class `ssrf`) does not post
+        # a duplicate coverage item. Primary-vs-primary emission is left as-is
+        # (pre-existing S14 behavior).
+        if weak and attack_family in emitted_families:
+            return
+        note = (
+            f"gf bucket '{bucket}' weak inner-token signal at ingest"
+            if weak
+            else f"gf bucket '{bucket}' matched at ingest"
+        )
+        payloads.append(
+            {
+                "request_variant_id": int(request_variant_id),
+                "auth_context": auth_context or "anonymous",
+                "input_slot": "endpoint",
+                "attack_family": attack_family,
+                "status_value": "pending",
+                "notes": note,
+            }
+        )
+        emitted_families.add(attack_family)
+
+    # Strong matches create coverage items per attack class. Secondary (weak
+    # inner-token) buckets — from compound keys like `?return_url=` on a row whose
+    # cluster is owned by another bucket — ALSO create coverage items (marked
+    # weak) so a cross-class surface reaches every relevant specialist, not just
+    # the one that won the cluster. `matched_buckets` is byte-identical to before;
+    # `secondary_buckets` is the additive cross-routing signal (Fix 4).
+    for bucket in primary_buckets:
+        _emit_coverage(bucket, weak=False)
+    for bucket in assignment.get("secondary_buckets", []):
+        if bucket not in primary_buckets:
+            _emit_coverage(bucket, weak=True)
+    return payloads
 
 
 def register(subparsers) -> None:
@@ -131,6 +209,13 @@ def _load_egress_blocked_hosts(path: str | None) -> set[str]:
     return blocked
 
 
+# Per-URL length cap for ingestion. A URL longer than this is skipped and
+# reported rather than carried into the bulk request-observation POST, where a
+# single over-long row can fail the WHOLE batch at the backend's length
+# validation and silently drop every good row with it (I-12). Matches the
+# per-line skip discipline already used for template/malformed/bad-JSON lines.
+MAX_INGEST_URL_LENGTH = 4096
+
 _FQDN_RE = re.compile(r"^[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}(?:[:/?#]|$)")
 _IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}(?:[:/?#]|$)")
 _LOCALHOST_RE = re.compile(r"^localhost(?:[:/?#]|$)", re.IGNORECASE)
@@ -158,6 +243,24 @@ def _ensure_url_scheme(url: str) -> str | None:
     ):
         return f"https://{url}"
     return None
+
+
+def _payload_text(value) -> str:
+    """Coerce a JSON-provided request/response payload field to storable TEXT.
+
+    ``headers``/``response_headers`` may arrive as a dict (HAR-style header maps)
+    or as a pre-serialized string; ``body``/``response_snippet`` arrive as
+    strings. A dict is JSON-serialized; None/absent becomes ``""`` so the
+    passthrough is a clean no-op for the bare-URL sources that carry none of
+    these. Everything else is stringified defensively.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
 
 
 def run(args) -> None:
@@ -191,12 +294,145 @@ def run(args) -> None:
     egress_blocked_count = 0
     egress_warned_hosts: set[str] = set()
 
+    # Scope admission gate (defense-in-depth). gau/wayback and other historical
+    # URL sources surface reachable-but-out-of-scope hosts; reachability is not
+    # scope (shared-constraints §1), so an out-of-scope host must never be
+    # admitted as probeable work. Inactive when scope.json has no allowlist.
+    scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
+    out_of_scope_count = 0
+    out_of_scope_warned_hosts: set[str] = set()
+
     input_path = getattr(args, "input_file", None)
     input_stream = open(input_path, "r", encoding="utf-8") if input_path else sys.stdin
     count = 0
     skipped_template = 0
     skipped_malformed = 0
     skipped_badjson = 0
+    skipped_overlong = 0
+    pending_rows: list[dict] = []
+    pending_observations: list[dict] = []
+    pending_coverage_items: list[dict] = []
+
+    def _flush_coverage_items() -> None:
+        if not pending_coverage_items:
+            return
+        items = list(pending_coverage_items)
+        pending_coverage_items.clear()
+        post_coverage_items_bulk(client, items, warn_prefix="ingest-endpoints")
+
+    def _flush_observations() -> None:
+        nonlocal count, skipped_malformed
+        if not pending_observations:
+            return
+        rows = list(pending_rows)
+        observations = list(pending_observations)
+        pending_rows.clear()
+        pending_observations.clear()
+
+        responses = post_request_observations_bulk(
+            client,
+            observations,
+            warn_prefix="ingest-endpoints",
+            fallback_individual=True,
+        )
+        for row, response in zip(rows, responses, strict=True):
+            if isinstance(response, Exception):
+                skipped_malformed += 1
+                print(
+                    f"WARN ingest-endpoints: backend rejected {row['url']}: "
+                    f"{response}; skipping this line",
+                    file=sys.stderr,
+                )
+                continue
+            request_variant_id = None
+            service_id = None
+            try:
+                request_variant_id = response.get("request_variant", {}).get("id")
+            except (AttributeError, TypeError):
+                pass
+            try:
+                service_id = response.get("service", {}).get("id")
+            except (AttributeError, TypeError):
+                pass
+
+            if not request_variant_id and not service_id:
+                skipped_malformed += 1
+                print(
+                    f"WARN ingest-endpoints: backend response missing "
+                    f"request_variant.id/service.id for {row['url']}; skipping this line",
+                    file=sys.stderr,
+                )
+                continue
+
+            queue_key = ""
+            if request_variant_id:
+                queue_key = f"variant:{request_variant_id}:{row['case_type']}"
+            elif service_id:
+                queue_key = f"service:{service_id}:{row['case_type']}"
+
+            db_insert_work_item(
+                db_path,
+                queue_key=queue_key,
+                method=row["method"],
+                url=row["url"],
+                url_path=row["url_path"],
+                query_params=json.dumps(row["query_params"]) if isinstance(row["query_params"], dict) else str(row["query_params"]),
+                body_params=json.dumps(row["body_params"]) if isinstance(row["body_params"], dict) else str(row["body_params"]),
+                path_params=json.dumps(row["path_params"]) if isinstance(row["path_params"], dict) else str(row["path_params"]),
+                cookie_params=json.dumps(row["cookie_params"]) if isinstance(row["cookie_params"], dict) else str(row["cookie_params"]),
+                # P1-F: pass request/response payloads through to storage. These
+                # are "" for the current bare-URL sources (a harmless no-op), and
+                # carry real payloads once a producer (e.g. the deferred HAR
+                # ingest path) emits them — closing the second silent-truncation
+                # point where ingest-endpoints dropped body/response fields.
+                headers=row.get("headers", ""),
+                body=row.get("body", ""),
+                response_headers=row.get("response_headers", ""),
+                response_snippet=row.get("response_snippet", ""),
+                # A richer JSON/HAR ingest can re-visit a URL first admitted by a
+                # bare-URL source: the backend upsert returns the SAME
+                # request_variant id, so `queue_key` collides and the plain
+                # `INSERT OR IGNORE` path leaves the pre-existing empty
+                # headers/body/response in place. Mark payload-carrying rows as
+                # `curated` so db_insert_work_item takes its update-existing path
+                # and lands the new payload on the already-admitted row instead of
+                # dropping it. Bare-URL rows carry no payload, so they keep the
+                # cheap non-curated path (no operator-triage clobber, no extra
+                # lookups) exactly as before.
+                curated=bool(
+                    row.get("headers")
+                    or row.get("body")
+                    or row.get("response_headers")
+                    or row.get("response_snippet")
+                ),
+                content_type=row["row_content_type"],
+                response_status=row["response_status"] or 0,
+                case_type=row["case_type"],
+                source=source,
+                params_key_sig=row["params_sig"],
+                request_variant_id=int(request_variant_id) if request_variant_id else None,
+                service_id=int(service_id) if service_id else None,
+                auth_context=auth_context,
+                signals=json_text(row["signals"]),
+                live_status=row["live_status"],
+            )
+            if request_variant_id:
+                pending_coverage_items.extend(
+                    _gf_coverage_item_payloads(
+                        request_variant_id=int(request_variant_id),
+                        case_type=row["case_type"],
+                        url=row["url"],
+                        url_path=row["url_path"],
+                        query_params=row["query_params"],
+                        body_params=row["body_params"],
+                        path_params=row["path_params"],
+                        auth_context=auth_context,
+                    )
+                )
+                if len(pending_coverage_items) >= DEFAULT_BULK_WRITE_SIZE:
+                    _flush_coverage_items()
+            count += 1
+        _flush_coverage_items()
 
     try:
         for line in input_stream:
@@ -209,10 +445,23 @@ def run(args) -> None:
             url_path = ""
             override_type = ""
             row_content_type = ""
+            response_status: int | None = None
+            live_status: str | None = None
+            signals = None
             query_params: dict = {}
             body_params: dict = {}
             path_params: dict = {}
             cookie_params: dict = {}
+            # P1-F: request/response payload passthrough. Bare-URL sources
+            # (katana/gau/recon) carry none of these, so they default empty (a
+            # no-op — see the passthrough note at db_insert_work_item below). A
+            # richer JSON producer (e.g. the deferred HAR ingest path) that DOES
+            # emit them then lands them on the work item instead of being
+            # silently dropped at this second truncation point.
+            headers = ""
+            body = ""
+            response_headers = ""
+            response_snippet = ""
 
             if line.startswith("{"):
                 try:
@@ -229,10 +478,26 @@ def run(args) -> None:
                 url_path = row.get("url_path") or ""
                 override_type = row.get("type") or ""
                 row_content_type = row.get("content_type") or ""
+                response_status = int_value(row.get("response_status"))
+                live_status = (
+                    str(row.get("live_status"))
+                    if row.get("live_status") not in (None, "")
+                    else None
+                )
+                signals = row.get("signals")
                 query_params = row.get("query_params") or {}
                 body_params = row.get("body_params") or {}
                 path_params = row.get("path_params") or {}
                 cookie_params = row.get("cookie_params") or {}
+                # P1-F: carry request/response payloads when a producer emits
+                # them. headers/response_headers may arrive as a dict (HAR-style)
+                # or a pre-serialized string; normalize dicts to JSON text since
+                # db_insert_work_item stores them as TEXT. body/response_snippet
+                # are already text (or absent -> "").
+                headers = _payload_text(row.get("headers"))
+                body = _payload_text(row.get("body"))
+                response_headers = _payload_text(row.get("response_headers"))
+                response_snippet = _payload_text(row.get("response_snippet"))
                 if not url:
                     skipped_malformed += 1
                     print(
@@ -276,6 +541,15 @@ def run(args) -> None:
                 continue
             url = resolved
 
+            if len(url) > MAX_INGEST_URL_LENGTH:
+                skipped_overlong += 1
+                print(
+                    f"WARN ingest-endpoints: skipping over-long URL "
+                    f"({len(url)} chars, cap {MAX_INGEST_URL_LENGTH}): {url[:120]}",
+                    file=sys.stderr,
+                )
+                continue
+
             if not url_path or url_path == "null":
                 url_path = extract_url_path(url)
             if not query_params:
@@ -285,7 +559,12 @@ def run(args) -> None:
             if not body_params:
                 body_params = {}
 
-            if override_type:
+            # An explicit producer `type` is authoritative ONLY when it is a real
+            # type. A sentinel `type=="unknown"` is NOT authoritative — it falls
+            # through to classify_type() so path/content-type shape can recover a
+            # real type. Mirrors the correct guard in
+            # `assess.lib.candidate_records.candidate_type()` (Issues 5/D).
+            if override_type and override_type != "unknown":
                 case_type = override_type
             else:
                 # Thread a JSON-provided `content_type` (when present) into the
@@ -299,6 +578,48 @@ def run(args) -> None:
             # Build observation payload
             parsed = urlparse(url)
             apex_host = (parsed.hostname or "").rstrip(".").lower()
+
+            # Scope admission gate (defense-in-depth) — fires BEFORE the egress
+            # check because out-of-scope is the harder boundary (never test) vs
+            # egress-blocked (resolve and retest). A reachable host not admitted
+            # by scope.json (no allowlist match, or matched an out_of_scope
+            # carve-out) is recorded as a skipped row with an auditable
+            # terminal_reason rather than admitted — reversible (no deletion),
+            # no request-observation POSTed (so no service/surface is created for
+            # it), and surfaced by `work-buffer stats --by reason`. This catches
+            # the gau/wayback historical-URL sources that bypass the recon
+            # pipeline's upstream scope filter.
+            if (
+                scope_filter_active
+                and apex_host
+                and not host_admitted(apex_host, scope_allow, scope_deny)
+            ):
+                out_of_scope_count += 1
+                if apex_host not in out_of_scope_warned_hosts:
+                    out_of_scope_warned_hosts.add(apex_host)
+                    print(
+                        f"WARN: {apex_host} is out of scope (no scope.json allowlist "
+                        f"match, or matched an out_of_scope carve-out). Recording its "
+                        f"URLs as skipped (terminal_reason='out-of-scope') instead of "
+                        f"admitting them to the work buffer.",
+                        file=sys.stderr,
+                    )
+                db_insert_out_of_scope_work_item(
+                    db_path,
+                    method=method,
+                    url=url,
+                    url_path=url_path,
+                    query_params=query_params,
+                    body_params=body_params,
+                    path_params=path_params,
+                    cookie_params=cookie_params,
+                    case_type=case_type,
+                    source=source,
+                    params_key_sig=params_sig,
+                    auth_context=auth_context,
+                    host=apex_host,
+                )
+                continue
 
             # Egress-blocked deferral: when the egress reputation check (see
             # cdn-ip-blocking.md) marks a host as CDN-edge-blocking the
@@ -347,9 +668,13 @@ def run(args) -> None:
                 "path_template": "",
                 "discovery_source": source,
                 "notes": "",
-                "response_status": None,
+                "response_status": response_status,
                 "evidence_ref": "",
-                "observation_payload": {"source": source},
+                "observation_payload": {
+                    "source": source,
+                    "signals": signals or [],
+                    "live_status": live_status,
+                },
                 "target_identity": parsed.hostname or "",
                 "target_kind": "host",
                 "target_notes": "",
@@ -360,76 +685,47 @@ def run(args) -> None:
                 "auto_generate_coverage": True,
             }
 
-            response = client.post("request-observations", observation)
-            request_variant_id = None
-            service_id = None
-            try:
-                request_variant_id = response.get("request_variant", {}).get("id")
-            except (AttributeError, TypeError):
-                pass
-            try:
-                service_id = response.get("service", {}).get("id")
-            except (AttributeError, TypeError):
-                pass
-
-            if not request_variant_id and not service_id:
-                skipped_malformed += 1
-                print(
-                    f"WARN ingest-endpoints: backend response missing "
-                    f"request_variant.id/service.id for {url}; skipping this line",
-                    file=sys.stderr,
-                )
-                continue
-
-            queue_key = ""
-            if request_variant_id:
-                queue_key = f"variant:{request_variant_id}:{case_type}"
-            elif service_id:
-                queue_key = f"service:{service_id}:{case_type}"
-
-            db_insert_work_item(
-                db_path,
-                queue_key=queue_key,
-                method=method,
-                url=url,
-                url_path=url_path,
-                query_params=json.dumps(query_params) if isinstance(query_params, dict) else str(query_params),
-                body_params=json.dumps(body_params) if isinstance(body_params, dict) else str(body_params),
-                path_params=json.dumps(path_params) if isinstance(path_params, dict) else str(path_params),
-                cookie_params=json.dumps(cookie_params) if isinstance(cookie_params, dict) else str(cookie_params),
-                content_type=row_content_type,
-                case_type=case_type,
-                source=source,
-                params_key_sig=params_sig,
-                request_variant_id=int(request_variant_id) if request_variant_id else None,
-                service_id=int(service_id) if service_id else None,
-                auth_context=auth_context,
+            pending_rows.append(
+                {
+                    "method": method,
+                    "url": url,
+                    "url_path": url_path,
+                    "query_params": query_params,
+                    "body_params": body_params,
+                    "path_params": path_params,
+                    "cookie_params": cookie_params,
+                    "row_content_type": row_content_type,
+                    "response_status": response_status,
+                    "live_status": live_status,
+                    "signals": signals,
+                    "case_type": case_type,
+                    "params_sig": params_sig,
+                    # P1-F payload passthrough (empty for bare-URL sources).
+                    "headers": headers,
+                    "body": body,
+                    "response_headers": response_headers,
+                    "response_snippet": response_snippet,
+                }
             )
-            if request_variant_id:
-                _bridge_gf_coverage_items(
-                    client,
-                    request_variant_id=int(request_variant_id),
-                    case_type=case_type,
-                    url_path=url_path,
-                    query_params=query_params,
-                    body_params=body_params,
-                    path_params=path_params,
-                    auth_context=auth_context,
-                )
-            count += 1
+            pending_observations.append(observation)
+            if len(pending_observations) >= DEFAULT_BULK_WRITE_SIZE:
+                _flush_observations()
+        _flush_observations()
+        _flush_coverage_items()
     finally:
         if input_path and input_stream is not sys.stdin:
             input_stream.close()
         client.close()
 
     print(f"[ingest] Ingested {count} work items from source '{source}'")
-    total_skipped = skipped_template + skipped_malformed + skipped_badjson
+    total_skipped = skipped_template + skipped_malformed + skipped_badjson + skipped_overlong
     if total_skipped:
         print(
             f"[ingest] Skipped {total_skipped} line(s): "
             f"{skipped_template} template/fuzz/empty, "
             f"{skipped_malformed} malformed/unkeyable, "
-            f"{skipped_badjson} bad-JSON (see WARN lines above).",
+            f"{skipped_badjson} bad-JSON, "
+            f"{skipped_overlong} over-long-URL (see WARN lines above).",
             file=sys.stderr,
         )
     if egress_blocked_count:
@@ -437,6 +733,16 @@ def run(args) -> None:
             f"[ingest] Deferred {egress_blocked_count} URL(s) to egress-blocked hosts "
             f"(cluster_key='deferred:egress-blocked'). Resolve the egress block before retesting "
             f"— see agent/references/runtime-guides/cdn-ip-blocking.md.",
+            file=sys.stderr,
+        )
+    if out_of_scope_count:
+        print(
+            f"[ingest] Excluded {out_of_scope_count} URL(s) across "
+            f"{len(out_of_scope_warned_hosts)} out-of-scope host(s) "
+            f"(status='skipped', terminal_reason='out-of-scope'). Reachable but not "
+            f"in scope.json — these never reach a specialist. Fix scope.json and "
+            f"re-ingest to admit them; review with "
+            f"`vigil assess work-buffer <db> stats --by reason`.",
             file=sys.stderr,
         )
 

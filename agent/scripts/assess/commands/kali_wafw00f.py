@@ -24,6 +24,9 @@ def register(subparsers) -> None:
     p.add_argument("target", nargs="?", default="", help="Target URL (positional). Mutually exclusive with -i.")
     p.add_argument("-i", dest="input_file", default="", help="File of newline-separated URLs.")
     p.add_argument("-a", dest="test_all", action="store_true", help="-a test against every WAF signature.")
+    p.add_argument("-p", "--proxy", dest="proxy", default="", help="Proxy <host:port> to route the probe through.")
+    p.add_argument("-r", "--noredirect", dest="noredirect", action="store_true",
+                   help="Do not follow redirects (test the edge response directly).")
     p.add_argument("-o", dest="output_csv", default="", help="-o CSV output file (engagement-relative).")
     p.set_defaults(func=run)
 
@@ -35,6 +38,10 @@ def run(args) -> None:
     cmd: list[str] = ["wafw00f"]
     if args.test_all:
         cmd.append("-a")
+    if args.proxy:
+        cmd.extend(["-p", args.proxy])
+    if args.noredirect:
+        cmd.append("-r")
     if args.input_file:
         cmd.extend(["-i", args.input_file])
     if args.output_csv:

@@ -35,6 +35,8 @@ A strong-but-unproven finding is parked, not dropped: hold it with `evidence_typ
 
 **ROE-blocked proof is a CANDIDATE, not a severity downgrade.** This rule demands the attacker outcome — but when you cannot safely complete the final proof step because the program's rules of engagement forbid it (touching real customer data, pivoting into production, exfiltrating a record you have already shown you can reach), that is a constraint on *you*, not a weakness in the finding. Do not lower the severity to match what you were permitted to demonstrate. Grade the **candidate at impact-if-true** — the severity it carries if the blocked step succeeds, which the surrounding evidence already makes likely — and record the single unblocking test that would convert it: set `details.roe_blocked=true` and put the exact next action in `details.required_followup`. This is distinct from the theoretical/`chain_required` park above (which needs another *bug* to land): here the primitive is proved and only the demonstration is walled off by policy. An ROE wall must never masquerade as a low-severity verdict.
 
+**Blocked-for-provisioning is a THIRD category — distinct from both `roe_blocked` and theoretical/`chain_required`.** `roe_blocked` means the primitive is proved and only the final demonstration is walled off by policy; theoretical/`chain_required` means the finding needs another *bug* to complete. A third case is neither: the attempt cannot even start because a precondition is missing — no test account in the required group, no access to the physical line/device, no additional credential or access grant — and the wall may be permanent for this engagement. Record this with `details.block_reason` (why the attempt could not proceed) and `details.unblock_requirements` (`{kind: account|line|device|credential|access, description, requested_from}` — what is missing and who/what would need to provision it); roll repeated attempts up into `details.attempts_summary` instead of scattering them across free-text notes. A `blocked` finding stays OUT of the report — unlike an `roe_blocked` candidate, it is not gradeable at impact-if-true, because the primitive itself was never reached. But the unblock path is first-class, not a dead end: when a later finding or chain lands that would satisfy the block (the missing account gets provisioned, the missing device turns up, the missing credential surfaces elsewhere), link the two — `vigil assess link-finding <blocked-finding-slug> --link-kind unblocked_by --target-kind finding --target-ref <finding-that-unblocks-it>` — so the operator, and the next engagement against this target, see the connection instead of re-discovering it from scratch.
+
 ## 3. Precondition equivalence check
 
 Before rating severity, identify the precondition required to trigger the vulnerability. If that precondition already grants the attacker equivalent or greater access than the vulnerability itself provides, the finding is defense-in-depth (Low), not an independent exploit. Score on incremental impact over the precondition, not total impact of the chain.
@@ -67,6 +69,20 @@ Push-harder signals include:
 ## 5. Exhaust the surface — rotate only when genuinely dry
 
 Leave a surface only when it is genuinely dry: no meaningful routes, no privileged features, no object references, and no useful source intelligence after a *thorough* pass. "Slow" is not "dry" — do not rotate on a timer; rotate when you have actually exhausted the surface.
+
+## 5a. A human-reach determination is part of exhausting a surface
+
+An endpoint whose human-reach status is still **unknown** — the `agent/shared-constraints.md`
+§2d preflight did not resolve it, and no `human_reach_decision` has been recorded —
+is an **open question, not a silent skip**. Do not close a surface as exhausted
+while a notify-shaped endpoint on it sits undetermined; run it through the §2d
+procedure (static characterization, then the bounded live-fire budget if still
+ambiguous) so it lands in the same recorded-verdict system as every other lead.
+A name alone — `send-notification`, `alert-approver`, `ticket-create` — is a
+hypothesis about behavior, not proof it reaches anyone: an endpoint that only
+*looks* notify-shaped may resolve NEGATIVE under §2d and become ordinary surface,
+and one that looks harmless may resolve POSITIVE. The recorded determination —
+not the name — decides how you treat it.
 
 ## 6. Evidence beats volume
 
@@ -157,6 +173,14 @@ with an entire untested application (the "a URL can be a whole application"
 rule below is the companion check). Treat ledger-green as the minimum bar you
 cleared, then keep looking for the surface the ledger could not see.
 
+**A negative verdict on one tier or lens does not cover siblings.** A
+"fails-closed" / "covered" / "no-params" negative is only valid when it names the exact
+**tier + lens** it was proven on and the run **completed** (not timed-out or partial). A
+sibling tier — different auth level, different role, different trust context — or a new
+lens on an already-worked surface is a fresh test, not a redundant one. Before recording
+a negative and closing the work item, state "proven fails-closed at [tier] / [lens] /
+[run-id]" — anything shorter than that is a disposition you cannot defend.
+
 **Pull the next uncovered host; do not sample.** The default loop is
 structural, not intuitive: take the next `uncovered` real-app host straight off
 `vigil assess coverage` and give it a lane, rather than choosing what to test
@@ -180,79 +204,28 @@ When progress stalls, use this table to pick a concrete next action instead of g
 
 ## 18. Sub-Agent Dispatch Discipline
 
-The operator's value is *not* doing the testing — it is choosing the right
-specialist, framing the dispatch tightly, and judging the returned evidence.
-When the operator does the hunting itself, two things break: the operator's
-context window fills with low-level transcripts that should have stayed in a
-specialist subagent, and the audit trail loses the per-role provenance that
-report-writer and later operators rely on.
-
-- **Default to dispatch.** When a task fits a named role (`recon-specialist`,
-  `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`,
-  `surface-collector`, `source-analyzer`, `report-writer`, or any
-  `code-*` role), launch that specialist instead of running the underlying
-  tools yourself. Specialists carry the role prompt, the matching skill
-  context, and the handoff schema the operator does not.
-- **Inline only for genuinely operator-scoped work.** A handful of actions
-  belong on the operator: scope and authorization decisions, dispatch
-  authoring, recording specialist handoffs, reviewing evidence, and the
-  occasional one-shot lookup that informs the next dispatch (a single
-  `vigil assess fetch ...` query, a `list-skills` call, a contract render).
-  Anything that walks a target, parses output, or iterates over a work-buffer
-  cluster is specialist work.
-- **One specialist, one objective, one skill set.** Each dispatch names the
-  role, the dispatch mode, and the explicit skill list (`--skills` on
-  `vigil assess agent start`). Bundling multiple objectives into one
-  dispatch defeats the role boundary and produces handoffs that report-writer
-  cannot map back to a coherent finding line.
-- **When in doubt, dispatch.** If the operator is about to run a Kali tool,
-  parse its output, and decide what to do next, that loop belongs in a
-  specialist. The cost of an extra dispatch is small; the cost of a polluted
-  operator context is large because it reduces the operator's ability to
-  judge the next dispatch.
+> **Sub-agent dispatch discipline** (default-to-dispatch, inline only for
+> operator-scoped work, one-specialist/one-objective/one-skill-set): moved to
+> `agent/operator-core.md`'s dispatch doctrine — operator-only content, not a
+> specialist read.
 
 ## 19. Developer psychology heuristics
 
-Use these to generate testable hypotheses about where developers introduced flaws:
-
-- **Feature-copy pattern**: Feature A has auth checks. Newly added Feature B was likely copied from A without the auth middleware — test B's auth boundary first.
-- **Flow-complexity pattern**: Multi-step workflows (checkout + coupon + refund + credits) have edge cases at every step boundary. Test step-skipping and out-of-order execution.
-- **API version drift**: `/api/v2/user` exists — does `/api/v1/user` still work with weaker or no auth? Old versions are rarely decommissioned properly.
-- **Naming anomaly signal**: If the API uses `userId` everywhere but one endpoint uses `user_id`, that endpoint was built by a different developer or team — it likely has different (weaker) security assumptions.
-- **Error response divergence**: Same 403 status code but different JSON structure on two endpoints = different backend systems with different trust boundaries. Test each independently.
-- **New feature window**: Features launched in the last 30 days have the lowest security maturity. Check changelogs and release notes for recent additions.
+> **Developer psychology heuristics** (feature-copy, flow-complexity, API
+> version drift, naming anomaly, error-response divergence, new-feature
+> window): moved to `agent/rules/mindsets/developer.md` — load it as your
+> generative lens for hypothesis generation.
 
 ## 20. Severity-CVSS alignment audit before report
 
-Before any report-writer dispatch, query `vigil assess list-findings` and verify
-each finding's `severity` matches its `details.cvss_score` band:
-
-- `high` requires `cvss_score >= 7.0`
-- `medium` requires `4.0 <= cvss_score <= 6.9`
-- `low` requires `cvss_score < 4.0`
-
-Fix mismatches via `vigil assess update-finding --inline '{"details":
-{"cvss_score": <n>, "cvss_vector": "..."}}'`. The JSON field is `details`,
-not `details_json`. A finding whose severity contradicts its CVSS makes the
-entire report look unverified to the triager, and mismatches are the single
-most common cleanup-time defect in this codebase. Run the audit before
-calling report-writer so the dispatch sees coherent state.
+> **Severity-CVSS alignment audit before report:** moved to
+> `agent/operator-core.md`'s dispatch doctrine — operator-only content, not a
+> specialist read.
 
 ## 21. Stale-text scrub before publishing
 
-Read each active finding's `summary` and `details` text fields and strip
-phrases that contradict the current state:
-
-- "severity adjusted from X to Y" when the severity is no longer Y
-- "originally rated as Z" when the rating has shifted twice since
-- "merged from W" when W has since been split off
-- "downgraded to medium" / "upgraded to high" / "previously low" against
-  the current severity field
-
-Stale narrative is invisible to backend status fields and ends up in
-report.md verbatim. The `vigil assess list-findings --json | jq -r .[].slug`
-loop in `agent/skills/report-generation/SKILL.md` (Review-and-Fix QA Mode)
-provides the executable recipe; this rule is the reason to run it.
+> **Stale-text scrub before publishing:** moved to `agent/operator-core.md`'s
+> dispatch doctrine — operator-only content, not a specialist read.
 
 ## 22. Smallest probe that answers the question
 
@@ -297,6 +270,21 @@ specific endpoint to capture the request/response that becomes the finding
 evidence. That follow-up `curl` is not "noisy curl that should have been a
 tool" — it is the surgical capture step the tool cannot perform. Keep
 doing them.
+
+## 22a. A self-imposed discovery restriction is not a target fact
+
+A self-imposed "I won't enumerate because it might violate RoB" is a conservative
+interpretation, not a target fact. Light, targeted, low-rate **curated** content-discovery
+of *known* protected resources — a path already found in JS, a parameter visible in a
+form, a directory referenced in a redirect — counts as "identifying an indicator" and IS
+compliant under a "minimal testing" commitment. The honest RoB line is **rate +
+wordlist-size + stop-on-sensitive-data**, not "never enumerate."
+
+Before accepting a self-imposed restriction as a severity cap, re-read the program's
+exact language. If the policy forbids high-volume automated scanning but not targeted
+discovery of paths you already have evidence for, re-dispatch with the restriction relaxed
+to the correct reading — treating an over-restriction as a finding boundary is exactly
+where depth is lost.
 
 ## 23. A non-conclusive response is a LEAD, not a verdict
 
@@ -350,6 +338,23 @@ and returns the **real origin** status + DOM; only that rendered origin response
 The kali path surfaces this as `status=waf_challenge` precisely so it cannot close a surface as
 `404`/`patched`/`gated`/`not-present`; do not override it with the challenge's status code.
 
+**(e) An auth-gate redirect is a bypass-test LEAD, not a "covered/gated" closure.**
+A `302` to a login or policy page proves the gate *fired* — it says nothing about whether
+the gate is bypassable. Classifying a redirected endpoint as "covered/gated" and closing
+it consumes the signal without doing the work. Record the redirect as a lead and run a
+bypass-technique sweep (static-extension exemption, path-normalization confusion,
+routing-header injection, verb tampering) before the surface is dispositioned — the
+auth-bypass skill carries the sweep methodology.
+
+**(f) Verify the exact bytes on the wire before treating a `406` / content-negotiation
+response as target behavior.** An unquoted header value in curl argv shell-splits into
+separate tokens, producing a malformed request that the connection layer rejects before it
+reaches the application. The resulting `406` or error is a **Kali-side artifact**, not a
+target response. Before closing a content-negotiation probe, confirm the request was sent
+with the header intact: replay with `--verbose` and inspect the `>` request lines to
+verify the `Accept:`/`Content-Type:` value was transmitted as a single token. An artifact
+from a malformed argv is not evidence the handler was reached.
+
 **Re-derive un-pushed signals from RAW evidence.** A prior agent's stopping point — a
 "tested / clean / disproven" note, a `notes/PHASE-3-REMAINING-WORK.md` line, an inherited
 disposition — is a **view to re-verify, not ground truth**. Before accepting any negative
@@ -360,6 +365,26 @@ prior pass may have been a downstream validation error mistaken for an auth gate
 may have been an `http=000` transport error (c); a "clean" may have been a status-only probe that
 never read the body (a); a "gated"/"not-present" may have been a WAF challenge page never
 re-rendered in a browser (d).
+
+## 24. OOB self-resolution caveat — confirm on a public egress source
+
+Blind SSRF is confirmed only when the callback arrives at a **publicly routable** listener
+from a **public egress source IP**, or when the callback includes a real HTTP interaction
+(status line, headers) originating from the target's egress path. A DNS hit that
+originates from a container-bridge or private subnet address — 172.x.x.x, 10.x.x.x, or
+the Kali runtime's own IP — is **self-resolution**: the Kali container resolved the OOB
+host itself, not the target server. Self-resolution is infrastructure noise, not a
+finding.
+
+To avoid fabricating self-resolution hits:
+- Place OOB callback hosts in **request bodies**, not in curl header argv. Curl resolves
+  header values before the request reaches the wire; a host in
+  `-H "X-Forwarded-For: http://<oob>"` may be resolved by the Kali container, not the
+  target.
+- Use `vigil oob mint` to get a nonce-tagged callback URL; correlate with
+  `vigil oob poll`, which matches probe-to-callback and shows the source IP. A hit whose
+  source IP falls in RFC-1918 space is self-resolution regardless of the DNS name.
+- Confirm public egress on the OOB hit before recording a SSRF finding.
 
 ## A URL can be a whole application — go deep on app units
 

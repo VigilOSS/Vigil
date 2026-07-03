@@ -335,6 +335,7 @@ def _upsert_coverage_item(
     status_value: str,
     notes: str,
     preserve_existing_status: bool = False,
+    refresh_service_status: bool = True,
 ) -> dict[str, Any]:
     normalized_status = _normalize_coverage_status(status_value)
     cursor = connection.execute(
@@ -371,7 +372,7 @@ def _upsert_coverage_item(
         )
         row = connection.execute("SELECT * FROM assessment_coverage_items WHERE id = ?", (row["id"],)).fetchone()
     assert row is not None
-    if row["service_id"] is not None:
+    if refresh_service_status and row["service_id"] is not None:
         _refresh_service_coverage_status(connection, engagement_id, int(row["service_id"]))
     return dict(row)
 
@@ -414,27 +415,32 @@ def _probe_key(
     target_host: str = "",
     target_path: str = "",
     target_port: int | None = None,
+    lens: str = "",
 ) -> tuple[str, str]:
     payload_hash = hashlib.sha256(payload_value.encode("utf-8")).hexdigest() if payload_value else ""
+    key_fields: dict[str, Any] = {
+        "request_variant_id": request_variant_id,
+        "service_id": service_id,
+        "coverage_item_id": coverage_item_id,
+        "auth_context": auth_context,
+        "input_slot": input_slot,
+        "attack_family": attack_family,
+        "payload_family": payload_family,
+        "payload_hash": payload_hash,
+        "tool_name": tool_name,
+        "target_host": target_host,
+        "target_path": target_path,
+        "target_port": target_port,
+    }
+    # lens partitions the probe space: the SAME target/payload probed under a
+    # DIFFERENT mindset is a distinct attempt, not a dedup hit. Add it to the key
+    # ONLY when set — a bare lens="" is not a distinct partition, and omitting the
+    # field keeps lens-less probes hashing to the SAME key they had before the
+    # lens column existed, so dedup stays intact for rows written pre-migration.
+    if lens:
+        key_fields["lens"] = lens
     probe_key = hashlib.sha256(
-        json.dumps(
-            {
-                "request_variant_id": request_variant_id,
-                "service_id": service_id,
-                "coverage_item_id": coverage_item_id,
-                "auth_context": auth_context,
-                "input_slot": input_slot,
-                "attack_family": attack_family,
-                "payload_family": payload_family,
-                "payload_hash": payload_hash,
-                "tool_name": tool_name,
-                "target_host": target_host,
-                "target_path": target_path,
-                "target_port": target_port,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        json.dumps(key_fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return payload_hash, probe_key
 
@@ -460,8 +466,24 @@ def _upsert_probe_run(
     target_host: str = "",
     target_path: str = "",
     target_port: int | None = None,
+    lens: str = "",
+    finding_id: int | None = None,
 ) -> dict[str, Any]:
     result_status = _normalize_probe_result_status(result_status)
+    # lens is free-text: light strip/normalize only, never hard-enumerated.
+    lens = (lens or "").strip()
+    # Validate the optional finding linkage up front so a typo'd id is a clean
+    # 404 rather than a raw FK IntegrityError (foreign_keys is ON).
+    if finding_id is not None:
+        finding_row = connection.execute(
+            "SELECT id FROM assessment_findings WHERE engagement_id = ? AND id = ?",
+            (engagement_id, finding_id),
+        ).fetchone()
+        if finding_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"finding id={finding_id} not found",
+            )
     payload_hash, probe_key = _probe_key(
         request_variant_id=request_variant_id,
         service_id=service_id,
@@ -475,15 +497,17 @@ def _upsert_probe_run(
         target_host=target_host,
         target_path=target_path,
         target_port=target_port,
+        lens=lens,
     )
     connection.execute(
         """
         INSERT INTO assessment_probe_runs (
             engagement_id, request_variant_id, service_id, coverage_item_id, auth_context, input_slot, attack_family,
             payload_family, payload_value_hash, probe_key, tool_name, agent_name, result_status,
-            observed_http_status, signal_type, evidence_ref, notes, target_host, target_path, target_port
+            observed_http_status, signal_type, evidence_ref, notes, target_host, target_path, target_port,
+            lens, finding_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(engagement_id, probe_key) DO UPDATE SET
             agent_name = COALESCE(NULLIF(excluded.agent_name, ''), assessment_probe_runs.agent_name),
             result_status = excluded.result_status,
@@ -493,6 +517,10 @@ def _upsert_probe_run(
             target_host = COALESCE(NULLIF(excluded.target_host, ''), assessment_probe_runs.target_host),
             target_path = COALESCE(NULLIF(excluded.target_path, ''), assessment_probe_runs.target_path),
             target_port = COALESCE(excluded.target_port, assessment_probe_runs.target_port),
+            -- finding_id backfills on a re-run of the same probe_key (it is NOT
+            -- part of probe_key); lens IS part of probe_key so it never differs
+            -- on a conflict and needs no update clause.
+            finding_id = COALESCE(excluded.finding_id, assessment_probe_runs.finding_id),
             notes = CASE
                 WHEN excluded.notes = '' THEN assessment_probe_runs.notes
                 WHEN assessment_probe_runs.notes = '' THEN excluded.notes
@@ -520,6 +548,8 @@ def _upsert_probe_run(
             target_host,
             target_path,
             target_port,
+            lens,
+            finding_id,
         ),
     )
     row = connection.execute(
@@ -710,23 +740,218 @@ def record_request_variant(
         )
         return variant
 
-def list_request_variants(engagement_id: int) -> list[dict[str, Any]]:
+DEFAULT_REQUEST_VARIANT_LIMIT = 250
+DEFAULT_REQUEST_OBSERVATION_LIMIT = 250
+DEFAULT_PROBE_RUN_LIMIT = 250
+DEFAULT_COVERAGE_ITEM_LIMIT = 1000
+DEFAULT_SURFACE_LIMIT = 1000
+MAX_REQUEST_LIST_LIMIT = 5000
+MAX_PROBE_RUN_LIST_LIMIT = 5000
+MAX_ASSESSMENT_LIST_LIMIT = 5000
+
+
+def _bounded_request_list_window(limit: int, offset: int) -> tuple[int, int]:
+    return (
+        max(1, min(int(limit), MAX_REQUEST_LIST_LIMIT)),
+        max(0, int(offset)),
+    )
+
+
+def _bounded_probe_run_window(limit: int, offset: int) -> tuple[int, int]:
+    return (
+        max(1, min(int(limit), MAX_PROBE_RUN_LIST_LIMIT)),
+        max(0, int(offset)),
+    )
+
+
+def _bounded_assessment_list_window(limit: int, offset: int) -> tuple[int, int]:
+    return (
+        max(1, min(int(limit), MAX_ASSESSMENT_LIST_LIMIT)),
+        max(0, int(offset)),
+    )
+
+
+def list_request_variants(
+    engagement_id: int,
+    *,
+    limit: int = DEFAULT_REQUEST_VARIANT_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_request_list_window(limit, offset)
     with _common.get_connection() as connection:
         return _fetch_all(
             connection,
-            "SELECT * FROM assessment_request_variants WHERE engagement_id = ? ORDER BY last_seen_at DESC, id DESC",
-            (engagement.id,),
+            """
+            SELECT *
+            FROM assessment_request_variants
+            WHERE engagement_id = ?
+            ORDER BY last_seen_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, limit, offset),
         )
 
-def list_request_observations(engagement_id: int) -> list[dict[str, Any]]:
+def list_request_observations(
+    engagement_id: int,
+    *,
+    limit: int = DEFAULT_REQUEST_OBSERVATION_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_request_list_window(limit, offset)
     with _common.get_connection() as connection:
         return _fetch_all(
             connection,
-            "SELECT * FROM assessment_request_observations WHERE engagement_id = ? ORDER BY created_at DESC, id DESC",
-            (engagement.id,),
+            """
+            SELECT *
+            FROM assessment_request_observations
+            WHERE engagement_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, limit, offset),
         )
+
+def _ingest_request_observation(
+    connection,
+    engagement_id: int,
+    *,
+    url: str,
+    method: str,
+    auth_context: str,
+    content_type_family: str,
+    query_schema: dict[str, Any],
+    body_schema: dict[str, Any],
+    path_schema: dict[str, Any],
+    cookie_schema: dict[str, Any],
+    header_schema: dict[str, Any],
+    path_template: str,
+    discovery_source: str,
+    notes: str,
+    response_status: int | None,
+    evidence_ref: str,
+    observation_payload: dict[str, Any],
+    target_identity: str | None,
+    target_kind: str,
+    target_notes: str,
+    target_ip_address: str | None,
+    target_hostname: str | None,
+    banner: str,
+    coverage_candidates: list[dict[str, Any]] | None,
+    auto_generate_coverage: bool,
+    deferred_service_refreshes: set[int] | None = None,
+) -> dict[str, Any]:
+    scheme, host, _, _ = _parse_url(url)
+    _, endpoint, port, service_name = _service_fields_from_url(url)
+    identity = target_identity or host
+    discovered_by = discovery_source
+    target = _upsert_target(
+        connection,
+        engagement_id,
+        identity=identity,
+        kind=target_kind,
+        host=host,
+        ip_address=target_ip_address,
+        hostname=target_hostname or host,
+        notes=target_notes or notes,
+        discovered_by=discovered_by,
+    )
+    service = _upsert_service(
+        connection,
+        engagement_id,
+        endpoint=endpoint,
+        protocol=scheme,
+        port=port,
+        service=service_name,
+        state="discovered",
+        coverage_status="pending",
+        banner=banner,
+        notes=notes,
+        discovered_by=discovered_by,
+        target_identity=identity,
+    )
+    request_variant = _upsert_request_variant(
+        connection,
+        engagement_id,
+        url=url,
+        method=method,
+        auth_context=auth_context,
+        content_type_family=content_type_family,
+        query_schema=query_schema,
+        body_schema=body_schema,
+        path_schema=path_schema,
+        cookie_schema=cookie_schema,
+        header_schema=header_schema,
+        path_template=path_template,
+        discovery_source=discovery_source,
+        notes=notes,
+    )
+    observation = _insert_request_observation(
+        connection,
+        engagement_id,
+        request_variant_id=request_variant["id"],
+        url=url,
+        discovery_source=discovery_source,
+        response_status=response_status,
+        evidence_ref=evidence_ref,
+        observation_payload=observation_payload,
+    )
+    candidates = coverage_candidates or []
+    if auto_generate_coverage:
+        candidates = [
+            *candidates,
+            *_auto_request_coverage_candidates(
+                query_schema=query_schema,
+                body_schema=body_schema,
+                path_schema=path_schema,
+                cookie_schema=cookie_schema,
+                header_schema=header_schema,
+            ),
+            {
+                "input_slot": "service",
+                "attack_family": "service-validation",
+                "status": "pending",
+                "notes": "Auto-generated from service observation",
+            },
+        ]
+    coverage_items: list[dict[str, Any]] = []
+    seen_keys: set[tuple[int | None, int | None, str, str, str]] = set()
+    for candidate in candidates:
+        key = (
+            request_variant["id"] if candidate.get("input_slot") != "service" else None,
+            service["id"] if candidate.get("input_slot") == "service" else None,
+            auth_context,
+            str(candidate.get("input_slot", "unknown")),
+            str(candidate.get("attack_family", "review")),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        coverage_item = _upsert_coverage_item(
+            connection,
+            engagement_id,
+            request_variant_id=key[0],
+            service_id=key[1],
+            auth_context=auth_context,
+            input_slot=key[3],
+            attack_family=key[4],
+            status_value=str(candidate.get("status", "pending")),
+            notes=str(candidate.get("notes", "")),
+            preserve_existing_status=True,
+            refresh_service_status=deferred_service_refreshes is None,
+        )
+        if deferred_service_refreshes is not None and coverage_item["service_id"] is not None:
+            deferred_service_refreshes.add(int(coverage_item["service_id"]))
+        coverage_items.append(coverage_item)
+    return {
+        "target": target,
+        "service": service,
+        "request_variant": request_variant,
+        "request_observation": observation,
+        "coverage_items": coverage_items,
+    }
+
 
 def ingest_request_observation(
     engagement_id: int,
@@ -756,37 +981,8 @@ def ingest_request_observation(
     auto_generate_coverage: bool,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    scheme, host, _, _ = _parse_url(url)
-    _, endpoint, port, service_name = _service_fields_from_url(url)
-    identity = target_identity or host
-    discovered_by = discovery_source
     with _common.get_connection() as connection:
-        target = _upsert_target(
-            connection,
-            engagement.id,
-            identity=identity,
-            kind=target_kind,
-            host=host,
-            ip_address=target_ip_address,
-            hostname=target_hostname or host,
-            notes=target_notes or notes,
-            discovered_by=discovered_by,
-        )
-        service = _upsert_service(
-            connection,
-            engagement.id,
-            endpoint=endpoint,
-            protocol=scheme,
-            port=port,
-            service=service_name,
-            state="discovered",
-            coverage_status="pending",
-            banner=banner,
-            notes=notes,
-            discovered_by=discovered_by,
-            target_identity=identity,
-        )
-        request_variant = _upsert_request_variant(
+        return _ingest_request_observation(
             connection,
             engagement.id,
             url=url,
@@ -801,69 +997,40 @@ def ingest_request_observation(
             path_template=path_template,
             discovery_source=discovery_source,
             notes=notes,
-        )
-        observation = _insert_request_observation(
-            connection,
-            engagement.id,
-            request_variant_id=request_variant["id"],
-            url=url,
-            discovery_source=discovery_source,
             response_status=response_status,
             evidence_ref=evidence_ref,
             observation_payload=observation_payload,
+            target_identity=target_identity,
+            target_kind=target_kind,
+            target_notes=target_notes,
+            target_ip_address=target_ip_address,
+            target_hostname=target_hostname,
+            banner=banner,
+            coverage_candidates=coverage_candidates,
+            auto_generate_coverage=auto_generate_coverage,
         )
-        candidates = coverage_candidates or []
-        if auto_generate_coverage:
-            candidates = [
-                *candidates,
-                *_auto_request_coverage_candidates(
-                    query_schema=query_schema,
-                    body_schema=body_schema,
-                    path_schema=path_schema,
-                    cookie_schema=cookie_schema,
-                    header_schema=header_schema,
-                ),
-                {
-                    "input_slot": "service",
-                    "attack_family": "service-validation",
-                    "status": "pending",
-                    "notes": "Auto-generated from service observation",
-                },
-            ]
-        coverage_items: list[dict[str, Any]] = []
-        seen_keys: set[tuple[int | None, int | None, str, str, str]] = set()
-        for candidate in candidates:
-            key = (
-                request_variant["id"] if candidate.get("input_slot") != "service" else None,
-                service["id"] if candidate.get("input_slot") == "service" else None,
-                auth_context,
-                str(candidate.get("input_slot", "unknown")),
-                str(candidate.get("attack_family", "review")),
-            )
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            coverage_items.append(
-                _upsert_coverage_item(
+
+
+def ingest_request_observations_bulk(
+    engagement_id: int,
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    records: list[dict[str, Any]] = []
+    deferred_service_refreshes: set[int] = set()
+    with _common.get_connection() as connection:
+        for item in items:
+            records.append(
+                _ingest_request_observation(
                     connection,
                     engagement.id,
-                    request_variant_id=key[0],
-                    service_id=key[1],
-                    auth_context=auth_context,
-                    input_slot=key[3],
-                    attack_family=key[4],
-                    status_value=str(candidate.get("status", "pending")),
-                    notes=str(candidate.get("notes", "")),
-                    preserve_existing_status=True,
+                    deferred_service_refreshes=deferred_service_refreshes,
+                    **item,
                 )
             )
-        return {
-            "target": target,
-            "service": service,
-            "request_variant": request_variant,
-            "request_observation": observation,
-            "coverage_items": coverage_items,
-        }
+        for service_id in sorted(deferred_service_refreshes):
+            _refresh_service_coverage_status(connection, engagement.id, service_id)
+    return {"engagement_id": engagement.id, "count": len(records), "records": records}
 
 def record_coverage_item(
     engagement_id: int,
@@ -892,8 +1059,45 @@ def record_coverage_item(
             preserve_existing_status=preserve_existing_status,
         )
 
-def list_coverage_items(engagement_id: int) -> list[dict[str, Any]]:
+def record_coverage_items_bulk(
+    engagement_id: int,
+    items: list[dict[str, Any]],
+    *,
+    preserve_existing_status: bool = True,
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    records: list[dict[str, Any]] = []
+    deferred_service_refreshes: set[int] = set()
+    with _common.get_connection() as connection:
+        for item in items:
+            record = _upsert_coverage_item(
+                connection,
+                engagement.id,
+                request_variant_id=item.get("request_variant_id"),
+                service_id=item.get("service_id"),
+                auth_context=str(item.get("auth_context", "anonymous")),
+                input_slot=str(item.get("input_slot", "endpoint")),
+                attack_family=str(item["attack_family"]),
+                status_value=str(item.get("status_value", "pending")),
+                notes=str(item.get("notes", "")),
+                preserve_existing_status=preserve_existing_status,
+                refresh_service_status=False,
+            )
+            if record["service_id"] is not None:
+                deferred_service_refreshes.add(int(record["service_id"]))
+            records.append(record)
+        for service_id in sorted(deferred_service_refreshes):
+            _refresh_service_coverage_status(connection, engagement.id, service_id)
+    return {"engagement_id": engagement.id, "count": len(records), "records": records}
+
+def list_coverage_items(
+    engagement_id: int,
+    *,
+    limit: int = DEFAULT_COVERAGE_ITEM_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_assessment_list_window(limit, offset)
     with _common.get_connection() as connection:
         rows = connection.execute(
             """
@@ -910,8 +1114,9 @@ def list_coverage_items(engagement_id: int) -> list[dict[str, Any]]:
             LEFT JOIN assessment_services AS services ON services.id = coverage.service_id
             WHERE coverage.engagement_id = ?
             ORDER BY coverage.updated_at DESC, coverage.id DESC
+            LIMIT ? OFFSET ?
             """,
-            (engagement.id,),
+            (engagement.id, limit, offset),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -936,6 +1141,8 @@ def record_probe_run(
     target_host: str = "",
     target_path: str = "",
     target_port: int | None = None,
+    lens: str = "",
+    finding_id: int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -960,12 +1167,30 @@ def record_probe_run(
             target_host=target_host,
             target_path=target_path,
             target_port=target_port,
+            lens=lens,
+            finding_id=finding_id,
         )
 
-def list_probe_runs(engagement_id: int) -> list[dict[str, Any]]:
+def list_probe_runs(
+    engagement_id: int,
+    *,
+    limit: int = DEFAULT_PROBE_RUN_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_probe_run_window(limit, offset)
     with _common.get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_probe_runs WHERE engagement_id = ? ORDER BY created_at DESC, id DESC", (engagement.id,))
+        return _fetch_all(
+            connection,
+            """
+            SELECT *
+            FROM assessment_probe_runs
+            WHERE engagement_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, limit, offset),
+        )
 
 def record_surface(
     engagement_id: int,
@@ -990,10 +1215,37 @@ def record_surface(
             status_value=status_value,
         )
 
-def list_surfaces(engagement_id: int) -> list[dict[str, Any]]:
+def list_surfaces(
+    engagement_id: int,
+    *,
+    limit: int | None = DEFAULT_SURFACE_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_surfaces WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+        if limit is None:
+            return _fetch_all(
+                connection,
+                """
+                SELECT *
+                FROM assessment_surfaces
+                WHERE engagement_id = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (engagement.id,),
+            )
+        limit, offset = _bounded_assessment_list_window(limit, offset)
+        return _fetch_all(
+            connection,
+            """
+            SELECT *
+            FROM assessment_surfaces
+            WHERE engagement_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, limit, offset),
+        )
 
 def update_surface(
     engagement_id: int,
@@ -1155,6 +1407,125 @@ def update_surface(
         assert row is not None
         return dict(row)
 
+def _upsert_surface_request_variant_link(
+    connection,
+    engagement_id: int,
+    *,
+    surface_id: int,
+    request_variant_id: int,
+    relation: str,
+    evidence_ref: str,
+) -> dict[str, Any]:
+    connection.execute(
+        """
+        INSERT INTO surface_request_variant_links (engagement_id, surface_id, request_variant_id, relation, evidence_ref)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(surface_id, request_variant_id, relation) DO UPDATE SET
+            evidence_ref = COALESCE(NULLIF(excluded.evidence_ref, ''), surface_request_variant_links.evidence_ref),
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (engagement_id, surface_id, request_variant_id, relation, evidence_ref),
+    )
+    row = connection.execute(
+        """
+        SELECT *
+        FROM surface_request_variant_links
+        WHERE surface_id = ? AND request_variant_id = ? AND relation = ?
+        """,
+        (surface_id, request_variant_id, relation),
+    ).fetchone()
+    assert row is not None
+    return dict(row)
+
+def create_surface_request_variant_link(
+    engagement_id: int,
+    *,
+    surface_id: int,
+    request_variant_id: int,
+    relation: str = "",
+    evidence_ref: str = "",
+) -> dict[str, Any]:
+    """Link a surface to a request variant by their durable backend ids.
+
+    ``request_variant_id`` is the cross-system join key (handed back on a
+    request-observation POST); a local cases.db work_item id would be
+    meaningless here. Both ends are validated against the engagement so a
+    typo'd id is a 404 rather than a dangling row.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        surface = connection.execute(
+            "SELECT id FROM assessment_surfaces WHERE engagement_id = ? AND id = ?",
+            (engagement.id, surface_id),
+        ).fetchone()
+        if surface is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"surface id={surface_id} not found",
+            )
+        variant = connection.execute(
+            "SELECT id FROM assessment_request_variants WHERE engagement_id = ? AND id = ?",
+            (engagement.id, request_variant_id),
+        ).fetchone()
+        if variant is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"request_variant id={request_variant_id} not found",
+            )
+        return _upsert_surface_request_variant_link(
+            connection,
+            engagement.id,
+            surface_id=surface_id,
+            request_variant_id=request_variant_id,
+            relation=relation,
+            evidence_ref=evidence_ref,
+        )
+
+def list_surface_request_variant_links_by_surface(
+    engagement_id: int,
+    surface_id: int,
+    *,
+    limit: int = DEFAULT_SURFACE_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_assessment_list_window(limit, offset)
+    with _common.get_connection() as connection:
+        return _fetch_all(
+            connection,
+            """
+            SELECT *
+            FROM surface_request_variant_links
+            WHERE engagement_id = ? AND surface_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, surface_id, limit, offset),
+        )
+
+def list_surface_request_variant_links_by_variant(
+    engagement_id: int,
+    request_variant_id: int,
+    *,
+    limit: int = DEFAULT_SURFACE_LIMIT,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_assessment_list_window(limit, offset)
+    with _common.get_connection() as connection:
+        return _fetch_all(
+            connection,
+            """
+            SELECT *
+            FROM surface_request_variant_links
+            WHERE engagement_id = ? AND request_variant_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (engagement.id, request_variant_id, limit, offset),
+        )
+
 HIGH_RISK_DEFERRED_SURFACE_TYPES: frozenset[str] = frozenset(
     {"account_recovery", "dynamic_render", "object_reference", "privileged_write"}
 )
@@ -1258,7 +1629,7 @@ def coverage_readiness(engagement_id: int) -> dict[str, Any]:
     softening (L1-2/L1-9/L1-10) only changes WHICH surfaces count toward
     ``blocker_count`` and adds advisory buckets — it never changes the shape.
     """
-    surfaces = list_surfaces(engagement_id)
+    surfaces = list_surfaces(engagement_id, limit=None)
 
     if not surfaces:
         return {

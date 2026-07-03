@@ -140,6 +140,47 @@ def _normalize_param_list(raw: Any) -> list[str]:
     return out
 
 
+# Sentinel key written into the -oJ artifact when an arjun run was killed/timed
+# out and produced NO real output, so a downstream reader (ingest-arjun) can tell
+# an empty artifact apart from a genuine "0 hidden params" negative.
+INCOMPLETE_SENTINEL_KEY = "_vigil_incomplete"
+
+
+def incomplete_sentinel(reason: str = "timed_out_or_killed") -> str:
+    """JSON text for the incomplete-run sentinel artifact (Finding 1)."""
+    return json.dumps({INCOMPLETE_SENTINEL_KEY: True, "_reason": reason})
+
+
+def mark_artifact_incomplete(
+    text: str, reason: str = "timed_out_or_killed"
+) -> str:
+    """Return ``text`` annotated with the incomplete-run sentinel.
+
+    Existing Arjun JSON objects may contain partial endpoint results from a run
+    that timed out after writing the artifact. Preserve those rows and add the
+    sentinel; for invalid/non-object artifacts, fall back to the standalone
+    sentinel shape so downstream ingest still treats the run as incomplete.
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return incomplete_sentinel(reason)
+    if not isinstance(data, dict):
+        return incomplete_sentinel(reason)
+    data[INCOMPLETE_SENTINEL_KEY] = True
+    data.setdefault("_reason", reason)
+    return json.dumps(data, sort_keys=True)
+
+
+def artifact_is_incomplete(text: str) -> bool:
+    """True when an arjun -oJ artifact carries the incomplete-run sentinel."""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(data, dict) and bool(data.get(INCOMPLETE_SENTINEL_KEY))
+
+
 def parse_arjun_json(text: str, *, default_method: str = "GET") -> list[dict[str, Any]]:
     """Parse Arjun ``-oJ`` JSON into a list of ``{endpoint, method, params}`` dicts.
 
@@ -177,6 +218,10 @@ def parse_arjun_json(text: str, *, default_method: str = "GET") -> list[dict[str
 
     if isinstance(data, dict):
         for endpoint, payload in data.items():
+            # Skip `_vigil_*` metadata keys (e.g. the incomplete-run sentinel) so
+            # they never become junk endpoint records.
+            if str(endpoint).startswith("_"):
+                continue
             if isinstance(payload, dict):
                 params = _normalize_param_list(payload.get("params") or payload.get("parameters"))
                 method = str(payload.get("method") or default_method)

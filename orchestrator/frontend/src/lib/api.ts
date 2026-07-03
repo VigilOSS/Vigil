@@ -75,6 +75,11 @@ export type AssessmentFinding = {
   title: string;
   severity: string;
   workflow_status: string;
+  // External-program submission state, ORTHOGONAL to workflow_status: a finding
+  // can be workflow_status=reported AND submission_status=accepted at once.
+  // One of: none (default) | submitted | accepted | needs_info | rejected |
+  // duplicate. Typed as string to match workflow_status above.
+  submission_status: string;
   verification_state: string;
   verification_disposition: string;
   canonical_location: string;
@@ -556,8 +561,17 @@ export function getReportReadiness(engagementKey: string) {
   return request<ReportReadiness>(`/engagements/${engagementKey}/assessment/report-readiness`);
 }
 
-export function listAssessmentSurfaces(engagementKey: string) {
-  return request<AssessmentSurface[]>(`/engagements/${engagementKey}/assessment/surfaces`);
+export function listAssessmentSurfaces(
+  engagementKey: string,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<AssessmentSurface[]>(
+    `/engagements/${engagementKey}/assessment/surfaces${qs ? `?${qs}` : ""}`,
+  );
 }
 
 export function listAssessmentFindings(engagementKey: string) {
@@ -578,8 +592,17 @@ export function listAssessmentFindingGroups(engagementKey: string) {
   return request<AssessmentFindingGroup[]>(`/engagements/${engagementKey}/assessment/finding-groups`);
 }
 
-export function listAssessmentProbes(engagementKey: string) {
-  return request<AssessmentProbeDetail[]>(`/engagements/${engagementKey}/assessment/probe-runs`);
+export function listAssessmentProbes(
+  engagementKey: string,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<AssessmentProbeDetail[]>(
+    `/engagements/${engagementKey}/assessment/probe-runs${qs ? `?${qs}` : ""}`,
+  );
 }
 
 export function listAssessmentAttackChains(engagementKey: string) {
@@ -686,8 +709,17 @@ export function listAssessmentServices(engagementKey: string) {
   return request<AssessmentService[]>(`/engagements/${engagementKey}/assessment/services`);
 }
 
-export function listAssessmentCoverageItems(engagementKey: string) {
-  return request<AssessmentCoverageItem[]>(`/engagements/${engagementKey}/assessment/coverage-items`);
+export function listAssessmentCoverageItems(
+  engagementKey: string,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return request<AssessmentCoverageItem[]>(
+    `/engagements/${engagementKey}/assessment/coverage-items${qs ? `?${qs}` : ""}`,
+  );
 }
 
 // ── Assessment command runs ─────────────────────────────
@@ -843,15 +875,29 @@ export type RequestObservation = {
   created_at: string;
 };
 
-export function listRequestVariants(engagementKey: string) {
+export function listRequestVariants(
+  engagementKey: string,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
   return request<RequestVariant[]>(
-    `/engagements/${engagementKey}/assessment/request-variants`,
+    `/engagements/${engagementKey}/assessment/request-variants${qs ? `?${qs}` : ""}`,
   );
 }
 
-export function listRequestObservations(engagementKey: string) {
+export function listRequestObservations(
+  engagementKey: string,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const qs = query.toString();
   return request<RequestObservation[]>(
-    `/engagements/${engagementKey}/assessment/request-observations`,
+    `/engagements/${engagementKey}/assessment/request-observations${qs ? `?${qs}` : ""}`,
   );
 }
 
@@ -908,6 +954,135 @@ export function listOobProbes(engagementKey: string, status?: string) {
 export function getOobProbe(engagementKey: string, nonce: string) {
   return request<OobProbeDetail>(
     `/engagements/${engagementKey}/assessment/oob-probes/${encodeURIComponent(nonce)}`,
+  );
+}
+
+// ── Phase-5 canonical HTTP flows ────────────────────────
+// Mirrors `assessment_http_flows` in orchestrator/backend/app/db.py and the
+// GET /http-flows serializer: header maps are parsed to objects and the
+// *_truncated / host_mismatch INTEGER columns come back as booleans. Raw
+// bodies are NOT inlined here — they live as engagement-local artifacts
+// (request_body_artifact_path / response_body_artifact_path) and are only
+// materialised through the HAR export. The row therefore carries body
+// *metadata* (sha256 / byte size / truncation flag) which the flow drawer
+// renders as the body "preview".
+export type HttpFlow = {
+  id: number;
+  engagement_id: number;
+  request_variant_id: number | null;
+  flow_uid: string;
+  method: string;
+  scheme: string;
+  host: string;
+  port: number | null;
+  url: string;
+  path: string;
+  response_status: number | null;
+  request_content_type: string;
+  response_content_type: string;
+  content_type_family: string;
+  auth_context: string;
+  request_body_sha256: string;
+  response_body_sha256: string;
+  request_body_bytes: number;
+  response_body_bytes: number;
+  request_body_truncated: boolean;
+  response_body_truncated: boolean;
+  request_body_artifact_path: string | null;
+  response_body_artifact_path: string | null;
+  request_headers: Record<string, string>;
+  response_headers: Record<string, string>;
+  redaction_status: string;
+  host_mismatch: boolean;
+  url_authority: string;
+  host_header: string;
+  sni: string;
+  timing_ms: number | null;
+  started_at: string;
+  created_at: string;
+};
+
+// Server-side filter axes for GET /http-flows + GET /http-flows/export-har.
+// Names are kept 1:1 with the backend query params. `truncated` matches a
+// flow truncated on EITHER side; `q` is a LIKE substring over url/path/host.
+export type HttpFlowFilters = {
+  host?: string;
+  method?: string;
+  response_status?: number;
+  content_type_family?: string;
+  auth_context?: string;
+  truncated?: boolean;
+  q?: string;
+  limit?: number;
+  offset?: number;
+};
+
+// Per-engagement capture policy. Raw-body capture is OFF by default (the
+// backend returns this shape from GET /capture-policy even when unset, and
+// embeds the same object on each /engagements list row). content_type_allow /
+// content_type_deny are the serialized forms of the *_json columns.
+export type CapturePolicy = {
+  enabled: boolean;
+  capture_request_bodies: boolean;
+  capture_response_bodies: boolean;
+  max_body_bytes: number;
+  content_type_allow: string[];
+  content_type_deny: string[];
+  redaction_profile: string;
+};
+
+// PUT /capture-policy takes an all-optional partial (extra=forbid server-side),
+// so keep the update payload strictly to known keys.
+export type CapturePolicyUpdate = Partial<CapturePolicy>;
+
+function httpFlowParams(filters: HttpFlowFilters): URLSearchParams {
+  const query = new URLSearchParams();
+  if (filters.host) query.set("host", filters.host);
+  if (filters.method) query.set("method", filters.method);
+  if (filters.response_status != null)
+    query.set("response_status", String(filters.response_status));
+  if (filters.content_type_family)
+    query.set("content_type_family", filters.content_type_family);
+  if (filters.auth_context) query.set("auth_context", filters.auth_context);
+  if (filters.truncated != null) query.set("truncated", filters.truncated ? "true" : "false");
+  if (filters.q) query.set("q", filters.q);
+  if (filters.limit != null) query.set("limit", String(filters.limit));
+  if (filters.offset != null) query.set("offset", String(filters.offset));
+  return query;
+}
+
+export function listHttpFlows(engagementKey: string, filters: HttpFlowFilters = {}) {
+  const qs = httpFlowParams(filters).toString();
+  return request<HttpFlow[]>(
+    `/engagements/${engagementKey}/assessment/http-flows${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export function getHttpFlow(engagementKey: string, flowUid: string) {
+  return request<HttpFlow>(
+    `/engagements/${engagementKey}/assessment/http-flows/${encodeURIComponent(flowUid)}`,
+  );
+}
+
+// App-relative URL for the HAR export honouring the active filter set. The
+// endpoint serves the reconstructed HAR 1.2 document (bodies inlined from the
+// engagement-local sidecars); a hidden <a download> points here so the browser
+// saves the file directly.
+export function exportHarUrl(engagementKey: string, filters: HttpFlowFilters = {}): string {
+  const qs = httpFlowParams(filters).toString();
+  return resolveAppUrl(
+    `/engagements/${encodeURIComponent(engagementKey)}/assessment/http-flows/export-har${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export function getCapturePolicy(engagementKey: string) {
+  return request<CapturePolicy>(`/engagements/${engagementKey}/assessment/capture-policy`);
+}
+
+export function setCapturePolicy(engagementKey: string, patch: CapturePolicyUpdate) {
+  return request<CapturePolicy>(
+    `/engagements/${engagementKey}/assessment/capture-policy`,
+    { method: "PUT", body: JSON.stringify(patch) },
   );
 }
 
@@ -1414,4 +1589,3 @@ function intelEntityPath(entityType: IntelEntityType): string {
       return "notes";
   }
 }
-

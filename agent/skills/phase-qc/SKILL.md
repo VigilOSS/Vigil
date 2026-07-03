@@ -11,7 +11,7 @@ origin: Vigil
 Run this at every **phase / wind-down boundary**, before you treat the phase's
 work as done:
 
-- before declaring a **surface or target's fan-out done** (the Phase-3
+- before declaring a **surface or target's fan-out done** (the Phase-4
   closed-surface re-audit moment),
 - before **lifting an account / coverage deferral** (un-deferring an objective,
   or leaning on a `deferred` / `not_applicable` resolution as if it were closed),
@@ -55,6 +55,21 @@ phase's full dispatch transcripts:
 3. **The findings list:** `vigil assess list-findings` / `vigil assess fetch findings`
    — slug, severity, status, `canonical_location`, and the `details` story (evidence /
    impact / cvss_vector).
+
+## Stage-Completion Audit (Pipeline Gate)
+
+Before running the judgment-question pass below, run the stage-completion audit. This is a prerequisite check — it confirms that every expected pipeline stage has a completed audit row; the judgment pass then reasons on top of those results, not on a pipeline that silently dropped stages.
+
+```bash
+vigil assess check-phase-readiness --phase <current-phase> --by-host
+```
+
+Walk the output for any stage flagged `timed_out`, `partial`, or never run (absent from the ledger). For each:
+
+- [ ] **Re-run the stage** if it is still worth running (scope unchanged, tool available, budget permits). A `timed_out` nuclei sweep over 500 hosts is not a verdict — it is a coverage gap. Raise `--timeout` or scope the list down and re-dispatch.
+- [ ] **Accept with reason** if re-run is not warranted (out-of-scope host discovered mid-run, tool unavailable, operator explicitly deferred): record the deferral via `vigil assess agent decision --kind coverage_deferral --payload-json '{"stage": "...", "host": "...", "reason": "..."}' --surfaced-to-user` so the gap is audited, not invisible.
+
+A stage that is silently absent from the ledger is a coverage gap the five judgment questions cannot see — `coverage` miss kind catches depth and surface gaps but cannot flag a tool that never ran. The stage audit catches what the ledger's binary state cannot.
 
 ## Procedure
 
@@ -142,7 +157,7 @@ A miss that is silently dropped is the failure mode this skill exists to prevent
   baseline phase-qc reasons against and never recomputes.
 - operator-core "Closed-surface dead-vs-unfinished re-audit" + "Depth Doctrine" — the
   `coverage` / `depth` miss source.
-- operator-core "Mandatory Phase-Exit Passes" + Phase-3 "System-level synthesis" — the
+- operator-core "Mandatory Phase-Exit Passes" + Phase-4 "System-level synthesis" — the
   `chain` miss source.
 - `agent/skills/browser-semantic-analysis/SKILL.md` — the re-probe for `waf-blind` misses.
 - `check-phase-readiness` / `transition-phase` — the binary, blocking gates phase-qc

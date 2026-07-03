@@ -122,7 +122,7 @@ The backend computes SHA-256, FTS-indexes a preview, and links the artifact to
 its producer agent (`producer_agent_id`, `producer_agent_role`), the originating
 command run (`producer_command_run_id`), and the finding it substantiates
 (`related_finding_slug`). The `assessment_artifacts` table at
-`orchestrator/backend/app/db.py:1372` is the schema source of truth.
+`orchestrator/backend/app/db.py:1652` is the schema source of truth.
 
 Use `--sensitive` for PII-bearing exports (mailbox content, full sign-in
 history, IAM principal listings) so the FTS preview is suppressed but the
@@ -429,13 +429,11 @@ agents cannot query unindexed local files.
    means the `agent_id` in step 6 did not match the registered dispatch — fix
    and re-handoff before returning.
 
-`agent done` / `agent close` are operator-only. Do not call them — the
-operator marks the dispatch complete after your return so checkpointing stays
-separate from lifecycle closure.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
-`agent handoff` is idempotent. Checkpoint after each major step (after the
-initial audit pull, after the correlation pass, after the verifier's
-five-check completes), not only at the end.
+The seven steps above are the blue-specific closing verbs. Checkpoint after
+each major step (after the initial audit pull, after the correlation pass,
+after the verifier's five-check completes), not only at the end.
 
 ---
 

@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.contracts import common_mistake_hints, render_contract
 from assess.lib.findings import finding_lock_path, next_finding_id
@@ -33,6 +33,18 @@ def register(subparsers) -> None:
              "non-existent path). Recording always succeeds either way — check-phase-readiness --phase report "
              "is the backstop for missing evidence; a URL is rerouted into details.references "
              "regardless. Use for theoretical/code-inferred findings with no captured file yet.",
+    )
+    p.add_argument(
+        "--update",
+        dest="update_slug",
+        metavar="SLUG",
+        default="",
+        help="Intentionally MODIFY the existing finding SLUG instead of recording a net-new one "
+             "(I-21 opt-in). A net-new record whose dedup tuple (defect_family + root_cause_key + "
+             "auth_context + canonical_location) collides with a reported/active finding under a "
+             "different slug is otherwise REFUSED, to avoid silently overwriting it. Pass --update "
+             "<slug> only when you mean to change that exact finding; for a distinct sibling on the "
+             "same root cause, give it a distinct root_cause_key/defect_family and use link-finding.",
     )
     p.set_defaults(func=run)
 
@@ -155,6 +167,147 @@ def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str,
         )
 
 
+# I-21 (clobber guard): the backend dedup UPSERT matches a net-new record onto
+# an existing finding by the (defect_family + root_cause_key + auth_context +
+# canonical_location) tuple, NOT by slug. Recording a net-new finding that
+# collides that tuple with a load-bearing (reported/active) finding under a
+# DIFFERENT slug silently overwrote it. This CLI check fails fast with the same
+# actionable guidance the backend match enforces (dual enforcement: a CLI bypass
+# cannot defeat the authoritative HTTP guard in state_manager/findings.py).
+# ``draft`` is fair game for the historical upsert; ``false_positive`` / ``merged``
+# stay semantically sticky — both are outside the guard set, matching the backend.
+_CLOBBER_GUARDED_STATUSES = frozenset({"active", "reported"})
+
+# Marker phrase the backend embeds in its clobber-refusal 409 detail. Used to
+# translate a backstop refusal (e.g. a title-tier match the CLI tuple-check does
+# not model, or a race) into a clean operator message instead of a raw HTTP dump.
+_BACKEND_CLOBBER_MARKER = "Refusing to clobber"
+
+
+def _find_clobbered_finding(
+    existing_findings,
+    *,
+    candidate_slug: str,
+    defect_family: str,
+    root_cause_key: str,
+    auth_context: str,
+    canonical_location: str,
+) -> dict | None:
+    """Return an existing finding a net-new record would silently clobber.
+
+    Mirrors the backend dedup tuple. Returns the matching reported/active finding
+    recorded under a DIFFERENT slug, or ``None`` when the record is safe. An empty
+    ``defect_family``/``root_cause_key`` cannot collide on the tuple, so the check
+    is skipped — the backend's title-fallback tier remains the backstop.
+    """
+    if not (defect_family and root_cause_key):
+        return None
+    for finding in existing_findings:
+        if not isinstance(finding, dict):
+            continue
+        if str(finding.get("slug", "")) == candidate_slug:
+            continue
+        if str(finding.get("workflow_status", "")).strip().lower() not in _CLOBBER_GUARDED_STATUSES:
+            continue
+        if (
+            str(finding.get("defect_family", "")) == defect_family
+            and str(finding.get("root_cause_key", "")) == root_cause_key
+            and str(finding.get("auth_context", "")) == auth_context
+            and str(finding.get("canonical_location", "")) == canonical_location
+        ):
+            return finding
+    return None
+
+
+def _refuse_clobber(existing: dict) -> None:
+    existing_slug = str(existing.get("slug", ""))
+    existing_status = str(existing.get("workflow_status", ""))
+    print(
+        f"record-finding: REFUSED — this finding's dedup tuple (defect_family + root_cause_key "
+        f"+ auth_context + canonical_location) collides with existing finding {existing_slug} "
+        f"(workflow_status={existing_status}); recording it would silently overwrite that "
+        f"{existing_status} finding.\n"
+        f"  - Distinct sibling on the same root cause? Give it a DISTINCT root_cause_key/"
+        f"defect_family, then attach it after recording with "
+        f"`vigil assess link-finding <this-slug> --root-cause {existing_slug}`.\n"
+        f"  - Intend to MODIFY {existing_slug}? Re-run with `--update {existing_slug}`.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _resolve_update_target(update_slug: str, json_slug: str, *, base_url: str, engagement_key: str) -> str:
+    """Resolve ``--update <slug>`` to the target slug, validating operator intent.
+
+    --update is the explicit opt-in to MODIFY an existing finding (I-21): it must
+    name an EXISTING slug and may not contradict a slug embedded in the JSON. The
+    resolved slug becomes the record's slug so the backend matches it directly
+    (its first tier) rather than re-running the net-new dedup collision.
+    """
+    if json_slug and json_slug != update_slug:
+        print(
+            f"record-finding: --update {update_slug} conflicts with slug '{json_slug}' in the "
+            f"JSON payload. Drop the JSON slug or set it to {update_slug}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    with AssessmentClient(base_url, engagement_key) as client:
+        try:
+            existing = client.get(f"findings/{update_slug}")
+        except AssessError as exc:
+            if "HTTP 404" in str(exc):
+                existing = None
+            else:
+                raise
+    if not isinstance(existing, dict) or not existing.get("slug"):
+        print(
+            f"record-finding: --update {update_slug} names a finding that does not exist. Record "
+            f"it without --update to create a new finding, or pass the correct existing slug.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return update_slug
+
+
+def _guard_finding_clobber(payload: dict, *, candidate_slug: str, base_url: str, engagement_key: str) -> None:
+    """Refuse a net-new record that would silently overwrite a reported/active
+    finding under a different slug (I-21). The backend match is the authoritative
+    backstop; this fails fast before the POST with the same guidance."""
+    with AssessmentClient(base_url, engagement_key) as client:
+        findings = client.get("findings")
+    if not isinstance(findings, list):
+        return
+    clobbered = _find_clobbered_finding(
+        findings,
+        candidate_slug=candidate_slug,
+        defect_family=str(payload.get("defect_family", "")),
+        root_cause_key=str(payload.get("root_cause_key", "")),
+        auth_context=str(payload.get("auth_context", "")),
+        canonical_location=str(payload.get("canonical_location", "")),
+    )
+    if clobbered is not None:
+        _refuse_clobber(clobbered)
+
+
+def _print_backend_clobber_refusal(exc: AssessError) -> bool:
+    """If ``exc`` is the backend clobber-guard 409, print its actionable detail
+    and return True (caller should exit 1). Otherwise return False so the caller
+    re-raises and other errors keep their existing handling."""
+    message = str(exc)
+    if "HTTP 409" not in message or _BACKEND_CLOBBER_MARKER not in message:
+        return False
+    _, _, body = message.partition("\n")
+    detail = body
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("detail"), str):
+        detail = parsed["detail"]
+    print(f"record-finding: REFUSED — {detail}", file=sys.stderr)
+    return True
+
+
 def _report_validation_errors(payload: dict, errors: list[str]) -> None:
     print("finding payload invalid after helper defaults:", file=sys.stderr)
     for error in errors:
@@ -188,11 +341,22 @@ def run(args) -> None:
         sys.exit(1)
 
     agent_name = args.agent_name
+    update_slug = (getattr(args, "update_slug", "") or "").strip()
 
     lock_path = finding_lock_path(eng_dir)
     with file_lock(lock_path):
         candidate_slug = payload.get("slug", "")
-        if not candidate_slug:
+        if update_slug:
+            # --update names the EXACT existing finding to modify; it is the
+            # explicit opt-in past the clobber guard. The slug becomes the target
+            # so the backend matches by slug rather than by a net-new collision.
+            candidate_slug = _resolve_update_target(
+                update_slug,
+                candidate_slug,
+                base_url=cfg.base_url,
+                engagement_key=cfg.engagement_key,
+            )
+        elif not candidate_slug:
             candidate_slug = next_finding_id(cfg.base_url, cfg.engagement_key, agent_name)
 
         payload = _normalize_payload(payload, agent_name=agent_name, candidate_slug=candidate_slug)
@@ -207,8 +371,23 @@ def run(args) -> None:
             allow_unindexed=getattr(args, "allow_unindexed_evidence", False),
         )
 
+        if not update_slug:
+            _guard_finding_clobber(
+                payload,
+                candidate_slug=candidate_slug,
+                base_url=cfg.base_url,
+                engagement_key=cfg.engagement_key,
+            )
+
         with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-            response = client.post("findings", payload)
+            try:
+                response = client.post("findings", payload)
+            except AssessError as exc:
+                # Backstop: the authoritative backend guard refused a clobber the
+                # CLI tuple-check did not model (title-tier match, or a race).
+                if _print_backend_clobber_refusal(exc):
+                    sys.exit(1)
+                raise
 
         finding = response.get("finding", {})
         if not finding.get("slug") or not finding.get("title"):

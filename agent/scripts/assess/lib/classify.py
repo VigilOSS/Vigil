@@ -21,11 +21,18 @@ _GRAPHQL_PATH = re.compile(r"/graphql", re.IGNORECASE)
 _GRAPHQL_CT = re.compile(r"^application/graphql$", re.IGNORECASE)
 _WS_SCHEME = re.compile(r"^wss?://", re.IGNORECASE)
 _WS_PATH = re.compile(r"/ws(/|$)|^/socket\.io(/|$)", re.IGNORECASE)
+# Strengthened (Issue I backstop): added `api-docs.json`, `swagger-resources`,
+# `swagger-ui`, `redoc`, and `/v3/api-docs` recall on top of the original
+# alternatives. Every alternative stays segment-bounded by `(^|/)...(/|$)` so the
+# FP set stays out: `/redocument` (next char `u`), `/swagger-resources-guide`
+# (next char `-`) all reject. (`/v[0-9]+/api-docs` is also covered by the bare
+# `api-docs` alternative since `api-docs` follows a `/` there.)
 _API_SPEC_PATH = re.compile(
     r"(^|/)("
-    r"api-docs"
+    r"api-docs(\.json)?"
     r"|openapi(\.json|\.yaml|\.yml)?"
-    r"|swagger(\.json|\.yaml|\.yml|-ui(\.html)?)?"
+    r"|swagger(\.json|\.yaml|\.yml|-ui(\.html)?|-resources)?"
+    r"|redoc"
     r"|v[0-9]+/api-docs"
     r")(/|$)",
     re.IGNORECASE,
@@ -59,8 +66,14 @@ _PAGE_CT = re.compile(r"text/html|application/xhtml|image/svg\+xml", re.IGNORECA
 # segment boundary, so the literal segment `/medicaid.documents/` does NOT match
 # (`.do` is followed by `c`). A real static-asset rule (js/css/image) sits
 # EARLIER in the cascade, so `/app.php/style.css` still types `stylesheet`.
+# ASP.NET HTTP handlers (`.axd`,`.ashx`,`.asmx`) and WCF services (`.svc`) are
+# routed application surfaces too (Issue A: WebResource.axd padding oracle,
+# ViewState/Telerik deserialization, ELMAH `.axd`, `.asmx`/`.svc?wsdl` SOAP/WCF),
+# so they type `page` instead of dropping to `unknown`. The `dotnet_handler`
+# bucket then scores them regardless of type.
 _APP_ROUTE_EXT = re.compile(
-    r"\.(php|aspx?|jsp|do|action|cfm|nsf)(?=[/?~]|$)", re.IGNORECASE
+    r"\.(php|aspx?|jsp|do|action|cfm|nsf|axd|ashx|asmx|svc)(?=[/?~]|$)",
+    re.IGNORECASE,
 )
 _DATA_EXT = re.compile(
     r"\.(json|xml|csv|ya?ml|txt|pdf|docx?|xlsx?|pptx?|rtf|odt)$", re.IGNORECASE
@@ -184,6 +197,28 @@ _LEXICAL_ROUTE_RULES: tuple[tuple["re.Pattern[str]", str], ...] = (
         ),
         "portal_session",
     ),
+    (
+        # Extensioned auth-entry pages (Issue C). WordPress `wp-login.php` and the
+        # generic `<prefix>-login` / `<prefix>-signin` portal forms carry a
+        # server-side page/app extension, so the page rule (step 9) would type
+        # them `page` and strip their `auth_entry` floor. The step-9 page rule
+        # consults these rescue rules BEFORE defaulting to `page`, so an
+        # extensioned auth page reaches `auth_entry`. Segment-anchored: a
+        # `<prefix>-` must precede the `login`/`signin` keyword, which must
+        # immediately precede a known app/page extension and then a segment
+        # boundary — `/wp-login.php`, `/user-signin.aspx`, `/account-login.jsp`
+        # match; `/login-help.php` (keyword not at segment end) and a plain
+        # content page `/blog-post.php` (no auth keyword) do NOT. The other
+        # (extensionless) rescue rules above cannot match an extensioned segment
+        # at all — their trailing `(?=[/?#]|$)` boundary rejects the `.<ext>` — so
+        # this is the only rule the step-9 reclaim can fire.
+        re.compile(
+            r"(^|/)[a-z0-9_]+-(?:login|signin|sign-in)"
+            r"\.(?:php|aspx?|jsp|do|action|cfm)(?=[/?#]|$)",
+            re.IGNORECASE,
+        ),
+        "auth_entry",
+    ),
 )
 
 
@@ -245,6 +280,19 @@ def classify_type(method: str, url_path: str, content_type: str = "", body_snipp
         return "stylesheet"
 
     # 9. page
+    # Issue C — extensioned auth-entry reclaim. The lexical auth rescue (step 17)
+    # runs AFTER this page rule, so an auth route carrying a page/app extension
+    # (`wp-login.php`, `portal-signin.aspx`, `account-login.jsp`) would otherwise
+    # be swallowed as `page` and stripped of its `auth_entry` floor. When the path
+    # IS page/app-extensioned, consult the lexical auth-route rules first and
+    # return the matched (auth) type. Only the dedicated extensioned-auth rule can
+    # match here — the other (extensionless) rescue rules' trailing
+    # `(?=[/?#]|$)` boundary rejects the `.<ext>` — so ordinary pages
+    # (`/index.php`, `/cgi-bin/login.php/extra`) still fall through to `page`.
+    if _PAGE_EXT.search(path_no_query) or _APP_ROUTE_EXT.search(url_path):
+        for route_rx, route_type in _LEXICAL_ROUTE_RULES:
+            if route_rx.search(path_no_query):
+                return route_type
     if _PAGE_EXT.search(path_no_query):
         return "page"
     # Mid-path app-route extension (`/login.php/extra`, `/db.nsf/view`). Run on

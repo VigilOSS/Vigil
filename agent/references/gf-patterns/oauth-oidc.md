@@ -19,6 +19,9 @@ misuse, or JWKS-substitution for JWT forgery.
 - The corpus contains `/.well-known/openid-configuration`, `/oauth2/`, or `/oidc/` paths
 - OAuth2/OIDC param keys (`client_id`, `redirect_uri`, `response_type`) appear in query strings
 - Operator is mapping the full authorization-server attack surface
+- A `/.well-known/oauth-authorization-server` metadata document advertises a
+  `registration_endpoint` (dynamic client registration is enabled), or a
+  `/oidc/register` route is present
 
 ## Parameter keys that match
 
@@ -34,6 +37,31 @@ Discovery and metadata:
 
 Protocol endpoints:
 `/oauth2/`, `/oidc/`, `/connect/authorize`, `/connect/token`, `/connect/userinfo`
+
+### Dynamic Client Registration (DCR) and PingFederate (classify-context-and-surface 2026-06, Part 3 §C.11)
+
+Part 3 §C.11 extends this bucket with dynamic-client-registration (DCR) and
+PingFederate surfaces, realized through one new literal fragment
+(`/connect/register`) plus the existing oauth-oidc fragments and the new
+`idp_admin` bucket:
+
+- **AS metadata / DCR discovery** — `/.well-known/oauth-authorization-server`
+  (RFC 8414, added under *Discovery and metadata*) is the discovery anchor: it
+  advertises the `registration_endpoint`, `token_endpoint`, and `jwks_uri`, so it
+  is the entry point for probing a DCR-enabled authorization server.
+- **`/oidc/register` DCR endpoint** — caught by the existing boundary-anchored
+  `/oidc/` fragment (`/oidc/register` → core `/oidc` + segment boundary), so no
+  separate fragment is needed.
+- **`/connect/register`** — the OIDC DCR endpoint, added as an explicit oauth-oidc
+  fragment. Because oauth-oidc is declared BEFORE `trust_surface` (whose `/connect`
+  fragment would otherwise capture it, both weight 35), a DCR route clusters
+  `gf:oauth-oidc` — keeping DCR abuse on the OAuth-flow specialist rather than the
+  generic callback bucket.
+- **PingFederate `/as/authorization.oauth2`, `/as/token.oauth2`,
+  `/as/clients.oauth2`** — routed to the new `idp_admin` bucket (weight 35),
+  which models the IdP admin / realm / DCR-config surface. `oauth-oidc`
+  continues to model the OAuth *flow*; `idp_admin` models the *admin* surface.
+  See `agent/references/gf-patterns/idp_admin.md`.
 
 ## Tie-break ordering (override vs trust_surface)
 
@@ -87,6 +115,12 @@ Param-key only:
   to have the server validate a forged JWT
 - **Client-credential enumeration:** `/oauth2/authorize?client_id=` is iterable when the
   server returns distinct errors for registered vs. unknown clients
+- **Dynamic Client Registration (DCR) abuse:** an open `registration_endpoint`
+  (advertised by `/.well-known/oauth-authorization-server`, reached via
+  `/oidc/register` or `/connect/register`) lets an attacker self-register a
+  client with an attacker-controlled `redirect_uri`, `jwks_uri`, or
+  `request_uri`, then drive a redirect-URI bypass or JWKS-substitution attack
+  with a freshly minted, server-trusted client
 
 ## Corpus grounding
 
@@ -102,6 +136,7 @@ See `docs/plans/research/classify-surface-2026-06/README.md` §4b.
 - [RFC 7636 — PKCE](https://www.rfc-editor.org/rfc/rfc7636)
 - [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html)
 - [RFC 8414 — OAuth 2.0 Authorization Server Metadata](https://www.rfc-editor.org/rfc/rfc8414)
+- [RFC 7591 — OAuth 2.0 Dynamic Client Registration Protocol](https://www.rfc-editor.org/rfc/rfc7591)
 - [PortSwigger — OAuth vulnerabilities](https://portswigger.net/web-security/oauth)
 
 ## Related
@@ -109,4 +144,5 @@ See `docs/plans/research/classify-surface-2026-06/README.md` §4b.
 - `agent/references/gf-patterns/auth.md` — credential-entry surfaces that precede the OAuth flow
 - `agent/references/gf-patterns/jwt.md` — bearer-token surfaces that follow OAuth token issuance
 - `agent/references/gf-patterns/redirect.md` — redirect_uri bypass at the URL-redirect level
-- `agent/references/gf-patterns/trust_surface.md` — broader trust-delegation bucket that owns bare `/oauth`, `/authorize`, `/token`
+- `agent/references/gf-patterns/trust_surface.md` — broader trust-delegation bucket that owns bare `/oauth`, `/authorize`, `/token`, and `/connect/register`
+- `agent/references/gf-patterns/idp_admin.md` — IdP admin / realm surface that owns the PingFederate `/as/*.oauth2` and DCR-config endpoints (the admin counterpart to this flow bucket)

@@ -22,7 +22,23 @@ hit usually translates to direct pre-auth RCE.
 
 ## Parameter keys that match
 
-`cmd, exec, command, shell, run, execute`
+`cmd, exec, command, shell, run, execute, ping, exe, func, function, cli, daemon`
+
+### Upstream gf param additions (2026-06)
+
+The command-exec keys `ping`, `exe`, `func`, `function`, `cli`, and `daemon` were folded in from
+the upstream gf pattern sets, which carry a wider exec param list than our original 6-key set.
+These all name a shell helper, binary, callable, or service-control surface (`?ping=`, `?exe=`,
+`?cli=`, `?daemon=restart`) that commonly feeds a subprocess.
+
+FP guard — `code` is DELIBERATELY EXCLUDED. `rce` is the highest-weight bucket (50) and outranks
+`oauth-oidc` (35), so adding `code` would make a bare `?code=` OAuth authorization-code callback
+mis-cluster as `gf:rce` instead of staying with the OAuth flow — a high-frequency false positive.
+For the same reason `query`, `load`, `read`, `download`, `upload`, and `dir` are also skipped:
+they are owned by other buckets (`xss`/`sqli`, `lfi`, `upload_fields`, etc.) and re-importing
+them here would steal rows from the correct cluster. Bucket weight only orders triage and never
+gates inclusion, but because `rce` sits at the top of the weight order, key selection here is
+held to a higher precision bar than the lower-weight buckets.
 
 ## Path patterns that match
 

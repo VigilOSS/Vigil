@@ -21,6 +21,42 @@ from .paths import resolve_orchestrator_base_url
 
 DEFAULT_IDENTITY = "default"
 
+# HTTP verbs that mutate server state and therefore need a CSRF double-submit
+# header. Duplicated (not imported) from ``assess.lib.kali._STATE_CHANGING_METHODS``
+# on purpose: this operator CLI lives in a different package than the assess
+# runtime and must not depend on it. Keep the two in sync.
+_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _csrf_export_arg(
+    material: dict[str, Any], cookies: dict[str, str], method: str | None
+) -> str:
+    """Render the opt-in CSRF double-submit ``-H`` arg for the copy-paste path.
+
+    Mirrors ``assess.lib.kali._csrf_double_submit_pair`` so the printed curl matches
+    what ``vigil assess kali --identity`` injects at exec time: the header is emitted
+    ONLY on a state-changing ``method``, ONLY when the identity declares the
+    app-specific ``csrf`` mapping AND the named cookie is present in the rendered
+    cookie view, and NEVER when the identity already carries that header (so an
+    operator-set header is not duplicated). Returns ``""`` in every other case.
+    """
+    if not method or str(method).strip().upper() not in _STATE_CHANGING_METHODS:
+        return ""
+    csrf = material.get("csrf")
+    if not isinstance(csrf, dict):
+        return ""
+    cookie_name = str(csrf.get("cookie") or "").strip()
+    header_name = str(csrf.get("header") or "").strip()
+    if not cookie_name or not header_name:
+        return ""
+    value = cookies.get(cookie_name)
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    existing = {str(k).lower() for k in (material.get("headers") or {})}
+    if header_name.lower() in existing:
+        return ""
+    return f"-H '{header_name}: {value}'"
+
 
 def _install_root(engagement_dir: Path) -> Path:
     # engagement_dir = <install_root>/agent/engagements/<key>
@@ -93,13 +129,22 @@ def status_line(engagement_dir: Path) -> str:
     headers_val = material.get("headers")
     headers = headers_val if isinstance(headers_val, dict) else {}
     expires_at = material.get("expires_at")
-    stale = _is_stale(str(expires_at)) if expires_at else False
+    # Honesty fix: `stale` is a claim about liveness. We can only compute it from
+    # an expiry timestamp. With no expires_at (the cookie-capture case — F5 APM /
+    # SiteMinder sessions carry none) the old code hardcoded `stale=false`, i.e.
+    # asserted the session was fresh when we had no basis to. A dead session then
+    # reads as live (a false negative). Emit `stale=unknown` instead; a live probe
+    # (`vigil assess auth-status --probe`) is the only way to confirm liveness.
+    if expires_at:
+        stale_repr = "true" if _is_stale(str(expires_at)) else "false"
+    else:
+        stale_repr = "unknown"
     return (
         f"{_key(engagement_dir)}\tmode={material.get('mode', 'none')}"
         f"\tstate={material.get('state', 'none')}"
         f"\tidentity={material.get('identity_name', '-')}"
         f"\tcookies={len(cookies)}\theaders={len(headers)}"
-        f"\texpires_at={expires_at or '-'}\tstale={str(stale).lower()}"
+        f"\texpires_at={expires_at or '-'}\tstale={stale_repr}"
     )
 
 
@@ -219,21 +264,293 @@ def edit_auth(engagement_dir: Path, identity: str | None = None) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
-def export_curl_args(engagement_dir: Path, identity: str | None = None) -> str:
-    """Render the identity's material as curl ``-H`` arguments (operator copy-paste)."""
+def export_curl_args(
+    engagement_dir: Path,
+    identity: str | None = None,
+    *,
+    host: str | None = None,
+    method: str | None = None,
+) -> str:
+    """Render the identity's material as curl ``-H`` arguments (operator copy-paste).
+
+    ``host`` selects the matching ``host_cookies`` bucket(s) and uses it ALONE —
+    the same host-scoped lookup ``vigil assess kali --identity`` applies at
+    injection time (I-22). The flat ``cookies`` field is a UNION across every
+    captured host, so seeding it and overlaying the bucket (the old behavior)
+    would leave cookie names unique to OTHER hosts in the printed ``Cookie``
+    header — cross-host session bleed. We fall back to the flat view ONLY for
+    identities with no per-host buckets at all (legacy/manual identities); when
+    buckets exist but none match ``host`` we omit cookies entirely rather than
+    route the display-only union onto an unrelated target. Without ``host``, a
+    multi-host engagement (several unrelated domains under one scope.json) only
+    ever exports whatever happened to land in the flat ``cookies`` field, which
+    silently drops every host except the one that capture-time scoping flattened
+    against — pass the target host explicitly to get the right session.
+
+    ``method`` gates the opt-in CSRF double-submit header the same way exec-time
+    injection does: pass ``POST``/``PUT``/``PATCH``/``DELETE`` and the printed curl
+    gains the app-specific ``-H '<csrf-header>: <cookie-value>'`` so a copy-pasted
+    write is not CSRF-rejected. Safe methods (or an unset method) print no CSRF
+    header — matching what a GET run injects.
+    """
     material = (
         _active_material(engagement_dir)
         if identity is None
         else _api(engagement_dir, "GET", f"/{identity}")
     )
+    raw_cookies = material.get("cookies")
+    flat_cookies = dict(raw_cookies) if isinstance(raw_cookies, dict) else {}
+    if host:
+        from .paths import add_assess_import_path
+
+        add_assess_import_path(_install_root(engagement_dir))
+        from assess.lib.identity import (  # type: ignore[import-not-found]
+            host_cookie_hosts,
+            host_cookies_for,
+        )
+
+        host_scoped = host_cookies_for(material, host)
+        if host_scoped:
+            # Authoritative per-host bucket: use it ALONE (no flat-union blend),
+            # so a cookie captured for a DIFFERENT host never rides this export.
+            cookies = dict(host_scoped)
+        elif not host_cookie_hosts(material):
+            # No per-host buckets at all (legacy/manual identity): the flat union
+            # is the only cookie view we have, so fall back to it.
+            cookies = flat_cookies
+        else:
+            # Buckets exist but none match this host → omit cookies rather than
+            # route the display-only union onto an unrelated target.
+            cookies = {}
+    else:
+        # No target host requested: preserve the flat view (unchanged behavior).
+        cookies = flat_cookies
     parts: list[str] = []
-    cookies = material.get("cookies") if isinstance(material.get("cookies"), dict) else {}
     if cookies:
         cookie_value = "; ".join(f"{k}={v}" for k, v in cookies.items())
         parts.append(f"-H 'Cookie: {cookie_value}'")
+        csrf_arg = _csrf_export_arg(material, cookies, method)
+        if csrf_arg:
+            parts.append(csrf_arg)
     for key, value in (material.get("headers") or {}).items():
         parts.append(f"-H '{key}: {value}'")
     return " ".join(parts)
+
+
+def _classify_liveness(
+    status: int | None,
+    haystack: str | None,
+    liveness: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """Deterministic, operator-configured session-liveness classifier.
+
+    There is exactly ONE way to decide liveness: an operator-declared signature in
+    ``material['liveness'] = {expect_status, authed_marker, dead_marker}`` (each key
+    optional), matched against ``haystack`` — the probe response's status line +
+    headers (INCLUDING ``Location``) + body text. This mirrors how a DAST scanner
+    (InsightAppSec / Burp) validates a session with logged-in / logged-out markers;
+    NO auth/login location is auto-detected. Precedence (first match wins):
+
+      1. no response captured (transport error)         -> unknown
+      2. no liveness signature configured               -> unknown (names the shape to set)
+      3. dead_marker set AND present in haystack         -> dead
+      4. authed_marker set AND absent from haystack      -> dead
+      5. expect_status set AND status != expect_status   -> dead
+      6. otherwise                                       -> live
+
+    Marker matching is case-sensitive substring against the combined haystack.
+    Returns ``(verdict, reason)`` where ``reason`` names the rule that fired. Pure
+    function: unit-tested without a network, and kept in lockstep with its mirror
+    (``vigil_cli.auth`` <-> ``assess.commands.auth_status``) — the two must classify
+    identical inputs identically.
+    """
+    if status is None:
+        return "unknown", "no response captured (transport error)"
+
+    cfg = liveness if isinstance(liveness, dict) else {}
+    raw_expect = cfg.get("expect_status")
+    expect_status = raw_expect if isinstance(raw_expect, int) and not isinstance(raw_expect, bool) else None
+    raw_authed = cfg.get("authed_marker")
+    authed_marker = raw_authed if isinstance(raw_authed, str) and raw_authed else None
+    raw_dead = cfg.get("dead_marker")
+    dead_marker = raw_dead if isinstance(raw_dead, str) and raw_dead else None
+
+    if expect_status is None and authed_marker is None and dead_marker is None:
+        return (
+            "unknown",
+            "no liveness signature configured; set "
+            "material.liveness = {expect_status, authed_marker, dead_marker}",
+        )
+
+    hay = haystack or ""
+    if dead_marker is not None and dead_marker in hay:
+        return "dead", f"dead_marker {dead_marker!r} present"
+    if authed_marker is not None and authed_marker not in hay:
+        return "dead", f"authed_marker {authed_marker!r} absent"
+    if expect_status is not None and status != expect_status:
+        return "dead", f"status {status} != expect {expect_status}"
+
+    confirmations: list[str] = []
+    if authed_marker is not None:
+        confirmations.append("authed_marker present")
+    if dead_marker is not None:
+        confirmations.append("dead_marker absent")
+    if expect_status is not None:
+        confirmations.append(f"status {status}")
+    return "live", ", ".join(confirmations)
+
+
+def _build_liveness_haystack(
+    status: int,
+    reason: str,
+    headers: list[tuple[str, str]],
+    body: str,
+) -> str:
+    """Combine the status line + response headers (incl. ``Location``) + body into
+    the single case-sensitive haystack the liveness classifier matches against."""
+    status_line = f"HTTP {status} {reason}".rstrip()
+    header_text = "\n".join(f"{name}: {value}" for name, value in headers)
+    return "\n".join(part for part in (status_line, header_text, body) if part)
+
+
+def _bearer_token(material: dict[str, Any]) -> str:
+    """Return a bearer token from legacy top-level fields or ``tokens`` material.
+
+    Mirrors ``assess.lib.kali._identity_bearer_token`` so the CLI probe carries the
+    same Authorization the runtime injects.
+    """
+    for value in (material.get("token"), material.get("bearer")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    tokens = material.get("tokens")
+    if isinstance(tokens, dict):
+        for key in ("access_token", "accessToken", "bearer", "token", "id_token", "idToken"):
+            value = tokens.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _authed_request_headers(
+    engagement_dir: Path, material: dict[str, Any], host: str
+) -> dict[str, str]:
+    """Build the request headers for a host-side authed probe from identity material.
+
+    Cookies are host-scoped the same way ``vigil assess kali --identity`` injects
+    them: the matching ``host_cookies`` bucket is used ALONE, falling back to the
+    flat ``cookies`` view ONLY for identities with no per-host buckets at all.
+    When buckets exist but none match the probed host we omit cookies entirely —
+    the flat view is a display-only UNION across every captured host, so injecting
+    it would bleed another host's session cookies onto this host (cross-host
+    session bleed). Plus the identity's headers and a bearer token when present.
+    """
+    headers: dict[str, str] = {}
+    for key, value in (material.get("headers") or {}).items():
+        if str(key).strip():
+            headers[str(key)] = str(value)
+    cookies: dict[str, str] = {}
+    host_scoped: dict[str, str] = {}
+    has_host_buckets = False
+    try:
+        from .paths import add_assess_import_path
+
+        add_assess_import_path(_install_root(engagement_dir))
+        from assess.lib.identity import (  # type: ignore[import-not-found]
+            host_cookie_hosts,
+            host_cookies_for,
+        )
+
+        host_scoped = host_cookies_for(material, host)
+        has_host_buckets = bool(host_cookie_hosts(material))
+    except Exception:  # noqa: BLE001 — assess import optional; fall back to flat view
+        host_scoped = {}
+        has_host_buckets = False
+    if host_scoped:
+        cookies.update(host_scoped)
+    elif not has_host_buckets:
+        # No per-host buckets at all (legacy/manual identity): fall back to the
+        # flat ``cookies`` view. When buckets DO exist but none match this probed
+        # host we deliberately OMIT cookies — ``material['cookies']`` is a
+        # display-only UNION across every captured host, so injecting it here
+        # would bleed another host's uniquely-named session cookies onto this
+        # host. Mirrors ``assess.lib.kali._identity_header_pairs``.
+        raw = material.get("cookies")
+        if isinstance(raw, dict):
+            cookies.update({str(k): str(v) for k, v in raw.items()})
+    if cookies and not any(k.lower() == "cookie" for k in headers):
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    token = _bearer_token(material)
+    if token and not any(k.lower() == "authorization" for k in headers):
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def probe_liveness(
+    engagement_dir: Path,
+    url: str,
+    identity: str | None = None,
+    *,
+    timeout: int = 15,
+) -> dict[str, Any]:
+    """Send a lightweight authed GET with the active identity's material and
+    classify session liveness against the identity's operator-configured
+    ``material['liveness']`` signature.
+
+    Redirects are NOT followed — a 302 to a login page is preserved as a signal in
+    the haystack rather than chased. The full response (status line + headers incl.
+    ``Location`` + body) is fed to ``_classify_liveness``. Returns
+    ``{"liveness", "reason", "http_status", "error"}``; any transport error yields
+    ``liveness="unknown"`` with a populated ``error`` (never a false verdict).
+    """
+    material = (
+        _active_material(engagement_dir)
+        if identity is None
+        else _api(engagement_dir, "GET", f"/{identity}")
+    )
+    liveness_cfg = material.get("liveness") if isinstance(material, dict) else None
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return {
+            "liveness": "unknown",
+            "reason": "invalid probe URL",
+            "http_status": None,
+            "error": f"invalid probe URL {url!r} (expected an absolute http(s) URL)",
+        }
+    headers = _authed_request_headers(engagement_dir, material, parsed.hostname)
+    conn_cls = (
+        http.client.HTTPSConnection
+        if parsed.scheme == "https"
+        else http.client.HTTPConnection
+    )
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    conn = conn_cls(parsed.hostname, port, timeout=timeout)
+    try:
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        status = resp.status
+        reason_line = resp.reason or ""
+        resp_headers = list(resp.getheaders())
+        body = resp.read().decode("utf-8", "replace")
+    except OSError as exc:
+        return {
+            "liveness": "unknown",
+            "reason": f"probe request failed: {exc}",
+            "http_status": None,
+            "error": f"probe request failed: {exc}",
+        }
+    finally:
+        conn.close()
+    haystack = _build_liveness_haystack(status, reason_line, resp_headers, body)
+    verdict, reason = _classify_liveness(status, haystack, liveness_cfg)
+    return {
+        "liveness": verdict,
+        "reason": reason,
+        "http_status": status,
+        "error": None,
+    }
 
 
 def _empty_auth() -> dict[str, object]:

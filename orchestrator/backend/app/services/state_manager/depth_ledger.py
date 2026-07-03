@@ -497,6 +497,59 @@ def _unit_ledger(
     if not depth_satisfied and ev_rank == 0:
         ev_rank = _TIER_WEIGHT.get(depth_tier, 1) * max(risk_score, 1)
 
+    # Per-class signal coverage (ADVISORY, additive — does NOT feed
+    # `depth_satisfied`, `missing_block`, or the family math above, all of which
+    # stay byte-identical). The gf coverage_items carry the SPECIFIC implied vuln
+    # CLASS in `attack_family` (e.g. 'sqli'/'idor', from GF_BUCKET_TO_CLASS), but
+    # `covered_families` collapses every class to its family — so a sibling-class
+    # probe (e.g. an `ssti` probe) marks the whole `injection` family covered and a
+    # `sqli` signal is never independently demanded, the single-class blind spot.
+    # Surface the high-signal classes a unit was flagged for (via its gf
+    # coverage_items, families that BLOCK_HIGH) that still lack a CLASS-SPECIFIC
+    # covering probe / coverage_item, so the operator can drain coverage per CLASS
+    # rather than per family. Reuses the same unit-mapped probes/coverage_items.
+    signal_classes_expected: set[str] = set()
+    for ci in coverage_items:
+        if not _coverage_maps_to_unit(ci, unit_id, unit_variant_ids):
+            continue
+        cls = vuln_taxonomy.normalize_class(str(ci.get("attack_family") or ""))
+        if not cls or not vuln_taxonomy.is_valid_class(cls):
+            continue
+        fam = vuln_taxonomy.family_of(cls)
+        if fam and fam not in _GENERIC_FAMILIES and _FAMILY_BLOCK_LEVEL.get(fam) == BLOCK_HIGH:
+            signal_classes_expected.add(cls)
+
+    signal_classes_covered: set[str] = set()
+    if signal_classes_expected:
+        for p in probes:
+            if not _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix):
+                continue
+            if str(p.get("result_status") or "").strip().lower() not in PROBE_RESULT_STATUSES_COVERING:
+                continue
+            signal_classes_covered.add(
+                vuln_taxonomy.normalize_class(str(p.get("attack_family") or ""))
+            )
+        for ci in coverage_items:
+            if not _coverage_maps_to_unit(ci, unit_id, unit_variant_ids):
+                continue
+            if str(ci.get("status") or "").strip().lower() not in (
+                "covered", "not_applicable", "not-applicable"
+            ):
+                continue
+            if not str(ci.get("notes") or "").strip():
+                continue
+            signal_classes_covered.add(
+                vuln_taxonomy.normalize_class(str(ci.get("attack_family") or ""))
+            )
+
+    signal_classes_uncovered = sorted(
+        signal_classes_expected - signal_classes_covered - {
+            vuln_taxonomy.normalize_class(str(c))
+            for rec in deferred_records
+            for c in (rec.get("vuln_classes") or [])
+        }
+    )
+
     return {
         "unit": {
             "id": unit_id,
@@ -524,6 +577,12 @@ def _unit_ledger(
         "decisive_surface": decisive_surface,
         "confidence": str(unit.get("confidence") or ""),
         "ev_rank": ev_rank,
+        # Advisory per-class gap (see computation above): specific high-signal vuln
+        # classes this unit's gf coverage_items implied that still lack a
+        # class-specific probe. Empty for units with no per-class signal. Does NOT
+        # affect depth_satisfied; the operator drains these per the depth-ledger
+        # doctrine in operator-core.md.
+        "signal_classes_uncovered": signal_classes_uncovered,
     }
 
 

@@ -1,9 +1,6 @@
 """Adversarial W3 gate verification tests."""
 import json
 from pathlib import Path
-import pytest
-from app.config import settings
-from app.services import state_manager
 
 BASE_TMPL = "/engagements/{key}/assessment"
 

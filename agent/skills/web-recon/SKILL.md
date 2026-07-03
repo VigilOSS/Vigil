@@ -33,7 +33,7 @@ proceed without rerunning the default sequence:
 - **Non-standard port** (everything on `:8443`/`:9000`/etc.) — `httpx` against the explicit
   port URL precedes `nmap`; the port set is already known.
 - **Internal / no-WAF target** — skip `wafw00f` (no signal); the rate-limit choice falls
-  through to the no-WAF default from `agent/operator-core.md` "Recon Dispatch Resource Policy".
+  through to the no-WAF default from `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy".
 - **Reactive sweep on already-fingerprinted stack** — `nuclei` runs against the URL delta
   without re-running `wafw00f`/`whatweb`; the fingerprint is already in intel.
 
@@ -277,7 +277,7 @@ hosts, TLS SAN expansions, vhost-fuzz live hits). The template set:
 ```
 
 Run nuclei reactively after the httpx pass so template hits become intel/finding
-candidates *before* Phase 3 specialists dispatch. Treat the recon-side nuclei sweep
+candidates *before* Phase 4 specialists dispatch. Treat the recon-side nuclei sweep
 as required, not as the optional "broad scan before exploitation" of older runbooks.
 
 ### Step 5 — Directory Fuzzing (mandatory L1 wordlist + tech extensions)
@@ -363,7 +363,7 @@ sub-procedures: Multi-time DNS resolution (split-VIP detection), Cross-host SAN
 collision detection, and vhost-cert mismatch detection. The cross-host view flags
 shared multi-tenant certs, vhost-cert mismatches, and split-VIP load-balanced
 clusters — none of which the per-host tools surface on their own. Run before leaving
-Phase 1 so SAN-discovered subdomains feed back into Phase 1a / Phase 3.
+Phase 1 so SAN-discovered subdomains feed back into Phase 1a / Phase 4.
 
 Methodology and recipes live in
 [`agent/skills/tls-vhost-correlation/SKILL.md`](../tls-vhost-correlation/SKILL.md).
@@ -527,11 +527,11 @@ downstream specialists can parse the output consistently.
 | `#### Surface Candidates` | Routes / endpoints / hosts evidenced by a real response or artifact, ready for `vigil assess record-surface`. |
 | `#### Intelligence` | Tech components (framework, CMS, server, WAF, CDN), TLS / SAN intel, rDNS vendor identification, version strings, vendor-template CSP / CORS placeholders, build-version constants — each row landed via `vigil assess record-intel <type>`. |
 | `#### Coverage Gaps` | Every mandatory step that did not complete, every conditional step that fired and why, every dispatch-mode-authorized skip with rationale, and every shared-frontend-trigger sub-procedure that was skipped because the trigger did not fire. The operator reads this section to decide whether to re-dispatch. |
-| `#### Recommended Phase 3 Ordering` | Risk-ranked surface clusters and the recommended specialist + skill for each. The handoff renderer feeds this to surface-collector and downstream specialists. |
+| `#### Recommended Phase 4 Ordering` | Risk-ranked surface clusters and the recommended specialist + skill for each. The handoff renderer feeds this to surface-collector and downstream specialists. |
 
 ## Extended Resources
 
-- `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table (cautious tier, CDN-fronted, WAF-protected, vendor SaaS, origin)
+- `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table (cautious tier, CDN-fronted, WAF-protected, vendor SaaS, origin)
 - `agent/references/runtime-guides/cdn-ip-blocking.md` — egress reputation check, four mitigation options (allowlist / proxy / browser / accept gap), give-up-vs-escalate rule
 - `agent/references/tools/recon/katana.md` — live crawl doctrine, JS-aware defaults, headless escalation, and ingestion handoff
 - `agent/skills/browser-semantic-analysis/SKILL.md` — browser execution decision tree for JS-heavy apps, soft errors, browser-originated APIs, and headless/headed deltas

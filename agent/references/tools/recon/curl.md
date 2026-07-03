@@ -1,5 +1,6 @@
 ---
 description: HTTP request crafting and testing
+skill: web-recon
 ---
 
 # curl

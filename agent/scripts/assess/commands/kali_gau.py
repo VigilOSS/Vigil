@@ -25,8 +25,17 @@ def register(subparsers) -> None:
     p.add_argument("--list", dest="target_list", default="", help="File of newline-separated domains.")
     p.add_argument("--subs", dest="subs", action="store_true", help="Include subdomains.")
     p.add_argument("--threads", dest="threads", default="", help="Worker threads.")
+    # gau's own flag is `--timeout`, but the audit scaffolding already owns
+    # `--timeout`. Expose `--gau-timeout` and translate to gau's `--timeout` in
+    # run() (mirrors sqlmap's `--sql-technique` -> `--technique` rename).
+    p.add_argument("--gau-timeout", dest="timeout_http", default="", help="gau per-request timeout (seconds).")
+    p.add_argument("--retries", dest="retries", default="", help="Retries per request.")
     p.add_argument("--blacklist", dest="blacklist", default="", help="Comma-separated extension blacklist.")
     p.add_argument("--providers", dest="providers", default="", help="Comma-separated providers (wayback,otx,...).")
+    p.add_argument("--fc", dest="filter_codes", default="", help="Filter (drop) these response codes.")
+    p.add_argument("--mc", dest="match_codes", default="", help="Match only these response codes.")
+    p.add_argument("--from", dest="date_from", default="", help="Fetch URLs from this date (YYYYMM).")
+    p.add_argument("--to", dest="date_to", default="", help="Fetch URLs up to this date (YYYYMM).")
     p.add_argument("-o", dest="output", default="", help="Output file.")
     p.set_defaults(func=run)
 
@@ -40,10 +49,22 @@ def run(args) -> None:
         cmd.append("--subs")
     if args.threads:
         cmd.extend(["--threads", str(args.threads)])
+    if args.timeout_http:
+        cmd.extend(["--timeout", str(args.timeout_http)])
+    if args.retries:
+        cmd.extend(["--retries", str(args.retries)])
     if args.blacklist:
         cmd.extend(["--blacklist", args.blacklist])
     if args.providers:
         cmd.extend(["--providers", args.providers])
+    if args.filter_codes:
+        cmd.extend(["--fc", args.filter_codes])
+    if args.match_codes:
+        cmd.extend(["--mc", args.match_codes])
+    if args.date_from:
+        cmd.extend(["--from", str(args.date_from)])
+    if args.date_to:
+        cmd.extend(["--to", str(args.date_to)])
     if args.output:
         # gau's CLI uses `--o` (double-dash, single-letter long flag), not
         # the conventional `-o` short flag. Pass the long form so the

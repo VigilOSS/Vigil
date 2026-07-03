@@ -17,8 +17,6 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from assess.lib import coverage_checks as cc
 from assess.lib import db as db_module
 from assess.commands import coverage as coverage_cmd
