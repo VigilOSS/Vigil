@@ -34,7 +34,19 @@ def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
             """,
             (engagement.id,),
         ).fetchall()
-    return [_serialize_finding_record(row) for row in rows]
+    # A ``blocked`` verification disposition (blocked-for-provisioning, hunting.md)
+    # is NOT a report candidate: the primitive was never reached, so it is neither
+    # gradeable at impact-if-true nor report-durable — it "stays OUT of the report".
+    # Excluding it here removes it from BOTH report projections
+    # (``_report_finding_records`` draft AND final) and from every report_readiness
+    # gate (this is the shared source), so a blocked finding never appears in the
+    # report AND never blocks finalizing it. A later real proof supersedes the
+    # block (rank: blocked < downgraded/confirmed) and re-admits the finding.
+    return [
+        record
+        for record in (_serialize_finding_record(row) for row in rows)
+        if record.get("verification_disposition") != "blocked"
+    ]
 
 def report_readiness(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)

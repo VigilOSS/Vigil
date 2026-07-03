@@ -137,7 +137,7 @@ A single Aura POST is cheap, but the playbook's full first pass sends **30+ POST
 - If the target sits behind a vendor edge with rate-limit signals (429, `X-RateLimit-Remaining`, `Retry-After`), drop to 1 request / 1000ms.
 - Send the namespace enumeration in a single batched POST when the Aura schema supports it (one envelope, multiple actions) rather than 30 separate requests.
 
-`agent/operator-core.md` "Recon Dispatch Resource Policy" defaults the Vendor SaaS row to 60 RPS aggregate; the Aura playbook is well under that, but operator opt-in should still gate the deep-enum dispatch when the target's policy is unknown.
+`agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" defaults the Vendor SaaS row to 60 RPS aggregate; the Aura playbook is well under that, but operator opt-in should still gate the deep-enum dispatch when the target's policy is unknown.
 
 ### 2. ServiceNow GlideRecord playbook
 
@@ -270,4 +270,4 @@ Record intelligence rows for adjacent assets the chain walk surfaced (DNS record
 - `agent/references/payloads/drupal-jsonapi-payloads.md` — entity-type / bundle list, sparse-fieldset abuse, `filter[]` query DSL.
 - `agent/references/payloads/pexip-admin-api-payloads.md` — admin-API namespace list, anonymous-vs-admin reachability triad, configuration-leak chain seeds.
 - `agent/references/payloads/csp-default-grep.md` — placeholder-literal grep pattern for vendor-template CSP/CORS re-baseline (see web-recon vendor-template step).
-- `agent/operator-core.md` "Recon Dispatch Resource Policy" — Vendor SaaS row carries the rate ceiling for the deep-enum dispatch.
+- `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" — Vendor SaaS row carries the rate ceiling for the deep-enum dispatch.

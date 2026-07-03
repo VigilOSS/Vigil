@@ -100,7 +100,7 @@ vigil assess record-finding gau-triage <path-to-finding-json>
 
 - **Use the wrapper verbs** — they pair the gau call with the ingest step in one shot, so the work buffer cannot end up empty after a successful gau run.
 - **Cache reuse is intentional and auditable** — the stderr `[gau-pipeline] REUSING ...` message and the `cache_reused: true` JSON field both surface the decision; if you want a fresh run, pass `--refresh`.
-- **Reproduce each hit before recording it as a finding** — speculative findings pollute the backend and mislead Phase 3 specialists.
+- **Reproduce each hit before recording it as a finding** — speculative findings pollute the backend and mislead Phase 4 specialists.
 - **JS-extracted endpoints get `source='js-extract'`** so report-writer can audit which work_items came from bundle extraction versus crawl/spec ingestion.
 
 ## Extended Resources

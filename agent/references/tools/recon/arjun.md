@@ -7,7 +7,7 @@ skill: parameter-fuzzing
 
 **Purpose:** Discover *hidden* HTTP parameters an endpoint silently accepts but never advertises — the inputs no crawler or archive surfaces. Arjun fires batches from a ~25k parameter-name wordlist, diffs each response against a baseline (reflection / status / length / content factors), and binary-splits to isolate the params that actually change behavior.
 
-Run all target-facing Arjun via `vigil assess kali arjun` (typed verb, audit-flag-aware, runs inside the isolated runtime). Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. Use `--technique PARAM-DISCOVERY` for active runs, `--technique OSINT` for `--passive` runs. Pull `--rate-limit`/`-d`/`-T` values from the matching trait row in `agent/operator-core.md` "Recon Dispatch Resource Policy" before running in volume.
+Run all target-facing Arjun via `vigil assess kali arjun` (typed verb, audit-flag-aware, runs inside the isolated runtime). Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. Use `--technique PARAM-DISCOVERY` for active runs, `--technique OSINT` for `--passive` runs. Pull `--rate-limit`/`-d`/`-T` values from the matching trait row in `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" before running in volume.
 
 ## Full capability — use all of it (nothing is narrowed)
 - **Methods** (`-m GET|POST|XML|JSON`): JSON/XML matter for modern APIs — discover hidden *body* fields on JSON endpoints, not just query params.

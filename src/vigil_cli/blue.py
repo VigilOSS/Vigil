@@ -748,7 +748,7 @@ def _cmd_dispatch(args: argparse.Namespace, install_root: Path) -> None:
 def _default_dispatch_mode_for_role(role: str) -> str:
     return {
         "alert-triage-specialist": "item-iterating",
-        "investigator": "hypothesis-driven",
+        "investigator": "item-iterating",
         "incident-verifier": "deep-manual",
         "ir-lead": "deep-manual",
         "osint-analyst": "hypothesis-driven",

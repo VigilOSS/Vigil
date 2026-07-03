@@ -35,6 +35,8 @@ A strong-but-unproven finding is parked, not dropped: hold it with `evidence_typ
 
 **ROE-blocked proof is a CANDIDATE, not a severity downgrade.** This rule demands the attacker outcome — but when you cannot safely complete the final proof step because the program's rules of engagement forbid it (touching real customer data, pivoting into production, exfiltrating a record you have already shown you can reach), that is a constraint on *you*, not a weakness in the finding. Do not lower the severity to match what you were permitted to demonstrate. Grade the **candidate at impact-if-true** — the severity it carries if the blocked step succeeds, which the surrounding evidence already makes likely — and record the single unblocking test that would convert it: set `details.roe_blocked=true` and put the exact next action in `details.required_followup`. This is distinct from the theoretical/`chain_required` park above (which needs another *bug* to land): here the primitive is proved and only the demonstration is walled off by policy. An ROE wall must never masquerade as a low-severity verdict.
 
+**Blocked-for-provisioning is a THIRD category — distinct from both `roe_blocked` and theoretical/`chain_required`.** `roe_blocked` means the primitive is proved and only the final demonstration is walled off by policy; theoretical/`chain_required` means the finding needs another *bug* to complete. A third case is neither: the attempt cannot even start because a precondition is missing — no test account in the required group, no access to the physical line/device, no additional credential or access grant — and the wall may be permanent for this engagement. Record this with `details.block_reason` (why the attempt could not proceed) and `details.unblock_requirements` (`{kind: account|line|device|credential|access, description, requested_from}` — what is missing and who/what would need to provision it); roll repeated attempts up into `details.attempts_summary` instead of scattering them across free-text notes. A `blocked` finding stays OUT of the report — unlike an `roe_blocked` candidate, it is not gradeable at impact-if-true, because the primitive itself was never reached. But the unblock path is first-class, not a dead end: when a later finding or chain lands that would satisfy the block (the missing account gets provisioned, the missing device turns up, the missing credential surfaces elsewhere), link the two — `vigil assess link-finding <blocked-finding-slug> --link-kind unblocked_by --target-kind finding --target-ref <finding-that-unblocks-it>` — so the operator, and the next engagement against this target, see the connection instead of re-discovering it from scratch.
+
 ## 3. Precondition equivalence check
 
 Before rating severity, identify the precondition required to trigger the vulnerability. If that precondition already grants the attacker equivalent or greater access than the vulnerability itself provides, the finding is defense-in-depth (Low), not an independent exploit. Score on incremental impact over the precondition, not total impact of the chain.
@@ -67,6 +69,20 @@ Push-harder signals include:
 ## 5. Exhaust the surface — rotate only when genuinely dry
 
 Leave a surface only when it is genuinely dry: no meaningful routes, no privileged features, no object references, and no useful source intelligence after a *thorough* pass. "Slow" is not "dry" — do not rotate on a timer; rotate when you have actually exhausted the surface.
+
+## 5a. A human-reach determination is part of exhausting a surface
+
+An endpoint whose human-reach status is still **unknown** — the `agent/shared-constraints.md`
+§2d preflight did not resolve it, and no `human_reach_decision` has been recorded —
+is an **open question, not a silent skip**. Do not close a surface as exhausted
+while a notify-shaped endpoint on it sits undetermined; run it through the §2d
+procedure (static characterization, then the bounded live-fire budget if still
+ambiguous) so it lands in the same recorded-verdict system as every other lead.
+A name alone — `send-notification`, `alert-approver`, `ticket-create` — is a
+hypothesis about behavior, not proof it reaches anyone: an endpoint that only
+*looks* notify-shaped may resolve NEGATIVE under §2d and become ordinary surface,
+and one that looks harmless may resolve POSITIVE. The recorded determination —
+not the name — decides how you treat it.
 
 ## 6. Evidence beats volume
 
@@ -188,85 +204,28 @@ When progress stalls, use this table to pick a concrete next action instead of g
 
 ## 18. Sub-Agent Dispatch Discipline
 
-The operator's value is *not* doing the testing — it is choosing the right
-specialist, framing the dispatch tightly, and judging the returned evidence.
-**Tight means a precise surface, scope, auth state, rules, and the outcome
-wanted — it does NOT mean a pre-chosen vulnerability or payload.** Naming the bug
-for the specialist anchors it to your guess and caps its depth at your
-imagination (§19's heuristics are the specialist's to run, not the operator's to
-pre-decide). When the operator does the hunting itself, two things break: the
-operator's context window fills with low-level transcripts that should have
-stayed in a specialist subagent, and the audit trail loses the per-role
-provenance that report-writer and later operators rely on.
-
-- **Default to dispatch.** When a task fits a named role (`recon-specialist`,
-  `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`,
-  `surface-collector`, `source-analyzer`, `report-writer`, or any
-  `code-*` role), launch that specialist instead of running the underlying
-  tools yourself. Specialists carry the role prompt, the matching skill
-  context, and the handoff schema the operator does not.
-- **Inline only for genuinely operator-scoped work.** A handful of actions
-  belong on the operator: scope and authorization decisions, dispatch
-  authoring, recording specialist handoffs, reviewing evidence, and the
-  occasional one-shot lookup that informs the next dispatch (a single
-  `vigil assess fetch ...` query, a `list-skills` call, a contract render).
-  Anything that walks a target, parses output, or iterates over a work-buffer
-  cluster is specialist work.
-- **One specialist, one objective, one skill set.** Each dispatch names the
-  role, the dispatch mode, and the explicit skill list (`--skills` on
-  `vigil assess agent start`). Bundling multiple objectives into one
-  dispatch defeats the role boundary and produces handoffs that report-writer
-  cannot map back to a coherent finding line.
-- **When in doubt, dispatch.** If the operator is about to run a Kali tool,
-  parse its output, and decide what to do next, that loop belongs in a
-  specialist. The cost of an extra dispatch is small; the cost of a polluted
-  operator context is large because it reduces the operator's ability to
-  judge the next dispatch.
+> **Sub-agent dispatch discipline** (default-to-dispatch, inline only for
+> operator-scoped work, one-specialist/one-objective/one-skill-set): moved to
+> `agent/operator-core.md`'s dispatch doctrine — operator-only content, not a
+> specialist read.
 
 ## 19. Developer psychology heuristics
 
-**Specialists: use these to generate *your own* hypotheses** about where this app's developers
-under-guarded. The operator tells you what's already covered, not which weakness to chase — these
-are the lens you bring to the surface you were handed:
-
-- **Feature-copy pattern**: Feature A has auth checks. Newly added Feature B was likely copied from A without the auth middleware — test B's auth boundary first.
-- **Flow-complexity pattern**: Multi-step workflows (checkout + coupon + refund + credits) have edge cases at every step boundary. Test step-skipping and out-of-order execution.
-- **API version drift**: `/api/v2/user` exists — does `/api/v1/user` still work with weaker or no auth? Old versions are rarely decommissioned properly.
-- **Naming anomaly signal**: If the API uses `userId` everywhere but one endpoint uses `user_id`, that endpoint was built by a different developer or team — it likely has different (weaker) security assumptions.
-- **Error response divergence**: Same 403 status code but different JSON structure on two endpoints = different backend systems with different trust boundaries. Test each independently.
-- **New feature window**: Features launched in the last 30 days have the lowest security maturity. Check changelogs and release notes for recent additions.
+> **Developer psychology heuristics** (feature-copy, flow-complexity, API
+> version drift, naming anomaly, error-response divergence, new-feature
+> window): moved to `agent/rules/mindsets/developer.md` — load it as your
+> generative lens for hypothesis generation.
 
 ## 20. Severity-CVSS alignment audit before report
 
-Before any report-writer dispatch, query `vigil assess list-findings` and verify
-each finding's `severity` matches its `details.cvss_score` band:
-
-- `high` requires `cvss_score >= 7.0`
-- `medium` requires `4.0 <= cvss_score <= 6.9`
-- `low` requires `cvss_score < 4.0`
-
-Fix mismatches via `vigil assess update-finding --inline '{"details":
-{"cvss_score": <n>, "cvss_vector": "..."}}'`. The JSON field is `details`,
-not `details_json`. A finding whose severity contradicts its CVSS makes the
-entire report look unverified to the triager, and mismatches are the single
-most common cleanup-time defect in this codebase. Run the audit before
-calling report-writer so the dispatch sees coherent state.
+> **Severity-CVSS alignment audit before report:** moved to
+> `agent/operator-core.md`'s dispatch doctrine — operator-only content, not a
+> specialist read.
 
 ## 21. Stale-text scrub before publishing
 
-Read each active finding's `summary` and `details` text fields and strip
-phrases that contradict the current state:
-
-- "severity adjusted from X to Y" when the severity is no longer Y
-- "originally rated as Z" when the rating has shifted twice since
-- "merged from W" when W has since been split off
-- "downgraded to medium" / "upgraded to high" / "previously low" against
-  the current severity field
-
-Stale narrative is invisible to backend status fields and ends up in
-report.md verbatim. The `vigil assess list-findings --json | jq -r .[].slug`
-loop in `agent/skills/report-generation/SKILL.md` (Review-and-Fix QA Mode)
-provides the executable recipe; this rule is the reason to run it.
+> **Stale-text scrub before publishing:** moved to `agent/operator-core.md`'s
+> dispatch doctrine — operator-only content, not a specialist read.
 
 ## 22. Smallest probe that answers the question
 

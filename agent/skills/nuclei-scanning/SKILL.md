@@ -25,10 +25,10 @@ Reactive sweeps run in-phase against URL deltas each phase produces — they are
 phase they belong to, not a reason to jump ahead. Every time new live URLs land during Phase 1
 or Phase 2, fire a focused CVE/misconfig/exposure scan on that delta so template hits become
 intel (`record-intel tech-component`, `record-intel note`, `record-intel cve`) and finding
-candidates *before* Phase 3 specialists dispatch — that way specialists inherit the signal
-rather than rediscovering it from the buffer. Phase 3a below is a coverage audit that re-runs
+candidates *before* Phase 4 specialists dispatch — that way specialists inherit the signal
+rather than rediscovering it from the buffer. Phase 4a below is a coverage audit that re-runs
 nuclei **only against gaps** left by the reactive passes — when reactive coverage was thorough,
-Phase 3a is a no-op summary, not a second broad sweep.
+Phase 4a is a no-op summary, not a second broad sweep.
 
 ### When to trigger a reactive sweep
 
@@ -108,13 +108,13 @@ Flags explained — each flag earns its place because removing it breaks an assu
   templates repeatedly and inflates `list-command-runs`.
 - `-t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/,http/technologies/,http/exposed-panels/` scopes template
   directories to the discovery-phase classes, because fuzzing/ and payload-heavy templates belong
-  to Phase 3 targeted work and would drown early signal in noise.
+  to Phase 4 targeted work and would drown early signal in noise.
 - `-severity medium,high,critical` suppresses info/low during discovery, because info findings are
   tech-detect data that nuclei's `-as` flag already produces elsewhere.
 - `-as` auto-aligns templates with detected tech stack, because untargeted template execution
   wastes rate budget on irrelevant CVEs (no WordPress templates on a Spring app).
 - `-stream` processes inputs without buffering, because Phase 1-2 deltas can arrive in small
-  batches and buffering delays early hits that should land as intel/findings before Phase 3
+  batches and buffering delays early hits that should land as intel/findings before Phase 4
   specialists dispatch.
 - `-jsonl` emits one JSON object per line, because ingestion tooling and `jq` both expect JSONL
   and regular `-o` text loses the template metadata.
@@ -130,7 +130,7 @@ Run each sweep synchronously — one blocking `vigil assess kali <verb> … --ti
 
 During discovery, stick to `http/cves/`, `http/misconfiguration/`, `http/exposures/`, `http/default-logins/`, `http/technologies/`,
 and `http/exposed-panels/`. Skip `http/fuzzing/` and payload-heavy template directories — they belong to
-Phase 3 targeted work because (1) their false-positive rate is higher, (2) they generate noisy
+Phase 4 targeted work because (1) their false-positive rate is higher, (2) they generate noisy
 request volume that trips WAFs before real testing starts, and (3) their matches require the
 specialist skill context to triage correctly. Dropping them from the reactive pass keeps the
 intel/finding writes (and any future priority-boost mechanism) aligned with genuine
@@ -209,7 +209,7 @@ version-string collisions, etc.) before they reach the finding lifecycle.
   record with `vigil assess record-finding vulnerability-analyst <finding-json-file>`
   only if the re-test reproduces the hit.
 - **Medium hits** — record as intel with `vigil assess record-intel note <json-file>`,
-  noting the template-id and matched URL. Medium hits often seed Phase 3 targeted testing
+  noting the template-id and matched URL. Medium hits often seed Phase 4 targeted testing
   rather than standalone findings.
 - **Tech fingerprints** (from `-as` template matches like `http/technologies/`) — record via
   `vigil assess record-intel tech-component <json-file>` so downstream tooling can match them
@@ -222,11 +222,11 @@ Reactive nuclei runs only against URLs present in the scope.json host list (enfo
 whose presence in the delta came from passive sources alone — an out-of-scope sweep breaks
 the authorization envelope even if the finding would be accurate.
 
-## Coverage Audit Mode (Phase 3a)
+## Coverage Audit Mode (Phase 4a)
 
-Phase 3a is not a second broad sweep — it is an audit that confirms every in-scope live host
+Phase 4a is not a second broad sweep — it is an audit that confirms every in-scope live host
 received a reactive pass with the expected template set, and fills any gaps. When Phase 1 and
-Phase 2 reactive sweeps were thorough, Phase 3a prints a coverage summary and advances without
+Phase 2 reactive sweeps were thorough, Phase 4a prints a coverage summary and advances without
 running nuclei again. The audit replaces the old "broad nuclei sweep before the work-buffer
 loop" pattern because a blind rerun wastes rate budget and inflates `list-command-runs`
 without finding new signal.
@@ -261,7 +261,7 @@ GAP_COUNT=$(wc -l < "$DIR/scans/nuclei_gap_$RID.txt")
 if [ "$GAP_COUNT" -eq 0 ]; then
   COVERED_COUNT=$(wc -l < "$DIR/scans/_in_scope_live_audit_$RID.txt")
   vigil assess log operator \
-    "Phase 3a nuclei coverage audit" \
+    "Phase 4a nuclei coverage audit" \
     "check-phase-readiness --phase consume" \
     "Reactive sweeps covered all ${COVERED_COUNT} in-scope live URLs; no rerun needed." \
     --actor-kind operator
@@ -280,13 +280,13 @@ vigil assess kali nuclei \
   -rate-limit 150 -c 25 -bs 25 \
   -stats -si 30 \
   -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_gap_$RID.jsonl \
-  --technique CVE-VALIDATION --intent "Phase 3a gap-only nuclei coverage audit" \
+  --technique CVE-VALIDATION --intent "Phase 4a gap-only nuclei coverage audit" \
   --probe-kind fingerprint --phase consume-test --timeout 1800
 ```
 
-Same template set and severity as reactive mode so Phase 3a coverage is directly comparable to
-what the reactive passes attempted. Any host reaching Phase 3a without reactive coverage usually
-came from a late ingestion (e.g., an endpoint `vulnerability-analyst` discovered mid-Phase-3 and
+Same template set and severity as reactive mode so Phase 4a coverage is directly comparable to
+what the reactive passes attempted. Any host reaching Phase 4a without reactive coverage usually
+came from a late ingestion (e.g., an endpoint `vulnerability-analyst` discovered mid-Phase-4 and
 re-ingested) — the audit picks it up.
 
 ### Triage and ingestion
@@ -296,9 +296,9 @@ revalidation; medium → intel; `-as` tech fingerprints → `record-intel tech-c
 the audit result in the engagement activity log even when the gap list is empty — the absence
 of a run is itself coverage evidence, which matters for the report.
 
-## Phase-3 substrate sweep scoping & safety (CR-27 / CR-30)
+## Phase-4 substrate sweep scoping & safety (CR-27 / CR-30)
 
-A broad Phase-3 nuclei sweep (full CVE/exposure/misconfig sets × every in-scope
+A broad Phase-4 nuclei sweep (full CVE/exposure/misconfig sets × every in-scope
 host) is **not politely completable** and collides with per-host VA lanes. Scope it
 deliberately along every dimension below before running it.
 
@@ -307,7 +307,7 @@ deliberately along every dimension below before running it.
 For a broad host-scale substrate sweep, **default to `-severity high,critical`** — the
 signal-to-request-volume ratio is what makes the sweep completable. (The in-phase
 *reactive* and *gap-audit* passes above deliberately keep `medium,high,critical`
-because their host/template scope is already small and medium hits seed Phase-3
+because their host/template scope is already small and medium hits seed Phase-4
 intel; do not widen a broad substrate sweep to medium.)
 
 ### Curated cheap-template subset, scoped by template DIRECTORIES — not broad tags
@@ -358,7 +358,7 @@ for D in http/takeovers/ http/exposed-panels/ http/default-logins/; do
     -t "$D" -severity high,critical -as -stream -jsonl \
     -rate-limit 150 -c 25 -bs 25 -stats -si 30 \
     -o /engagements/$ENGAGEMENT_KEY/scans/nuclei_substrate_${CAT}_$RID.jsonl \
-    --technique CVE-VALIDATION --intent "Phase-3 substrate sweep ($D)" \
+    --technique CVE-VALIDATION --intent "Phase-4 substrate sweep ($D)" \
     --probe-kind fingerprint --phase consume-test --timeout 1200
 done
 ```
@@ -370,13 +370,13 @@ templates against production-like targets — you do not need to pass it yoursel
 
 ### Operator-sweep vs VA-lane collision avoidance (CR-30)
 
-A separate operator-run substrate sweep **collides** with the Phase-3 VA fan-out
+A separate operator-run substrate sweep **collides** with the Phase-4 VA fan-out
 when both touch the same hosts (shared rate budget, duplicated traffic, racing
 tools). Pick one of two collision-free patterns:
 
 1. **Run-to-completion first.** Run the bounded substrate sweep to *completion*
    before any VA lane touches that host subset, so the VA lanes inherit the signal
-   instead of racing it. (This is what the Phase-3a coverage audit already does — it
+   instead of racing it. (This is what the Phase-4a coverage audit already does — it
    runs once, before the work-buffer/VA loop.)
 2. **Fold into the owning VA lane.** Hand the scoped, per-host-subset nuclei call to
    the vulnerability-analyst lane that *owns* that subset, so a single lane is the
@@ -486,6 +486,6 @@ cat /tmp/nuclei.jsonl | jq '.info.name, .info.severity, .matched-at'
 
 ## Extended Resources
 
-- `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; `--rate-limit / -bs / -c` defaults pulled from the trait row.
+- `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; `--rate-limit / -bs / -c` defaults pulled from the trait row.
 - `agent/references/tools/recon/nuclei.md` — nuclei flags, template management, output formats
 - `agent/references/subdomain-takeover.md` — why an `http/takeovers/` hit is a screening signature, not a verdict: the per-provider claimability rules and the benign own-account claim that proves or kills a takeover candidate before a finding is recorded.

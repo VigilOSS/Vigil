@@ -11,7 +11,7 @@ origin: Vigil
 Run this at every **phase / wind-down boundary**, before you treat the phase's
 work as done:
 
-- before declaring a **surface or target's fan-out done** (the Phase-3
+- before declaring a **surface or target's fan-out done** (the Phase-4
   closed-surface re-audit moment),
 - before **lifting an account / coverage deferral** (un-deferring an objective,
   or leaning on a `deferred` / `not_applicable` resolution as if it were closed),
@@ -157,7 +157,7 @@ A miss that is silently dropped is the failure mode this skill exists to prevent
   baseline phase-qc reasons against and never recomputes.
 - operator-core "Closed-surface dead-vs-unfinished re-audit" + "Depth Doctrine" — the
   `coverage` / `depth` miss source.
-- operator-core "Mandatory Phase-Exit Passes" + Phase-3 "System-level synthesis" — the
+- operator-core "Mandatory Phase-Exit Passes" + Phase-4 "System-level synthesis" — the
   `chain` miss source.
 - `agent/skills/browser-semantic-analysis/SKILL.md` — the re-probe for `waf-blind` misses.
 - `check-phase-readiness` / `transition-phase` — the binary, blocking gates phase-qc

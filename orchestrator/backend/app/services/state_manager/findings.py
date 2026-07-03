@@ -218,6 +218,8 @@ def _default_transition_reason(action: str, after: dict[str, str]) -> str:
         return "Verification downgraded the finding severity."
     if action == "verified_false_positive":
         return "Verification marked the finding as a false positive."
+    if action == "verified_blocked":
+        return "Verification recorded the finding as blocked-for-provisioning; held out of the report."
     if action == "verification_disputed":
         return "Verification disputed the current finding assessment."
     if action == "workflow_reported":
@@ -466,6 +468,19 @@ def create_finding(
                     auth_context=auth_context,
                     canonical_location=canonical_location,
                 )
+        # A ``blocked`` disposition REQUIRES a ``block_reason`` on the create/record
+        # path too — not only via /verify. Without this guard, POST /findings with
+        # verification_disposition='blocked' and no block_reason would 201 and then
+        # be silently excluded from the report (report-readiness drops 'blocked'),
+        # producing a reasonless, invisible finding. Mirror verify_finding's invariant
+        # (the reason may arrive in this record's details OR already be on the finding).
+        if incoming_verification_disposition == "blocked":
+            _validate_blocked_verification_details(
+                incoming_details=details or {},
+                existing_details=(
+                    _json_object(existing["details_json"]) if existing is not None else {}
+                ),
+            )
         before_state = _finding_state_snapshot(existing) if existing is not None else None
         if existing is None:
             # CR-31: allocate the slug + INSERT under the (engagement_id, slug)
@@ -890,6 +905,66 @@ def patch_finding(
         details_mode=details_mode,
     )
 
+# Documented (not hard-enforced) vocabulary for what a blocked finding is
+# waiting on. hunting.md: unblock_requirements.kind names the class of the
+# missing precondition; a light type check only — an unknown kind is NOT a 400
+# (mirrors the free-text/forward-compatible posture of probe result_status).
+_UNBLOCK_REQUIREMENT_KINDS = frozenset({"account", "line", "device", "credential", "access"})
+
+
+def _validate_unblock_requirements(value: Any) -> None:
+    """Light shape check for ``details.unblock_requirements`` on a blocked finding.
+
+    Optional. When present it must be an object; ``kind`` (if present) must be a
+    string, but its VALUE is not enum-enforced so a new kind does not require a
+    backend redeploy. ``description`` / ``requested_from`` are advisory free-text.
+    """
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="details.unblock_requirements must be an object",
+        )
+    kind = value.get("kind")
+    if kind is not None and not isinstance(kind, str):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="details.unblock_requirements.kind must be a string",
+        )
+
+
+def _validate_blocked_verification_details(
+    *,
+    incoming_details: dict[str, Any],
+    existing_details: dict[str, Any],
+) -> None:
+    """A ``blocked`` verification disposition REQUIRES a ``block_reason``.
+
+    Mirrors the intel precedent (``intel._validate_cve_attempted_blocked``): the
+    reason (why the exploit attempt could not even start) may arrive in this
+    verify's ``details`` OR already exist on the finding, but it must be present
+    (non-empty, <=500 chars) after the verify applies. This is a genuine
+    validation invariant — a hard 400 — not an advisory heuristic.
+    """
+    block_reason = incoming_details.get("block_reason")
+    if not (isinstance(block_reason, str) and block_reason.strip()):
+        block_reason = existing_details.get("block_reason")
+    if not isinstance(block_reason, str) or not block_reason.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="details.block_reason is required when disposition='blocked'",
+        )
+    if len(block_reason) > 500:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="details.block_reason exceeds 500 characters",
+        )
+    _validate_unblock_requirements(
+        incoming_details.get("unblock_requirements", existing_details.get("unblock_requirements"))
+    )
+
+
 def verify_finding(
     engagement_id: int,
     *,
@@ -948,6 +1023,19 @@ def verify_finding(
             )
         target_workflow = "false_positive"
         transition_action = "verified_false_positive"
+    elif normalized_disposition == "blocked":
+        # Blocked-for-provisioning (hunting.md): the attempt could not even start
+        # (missing account/line/device/credential/access). Requires a
+        # block_reason (present in this verify OR already on the finding). Marked
+        # verified so it leaves the unreviewed DoD queue, but report-readiness /
+        # the report projection exclude it on disposition ('blocked' is neither
+        # confirmed nor downgraded), keeping it OUT of the report until unblocked.
+        _validate_blocked_verification_details(
+            incoming_details=details_payload,
+            existing_details=_json_object(existing["details_json"]),
+        )
+        target_verification_state = "verified"
+        transition_action = "verified_blocked"
     elif normalized_disposition == "confirmed":
         transition_action = "verified_confirmed"
     elif normalized_disposition == "pending_runtime_proof":

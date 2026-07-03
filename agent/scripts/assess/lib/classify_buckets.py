@@ -23,6 +23,7 @@ Design notes:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -1111,6 +1112,90 @@ INERT_TYPES: frozenset[str] = frozenset(
 _INERT_TYPES = INERT_TYPES
 
 
+# ---------------------------------------------------------------------------- #
+# Classifier version stamp (reclassification staleness).
+#
+# `CLASSIFIER_VERSION` is a short, cross-process-DETERMINISTIC digest of EVERY
+# module-level table/constant that `classify_row` (and the helpers it calls)
+# reads to produce a row's `priority_score` / `cluster_key` / `priority_reason`
+# / `terminal_reason` / `matched_buckets`. That is NOT just the four headline
+# tables (`_BUCKETS`, `_REGEX_BUCKET_RULES`, `_TYPE_FLOOR`, `INERT_TYPES`): it
+# also covers the path-predicate signals (`_PRIVILEGED_ACTION_VERBS`,
+# `_FULL_URL_REGEX_BUCKETS`, the object-ref / api-version / cluster regexes and
+# `_PLACEHOLDER_TOKENS` / `_CLUSTER_PLACEHOLDERS`), the boost-only context tables
+# (`_NONPROD_HOST_LABEL_RE`, `_NONDEFAULT_PORTS`, `_LIVE_STATUS_TOKENS`), the
+# dead-archive demotion tables (`_GAU_ARCHIVE_SOURCE`, `_DEAD_LIVE_STATUS_TOKENS`),
+# the weak-token cap / fragment boundary / camelCase splitter, the SAML-auth
+# fragments, the upload-shadow set, AND a hand-maintained `_CLASSIFIER_LOGIC_REVISION`
+# integer that maintainers MUST bump for any `classify_row` LOGIC change not
+# captured by one of those data tables (e.g. an edit to the +15/+5 context
+# weights or a branch reordering). Constants DERIVED from `_BUCKETS` via `next(...)`
+# (`_IDOR_WEIGHT`, `_PRIVILEGED_ACTION_WEIGHT`, `_INTERESTINGEXT_WEIGHT`,
+# `_AUTH_KEY_SET`, `_SSO_PATH_FRAGMENTS`) are covered transitively — they cannot
+# change without `_BUCKETS` itself changing — so they are not re-listed.
+# `db_insert_work_item()` stamps it inline at ingest and
+# `classify-work` re-stamps it on every re-classification, so a later
+# `classify-work --reclassify-stale` can tell rows scored under an OLD taxonomy
+# from rows already at the current one — restamping only the stale
+# ones instead of the all-or-nothing `--reclassify-all`. A taxonomy edit to ANY
+# of the above tables bumps the digest so `--reclassify-stale` picks up the rows
+# it changes; keeping this input set complete is what makes that guarantee hold.
+#
+# DETERMINISM IS LOAD-BEARING (do not "simplify" this). The digest MUST be
+# identical across separate Python processes (the ingest process and the
+# `--reclassify-stale` process compute it independently); if it were not, every
+# row would always look stale and every run would reclassify the whole corpus.
+# That rules out `repr(frozenset(...))`, `str(set(...))`, and the builtin
+# `hash()` — all three are PYTHONHASHSEED-randomized, so their output varies run
+# to run. The same trap is documented at
+# `src/vigil_cli/bench/factory/axes.py:116` (blake2s chosen over `hash()` for
+# exactly this reason).
+#
+# We instead CANONICALIZE the input: recursively turn every set/frozenset into a
+# SORTED list (order-independent), leave tuples/lists in declaration order
+# (order IS meaningful for `_BUCKETS` tie-breaks), sort dict keys, then hash the
+# `sort_keys=True` JSON. A comment/refactor edit that does not change the tables
+# leaves the digest byte-identical; a real taxonomy edit (new bucket, changed
+# weight, new inert type, new regex rule) bumps it.
+def _canonicalize(obj: Any) -> Any:
+    """Return a JSON-serializable, order-canonical mirror of ``obj``.
+
+    Sets/frozensets → sorted lists (membership, not iteration order, is what
+    matters). Dicts → key-sorted dicts with canonicalized values. Tuples/lists
+    → lists with canonicalized elements, order PRESERVED (declaration order is
+    semantically significant for `_BUCKETS`). Compiled ``re.Pattern`` objects →
+    their source `.pattern` string (a bare Pattern is NOT JSON-serializable and
+    would crash `json.dumps`; the digest inputs pass `.pattern` explicitly, but
+    this keeps a stray Pattern from silently breaking the stamp). Scalars pass
+    through unchanged.
+    """
+    if isinstance(obj, re.Pattern):
+        return obj.pattern
+    if isinstance(obj, (set, frozenset)):
+        return sorted(_canonicalize(item) for item in obj)
+    if isinstance(obj, dict):
+        return {key: _canonicalize(value) for key, value in sorted(obj.items())}
+    if isinstance(obj, (list, tuple)):
+        return [_canonicalize(item) for item in obj]
+    return obj
+
+
+# `_CLASSIFIER_VERSION_INPUTS` and `CLASSIFIER_VERSION` are assembled at the END
+# of this module (see "Classifier version stamp — digest assembly" below): the
+# input set intentionally spans tables/regexes/scalars declared throughout the
+# file (context/demotion tables, weak-token cap, cluster placeholders, ...), so
+# the dict cannot be built here without forward-referencing names that do not
+# exist yet. `_canonicalize` (above) is the only piece needed at this point.
+
+# Sentinel `classifier_version` value for rows an operator has hand-tuned. It is
+# NOT a real digest, so it never equals `CLASSIFIER_VERSION` and is protected
+# from `--reclassify-stale` (which excludes it explicitly). `work-buffer
+# mark-manual <id>` stamps it; `--reclassify-all` is the only path that
+# overwrites it. Single source of truth so `classify_work.py` and the
+# `mark-manual` verb reference the same string.
+MANUAL_CLASSIFIER_VERSION: str = "manual"
+
+
 # Structured reason tags for deferred/skipped work items. SINGLE SOURCE OF TRUTH
 # for the skip vocabulary so `defer-cluster`/`defer-items`, `work-buffer stats
 # --by reason`, and any future gate read the same set. The stored value is
@@ -1867,3 +1952,65 @@ def classify_from_fields(
         live_status=live_status,
         demote_dead_archive=demote_dead_archive,
     )
+
+
+# ---------------------------------------------------------------------------- #
+# Classifier version stamp — digest assembly.
+#
+# Assembled here, at the module's end, because a complete `classify_row` digest
+# must reference constants declared throughout the file (the context/demotion
+# tables, `WEAK_TOKEN_CAP`, `_CLUSTER_PLACEHOLDERS`, `_AUTH_SAML_FRAGMENTS`, ...).
+# See the "Classifier version stamp" comment near `_canonicalize` for the intent
+# and the determinism contract. Every entry below is a classification-affecting
+# module-level constant; compiled `re.Pattern` values are digested via their
+# `.pattern` source string (a bare Pattern is not JSON-serializable). Constants
+# derived from `_BUCKETS` (`_IDOR_WEIGHT`, `_PRIVILEGED_ACTION_WEIGHT`,
+# `_INTERESTINGEXT_WEIGHT`, `_AUTH_KEY_SET`, `_SSO_PATH_FRAGMENTS`) are covered
+# transitively by `buckets` and deliberately not re-listed.
+
+# Hand-maintained logic-revision counter. BUMP THIS whenever you change
+# `classify_row` / `_context_bonus` / a classification helper in a way NOT
+# captured by one of the data tables digested below — e.g. editing the +15/+5
+# context-bonus weights, reordering the return branches, or adding a new scalar
+# literal to the scoring logic. It is the escape hatch that keeps the stamp from
+# silently falling out of sync with a pure-logic edit; a data-table edit already
+# bumps the digest on its own, so this only needs a bump for logic-only changes.
+_CLASSIFIER_LOGIC_REVISION: int = 1
+
+_CLASSIFIER_VERSION_INPUTS: dict[str, Any] = {
+    # Headline bucket / floor / inert tables.
+    "buckets": _BUCKETS,
+    "regex_bucket_rules": _REGEX_BUCKET_RULES,
+    "type_floor": _TYPE_FLOOR,
+    "inert_types": INERT_TYPES,
+    # Path-predicate signals (`classify_row` appends these directly).
+    "privileged_action_verbs": _PRIVILEGED_ACTION_VERBS,
+    "full_url_regex_buckets": _FULL_URL_REGEX_BUCKETS,
+    "auth_saml_fragments": _AUTH_SAML_FRAGMENTS,
+    "upload_generic_shadows": _UPLOAD_GENERIC_SHADOWS,
+    # Object-ref / cluster-normalization tables + regexes.
+    "placeholder_tokens": _PLACEHOLDER_TOKENS,
+    "cluster_placeholders": _CLUSTER_PLACEHOLDERS,
+    "uuid_re": _UUID_RE.pattern,
+    "long_hex_re": _LONG_HEX_RE.pattern,
+    "year_re": _YEAR_RE.pattern,
+    "numeric_re": _NUMERIC_RE.pattern,
+    "opaque_token_re": _OPAQUE_TOKEN_RE.pattern,
+    "api_version_seg_re": _API_VERSION_SEG_RE.pattern,
+    # Weak-token rescue: cap + camelCase splitter + fragment boundary.
+    "weak_token_cap": WEAK_TOKEN_CAP,
+    "camel_boundary_re": _CAMEL_BOUNDARY_RE.pattern,
+    "fragment_boundary": _FRAGMENT_BOUNDARY,
+    # Boost-only context layer (`_context_bonus`).
+    "nonprod_host_label_re": _NONPROD_HOST_LABEL_RE.pattern,
+    "nondefault_ports": _NONDEFAULT_PORTS,
+    "live_status_tokens": _LIVE_STATUS_TOKENS,
+    # Dead-archive demotion path (`_is_dead_archive_noise`).
+    "gau_archive_source": _GAU_ARCHIVE_SOURCE,
+    "dead_live_status_tokens": _DEAD_LIVE_STATUS_TOKENS,
+    # Logic-revision escape hatch (see above).
+    "logic_revision": _CLASSIFIER_LOGIC_REVISION,
+}
+CLASSIFIER_VERSION: str = hashlib.sha256(
+    json.dumps(_canonicalize(_CLASSIFIER_VERSION_INPUTS), sort_keys=True).encode("utf-8")
+).hexdigest()[:12]

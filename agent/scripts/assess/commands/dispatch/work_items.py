@@ -14,7 +14,7 @@ import sys
 
 from urllib.parse import quote
 
-from assess.lib.classify_buckets import reason_tag_of
+from assess.lib.classify_buckets import MANUAL_CLASSIFIER_VERSION, reason_tag_of
 from assess.lib.client import AssessmentClient
 from assess.lib.discovery import normalize_host
 from assess.lib.db import (
@@ -40,6 +40,7 @@ _DB_ACTIONS = (
     "fetch-by-priority",
     "defer-cluster",
     "defer-items",
+    "mark-manual",
     "done",
     "error",
     "reset-stale",
@@ -110,6 +111,25 @@ def _stats(db_path: str, *, by: str = "status") -> None:
             print(
                 f"{label}|{row['status']}|{row['count']}|max_priority={row['max_priority'] or 0}"
             )
+        return
+
+    if by == "classifier_version":
+        # Group by the classifier version stamp so an operator can see, at a
+        # glance, how much of the buffer was scored under the current
+        # `classify_buckets.CLASSIFIER_VERSION` vs an old taxonomy (stale) vs
+        # NULL (legacy, never stamped) vs 'manual' (hand-tuned, protected from
+        # `--reclassify-stale`). This is the read side of the reclassify-stale
+        # workflow — run it before/after a `_BUCKETS` change to size the drift.
+        print("--- Work Buffer by Classifier Version ---")
+        rows = db_query(
+            db_path,
+            "SELECT COALESCE(classifier_version, '(none)') AS classifier_version, "
+            "status, COUNT(*) as count "
+            "FROM work_items GROUP BY classifier_version, status "
+            "ORDER BY classifier_version, status",
+        )
+        for row in rows:
+            print(f"{row['classifier_version']}|{row['status']}|{row['count']}")
         return
 
     if by == "host":
@@ -219,6 +239,39 @@ def _defer_items(db_path: str, id_list, reason: str) -> None:
         sys.exit(1)
     print(
         f"Deferred {affected} pending item(s): {ids_repr} (reason: {reason})"
+    )
+
+
+def _mark_manual(db_path: str, id_list) -> None:
+    """Stamp `classifier_version='manual'` on specific work-item ids.
+
+    This is the escape hatch that protects hand-tuned rows (a priority bump or
+    a custom cluster_key an operator set by hand) from `classify-work
+    --reclassify-stale`, which restamps every row whose version is NULL or !=
+    the current digest but explicitly SKIPS the `manual` sentinel. Only
+    `--reclassify-all` (the nuclear option) overwrites a manual row. Unlike
+    defer, this touches ONLY the version stamp — status/priority/cluster are
+    left exactly as the operator tuned them. When zero rows match, exit
+    non-zero so a typo (or stale id list) does not look like a successful mark.
+    """
+    ids = _validate_id_list(id_list)
+    placeholders = ",".join("?" * len(ids))
+    affected = db_exec(
+        db_path,
+        f"UPDATE work_items SET classifier_version = ? WHERE id IN ({placeholders})",
+        (MANUAL_CLASSIFIER_VERSION, *ids),
+    )
+    ids_repr = ",".join(str(i) for i in ids)
+    if affected == 0:
+        print(
+            f"mark-manual: no work items matched the given ids "
+            f"(invalid or already removed?): {ids_repr}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(
+        f"Marked {affected} item(s) manual (protected from --reclassify-stale): "
+        f"{ids_repr}"
     )
 
 

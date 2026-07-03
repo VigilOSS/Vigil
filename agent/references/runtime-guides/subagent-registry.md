@@ -35,7 +35,7 @@ The operator's audit trail. One row per dispatched specialist agent.
 | `actual_model` | string | Model that actually executed when it differs from the request. |
 | `requested_reasoning` | string | Requested reasoning level. |
 | `actual_reasoning` | string | Observed reasoning level when it differs from the request. |
-| `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation`. |
+| `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm`. |
 | `finding_slugs_json` | JSON array | Finding slugs the dispatch produced (`agent done` PATCH may append additively). |
 
 ### CLI
@@ -76,7 +76,7 @@ The contract fields recorded on every `vigil assess agent start` / `POST /dispat
 
 | Field | Type | Values |
 |---|---|---|
-| `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` (see "Dispatch-Mode Declaration" in `agent/operator-core.md`) |
+| `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm` (see "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`) |
 | `skills` | string | Comma-separated skill names loaded by the specialist; required for non-operator roles. |
 | `requested_model` | string (optional) | Intended model id from the operator |
 | `actual_model` | string (optional) | Model that actually executed |

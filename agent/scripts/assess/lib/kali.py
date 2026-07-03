@@ -210,22 +210,130 @@ def _emit_probe_run(
 
 _IDENTITY_INJECTABLE_TOOLS = frozenset({"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"})
 
+# HTTP verbs that mutate server state. A CSRF double-submit token is only
+# meaningful on these — a GET/HEAD is read-only and never needs it (and a
+# framework that rejects an unexpected header on a safe request would be
+# needlessly tripped).
+_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _request_is_state_changing(cmd: list[str]) -> bool:
+    """True when the argv describes a state-changing HTTP request (curl-style).
+
+    Derived from the argv the same way the target host is (see
+    ``kali_resolve.target_host_port``). Precedence — and the reason we scan the
+    WHOLE argv before deciding rather than returning on the first hit:
+
+      1. An explicit ``-X/--request <verb>`` (attached ``-XPOST`` / ``--request=POST``
+         or a separate value) is AUTHORITATIVE — it sets the method. If that verb
+         is GET/HEAD the request is read-only even with a ``-d`` body attached, so
+         we must not let an earlier ``-d`` short-circuit us into "state-changing".
+      2. ``-G``/``--get`` forces curl to send a GET and move any ``-d`` data into the
+         query string, so ``-G -d k=v`` is a GET — the CSRF header must NOT inject
+         (a ``-d`` body no longer implies POST once ``-G`` is present).
+      3. Otherwise a request-body flag (``-d`` / ``--data`` / ``--data-*`` / ``--json``)
+         is curl's implicit POST → state-changing.
+
+    GET/HEAD — and anything we cannot positively classify (including bundled short
+    clusters like ``-sd`` we do not attempt to split) — are read-only, so the CSRF
+    header stays off by default (fail-safe: never stamp a header we are not sure
+    the request needs; a missed injection is harmless, a false one is not).
+    """
+    tokens = [str(t) for t in (cmd or [])]
+    n = len(tokens)
+    explicit_method: str | None = None
+    force_get = False
+    has_body_flag = False
+    for idx, tok in enumerate(tokens):
+        # -X POST / --request POST (verb as a separate token).
+        if tok in ("-X", "--request"):
+            if idx + 1 < n:
+                explicit_method = tokens[idx + 1].strip().upper()
+            continue
+        # -XPOST (attached short form) / --request=POST.
+        if tok.startswith("-X") and len(tok) > 2:
+            explicit_method = tok[2:].strip().upper()
+            continue
+        if tok.startswith("--request="):
+            explicit_method = tok.split("=", 1)[1].strip().upper()
+            continue
+        # -G / --get: curl sends a GET and appends -d data to the query string.
+        if tok in ("-G", "--get"):
+            force_get = True
+            continue
+        # Request-body flags imply a body → curl's implicit POST (unless -G/-X overrides).
+        if tok in ("-d", "--json"):
+            has_body_flag = True
+            continue
+        if tok.startswith("--data"):  # --data / --data-raw / --data-binary / --data-urlencode / --data=...
+            has_body_flag = True
+            continue
+        if tok.startswith("-d") and len(tok) > 2:  # -d@file / -dvalue (attached short form)
+            has_body_flag = True
+            continue
+    # Explicit method is authoritative; -G forces GET; else a body implies POST.
+    if explicit_method is not None:
+        return explicit_method in _STATE_CHANGING_METHODS
+    if force_get:
+        return False
+    return has_body_flag
+
+
+def _csrf_double_submit_pair(
+    material: dict, cookie_map: dict[str, str]
+) -> tuple[str, str] | None:
+    """Resolve an opt-in CSRF double-submit ``(header, value)`` from identity material.
+
+    The mapping is APP-SPECIFIC and OPT-IN — the header name and its source cookie
+    vary per target, so nothing is hardcoded::
+
+        material["csrf"] = {"cookie": "<cookie-name>", "header": "<header-name>"}
+
+    The value is mirrored from the named cookie in the ALREADY-BUILT ``cookie_map``
+    (the same host-scoped view that becomes the ``Cookie`` header), so the header
+    carries exactly the token the request also sends as a cookie — the double-submit
+    invariant. Returns ``None`` when the mapping is absent/malformed or the named
+    cookie is not present in this request's cookie view (no crash, no header).
+    """
+    csrf = material.get("csrf")
+    if not isinstance(csrf, dict):
+        return None
+    cookie_name = str(csrf.get("cookie") or "").strip()
+    header_name = str(csrf.get("header") or "").strip()
+    if not cookie_name or not header_name:
+        return None
+    value = cookie_map.get(cookie_name)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return (header_name, value)
+
 
 def _identity_header_pairs(
-    material: dict, *, request_host: str = ""
+    material: dict, *, request_host: str = "", state_changing: bool = False
 ) -> list[tuple[str, str]]:
     """Flatten an identity's auth material into ``(header, value)`` pairs.
 
     Supports a ``headers`` map, a ``cookies`` map plus the request-host-scoped
     ``host_cookies`` jar (joined into one ``Cookie`` header the way a browser
-    sends it), and an optional bearer ``token``. Order is deterministic.
+    sends it), an optional bearer ``token``, and an opt-in CSRF double-submit
+    header derived from a named cookie. Order is deterministic.
 
     ``request_host`` selects the matching ``host_cookies`` bucket(s) (I-22): a
     cookie-session app on a host other than the capture-time primary scope host
     would otherwise be sent the flat (mismatched/empty) cookie view and read the
-    request as "session stale". The host-scoped bucket overlays the flat
-    ``cookies`` view so the right session rides each host; with no ``host_cookies``
-    (or no match) the behavior is the unchanged flat-cookie injection.
+    request as "session stale". When a per-host bucket matches, it is used ALONE:
+    the flat ``cookies`` view is a UNION across every captured host, so blending it
+    in would leak another host's uniquely-named session cookies into this request
+    (cross-host session bleed). We fall back to the flat view ONLY for identities
+    that carry no per-host buckets at all (manual/legacy identities with no
+    ``host_cookies``); when buckets exist but none match this request host, we omit
+    cookies entirely rather than route the display-only union onto an unrelated
+    target.
+
+    ``state_changing`` gates the CSRF double-submit header: on a POST/PUT/PATCH/
+    DELETE the ``material["csrf"]`` mapping (if present) mirrors the named cookie's
+    value into the configured header so writes aren't CSRF-rejected and misread as
+    an auth gate (a false-negative BFLA risk). GET/HEAD never inject it.
     """
     pairs: list[tuple[str, str]] = []
     headers = material.get("headers")
@@ -234,13 +342,36 @@ def _identity_header_pairs(
             if str(key).strip():
                 pairs.append((str(key), str(value)))
     cookie_map: dict[str, str] = {}
-    cookies = material.get("cookies")
-    if isinstance(cookies, dict):
-        cookie_map.update({str(k): str(v) for k, v in cookies.items()})
-    cookie_map.update(host_cookies_for(material, request_host))
+    host_scoped = host_cookies_for(material, request_host)
+    if host_scoped:
+        # Authoritative per-host bucket: use it alone (no flat-union blend), so a
+        # cookie captured for a DIFFERENT host never rides this request.
+        cookie_map.update(host_scoped)
+    elif not host_cookie_hosts(material):
+        # This identity has NO captured per-host buckets at all (a manual/legacy
+        # identity whose only cookies live in the flat ``cookies`` view): fall
+        # back to that flat view. When per-host buckets DO exist but none match
+        # this request host (or a list-mode run left ``request_host`` empty) we
+        # deliberately OMIT cookies rather than fall back — ``material["cookies"]``
+        # is a DISPLAY-ONLY union across every captured host, so injecting it here
+        # would bleed another host's uniquely-named session cookies into this
+        # unrelated target (cross-host session bleed).
+        cookies = material.get("cookies")
+        if isinstance(cookies, dict):
+            cookie_map.update({str(k): str(v) for k, v in cookies.items()})
     if cookie_map:
         cookie = "; ".join(f"{k}={v}" for k, v in cookie_map.items())
         pairs.append(("Cookie", cookie))
+        # CSRF double-submit (opt-in, method-gated). Only on a state-changing
+        # request, only when the app-specific mapping resolves against a cookie
+        # this request actually carries, and never clobbering an operator-set
+        # header (mirrors the Authorization guard below).
+        if state_changing:
+            csrf_pair = _csrf_double_submit_pair(material, cookie_map)
+            if csrf_pair is not None:
+                header_name, header_value = csrf_pair
+                if not any(name.lower() == header_name.lower() for name, _ in pairs):
+                    pairs.append((header_name, header_value))
     token = _identity_bearer_token(material)
     if token and not any(name.lower() == "authorization" for name, _ in pairs):
         pairs.append(("Authorization", f"Bearer {token}"))
@@ -275,19 +406,22 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
     """
     if not isinstance(material, dict):
         return False
-    request_host = kali_resolve.target_host_port(tool_name, cmd)[0]
-    pairs = _identity_header_pairs(material, request_host=request_host)
-    if not pairs:
-        return False
     exe = os.path.basename(str(cmd[0])).lower() if cmd else ""
     if exe not in _IDENTITY_INJECTABLE_TOOLS:
         return False
-    for name, value in pairs:
-        cmd.extend(["-H", f"{name}: {value}"])
+    request_host = kali_resolve.target_host_port(tool_name, cmd)[0]
+    state_changing = _request_is_state_changing(cmd)
+    pairs = _identity_header_pairs(
+        material, request_host=request_host, state_changing=state_changing
+    )
     # WARN when the identity carries captured host_cookies that did NOT make it
     # into this request — a request to a host with no matching bucket (or a
     # list-mode run with no single request host) — so a cookie-session app isn't
     # silently probed without its session and read as "session stale" (I-22).
+    # Emitted BEFORE the empty-``pairs`` short-circuit: when the identity's only
+    # material is per-host cookies and none match this host, we now correctly omit
+    # the cross-host flat-union fallback, which can leave ``pairs`` empty — but the
+    # operator still needs to know the session did not ride this run.
     bucket_hosts = host_cookie_hosts(material)
     if bucket_hosts and not host_cookies_for(material, request_host):
         print(
@@ -298,6 +432,10 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
             "as stale; target a single host this identity has a session for.",
             file=sys.stderr,
         )
+    if not pairs:
+        return False
+    for name, value in pairs:
+        cmd.extend(["-H", f"{name}: {value}"])
     return True
 
 

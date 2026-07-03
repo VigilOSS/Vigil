@@ -65,9 +65,10 @@ OOS notes:
 ### Program-Mandated Headers
 
 ```bash
-# Register these before any probing:
-vigil engagement set-header <engagement-key> "X-Bug-Bounty-Researcher" "<handle>"
-vigil engagement set-header <engagement-key> "User-Agent" "BugBountyResearcher/<handle>"
+# Register these before any probing. set-header takes the engagement key plus a
+# single "Name: Value" string (NOT separate name and value arguments):
+vigil engagement set-header <engagement-key> "X-Bug-Bounty-Researcher: <handle>"
+vigil engagement set-header <engagement-key> "User-Agent: BugBountyResearcher/<handle>"
 ```
 
 | Header | Value | Injection method |
@@ -92,7 +93,7 @@ Placement decision (fill in one):
 ## 3. Rate Cap
 
 > Exceeding the program's rate cap risks a ban or invalidation of findings.
-> The per-target rate table in `agent/operator-core.md` "Recon Dispatch Resource Policy"
+> The per-target rate table in `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy"
 > provides per-trait defaults; the values below OVERRIDE those defaults for this engagement.
 
 | Surface | Max requests/sec | Max concurrency | Notes |
@@ -102,8 +103,8 @@ Placement decision (fill in one):
 | Authenticated flows | `[FILL]` | `[FILL]` | [FILL: e.g., "session invalidates on rapid reuse"] |
 
 Back-off rule: on a 429, pause `[FILL: e.g., 60]` seconds before retrying. Do not bypass
-the rate limit — `agent/operator-core.md` §201 makes this explicit; the program may revoke
-scope on violation.
+the rate limit — `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" makes this explicit;
+the program may revoke scope on violation.
 
 ---
 
@@ -132,18 +133,38 @@ so the operator can confirm the boundary.
 
 > Any flow that on success OR failure could land in a real inbox, create a persistent
 > record visible to real users, or send a notification must be characterized statically —
-> not proved by triggering it. See `agent/shared-constraints.md` §1/§2 for the doctrine.
+> not proved by triggering it. See `agent/shared-constraints.md` §2d for the doctrine
+> (static-first characterization, the reaches-a-real-third-party test, and the capped
+> 1-3 live-fire budget for genuine unknowns).
 
 Known irreversible / notifying flows in this engagement:
 
-| Endpoint / action | Side effect | Approved for probing? | Condition |
-|-------------------|-------------|----------------------|-----------|
-| `[FILL: e.g., POST /api/support/ticket]` | Creates a real support ticket visible to the vendor | No | Record a scope_decision; do not fire |
-| `[FILL: e.g., POST /api/password-reset]` | Sends a reset email to the account address | Conditional | Only with a researcher-owned email address |
-| `[FILL: add rows]` | | | |
+| Endpoint / action | Side effect | Real recipient? (yes\|no\|unknown) | Approved for probing? | Condition |
+|-------------------|-------------|----------------------------------|----------------------|-----------|
+| `[FILL: e.g., POST /api/support/ticket]` | Creates a real support ticket visible to the vendor | Yes | No | Record a `human_reach_decision`; do not fire |
+| `[FILL: e.g., POST /api/password-reset]` | Sends a reset email to the account address | Unknown | Conditional | Only with a researcher-owned email address (see Known-Safe Test Destinations below) |
+| `[FILL: add rows]` | | | | |
 
 Static characterization procedure: describe the likely behavior from source / spec /
-documentation and record a `scope_decision`. Do not trigger to confirm.
+documentation and record a `scope_decision`. Do not trigger to confirm beyond the
+capped live-fire budget in `agent/shared-constraints.md` §2d when the recipient is
+genuinely unknown.
+
+### Known-Safe Test Destinations
+
+> Pre-declare test identities and destinations here that are proven NEGATIVE under
+> the `agent/shared-constraints.md` §2d "reaches-a-real-third-party" test — a
+> researcher-owned mailbox/phone, a documented sandbox with no live inbox, or a
+> self-directed test account. A destination listed here is ordinary surface — hunt
+> it fully; sending to it does not consume the §2d live-fire budget and does not
+> need a `human_reach_decision` record.
+
+| Destination | Type | Owner / control | Notes |
+|-------------|------|-----------------|-------|
+| `[FILL: e.g., pentest+vigil@researcher.example]` | Email | Researcher-owned mailbox | Safe for password-reset / notification testing |
+| `[FILL: e.g., +1-555-0100]` | Phone / SMS | Researcher-owned test number | Safe for SMS-notification testing |
+| `[FILL: e.g., staging.example.com sandbox tenant]` | Sandbox account | Provisioned by the program, no live inbox | Confirmed no delivery to real users |
+| `[FILL: add rows]` | | | |
 
 ---
 
@@ -180,10 +201,16 @@ Known non-submittable classes for this program:
 - [ ] Self-XSS (requires victim interaction not achievable by attacker)
 - [ ] `[FILL: any program-specific not-applicable class]`
 
-Finding lifecycle for parked findings:
-1. Record normally via `vigil assess record-finding` with `status=parked`
-2. Add a `parked_reason` to `details.notes`
-3. Re-evaluate after each engagement phase — a chain may promote it
+Finding lifecycle for parked findings (there is no `parked` status — use the real
+holding-area mechanism):
+1. Record normally via `vigil assess record-finding`. For informational / not-applicable-by-policy
+   classes, set `evidence_type=informational`; for a strong-but-unproven finding or chain primitive,
+   set `evidence_type=theoretical` and `details.chain_required=true` (with `details.chain_rationale`).
+2. Move it into the holding area so it stays OUT of the report until proven, rather than leaving it
+   report-ready: `vigil assess verify-finding <slug> --disposition pending_runtime_proof --reason "parked: <why not yet submittable>"`.
+   The park reason lives in that verification reason / `details.chain_rationale`, not a non-existent `parked_reason`.
+3. Review the holding area with `vigil assess list-findings --holding` and re-evaluate after each
+   engagement phase — a chain may promote it to submittable.
 
 ---
 
@@ -221,7 +248,7 @@ export SUBFINDER_GITHUB_TOKEN="[FILL: personal token, read:packages scope]"
 After setting the keys, re-run the dns-discovery stage:
 
 ```bash
-vigil assess dns-discovery --engagement-key <key>
+vigil assess dns-discovery <apex-domain> --engagement-dir <engagement-dir>
 # OR if already ran subfinder:
 vigil assess kali subfinder -d <apex-domain> -all -recursive \
   -o /engagements/<key>/scans/subs_passive_refresh.txt \

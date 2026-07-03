@@ -15,7 +15,7 @@ from typing import Any, Iterator
 # `_load_script_module` test loader (which also inserts the scripts dir on
 # sys.path before exec_module). A relative `from .classify_buckets` fails
 # in the test path because the file is loaded without a parent package.
-from assess.lib.classify_buckets import INERT_TYPES
+from assess.lib.classify_buckets import CLASSIFIER_VERSION, INERT_TYPES
 
 _SCHEMA_FILE = Path(__file__).resolve().parent.parent.parent / "schema.sql"
 
@@ -46,6 +46,10 @@ _WORK_ITEMS_PRIORITY_COLUMNS: tuple[tuple[str, str], ...] = (
     # an explicit 0/1.
     ("request_body_truncated", "INTEGER NOT NULL DEFAULT 0"),
     ("response_truncated", "INTEGER NOT NULL DEFAULT 0"),
+    # Reclassification staleness stamp. Legacy rows come back NULL (interpreted
+    # as "scored under an unknown/old bucket table") so `classify-work
+    # --reclassify-stale` picks them up on first run.
+    ("classifier_version", "TEXT"),
 )
 _CASES_TRUNCATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("request_body_truncated", "INTEGER NOT NULL DEFAULT 0"),
@@ -541,7 +545,8 @@ def db_insert_work_item(
                 priority_score = ?,
                 priority_reason = ?,
                 cluster_key = ?,
-                terminal_reason = ?
+                terminal_reason = ?,
+                classifier_version = ?
             WHERE queue_key = ?
               AND status = 'skipped'
               AND terminal_reason LIKE 'skipped:out-of-scope%'
@@ -559,6 +564,7 @@ def db_insert_work_item(
                 assignment["priority_reason"],
                 assignment["cluster_key"],
                 assignment["terminal_reason"],
+                CLASSIFIER_VERSION,
                 queue_key,
             ),
         ).rowcount
@@ -576,6 +582,7 @@ def db_insert_work_item(
                     priority_reason = ?,
                     cluster_key = ?,
                     terminal_reason = ?,
+                    classifier_version = ?,
                     signals = COALESCE(?, signals),
                     selected_by = COALESCE(?, selected_by),
                     triage_rationale = COALESCE(?, triage_rationale),
@@ -587,6 +594,7 @@ def db_insert_work_item(
                     priority_reason if priority_reason is not None else assignment["priority_reason"],
                     cluster_key if cluster_key is not None else assignment["cluster_key"],
                     terminal_reason if terminal_reason is not None else assignment["terminal_reason"],
+                    CLASSIFIER_VERSION,
                     signals,
                     selected_by,
                     triage_rationale,
@@ -610,7 +618,8 @@ def db_insert_work_item(
             SET priority_score = ?,
                 priority_reason = ?,
                 cluster_key = ?,
-                terminal_reason = COALESCE(?, terminal_reason)
+                terminal_reason = COALESCE(?, terminal_reason),
+                classifier_version = ?
             WHERE queue_key = ?
               AND priority_score = 0
               AND cluster_key IS NULL
@@ -620,6 +629,7 @@ def db_insert_work_item(
                 assignment["priority_reason"],
                 assignment["cluster_key"],
                 assignment["terminal_reason"],
+                CLASSIFIER_VERSION,
                 queue_key,
             ),
         )
