@@ -1,11 +1,9 @@
 -
 # Maintainer & contributor guide
 
-This is the hand-maintained development guide for the repository: local setup, the
+This is the development guide for the repository: local setup, the
 "clone -> first dispatch" walkthrough, step-by-step recipes for extending the system, and the
-verification and regeneration rules contributors must follow. It is **not** the operator prompt —
-`agent/AGENTS.md` is the generated operator wrapper, and editing it directly is overwritten on the
-next render.
+verification and regeneration rules contributors must follow.
 
 Read alongside this file:
 - [`README.md`](README.md) — install, runtime model, and engagement startup reference for users.
@@ -44,30 +42,7 @@ This repository is managed with **[Jujutsu (`jj`)](https://github.com/jj-vcs/jj)
 **colocated** with Git — a `.jj/` and a `.git/` sit side by side. Plain `git` *read* commands
 (`git log`, `git status`, `git diff`) still work and reflect the live state, but make all
 commits / branches / pushes with `jj`, **not** `git` — mixing in `git commit`/`checkout`/`branch`
-desyncs the colocation. If you only know Git, internalize these differences first:
-
-- **No staging area.** The working copy *is* a commit (the change at `@`). `jj` auto-snapshots your
-  edits into it on every command — there is no `git add`. `jj st` shows the working-copy diff and the
-  current change.
-- **Describe, then start the next change.** `jj describe -m "msg"` sets the current change's commit
-  message; `jj new` opens a fresh empty change on top (so the described one becomes its parent).
-  `jj log` shows the graph: the short *change-id* on the left, the Git commit hash on the right, and
-  any bookmarks inline.
-- **Write commit messages for the next developer, not yourself.** An imperative summary of *what*
-  changed plus a body explaining *why* — no internal codenames, workstream labels, or "Phase N"
-  jargon that means nothing outside this session; end with the `Co-Authored-By` trailer. Someone
-  reading `jj log`/`git log` cold should understand the change without asking.
-- **Bookmarks are branches.** `jj` uses *bookmarks* instead of Git branches. PRs here are created with
-  `jj git push --change @` (alias `-c`), which mints an auto-named `push-<random>` bookmark and pushes
-  it — that is why the PR head branches are named e.g. `push-ommwlslwsorl`. To update an open PR,
-  re-run `jj git push` (the bookmark tracks your change). Create/move a named bookmark with
-  `jj bookmark set <name> -r @`.
-- **Nothing is "detached" or dangling.** Unlike Git there is no detached-HEAD hazard: every change is
-  tracked, and `jj op log` + `jj undo` recover any prior state. A Git-style "this commit isn't on a
-  branch, move it before you lose it" instinct does **not** apply here.
-- **Common map:** `git switch`→`jj edit <rev>` / `jj new <rev>`; `git commit -a`→`jj describe`;
-  `git rebase`→`jj rebase`; `git push -u origin HEAD`→`jj git push -c @`; `git stash`→just `jj new`
-  (the WIP stays its own change). Pull with `jj git fetch`.
+desyncs the colocation. To learn more load the Jujutsu skill.
 
 # Newcomer walkthrough: clone to first dispatch
 
@@ -258,7 +233,7 @@ a test. `agent/scripts/assess/cli.py` is the authoritative subcommand registry.
    `orchestrator/backend/tests/test_anomaly_score.py`, then assert on `run(...)` behavior:
 
    ```bash
-   uv run --directory orchestrator/backend pytest orchestrator/backend/tests/test_<name>.py
+   uv run --directory orchestrator/backend --extra dev pytest tests/test_<name>.py
    ```
 
    If the verb persists a new field that the backend stores, follow the coupling and registration
@@ -284,7 +259,7 @@ reproducible verdict (anomaly ranking, payload classification, reachability) the
    for file + stdin input, mirroring `test_anomaly_score.py`. Keep every case deterministic:
 
    ```bash
-   uv run --directory orchestrator/backend pytest orchestrator/backend/tests/test_<name>.py
+   uv run --directory orchestrator/backend --extra dev pytest tests/test_<name>.py
    ```
 
    When an invariant must exist in exactly one place (a bucket table, an enum, a noise filter), make
@@ -322,33 +297,6 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
    Commit the fixture and definition together so replay stays zero-token. Use
    `vigil assess eval-capture ... --check` after a re-run to diff a fresh capture against the committed
    baseline without overwriting it; it exits non-zero on a coverage regression.
-
-## Promote engagement lessons to the prompt layer
-
-After each engagement, review it for durable, capability-neutral lessons and promote them so
-future engagements benefit. This closes the loop the tool-registration recipes above leave open
-for prompt-level learning — a tool's kali wrapper lands via the recipes above; engagement
-methodology observations belong here.
-
-1. **Identify promotable lessons.** Review any `ISSUES.md` or `METHODOLOGY-GAPS.md` artifacts
-   the engagement produced. A lesson is promotable when it generalizes across engagements without
-   naming a specific host, slug, CMS, or program-specific rule. Engagement-specific ROE (no-fire
-   endpoints, required request headers, specific marker values, rate caps) belongs in the
-   ENGAGEMENT.md template or `scope.json`, not in global prompts — it never enters
-   `operator-core.md` or `shared-constraints*.md`.
-
-2. **Route to the right layer.** Choose the lowest-specificity layer the lesson fits:
-   - Operator-loop workflow or dispatch doctrine → `agent/operator-core.md` (rerender after editing)
-   - Always-active hunting / reporting / adversarial guardrails → `agent/rules/*.md` (no render)
-   - Vuln-family or tool procedure methodology → `agent/skills/<name>/SKILL.md` (no render; follow
-     **Add a skill** above if no existing skill fits)
-   - Rules that must hold across many specialists → `agent/shared-constraints.md` (no render)
-
-3. **Verify.**
-   - [ ] Each edited file contains no real host, slug, program name, or per-engagement ROE.
-   - [ ] If `agent/operator-core.md` or `agent/agents/*.md` was touched: rerender
-         (`cd agent && ./scripts/render-operator-prompts.sh repo`) and review wrapper diffs.
-   - [ ] If a new skill was created: `vigil assess list-skills | grep <name>` confirms discovery.
 
 # Code map maintenance
 
@@ -459,14 +407,15 @@ If a change affects prompt generation, rerender and review the generated wrapper
 If a change affects CLI ownership or lifecycle behavior, run the relevant backend CLI and API tests,
 not markdown wording tests.
 
-Run the change against the **Prompt health ruleset** (`# Prompt Authoring Standards` below) as
-well — it is the standing checklist for Load-First budgets, MANDATORY-vs-LOAD-ON-FIRST-USE splits,
-duplication, and dispatch-field placement, and applies on top of the coherence pass above.
+Run the change against the **prompt health ruleset** in
+[`docs/prompt-authoring-standards.md`](docs/prompt-authoring-standards.md) as well — it is the
+standing checklist for Load-First budgets, MANDATORY-vs-LOAD-ON-FIRST-USE splits, duplication, and
+dispatch-field placement, and applies on top of the coherence pass above.
 
 If the change adds a primitive to a role (a Load-First shape, a dispatch field, a disposition
 vocabulary, a pointer form), it is not done until it is propagated and grep-verified across every
-role it applies to — see the **Propagation standard** in Rule 12 of the health ruleset. "Added to
-one role" is a prototype, not a landed change.
+role it applies to — see Rule 12 of that ruleset. "Added to one role" is a prototype, not a landed
+change.
 
 ## Markdown prompt/doc testing policy
 
@@ -476,6 +425,17 @@ editing into fixture maintenance and encourage preserving stale phrasing instead
 instructions. Keep durable contracts in code-owned surfaces instead: CLI helpers, backend request
 models, schema generation, API/service behavior, and tests for those executable contracts. For
 prompt/doc changes, rerender generated artifacts when required and review the markdown diffs.
+
+# Prompt authoring standards
+
+Every prompt in this system — operator doctrine, role prompts, skills, shared constraints, and
+rules — follows the conventions in
+[`docs/prompt-authoring-standards.md`](docs/prompt-authoring-standards.md): the twelve-rule
+**prompt health ruleset** (Load-First budgets, MANDATORY-vs-LOAD-ON-FIRST-USE splits, DRY,
+mode-gating, dispatch-field placement, FP-gate naming, root-causing prohibitions, and primitive
+propagation) plus the authoring principles behind it (positive instructions with reasoning,
+division of labor over prohibition, role clarity, checklist verification). Run every prompt/doc
+edit through that ruleset in addition to the **Prompt edit checklist** above.
 
 # Tests & verification
 
@@ -552,172 +512,3 @@ Build the primary runtime image from the repo root:
 docker build -t vigil:latest -f agent/docker/runtime-full/Dockerfile .
 ```
 
-# Prompt Authoring Standards
-
-All prompts in this system — operator instructions, agent prompts, skill definitions, and rules — follow
-these conventions based on [Anthropic's prompt engineering guidance](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview). Apply them when writing new prompts or editing existing ones.
-
-## Positive instructions with reasoning
-
-State what to do, then explain why. The reasoning helps the model generalize to edge cases that
-the literal rule doesn't cover.
-
-Instead of: "Do NOT test directly with host-side commands."
-Write: "Dispatch to the appropriate subagent for testing — analysis and testing belong to specialist agents because they carry the skill context and methodology depth that the operator prompt lacks."
-
-The reasoning ("because they carry the skill context") lets the model judge novel situations where
-the rule might or might not apply, rather than pattern-matching on the prohibition.
-
-## Why this matters for LLM prompts
-
-Negative instructions ("don't do X") tell the model what to avoid but leave the desired behavior
-unspecified. The model must infer what to do instead, which introduces ambiguity. Positive
-instructions ("do Y, because Z") specify the desired behavior directly and ground it in a reason
-the model can evaluate.
-
-## Structure for constraints
-
-When a constraint is load-bearing (safety, correctness, or quality depends on it):
-
-```
-[What to do] — [why, in terms of what breaks if violated]
-```
-
-Examples from this prompt set:
-- "Use `vigil assess record-surface` for all surface writes — calling the library directly bypasses backend sync"
-- "Finding IDs are allocated by `vigil assess record-finding` under a lock — hand-allocating risks collisions"
-- "Route all in-scope target work through the `vigil assess kali` CLI — host-side probes bypass the runtime's network isolation"
-
-## Role clarity in agent prompts
-
-Each agent prompt starts with a single sentence that establishes identity and scope. This focuses
-the model's behavior without requiring prohibition lists.
-
-Example: "You are the primary vulnerability analyst for source code. You receive pre-built context
-slices and your job is to determine whether an attacker controlling the identified inputs can
-cause harm."
-
-## Checklist format for verification
-
-Use markdown checkboxes for pre-work and pre-output verification steps. Checklists are more
-reliable than prose instructions because the model can evaluate each item independently.
-
-## Division of labor over prohibition
-
-When the operator should not do something, frame it as belonging to a specific agent rather
-than as a prohibition on the operator.
-
-Instead of: "The operator must not evaluate guards or sinks."
-Write: "Guard and sink evaluation belong to code-vuln-hunter — the operator provides the context slices and records the results."
-
-## Prompt health ruleset
-
-The twelve rules below are the standing health checklist for every prompt/doc edit — role files
-(`agent/agents/*.md`), shared layers (`agent/shared-constraints*.md`), rules (`agent/rules/*.md`),
-and operator doctrine (`agent/operator-core*.md`). They exist because a specialist's real context
-is not just its role file — it is the role file **plus every `## Load First` entry**, and that
-standing load grows silently whenever a rule gets re-authored in a second place instead of
-pointed to. Apply this checklist alongside the **Prompt edit checklist** above; it governs
-prompt-health quality, not the coherence pass that checklist runs.
-
-### 1. State a per-role Load-First budget
-
-A role's real context cost is its own body plus every file listed under **MANDATORY** in its
-`## Load First` section — not the role file's line count in isolation. When you add a role or a
-mandatory Load-First entry, note the resulting total against the role's stated budget (or set one
-if none exists). Growth past the budget is a signal to trim or hoist content out (per Rule 3),
-not to accept a creeping standing load.
-
-### 2. Split Load First into MANDATORY vs LOAD-ON-FIRST-USE
-
-Every role's `## Load First` section separates what is loaded unconditionally from what is loaded
-lazily, trigger-gated on the situation that needs it — see `agent/agents/recon-specialist.md`
-(`## Load First`) for the canonical shape: a **MANDATORY (before any work)** list and a
-**LOAD-ON-FIRST-USE (lazy)** list where each entry states the trigger inline (e.g. "when you run
-the L1 ffuf pass (step 6)"). A file that only a subset of dispatches ever need belongs in the lazy
-list with its trigger named, not in MANDATORY by default.
-
-### 3. DRY — a rule lives in one file
-
-Author a procedure, contract, or piece of judgment exactly once, in its owning file; every other
-site gets a short pointer, not a restatement. Duplication drifts (two copies of the same OOB
-mint→poll sequence, or a CVSS-table cross-reference that goes stale when the table moves) and each
-copy adds standing-load weight the specialist pays on every dispatch. Use a pointer, not a
-paraphrase — for example, the canonical cross-family pointer used by every offensive/code role for
-context-isolation, finding-recording format, and closing-sequence wrapper is:
-
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
-
-### 4. Single responsibility, mode-gated
-
-A role prompt covers one specialist's job. Content that only applies in one operating mode (a
-review pass, a final-report run, an exploit-review gate) is gated behind an explicit mode check
-in the prompt, not always-loaded prose the specialist must mentally filter on every dispatch.
-Prefer "Iteration mode: ... **Default when omitted:** ..." framing (see
-`agent/agents/recon-specialist.md`'s "Iteration mode:" line) over one role file quietly doing two
-jobs.
-
-### 5. Injected content gets a named top-of-dispatch field
-
-Position beats verbosity: content that is specific to one dispatch (a mindset lens, `hunt_scope`,
-coverage/ROE state) goes in a named field at the very TOP of the dispatch prompt, ahead of the
-~400-line role body. Content buried after a long fixed role body is the "lost in the middle"
-failure mode — the per-dispatch instruction that should govern the run gets out-competed by
-generic role prose the model read first.
-
-### 6. Must-reads are conditional pointers with a stated trigger
-
-When a role's Load First list points at another doc instead of inlining it, the pointer states the
-trigger condition, not just the filename — a bare filename forces the specialist to load it
-defensively (paying the cost anyway) or skip it wrongly. Model wording: *"load in full only
-immediately before authoring a confirmed/upgraded finding's report-ready details, in review mode,
-or when drafting an external submission — not for exploration/kill."*
-
-### 7. Every dispatch names its FP gate
-
-Any dispatch that produces or reviews a finding cites its false-positive/severity-downgrade gate
-by name — e.g. `agent/references/finding-fp-and-severity-gate.md` — so the specialist knows which
-document governs disposition before it writes a verdict, rather than inferring it from role prose
-scattered across the file.
-
-### 8. New per-dispatch dimensions extend the header, never fork a role
-
-When you add a new axis a dispatch can vary along (e.g. a depth split, a mindset selection), add
-it as a field in the existing Dispatch Context Template / Specialist Dispatch Contract header in
-`agent/operator-core.md`, and thread it through the existing role file. Do not fork a second role
-file to carry the new dimension — that reintroduces the duplication Rule 3 forbids and splits a
-single specialist's contract across two authoritative sources.
-
-### 9. Length changes restate the budget
-
-When a role file's or shared layer's line count changes meaningfully, restate its new total against
-the Rule 1 budget in the same change — a trim that isn't reflected in the stated budget, or a
-growth that silently blows past it, is exactly the drift this checklist exists to catch.
-
-### 10. No CI wording tests — advisory only
-
-Per the **Markdown prompt/doc testing policy** above, prompt/doc health (including any per-role
-line-count check) is enforced as a human authoring checklist plus, at most, an advisory WARN — never
-a blocking CI wording test. A wording or line-count assertion that fails the build turns normal
-prompt editing into fixture maintenance and rewards preserving stale phrasing over improving the
-instructions; keep any automated signal non-blocking.
-
-### 11. Root-cause every prohibition before writing a "do not"
-
-Before you write a "do not" / "never" / "must not," diagnose why the unwanted behavior happens —
-is it a **missing WHY** (the model doesn't know the reason, so state the reason and the positive
-action), a **structural problem** (the prompt makes the wrong thing easy or the right thing
-unavailable, so fix the structure), or a **division-of-labor issue** (the work belongs to a
-different role/command, so route it there per "Division of labor over prohibition" above)? Fix the
-cause; a bare prohibition is the last resort, used only when no root-cause fix applies. A prohibition
-that survives this pass keeps the mechanism it protects adjacent to it (see `agent/agents/ir-lead.md`'s
-prohibition + protected-mechanism shape) so a future editor can see what it guards.
-
-### 12. Propagate a primitive to every role it applies to, then grep-verify
-
-A primitive added to one role is a **prototype, not a direction, until it is propagated and
-grep-verified across every role it applies to. "Added to VA/EX" is never "done."** When you
-introduce a shared primitive (a new Load-First shape, a dispatch field, a disposition vocabulary,
-a pointer form), finish the change with an explicit list of the roles it applies to plus a grep
-pattern that must return **0 residual matches** (of the old form) across all `agent/agents/*.md` —
-otherwise the rollout re-creates the exact duplication Rule 3 exists to kill.
