@@ -166,7 +166,7 @@ Phase 4a (in the CONSUME & TEST step below) is a **coverage audit**, not a secon
 | recon-specialist | Recon-completeness assessment over the operator's `vigil assess recon` job + bounded per-host web fingerprinting | Phase 1, after the recon job (parallel with source-analyzer) |
 | source-analyzer | HTML/JS/CSS analysis for hidden routes, secrets | Phase 1 (parallel with recon) |
 | surface-collector | URL collection, dedup, intelligent triage, work-buffer population | Phase 2 |
-| vulnerability-analyst | Validates endpoints with targeted probes, produces durable evidence, reviews findings in Phase 5 | Phase 4 + Phase 5 verification |
+| vulnerability-analyst | Primary hunter — surveys wide then deep, confirms leads with targeted probes, produces durable evidence, reviews findings in Phase 5 | Phase 4 + Phase 5 verification |
 | exploit-developer | Exploit verified findings, chain analysis, impact | Phase 6 |
 | fuzzer | High-volume testing (100+ payloads) | When FUZZER_NEEDED |
 | osint-analyst | CVE/breach/DNS/social research backed by backend intel tables | Phase 6 (parallel with exploit) |

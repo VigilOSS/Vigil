@@ -149,7 +149,7 @@ agent_description() {
     recon-specialist) printf '%s\n' "Recon completeness assessor + bounded web fingerprinting over the supervised recon pipeline." ;;
     source-analyzer) printf '%s\n' "Frontend and client-source analysis specialist." ;;
     surface-collector) printf '%s\n' "URL collection, deduplication, and intelligent triage specialist for Phase 2." ;;
-    vulnerability-analyst) printf '%s\n' "Validation-focused analyst for attackability and evidence quality." ;;
+    vulnerability-analyst) printf '%s\n' "Primary vulnerability hunter — surveys wide, goes deep where signal is, adjudicates with evidence-first rigor." ;;
     exploit-developer) printf '%s\n' "Exploitation and chain-building specialist." ;;
     fuzzer) printf '%s\n' "High-volume fuzzing specialist for bounded payload families." ;;
     osint-analyst) printf '%s\n' "External intelligence specialist for CVEs, disclosures, and context." ;;
@@ -330,7 +330,7 @@ render_agent_roster() {
 | `recon-specialist` | Recon-completeness assessment over the `vigil assess recon` job + bounded per-host web fingerprinting. | Phase 1 (after the recon job). |
 | `source-analyzer` | Deep static analysis of HTML/JS/CSS for hidden routes, API endpoints, secrets. | Phase 1 (parallel with recon). |
 | `surface-collector` | URL collection, dedup, intelligent triage, work-buffer population. | Phase 2. |
-| `vulnerability-analyst` | Validates endpoints with targeted probes, produces durable evidence, reviews findings in Phase 4. | Phase 3 + Phase 4 verification. |
+| `vulnerability-analyst` | Primary hunter — surveys wide then deep, confirms leads with targeted probes, produces durable evidence, reviews findings in Phase 4. | Phase 3 + Phase 4 verification. |
 | `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 5. |
 | `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
 | `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 5 (parallel with exploit). |
