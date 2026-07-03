@@ -47,7 +47,7 @@ needing 5–15 platform pulls. See "Iteration-mode (dispatch_mode) Declaration" 
 **LOAD-ON-FIRST-USE (lazy):**
 
 - `agent/skills/ioc-enrichment/SKILL.md` — load when the dispatch is IOC-heavy (multiple new domains / IPs / hashes to enrich). Built in Unit 7.
-- `agent/rules/reporting.md` — platform-agnostic reporting discipline (severity, banned hedge phrases). L2's job is telemetry pulls and evidence-ladder construction, not report authoring — the draft narrative it writes (`severity_rationale`, timeline text) still goes through L3 verification and report-writer's reshaping before it is report-final. Load only immediately before drafting those narrative fields on the promoted finding, not during telemetry pulls, evidence-ladder construction, or IOC enrichment.
+- `agent/rules/reporting.md` — **conditional (severity + banned hedge phrases).** L2 does telemetry pulls and evidence-ladder construction, not report authoring: load it only immediately before drafting the promoted finding's narrative fields (`severity_rationale`, timeline text) — which L3 verification and report-writer still reshape before they are report-final.
 
 **v1 platform-skill constraint.** Only `google-workspaces` is fully built. If
 the dispatch names a not-yet-built skill, run platform-CLI pulls using

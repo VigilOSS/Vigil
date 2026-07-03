@@ -144,11 +144,15 @@ operator marks the dispatch complete after your return so checkpointing stays
 separate from lifecycle closure.
 
 `agent handoff` is idempotent — call it as a checkpoint after each major step,
-not only at the end. Use the exact `agent_id`, `agent_role`, and `phase`
-values from the **Runtime Identity block** the operator placed at the top of
-your dispatch prompt; the handoff row is keyed on `agent_id`, and a mismatched
-value creates an orphaned row the operator cannot render. Schema:
-`agent/references/runtime-guides/handoff-schema.md` "Checkpointing".
+not only at the end. Why: a dispatch that halts before the final closing call
+(e.g. context exhaustion) makes its most recent checkpoint the canonical
+resume point — skip a checkpoint and whatever you did since the last one is
+invisible to the operator and to whoever resumes. Use the exact `agent_id`,
+`agent_role`, and `phase` values from the **Runtime Identity block** the
+operator placed at the top of your dispatch prompt; the handoff row is keyed
+on `agent_id`, and a mismatched value creates an orphaned row the operator
+cannot render. Schema: `agent/references/runtime-guides/handoff-schema.md`
+"Checkpointing".
 
 On long runs, at each handoff checkpoint — and also whenever the working
 context grows long mid-task, even between checkpoints — re-emit a compact

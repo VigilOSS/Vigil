@@ -304,7 +304,7 @@ the state durable; the response is your reflection on top of that.
 
 Don't truncate reasoning to be brief — careful threat-modeling directly
 improves the hunter's downstream coverage (see
-`agent/shared-constraints.md` §16). The Module Map, Threat Model, File
+`agent/shared-constraints-core.md` "Reasoning quality > response brevity"). The Module Map, Threat Model, File
 Classifications, Call Graph, Recommended Analysis Order, Attack Hypotheses,
 and File Analysis Queue all live in their respective backend tables and the
 queue artifact file under `tools/analysis-state/` — so the response can stay

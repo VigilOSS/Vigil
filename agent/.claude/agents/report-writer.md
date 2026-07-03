@@ -202,7 +202,7 @@ what makes the rest of the state durable. The response is your reflection on
 top of all that.
 
 Don't truncate reasoning to be brief — careful narrative analysis directly
-improves report-draft quality (see `agent/shared-constraints.md` §16). QA
+improves report-draft quality (see `agent/shared-constraints-core.md` "Reasoning quality > response brevity"). QA
 detail and any `QA BLOCKED` reasons live in the handoff `coverage_gaps` and
 `runtime_issues` — so the response can stay focused on report-writing
 judgments rather than restating canonical state.

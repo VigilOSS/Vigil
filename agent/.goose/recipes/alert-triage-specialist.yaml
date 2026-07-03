@@ -34,7 +34,7 @@ instructions: |2
 
   **LOAD-ON-FIRST-USE (lazy):**
 
-  - `agent/rules/reporting.md` — banned hedge phrases, severity discipline, section-length limits. L1 is a triager, not a report author — load only when the mechanical-noise auto-close path fires and you are composing the `kill_reason` text for `vigil assess kill-finding` (the one L1 output that lands in a closed finding's record), not during alert normalization, platform-skill routing, or the dispatch-to-L2 handoff, none of which author report-bound prose.
+  - `agent/rules/reporting.md` — **conditional (banned hedge phrases + severity discipline).** L1 is a triager, not a report author: load it only when composing the `kill_reason` prose for a mechanical-noise auto-close — the one L1 output that lands in a finding record.
 
   ## Pre-Work Checkpoint
 

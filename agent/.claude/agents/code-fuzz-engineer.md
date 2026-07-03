@@ -29,7 +29,9 @@ and interpret its output correctly.
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-fuzz-campaign/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 
-**LOAD-ON-FIRST-USE (lazy):** none — this role's methodology is fully covered by the mandatory set above.
+**LOAD-ON-FIRST-USE (lazy):**
+
+- `agent/rules/reporting.md` — **conditional:** load only immediately before authoring a confirmed finding's report-ready `details` prose (evidence / impact / remediation) — the hunt-time severity/outcome essence is already in `agent/rules/hunting.md` §2–§3; not for campaign setup or crash triage.
 
 ## Pre-Work Checkpoint
 

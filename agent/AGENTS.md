@@ -645,7 +645,7 @@ interpretation.
 
 ## Finding and Intel Recording
 
-Use `vigil assess record-finding <agent-name> <finding-json-file>` for findings (the prefix table, payload schema, severity↔CVSS rules, and lifecycle helpers live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `vigil assess contract record-finding`. Use the lifecycle helpers — `verify-finding` / `kill-finding` for verification outcomes, `reset-finding` to reopen a previously verified or false-positive finding, `update-finding` for non-verification metadata — instead of raw `post` / `patch`.
+Use `vigil assess record-finding <agent-name> <finding-json-file>` for findings (the prefix table and severity↔CVSS band table are canonical in `agent/shared-constraints-core.md` "Finding IDs and the `record-finding` Contract"; the payload schema and dedup rules live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `vigil assess contract record-finding`. Use the lifecycle helpers — `verify-finding` / `kill-finding` for verification outcomes, `reset-finding` to reopen a previously verified or false-positive finding, `update-finding` for non-verification metadata — instead of raw `post` / `patch`.
 
 Use `vigil assess record-intel <type> <json-file>` for `#### Intelligence` rows (intel types and dedup keys in §13). report-writer uses `vigil assess list-report-findings --mode <final|draft> --json`, which returns grouped root-cause findings with sequential `001~N` report IDs.
 

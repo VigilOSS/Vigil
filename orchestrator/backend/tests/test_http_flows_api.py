@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 
@@ -205,6 +207,124 @@ def test_import_drops_stale_cross_engagement_request_variant_id(client, isolate_
     assert imported.json()["flows"][0]["request_variant_id"] is None
     detail = client.get(BASE.format(key=key) + "/foreign-var").json()
     assert detail["request_variant_id"] is None
+
+
+def test_import_plain_har_persists_body_to_sidecar_and_re_exports(client, isolate_settings):
+    # BUG 3 regression: a plain (non-Vigil) HAR carries inline body text but no
+    # ``_vigil.*_body_artifact_path``. Import must persist that text to an
+    # engagement-local sidecar and record the path — otherwise the positive byte
+    # count points at a body that ``har_from_flows`` (re-inlines only from paths)
+    # can never recover, and the body is lost on the next export/detail view.
+    key = "2026-06-01-000010-plainhar"
+    root = write_engagement(isolate_settings["engagements_dir"], key)
+    req_text = '{"user":"admin","pw":"s3cret"}'
+    resp_text = '{"token":"abc123"}'
+    plain_har = {
+        "log": {
+            "version": "1.2",
+            "creator": {"name": "some-browser", "version": "1.0"},
+            "entries": [
+                {
+                    "startedDateTime": "2026-06-01T12:00:00Z",
+                    "time": 5,
+                    "request": {
+                        "method": "POST",
+                        "url": "https://api.example.com/v1/login",
+                        "headers": [],
+                        "postData": {"mimeType": "application/json", "text": req_text},
+                    },
+                    "response": {
+                        "status": 200,
+                        "headers": [],
+                        "content": {"mimeType": "application/json", "text": resp_text},
+                    },
+                    # NO _vigil object → plain (non-Vigil) HAR.
+                }
+            ],
+        }
+    }
+    imported = client.post(BASE.format(key=key) + "/import-har", json=plain_har)
+    assert imported.status_code == 201, imported.text
+    flow = imported.json()["flows"][0]
+    # Bytes counted AND a recoverable sidecar path recorded (the fix).
+    assert flow["request_body_bytes"] == len(req_text.encode("utf-8"))
+    assert flow["response_body_bytes"] == len(resp_text.encode("utf-8"))
+    assert flow["request_body_artifact_path"]
+    assert flow["response_body_artifact_path"]
+    # sha recorded and the sidecar exists on disk under the engagement root.
+    assert flow["response_body_sha256"] == hashlib.sha256(resp_text.encode()).hexdigest()
+    assert (root / flow["response_body_artifact_path"]).is_file()
+    # Re-export re-inlines the bodies from the sidecars (previously unrecoverable).
+    har = client.get(BASE.format(key=key) + "/export-har").json()
+    entry = har["log"]["entries"][0]
+    assert entry["request"]["postData"]["text"] == req_text
+    assert entry["response"]["content"]["text"] == resp_text
+
+
+def test_export_base64_encodes_non_utf8_body(client, isolate_settings):
+    # BUG 4 regression: a non-UTF-8 body sidecar (PDF/zip/octet-stream captured
+    # with no content-type filter) must be base64-encoded with an ``encoding``
+    # marker on HAR export — NOT silently mojibake'd via ``errors="replace"``.
+    key = "2026-06-01-000011-binary"
+    root = write_engagement(isolate_settings["engagements_dir"], key)
+    raw = bytes([0x89, 0x50, 0x4E, 0x47, 0xFF, 0xFE, 0x00, 0x01, 0x80])  # invalid UTF-8
+    assert raw.decode("utf-8", errors="ignore") != raw.decode("latin-1")  # truly non-UTF-8
+    sha = hashlib.sha256(raw).hexdigest()
+    body_rel = f"traffic/mitmproxy/bodies/{sha}.bin"
+    (root / body_rel).parent.mkdir(parents=True, exist_ok=True)
+    (root / body_rel).write_bytes(raw)
+    client.post(
+        BASE.format(key=key),
+        json=_flow_payload(
+            flow_uid="bin-1",
+            response_content_type="application/octet-stream",
+            response_body_artifact_path=body_rel,
+            response_body_bytes=len(raw),
+            response_body_sha256=sha,
+        ),
+    )
+    har = client.get(BASE.format(key=key) + "/export-har").json()
+    content = har["log"]["entries"][0]["response"]["content"]
+    assert content["encoding"] == "base64"
+    assert base64.b64decode(content["text"]) == raw  # exact bytes, no corruption
+
+
+def test_binary_body_round_trips_export_import_via_base64(client, isolate_settings):
+    # BUG 3 + BUG 4 integration: export marks a non-UTF-8 body base64; a plain-HAR
+    # re-import decodes that base64 back into a sidecar so the EXACT bytes survive
+    # a full export→import round trip (rather than being lost or corrupted).
+    src = "2026-06-01-000012-binsrc"
+    dst = "2026-06-01-000013-bindst"
+    sroot = write_engagement(isolate_settings["engagements_dir"], src)
+    droot = write_engagement(isolate_settings["engagements_dir"], dst)
+    raw = bytes(range(256))  # every byte value → decidedly non-UTF-8
+    sha = hashlib.sha256(raw).hexdigest()
+    body_rel = f"traffic/mitmproxy/bodies/{sha}.bin"
+    (sroot / body_rel).parent.mkdir(parents=True, exist_ok=True)
+    (sroot / body_rel).write_bytes(raw)
+    client.post(
+        BASE.format(key=src),
+        json=_flow_payload(
+            flow_uid="rt-bin",
+            response_content_type="application/octet-stream",
+            response_body_artifact_path=body_rel,
+            response_body_bytes=len(raw),
+            response_body_sha256=sha,
+        ),
+    )
+    har = client.get(BASE.format(key=src) + "/export-har").json()
+    content = har["log"]["entries"][0]["response"]["content"]
+    assert content["encoding"] == "base64"
+    # Strip _vigil so import treats it as a plain HAR and re-persists the body via
+    # _har_body_raw (base64-aware) + the sidecar writer (the cross-engagement
+    # sidecar-copy path for Vigil HARs is a separate concern).
+    for entry in har["log"]["entries"]:
+        entry.pop("_vigil", None)
+    imported = client.post(BASE.format(key=dst) + "/import-har", json=har)
+    assert imported.status_code == 201, imported.text
+    flow = imported.json()["flows"][0]
+    assert flow["response_body_artifact_path"]
+    assert (droot / flow["response_body_artifact_path"]).read_bytes() == raw
 
 
 def test_capture_policy_default_off_and_put(client, isolate_settings):

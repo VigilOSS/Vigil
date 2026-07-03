@@ -396,6 +396,13 @@ Required fields per dispatch:
 | `dispatch_mode` | `item-iterating` / `deep-manual` / `hypothesis-driven` (per the role defaults above) |
 | `skills` | Comma-separated skill names the specialist must load. Pass via `--skills` to `vigil assess agent start` so the dispatch row is a truthful audit of skill context. |
 
+(`dispatch_mode` intentionally omits `swarm`, the fifth red-side value in
+`operator-core.md`. Swarm fans a corpus-scale scan workload out to N parallel
+workers — there is no blue-roster analogue, since blue has no fuzzer or
+large-file-corpus role to fan out over. This is the same scoping-out already
+applied to `hunt_scope` and the Dispatch Mindset below — add `swarm` here only
+if a real blue corpus workload shows up.)
+
 Optional fields: `model`, `reasoning`, `scope_host` (rare in blue; tenant is
 the scoping unit), `tenant_reference_paths[]` (auto-injected by
 `vigil blue dispatch`).

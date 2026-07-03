@@ -77,12 +77,12 @@ vigil assess agent done <agent_id> --status completed --finding-slugs <slugs>
 | resume-brief / render-handoff paste | Required when continuation or prior dispatch exists | § Runtime Identity Block ("If this is a continuation…") + § Dispatch Context Template "Cross-agent prior work" |
 | `target` | Required | § Dispatch Context Template "Agent identity and target URL" |
 | `outcome objective` | Required | § Dispatch Context Template "specific outcome objective" |
-| `skills` | Required | § Dispatch Context Template "Which skill(s) to load" + Pre-Dispatch Checklist |
+| `skills` | Required | § Dispatch Context Template "Which skill(s) to load" + Pre-Dispatch Checklist — the named skills are illustrative, not the boundary of what may be loaded; the specialist self-discovers others via `vigil assess list-skills` |
 | `depth expectation` | Required | § Dispatch Context Template "Depth expectation" |
 | `rate-limit budget` | Required when target-facing | § Dispatch Context Template "Rate-limit budget" |
 | `oob` | Required when the dispatch may need a callback | § Dispatch Context Template "OOB / listener availability" |
 | `auth_context` / `credential_id` | Required | § Dispatch Context Template "Auth context" |
-| `coverage` | Required | § Dispatch Context Template "Coverage statement" |
+| `coverage` | Required | § Dispatch Context Template "Coverage statement" — source it from `vigil assess resume-brief` (its Surfaces / Work Buffer / Attempts sections) or `vigil assess list-command-runs --q <surface> --show-matches` |
 | `cleanup` | Required when server-side state may be left | § Dispatch Context Template "Cleanup constraints" |
 | `human_reach_decision` | Required when an open gate exists on the target surface | § Dispatch Context Template "Human-reach gate state" |
 | role-specific additions | Required per role | § Dispatch Context Template "Role-specific additions" |
@@ -115,7 +115,7 @@ mindset lens: agent/rules/mindsets/idor-bac.md — Pass-1 wide sweep flagged num
 #### Handoff from vulnerability-analyst dispatch va-wide-9f1a (Pass-1, rendered)
 - Prior task: Pass-1 wide sweep, orders/billing surface group
 - Scope host: saas.acme.example
-- Phase: consume-test (status: completed)
+- **Dispatched at:** 2026-06-30T08:02:14Z (status: completed)
 - Summary: baseline pass across /api/v1/orders*, /api/v1/invoices*, /api/v1/billing*; numeric
   IDs on orders/invoices, UUIDs on billing (lower BAC signal); no auth-boundary probing done yet
 - Coverage gaps: no cross-identity replay attempted on any of the three route families
@@ -191,7 +191,7 @@ mindset lens: agent/rules/mindsets/chain-impact.md — two confirmed findings on
 #### Handoff from vulnerability-analyst dispatch va-idor-b7c2 (rendered)
 - Prior task: Deep IDOR/BAC pass on orders+invoices, cross-identity replay user_a/user_b
 - Scope host: saas.acme.example
-- Phase: consume-test (status: completed)
+- **Dispatched at:** 2026-06-30T15:41:02Z (status: completed)
 - Summary: confirmed cross-tenant IDOR on /api/v1/orders/{id} — user_b's session reads
   user_a's order detail including shipping PII by incrementing the numeric id
 - Findings recorded: VULN-2026-06-30-011 — Cross-tenant IDOR on order detail [severity=medium]

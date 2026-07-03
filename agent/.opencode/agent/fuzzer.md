@@ -106,7 +106,7 @@ the response is your reflection on top of that.
 
 Don't truncate reasoning to be brief — careful anomaly-signal analysis directly
 improves vulnerability-analyst's downstream validation work (see
-`agent/shared-constraints.md` §16). Hit details live in the raw hit log under
+`agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Hit details live in the raw hit log under
 `$DIR/scans/fuzzer/` (linked via `working_artifacts`) and anomaly-triage actions
 live in `next_steps` — so the response can stay focused on signal interpretation
 rather than restating canonical state.

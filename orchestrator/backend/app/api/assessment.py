@@ -1603,8 +1603,9 @@ async def import_http_flows_har(engagement_key: str, request: HarImportRequest) 
     field."""
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     har_payload = {"log": request.log}
+    root = Path(engagement.engagement_root).resolve()
     flow_kwargs_list = await anyio.to_thread.run_sync(
-        functools.partial(state_manager.flows_from_har, har_payload)
+        functools.partial(state_manager.flows_from_har, har_payload, root=root)
     )
 
     def _insert_all() -> list[dict[str, Any]]:

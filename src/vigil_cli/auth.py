@@ -273,14 +273,19 @@ def export_curl_args(
 ) -> str:
     """Render the identity's material as curl ``-H`` arguments (operator copy-paste).
 
-    ``host`` overlays the matching ``host_cookies`` bucket(s) on top of the
-    legacy flat ``cookies`` view — the same host-scoped lookup
-    ``vigil assess kali --identity`` already applies at injection time (I-22).
-    Without it, a multi-host engagement (several unrelated domains under one
-    scope.json) only ever exports whatever happened to land in the flat
-    ``cookies`` field, which silently drops every host except the one that
-    capture-time scoping flattened against — pass the target host explicitly
-    to get the right session.
+    ``host`` selects the matching ``host_cookies`` bucket(s) and uses it ALONE —
+    the same host-scoped lookup ``vigil assess kali --identity`` applies at
+    injection time (I-22). The flat ``cookies`` field is a UNION across every
+    captured host, so seeding it and overlaying the bucket (the old behavior)
+    would leave cookie names unique to OTHER hosts in the printed ``Cookie``
+    header — cross-host session bleed. We fall back to the flat view ONLY for
+    identities with no per-host buckets at all (legacy/manual identities); when
+    buckets exist but none match ``host`` we omit cookies entirely rather than
+    route the display-only union onto an unrelated target. Without ``host``, a
+    multi-host engagement (several unrelated domains under one scope.json) only
+    ever exports whatever happened to land in the flat ``cookies`` field, which
+    silently drops every host except the one that capture-time scoping flattened
+    against — pass the target host explicitly to get the right session.
 
     ``method`` gates the opt-in CSRF double-submit header the same way exec-time
     injection does: pass ``POST``/``PUT``/``PATCH``/``DELETE`` and the printed curl
@@ -294,14 +299,32 @@ def export_curl_args(
         else _api(engagement_dir, "GET", f"/{identity}")
     )
     raw_cookies = material.get("cookies")
-    cookies = dict(raw_cookies) if isinstance(raw_cookies, dict) else {}
+    flat_cookies = dict(raw_cookies) if isinstance(raw_cookies, dict) else {}
     if host:
         from .paths import add_assess_import_path
 
         add_assess_import_path(_install_root(engagement_dir))
-        from assess.lib.identity import host_cookies_for  # type: ignore[import-not-found]
+        from assess.lib.identity import (  # type: ignore[import-not-found]
+            host_cookie_hosts,
+            host_cookies_for,
+        )
 
-        cookies.update(host_cookies_for(material, host))
+        host_scoped = host_cookies_for(material, host)
+        if host_scoped:
+            # Authoritative per-host bucket: use it ALONE (no flat-union blend),
+            # so a cookie captured for a DIFFERENT host never rides this export.
+            cookies = dict(host_scoped)
+        elif not host_cookie_hosts(material):
+            # No per-host buckets at all (legacy/manual identity): the flat union
+            # is the only cookie view we have, so fall back to it.
+            cookies = flat_cookies
+        else:
+            # Buckets exist but none match this host → omit cookies rather than
+            # route the display-only union onto an unrelated target.
+            cookies = {}
+    else:
+        # No target host requested: preserve the flat view (unchanged behavior).
+        cookies = flat_cookies
     parts: list[str] = []
     if cookies:
         cookie_value = "; ".join(f"{k}={v}" for k, v in cookies.items())
@@ -414,8 +437,12 @@ def _authed_request_headers(
     """Build the request headers for a host-side authed probe from identity material.
 
     Cookies are host-scoped the same way ``vigil assess kali --identity`` injects
-    them (the matching ``host_cookies`` bucket, falling back to the flat view), plus
-    the identity's headers and a bearer token when present.
+    them: the matching ``host_cookies`` bucket is used ALONE, falling back to the
+    flat ``cookies`` view ONLY for identities with no per-host buckets at all.
+    When buckets exist but none match the probed host we omit cookies entirely —
+    the flat view is a display-only UNION across every captured host, so injecting
+    it would bleed another host's session cookies onto this host (cross-host
+    session bleed). Plus the identity's headers and a bearer token when present.
     """
     headers: dict[str, str] = {}
     for key, value in (material.get("headers") or {}).items():
@@ -423,18 +450,30 @@ def _authed_request_headers(
             headers[str(key)] = str(value)
     cookies: dict[str, str] = {}
     host_scoped: dict[str, str] = {}
+    has_host_buckets = False
     try:
         from .paths import add_assess_import_path
 
         add_assess_import_path(_install_root(engagement_dir))
-        from assess.lib.identity import host_cookies_for  # type: ignore[import-not-found]
+        from assess.lib.identity import (  # type: ignore[import-not-found]
+            host_cookie_hosts,
+            host_cookies_for,
+        )
 
         host_scoped = host_cookies_for(material, host)
+        has_host_buckets = bool(host_cookie_hosts(material))
     except Exception:  # noqa: BLE001 — assess import optional; fall back to flat view
         host_scoped = {}
+        has_host_buckets = False
     if host_scoped:
         cookies.update(host_scoped)
-    else:
+    elif not has_host_buckets:
+        # No per-host buckets at all (legacy/manual identity): fall back to the
+        # flat ``cookies`` view. When buckets DO exist but none match this probed
+        # host we deliberately OMIT cookies — ``material['cookies']`` is a
+        # display-only UNION across every captured host, so injecting it here
+        # would bleed another host's uniquely-named session cookies onto this
+        # host. Mirrors ``assess.lib.kali._identity_header_pairs``.
         raw = material.get("cookies")
         if isinstance(raw, dict):
             cookies.update({str(k): str(v) for k, v in raw.items()})
