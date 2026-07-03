@@ -433,6 +433,7 @@ def record_command_run(
     auth_context: str | None = None,
     target_host: str = "",
     timeout_seconds_requested: int | None = None,
+    finding_id: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
@@ -531,6 +532,20 @@ def record_command_run(
     argv_json_value = json.dumps(list(argv) if argv else [], ensure_ascii=False)
 
     with _common.get_connection() as connection:
+        # Validate the optional finding linkage up front so a typo'd id is a
+        # clean 404 rather than a raw FK IntegrityError (foreign_keys is ON).
+        if finding_id is not None:
+            finding_row = connection.execute(
+                "SELECT id FROM assessment_findings WHERE engagement_id = ? AND id = ?",
+                (engagement.id, finding_id),
+            ).fetchone()
+            if finding_row is None:
+                # NB: the ``status`` parameter shadows the imported fastapi
+                # ``status`` module inside this function, so use the numeric code.
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"finding id={finding_id} not found",
+                )
         # Dedup-at-write-time: if an in-flight row exists with the same
         # (command, argv_json) for this engagement inside the configurable
         # window, ALWAYS insert a new row but link it to the predecessor via
@@ -575,7 +590,7 @@ def record_command_run(
                     stdout_path, stderr_path,
                     peak_rss_bytes, cpu_user_seconds, cpu_system_seconds,
                     working_dir, scope_version, auth_context, target_host,
-                    superseded_by_id, timeout_seconds_requested
+                    superseded_by_id, timeout_seconds_requested, finding_id
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
@@ -590,7 +605,7 @@ def record_command_run(
                     ?, ?,
                     ?, ?, ?,
                     ?, ?, ?, ?,
-                    ?, ?
+                    ?, ?, ?
                 )
                 """,
                 (
@@ -639,6 +654,7 @@ def record_command_run(
                     (target_host or "").strip(),
                     superseded_by_id,
                     timeout_seconds_requested,
+                    finding_id,
                 ),
             )
         except sqlite3.IntegrityError as exc:

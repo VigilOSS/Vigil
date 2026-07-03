@@ -75,6 +75,7 @@ class VerificationDisposition(enum.StrEnum):
 
     NONE = "none"
     PENDING_RUNTIME_PROOF = "pending_runtime_proof"
+    BLOCKED = "blocked"
     CONFIRMED = "confirmed"
     DOWNGRADED = "downgraded"
     FALSE_POSITIVE = "false_positive"
@@ -126,6 +127,16 @@ VERIFICATION_DISPOSITION_RANK = {
     # _coalesce_verification_disposition, so its -1 only matters for confidence
     # ordering in _finding_confidence_tuple.
     VerificationDisposition.PENDING_RUNTIME_PROOF: 1,
+    # "Blocked-for-provisioning" (hunting.md): the exploit attempt could not even
+    # start because a precondition is missing (no test account / line / device /
+    # credential / access). Sticky vs 'none' (rank 1 >= 0, so a later bare none in
+    # _coalesce_verification_disposition cannot clobber it), but yields to
+    # downgraded (2) / confirmed (3) so a later real proof supersedes the block,
+    # and false_positive is handled by the explicit early-returns in the coalesce.
+    # Shares rank 1 with pending_runtime_proof: both are non-report holding states
+    # that a real verdict outranks; the tie only affects confidence ordering in
+    # _finding_confidence_tuple, where they are equivalently weak-but-reviewed.
+    VerificationDisposition.BLOCKED: 1,
     VerificationDisposition.DOWNGRADED: 2,
     VerificationDisposition.CONFIRMED: 3,
     VerificationDisposition.FALSE_POSITIVE: -1,

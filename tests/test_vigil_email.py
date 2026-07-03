@@ -6,7 +6,12 @@ of ``test_vigil_cli.py``.
 """
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -133,3 +138,253 @@ def test_email_cli_no_matches_exits_nonzero(monkeypatch, capsys):
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "no messages" in err
+
+
+# ---------------------------------------------------------------------------
+# JXA scan-direction regression coverage.
+#
+# The scan-direction bug lived in the `collectMessages` closure inside
+# `_READ_MESSAGES_JXA`: it assumed each Mail.app mailbox's `messages()` array is
+# ordered oldest-first and `break`-ed on the first message older than the
+# `--within` cutoff, so newest-first mailboxes (e.g. the example-operatoreng IMAP INBOX)
+# tripped the break immediately and silently dropped recent mail. The fix added
+# per-mailbox direction detection, a `scanCap`, an early-exit only after the
+# direction is confirmed, and a forced full-scan of the synthetic cross-account
+# `Mail.inbox` aggregate (`forceFullScan: true`).
+#
+# The JXA normally runs only inside Mail.app via `osascript`, so it can't be
+# invoked directly in CI. Instead of re-implementing the algorithm (which could
+# silently drift from the shipped code), these tests execute the ACTUAL
+# `_READ_MESSAGES_JXA` string under `node`, supplying a mocked Mail.app
+# `Application` global so the real `run()` -> `collectMessages()` path drives our
+# fixtures. This exercises the exact shipped algorithm, including the
+# `Mail.inbox` -> `forceFullScan` and per-account "inbox" mailbox wiring.
+#
+# osascript's `Application`/`JavaScript for Automation` runtime is a superset of
+# plain JS for the constructs `collectMessages` uses (const/let, arrow fns,
+# for-of, Date/Math/JSON/Array), so running the same source under node is a
+# faithful stand-in for the scan-direction logic. Not covered here: real
+# Mail.app object semantics and osascript timeouts (mocked away), and the
+# CLI/`read_messages` boundary (covered by the tests above).
+
+_NOW = datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC)
+
+requires_node = pytest.mark.skipif(
+    shutil.which("node") is None,
+    reason="node is required to execute the JXA scan-direction algorithm",
+)
+
+# Node harness: install a mocked Mail.app `Application`, splice in the real
+# shipped JXA, then invoke its `run()` entry point and emit the resulting
+# payload plus a scan counter. `dateReceived` increments `scanCount` so tests
+# can assert the scanCap bound. Placeholders are substituted (not f-string /
+# %-formatted) so the JS braces stay literal.
+_NODE_HARNESS_TEMPLATE = """\
+let scanCount = 0;
+function mkMsg(msValue) {
+  return {
+    dateReceived: function () { scanCount += 1; return new Date(msValue); },
+    sender: function () { return ""; },
+    subject: function () { return ""; },
+    content: function () { return ""; },
+    toRecipients: function () { return []; },
+    ccRecipients: function () { return []; },
+  };
+}
+const AGGREGATE = __AGGREGATE__.map(mkMsg);
+const ACCOUNTS = __ACCOUNTS__.map(function (account) {
+  return {
+    name: function () { return account.name; },
+    mailboxes: function () {
+      return account.mailboxes.map(function (mailbox) {
+        return {
+          name: function () { return mailbox.name; },
+          messages: function () { return mailbox.ms.map(mkMsg); },
+        };
+      });
+    },
+  };
+});
+const MOCK = {
+  inbox: { messages: function () { return AGGREGATE; } },
+  accounts: function () { return ACCOUNTS; },
+};
+globalThis.Application = function () { return MOCK; };
+
+__JXA__
+
+const out = run([JSON.stringify(__CFG__)]);
+process.stdout.write(JSON.stringify({ payload: JSON.parse(out), scanCount: scanCount }));
+"""
+
+
+def _ms(minutes_ago: int) -> int:
+    """Epoch-ms for a message received ``minutes_ago`` before the fixed _NOW."""
+    return int((_NOW - timedelta(minutes=minutes_ago)).timestamp() * 1000)
+
+
+def _minutes_ago(iso: str) -> int:
+    """Round-trip a JXA `toISOString()` value back to whole minutes before _NOW."""
+    text = iso[:-1] + "+00:00" if iso.endswith("Z") else iso
+    return round((_NOW - datetime.fromisoformat(text)).total_seconds() / 60)
+
+
+def _run_jxa_scan(
+    *,
+    aggregate_minutes: list[int] | None = None,
+    accounts: list[dict] | None = None,
+    since_minutes: int = 10,
+    limit: int = 200,
+):
+    """Run the real `_READ_MESSAGES_JXA` under node against mocked mailboxes.
+
+    ``aggregate_minutes`` populates the synthetic cross-account ``Mail.inbox``
+    aggregate (always scanned with ``forceFullScan``); ``accounts`` is a list of
+    ``{"name", "mailboxes": [{"name", "minutes": [...]}]}`` for per-account
+    mailboxes (only those whose name contains "inbox" are scanned, mirroring
+    the JXA filter). Message ages are expressed as whole minutes before _NOW.
+
+    Returns ``(collected_minutes_ago, scan_count)`` where ``collected_minutes_ago``
+    is the age (in minutes) of each collected message, in payload order.
+    """
+    from vigil_cli.email import _READ_MESSAGES_JXA
+
+    node = shutil.which("node")
+    assert node is not None  # guarded by @requires_node
+
+    aggregate_ms = [_ms(m) for m in (aggregate_minutes or [])]
+    accounts_ms = [
+        {
+            "name": account["name"],
+            "mailboxes": [
+                {"name": mb["name"], "ms": [_ms(m) for m in mb["minutes"]]}
+                for mb in account["mailboxes"]
+            ],
+        }
+        for account in (accounts or [])
+    ]
+    cfg = {"since": (_NOW - timedelta(minutes=since_minutes)).isoformat(), "limit": limit}
+
+    script = (
+        _NODE_HARNESS_TEMPLATE
+        .replace("__AGGREGATE__", json.dumps(aggregate_ms))
+        .replace("__ACCOUNTS__", json.dumps(accounts_ms))
+        .replace("__JXA__", _READ_MESSAGES_JXA)
+        .replace("__CFG__", json.dumps(cfg))
+    )
+
+    # `.cjs` forces CommonJS/non-strict regardless of any repo package.json,
+    # matching how the plain-JS JXA source expects to be evaluated.
+    with tempfile.NamedTemporaryFile("w", suffix=".cjs", delete=False) as handle:
+        handle.write(script)
+        path = handle.name
+    try:
+        proc = subprocess.run([node, path], text=True, capture_output=True)
+    finally:
+        os.unlink(path)
+
+    if proc.returncode != 0:
+        pytest.fail(
+            f"node JXA harness failed ({proc.returncode}): "
+            f"{proc.stderr.strip() or proc.stdout.strip()}"
+        )
+
+    data = json.loads(proc.stdout)
+    collected = [_minutes_ago(m["received_at"]) for m in data["payload"]["messages"]]
+    return collected, data["scanCount"]
+
+
+def _inbox_account(minutes: list[int]) -> list[dict]:
+    return [{"name": "example-operatoreng", "mailboxes": [{"name": "INBOX", "minutes": minutes}]}]
+
+
+@requires_node
+def test_jxa_newest_first_mailbox_keeps_recent_mail():
+    # The original bug: a newest-first mailbox (index 0 = newest) with recent
+    # mail at the top followed by older mail. A fixed oldest-first scan breaks
+    # immediately and drops the recent messages; the direction-detecting fix
+    # must collect them.
+    collected, _ = _run_jxa_scan(
+        aggregate_minutes=[],
+        accounts=_inbox_account([1, 2, 3, 40, 50]),
+        since_minutes=10,
+    )
+    assert set(collected) == {1, 2, 3}
+    # The messages beyond the --within cutoff are (correctly) excluded.
+    assert 40 not in collected and 50 not in collected
+
+
+@requires_node
+def test_jxa_oldest_first_mailbox_early_exits_at_cutoff():
+    # Oldest-first mailbox (index 0 = oldest). The 2-min message sits at index 1
+    # (a deliberate order anomaly) so a correct early-exit never reaches it: the
+    # scan starts at the newest end, collects the 1-min message, then breaks on
+    # the 40-min message. If the early-exit regressed into a full scan the 2-min
+    # message would leak in.
+    collected, _ = _run_jxa_scan(
+        aggregate_minutes=[],
+        accounts=_inbox_account([50, 2, 45, 40, 1]),
+        since_minutes=10,
+    )
+    assert collected == [1]
+    assert 2 not in collected  # early-exit stopped before the anomalous message
+
+
+@requires_node
+def test_jxa_force_full_scan_aggregate_never_early_exits():
+    # The synthetic Mail.inbox aggregate interleaves accounts, so ordering is not
+    # monotonic. It is scanned with forceFullScan: an old message (40 min) sits
+    # between two recent ones (1 and 2 min). A break-based scan would drop the
+    # recent message after the old one; the full scan keeps both.
+    collected, _ = _run_jxa_scan(aggregate_minutes=[1, 40, 2], accounts=[], since_minutes=10)
+    assert set(collected) == {1, 2}
+    assert 40 not in collected
+
+
+@requires_node
+def test_jxa_force_full_scan_is_load_bearing_vs_per_account():
+    # Contrast: the SAME interleaved [1, 40, 2] ordering as a per-account mailbox
+    # (no forceFullScan) is direction-detected as newest-first and breaks on the
+    # 40-min message, dropping the trailing 2-min message. This proves the
+    # aggregate's forceFullScan flag is what prevents the drop above.
+    collected, _ = _run_jxa_scan(
+        aggregate_minutes=[],
+        accounts=_inbox_account([1, 40, 2]),
+        since_minutes=10,
+    )
+    assert collected == [1]
+    assert 2 not in collected
+
+
+@requires_node
+def test_jxa_scan_cap_bounds_the_scan():
+    # scanCap = max(limit * 5, 500). With limit=100 the cap is 500. Feed 600
+    # messages (a recent one at index 0, then 599 old ones): the full scan runs
+    # from the tail, inspects exactly 500 messages (all old -> none collected),
+    # and stops before reaching the recent message at index 0.
+    collected, scan_count = _run_jxa_scan(
+        aggregate_minutes=[1] + [60] * 599,
+        accounts=[],
+        since_minutes=10,
+        limit=100,
+    )
+    assert scan_count == 500  # bounded by scanCap, not the full 600
+    assert collected == []  # the index-0 recent message is past the cap
+
+
+def test_jxa_scan_direction_wiring_present_in_source():
+    # Cheap, node-free guard on the wiring the tests above depend on, so an
+    # accidental edit to the JXA is caught even where node is unavailable.
+    from vigil_cli.email import _READ_MESSAGES_JXA as jxa
+
+    # The cross-account aggregate is scanned with forceFullScan...
+    assert "Mail.inbox.messages()" in jxa
+    assert "forceFullScan: true" in jxa
+    # ...while per-account inbox mailboxes are scanned WITHOUT it (direction is
+    # detected per mailbox).
+    assert (
+        "collectMessages(safe(() => mailbox.messages(), []), accountName, mailboxName, payload);"
+        in jxa
+    )
+    # scanCap sizing is part of the fix's contract.
+    assert "Math.max(limit * 5, 500)" in jxa

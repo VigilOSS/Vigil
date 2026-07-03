@@ -234,22 +234,23 @@ def detect_transport_error(
 # recovery (``vigil assess kali browser``), it does not strand it.
 
 # (needle_lowercased, vendor) — substring match against the body+headers+stderr
-# haystack. Each is on its own a strong WAF/bot-challenge signal. Mix of
-# interstitial-page strings, challenge-form field names, and bot-manager
-# cookie/header names per vendor.
+# haystack. Each is on its own a strong WAF/bot-challenge signal: an
+# interstitial-page string, a challenge-form field name, or a challenge-only
+# resource path. Deliberately EXCLUDED here are the always-present session /
+# edge fingerprints (Akamai ``_abck``/``ak_bmsc``/``bm_sz``/``AkamaiGHost``,
+# Imperva ``incap_ses``/``visid_incap``/``reese84``/``x-iinfo``): a bot manager
+# sets those on ~every response it fronts, so their mere presence means "this
+# vendor is in front", NOT "this is a challenge". They are demoted to the
+# edge-marker tier (``_CDN_EDGE_MARKERS``) and flag ONLY alongside a real
+# challenge SHAPE. The Akamai challenge STATE that a header-only block DOES carry
+# lives in the ``_abck`` cookie VALUE and is recovered by
+# :func:`_abck_challenge_sentinel`, not by matching the cookie name.
 _WAF_NAMED_SIGNATURES: tuple[tuple[str, str], ...] = (
-    # Imperva / Incapsula
-    ("reese84", "imperva"),
-    ("incap_ses", "imperva"),
-    ("visid_incap", "imperva"),
+    # Imperva / Incapsula — challenge-specific needles only.
     ("_incapsula_resource", "imperva"),
     ("pardon our interruption", "imperva"),
-    ("x-iinfo", "imperva"),
-    # Akamai (Bot Manager / Ghost edge)
-    ("_abck", "akamai"),
-    ("ak_bmsc", "akamai"),
-    ("bm_sz", "akamai"),
-    ("akamaighost", "akamai"),
+    # Akamai — the Access-Denied reference-error body string only (the session
+    # cookies + AkamaiGHost banner are edge markers, see _CDN_EDGE_MARKERS).
     ("reference&#32;&#35;", "akamai"),
     # Cloudflare
     ("cf-chl", "cloudflare"),
@@ -261,13 +262,17 @@ _WAF_NAMED_SIGNATURES: tuple[tuple[str, str], ...] = (
     ("cf-mitigated", "cloudflare"),
     ("attention required! | cloudflare", "cloudflare"),
     ("challenge-platform", "cloudflare"),
-    # Other common bot-defense vendors (renamed-marker safety still applies via
-    # the generic-shape pass, but naming the common ones keeps reasons sharp).
-    ("datadome", "datadome"),
-    ("perimeterx", "perimeterx"),
-    ("_px", "perimeterx"),
-    ("x-sucuri-id", "sucuri"),
-    ("sucuri website firewall", "sucuri"),
+    # Other common bot-defense vendors — challenge/BLOCK-specific needles only.
+    # The always-present fingerprints for these vendors (the DataDome ``datadome``
+    # cookie + ``js.datadome.co`` sensor tag, the PerimeterX ``_px`` cookies +
+    # ``client.perimeterx.net`` sensor, the Sucuri ``x-sucuri-id`` proxy header)
+    # ride ~every response the vendor fronts — challenge or not — so, exactly like
+    # the Akamai/Imperva session cookies above, they are DEMOTED to the edge-marker
+    # tier and flag only alongside a real challenge SHAPE. What survives here is
+    # block-only: DataDome's captcha host (referenced only when it serves a
+    # challenge) and Sucuri's block-page title.
+    ("captcha-delivery.com", "datadome"),  # DataDome captcha/challenge host — block-only.
+    ("sucuri website firewall", "sucuri"),  # Sucuri block-page title — block-only.
 )
 
 # Generic block phrases that ALSO appear on legitimate origin 401/403 pages, so
@@ -286,16 +291,28 @@ _WAF_CORROBORATION_PHRASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 
 # CDN / edge / bot-defense fingerprints used by the generic-shape pass. Presence
 # of one of these (in a header dump or the body) is necessary — but NOT
-# sufficient — to call a JS-only shell a challenge.
+# sufficient — to call a JS-only shell a challenge. This tier ALSO owns the
+# always-present vendor session/edge fingerprints (Akamai ``_abck``/``ak_bmsc``/
+# ``bm_sz``, Imperva ``incap_ses``/``visid_incap``/``reese84``, DataDome
+# ``datadome``, PerimeterX ``_px``/``x-px``, Sucuri ``x-sucuri``) that were
+# previously (and inconsistently) treated as sufficient signatures: front ~every
+# response, they corroborate a challenge only when a real challenge SHAPE is
+# present, never on the name alone.
 _CDN_EDGE_MARKERS: tuple[str, ...] = (
     "cf-ray",
     "cloudflare",
     "akamaighost",
     "x-akamai",
     "akamai",
+    "_abck",
+    "ak_bmsc",
+    "bm_sz",
     "x-iinfo",
     "incapsula",
     "imperva",
+    "incap_ses",
+    "visid_incap",
+    "reese84",
     "x-cdn",
     "x-sucuri",
     "sucuri",
@@ -306,6 +323,7 @@ _CDN_EDGE_MARKERS: tuple[str, ...] = (
     "x-datadome",
     "datadome",
     "perimeterx",
+    "_px",
     "x-px",
 )
 
@@ -474,6 +492,36 @@ def _looks_like_generic_challenge(
     return False, ""
 
 
+# Akamai Bot Manager sets ``_abck`` on ~every response it fronts, so the mere
+# cookie NAME is an edge fingerprint (see ``_CDN_EDGE_MARKERS``), NOT a challenge.
+# The challenge STATE lives in the cookie VALUE: the sensor-validation field (the
+# second ``~``-delimited field) is held at ``-1`` until the client solves the
+# sensor check, so an ``_abck`` whose validation field is ``-1`` is a genuine
+# header-only BLOCK. A passed/normal Bot Manager ``_abck`` carries a non-``-1``
+# validation field (later ``-1`` fields are normal), so this recovers a true
+# block without flagging ordinary Bot Manager traffic. The value char class stops
+# at the cookie/attribute separators and at JSON/quote delimiters so a Set-Cookie
+# embedded in an httpx ``-json`` line is captured cleanly.
+_ABCK_SENTINEL_RE = re.compile(r"_abck=([^;,\s\"']+)")
+
+
+def _abck_challenge_sentinel(haystack: str) -> str:
+    """Return the offending ``_abck`` value when it carries Akamai's
+    sensor-unvalidated (``-1``) challenge sentinel, else ``""``.
+
+    ``haystack`` is the lowercased body+headers+stderr blob. This inspects the
+    cookie VALUE (not merely its name) and tests the SECOND ``~``-delimited field
+    — the sensor-validation slot Akamai pins at ``-1`` on a not-yet-passed
+    challenge/block. A normal (passed) Bot Manager cookie carries a non-``-1``
+    value there, so ordinary Bot Manager traffic is never flagged.
+    """
+    for match in _ABCK_SENTINEL_RE.finditer(haystack):
+        fields = match.group(1).split("~")
+        if len(fields) >= 2 and fields[1] == "-1":
+            return match.group(1)
+    return ""
+
+
 def detect_waf_challenge(
     stdout_preview: str,
     stderr_preview: str = "",
@@ -506,6 +554,17 @@ def detect_waf_challenge(
     for needle, vendor in _WAF_NAMED_SIGNATURES:
         if needle in haystack:
             return True, f"{vendor} WAF/bot-challenge signature: '{needle}'"
+
+    # Akamai header-only BLOCK: the _abck cookie VALUE carries the
+    # sensor-unvalidated (-1) sentinel. The cookie NAME alone is an always-present
+    # edge fingerprint (demoted to _CDN_EDGE_MARKERS); only the unvalidated VALUE
+    # is a genuine challenge, so normal Bot Manager traffic is not flagged.
+    abck = _abck_challenge_sentinel(haystack)
+    if abck:
+        return True, (
+            f"akamai WAF/bot-challenge signature: _abck sensor-unvalidated "
+            f"sentinel ('{abck}')"
+        )
 
     # Generic block phrases (e.g. "Access Denied") flag ONLY when a vendor marker
     # is also present, so a legitimate origin 401/403 carrying the phrase is

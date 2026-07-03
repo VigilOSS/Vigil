@@ -357,6 +357,59 @@ def _run_ingest_line(tmp_path, monkeypatch, capsys, line: str) -> None:
     return str(db)
 
 
+def test_ingest_endpoints_carries_request_response_payloads_when_present(
+    tmp_path, monkeypatch, capsys
+):
+    """P1-F: when a JSON producer emits headers/body/response_headers/
+    response_snippet, ingest-endpoints threads them onto the work_item instead
+    of dropping them at this second silent-truncation point. headers/
+    response_headers arriving as dicts are JSON-serialized; body/response_snippet
+    strings pass through."""
+    line = json.dumps(
+        {
+            "method": "POST",
+            "url": "https://h.example/api/orders",
+            "content_type": "application/json",
+            "headers": {"Content-Type": "application/json", "X-Req": "1"},
+            "body": '{"qty": 2}',
+            "response_headers": {"Content-Type": "application/json"},
+            "response_snippet": '{"order_id": 42, "status": "created"}',
+        }
+    )
+    db = _run_ingest_line(tmp_path, monkeypatch, capsys, line)
+    rows = db_query(
+        str(db),
+        "SELECT headers, body, response_headers, response_snippet "
+        "FROM work_items WHERE url = ?",
+        ("https://h.example/api/orders",),
+    )
+    assert len(rows) == 1, "ingest-endpoints did not create the work item"
+    assert json.loads(rows[0]["headers"]) == {"Content-Type": "application/json", "X-Req": "1"}
+    assert rows[0]["body"] == '{"qty": 2}'
+    assert json.loads(rows[0]["response_headers"]) == {"Content-Type": "application/json"}
+    assert rows[0]["response_snippet"] == '{"order_id": 42, "status": "created"}'
+
+
+def test_ingest_endpoints_bare_url_leaves_payloads_empty(
+    tmp_path, monkeypatch, capsys
+):
+    """P1-F regression: the passthrough is a clean no-op for the current
+    bare-URL sources (katana/gau/recon) that carry no payloads — the fields
+    default empty, unchanged from before the fix."""
+    db = _run_ingest_line(tmp_path, monkeypatch, capsys, "https://h.example/plain")
+    rows = db_query(
+        str(db),
+        "SELECT headers, body, response_headers, response_snippet "
+        "FROM work_items WHERE url = ?",
+        ("https://h.example/plain",),
+    )
+    assert len(rows) == 1
+    assert (rows[0]["headers"] or "") == ""
+    assert (rows[0]["body"] or "") == ""
+    assert (rows[0]["response_headers"] or "") == ""
+    assert (rows[0]["response_snippet"] or "") == ""
+
+
 def test_ingest_explicit_unknown_type_falls_through_to_typer(
     tmp_path, monkeypatch, capsys
 ):
@@ -519,6 +572,127 @@ def test_ingest_endpoints_over_long_url_skipped_batch_survives(
     # The drop is reported (per-line WARN + the summary breakdown), not silent.
     assert "over-long URL" in captured.err
     assert "1 over-long-URL" in captured.err
+
+
+class _StableVariantClient:
+    """Backend stub whose upsert returns the SAME request_variant id for a
+    repeated (method, url).
+
+    This mirrors the real backend: re-observing an already-admitted URL upserts
+    to the same request_variant instead of minting a new one. That is the
+    precondition for the duplicate-row bug — the CLI then derives the SAME
+    queue_key on the richer second ingest, so a plain INSERT OR IGNORE would
+    leave the first row's empty payloads in place.
+    """
+
+    def __init__(self) -> None:
+        self.observations: list[dict] = []
+        self.posts: list[tuple[str, dict]] = []
+        self._ids: dict[tuple[str, str], int] = {}
+        self._next = 1000
+
+    def _variant_for(self, method, url) -> int:
+        key = (method, url)
+        if key not in self._ids:
+            self._next += 1
+            self._ids[key] = self._next
+        return self._ids[key]
+
+    def post(self, endpoint: str, payload: dict) -> dict:
+        self.posts.append((endpoint, payload))
+        if endpoint == "request-observations/bulk":
+            records = []
+            for obs in payload.get("items", []):
+                self.observations.append(obs)
+                vid = self._variant_for(obs.get("method"), obs.get("url"))
+                records.append({"request_variant": {"id": vid}})
+            return {"count": len(records), "records": records}
+        if endpoint == "coverage-items/bulk":
+            return {"count": len(payload.get("items", [])), "records": []}
+        if endpoint == "request-observations":
+            self.observations.append(payload)
+            vid = self._variant_for(payload.get("method"), payload.get("url"))
+            return {"request_variant": {"id": vid}}
+        return {}
+
+    def close(self) -> None:  # pragma: no cover - trivial
+        pass
+
+
+def test_ingest_richer_reingest_updates_existing_row_payloads(
+    tmp_path, monkeypatch, capsys
+):
+    """A richer JSON/HAR ingest that re-visits a URL first admitted by a bare-URL
+    source must LAND its payloads on the already-admitted row.
+
+    The backend upsert returns the SAME request_variant id, so the CLI derives
+    the SAME queue_key; before the fix, db_insert_work_item's INSERT OR IGNORE +
+    classification-only update left the pre-existing empty headers/body/response
+    untouched. Marking payload-carrying rows as curated routes them through the
+    update-existing path so the payload is stored (and no duplicate row appears).
+    """
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")  # db_init requires the file to already exist
+    db_init(str(db))
+    url = "https://h.example/api/orders"
+
+    fake = _StableVariantClient()
+    monkeypatch.setattr(ingest_endpoints, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
+    monkeypatch.setattr(ingest_endpoints, "auth_active_context", lambda *a, **k: "anonymous")
+    monkeypatch.setattr(ingest_endpoints, "AssessmentClient", lambda *a, **k: fake)
+
+    # 1) Bare-URL source admits the URL first — no request/response payloads.
+    bare = tmp_path / "bare.txt"
+    bare.write_text(url + "\n", encoding="utf-8")
+    ingest_endpoints.run(_ingest_ns(str(db), str(bare), str(tmp_path)))
+    capsys.readouterr()
+
+    before = db_query(
+        str(db),
+        "SELECT headers, body, response_headers, response_snippet FROM work_items WHERE url = ?",
+        (url,),
+    )
+    assert len(before) == 1, "bare-URL ingest did not create the work item"
+    assert (before[0]["headers"] or "") == ""
+    assert (before[0]["body"] or "") == ""
+    assert (before[0]["response_snippet"] or "") == ""
+
+    # 2) Richer JSON ingest re-visits the SAME url carrying payloads.
+    richer = tmp_path / "richer.jsonl"
+    richer.write_text(
+        json.dumps(
+            {
+                "method": "GET",
+                "url": url,
+                "content_type": "application/json",
+                "headers": {"Content-Type": "application/json", "X-Req": "1"},
+                "body": '{"qty": 2}',
+                "response_headers": {"Content-Type": "application/json"},
+                "response_snippet": '{"order_id": 42, "status": "created"}',
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    ingest_endpoints.run(_ingest_ns(str(db), str(richer), str(tmp_path)))
+    capsys.readouterr()
+
+    after = db_query(
+        str(db),
+        "SELECT headers, body, response_headers, response_snippet FROM work_items WHERE url = ?",
+        (url,),
+    )
+    # Upsert, not a duplicate — still exactly one row for the URL.
+    assert len(after) == 1
+    # ...and the payloads the richer ingest carried now landed on it (before the
+    # fix these stayed empty because the colliding queue_key hit INSERT OR IGNORE).
+    assert (after[0]["headers"] or ""), (
+        "richer re-ingest did not store request headers on the already-admitted row"
+    )
+    assert json.loads(after[0]["headers"]) == {"Content-Type": "application/json", "X-Req": "1"}
+    assert after[0]["body"] == '{"qty": 2}'
+    assert json.loads(after[0]["response_headers"]) == {"Content-Type": "application/json"}
+    assert after[0]["response_snippet"] == '{"order_id": 42, "status": "created"}'
 
 
 def test_out_of_scope_insert_retires_existing_pending_same_url(tmp_path):

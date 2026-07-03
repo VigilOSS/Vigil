@@ -35,7 +35,7 @@ def _load_proxy_addon_module():
     mitmproxy_module = ModuleType("mitmproxy")
     mitmproxy_module.http = SimpleNamespace(HTTPFlow=object)
     mitmproxy_module.ctx = SimpleNamespace(
-        options=SimpleNamespace(engagements_root="", engagement_dir="", registry_poll_seconds=30),
+        options=SimpleNamespace(engagements_root="", registry_poll_seconds=30),
         log=SimpleNamespace(info=lambda *a, **k: None, warn=lambda *a, **k: None, error=lambda *a, **k: None),
     )
     sys.modules["mitmproxy"] = mitmproxy_module
@@ -2738,28 +2738,11 @@ def _agent_prompt_files() -> list[Path]:
     return files
 
 
-_C45_REVIEW_MODE_SECTIONS = {
-    "recon-specialist.md": "## Review Mode (Phase 1 → 2 exit)",
-    "exploit-developer.md": "## Review Mode (Phase 5 → 6 exit)",
-    "vulnerability-analyst.md": "## Root-Cause Review Mode (Phase 4 → 5 exit)",
-}
-
-
-@pytest.mark.parametrize(
-    "agent_file,heading",
-    sorted(_C45_REVIEW_MODE_SECTIONS.items()),
-)
-def test_c45_review_mode_section_present(agent_file: str, heading: str) -> None:
-    """C45: each of recon-specialist / exploit-developer / vulnerability-analyst
-    carries a review-mode section. The headings are exact so future renames
-    surface as a clear test failure. report-writer is intentionally NOT here —
-    it already has Review-and-Fix QA Mode in report-generation/SKILL.md."""
-    repo_root = Path(__file__).resolve().parents[3]
-    body = (repo_root / "agent" / "agents" / agent_file).read_text(encoding="utf-8")
-    assert heading in body, (
-        f"{agent_file} should carry the C45 review-mode section with heading "
-        f"'{heading}'"
-    )
+# (C45 review-mode heading-pin test removed: per the repository's
+# "Markdown prompt/doc testing policy" (root AGENTS.md), prompt/doc wording and
+# exact headings are not asserted in tests — brittle heading pins turn normal
+# prompt editing into fixture maintenance and reward stale phrasing. Review-mode
+# section presence is a prompt-authoring-checklist concern, not a CI gate.)
 
 
 def test_no_operator_prompt_invokes_update_finding_with_details_json() -> None:

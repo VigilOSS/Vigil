@@ -36,9 +36,7 @@ def _load_proxy_addon_module():
             warn=lambda *_a, **_k: None,
             error=lambda *_a, **_k: None,
         ),
-        options=SimpleNamespace(
-            engagements_root="", engagement_dir="", registry_poll_seconds=30
-        ),
+        options=SimpleNamespace(engagements_root="", registry_poll_seconds=30),
     )
     sys.modules.setdefault("mitmproxy", mitmproxy)
     sys.modules.setdefault("mitmproxy.http", http)
@@ -74,6 +72,23 @@ def _seed_engagement(
 # ---------------------------------------------------------------------------
 # Filesystem registry + matching
 # ---------------------------------------------------------------------------
+
+
+def test_load_exposes_only_shared_engagements_root_option() -> None:
+    module = _load_proxy_addon_module()
+    collector = module.CaseCollector()
+    added: list[tuple] = []
+
+    class Loader:
+        def add_option(self, *args) -> None:
+            added.append(args)
+
+    collector.load(Loader())
+
+    option_names = [args[0] for args in added]
+    assert "engagements_root" in option_names
+    assert "registry_poll_seconds" in option_names
+    assert "engagement_dir" not in option_names
 
 
 def test_registry_scans_each_engagement_scope_json(tmp_path: Path) -> None:
@@ -276,10 +291,17 @@ def test_routes_cache_is_written_after_reload(tmp_path: Path) -> None:
 
 
 class _FakeHttpResponse:
-    def __init__(self, status_code: int, headers: dict[str, str], body: bytes):
+    def __init__(
+        self,
+        status_code: int,
+        headers: dict[str, str],
+        body: bytes,
+        timestamp_end: float | None = None,
+    ):
         self.status_code = status_code
         self.headers = _FakeHeaders(headers)
         self._body = body
+        self.timestamp_end = timestamp_end
 
     def get_content(self):
         return self._body
@@ -297,6 +319,13 @@ class _FakeHeaders:
         value = self._items.get(key.lower())
         return [value] if value else []
 
+    # Support ``dict(headers)`` the way mitmproxy's Headers does.
+    def keys(self):
+        return self._items.keys()
+
+    def __getitem__(self, key: str) -> str:
+        return self._items[key.lower()]
+
 
 class _FakeRequest:
     def __init__(
@@ -306,20 +335,41 @@ class _FakeRequest:
         method: str = "GET",
         headers: dict[str, str] | None = None,
         cookies: dict[str, str] | None = None,
+        body: bytes = b"",
+        timestamp_start: float | None = None,
     ):
         self.pretty_url = url
         self.method = method
         self.headers = _FakeHeaders(headers or {})
         self.cookies = cookies or {}
+        self._body = body
+        self.timestamp_start = timestamp_start
 
     def get_content(self):
-        return b""
+        return self._body
+
+
+class _FakeConn:
+    def __init__(self, ip_address=None, sni: str | None = None):
+        self.ip_address = ip_address
+        self.sni = sni
 
 
 class _FakeFlow:
-    def __init__(self, request: _FakeRequest, response: _FakeHttpResponse):
+    def __init__(
+        self,
+        request: _FakeRequest,
+        response: _FakeHttpResponse,
+        *,
+        server_conn: _FakeConn | None = None,
+        client_conn: _FakeConn | None = None,
+        flow_id: str = "",
+    ):
         self.request = request
         self.response = response
+        self.server_conn = server_conn
+        self.client_conn = client_conn
+        self.id = flow_id
 
 
 def _record_captures(collector):
@@ -760,3 +810,714 @@ def test_insert_case_recovers_from_connection_invisible_to_readers(
         .fetchall()
     )
     assert orphan_rows == [("variant:2:page",)]
+
+
+# ---------------------------------------------------------------------------
+# _is_deletion_set_cookie unit tests (logout guard)
+# ---------------------------------------------------------------------------
+
+
+def test_is_deletion_set_cookie_f5_apm_deleted_value():
+    """F5/APM CMS logout: value is the literal string 'deleted'."""
+    module = _load_proxy_addon_module()
+    # Canonical CMS logout pattern.
+    assert module._is_deletion_set_cookie("MRHSession=deleted; path=/; Secure; HttpOnly") is True
+    assert module._is_deletion_set_cookie("F5_ST=deleted; path=/") is True
+    # Case-insensitive.
+    assert module._is_deletion_set_cookie("MRHSession=DELETED; path=/") is True
+    assert module._is_deletion_set_cookie("MRHSession=Deleted") is True
+
+
+def test_is_deletion_set_cookie_empty_value():
+    """Empty value is a deletion (Max-Age=0 stripped by some stacks before the value)."""
+    module = _load_proxy_addon_module()
+    assert module._is_deletion_set_cookie("MRHSession=; path=/") is True
+    assert module._is_deletion_set_cookie("MRHSession=") is True
+
+
+def test_is_deletion_set_cookie_max_age_zero():
+    """Max-Age=0 is the RFC 6265 deletion mechanism."""
+    module = _load_proxy_addon_module()
+    assert module._is_deletion_set_cookie("sid=abc; Max-Age=0") is True
+    assert module._is_deletion_set_cookie("sid=abc; max-age=0; path=/") is True
+    assert module._is_deletion_set_cookie("sid=abc; Max-Age=-1") is True
+
+
+def test_is_deletion_set_cookie_expires_in_past():
+    """Expires with an epoch / far-past date is a deletion."""
+    module = _load_proxy_addon_module()
+    assert module._is_deletion_set_cookie(
+        "sid=abc; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    ) is True
+    assert module._is_deletion_set_cookie(
+        "sid=abc; expires=Thu, 01 Jan 1970 00:00:01 GMT"
+    ) is True
+
+
+def test_is_deletion_set_cookie_live_cookie_not_deletion():
+    """A normal session cookie must not be treated as a deletion."""
+    module = _load_proxy_addon_module()
+    assert module._is_deletion_set_cookie("MRHSession=abc123valid; path=/; Secure") is False
+    assert module._is_deletion_set_cookie("sid=xyz; Max-Age=3600") is False
+    # A far-future Expires is not a deletion (timegm >= now).
+    assert module._is_deletion_set_cookie(
+        "sid=abc; Expires=Thu, 01 Jan 2099 00:00:00 GMT"
+    ) is False
+
+
+def test_is_deletion_set_cookie_quoted_empty():
+    """A quoted-empty logout cookie (MRHSession="") is a deletion sentinel."""
+    module = _load_proxy_addon_module()
+    assert module._is_deletion_set_cookie('MRHSession=""; path=/; Secure') is True
+    assert module._is_deletion_set_cookie('sid=""') is True
+    # A quoted LIVE value is not a deletion.
+    assert module._is_deletion_set_cookie('sid="abc123"; path=/') is False
+
+
+# ---------------------------------------------------------------------------
+# P1 out-of-scope carve-out: URL-form + CIDR entries, fail-closed
+# ---------------------------------------------------------------------------
+
+
+def test_out_of_scope_covers_url_form_entry():
+    module = _load_proxy_addon_module()
+    # URL-form entry reduced to its bare host and matched.
+    assert module._out_of_scope_covers(
+        ["https://appointments.acme-regional.example/book"], "appointments.acme-regional.example"
+    ) is True
+    # A different host under the same apex is NOT covered by the URL-form host.
+    assert module._out_of_scope_covers(
+        ["https://appointments.acme-regional.example/book"], "app.acme-regional.example"
+    ) is False
+
+
+def test_out_of_scope_covers_cidr_against_resolved_ip():
+    module = _load_proxy_addon_module()
+    # In-range resolved IP → covered (drop).
+    assert module._out_of_scope_covers(
+        ["10.0.0.0/8"], "internal.example.com", "10.1.2.3"
+    ) is True
+    # Out-of-range resolved IP → not covered.
+    assert module._out_of_scope_covers(
+        ["10.0.0.0/8"], "public.example.com", "93.184.216.34"
+    ) is False
+    # An IP-literal hostname is honored even without a separate resolved_ip.
+    assert module._out_of_scope_covers(["10.0.0.0/8"], "10.9.9.9") is True
+
+
+def test_out_of_scope_cidr_without_ip_fails_closed():
+    """A CIDR carve-out with no resolvable IP is uncertain — fail closed."""
+    module = _load_proxy_addon_module()
+    assert module._out_of_scope_covers(["10.0.0.0/8"], "internal.example.com") is True
+
+
+def test_out_of_scope_slash_non_cidr_reduces_to_host_not_drop_all():
+    """A slash-bearing entry that is NOT a valid CIDR (host/path or bare path) is
+    reduced to its host and matched as a host pattern — it must NEVER drop every
+    host in the engagement. Regression for the fail-closed-drops-everything bug
+    (a single "example.com/admin" or CIDR typo killed the whole engagement's
+    capture)."""
+    module = _load_proxy_addon_module()
+    # Host/path carve-out denylists ONLY its host...
+    assert module._out_of_scope_covers(["example.com/admin"], "example.com") is True
+    # ...and does NOT drop unrelated hosts (the bug dropped these too).
+    assert module._out_of_scope_covers(["example.com/admin"], "shop.example.com") is False
+    assert module._out_of_scope_covers(["example.com/admin"], "other.com") is False
+    # A host-less path is host-blind → skipped, never a drop-all.
+    assert module._out_of_scope_covers(["/api/internal"], "anything.example") is False
+    # A CIDR typo ("not/a/cidr/or/url") reduces to host "not" → no match, no drop-all.
+    assert module._out_of_scope_covers(["not/a/cidr/or/url"], "target.example") is False
+    # Host-less/unparseable URL-form is host-blind → skipped, not a drop-all.
+    assert module._out_of_scope_covers(["://"], "target.example") is False
+
+
+def test_match_engagement_drops_cidr_out_of_scope_with_resolved_ip(tmp_path: Path):
+    """A CIDR out_of_scope entry drops a host whose resolved IP is in-range,
+    while an out-of-range host still routes."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root, "eng-a", hosts=["*.example.com"], out_of_scope=["10.0.0.0/8"]
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    # Internal host resolving into 10/8 is dropped.
+    assert (
+        collector._match_engagement("internal.example.com", resolved_ip="10.5.6.7")
+        is None
+    )
+    # Public host resolving outside 10/8 still routes.
+    chosen = collector._match_engagement("api.example.com", resolved_ip="93.184.216.34")
+    assert chosen is not None and chosen.key == "eng-a"
+
+
+def test_match_engagement_path_carve_out_does_not_drop_whole_engagement(tmp_path: Path):
+    """A host/path out_of_scope entry must denylist ONLY its host, never wipe out
+    the whole engagement's capture. Regression for the catastrophic
+    fail-closed-drops-everything bug."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root, "eng-a",
+        hosts=["*.example.com", "*.other.com"],
+        out_of_scope=["example.com/admin"],
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    # Unrelated in-scope hosts STILL route (the bug dropped all of these).
+    assert collector._match_engagement("shop.example.com", resolved_ip="93.184.216.34").key == "eng-a"
+    assert collector._match_engagement("api.other.com", resolved_ip="93.184.216.34").key == "eng-a"
+    # Only the reduced carve-out host is dropped.
+    assert collector._match_engagement("example.com", resolved_ip="93.184.216.34") is None
+
+
+def test_capture_auth_skips_out_of_scope_host(tmp_path: Path):
+    """_capture_auth must NEVER harvest credentials for a host an out_of_scope
+    entry could cover (defense in depth, even if routing let it through)."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root,
+        "eng-a",
+        hosts=["*.example.com"],
+        out_of_scope=["https://secret.example.com"],
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    calls = _record_captures(collector)
+    entry = collector.registry["eng-a"]
+
+    request = _FakeRequest(
+        url="https://secret.example.com/login",
+        method="POST",
+        cookies={"session": "abc"},
+    )
+    response = _FakeHttpResponse(status_code=200, headers={}, body=b"{}")
+    collector._capture_auth(entry, _FakeFlow(request, response))
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# P1 bearer synthesis + nested tokens + request Authorization
+# ---------------------------------------------------------------------------
+
+
+def test_capture_auth_bearer_ignores_refresh_and_type_tokens(tmp_path: Path):
+    """token_type=Bearer / refresh_token / csrf_token must NOT seed the bearer;
+    the access_token wins by priority (not document order)."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    calls = _record_captures(collector)
+    entry = collector._match_engagement("a.example.com")
+
+    request = _FakeRequest(url="https://a.example.com/login", method="POST")
+    response = _FakeHttpResponse(
+        status_code=200,
+        headers={},
+        body=b'{"token_type": "Bearer", "refresh_token": "r-secret", '
+        b'"csrf_token": "c-secret", "access_token": "a-secret"}',
+    )
+    collector._capture_auth(entry, _FakeFlow(request, response))
+
+    assert len(calls) == 1
+    _, kw = calls[0]
+    assert kw["headers"]["Authorization"] == "Bearer a-secret"
+    # All token-keyed fields are still accumulated in the tokens delta.
+    assert kw["tokens"]["access_token"] == "a-secret"
+    assert kw["tokens"]["refresh_token"] == "r-secret"
+
+
+def test_capture_auth_extracts_nested_bearer_token(tmp_path: Path):
+    """A bearer nested one level under the login response still enters the store."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    calls = _record_captures(collector)
+    entry = collector._match_engagement("a.example.com")
+
+    request = _FakeRequest(url="https://a.example.com/auth/login", method="POST")
+    response = _FakeHttpResponse(
+        status_code=200,
+        headers={},
+        body=b'{"data": {"access_token": "nested-tok"}}',
+    )
+    collector._capture_auth(entry, _FakeFlow(request, response))
+
+    assert len(calls) == 1
+    _, kw = calls[0]
+    assert kw["tokens"]["access_token"] == "nested-tok"
+    assert kw["headers"]["Authorization"] == "Bearer nested-tok"
+
+
+def test_capture_auth_captures_request_authorization_header(tmp_path: Path):
+    """A bearer-only session (Authorization on the request, no cookies, no login
+    response) must still enter the credential store."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    calls = _record_captures(collector)
+    entry = collector._match_engagement("a.example.com")
+
+    request = _FakeRequest(
+        url="https://a.example.com/api/me",
+        method="GET",
+        headers={"Authorization": "Bearer live-session-tok"},
+    )
+    response = _FakeHttpResponse(status_code=200, headers={}, body=b"{}")
+    collector._capture_auth(entry, _FakeFlow(request, response))
+
+    assert len(calls) == 1
+    _, kw = calls[0]
+    assert kw["headers"]["Authorization"] == "Bearer live-session-tok"
+
+
+def test_capture_auth_stores_dequoted_set_cookie(tmp_path: Path):
+    """A live quoted Set-Cookie value is stored dequoted (no double-quoting)."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    calls = _record_captures(collector)
+    entry = collector._match_engagement("a.example.com")
+
+    request = _FakeRequest(url="https://a.example.com/login", method="POST")
+    response = _FakeHttpResponse(
+        status_code=200,
+        headers={"set-cookie": 'sid="quoted-val"; Path=/; HttpOnly'},
+        body=b"{}",
+    )
+    collector._capture_auth(entry, _FakeFlow(request, response))
+
+    assert len(calls) == 1
+    _, kw = calls[0]
+    assert kw["cookies"]["sid"] == "quoted-val"
+
+
+# ---------------------------------------------------------------------------
+# P2 content_type_family: html/xml before generic text/
+# ---------------------------------------------------------------------------
+
+
+def test_content_type_family_html_before_text():
+    module = _load_proxy_addon_module()
+    assert module._content_type_family("text/html; charset=utf-8") == "html"
+    assert module._content_type_family("application/xml") == "xml"
+    assert module._content_type_family("text/plain") == "text"
+    assert module._content_type_family("application/json") == "json"
+    assert module._content_type_family("application/javascript") == "javascript"
+    assert module._content_type_family("") == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# P1 body_schema: a top-level JSON array/scalar request body must not 422
+# ---------------------------------------------------------------------------
+
+
+def test_post_request_observation_coerces_non_dict_body_schema(tmp_path: Path, monkeypatch):
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector.orchestrator_base_url = "http://orchestrator.test"
+    collector._reload_registry(force=True)
+    entry = collector._match_engagement("a.example.com")
+
+    sent: dict = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"request_variant": {"id": 42}}).encode("utf-8")
+
+    def fake_urlopen(request, timeout=10):
+        sent["payload"] = json.loads(request.data.decode("utf-8"))
+        return _Resp()
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    result = collector._post_request_observation(
+        entry=entry,
+        url="https://a.example.com/api",
+        method="POST",
+        auth_context="anonymous",
+        content_type="application/json",
+        params={"body_params": "[1, 2, 3]"},  # top-level JSON array
+        response_status=200,
+        evidence_ref="proxy",
+        observation_payload={},
+    )
+    assert result is not None
+    # The array body was coerced to {} so the typed dict[str, Any] never 422s.
+    assert sent["payload"]["body_schema"] == {}
+
+
+# ---------------------------------------------------------------------------
+# P1 request-body save gated on REQUEST content type (not response)
+# ---------------------------------------------------------------------------
+
+
+def test_request_body_saved_when_response_is_binary(tmp_path: Path):
+    """A JSON request body answered by an image/png response must still be saved:
+    the body save is gated on the REQUEST content type, not the response type."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    collector._match_engagement("a.example.com")
+
+    captured: dict = {}
+    collector._capture_auth = lambda *a, **k: None
+    collector._post_request_observation = lambda **kw: {
+        "request_variant": {"id": 1},
+        "service": {"id": 1},
+    }
+    collector._insert_case = lambda entry, **kw: captured.update(kw)
+
+    request = _FakeRequest(
+        url="https://a.example.com/upload",
+        method="POST",
+        headers={"content-type": "application/json"},
+        body=b'{"k": "v"}',
+    )
+    response = _FakeHttpResponse(
+        status_code=200,
+        headers={"content-type": "image/png"},
+        body=b"\x89PNG binary",
+    )
+    collector.response(_FakeFlow(request, response))
+
+    assert captured.get("body") == '{"k": "v"}'
+    # The stored content_type is the REQUEST type (consistent with the saved body).
+    assert captured.get("content_type") == "application/json"
+
+
+# ---------------------------------------------------------------------------
+# Part B: full-flow capture (policy-gated sidecars + JSONL index + ingest POST)
+# ---------------------------------------------------------------------------
+
+
+def _enabled_policy(**overrides) -> dict:
+    policy = {
+        "enabled": True,
+        "capture_request_bodies": True,
+        "capture_response_bodies": True,
+        "max_body_bytes": 100000,
+        "content_type_allow": [],
+        "content_type_deny": [],
+        "redaction_profile": "none",
+    }
+    policy.update(overrides)
+    return policy
+
+
+def _capture_full_flow(collector, entry, flow, **kwargs):
+    posted: list[dict] = []
+    collector._post_http_flow = lambda e, record: posted.append(record)
+    defaults = dict(
+        hostname="a.example.com",
+        path="/api",
+        resolved_ip=None,
+        request_variant_id=7,
+        auth_context="authenticated",
+        content_family="json",
+        request_content_type="application/json",
+        response_content_type="application/json",
+        response_status=200,
+        raw_req_body=b'{"req": 1}',
+        resp_body=b'{"resp": 2}',
+    )
+    defaults.update(kwargs)
+    collector._maybe_capture_full_flow(entry, flow, **defaults)
+    return posted
+
+
+def test_full_flow_capture_disabled_by_default(tmp_path: Path):
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    entry = collector.registry["eng-a"]
+    # No capture-policy.json → policy disabled.
+    assert entry.capture_policy["enabled"] is False
+
+    request = _FakeRequest(url="https://a.example.com/api", method="POST", body=b'{"a":1}')
+    response = _FakeHttpResponse(status_code=200, headers={}, body=b'{"b":2}')
+    posted = _capture_full_flow(collector, entry, _FakeFlow(request, response))
+
+    assert posted == []
+    assert not (entry.root / "traffic").exists()
+
+
+def test_full_flow_capture_writes_sidecars_index_and_posts(tmp_path: Path):
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    entry = collector.registry["eng-a"]
+    entry.capture_policy = _enabled_policy()
+
+    request = _FakeRequest(
+        url="https://a.example.com/api",
+        method="POST",
+        headers={"content-type": "application/json", "host": "a.example.com"},
+        body=b'{"req": 1}',
+        timestamp_start=1_700_000_000.0,
+    )
+    response = _FakeHttpResponse(
+        status_code=201,
+        headers={"content-type": "application/json"},
+        body=b'{"resp": 2}',
+        timestamp_end=1_700_000_000.5,
+    )
+    flow = _FakeFlow(request, response, flow_id="flow-xyz")
+    posted = _capture_full_flow(
+        collector,
+        entry,
+        flow,
+        response_status=201,
+        raw_req_body=b'{"req": 1}',
+        resp_body=b'{"resp": 2}',
+    )
+
+    assert len(posted) == 1
+    rec = posted[0]
+    assert rec["flow_uid"] == "flow-xyz"
+    assert rec["request_variant_id"] == 7
+    assert rec["host"] == "a.example.com"
+    assert rec["timing_ms"] == 500
+    assert rec["started_at"] == "2023-11-14T22:13:20Z"
+
+    import hashlib
+
+    req_sha = hashlib.sha256(b'{"req": 1}').hexdigest()
+    resp_sha = hashlib.sha256(b'{"resp": 2}').hexdigest()
+    assert rec["request_body_sha256"] == req_sha
+    assert rec["response_body_sha256"] == resp_sha
+    assert rec["request_body_artifact_path"] == f"traffic/mitmproxy/bodies/{req_sha}.bin"
+    assert rec["response_body_artifact_path"] == f"traffic/mitmproxy/bodies/{resp_sha}.bin"
+    assert rec["request_body_truncated"] is False
+
+    # Sidecars written engagement-local with the exact bytes.
+    assert (entry.root / rec["request_body_artifact_path"]).read_bytes() == b'{"req": 1}'
+    assert (entry.root / rec["response_body_artifact_path"]).read_bytes() == b'{"resp": 2}'
+
+    # JSONL index appended and referenced on the POST record.
+    assert rec["index_artifact_path"].startswith("traffic/mitmproxy/flows/")
+    index_file = entry.root / rec["index_artifact_path"]
+    assert index_file.is_file()
+    lines = index_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["flow_uid"] == "flow-xyz"
+
+
+def test_full_flow_capture_truncates_and_honors_deny(tmp_path: Path):
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    entry = collector.registry["eng-a"]
+    entry.capture_policy = _enabled_policy(
+        max_body_bytes=4, content_type_deny=["image/"]
+    )
+
+    request = _FakeRequest(
+        url="https://a.example.com/api",
+        method="POST",
+        headers={"content-type": "application/json", "host": "a.example.com"},
+        body=b"0123456789",
+    )
+    # Response is image/png → denied, no response sidecar.
+    response = _FakeHttpResponse(
+        status_code=200, headers={"content-type": "image/png"}, body=b"PNGDATA"
+    )
+    posted = _capture_full_flow(
+        collector,
+        entry,
+        _FakeFlow(request, response),
+        request_content_type="application/json",
+        response_content_type="image/png",
+        raw_req_body=b"0123456789",
+        resp_body=b"PNGDATA",
+    )
+    rec = posted[0]
+    # Request body truncated to 4 bytes; truncation flagged honestly.
+    assert rec["request_body_bytes"] == 4
+    assert rec["request_body_truncated"] is True
+    stored = entry.root / rec["request_body_artifact_path"]
+    assert stored.read_bytes() == b"0123"
+    # Denied response body → no sidecar, no sha.
+    assert rec["response_body_artifact_path"] is None
+    assert rec["response_body_sha256"] == ""
+
+
+def test_full_flow_capture_records_host_mismatch(tmp_path: Path):
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    entry = collector.registry["eng-a"]
+    entry.capture_policy = _enabled_policy(
+        capture_request_bodies=False, capture_response_bodies=False
+    )
+
+    # Host header disagrees with the URL authority → host_mismatch telemetry.
+    request = _FakeRequest(
+        url="https://a.example.com/api",
+        method="GET",
+        headers={"host": "evil.example.com"},
+    )
+    response = _FakeHttpResponse(status_code=200, headers={}, body=b"")
+    flow = _FakeFlow(
+        request, response, client_conn=_FakeConn(sni="a.example.com")
+    )
+    posted = _capture_full_flow(
+        collector,
+        entry,
+        flow,
+        raw_req_body=b"",
+        resp_body=b"",
+    )
+    rec = posted[0]
+    assert rec["host_mismatch"] is True
+    assert rec["host_header"] == "evil.example.com"
+    assert rec["sni"] == "a.example.com"
+    assert rec["url_authority"] == "a.example.com"
+
+
+def test_capture_policy_read_from_filesystem_mirror(tmp_path: Path):
+    """The addon reads the capture policy from the capture-policy.json mirror the
+    backend writes next to scope.json (filesystem fallback)."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    eng = _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    (eng / "capture-policy.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "capture_request_bodies": True,
+                "capture_response_bodies": False,
+                "max_body_bytes": 2048,
+                "content_type_allow": ["application/json"],
+                "content_type_deny": [],
+                "redaction_profile": "none",
+            }
+        ),
+        encoding="utf-8",
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    policy = collector.registry["eng-a"].capture_policy
+    assert policy["enabled"] is True
+    assert policy["capture_request_bodies"] is True
+    assert policy["capture_response_bodies"] is False
+    assert policy["max_body_bytes"] == 2048
+    assert policy["content_type_allow"] == ["application/json"]
+
+
+def test_capture_policy_from_backend_registry_row(tmp_path: Path, monkeypatch):
+    """The registry fetch carries capture_policy from the /engagements payload."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    (root / "eng-a").mkdir(parents=True)
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector.orchestrator_base_url = "http://orchestrator.test"
+
+    payload = [
+        {
+            "key": "eng-a",
+            "scope_hosts": ["a.example.com"],
+            "capture_policy": {"enabled": True, "max_body_bytes": 512},
+        }
+    ]
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps(payload).encode("utf-8")
+
+    monkeypatch.setattr(module, "urlopen", lambda *a, **k: _Resp())
+    entries = collector._fetch_registry_from_backend()
+    assert entries[0].capture_policy["enabled"] is True
+    assert entries[0].capture_policy["max_body_bytes"] == 512
+
+
+# ---------------------------------------------------------------------------
+# Body-capture content-type filter: MIME wildcards (image/*) must match
+# ---------------------------------------------------------------------------
+
+
+def test_body_capture_deny_honors_mime_wildcard():
+    """A ``content_type_deny`` of ``image/*`` (the exact value the capture-policy
+    API stores) must exclude ``image/png`` — a substring-only check treated
+    ``image/*`` as literal text and never matched, so binary responses were still
+    captured when ``capture_response_bodies`` was on, bypassing the policy."""
+    module = _load_proxy_addon_module()
+    # Deny image/* -> image/png and a bare "image" are excluded; non-image passes.
+    assert module._body_capture_allowed("image/png", [], ["image/*"]) is False
+    assert module._body_capture_allowed("image/jpeg", [], ["image/*"]) is False
+    assert module._body_capture_allowed("image", [], ["image/*"]) is False
+    assert module._body_capture_allowed("application/json", [], ["image/*"]) is True
+
+
+def test_body_capture_allow_honors_mime_wildcard_and_substring_still_works():
+    module = _load_proxy_addon_module()
+    # Allow-list wildcard: only text/* captured.
+    assert module._body_capture_allowed("text/html; charset=utf-8", ["text/*"], []) is True
+    assert module._body_capture_allowed("application/json", ["text/*"], []) is False
+    # Historical substring entries keep working (no regression).
+    assert module._body_capture_allowed("image/png", [], ["image/"]) is False
+    assert module._body_capture_allowed("application/json", [], ["json"]) is False

@@ -25,34 +25,28 @@ supervised, resumable `vigil assess recon` job. Your job is to:
 3. **Turn the discovered surface into prioritized, judged attack surface** and
    next-step hypotheses for follow-on specialists.
 
-**Modes accepted:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven`. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven`. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-## Don't run — or launch — the long enumeration spine
+## Bounded Probes Are Yours; the Enumeration Spine Is the Operator's Job
 
 Run only short, bounded synchronous probes (`agent/shared-constraints.md` §2). The
 long enumeration spine (a `puredns` brute, a full-apex `dns-discovery`, a bulk
-`web-discovery`) is the operator's `vigil assess recon` job — you neither hold it as
-a blocking call **nor launch it as a `--background` job** (a dispatched specialist
-that backgrounds and polls is SIGUSR1-killed mid-wait). Read the job's `recon-status`
-result; when more enumeration is needed, **recommend it** in your handoff
-`next_steps` (e.g. "operator: re-run `vigil assess recon example.com --brute
---resume`") rather than launching it.
+`web-discovery`) is the operator's supervised, resumable `vigil assess recon` job —
+it is built to outlive a single dispatch, which is exactly what a dispatched
+specialist cannot do: a specialist that holds it as a blocking call, or launches it
+as a `--background` job and polls, gets SIGUSR1-killed mid-wait. That's the
+division of labor this boundary protects. Read the job's `recon-status` result;
+when more enumeration is needed, **recommend it** in your handoff `next_steps`
+(e.g. "operator: re-run `vigil assess recon example.com --brute --resume`") rather
+than launching it.
 
-## Specialist Context Isolation
-
-You are a specialist sub-agent, not the operator. Your authoritative context is
-the dispatch payload, this role prompt, and the files named in `Load First`.
-Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
-they are operator-only procedures for phase orchestration, dispatch policy,
-startup, and cross-agent state management. Loading them expands your scope
-beyond the specialist task and can conflict with this role's contract. Shared
-rules that specialists need live in `agent/shared-constraints*.md` and are
-already listed below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
+- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, the `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -64,7 +58,7 @@ already listed below.
 
 - `agent/skills/port-scanning/SKILL.md` — when you run the per-host nmap step (carries the per-host port-data presence assertion).
 - `agent/skills/nuclei-scanning/SKILL.md` — when you run the reactive nuclei sweep (step 5).
-- `agent/skills/cloud-exposure/SKILL.md` — on a dangling-CNAME observation or a nuclei `http/takeovers/` template hit, BEFORE recording any subdomain-takeover finding. That skill owns the per-provider claimability rules and the prove-or-kill benign own-account claim; the bare dangling/takeover signature is the #1 false-positive class for this bug type (it proves a name is unserved, not that you can re-bind it), so route every takeover candidate through it before recording.
+- `agent/skills/cloud-exposure/SKILL.md` — on a dangling-CNAME observation or a nuclei `http/takeovers/` template hit, BEFORE recording any subdomain-takeover finding. That skill runs the per-provider claimability check and the prove-or-kill benign own-account claim (deferring to `agent/references/subdomain-takeover.md`, the single source of truth for the claimability rules); the bare dangling/takeover signature is the #1 false-positive class for this bug type (it proves a name is unserved, not that you can re-bind it), so route every takeover candidate through it before recording.
 - `agent/skills/directory-fuzzing/SKILL.md` — when you run the L1 ffuf pass (step 6).
 - `agent/skills/browser-semantic-analysis/SKILL.md` — when its activation triggers appear.
 
@@ -77,7 +71,7 @@ Before any work, verify — if any item is unchecked, STOP and load it:
 - [ ] Read `scope.json`: in-scope hosts + active `exploit_policy`
 - [ ] Have the dispatch context (target, phase, objective, prior findings)
 - [ ] **Read the recon-job state first** — `vigil assess recon-status [--job-id N]` (per-stage state, counts, failures/partials/WARNs) and the artifacts under `scans/dns-discovery/`, `scans/web-discovery/`, `scans/recon/`. This is your starting picture.
-- [ ] Checked command history as a coverage map — `vigil assess list-command-runs --q <keyword> --show-matches` (unscoped by default; narrow with `--agent-name`/`--phase` only if swamped). Before citing a prior run, fetch its preview with `vigil assess get-command-run <id>` (`success=true` only means `return_code=0`, not that the output answers your question). Full guide: `agent/references/runtime-guides/command-history-auditing.md`.
+- [ ] Checked command history as a coverage map before probing — see `agent/shared-constraints.md` §2b.
 
 ## Why Recon Completeness Matters
 
@@ -97,6 +91,10 @@ completeness against the `subdomain-enumeration` bound rules:
 - **dns:** resolved-host count plausible for the apex set? Did the brute run
   (`--brute`)? Did wildcard pre-strip fire (telecom/CDN sink)? Did convergence
   stop on the two-zero-pass rule or hit `--max-passes`?
+- **bbot:** ran as the opt-in passive mop-up (`--bbot`) when the subfinder set
+  looked thin, or explicitly not warranted for this apex? Its `DNS_NAME` events
+  only count once the convergence resolve pass DNS-validates them — raw bbot
+  output is unconfirmed until then.
 - **web:** live-probe count vs. resolved hosts; did the crawl run or was it
   `--no-crawl`? Any hosts blackholed (egress) that need deferral?
 - **gau:** ran (default) or dropped (`--no-gau` for a brand-new site)? Any apexes
@@ -153,6 +151,7 @@ means every item is verified, not assumed.
 
 **From the recon job (assess, don't re-run):**
 - [ ] Subdomain enumeration reached convergence (or its stop reason is recorded) — not silently truncated by a WARN.
+- [ ] bbot passive mop-up (`--bbot`) run when the subfinder set was thin, or explicitly not warranted — its `DNS_NAME` events DNS-validated before being counted.
 - [ ] Wildcard / telecom-PTR sinks detected + pre-stripped; raw enum treated as candidates, not hosts.
 - [ ] Live HTTP set established; blackholed hosts deferred, not dropped.
 - [ ] Historical URLs mined (gau) unless `--no-gau` was justified.
@@ -175,6 +174,10 @@ means every item is verified, not assumed.
 
 ## Mandatory Closing Sequence
 
+Closing-sequence wrapper (resume-brief framing, idempotent/checkpoint cadence,
+plan-state digest): see `agent/shared-constraints-core.md`. Below is this role's
+own verb list.
+
 ### Blocked-claim self-check (run BEFORE the handoff)
 
 Before any `handoff_status=blocked`, `runtime_issues[].severity=blocker`, or "tool
@@ -186,12 +189,11 @@ the image, target unreachable, hard WAF lockout). For the recon JOB, read
 `recon-status` + the stage `exit_code`s: a `failed` stage is a real gap; a
 `done`-with-low-counts stage is `dry`, not blocked.
 
-### Checkpoint a handoff incrementally
+### Closing verbs
 
-`vigil assess agent handoff` is idempotent — checkpoint after each major step, not
-only at the end. (No separate `post probe-runs` step is needed: every `vigil assess
-kali` call in your bounded chain already writes its own command-run audit row, so
-coverage state is captured as each tool runs.) Then, in order:
+Every `vigil assess kali` call in your bounded chain already writes its own
+command-run audit row as it runs, so coverage state is captured automatically —
+there is no separate probe-run recording step for you to run here. In order:
 
 1. `vigil assess record-finding recon-specialist <finding-json>` per finding
 2. `vigil assess record-intel <type> <intel-json>` per intel row
@@ -208,10 +210,10 @@ command**, not a probe you run. Schema: `agent/references/runtime-guides/handoff
 
 Reason through the work in your response — the completeness verdict, what the
 fingerprints suggest, which hosts/surfaces look high-value, and the exact operator
-action that closes each gap. Backend writes via the Mandatory Closing Sequence
+action that closes each gap. Backend writes via the Closing verbs above
 make state durable; the response is your reflection on top, written for the
 operator and downstream specialists. Don't truncate reasoning to be brief
-(see `agent/shared-constraints.md` §16).
+(see `agent/shared-constraints-core.md` "Reasoning quality > response brevity").
 
 ## Handoffs
 

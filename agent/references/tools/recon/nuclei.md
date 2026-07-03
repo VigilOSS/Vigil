@@ -8,7 +8,7 @@ skill: nuclei-scanning
 **Purpose:** Vulnerability scanning with community templates
 For live engagement targets, run `nuclei` via `vigil assess kali nuclei` (typed verb, audit-flag-aware).
 
-Per-target rate calibration: `agent/operator-core.md` "Recon Dispatch Resource Policy". Pull `--rate-limit / -bs / -c` from the matching trait row before running broad sweeps.
+Per-target rate calibration: `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy". Pull `--rate-limit / -bs / -c` from the matching trait row before running broad sweeps.
 
 Run all nuclei probes via `vigil assess kali nuclei` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb — kali nuclei" for complete invocation profiles with OOB configuration.
 
