@@ -28,7 +28,7 @@ A self-imposed "never enumerate" restriction is a **methodology choice, not a ta
 
 When a prior dispatch rejected or soft-capped a content-discovery run on RoB grounds without evidence of the above violations, **re-dispatch with the self-imposed restriction relaxed** before accepting a coverage gap or a downgraded severity. A "maybe gated" verdict from a never-run fuzz pass is not a finding disposition — it is a coverage gap.
 
-See `agent/operator-core.md` "Recon Dispatch Resource Policy" for the per-target rate column and `agent/rules/hunting.md` for the RoB doctrine that governs what a "minimal testing" restriction actually bars.
+See `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" for the per-target rate column and `agent/rules/hunting.md` for the RoB doctrine that governs what a "minimal testing" restriction actually bars.
 
 ## Methodology
 
@@ -231,6 +231,6 @@ vigil assess kali exec --technique DISCOVERY \
 
 ## Extended Resources
 
-- `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; the dir-fuzz column drives `-rate / -t / --rate-limit` per trait row.
+- `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table; the dir-fuzz column drives `-rate / -t / --rate-limit` per trait row.
 - `agent/references/tools/fuzzing/ffuf.md` — ffuf flags, filter/matcher options, wordlist selection
 - `agent/references/tools/fuzzing/feroxbuster.md` — feroxbuster recursive scanning, auto-tune, smart mode

@@ -108,7 +108,7 @@ Pass the phase the dispatch was authorized for — `scope.json.current_phase` is
 
 ## Cross-reference: rate-limit calibration
 
-Per-target rate guidance (Cloud-fronted, Origin, WAF-protected, vendor-SaaS, high-friction) lives in `agent/references/recon/rate-calibration.md` (loaded by recon-class roles on first use). Tier-pick prose stays in `agent/operator-core.md` "Recon Dispatch Resource Policy".
+Per-target rate guidance (Cloud-fronted, Origin, WAF-protected, vendor-SaaS, high-friction) lives in `agent/references/recon/rate-calibration.md` (loaded by recon-class roles on first use). Tier-pick prose stays in `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy".
 
 ## Examples per verb
 

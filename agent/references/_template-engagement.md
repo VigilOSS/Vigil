@@ -93,7 +93,7 @@ Placement decision (fill in one):
 ## 3. Rate Cap
 
 > Exceeding the program's rate cap risks a ban or invalidation of findings.
-> The per-target rate table in `agent/operator-core.md` "Recon Dispatch Resource Policy"
+> The per-target rate table in `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy"
 > provides per-trait defaults; the values below OVERRIDE those defaults for this engagement.
 
 | Surface | Max requests/sec | Max concurrency | Notes |
@@ -103,7 +103,7 @@ Placement decision (fill in one):
 | Authenticated flows | `[FILL]` | `[FILL]` | [FILL: e.g., "session invalidates on rapid reuse"] |
 
 Back-off rule: on a 429, pause `[FILL: e.g., 60]` seconds before retrying. Do not bypass
-the rate limit — `agent/operator-core.md` "Recon Dispatch Resource Policy" makes this explicit;
+the rate limit — `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" makes this explicit;
 the program may revoke scope on violation.
 
 ---

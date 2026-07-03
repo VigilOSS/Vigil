@@ -33,7 +33,7 @@ proceed without rerunning the default sequence:
 - **Non-standard port** (everything on `:8443`/`:9000`/etc.) — `httpx` against the explicit
   port URL precedes `nmap`; the port set is already known.
 - **Internal / no-WAF target** — skip `wafw00f` (no signal); the rate-limit choice falls
-  through to the no-WAF default from `agent/operator-core.md` "Recon Dispatch Resource Policy".
+  through to the no-WAF default from `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy".
 - **Reactive sweep on already-fingerprinted stack** — `nuclei` runs against the URL delta
   without re-running `wafw00f`/`whatweb`; the fingerprint is already in intel.
 
@@ -531,7 +531,7 @@ downstream specialists can parse the output consistently.
 
 ## Extended Resources
 
-- `agent/operator-core.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table (cautious tier, CDN-fronted, WAF-protected, vendor SaaS, origin)
+- `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table (cautious tier, CDN-fronted, WAF-protected, vendor SaaS, origin)
 - `agent/references/runtime-guides/cdn-ip-blocking.md` — egress reputation check, four mitigation options (allowlist / proxy / browser / accept gap), give-up-vs-escalate rule
 - `agent/references/tools/recon/katana.md` — live crawl doctrine, JS-aware defaults, headless escalation, and ingestion handoff
 - `agent/skills/browser-semantic-analysis/SKILL.md` — browser execution decision tree for JS-heavy apps, soft errors, browser-originated APIs, and headless/headed deltas
