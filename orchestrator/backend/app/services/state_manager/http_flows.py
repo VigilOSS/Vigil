@@ -591,6 +591,62 @@ def _persist_har_body_sidecar(
     return rel_path, sha, len(raw)
 
 
+def _local_body_artifact(root: Path | None, artifact_path: Any) -> Path | None:
+    """Return an engagement-local body sidecar only when it exists under ``root``."""
+    if root is None or not isinstance(artifact_path, str) or not artifact_path.strip():
+        return None
+    root_resolved = root.resolve(strict=False)
+    candidate = (root_resolved / artifact_path).resolve(strict=False)
+    try:
+        candidate.relative_to(root_resolved)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def _import_har_body_sidecar(
+    root: Path | None,
+    body_obj: dict[str, Any],
+    artifact_path: Any,
+    sha256: str,
+    byte_count: Any,
+) -> tuple[str | None, str, int]:
+    """Normalize HAR body metadata to a recoverable engagement-local sidecar.
+
+    Vigil HARs exported from another engagement carry source-relative sidecar
+    paths in ``_vigil``. Those paths are only reusable when the file exists under
+    the destination root; otherwise the inline HAR body must be re-persisted
+    locally so later detail/export reads can recover it.
+    """
+    raw = _har_body_raw(body_obj)
+    artifact = str(artifact_path).strip() if isinstance(artifact_path, str) and artifact_path.strip() else None
+    local_artifact = _local_body_artifact(root, artifact)
+    if local_artifact is not None:
+        if isinstance(byte_count, int) and not isinstance(byte_count, bool):
+            normalized_count = byte_count
+            normalized_sha = sha256
+        else:
+            try:
+                local_raw = local_artifact.read_bytes()
+            except OSError:
+                local_raw = raw
+            normalized_count = len(local_raw)
+            normalized_sha = sha256 or (
+                hashlib.sha256(local_raw).hexdigest() if local_raw else ""
+            )
+        return artifact, normalized_sha, normalized_count
+
+    if artifact is not None and root is None:
+        return artifact, sha256, int(byte_count or len(raw) or 0)
+
+    if raw:
+        persisted_path, persisted_sha, persisted_bytes = _persist_har_body_sidecar(root, raw)
+        if persisted_path:
+            return persisted_path, persisted_sha, persisted_bytes
+
+    return None, "", 0
+
+
 def har_from_flows(
     flows: list[dict[str, Any]],
     *,
@@ -747,36 +803,30 @@ def flows_from_har(
         flow_uid = str(vigil.get("flow_uid") or "").strip()
         if not flow_uid:
             flow_uid = _synthesize_flow_uid(method, url, started_at or str(index), response_status)
-        # Body bytes / sha / artifact path. A Vigil HAR carries these on ``_vigil``
-        # (round-trip). A plain HAR carries only the inline ``postData``/``content``
-        # text: persist it to a sidecar so ``har_from_flows`` can re-inline it on
-        # the next export, and record the resulting path/sha. Without a writable
-        # ``root`` (or on write failure) we record ZERO bytes rather than a phantom
-        # count pointing at a body no one can recover.
-        request_body_artifact_path = vigil.get("request_body_artifact_path")
-        request_body_sha256 = str(vigil.get("request_body_sha256") or "")
-        request_body_bytes = vigil.get("request_body_bytes")
-        if request_body_bytes is None:
-            if request_body_artifact_path is None:
-                request_body_artifact_path, sha, request_body_bytes = (
-                    _persist_har_body_sidecar(root, _har_body_raw(post_data))
-                )
-                if sha:
-                    request_body_sha256 = sha
-            else:
-                request_body_bytes = len(_har_body_raw(post_data))
-        response_body_artifact_path = vigil.get("response_body_artifact_path")
-        response_body_sha256 = str(vigil.get("response_body_sha256") or "")
-        response_body_bytes = vigil.get("response_body_bytes")
-        if response_body_bytes is None:
-            if response_body_artifact_path is None:
-                response_body_artifact_path, sha, response_body_bytes = (
-                    _persist_har_body_sidecar(root, _har_body_raw(content))
-                )
-                if sha:
-                    response_body_sha256 = sha
-            else:
-                response_body_bytes = len(_har_body_raw(content))
+        # Body bytes / sha / artifact path. A Vigil HAR carries sidecar paths in
+        # ``_vigil``, but those paths are only trustworthy in the destination
+        # engagement when the file exists locally. Cross-engagement imports must
+        # re-persist the inline HAR body into this engagement's sidecar directory;
+        # otherwise later detail/export reads would point at a missing source
+        # artifact. Plain HARs follow the same path with no incoming artifact.
+        request_body_artifact_path, request_body_sha256, request_body_bytes = (
+            _import_har_body_sidecar(
+                root,
+                post_data,
+                vigil.get("request_body_artifact_path"),
+                str(vigil.get("request_body_sha256") or ""),
+                vigil.get("request_body_bytes"),
+            )
+        )
+        response_body_artifact_path, response_body_sha256, response_body_bytes = (
+            _import_har_body_sidecar(
+                root,
+                content,
+                vigil.get("response_body_artifact_path"),
+                str(vigil.get("response_body_sha256") or ""),
+                vigil.get("response_body_bytes"),
+            )
+        )
         results.append(
             {
                 "flow_uid": flow_uid,
