@@ -62,44 +62,29 @@ orchestration, not target traffic.
 Target-facing dispatches run **synchronously by default**: each
 `vigil assess kali <verb> ... --timeout N` call is blocking and awaited to
 completion in-band — no `run_in_background`, no `vigil assess kali job start`,
-no dtach, and no watcher/poll loop. A specialist must never background target
-traffic and then halt waiting for a completion notification: the harness
-auto-resumes the halted agent, which launches the next detached job and halts
-again, producing unbounded relaunch thrash, duplicate probes, and near-zero net coverage.
-A generous `--timeout` is the correct tool for a single long probe
-(`nmap+scripts`, `sqlmap`, `nuclei` sweep, `dirb`, `gobuster`, `ffuf` large
-wordlists): when it expires the audit pipeline cascades SIGTERM→SIGKILL into
-the in-container PID, so a synchronous call is killed cleanly and is never
-orphaned.
+no dtach, and no watcher/poll loop. A specialist that backgrounds target
+traffic and halts for a completion notification gets auto-resumed, launches the
+next detached job, and halts again — unbounded relaunch thrash, duplicate
+probes, near-zero net coverage. A generous `--timeout` is the correct tool for a
+single long probe; on expiry the audit pipeline cascades SIGTERM→SIGKILL into
+the in-container PID, so the call is killed cleanly and never orphaned. **Above
+the CLI's own `--timeout` sits a separate agent-harness ceiling you do not
+control**: a blocking call that runs too long is auto-backgrounded and the agent
+is killed (**exit 144 / SIGUSR1**), orphaning the probe and writing no handoff. A
+larger `--timeout` only widens that window — a single synchronous probe must fit
+in minutes, not tens of minutes; genuinely long enumeration belongs in an
+operator-owned supervised job.
 
-That cascade governs the Vigil CLI's *own* `--timeout`. Above it sits a separate
-**agent-harness ceiling you do not control**: if a single blocking tool call runs
-longer than the harness allows, the harness auto-backgrounds the call and kills the
-agent (**exit 144 / SIGUSR1**) at a timeout you cannot set — orphaning the in-flight
-probe and any detached children, and writing no handoff. A larger `--timeout` does
-not defeat this; it only widens the window in which the harness fires. So a single
-synchronous probe must fit well under that ceiling (minutes, not tens of minutes),
-and genuinely long enumeration — a full-apex `puredns` brute, bulk HTTP liveness
-over thousands of hosts, a deep crawl — belongs in the operator-owned, supervised,
-resumable `vigil assess recon` job that the operator polls, never a specialist's
-blocking call.
+**"Synchronous" means awaited-in-band, NOT one-call-at-a-time** — issuing several
+blocking calls in parallel, each awaited in-band, is fine; the ban is on
+detaching a job and reaping it later, not on concurrency. `vigil assess kali job
+start` (the dtach-supervised worker that survives shell exit) is **operator-only**
+— a single long sweep the operator launches and monitors, never a per-step or
+fan-out pattern in a specialist loop. A specialist that needs a probe to outlive
+its dispatch says so in its handoff and lets the operator own the job.
 
-**"Synchronous" means awaited-in-band, NOT one-call-at-a-time and NOT
-no-parallelism.** The ban is on the backgrounding / `dtach` / fire-and-forget /
-poll-for-completion-later patterns above — not on concurrency. Issuing several
-blocking calls in parallel, each awaited to completion in-band, is fine: the
-prohibited thing is detaching a job and reaping it later, not running more than
-one probe at once. (The operator likewise runs multiple specialists
-concurrently — synchronous execution inside each does not mean a single global
-in-flight call.)
-
-`vigil assess kali job start` — the SQLite-backed, dtach-supervised worker that
-survives calling-shell exit — is reserved for a **single** long-running sweep
-the **operator** explicitly launches and monitors directly. It is never a
-per-step pattern inside a specialist's agent loop and never a way to fan out
-parallel detached probes. If a dispatched specialist believes a probe must
-outlive its dispatch, it says so in its handoff and lets the operator own the
-job rather than backgrounding it itself.
+Full sync-vs-async decision, the mode table, and the SIGUSR1 rationale:
+`agent/skills/kali-exec/SKILL.md` "Synchronous vs. async decision".
 
 Host-side commands are limited to coordination and non-target support only:
 `jq`, `sqlite3`, `python3`, `grep` / `rg`, `sed`, `awk`, `base64`, `openssl`,
@@ -118,83 +103,37 @@ to a file (`echo X > file`), piping into another tool, or generating a payload.
 
 ### Process cleanup — no broad `pkill`/`killall` by binary name
 
-Agents MUST NOT use `pkill`, `killall`, or `kill -9 -f <binary>` against
-shared-runtime processes. The Kali runtime is shared infrastructure across
-parallel specialists, so a broad signal by binary name kills sibling agents'
-work — losing potentially hours of recon. The audit pipeline already
-cascades SIGTERM→SIGKILL into the in-container PID on timeout, so manual
-cleanup is rarely needed; when it is, **PID-targeted kill is OK** — `kill
--TERM <pid>` against a tracked, in-container PID only signals your own
-process, not siblings. The forbidden pattern is the *binary-name* selector
-(`pkill -f nmap`, `killall nuclei`); the safe pattern is the *PID*
-selector (`kill -TERM "$(cat /tmp/vigil-pid-<run_uuid>)"`).
-
-What to do instead — track the lifecycle of every process you spawn and stop
-only the one you started:
-
-- **Synchronous runs (the specialist default) — let `--timeout` clean up.**
-  A blocking `vigil assess kali <verb> ... --timeout N` cascades
-  SIGTERM→SIGKILL into the in-container PID when the budget expires, so no
-  manual cleanup is needed for the common case.
-- **Operator-owned long sweeps — use the job lifecycle.** When the operator
-  has launched a single authorized long sweep with `vigil assess kali job
-  start ... -- <verb> ...`, stop it cleanly with `vigil assess kali job stop
-  <id>`. The job worker SIGTERMs only the in-container PID it owns; sibling
-  jobs stay alive. (Specialists do not start jobs — see §2.)
-- **Mid-run synchronous cleanup — use the run-uuid PID file.**
-  Every audit row carries a `run_uuid`. The runtime writes the
-  in-container PID to `/tmp/vigil-pid-<run_uuid>` for the duration of the
-  run, so cleanup is `vigil assess kali exec --technique META --intent
-  "terminate tracked runtime pid" --probe-kind cleanup --phase <phase>
-  --timeout 30 -- sh -c 'kill -TERM "$(cat
-  /tmp/vigil-pid-<run_uuid>.pid)"'`. This signals only your run, not sibling
-  runs of the same binary.
-- **Last-resort hygiene for hours-long parallel runs — copy the binary
-  per agent.** `vigil assess kali exec --technique META --intent
-  "create per-agent nmap copy" --probe-kind cleanup --phase <phase>
-  --timeout 30 -- cp /usr/bin/nmap /usr/local/bin/nmap-${AGENT_NAME}` so a later `pkill -f
-  nmap-${AGENT_NAME}` only matches your processes. Prefer the job
-  lifecycle; reach for this only when two specialists genuinely need
-  multi-hour parallel sweeps of the same heavy binary.
-- **Timeout-related cleanup is automatic.** `vigil assess kali exec` and
-  every typed verb cascade SIGTERM→SIGKILL into the in-container PID via
-  `docker exec ... kill` when `--timeout` expires. Operators do not need
-  to kill anything manually for a timeout — the in-container tree is
-  already gone.
+Never signal shared-runtime processes by binary name (`pkill -f nmap`,
+`killall nuclei`) — a broad selector kills sibling specialists' parallel scans
+in the shared runtime, losing hours of recon. Synchronous `--timeout` expiry
+already cascades SIGTERM→SIGKILL into the in-container PID, so manual cleanup is
+rarely needed; operator jobs stop with `vigil assess kali job stop <id>`. When
+you must clean up mid-run, use the **PID selector**, not the binary name: every
+audit row carries a `run_uuid` and the runtime writes its in-container PID to
+`/tmp/vigil-pid-<run_uuid>`, so `kill -TERM "$(cat /tmp/vigil-pid-<run_uuid>)"`
+signals only your run. Full rationale: `agent/skills/kali-exec/SKILL.md`
+"Process cleanup discipline".
 
 ### Command Metadata
 
 Every target-facing `vigil assess kali` call carries audit metadata as required CLI flags; the
-CLI fails closed when they're missing rather than degrading to a stale env-var default.
+CLI fails closed when they're missing rather than degrading to a stale env-var default. The
+required set is `--technique`, `--intent`, `--probe-kind`, `--phase`, and `--timeout`, plus
+`--destructive` when the command writes/edits/deletes target state and `--force` to suppress the
+dedup-warning log on an intentional retry (a fresh audit row is written regardless;
+`superseded_by_id` links it to the predecessor).
 
-- **`--technique <enum>`** — the vulnerability class this command tests. Derive it from the
-  skill you loaded (`ssrf-testing` → `SSRF`, `sqli-testing` → `SQLI`, etc.); when the mapping
-  isn't obvious the skill file names the correct value at the top. Use `HEALTH` for
-  runtime/tool inventory commands.
-- **`--intent "<text>"`** — a ≤200-char one-liner describing what this specific command is
-  trying to accomplish. Replaces the `echo "=== label ==="` pattern.
-- **`--probe-kind <kind>`** — `fingerprint` | `baseline` | `payload` | `exploit` | `replay` | `cleanup`.
-- **`--destructive`** — pass when the command writes, edits, or deletes target state
-  (POST/PUT/PATCH/DELETE, upload, account creation, config change). Off for read-only probes.
-- **`--timeout <seconds>`** — required wall-clock budget. Synchronous calls hit it cleanly
-  (SIGTERM→SIGKILL into the in-container PID); raise it for a heavy single probe rather than
-  backgrounding it — a long budget is not a reason to use `vigil assess kali job start`
-  (operator-only, §2).
-- **`--phase <enum>`** — REQUIRED on every call. Pass the phase the dispatch was authorized
-  for, NOT `scope.json.current_phase` — engagements regularly operate **between** phases
-  (mid-Phase-3 recon on a newly-discovered host, Phase-5 exploit-developer fingerprinting), and
-  the audit row must reflect what the dispatch was for, not what the engagement happened to be
-  in.
-- **`--force`** — suppress the dedup-warning log for an intentional retry; the command always
-  executes and records a fresh audit row regardless (`superseded_by_id` links it to the
-  predecessor).
+Two judgment points that the mechanical layers can't give you: derive `--technique` from the
+skill you loaded (`ssrf-testing` → `SSRF`, `sqli-testing` → `SQLI`; `HEALTH` for runtime/tool
+inventory), and pass `--phase` for the phase the **dispatch was authorized for**, NOT
+`scope.json.current_phase` — engagements routinely operate between phases.
 
-Full enum values (`--technique`, `--probe-kind`, `--phase`), per-verb defaults, and example
-payloads: `vigil assess list-commands` (phase-grouped catalog) and `vigil assess contract kali
-<verb>` (canonical schema). `--engagement-key` derives from `${ENGAGEMENT_DIR}/engagement.json`;
-`--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$VIGIL_AGENT_NAME`, then
-`operator` — dispatch wrappers must export `AGENT_NAME=<role>` or pass `--agent-name <role>`
-explicitly, because a silent `operator` attribution breaks coverage ownership.
+Full flag-by-flag purpose, the enum values for `--technique`/`--probe-kind`/`--phase`, and the
+`--engagement-key`/`--agent-name` resolution order live in
+`agent/skills/kali-exec/SKILL.md` ("Audit-flag mapping", "Phase tags") and are generated per-verb
+by `vigil assess contract kali <verb>` / `vigil assess list-commands`. Dispatch wrappers must
+export `AGENT_NAME=<role>` or pass `--agent-name <role>` — a silent `operator` attribution breaks
+coverage ownership.
 
 ---
 
@@ -207,8 +146,8 @@ procedure.
 
 **Posture: capped live-fire, not zero-fire.** Static characterization (Step 1) is unlimited;
 genuine ambiguity gets a small, hard, audited live-fire budget (Step 3), gated by a durable
-recorded decision. This is a deliberate, bounded loosening, not routine live-fire license — read
-the whole procedure, including the cross-dispatch rule, before relying on the budget.
+recorded decision — a bounded loosening, not routine live-fire license. Read the whole
+procedure, including the cross-dispatch rule, before relying on the budget.
 
 ### Step 1 — mandatory-first, unlimited static characterization
 
@@ -365,9 +304,10 @@ the real `--details-inline`/`--details-replace`, `kali katana -H`, `kali exec
 
 ## 2a. Listener, Tunnel, and OOB Responsibility
 
-Shared listener infrastructure belongs to the operator because a listener, tunnel, or
-interactsh server is global runtime state that can break other specialists if it is
-started, restarted, or reconfigured mid-engagement.
+Starting, stopping, restarting, or reconfiguring shared listener, tunnel, and OOB server
+processes belongs to the **operator** — these are global runtime state whose disruption breaks
+other concurrent specialists: pwncat-vl listeners, frp tunnels, chisel listeners, `nc -lvp`,
+`socat` listeners, `frpc`, `oob-server`, interactsh servers, or equivalent.
 
 Agent-side OOB readiness checks, named per-agent clients, and the mint→poll→correlate
 procedure are canonical in `agent/references/offensive-tactics/frp-tunneling.md`
@@ -385,12 +325,6 @@ When exploitation requires a reverse-shell listener or tunnel exposure:
    block on the operator for checks that `vigil oob status`, `vigil oob poll`, or
    the raw-debug tails (`vigil logs oob`, `vigil oob client logs`) can answer
    directly.
-
-Starting, stopping, or restarting shared listener, tunnel, and OOB server processes
-belongs to the operator — these are global runtime state whose disruption breaks
-other concurrent specialists: pwncat-vl listeners, frp tunnels, chisel listeners,
-`nc -lvp`, `socat` listeners, `frpc`, `oob-server`, interactsh servers, or
-equivalent network listener processes.
 
 ---
 
@@ -476,20 +410,15 @@ discovery is fast (~200 tokens) and usually faster than guessing.
 filter to that skill's paired references). Identify the paired
 payload files, tool cheatsheets, and OWASP checklists that apply to your task and load them.
 
-**Complete both reads before target-facing work begins.** Improvising a technique that
-already exists in the skill/reference set wastes tokens, produces inconsistent results, and
-misses methodology that the skill encodes (e.g., mitmproxy setup, payload libraries, tool flags).
-
-**References are not a fallback.** The `references/` library contains:
+**Complete both reads before target-facing work begins, and only improvise after confirming
+the set is genuinely insufficient.** References are not a fallback: improvising a technique that
+already exists wastes tokens, produces inconsistent results, and misses encoded methodology
+(mitmproxy setup, payload libraries, tool flags). A skill's "Extended Resources" list is required
+reading for that test class, not optional. The `references/` library contains:
 - `payloads/` — 20 copy-pasteable attack payload files per bug class
 - `api-security/` — OWASP API Security Top 10:2023 checklists
 - `offensive-tactics/` — red team TTPs by kill-chain phase
 - `tools/` — CLI tool cheatsheets (nmap, ffuf, sqlmap, hydra, etc.)
-
-When a skill's "Extended Resources" section lists reference files, those are required reading
-for that test class — not optional supplemental material.
-
-Only improvise after confirming the reference set is genuinely insufficient.
 
 ---
 
@@ -558,9 +487,9 @@ proved the finding. The field allows up to 20 KB. If the operator or another age
 reproduce the finding later, the notes field alone should be sufficient without re-discovering
 the request format, session tokens, or tool parameters.
 
-**Failure to use `vigil assess record-finding` is the single most common subagent defect.** If you
-produce `#### Findings` output, each finding payload in that section must have been recorded
-via `vigil assess record-finding` during your session. Do not defer recording to the operator.
+**Failure to use `vigil assess record-finding` is the single most common subagent defect.** Every
+payload in a `#### Findings` block must have been recorded during your session — do not defer
+recording to the operator.
 
 ---
 
@@ -617,20 +546,9 @@ Full rule sets: `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rul
 
 ## 8. OWASP Quick Reference
 
-| Code | Category |
-|------|----------|
-| A01 | Broken Access Control |
-| A02 | Cryptographic Failures |
-| A03 | Injection |
-| A04 | Insecure Design |
-| A05 | Security Misconfiguration |
-| A06 | Vulnerable and Outdated Components |
-| A07 | Identification and Authentication Failures |
-| A08 | Software and Data Integrity Failures |
-| A09 | Security Logging and Monitoring Failures |
-| A10 | Server-Side Request Forgery |
-
-API security: `agent/references/api-security/`
+The OWASP Top 10:2021 category-code lookup is reference material, not a per-dispatch
+constraint — it lives in `agent/references/owasp-quick-reference.md` (load on demand when
+mapping a finding to a category). API-specific checklists: `agent/references/api-security/`.
 
 ---
 
@@ -690,42 +608,26 @@ Engagement artifacts live at one physical location on disk but have two names de
 
 ## 11a. Script Execution Inside Kali
 
-Custom scripts (Python helpers, exploit PoCs, payload builders) often need to
-run inside the runtime container so they can hit target hosts through the same
-network isolation envelope as the Kali tools. The path the operator references
-when authoring or reviewing the script is different from the path the script
-sees at execution time, and getting this wrong causes silent file-not-found
-failures or runs the script against the wrong file system.
+Custom scripts (Python helpers, exploit PoCs, payload builders) run inside the
+runtime container so they hit target hosts through the same isolation envelope as
+the Kali tools. Host and container name the same bind-mounted bytes differently —
+getting the prefix wrong causes silent file-not-found failures.
 
-- **Authoring on the host** — write scripts under
-  `$DIR/scripts/<name>.py` (host path) or `$ENGAGEMENT_DIR/scripts/<name>.py`.
-  The host path is what the operator and reviewers see, what `vigil assess`
-  recording references when capturing artifacts, and what shows up in commit
-  diffs.
-- **Executing inside Kali** — invoke the script through `vigil assess kali exec`
-  using its container-side path
-  `/engagements/$ENGAGEMENT_KEY/scripts/<name>.py`. The container sees the
-  bind-mounted directory at `/engagements/<engagement_key>`, so the host-side
-  `$DIR` prefix is invalid inside the runtime and a literal `$DIR` in the argv
-  resolves to nothing.
-- **Common pattern** — author at `$DIR/scripts/exploit.py`, then run
-  `vigil assess kali exec --technique EXPLOIT --intent "..." --probe-kind exploit
-  --phase exploit --timeout 600 -- python3
-  /engagements/$ENGAGEMENT_KEY/scripts/exploit.py --target https://example`.
-  The `--` separator forwards everything after it as raw argv to the in-container
-  command, which is how arbitrary script invocations stay auditable through the
-  same wrapper that records typed verbs.
+- **Author on the host** at `$DIR/scripts/<name>.py` (or
+  `$ENGAGEMENT_DIR/scripts/<name>.py`) — the path the operator, reviewers, `vigil
+  assess` artifact recording, and commit diffs see.
+- **Execute inside Kali** via `vigil assess kali exec ... -- python3
+  /engagements/$ENGAGEMENT_KEY/scripts/<name>.py ...`. The container sees the mount
+  at `/engagements/<engagement_key>`, so a literal `$DIR` in the argv resolves to
+  nothing. The `--` separator forwards everything after it as raw argv, keeping the
+  invocation auditable through the same wrapper that records typed verbs.
 - **Outputs land back on the host** — anything the script writes under
-  `/engagements/$ENGAGEMENT_KEY/...` is visible from the host at the matching
-  `$DIR/...` path, because both names point at the same bind-mounted directory.
-  Engagement-scoped output should always live under that tree, not under
-  `/tmp` or `/data` inside the container, so artifacts survive container
-  restarts and remain attached to the engagement.
+  `/engagements/$ENGAGEMENT_KEY/...` appears at the matching `$DIR/...` path.
+  Keep engagement-scoped output under that tree, never `/tmp` or `/data` inside the
+  container, so artifacts survive restarts and stay attached to the engagement.
 
-The dual-path naming exists because the container and the host share one
-filesystem at one mount point — there is no second copy of the script to
-sync. The two prefixes are aliases for the same bytes; using the wrong one
-just means the lookup happens against a path that does not exist on that side.
+A worked example lives in `agent/skills/kali-exec/SKILL.md` "Run a custom Python
+helper inside the runtime".
 
 ---
 
