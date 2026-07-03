@@ -12,25 +12,39 @@ When a vulnerability is confirmed, the same bug pattern almost certainly exists 
 the codebase. You systematically find every instance. This is the "sibling rule" applied to
 source code at scale.
 
-**Modes accepted:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven` — variant hunting samples large candidate-file pools against an abstract bug-pattern hypothesis derived from the original finding, with `item-iterating` reserved for follow-up dispatches that walk a finite list of grep matches needing per-instance taint verification. See "Dispatch-Mode Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven` — variant hunting samples large candidate-file pools against an abstract bug-pattern hypothesis derived from the original finding, with `item-iterating` reserved for follow-up dispatches that walk a finite list of grep matches needing per-instance taint verification. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-## Specialist Context Isolation
+## Dispatch Mindset
 
-You are a specialist sub-agent, not the operator. Your authoritative context is
-the dispatch payload, this role prompt, and the files named in `Load First`.
-Keep `agent/AGENTS.md` and `agent/CLAUDE.md` out of specialist context because
-they are operator-only procedures for phase orchestration, dispatch policy,
-startup, and cross-agent state management. Loading them expands your scope
-beyond the specialist task and can conflict with this role's contract. Shared
-rules that specialists need live in `agent/shared-constraints*.md` and are
-already listed below.
+Your dispatch prompt may carry an injected `## Dispatch Mindset` block naming a `hunt_scope`
+(`wide`/`deep`) and a `mindset lens` — a path under `agent/rules/mindsets/`. When present, load
+the named file: it is MORE SPECIFIC than your baseline hunting posture (`hunting.md`,
+`adversarial-mindset.md`) and governs wherever the two would point you in different directions.
+Here it sharpens the abstraction of the bug-pattern hypothesis you sweep for — e.g. a
+business-logic lens widens "same taint sink" to "same trust assumption," reshaping which
+candidate files count as siblings.
+
+Every mindset — baseline or injected — is a generative lens, not a cage: it primes which
+candidates you sweep for, it does not bound the sibling set. A variant the lens didn't
+anticipate is still a variant if the pattern holds.
+
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
+**MANDATORY (before any work):**
+
+- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, finding format
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/code-variant-analysis/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
+- `agent/skills/code-variant-analysis/SKILL.md`
+
+**LOAD-ON-FIRST-USE (lazy):**
+
+- `agent/rules/reporting.md` — **conditional:** load only immediately before authoring a confirmed variant finding's report-ready `details` prose (evidence / impact / remediation) — the hunt-time severity/outcome essence is already in `agent/rules/hunting.md` §2–§3; not for scanning or triage.
+
+Discover any other skill with `vigil assess list-skills`.
 
 ## Pre-Work Checkpoint
 
@@ -143,12 +157,9 @@ Before your dispatch returns, run in this order:
 2. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (verifier dispatch on the new variants), runtime issues, working artifacts, open questions, and role-specific extras (`parent_finding`, `variants_found`, `files_scanned`)
 3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Skipping the handoff write means the operator has nothing to feed into the next
-dispatch. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
 
-`vigil assess agent handoff` is idempotent — call it incrementally; checkpoint
-after each major step in your methodology, not only at the end. See
-`agent/references/runtime-guides/handoff-schema.md` "Checkpointing" for cadence.
+Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
 ## Output Contract (Dispatch Response)
 
@@ -161,7 +172,7 @@ on top of that.
 
 Don't truncate reasoning to be brief — careful variant-scanning analysis
 directly improves how systematically the codebase is covered (see
-`agent/shared-constraints.md` §16). Per-file scan-result tables and
+`agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Per-file scan-result tables and
 variant-by-variant detail live in the finding rows and handoff extras — so the
 response can stay focused on variant-pattern reasoning rather than restating
 canonical state.

@@ -10,7 +10,7 @@ origin: Vigil
 
 Guides surface-collector through the Phase 2 URL collection pipeline: live crawling, historical
 enrichment, deduplication, intelligent triage, and work-buffer population. The goal is to turn
-raw tool output into a prioritized, attack-signal-enriched work buffer that drives Phase 3.
+raw tool output into a prioritized, attack-signal-enriched work buffer that drives Phase 4.
 
 ## When to Activate
 
@@ -176,7 +176,7 @@ There is no per-host URL cap. Volume control happens at ingest:
 - **Classification runs inline at ingestion** so every URL gets a `cluster_key` and
   `priority_score` immediately. Run `vigil assess list-clusters "$DB"` to review the
   resulting cluster set and `vigil assess work-buffer "$DB" defer-cluster <key> --reason "…"`
-  to drop low-signal clusters before Phase 3.
+  to drop low-signal clusters before Phase 4.
 - **Egress-blocked hosts still defer** (see "Egress-blocked hosts" below) — that is a
   network-failure class, not a volume cap.
 
@@ -244,7 +244,7 @@ vigil assess record-surface auth-bypass-lead "https://TARGET/protected" surface-
   --status discovered
 ```
 
-Triage must not consume the redirect signal and silently close the work item as "gated." Closing it ends the lead. The auth-bypass sweep (see `agent/skills/auth-bypass/SKILL.md` "Attack the Gate Itself") consumes these leads in Phase 3. See `agent/rules/hunting.md §23` for the general lead-not-verdict doctrine.
+Triage must not consume the redirect signal and silently close the work item as "gated." Closing it ends the lead. The auth-bypass sweep (see `agent/skills/auth-bypass/SKILL.md` "Attack the Gate Itself") consumes these leads in Phase 2. See `agent/rules/hunting.md §23` for the general lead-not-verdict doctrine.
 
 **Triage categories** (see agent prompt for full pattern lists):
 
@@ -257,7 +257,7 @@ Triage must not consume the redirect signal and silently close the work item as 
 For each category, produce:
 - Count of matching URLs
 - Representative examples (3-5 per category)
-- Recommended Phase 3 priority and vuln-class skill
+- Recommended Phase 4 priority and vuln-class skill
 
 ### Step 6.5: URL-shape body-field harvest (SSRF candidates)
 
@@ -272,7 +272,7 @@ vigil assess work-buffer "$DB" --json \
   | grep -iE '\b(url|uri|host|hostname|endpoint|callback|webhook|notify|postback|target|destination|return|redirect|next|continue|origin|fetch|import|source|metadata|discovery)\b\s*[:=]'
 ```
 
-For each hit, record the candidate so Phase 3 dispatching does not lose it:
+For each hit, record the candidate so Phase 4 dispatching does not lose it:
 
 ```bash
 vigil assess record-surface ssrf-candidate "<endpoint>" surface-collector-url-shape \
@@ -317,7 +317,7 @@ For more depth on a high-value endpoint, drop `-w` (full default list) and/or ad
 (it archive-augments the wordlist — note it still actively scans, so it adds traffic, not
 politeness; see `agent/skills/parameter-fuzzing/SKILL.md` and `agent/references/tools/recon/arjun.md`).
 Enriched rows carry `selected_by=arjun` and a `triage_rationale` (which names `kali sqlmap` for
-DB-class params), so Phase 3 dispatch picks them up like any other high-priority cluster.
+DB-class params), so Phase 4 dispatch picks them up like any other high-priority cluster.
 
 ### Step 7: Surface and Finding Recording
 
@@ -368,7 +368,7 @@ The surface-collector agent prompt defines the full output format. Key sections:
 | `#### Priority Attack Surfaces` | Ranked triage clusters — the key deliverable |
 | `#### Coverage Gaps` | Which sources failed and why |
 | `#### Intelligence` | Extracted attack signals |
-| `#### Recommended Phase 3 Ordering` | Risk-informed dispatch order |
+| `#### Recommended Phase 4 Ordering` | Risk-informed dispatch order |
 
 ## Extended Resources
 

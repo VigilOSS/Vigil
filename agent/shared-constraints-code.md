@@ -3,6 +3,8 @@
 Load this file first -- before your role-specific skill and before any source code work.
 These rules apply to every code analysis specialist agent regardless of role.
 
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+
 ---
 
 ## 1. Authorization and Scope
@@ -109,20 +111,10 @@ parallel dispatches risks collisions.
 
 **Title formula:** `[Bug Class] in [file:line or component] allows [attacker role] to [impact]`
 
-**CVSS<->severity must match:**
-
-| Severity | CVSS range |
-|---|---|
-| `critical` | 9.0-10.0 |
-| `high` | 7.0-8.9 |
-| `medium` | 4.0-6.9 |
-| `low` | 0.1-3.9 |
-| `info` | 0.0 |
-
-If your CVSS score does not fall within the matching severity range, adjust one or the other
-before recording. A memory corruption primitive with attacker-controlled reachability needs the
-same severity discipline as a web auth bug because the report pipeline consumes one shared
-finding table.
+CVSS↔severity ranges and the matching-adjustment rule are in `agent/shared-constraints-core.md`
+("Finding IDs and the `record-finding` Contract"). A memory corruption primitive with
+attacker-controlled reachability needs the same severity discipline as a web auth bug because the
+report pipeline consumes one shared finding table.
 
 **White-box source access is not attacker access.** The operator and code agents can read the
 repository because the customer provided it for review; do not treat that reviewer capability as
@@ -270,11 +262,10 @@ Only improvise after confirming the reference set is genuinely insufficient for 
 
 ## 9. Script Path Convention
 
-All assessment operations use `vigil assess <subcommand>` from any directory. JSON payloads belong
-in files, not inline shell arguments, because payload files are auditable and avoid shell escaping
-damage.
-
-Use `ENGAGEMENT_DIR` or `--engagement-dir` for path resolution — hardcoded absolute paths break across environments.
+The base convention (`vigil assess <subcommand>` from any directory, JSON payloads in files not
+inline shell arguments, `ENGAGEMENT_DIR`/`--engagement-dir` for path resolution) is in
+`agent/shared-constraints-core.md` "Script Path Convention". This section adds only the
+code-specific quoting and banner rules below.
 
 Shell-quote Java and Kotlin identifiers that contain `$` (anonymous classes, lambda
 names, generated accessors — e.g. `com.example.Auth$$Lambda$1`): wrap in single quotes
@@ -315,25 +306,17 @@ supplied as an optional consistency check.
 verified finding is missing `cvss_score`, `cvss_vector`, `steps_to_reproduce`,
 `remediation`, `impact`, or `evidence`. Include all six fields at recording time so
 findings pass readiness without a remediation loop. CVSS must align with severity per
-the ranges in `shared-constraints.md` §9 (critical 9.0–10.0, high 7.0–8.9,
-medium 4.0–6.9, low 0.1–3.9, info 0.0).
+the ranges in `agent/shared-constraints-core.md` ("Finding IDs and the `record-finding`
+Contract").
 
 ---
 
 ## 11. Mandatory Closing Sequence
 
-When the dispatch prompt includes a `resume-brief` block after Runtime Identity,
-treat it as the compact operating picture. Use its finding, command-run, handoff,
-and artifact IDs for drill-down instead of reconstructing state from unindexed
-local notes.
-
-Write durable state to backend tables and linked artifacts immediately because
-hidden markdown notes break resume, report readiness, and cross-agent handoff.
-Any `.md` file under `notes/` that matters after the current command must be
-registered with `vigil assess artifact register <path>` and linked through a
-finding, chain, dispatch/agent, surface, request variant, or command run before
-the dispatch closes. Unlinked markdown notes are scratch only and are not valid
-resume or report input.
+The closing-sequence wrapper (resume-brief framing, unlinked-notes registration rule,
+`agent done`/`agent close` being operator-only, idempotent/checkpoint handoff framing, and the
+plan-state digest) is in `agent/shared-constraints-core.md`. This section adds only the
+code-family closing verb order below.
 
 Before your dispatch returns, run in this order:
 
@@ -348,16 +331,6 @@ Before your dispatch returns, run in this order:
    `blocked` when the objective could not complete.
 4. `vigil assess agent render-handoff <agent_id>` — self-check before exiting.
    A 404 means the `agent_id` did not match the registered dispatch.
-
-`agent done` / `agent close` are operator-only — do not call them.
-
-`vigil assess agent handoff` is idempotent; checkpoint after each major phase of work, not only at the end.
-Schema: `agent/references/runtime-guides/handoff-schema.md`.
-
-On long runs, at each handoff checkpoint also re-emit a compact plan-state digest in your
-response — objective / done so far / still pending / immediate next step (~3-5 lines) — so the
-objective does not drift to the bottom of a long context. This is additive to the handoff write,
-not a separate ceremony.
 
 ---
 

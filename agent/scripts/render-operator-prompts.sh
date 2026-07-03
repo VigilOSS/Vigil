@@ -149,7 +149,7 @@ agent_description() {
     recon-specialist) printf '%s\n' "Recon completeness assessor + bounded web fingerprinting over the supervised recon pipeline." ;;
     source-analyzer) printf '%s\n' "Frontend and client-source analysis specialist." ;;
     surface-collector) printf '%s\n' "URL collection, deduplication, and intelligent triage specialist for Phase 2." ;;
-    vulnerability-analyst) printf '%s\n' "Validation-focused analyst for attackability and evidence quality." ;;
+    vulnerability-analyst) printf '%s\n' "Primary vulnerability hunter — surveys wide, goes deep where signal is, adjudicates with evidence-first rigor." ;;
     exploit-developer) printf '%s\n' "Exploitation and chain-building specialist." ;;
     fuzzer) printf '%s\n' "High-volume fuzzing specialist for bounded payload families." ;;
     osint-analyst) printf '%s\n' "External intelligence specialist for CVEs, disclosures, and context." ;;
@@ -287,6 +287,23 @@ agent_prompt_body() {
   ' "$source"
 }
 
+# Specialist auto-load stop-sign. Claude Code (and other harnesses) auto-load
+# CLAUDE.md/AGENTS.md walking up the dir tree, so a DISPATCHED SPECIALIST subagent
+# inherits these operator pointers before it reaches its own Specialist-Context-Isolation
+# rule. This banner is the harness-injection stop-sign: authored ONCE here and reused
+# by every operator-prompt + pointer render below (DRY). See agent/shared-constraints-core.md
+# ("Specialist Context Isolation") for why.
+render_specialist_stop_sign() {
+  cat <<'EOF'
+<!-- STOP — DISPATCHED SPECIALIST: if you are a specialist subagent (recon, source,
+     surface, vuln, exploit, fuzzer, osint, report, or any code-* role), do NOT load
+     this file. It is the OPERATOR prompt and its startup/runtime banner must not bleed
+     into your context. Load ONLY your own role file and every entry in its `Load First`.
+     Auto-loaded CLAUDE.md/AGENTS.md pointers up the directory tree do not apply to you.
+     See agent/shared-constraints-core.md ("Specialist Context Isolation") for why. -->
+EOF
+}
+
 render_prompt_locality() {
   cat <<'EOF'
 ## Prompt Locality
@@ -294,7 +311,7 @@ render_prompt_locality() {
 - Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
 - Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md` / `.opencode/agent/*.md` / `.goose/recipes/*.yaml`
-- Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
+- Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/adversarial-mindset.md`. `agent/rules/reporting.md` is specialist/Report-phase-loaded (named in report-writer dispatch Load lists, not loaded into operator context before Phase 8).
 - Skill discovery: `vigil assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
 - Reference discovery: `vigil assess list-references` (compact name + one-line description + paired skill; `--skill <name>` for a skill's paired refs).
@@ -313,11 +330,11 @@ render_agent_roster() {
 | `recon-specialist` | Recon-completeness assessment over the `vigil assess recon` job + bounded per-host web fingerprinting. | Phase 1 (after the recon job). |
 | `source-analyzer` | Deep static analysis of HTML/JS/CSS for hidden routes, API endpoints, secrets. | Phase 1 (parallel with recon). |
 | `surface-collector` | URL collection, dedup, intelligent triage, work-buffer population. | Phase 2. |
-| `vulnerability-analyst` | Validates endpoints with targeted probes, produces durable evidence, reviews findings in Phase 4. | Phase 3 + Phase 4 verification. |
-| `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 5. |
+| `vulnerability-analyst` | Primary hunter — surveys wide then deep, confirms leads with targeted probes, produces durable evidence, reviews findings in Phase 5. | Phase 4 + Phase 5 verification. |
+| `exploit-developer` | Crafts exploits, confirms impact, and builds realistic attack chains. | Phase 6. |
 | `fuzzer` | High-volume parameter/directory/protocol fuzzing with bounded objectives. | When FUZZER_NEEDED. |
-| `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 5 (parallel with exploit). |
-| `report-writer` | Generates structured engagement report from durable backend finding state. | Phase 7 or on-demand. |
+| `osint-analyst` | External intelligence gathering, CVE/disclosure research, and prioritization support. | Phase 6 (parallel with exploit). |
+| `report-writer` | Generates structured engagement report from durable backend finding state. | Phase 8 or on-demand. |
 
 EOF
 }
@@ -344,6 +361,10 @@ render_operator_prompt() {
 <!-- GENERATED FILE — DO NOT EDIT. -->
 <!-- Source: agent/operator-core.md (+ agent/agents/*.md for embedded specialist text) -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
+EOF
+    render_specialist_stop_sign
+    cat <<'EOF'
 
 # Vigil — Operator Instructions
 
@@ -388,6 +409,10 @@ render_operator_prompt_blue() {
 <!-- Source: agent/operator-core-blue.md (+ agent/agents/*.md for embedded specialist text) -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo --type blue -->
 
+EOF
+    render_specialist_stop_sign
+    cat <<'EOF'
+
 # Vigil — Blue Operator Instructions
 
 EOF
@@ -402,11 +427,16 @@ render_claude() {
   # Claude Code to load ~16.5k tokens 2-4x per turn (engagement wrapper +
   # agent/CLAUDE.md + agent/AGENTS.md). Keeping CLAUDE.md as a pointer
   # collapses that to a single load.
-  cat > "$CLAUDE_OUT" <<'EOF'
+  {
+    cat <<'EOF'
 <!-- GENERATED FILE — DO NOT EDIT. -->
 <!-- This file is intentionally a thin pointer to AGENTS.md so Claude Code -->
 <!-- does not load the same operator prompt twice. -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+
+EOF
+    render_specialist_stop_sign
+    cat <<'EOF'
 
 # Vigil — Operator Instructions
 
@@ -415,6 +445,7 @@ Read `AGENTS.md` (in this same directory) for the complete operator prompt.
 Load `AGENTS.md` OR this file, not both — they would otherwise be identical.
 `AGENTS.md` is canonical.
 EOF
+  } > "$CLAUDE_OUT"
 }
 
 render_agents() {

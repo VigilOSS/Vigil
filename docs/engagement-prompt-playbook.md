@@ -42,7 +42,7 @@ The whole playbook reduces to this table. Everything after it is detail.
 | **Forgetting the core loop / phases** after many batches | "Re-read operator-core.md, confirm the phase, then continue." | operator-core Resume Gate |
 | **Overclaiming severity / impact** | "What can an attacker do *right now*? Score the incremental impact, not the theoretical ceiling." | hunting §2, §3 |
 | **Tunnel-visioned on the first win** | "Don't stop at the first bug — hunt its siblings and the cluster around it before moving on." | hunting §9, §10 |
-| **Wasting shallow dispatches** (20–30s agents) | "Give each specialist enough scope to run deep; don't burn a dispatch on a 30-second task." | operator-core Dispatch-Mode Declaration |
+| **Wasting shallow dispatches** (20–30s agents) | "Give each specialist enough scope to run deep; don't burn a dispatch on a 30-second task." | operator-core Iteration-mode (dispatch_mode) Declaration |
 | **Calling theory a finding** | "No theory. If you can't show the attacker outcome with a real request/response, park it `chain_required`, don't report it." | hunting §2; shared-constraints §7 |
 | **Thrashing** when another agent changed state | "Another agent is working — review what changed and decide; don't reflexively revert." | (net-new — §4) |
 | **About to ship a self-graded finding** | "Dispatch a fresh, low-context specialist to review this as a skeptical triager." | operator-core Phase 4; adversarial-mindset |

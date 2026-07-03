@@ -38,6 +38,7 @@ class EngagementView:
     platforms: list[str] | None = None
     tenant_reference_paths: list[str] | None = None
     out_of_scope: list[str] | None = None
+    capture_policy: dict[str, Any] | None = None
 
 
 AssignmentSignature = tuple[tuple[str, int | None], ...]
@@ -445,6 +446,24 @@ def _collect_scope_hosts(scope: dict[str, Any]) -> list[str]:
     return result
 
 
+def _capture_policy_details(engagement_root: Path) -> dict[str, Any]:
+    """Return the per-engagement mitmproxy capture policy for the registry payload.
+
+    Reads the ``capture-policy.json`` filesystem mirror that
+    ``state_manager.set_capture_policy`` writes next to ``scope.json`` (the DB is
+    the source of truth; the file is the durable mirror the proxy addon also
+    falls back to). Reading the mirror here — rather than the DB — keeps the
+    ``/engagements`` registry poll to a single DB connection (the proxy polls it
+    frequently). Absent/invalid file → the default OFF policy.
+    """
+    # Local import mirrors coverage.py's deferred `from .. import engagements`
+    # convention to keep the state_manager<->engagements relationship cycle-free.
+    from .state_manager.http_flows import normalize_capture_policy
+
+    raw = _json_file(engagement_root / "capture-policy.json")
+    return normalize_capture_policy(raw if isinstance(raw, dict) else {})
+
+
 def _collect_out_of_scope(scope: dict[str, Any]) -> list[str]:
     """Return the deduped, lowercased out-of-scope carve-out patterns.
 
@@ -505,6 +524,7 @@ def _view_for(engagement: Engagement, *, session_count: int | None = None) -> En
         platforms=platforms,
         tenant_reference_paths=tenant_reference_paths,
         out_of_scope=out_of_scope,
+        capture_policy=_capture_policy_details(Path(engagement.engagement_root)),
     )
 
 

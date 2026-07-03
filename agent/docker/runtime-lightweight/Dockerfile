@@ -14,6 +14,7 @@ ARG MITM6_VERSION=0.3.0
 ARG DPAPICK3_VERSION=0.7.1
 ARG AIOQUIC_VERSION=1.2.0
 ARG FLASK_VERSION=3.1.2
+ARG BOTO3_VERSION=1.43.39
 ARG CHISEL_VERSION=1.11.4
 ARG LIGOLO_VERSION=0.8.2
 ARG PWNCAT_VL_VERSION=0.6.2
@@ -48,7 +49,8 @@ RUN python3 -m venv /opt/offsec-venv && \
       "mitm6==${MITM6_VERSION}" \
       "dpapick3==${DPAPICK3_VERSION}" \
       "aioquic==${AIOQUIC_VERSION}" \
-      "flask==${FLASK_VERSION}"
+      "flask==${FLASK_VERSION}" \
+      "boto3==${BOTO3_VERSION}"
 RUN arch="$(dpkg --print-architecture)" && \
     case "$arch" in \
       amd64) release_arch=amd64 ;; \

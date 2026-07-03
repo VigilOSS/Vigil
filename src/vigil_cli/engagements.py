@@ -29,6 +29,11 @@ from .paths import (
     resolve_orchestrator_data_dir,
 )
 
+# Persisted active-engagement pointer key in ~/.config/vigil/config.json. Kept
+# in lock-step with assess.lib.config.ACTIVE_ENGAGEMENT_CONFIG_KEY so the
+# top-level `vigil` verbs and `vigil assess` read the SAME pointer.
+ACTIVE_ENGAGEMENT_CONFIG_KEY = "active_engagement_dir"
+
 ENGAGEMENT_TYPES = {"web", "code", "both", "android", "blue"}
 ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
 ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV = "VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES"
@@ -603,7 +608,7 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
         oob_state = "unknown"
 
     mitm_label = "running" if mitm_running else "stopped"
-    mitm_hint = "" if mitm_running else f"   (auth capture: vigil mitmproxy start {key})"
+    mitm_hint = "" if mitm_running else "   (auth capture: vigil mitmproxy start)"
     oob_hint = "" if oob_state == "running" else "   (callbacks: vigil oob start)"
 
     print(f"[vigil] engagement: {key}", file=sys.stderr)
@@ -877,18 +882,122 @@ def resolve_engagement_path(install_root: Path, key: str | None = None, *, selec
     raise SystemExit("Specify an engagement key or --select")
 
 
-def current_engagement_path() -> Path | None:
-    candidates: list[Path] = []
-    env_dir = os.environ.get("ENGAGEMENT_DIR")
-    if env_dir:
-        candidates.append(Path(env_dir).expanduser())
+def _read_active_pointer() -> Path | None:
+    """Return the persisted active-engagement dir if it is a valid engagement
+    root, else None. A pointer at a deleted/renamed engagement (no scope.json)
+    is skipped with a one-line stderr warning — never used silently.
+    """
+    from . import config as config_module
+
+    raw = config_module.get_config_value(ACTIVE_ENGAGEMENT_CONFIG_KEY)
+    if not raw:
+        return None
+    pointer = Path(raw).expanduser()
+    if (pointer / "scope.json").is_file():
+        return pointer.resolve()
+    print(
+        f"WARNING: active engagement pointer '{raw}' is not an engagement root "
+        "(no scope.json); ignoring it. Run `vigil use <key>` to re-point it.",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _warn_env_mismatch(resolved_dir: Path, tier: str) -> None:
+    """One-line stderr warning when ``$ENGAGEMENT_DIR`` disagrees with the tier
+    that actually won — the guard against a stale shell-profile leak.
+    """
+    env_dir = os.environ.get("ENGAGEMENT_DIR", "")
+    if not env_dir:
+        return
+    try:
+        env_resolved = Path(env_dir).expanduser().resolve()
+    except OSError:
+        return
+    if env_resolved == resolved_dir:
+        return
+    print(
+        f"WARNING: $ENGAGEMENT_DIR points at {env_dir} but resolved {resolved_dir} "
+        f"from {tier}; check your shell profile (e.g. a stale "
+        "`export ENGAGEMENT_DIR=` line).",
+        file=sys.stderr,
+    )
+
+
+def resolve_current_engagement() -> tuple[Path, str] | None:
+    """Unified "current engagement" resolver for the top-level ``vigil`` verbs.
+
+    Mirrors the assess resolver's lower tiers (the ``--engagement-dir`` flag
+    tier is handled by callers via :func:`resolve_engagement_path`):
+
+        CWD walk-up  ->  active pointer  ->  ``$ENGAGEMENT_DIR``
+
+    Returns ``(path, tier)`` with tier in ``{"cwd", "pointer", "env"}`` or None.
+    Keeps ``vigil`` verbs and ``vigil assess`` agreeing on "current".
+    """
     cwd = Path.cwd()
-    candidates.extend([cwd, *cwd.parents])
-    for candidate in candidates:
+    for candidate in (cwd, *cwd.parents):
         resolved = candidate.resolve()
         if (resolved / "scope.json").is_file():
-            return resolved
+            _warn_env_mismatch(resolved, "cwd")
+            return resolved, "cwd"
+    pointer = _read_active_pointer()
+    if pointer is not None:
+        _warn_env_mismatch(pointer, "pointer")
+        return pointer, "pointer"
+    env_dir = os.environ.get("ENGAGEMENT_DIR")
+    if env_dir:
+        resolved = Path(env_dir).expanduser().resolve()
+        if (resolved / "scope.json").is_file():
+            return resolved, "env"
     return None
+
+
+def current_engagement_path() -> Path | None:
+    result = resolve_current_engagement()
+    return result[0] if result is not None else None
+
+
+def set_active_engagement(install_root: Path, path: Path) -> Path:
+    """Persist *path* as the active-engagement pointer.
+
+    Writes BOTH ``~/.config/vigil/config.json:active_engagement_dir`` (canonical,
+    consumed by the resolver) and the ``<engagements_root>/.active`` mirror (a
+    human-readable breadcrumb). Validates the engagement root first so the
+    pointer can never point at a non-engagement. Returns the resolved path.
+    """
+    from . import config as config_module
+
+    resolved = path.expanduser().resolve()
+    if not (resolved / "scope.json").is_file():
+        raise SystemExit(f"{resolved} is not an engagement root (no scope.json).")
+    config_module.set_config_value(ACTIVE_ENGAGEMENT_CONFIG_KEY, str(resolved))
+    _write_active_mirror(install_root, resolved.name)
+    return resolved
+
+
+def clear_active_engagement(install_root: Path) -> None:
+    """Unset both the config pointer and the ``.active`` mirror."""
+    from . import config as config_module
+
+    config_module.unset_config_value(ACTIVE_ENGAGEMENT_CONFIG_KEY)
+    mirror = engagements_root(install_root) / ".active"
+    try:
+        mirror.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _write_active_mirror(install_root: Path, key: str) -> None:
+    """Best-effort ``<engagements_root>/.active`` breadcrumb; config.json is
+    canonical, so a mirror-write failure is non-fatal.
+    """
+    root = engagements_root(install_root)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ".active").write_text(key + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _select_engagement(rows: list[EngagementRow]) -> EngagementRow:
@@ -920,6 +1029,15 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
     launcher = engagement_dir / f"start_{client}.sh"
     if not launcher.exists():
         raise SystemExit(f"Launcher not found for {client}: {launcher}")
+    # Refresh the persisted active-engagement pointer to the engagement being
+    # launched so the durable default tracks reality and can never freeze on a
+    # foreign engagement (the ~/.zshrc-leak class). Best-effort: a pointer-write
+    # failure must not block the launch. The launcher still exports
+    # ENGAGEMENT_DIR for back-compat.
+    try:
+        set_active_engagement(install_root, engagement_dir)
+    except (SystemExit, OSError):
+        pass
     os.chdir(engagement_dir)
     os.execv(str(launcher), [str(launcher), *extra_args])
 
@@ -1529,6 +1647,28 @@ def _install_client_kind(agent_root: Path) -> str:
     return "both"
 
 
+# Specialist auto-load stop-sign. Claude Code (and other harnesses) auto-load
+# CLAUDE.md/AGENTS.md walking up the dir tree, so a DISPATCHED SPECIALIST subagent
+# inherits these per-engagement operator pointers before it reaches its own
+# Specialist-Context-Isolation rule. Authored ONCE and prepended to every per-engagement
+# pointer this writer emits (DRY). Kept in lock-step with the render-pipeline banner in
+# agent/scripts/render-operator-prompts.sh:render_specialist_stop_sign.
+_SPECIALIST_STOP_SIGN = (
+    "<!-- STOP — DISPATCHED SPECIALIST: if you are a specialist subagent (recon, source,\n"
+    "     surface, vuln, exploit, fuzzer, osint, report, or any code-* role), do NOT load\n"
+    "     this file. It is an OPERATOR pointer and its startup/runtime banner must not bleed\n"
+    "     into your context. Load ONLY your own role file and every entry in its `Load First`.\n"
+    "     Auto-loaded CLAUDE.md/AGENTS.md pointers up the directory tree do not apply to you.\n"
+    '     See agent/shared-constraints-core.md ("Specialist Context Isolation") for why. -->\n'
+)
+
+# Operator-only ROE pointer added to per-engagement wrappers. ENGAGEMENT.md carries this
+# engagement's ban-risk ROE (scope, required headers, rate cap, no-fire endpoints).
+_ENGAGEMENT_ROE_POINTER = (
+    "Read `ENGAGEMENT.md` in this directory if present (it carries ban-risk ROE for this engagement).\n"
+)
+
+
 def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *, engagement_type: str) -> None:
     install_root = agent_root.parent
     if engagement_type == "blue":
@@ -1537,6 +1677,12 @@ def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *,
             subprocess.run([str(render_script), "repo", str(eng_dir), "--type", "blue"], check=True)
         except FileNotFoundError as exc:
             raise SystemExit(f"prompt render script not found at {render_script}: {exc}") from exc
+        # The blue render writes the full blue operator prompt to eng_dir; append
+        # the per-engagement ROE pointer so blue matches the red path's WS7 coverage.
+        blue_agents = eng_dir / "AGENTS.md"
+        if blue_agents.exists():
+            with blue_agents.open("a", encoding="utf-8") as fh:
+                fh.write(f"\n{_ENGAGEMENT_ROE_POINTER}")
         return
 
     # Specialist context isolation invariant:
@@ -1571,15 +1717,19 @@ Artifacts:
     # turn (once via CLAUDE.md, once via AGENTS.md).
     if client_kind in {"codex", "claude", "both"}:
         (eng_dir / "AGENTS.md").write_text(
-            f"# Engagement Workspace\n\nLoad workspace operator instructions from:\n- {agent_root / 'AGENTS.md'}\n\n{common}",
+            f"{_SPECIALIST_STOP_SIGN}\n"
+            f"# Engagement Workspace\n\nLoad workspace operator instructions from:\n- {agent_root / 'AGENTS.md'}\n\n"
+            f"{_ENGAGEMENT_ROE_POINTER}\n{common}",
             encoding="utf-8",
         )
     if client_kind in {"claude", "both"}:
         (eng_dir / "CLAUDE.md").write_text(
+            f"{_SPECIALIST_STOP_SIGN}\n"
             "# Engagement Workspace\n\n"
             "Read `AGENTS.md` (in this same directory) for operator instructions.\n"
             "Do not also load this file — it is a pointer to AGENTS.md to avoid\n"
-            "double-loading the operator prompt.\n",
+            "double-loading the operator prompt.\n\n"
+            f"{_ENGAGEMENT_ROE_POINTER}",
             encoding="utf-8",
         )
 

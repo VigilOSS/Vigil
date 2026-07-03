@@ -10,15 +10,45 @@
 // in the shared code-split chunk and never bloats the main entry bundle.
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { RequestObservation, RequestVariant } from "../lib/api";
-import { listRequestObservations, listRequestVariants } from "../lib/api";
+import type {
+  CapturePolicy,
+  CapturePolicyUpdate,
+  HttpFlow,
+  HttpFlowFilters,
+  RequestObservation,
+  RequestVariant,
+} from "../lib/api";
+import {
+  exportHarUrl,
+  getCapturePolicy,
+  getHttpFlow,
+  listHttpFlows,
+  listRequestObservations,
+  listRequestVariants,
+  setCapturePolicy,
+} from "../lib/api";
 import { useBodyScrollLock } from "../lib/modalScrollLock";
 import { useToast } from "../contexts/ToastContext";
 import { CodeBlock, RelTime } from "./formatting";
-import { KV, ProseSection, SectionHead } from "./drawer/DrawerKit";
+import { KV, ProseSection } from "./drawer/DrawerKit";
 import { TableSkeleton } from "./Skeletons";
 
 const HttpGrid = lazy(() => import("./HttpGrid"));
+const HttpFlowsGrid = lazy(() => import("./HttpFlowsGrid"));
+
+// Compact human byte size — shared with the flows grid / drawer.
+function fmtBytes(n: number | null | undefined): string {
+  if (n == null || n <= 0) return "0 B";
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+}
+
+// Which sub-view of the HTTP tab is active: the legacy request-variant list
+// or the Phase-5 canonical full-flow store.
+type HttpView = "variants" | "flows";
 
 // ── HTTP method colors ────────────────────────────────────────────────
 // Mapped onto our palette (the reference-project reference used --m-* vars that
@@ -104,6 +134,7 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
   const [query, setQuery] = useState("");
   const [methodFilters, setMethodFilters] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<RequestVariant | null>(null);
+  const [view, setView] = useState<HttpView>("variants");
 
   const searchRef = useRef<HTMLInputElement | null>(null);
 
@@ -248,8 +279,10 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
 
   const activeFilterCount = methodFilters.size + (query ? 1 : 0);
 
-  // `/` focuses search, Esc blurs / closes the drawer.
+  // `/` focuses search, Esc blurs / closes the drawer. Only active in the
+  // variants view — the flows view (HttpFlowsView) owns its own shortcuts.
   useEffect(() => {
+    if (view !== "variants") return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const tag = (target?.tagName || "").toLowerCase();
@@ -266,12 +299,23 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected]);
+  }, [selected, view]);
 
   const truncated = variants.length >= INITIAL_FETCH_LIMIT;
 
   return (
     <div className="findings-redesign">
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+        <HttpViewToggle view={view} onChange={setView} />
+      </div>
+      {view === "flows" ? (
+        <HttpFlowsView
+          engagementKey={engagementKey}
+          refreshVersion={refreshVersion}
+          toast={toast}
+        />
+      ) : (
+        <>
       {/* Toolbar */}
       <div className="panel findings-toolbar-panel">
         <div className="toolbar">
@@ -389,6 +433,40 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
           <code>Esc</code> close detail
         </span>
       </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── View toggle ───────────────────────────────────────────────────────
+// Segmented control (reuses the Findings .view-toggle styling) switching
+// between the legacy request-variant list and the Phase-5 flow store.
+function HttpViewToggle({
+  view,
+  onChange,
+}: {
+  view: HttpView;
+  onChange: (v: HttpView) => void;
+}) {
+  return (
+    <div className="view-toggle" role="group" aria-label="HTTP view">
+      <button
+        type="button"
+        className={view === "variants" ? "is-active" : ""}
+        onClick={() => onChange("variants")}
+        aria-pressed={view === "variants"}
+      >
+        Variants
+      </button>
+      <button
+        type="button"
+        className={view === "flows" ? "is-active" : ""}
+        onClick={() => onChange("flows")}
+        aria-pressed={view === "flows"}
+      >
+        Flows
+      </button>
     </div>
   );
 }
@@ -566,6 +644,863 @@ function HttpDrawer({
           </div>
         </div>
       </article>
+    </div>
+  );
+}
+
+// ── Flows view (Phase-5 canonical full-flow store) ────────────────────
+// A second sub-view of the HTTP tab rendering assessment_http_flows. Unlike
+// the variants view (fetch-once + filter-in-React), the filter set here is
+// pushed to the backend as query params so large corpora filter server-side.
+// An unfiltered snapshot (`allFlows`) drives the facet chips/dropdowns +
+// counts; the grid renders `results` (the server-filtered slice, or the full
+// snapshot when no filter is active).
+type ToastFn = (message: string, type?: "success" | "error" | "info") => void;
+
+const FLOWS_FETCH_LIMIT = 5000;
+
+function HttpFlowsView({
+  engagementKey,
+  refreshVersion,
+  toast,
+}: {
+  engagementKey: string;
+  refreshVersion?: number;
+  toast: ToastFn;
+}) {
+  const [allFlows, setAllFlows] = useState<HttpFlow[]>([]);
+  const [results, setResults] = useState<HttpFlow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [resultsLoading, setResultsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Server-side filter axes (names align 1:1 with the backend query params).
+  const [host, setHost] = useState("");
+  const [method, setMethod] = useState("");
+  const [status, setStatus] = useState(""); // exact response_status; "" = any
+  const [ctype, setCtype] = useState("");
+  const [auth, setAuth] = useState("");
+  const [truncated, setTruncated] = useState<"" | "true" | "false">("");
+  const [query, setQuery] = useState("");
+
+  const [selected, setSelected] = useState<HttpFlow | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+
+  // ── Unfiltered facet snapshot ────
+  const reloadInFlightRef = useRef(false);
+  const reload = useCallback(
+    async (showSpinner = true) => {
+      if (reloadInFlightRef.current) return;
+      reloadInFlightRef.current = true;
+      if (showSpinner) setLoading(true);
+      try {
+        const items = await listHttpFlows(engagementKey, { limit: FLOWS_FETCH_LIMIT });
+        setAllFlows(items);
+        setLoadError(null);
+      } catch (err) {
+        if (showSpinner) setAllFlows([]);
+        setLoadError(err instanceof Error ? err.message : "Failed to load HTTP flows");
+      } finally {
+        reloadInFlightRef.current = false;
+        if (showSpinner) setLoading(false);
+      }
+    },
+    [engagementKey],
+  );
+
+  useEffect(() => {
+    void reload(true);
+  }, [reload]);
+
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
+    void reload(false);
+  }, [refreshVersion, reload]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void reload(false);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [reload]);
+
+  // ── Active server filters ────
+  const serverFilters = useMemo<HttpFlowFilters>(() => {
+    const f: HttpFlowFilters = {};
+    if (host) f.host = host;
+    if (method) f.method = method;
+    if (status) f.response_status = Number(status);
+    if (ctype) f.content_type_family = ctype;
+    if (auth) f.auth_context = auth;
+    if (truncated) f.truncated = truncated === "true";
+    if (query.trim()) f.q = query.trim();
+    return f;
+  }, [host, method, status, ctype, auth, truncated, query]);
+
+  const filtersActive = Object.keys(serverFilters).length > 0;
+
+  // ── Server-side filtered results (debounced so typing `q` doesn't spam
+  // the backend). When nothing is filtered we reuse the snapshot directly. ──
+  useEffect(() => {
+    if (!filtersActive) {
+      setResults(allFlows);
+      setResultsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setResultsLoading(true);
+    const handle = window.setTimeout(() => {
+      listHttpFlows(engagementKey, { ...serverFilters, limit: FLOWS_FETCH_LIMIT })
+        .then((items) => {
+          if (!cancelled) {
+            setResults(items);
+            setLoadError(null);
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setResults([]);
+            setLoadError(err instanceof Error ? err.message : "Failed to filter HTTP flows");
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setResultsLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [engagementKey, filtersActive, serverFilters, allFlows]);
+
+  // Drop the selection only when the flow leaves the full set (not merely the
+  // filtered view) so the drawer survives a filter change.
+  useEffect(() => {
+    if (selected && !allFlows.some((f) => f.flow_uid === selected.flow_uid)) {
+      setSelected(null);
+    }
+  }, [allFlows, selected]);
+
+  // ── Facets from the unfiltered snapshot ────
+  const methodCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const f of allFlows) {
+      const k = (f.method || "GET").toUpperCase();
+      c[k] = (c[k] || 0) + 1;
+    }
+    return c;
+  }, [allFlows]);
+
+  const hostOptions = useMemo(
+    () => Array.from(new Set(allFlows.map((f) => f.host).filter(Boolean))).sort(),
+    [allFlows],
+  );
+  const ctypeOptions = useMemo(
+    () => Array.from(new Set(allFlows.map((f) => f.content_type_family).filter(Boolean))).sort(),
+    [allFlows],
+  );
+  const authOptions = useMemo(
+    () => Array.from(new Set(allFlows.map((f) => f.auth_context).filter(Boolean))).sort(),
+    [allFlows],
+  );
+  const statusOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          allFlows
+            .map((f) => f.response_status)
+            .filter((s): s is number => s != null),
+        ),
+      ).sort((a, b) => a - b),
+    [allFlows],
+  );
+
+  const truncatedCount = useMemo(
+    () => allFlows.filter((f) => f.request_body_truncated || f.response_body_truncated).length,
+    [allFlows],
+  );
+
+  const activeFilterCount =
+    (host ? 1 : 0) +
+    (method ? 1 : 0) +
+    (status ? 1 : 0) +
+    (ctype ? 1 : 0) +
+    (auth ? 1 : 0) +
+    (truncated ? 1 : 0) +
+    (query ? 1 : 0);
+
+  const clearAll = () => {
+    setHost("");
+    setMethod("");
+    setStatus("");
+    setCtype("");
+    setAuth("");
+    setTruncated("");
+    setQuery("");
+  };
+
+  const toggleMethod = (m: string) => setMethod((cur) => (cur === m ? "" : m));
+
+  // `/` focuses search, Esc blurs / closes the drawer.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = (target?.tagName || "").toLowerCase();
+      const isTyping = tag === "input" || tag === "textarea" || tag === "select";
+      if (!isTyping && e.key === "/") {
+        e.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
+      if (e.key === "Escape") {
+        if (isTyping) (target as HTMLElement).blur();
+        else if (selected) setSelected(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected]);
+
+  // ── HAR export honouring the active filters ────
+  const onExportHar = () => {
+    if (allFlows.length === 0) {
+      toast("No flows to export", "info");
+      return;
+    }
+    const url = exportHarUrl(engagementKey, serverFilters);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${engagementKey}-http-flows.har`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast("Exporting HAR…", "info");
+  };
+
+  const snapshotTruncated = allFlows.length >= FLOWS_FETCH_LIMIT;
+
+  return (
+    <>
+      <CapturePolicyControl engagementKey={engagementKey} toast={toast} />
+
+      {/* Toolbar */}
+      <div className="panel findings-toolbar-panel">
+        <div className="toolbar">
+          <div className="search-wrap">
+            <IconSearch />
+            <input
+              ref={searchRef}
+              className="search-input"
+              placeholder="Search flows — URL, path, host…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {query && (
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setQuery("")}
+                title="Clear"
+                style={{ width: 22, height: 22 }}
+              >
+                <IconClose />
+              </button>
+            )}
+            <span className="search-kbd">/</span>
+          </div>
+          <div className="toolbar-right">
+            <span className="meta-text">
+              {results.length} of {allFlows.length} flow
+              {allFlows.length === 1 ? "" : "s"}
+              {(loading || resultsLoading) && " · loading…"}
+              {snapshotTruncated && " · snapshot capped"}
+            </span>
+            <button type="button" className="qa-btn" onClick={onExportHar}>
+              Export HAR
+            </button>
+          </div>
+        </div>
+
+        <div className="filter-row">
+          {Object.keys(methodCounts).length > 0 && (
+            <div className="filter-group">
+              <span className="filter-label">Method</span>
+              {Object.keys(methodCounts)
+                .sort((a, b) => methodCounts[b] - methodCounts[a] || a.localeCompare(b))
+                .map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    className={`filter-chip method-chip ${methodClass(m)} ${
+                      method === m ? "is-active" : ""
+                    }`}
+                    onClick={() => toggleMethod(m)}
+                  >
+                    <span className={`sev-dot method-dot ${methodClass(m)}`} />
+                    {m}
+                    <span className="filter-count">{methodCounts[m]}</span>
+                  </button>
+                ))}
+            </div>
+          )}
+
+          {hostOptions.length > 0 && (
+            <div className="filter-select-group">
+              <span className="filter-label">Host</span>
+              <select
+                className="filter-select"
+                value={host}
+                onChange={(e) => setHost(e.target.value)}
+              >
+                <option value="">All hosts</option>
+                {hostOptions.map((h) => (
+                  <option key={h} value={h}>
+                    {h}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {statusOptions.length > 0 && (
+            <div className="filter-select-group">
+              <span className="filter-label">Status</span>
+              <select
+                className="filter-select"
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+              >
+                <option value="">Any</option>
+                {statusOptions.map((s) => (
+                  <option key={s} value={String(s)}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {ctypeOptions.length > 0 && (
+            <div className="filter-select-group">
+              <span className="filter-label">Type</span>
+              <select
+                className="filter-select"
+                value={ctype}
+                onChange={(e) => setCtype(e.target.value)}
+              >
+                <option value="">All types</option>
+                {ctypeOptions.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {authOptions.length > 0 && (
+            <div className="filter-select-group">
+              <span className="filter-label">Auth</span>
+              <select
+                className="filter-select"
+                value={auth}
+                onChange={(e) => setAuth(e.target.value)}
+              >
+                <option value="">All</option>
+                {authOptions.map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div className="filter-select-group">
+            <span className="filter-label">Body</span>
+            <select
+              className="filter-select"
+              value={truncated}
+              onChange={(e) => setTruncated(e.target.value as "" | "true" | "false")}
+              title="Filter by body-truncation state"
+            >
+              <option value="">Any</option>
+              <option value="true">Truncated ({truncatedCount})</option>
+              <option value="false">Complete</option>
+            </select>
+          </div>
+
+          {activeFilterCount > 0 && (
+            <button type="button" className="filter-clear" onClick={clearAll}>
+              Clear all ({activeFilterCount})
+            </button>
+          )}
+        </div>
+      </div>
+
+      {loadError && (
+        <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
+          <p className="empty" style={{ textAlign: "left" }}>
+            {loadError}
+          </p>
+        </div>
+      )}
+
+      {/* Flows table */}
+      <section className="panel">
+        <div className="panel-header">
+          <h2>HTTP flows</h2>
+          <p className="meta-text">
+            {results.length} flow{results.length === 1 ? "" : "s"}
+            {truncatedCount ? ` · ${truncatedCount} truncated` : ""}
+          </p>
+        </div>
+
+        {loading ? (
+          <TableSkeleton rows={8} showHeader={false} />
+        ) : allFlows.length === 0 ? (
+          <p className="empty-state" style={{ padding: "20px", color: "var(--muted)" }}>
+            No canonical HTTP flows captured yet. Enable raw-body capture above and route
+            traffic through the vigil proxy to populate this view.
+          </p>
+        ) : (
+          <Suspense fallback={<TableSkeleton rows={8} showHeader={false} />}>
+            <HttpFlowsGrid
+              rows={results}
+              selectedUid={selected?.flow_uid ?? null}
+              onRowOpen={(flow) => setSelected(flow)}
+            />
+          </Suspense>
+        )}
+      </section>
+
+      {selected && (
+        <FlowDrawer
+          engagementKey={engagementKey}
+          flow={selected}
+          toast={toast}
+          onClose={() => setSelected(null)}
+        />
+      )}
+
+      <div className="findings-shortcuts">
+        <span>
+          <code>/</code> focus search
+        </span>
+        <span>
+          <code>Esc</code> close detail
+        </span>
+      </div>
+    </>
+  );
+}
+
+// ── Capture policy control ────────────────────────────────────────────
+// View + edit the per-engagement raw-body capture policy. Capture is OFF by
+// default; the operator flips it on here (backend also mirrors the policy to
+// capture-policy.json for the offline addon). Compact summary row with an
+// expander for the body-capture toggles + max-body-bytes cap.
+function CapturePolicyControl({
+  engagementKey,
+  toast,
+}: {
+  engagementKey: string;
+  toast: ToastFn;
+}) {
+  const [policy, setPolicy] = useState<CapturePolicy | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  const [maxDraft, setMaxDraft] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    getCapturePolicy(engagementKey)
+      .then((p) => {
+        if (!cancelled) {
+          setPolicy(p);
+          setMaxDraft(String(p.max_body_bytes));
+          setError(null);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled)
+          setError(err instanceof Error ? err.message : "Failed to load capture policy");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engagementKey]);
+
+  const save = useCallback(
+    (patch: CapturePolicyUpdate) => {
+      setSaving(true);
+      setCapturePolicy(engagementKey, patch)
+        .then((p) => {
+          setPolicy(p);
+          setMaxDraft(String(p.max_body_bytes));
+          setError(null);
+          toast("Capture policy updated", "success");
+        })
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : "Failed to update capture policy";
+          setError(msg);
+          toast(msg, "error");
+        })
+        .finally(() => setSaving(false));
+    },
+    [engagementKey, toast],
+  );
+
+  if (loading) {
+    return (
+      <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
+        <span className="meta-text">Loading capture policy…</span>
+      </div>
+    );
+  }
+  if (!policy) {
+    return (
+      <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
+        <p className="empty" style={{ textAlign: "left" }}>
+          {error ?? "Capture policy unavailable."}
+        </p>
+      </div>
+    );
+  }
+
+  const enabled = policy.enabled;
+  const maxChanged = maxDraft.trim() !== "" && Number(maxDraft) !== policy.max_body_bytes;
+
+  return (
+    <div className="panel findings-toolbar-panel">
+      <div className="toolbar" style={{ alignItems: "center" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span className="filter-label">Raw-body capture</span>
+          <span className={`pill ${enabled ? "pill-reported" : "pill-unreviewed"}`}>
+            {enabled ? "ON" : "OFF"}
+          </span>
+          {saving && <span className="meta-text">saving…</span>}
+        </div>
+        <div className="toolbar-right">
+          <button
+            type="button"
+            className={`qa-btn ${enabled ? "" : "primary"}`}
+            disabled={saving}
+            onClick={() => save({ enabled: !enabled })}
+          >
+            {enabled ? "Disable capture" : "Enable capture"}
+          </button>
+          <button type="button" className="qa-btn" onClick={() => setOpen((o) => !o)}>
+            {open ? "Hide options" : "Options"}
+          </button>
+        </div>
+      </div>
+
+      {open && (
+        <div
+          className="filter-row"
+          style={{ gap: 16, alignItems: "center", paddingTop: 10 }}
+        >
+          <label
+            className="meta-text"
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}
+          >
+            <input
+              type="checkbox"
+              checked={policy.capture_request_bodies}
+              disabled={saving}
+              onChange={(e) => save({ capture_request_bodies: e.target.checked })}
+            />
+            Capture request bodies
+          </label>
+          <label
+            className="meta-text"
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}
+          >
+            <input
+              type="checkbox"
+              checked={policy.capture_response_bodies}
+              disabled={saving}
+              onChange={(e) => save({ capture_response_bodies: e.target.checked })}
+            />
+            Capture response bodies
+          </label>
+          <div className="filter-select-group">
+            <span className="filter-label">Max body bytes</span>
+            <input
+              className="filter-select"
+              type="number"
+              min={0}
+              step={1024}
+              value={maxDraft}
+              disabled={saving}
+              style={{ width: 120 }}
+              onChange={(e) => setMaxDraft(e.target.value)}
+            />
+            <button
+              type="button"
+              className="qa-btn"
+              disabled={saving || !maxChanged || Number.isNaN(Number(maxDraft))}
+              onClick={() => save({ max_body_bytes: Math.max(0, Math.floor(Number(maxDraft))) })}
+            >
+              Save
+            </button>
+          </div>
+        </div>
+      )}
+      {error && (
+        <p className="empty" style={{ textAlign: "left", paddingTop: 8 }}>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ── Flow detail drawer ────────────────────────────────────────────────
+// Centred modal (same .finding-overlay + .drawer-panel shell as HttpDrawer)
+// showing the selected flow's request/response metadata, routing-integrity
+// indicators (host_mismatch), body metadata + truncation flags, and the
+// captured header maps. Raw body bytes are engagement-local artifacts, not
+// inlined here — the operator materialises them via Export HAR. On open we
+// re-hydrate from GET /http-flows/{flow_uid} for the canonical row.
+function FlowDrawer({
+  engagementKey,
+  flow,
+  toast,
+  onClose,
+}: {
+  engagementKey: string;
+  flow: HttpFlow;
+  toast: ToastFn;
+  onClose: () => void;
+}) {
+  useBodyScrollLock();
+  const [row, setRow] = useState<HttpFlow>(flow);
+  useEffect(() => {
+    setRow(flow);
+  }, [flow]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!flow.flow_uid) return;
+    getHttpFlow(engagementKey, flow.flow_uid)
+      .then((full) => {
+        if (!cancelled) setRow(full);
+      })
+      .catch(() => {
+        // Keep the list row on failure — it already carries the full shape.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engagementKey, flow.flow_uid]);
+
+  const method = (row.method || "GET").toUpperCase();
+  const reqHeaders = row.request_headers && Object.keys(row.request_headers).length > 0
+    ? JSON.stringify(row.request_headers, null, 2)
+    : null;
+  const respHeaders = row.response_headers && Object.keys(row.response_headers).length > 0
+    ? JSON.stringify(row.response_headers, null, 2)
+    : null;
+
+  return (
+    <div className="finding-overlay" role="presentation" onClick={onClose}>
+      <article
+        className="drawer-panel panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="http-flow-modal-title"
+        onClick={(event) => event.stopPropagation()}
+        style={{ maxWidth: "820px", width: "min(94vw, 820px)", maxHeight: "90vh", overflow: "auto" }}
+      >
+        <div className="drawer-hero">
+          <div className="drawer-top">
+            <div className="drawer-slug">
+              <span className={`method-badge ${methodClass(method)}`}>{method}</span>
+              {row.response_status != null && (
+                <span className={`status-badge ${statusClass(row.response_status)}`}>
+                  {row.response_status}
+                </span>
+              )}
+            </div>
+            <div className="drawer-nav">
+              <button type="button" className="icon-btn" onClick={onClose} title="Close (Esc)">
+                <IconClose />
+              </button>
+            </div>
+          </div>
+          <h2 id="http-flow-modal-title" className="drawer-title mono">
+            {row.path || row.url || "/"}
+          </h2>
+          <div className="hero-meta">
+            {row.host && <span className="tag">{row.host}</span>}
+            {row.content_type_family && row.content_type_family !== "unknown" && (
+              <span className="tag">{row.content_type_family}</span>
+            )}
+            {row.auth_context && <span className="tag">{row.auth_context}</span>}
+            {row.redaction_status && row.redaction_status !== "none" && (
+              <span className="tag">redacted: {row.redaction_status}</span>
+            )}
+            {row.host_mismatch && (
+              <span className="tag warning" title="URL authority / Host header / SNI disagree">
+                host mismatch
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="drawer-body">
+          <div className="section">
+            <p className="section-title">Metadata</p>
+            <div className="kv-grid">
+              <KV k="Method" v={method} />
+              <KV k="Scheme" v={row.scheme} />
+              <KV k="Host" v={row.host} mono toast={row.host ? toast : undefined} />
+              <KV k="Port" v={row.port} mono />
+              <KV k="URL" v={row.url} mono toast={row.url ? toast : undefined} />
+              <KV k="Path" v={row.path} mono />
+              <KV k="Status" v={row.response_status} />
+              <KV k="Request content-type" v={row.request_content_type} />
+              <KV k="Response content-type" v={row.response_content_type} />
+              <KV k="Content-Type family" v={row.content_type_family} />
+              <KV k="Auth context" v={row.auth_context} />
+              <KV k="Timing" v={row.timing_ms != null ? `${row.timing_ms} ms` : undefined} />
+              <KV k="Flow UID" v={row.flow_uid} mono toast={row.flow_uid ? toast : undefined} />
+              <div className="kv">
+                <p className="k">Started</p>
+                <p className="v">{row.started_at ? <RelTime iso={row.started_at} /> : "—"}</p>
+              </div>
+              <div className="kv">
+                <p className="k">Captured</p>
+                <p className="v">{row.created_at ? <RelTime iso={row.created_at} /> : "—"}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="section">
+            <p className="section-title">Routing integrity</p>
+            <div className="kv-grid">
+              <KV k="URL authority" v={row.url_authority} mono />
+              <KV k="Host header" v={row.host_header} mono />
+              <KV k="SNI" v={row.sni} mono />
+              <div className="kv">
+                <p className="k">Host mismatch</p>
+                <p className="v" style={{ color: row.host_mismatch ? "var(--warn)" : undefined }}>
+                  {row.host_mismatch ? "yes" : "no"}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="section">
+            <p className="section-title">Bodies</p>
+            <p className="meta-text" style={{ margin: "0 0 8px" }}>
+              Raw body bytes stay engagement-local as artifacts. Use Export HAR to materialise
+              the content.
+            </p>
+            <div className="http-schema-grid">
+              <FlowBodyMeta
+                label="Request"
+                contentType={row.request_content_type}
+                bytes={row.request_body_bytes}
+                sha={row.request_body_sha256}
+                truncated={row.request_body_truncated}
+                artifactPath={row.request_body_artifact_path}
+                toast={toast}
+              />
+              <FlowBodyMeta
+                label="Response"
+                contentType={row.response_content_type}
+                bytes={row.response_body_bytes}
+                sha={row.response_body_sha256}
+                truncated={row.response_body_truncated}
+                artifactPath={row.response_body_artifact_path}
+                toast={toast}
+              />
+            </div>
+          </div>
+
+          {(reqHeaders || respHeaders) && (
+            <div className="section">
+              <p className="section-title">Headers</p>
+              <div className="http-schema-grid">
+                {reqHeaders && (
+                  <CodeBlock
+                    label="Request headers"
+                    text={reqHeaders}
+                    onCopied={() => toast("Copied", "success")}
+                  />
+                )}
+                {respHeaders && (
+                  <CodeBlock
+                    label="Response headers"
+                    text={respHeaders}
+                    onCopied={() => toast("Copied", "success")}
+                  />
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </article>
+    </div>
+  );
+}
+
+// Body-side metadata block (request or response). Renders a compact KV grid
+// covering content-type, size, truncation flag, sha256, and the artifact path.
+function FlowBodyMeta({
+  label,
+  contentType,
+  bytes,
+  sha,
+  truncated,
+  artifactPath,
+  toast,
+}: {
+  label: string;
+  contentType: string;
+  bytes: number;
+  sha: string;
+  truncated: boolean;
+  artifactPath: string | null;
+  toast: ToastFn;
+}) {
+  return (
+    <div>
+      <div className="code-block-header">
+        <span className="code-block-label">
+          {label} body
+          {truncated && (
+            <span className="tag warning" style={{ marginLeft: 8 }}>
+              truncated
+            </span>
+          )}
+        </span>
+      </div>
+      <div className="kv-grid" style={{ marginTop: 6 }}>
+        <KV k="Content-Type" v={contentType || "—"} />
+        <KV k="Size" v={fmtBytes(bytes)} />
+        <div className="kv">
+          <p className="k">Truncated</p>
+          <p className="v" style={{ color: truncated ? "var(--warn)" : undefined }}>
+            {truncated ? "yes" : "no"}
+          </p>
+        </div>
+        <KV k="SHA-256" v={sha} mono toast={sha ? toast : undefined} />
+        <KV k="Artifact" v={artifactPath ?? undefined} mono toast={artifactPath ? toast : undefined} />
+      </div>
     </div>
   );
 }

@@ -577,7 +577,7 @@ After ingestion, the operator triggers a reactive nuclei sweep against the newly
 
 ## Extended Resources
 
-- `agent/references/recon/rate-calibration.md` — canonical per-target rate calibration; the DNS-brute column gates puredns/shuffledns invocations. Tier-pick prose lives in `agent/operator-core.md` "Recon Dispatch Resource Policy".
+- `agent/references/recon/rate-calibration.md` — canonical per-target rate calibration; the DNS-brute column gates puredns/shuffledns invocations. Tier-pick prose lives in `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy".
 - `agent/references/tools/recon/subdomain-enumeration-tools.md` — comparison matrix, API-key value-for-cost, puredns rate guidance, alterx permutation chain, cero CIDR-feed, bbot passive preset, when-not-to-bruteforce signals.
 - `agent/skills/kali-exec/SKILL.md` — Phase A→D workflow with example invocations (kali-cli foundational skill).
 - `agent/references/tools/recon/puredns.md` — massdns dependency, wildcard tuning, rate-limit ceilings.

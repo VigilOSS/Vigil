@@ -246,6 +246,20 @@ _TOP_UNCOVERED_SURFACE_LIMIT = 6
 _RESUME_NOTE_TAGS = frozenset({"coverage", "read-first"})
 _RESUME_NOTE_LIMIT = 8
 
+# "Do-today" attempt ledger surfacing (P1-C). The Attempts section pulls three
+# already-persisted but previously resume-invisible signals so the operator
+# reads what has been TRIED-AND-WALLED-OFF before re-dispatching the same
+# surface: recorded blocked techniques, non-covering probe runs, and findings
+# flagged roe_blocked in details_json. Each list is bounded (pointers + counts,
+# never bodies) consistent with the other sections.
+_ATTEMPTS_ROW_LIMIT = 8
+# The covering subset mirrors state_manager.coverage.PROBE_RESULT_STATUSES_
+# COVERING; a probe run outside it (blocked / no-signal / attempted / error) is
+# an attempt that did NOT establish coverage — exactly what "what did I already
+# try here" wants. Kept as a local literal (the brief must not depend on the
+# coverage module) but pinned to the same two values.
+_PROBE_COVERING_STATUSES = ("tested", "signal")
+
 
 def _surfaces_section(connection, engagement_id: int) -> dict[str, Any]:
     """Surface coverage rollup for the resume brief (gap #1 root fix).
@@ -357,6 +371,122 @@ def _resume_note_pointers(engagement_id: int, *, since: str) -> list[dict[str, A
     return _since_filter(matches, since=since, field="updated_at")[:_RESUME_NOTE_LIMIT]
 
 
+def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str, Any]:
+    """Do-today attempt ledger (P1-C) — three already-persisted signals that the
+    brief never surfaced, so a re-dispatch could unknowingly retry a walled-off
+    surface.
+
+    - ``blocked_techniques``: recent ``assessment_blocked_techniques`` rows
+      (wires the previously CLI-less table into resume).
+    - ``noncovering_probe_runs``: ``assessment_probe_runs`` whose result_status
+      is NOT in the covering subset (tested/signal) — i.e. blocked / no-signal /
+      attempted / error attempts that established no coverage.
+    - ``roe_blocked_findings``: findings whose ``details_json`` has
+      ``roe_blocked`` set true (value-aware json_extract, mirroring the
+      chain_required predicate). Projected as finding pointers.
+
+    Each list is bounded and, where the row carries a timestamp, since-filtered.
+    Counts are the pre-truncation totals so a truncated list still signals depth.
+    """
+    blocked_rows = connection.execute(
+        """
+        SELECT id, technique_key, technique, target_kind, target_ref,
+               reason, retry_state, evidence_ref, notes, updated_at
+        FROM assessment_blocked_techniques
+        WHERE engagement_id = ?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+        """,
+        (engagement_id, _ATTEMPTS_ROW_LIMIT * 3),
+    ).fetchall()
+    blocked_techniques = _since_filter(
+        [
+            {
+                "id": row["id"],
+                "technique_key": row["technique_key"],
+                "technique": row["technique"],
+                "target_kind": row["target_kind"] or "",
+                "target_ref": row["target_ref"] or "",
+                "reason": str(row["reason"] or "")[:300],
+                "retry_state": row["retry_state"] or "",
+                "evidence_ref": row["evidence_ref"] or "",
+                "notes": str(row["notes"] or "")[:300],
+                "updated_at": row["updated_at"],
+            }
+            for row in blocked_rows
+        ],
+        since=since,
+        field="updated_at",
+    )[:_ATTEMPTS_ROW_LIMIT]
+
+    placeholders = ", ".join("?" for _ in _PROBE_COVERING_STATUSES)
+    probe_rows = connection.execute(
+        f"""
+        SELECT id, attack_family, result_status, tool_name, agent_name,
+               target_host, target_path, signal_type, evidence_ref, created_at
+        FROM assessment_probe_runs
+        WHERE engagement_id = ?
+          AND result_status NOT IN ({placeholders})
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        """,
+        (engagement_id, *_PROBE_COVERING_STATUSES, _ATTEMPTS_ROW_LIMIT * 3),
+    ).fetchall()
+    noncovering_probe_runs = _since_filter(
+        [
+            {
+                "id": row["id"],
+                "attack_family": row["attack_family"] or "",
+                "result_status": row["result_status"] or "",
+                "tool_name": row["tool_name"] or "",
+                "agent_name": row["agent_name"] or "",
+                "target_host": row["target_host"] or "",
+                "target_path": row["target_path"] or "",
+                "signal_type": row["signal_type"] or "",
+                "evidence_ref": row["evidence_ref"] or "",
+                "created_at": row["created_at"],
+            }
+            for row in probe_rows
+        ],
+        since=since,
+        field="created_at",
+    )[:_ATTEMPTS_ROW_LIMIT]
+
+    roe_blocked_findings = _limited_findings(
+        connection,
+        engagement_id,
+        "json_extract(details_json,'$.roe_blocked') = 1",
+        since=since,
+    )
+
+    # Counts are absolute totals (like finding_counts), not len() of the
+    # truncated lists — so a list capped at _ATTEMPTS_ROW_LIMIT still signals the
+    # true depth of walled-off work a re-dispatch must not blindly retry.
+    blocked_total = connection.execute(
+        "SELECT COUNT(*) FROM assessment_blocked_techniques WHERE engagement_id = ?",
+        (engagement_id,),
+    ).fetchone()[0]
+    noncovering_total = connection.execute(
+        f"SELECT COUNT(*) FROM assessment_probe_runs "
+        f"WHERE engagement_id = ? AND result_status NOT IN ({placeholders})",
+        (engagement_id, *_PROBE_COVERING_STATUSES),
+    ).fetchone()[0]
+    roe_blocked_total = connection.execute(
+        "SELECT COUNT(*) FROM assessment_findings "
+        "WHERE engagement_id = ? AND json_extract(details_json,'$.roe_blocked') = 1",
+        (engagement_id,),
+    ).fetchone()[0]
+
+    return {
+        "blocked_techniques": blocked_techniques,
+        "blocked_techniques_count": blocked_total,
+        "noncovering_probe_runs": noncovering_probe_runs,
+        "noncovering_probe_runs_count": noncovering_total,
+        "roe_blocked_findings": roe_blocked_findings,
+        "roe_blocked_findings_count": roe_blocked_total,
+    }
+
+
 def build_resume_brief(
     engagement_id: int,
     *,
@@ -407,13 +537,14 @@ def build_resume_brief(
             "chain_required": _limited_findings(
                 connection,
                 engagement_id,
-                "details_json LIKE '%chain_required%'",
+                "json_extract(details_json,'$.chain_required') = 1",
                 since=since,
             ),
         }
         counts = _counts(connection, engagement_id)
         surfaces_section = _surfaces_section(connection, engagement_id)
         work_buffer_section = _work_buffer_section(connection, engagement_id)
+        attempts_section = _attempts_section(connection, engagement_id, since=since)
 
     command_matches_all = (
         state_manager.list_command_runs(
@@ -482,6 +613,7 @@ def build_resume_brief(
         "finding_counts": counts,
         "surfaces": surfaces_section,
         "work_buffer": work_buffer_section,
+        "attempts": attempts_section,
         "target_finding": target_finding,
         "findings": findings,
         "recent_decisions": _recent_decisions(engagement_id, since=since),

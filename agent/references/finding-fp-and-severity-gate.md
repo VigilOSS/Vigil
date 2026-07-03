@@ -1,5 +1,5 @@
 ---
-description: "General FP + severity-downgrade gate (C1–C6) run at Phase-4 verification: data-sensitivity / public-data / boundary-crossing / id-enumerability checks, per-metric CVSS-vector discipline, orphan-write read-back, kill-trigger catalog, severity ladder. The live/web analog of code-finding-verification."
+description: "General FP + severity-downgrade gate (C1–C6) run at Phase-4 verification on any debate-skipped runtime-proven finding (data-exposure/write-impact, auth-bypass, race, business-logic): data-sensitivity / public-data / boundary-crossing / id-enumerability checks, per-metric CVSS-vector discipline, orphan-write read-back, kill-trigger catalog, severity ladder. The live/web analog of code-finding-verification."
 category: Finding Verification Gates
 ---
 
@@ -15,6 +15,16 @@ category: Finding Verification Gates
 by an independent triager — the calculator produced a number, but the proven real-world impact was
 lower (a "read" that exposed no PII because no read endpoint existed; a "file attach" that was an
 orphan write never proven to land on a real record). This gate catches that before it ships.
+
+**Applicability.** The catalog below is written against data-exposure and write-impact findings, but
+the gate is not limited to them: it applies to **any finding that skips the Phase-4 Ideator-vs-Tracer
+debate because it is runtime-proven** (`agent/agents/vulnerability-analyst.md`'s debate-skip rule) —
+auth-bypass, race-condition, and business-logic findings included. Runtime proof settles the causal
+chain, not the overclaim/severity-inflation question this gate exists to answer, so a debate-skipped
+finding still owes this pass before `confirmed`/`downgraded`. Apply C1–C4 where data/object access is
+in play; apply C5 (per-metric CVSS discipline) and C6 (real-object proof, generalized beyond writes to
+any claimed state change — an auth-bypass session, a race's won outcome, a business-logic state
+transition) universally, and read the Fast FP triggers as patterns to match by shape, not by class.
 
 This file is the codified home of the recurring FP/overclaim catalog — when a new overclaim pattern
 recurs across engagements, land it here (as a kill/downgrade trigger below or a per-metric C-check),
