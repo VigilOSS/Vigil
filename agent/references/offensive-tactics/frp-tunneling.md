@@ -210,10 +210,10 @@ vigil oob client logs vuln-ssrf-api --lines 80
 ```
 
 This is only a raw tail of this client's listener log, useful for infra
-debugging (is the listener up, is anything arriving at all). It is **never**
-the correlation surface — do not read it, or the shared `vigil logs oob
---lines 80` server/FRP tail, to decide whether a probe hit. Nonce<->probe
-correlation is `vigil oob poll --client <name>` only (step 4).
+debugging (is the listener up, is anything arriving at all) — never the
+correlation surface. Do not read this raw tail, or the shared
+`vigil logs oob --lines 80` server/FRP tail, to decide whether a probe hit.
+Nonce<->probe attribution is `vigil oob poll --client <name>` only (step 4).
 
 ### Fallback
 
