@@ -266,6 +266,8 @@ External submissions (bug bounty, disclosure email) are read by humans. The patt
 
 **Keep telemetry internal.** Request volumes, per-phase timing, percentile latencies, and per-node distribution are operational state. One UTC date range covers the time window if the reviewer needs it.
 
+**State safety framing once; keep it separate from mechanism.** Say why the PoC is safe to run (offline / localhost-only / FAKE credentials) exactly once, in the setup — never re-asserted at every step. That test-safety fact answers "why can I trust this didn't touch the real target," which is a different question from the vulnerability's mechanism ("why does the sink fire," "what triggers it," "what order things happen in"). Restating the safety framing at each step in place of explaining the mechanism is padding: it dilutes the finding's actual proof and is one of the most recognizable tells of agent-authored output. A PoC that says "offline" or "FAKE" a dozen times reads as a script defending itself, not a script proving a bug.
+
 **Deconfliction: three lines only.** Researcher ID, source IP, UTC time window (single range, not per-phase). Omit if the program does not require it.
 
 **Attack scenarios: realistic adversary, not a character.** Name the adversary class, starting access, action, and outcome in 2-3 sentences — cartoonish personas ("a first-year student in a dorm room") and romantic framing ("from a public Wi-Fi network with a copy of curl") undermine credibility.

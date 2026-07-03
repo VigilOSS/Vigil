@@ -1,5 +1,5 @@
 ---
-description: "General FP + severity-downgrade gate (C1–C6) run at Phase-4 verification on any debate-skipped runtime-proven finding (data-exposure/write-impact, auth-bypass, race, business-logic): data-sensitivity / public-data / boundary-crossing / id-enumerability checks, per-metric CVSS-vector discipline, orphan-write read-back, kill-trigger catalog, severity ladder. The live/web analog of code-finding-verification."
+description: "General FP + severity-downgrade gate (C1–C7) run at Phase-4 verification on any debate-skipped runtime-proven finding (data-exposure/write-impact, auth-bypass, race, business-logic): data-sensitivity / public-data / boundary-crossing / id-enumerability checks, per-metric CVSS-vector discipline, orphan-write read-back, by-design/documented/precedent check, kill-trigger catalog, severity ladder. The live/web analog of code-finding-verification."
 category: Finding Verification Gates
 ---
 
@@ -22,9 +22,10 @@ debate because it is runtime-proven** (`agent/agents/vulnerability-analyst.md`'s
 auth-bypass, race-condition, and business-logic findings included. Runtime proof settles the causal
 chain, not the overclaim/severity-inflation question this gate exists to answer, so a debate-skipped
 finding still owes this pass before `confirmed`/`downgraded`. Apply C1–C4 where data/object access is
-in play; apply C5 (per-metric CVSS discipline) and C6 (real-object proof, generalized beyond writes to
+in play; apply C5 (per-metric CVSS discipline), C6 (real-object proof, generalized beyond writes to
 any claimed state change — an auth-bypass session, a race's won outcome, a business-logic state
-transition) universally, and read the Fast FP triggers as patterns to match by shape, not by class.
+transition), and C7 (by-design/documented/precedent) universally, and read the Fast FP triggers as
+patterns to match by shape, not by class.
 
 This file is the codified home of the recurring FP/overclaim catalog — when a new overclaim pattern
 recurs across engagements, land it here (as a kill/downgrade trigger below or a per-metric C-check),
@@ -34,7 +35,7 @@ that re-applies these same patterns just before submission is `agent/skills/blin
 Each check yields **PASS** (cite evidence at the bar a KILL would), **DOWNGRADE** (lower the
 metric/severity, with the reason), **KILL** (false positive — don't record), or **GAP** (cannot
 resolve → blocks; do not default to PASS). It maps onto the verifier's existing
-`PASS / KILL / DOWNGRADE / UPGRADE` decision framework. C5 and C6 are the net-new core; the rest
+`PASS / KILL / DOWNGRADE / UPGRADE` decision framework. C5, C6, and C7 are the net-new core; the rest
 cross-references the always-loaded rules rather than restating them.
 
 ## The checks
@@ -80,11 +81,39 @@ cross-references the always-loaded rules rather than restating them.
   victim's data visibly changes, the file appears on the real record, the value becomes
   retrievable). No read-back **and** success-for-nonexistent-ids ⇒ real-object impact is unproven ⇒
   `I` is not `H`; the finding may be only storage pollution / informational.
+- **C7 — Is this by-design / documented / precedented, or a genuine boundary break?**
+  *(net-new — first-class gate item; run before scoring, not after.)* Answer explicitly:
+  - **Is this documented or intended behavior?** Check the vendor's own docs and any published
+    security/trust-boundary statement (a repo's `SECURITY.md`, a platform's trust-and-safety page)
+    for the feature the finding touches. If the docs describe the exact behavior observed, the
+    finding must show a boundary the docs mark as protected being crossed — not merely "the docs
+    describe capability X and X sounds dangerous."
+  - **Is the affected resource meant to be public?** Broader than C2's data-exposure framing — also
+    covers reachable-but-intentionally-open endpoints, features, or capabilities.
+  - **What do the vendor docs actually say?** Cite the exact page/section/line. A finding argued
+    from assumption about how a feature "probably" works is weaker than one anchored to the
+    documented contract — go read the docs before scoring, don't infer the boundary from the
+    behavior alone. (Worked example of doing this systematically: have osint-analyst or the
+    vulnerability-analyst build a per-capability "docs SHOULD / documented BOUNDARY" map before
+    scoring a cluster of related findings, citing doc URLs/lines against each — this is more
+    reliable than re-deriving the boundary ad hoc per finding.)
+  - **Are there real-world precedents, and how were they rated?** Check CVE / HackerOne / Bugcrowd
+    disclosure history for the same vendor, product, or pattern. A precedent rated Medium is a real
+    prior against filing the same primitive as Critical without a materially different proof —
+    calibrate from actual comparables, not the best-imaginable attacker outcome.
+  - DOWNGRADE/KILL if the observed behavior matches documented intent and the finding cannot show a
+    documented boundary being crossed. PASS — citing the doc URL/line, and where a boundary-break
+    claim is made, the exact clause marking it out-of-bounds — when the finding demonstrates
+    crossing a boundary the vendor's own docs protect. This both **preempts the N/A ("working as
+    intended") disposition** before it costs a submission, and **calibrates severity from real
+    comparables** instead of the best-imaginable case.
 
-## Fast FP / kill-severity triggers (run alongside C1–C6)
+## Fast FP / kill-severity triggers (run alongside C1–C7)
 
 Data-exposure-specific:
 - **Anonymous/public by design** — anonymity isn't the bug (C3). **[KILL]**
+- **Documented capability, no boundary crossed** — vendor docs describe the exact behavior observed
+  and the finding does not show a documented boundary being crossed (C7). **[KILL/DOWN]**
 - **Self-only / your-own-data in another shape** — same account, or you swapped to your own id (no
   victim), or your own data via a different route. **[KILL]**
 - **Opaque surrogate with no power** — a leaked id/UUID that resolves to nothing and is usable
@@ -151,13 +180,17 @@ count is a ceiling.)
 This gate's conclusions are not scratch notes — the verifier writes them into the finding's durable
 `details` so the report-writer only formats: the corrected `cvss_vector`/`cvss_score`, the
 `evidence` (the exact fields + the two-context / read-back proof), the `impact` (the one-sentence
-attacker outcome from C5's gut-check), and `remediation`. See the "Four Validation Gates" (Gate 3)
-in `agent/agents/vulnerability-analyst.md`.
+attacker outcome from C5's gut-check), the `remediation`, and — when C7 was material to the
+disposition — the exact vendor doc URL/line cited and, if found, the precedent disclosure it was
+compared against. See the "Four Validation Gates" (Gate 3) in `agent/agents/vulnerability-analyst.md`.
 
 ## Related
 
 - `agent/rules/hunting.md` — §2 (existence-vs-exploitation), §3 (precondition equivalence), §20 (severity-CVSS audit)
 - `agent/rules/reporting.md` — §2 (proof), §3 (severity follows impact + precondition analysis; also the home of the info-disclosure / stack-trace "informational unless it enables a proven higher-impact attack" rule), §4 (non-public data), §5 (distinct identities)
+- `agent/skills/osint-recon/SKILL.md` — the CVE/disclosure-history research C7's precedent question
+  draws on; also the role best placed to build a per-capability vendor-docs boundary map (docs SHOULD
+  vs. documented BOUNDARY, cited by URL/line) ahead of scoring a cluster of related findings
 - `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission blind gate that re-applies the same overclaim catalog on the submission bytes before publish (this gate is the in-context Phase-4 version)
 - `agent/agents/vulnerability-analyst.md` — the 8-Question Gate, Chain-Only List, Fast Kill Signals, Four Validation Gates
 - `agent/skills/code-finding-verification/SKILL.md` — the code-finding analog (five-check protocol); use that for source-only findings

@@ -117,7 +117,7 @@ Emit it as a markdown table or as a JSON array of those objects. Keep `expected`
   (anyone can self-register → the precondition is free → effectively unauthenticated →
   higher band); an "impact-if-true" never proven up to the claimed band; an inflated
   `S:C` / `I:H` with no real object crossing the boundary. *Signal:* the finding's
-  severity vs. its proven evidence, run through the C1–C6 FP & severity gate.
+  severity vs. its proven evidence, run through the C1–C7 FP & severity gate.
   *Redispatch:* re-grade via `agent/references/finding-fp-and-severity-gate.md`, or a
   `vulnerability-analyst` review-mode pass to prove or kill the impact-if-true.
 - **`chain`** — A→B primitives left **unsynthesized** across the phase's lanes. Two
@@ -151,7 +151,7 @@ A miss that is silently dropped is the failure mode this skill exists to prevent
   the per-PHASE level. blind-triage judges one submission's bytes blind; phase-qc
   judges a whole phase's coverage / depth / grading / chains. They stack: blind-triage
   per Medium+ finding, phase-qc once at the boundary.
-- `agent/references/finding-fp-and-severity-gate.md` — the C1–C6 FP / severity-downgrade
+- `agent/references/finding-fp-and-severity-gate.md` — the C1–C7 FP / severity-downgrade
   catalog phase-qc applies for `grading` misses.
 - `vigil assess coverage` (operator-core "Read the coverage ledger…") — the measured
   baseline phase-qc reasons against and never recomputes.
