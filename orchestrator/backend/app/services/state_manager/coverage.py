@@ -625,6 +625,20 @@ def _auto_request_coverage_candidates(
         candidates.append({"input_slot": "header", "attack_family": "header-review", "status": "pending", "notes": "Auto-generated from request observation"})
     return candidates
 
+
+def _slot_class(input_slot: str | None) -> str:
+    """Base slot class of an ``input_slot``, tolerating the ``slot:name`` probe
+    convention (``header:X-Forwarded-Host`` -> ``header``).
+
+    Coverage-item candidates are always coarse today (``endpoint|query|body|path|
+    cookie|header|service``), so this is a forward guard, not a live-bug fix: if a
+    prefixed slot ever reaches candidate linkage, the service-vs-request-variant
+    decision still keys on the base class instead of mis-linking on the full
+    string. For a coarse value with no ``:`` it returns the value unchanged, so
+    existing behavior is preserved exactly.
+    """
+    return str(input_slot or "unknown").split(":", 1)[0]
+
 def record_target(
     engagement_id: int,
     *,
@@ -918,9 +932,10 @@ def _ingest_request_observation(
     coverage_items: list[dict[str, Any]] = []
     seen_keys: set[tuple[int | None, int | None, str, str, str]] = set()
     for candidate in candidates:
+        is_service = _slot_class(candidate.get("input_slot")) == "service"
         key = (
-            request_variant["id"] if candidate.get("input_slot") != "service" else None,
-            service["id"] if candidate.get("input_slot") == "service" else None,
+            request_variant["id"] if not is_service else None,
+            service["id"] if is_service else None,
             auth_context,
             str(candidate.get("input_slot", "unknown")),
             str(candidate.get("attack_family", "review")),

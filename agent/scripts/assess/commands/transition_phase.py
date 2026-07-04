@@ -710,17 +710,28 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
 
 def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
     """The ONE hard block (Wave 7 / S17 resolution; master plan §1A, depth-gate
-    §5.3): the terminal report/complete edge cannot pass with a high-value app
-    unit that is BOTH unsatisfied AND undeferred AND untouched.
+    §5.3; coverage-grain unbundle / ADR 0012): the terminal report/complete edge
+    cannot pass with a high-value app unit that is left deep-untested.
 
     Calls the read-only ``application-units/terminal-block`` endpoint (mirroring
-    how the report branch calls ``report-readiness``). A non-empty ``blocking``
-    set appends ONE ``depth_unsatisfied_units`` blocker at the DEFAULT
-    ``severity="block"`` (the hard block) with the exact escape valves. The
-    ``warned_under_observed`` units are appended as an ``severity="advisory"``
-    blocker so they are surfaced but NEVER block. The deferral rate is visible
-    in both. WEB-ONLY: the endpoint returns ``skipped=True`` (empty blocking)
-    for code/blue, so this never blocks those tracks even when reached.
+    how the report branch calls ``report-readiness``). The ``blocking`` set spans
+    two grains of the SAME gate, split here into two ``severity="block"`` blockers
+    that both clear via the same ``depth_deferral`` / ``--force --reason`` valves:
+
+      * ``depth_unsatisfied_units`` (grain ``"family"``) — the historical block:
+        a decisive/high-confidence unit left unsatisfied AND undeferred AND
+        UNTOUCHED (names the uncovered BLOCK_HIGH families).
+      * ``depth_uncovered_classes`` (grain ``"class"``) — the coverage-grain
+        block: a decisive/high-confidence unit whose gf coverage_items flagged a
+        specific BLOCK_HIGH *class* never class-specifically covered, which fires
+        even when the family looks covered/touched (the single-class blind spot).
+        The reason names the uncovered classes and the deferral escape.
+
+    The ``warned_under_observed`` units are appended as an ``severity="advisory"``
+    blocker so they are surfaced but NEVER block. The deferral rate is visible in
+    all. WEB-ONLY: the endpoint returns ``skipped=True`` (empty blocking) for
+    code/blue, so this never blocks those tracks even when reached. This extends
+    the ONE gate — it does not add a parallel one.
     """
     out: list[dict[str, str]] = []
     try:
@@ -735,15 +746,28 @@ def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
     blocking = result.get("blocking") or []
     warned = result.get("warned_under_observed") or []
 
-    if blocking:
-        names = [_unit_label(b.get("unit", {})) for b in blocking]
+    # The block set carries two grains (depth_ledger.terminal_depth_block):
+    #   * "family" — the historical block: a decisive/high-confidence unit left
+    #     untested/undeferred/untouched (names the uncovered BLOCK_HIGH families);
+    #   * "class"  — the coverage-grain-unbundle block (ADR 0012): a decisive/
+    #     high-confidence unit whose gf coverage_items flagged a specific
+    #     BLOCK_HIGH *class* that was never class-specifically covered (a sibling
+    #     class covered the family, so the family gate would pass). Both are ONE
+    #     gate (severity="block") on this same edge — the --force/--reason override
+    #     and the depth_deferral valve clear either.
+    family_blocking = [b for b in blocking if b.get("block_grain") != "class"]
+    class_blocking = [b for b in blocking if b.get("block_grain") == "class"]
+
+    if family_blocking:
+        names = [_unit_label(b.get("unit", {})) for b in family_blocking]
         sample = ", ".join(names[:6]) + (" ..." if len(names) > 6 else "")
         out.append({
             "kind": "depth_unsatisfied_units",
             "severity": "block",
             "detail": (
-                f"{len(blocking)} high-value app unit(s) are untested, undeferred, "
-                f"and untouched (the engagement never went deep on them): {sample}. "
+                f"{len(family_blocking)} high-value app unit(s) are untested, "
+                f"undeferred, and untouched (the engagement never went deep on "
+                f"them): {sample}. "
                 "These carry a high-confidence deep_required tier or a decisive risk "
                 "surface (auth_entry / object_reference / privileged_write / "
                 "api_documentation). Either go deep on them, OR defer with "
@@ -752,6 +776,36 @@ def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
                 "\"vuln_classes\":[...],\"reason\":\"<why>\"}'` (bounded, recorded), "
                 "OR override with `transition-phase ... --force --reason \"<why>\"`. "
                 f"({deferral_count} depth_deferral(s) already recorded.)"
+            ),
+        })
+
+    if class_blocking:
+        parts = [
+            f"{_unit_label(b.get('unit', {}))} "
+            f"[{', '.join(str(c) for c in (b.get('uncovered_classes') or [])) or '?'}]"
+            for b in class_blocking
+        ]
+        sample = "; ".join(parts[:6]) + (" ..." if len(parts) > 6 else "")
+        all_classes = sorted({
+            str(c) for b in class_blocking for c in (b.get("uncovered_classes") or [])
+        })
+        out.append({
+            "kind": "depth_uncovered_classes",
+            "severity": "block",
+            "detail": (
+                f"{len(class_blocking)} decisive / high-confidence app unit(s) have a "
+                f"BLOCK_HIGH vuln CLASS that was flagged but never class-specifically "
+                f"tested — a sibling class covered the family, but the specific "
+                f"class(es) are still uncovered: {sample}. Uncovered class(es): "
+                f"{', '.join(all_classes)}. Either drain each class with a "
+                "class-specific covering probe / evidence-bearing coverage-item "
+                "(result_status tested/signal — `status=completed` alone never "
+                "counts), OR defer the class(es) with `vigil assess agent decision "
+                "--kind depth_deferral --surfaced-to-user --payload-json "
+                "'{\"host\":\"<host>\",\"path_prefix\":\"<prefix>\","
+                "\"vuln_classes\":[<classes>],\"reason\":\"<why>\"}'` (bounded, "
+                "recorded), OR override with `transition-phase ... --force --reason "
+                f"\"<why>\"`. ({deferral_count} depth_deferral(s) already recorded.)"
             ),
         })
 

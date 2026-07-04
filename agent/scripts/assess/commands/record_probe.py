@@ -25,7 +25,7 @@ import sys
 from assess.lib import probe_args
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.contracts import render_contract_epilog
+from assess.lib.contracts import add_contract_subparser, render_contract_epilog
 
 
 # Covering result_status vocabulary — the two statuses that count as coverage.
@@ -35,8 +35,10 @@ _COVERING_STATUSES = ("tested", "signal")
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser(
+    p = add_contract_subparser(
+        subparsers,
         "record-probe",
+        contract_name="record-probe",
         help="Record a covering probe run (tested|signal); --evidence-ref required.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=render_contract_epilog("record-probe"),
@@ -53,6 +55,7 @@ def register(subparsers) -> None:
 
 
 def run(args) -> None:
+    probe_args.enforce_required_inputs(args, "record-probe")
     if not (args.evidence_ref or "").strip():
         print(
             "record-probe: --evidence-ref is required for a covering probe "

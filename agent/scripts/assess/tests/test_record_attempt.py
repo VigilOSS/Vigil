@@ -83,6 +83,7 @@ def test_record_attempt_blocked_roundtrip(tmp_path, monkeypatch, capsys):
             "--target-host", "api.example.com",
             "--target-path", "/fetch",
             "--target-port", "443",
+            "--input-slot", "query:url",
             "--auth-context", "member",
             "--notes", "WAF 403 on internal hosts",
         ],
@@ -139,6 +140,8 @@ def test_record_attempt_resolves_finding_slug(tmp_path, monkeypatch, capsys):
             "--result-status", "no-signal",
             "--attack-family", "idor",
             "--target-host", "app.example.com",
+            "--input-slot", "path",
+            "--auth-context", "member",
             "--finding", "VA-047",
         ],
         str(tmp_path),
@@ -154,7 +157,11 @@ def test_record_attempt_finding_numeric_id_passthrough(tmp_path, monkeypatch, ca
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
-        ["record-attempt", "--result-status", "error", "--attack-family", "sqli", "--finding", "12"],
+        [
+            "record-attempt", "--result-status", "error", "--attack-family", "sqli",
+            "--target-host", "app.example.com", "--input-slot", "body:q", "--auth-context", "anonymous",
+            "--finding", "12",
+        ],
         str(tmp_path),
     )
     record_attempt.run(args)
@@ -167,7 +174,11 @@ def test_record_attempt_missing_finding_slug_errors(tmp_path, monkeypatch, capsy
     fake = _FakeClient(findings={})
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
-        ["record-attempt", "--result-status", "attempted", "--attack-family", "ssrf", "--finding", "NOPE-1"],
+        [
+            "record-attempt", "--result-status", "attempted", "--attack-family", "ssrf",
+            "--target-host", "app.example.com", "--input-slot", "query:x", "--auth-context", "anonymous",
+            "--finding", "NOPE-1",
+        ],
         str(tmp_path),
     )
     from assess.lib.client import AssessError
@@ -181,7 +192,10 @@ def test_record_attempt_unknown_family_warns_but_records(tmp_path, monkeypatch, 
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
-        ["record-attempt", "--result-status", "attempted", "--attack-family", "not-a-real-class"],
+        [
+            "record-attempt", "--result-status", "attempted", "--attack-family", "not-a-real-class",
+            "--target-host", "app.example.com", "--input-slot", "query:x", "--auth-context", "anonymous",
+        ],
         str(tmp_path),
     )
     record_attempt.run(args)
@@ -189,3 +203,73 @@ def test_record_attempt_unknown_family_warns_but_records(tmp_path, monkeypatch, 
     assert "WARN" in err and "not a known" in err
     # WARN-first: still recorded, stored verbatim (normalized casing).
     assert fake.posts[0][1]["attack_family"] == "not-a-real-class"
+
+
+# -- WS3 required-input guards (run()-time, block-not-warn) --------------------
+
+def _attempt_argv(**overrides) -> list[str]:
+    """A record-attempt argv that PASSES every guard; overrides tweak one field."""
+    base = {
+        "--result-status": "blocked",
+        "--attack-family": "ssrf",
+        "--target-host": "api.example.com",
+        "--input-slot": "query:url",
+        "--auth-context": "anonymous",
+    }
+    base.update(overrides)
+    argv = ["record-attempt"]
+    for k, v in base.items():
+        if v is not None:
+            argv += [k, v]
+    return argv
+
+
+def test_record_attempt_rejects_missing_input_slot(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(_attempt_argv(**{"--input-slot": None}), str(tmp_path))
+    with pytest.raises(SystemExit):
+        record_attempt.run(args)
+    err = capsys.readouterr().err
+    assert "--input-slot is required" in err
+    assert "See: vigil assess contract record-attempt" in err
+    assert fake.posts == []
+
+
+def test_record_attempt_rejects_missing_auth_context(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(_attempt_argv(**{"--auth-context": None}), str(tmp_path))
+    with pytest.raises(SystemExit):
+        record_attempt.run(args)
+    assert "--auth-context is required" in capsys.readouterr().err
+    assert fake.posts == []
+
+
+def test_record_attempt_rejects_missing_target_host(tmp_path, monkeypatch, capsys):
+    """record-attempt exposes no FK-link flags, so --target-host is unconditional.
+
+    The rejection message must NOT dangle a --request-variant-id clause the verb
+    cannot accept."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(_attempt_argv(**{"--target-host": None}), str(tmp_path))
+    with pytest.raises(SystemExit):
+        record_attempt.run(args)
+    err = capsys.readouterr().err
+    assert "--target-host is required" in err
+    assert "--request-variant-id" not in err  # not offered by this verb
+    assert fake.posts == []
+
+
+def test_record_attempt_missing_required_flag_shows_pointer(tmp_path, monkeypatch, capsys):
+    """A missing argparse-required flag (--attack-family) still surfaces the
+    contract pointer on the ERROR path (not just on --help)."""
+    with pytest.raises(SystemExit):
+        _parse(
+            ["record-attempt", "--result-status", "blocked", "--target-host", "h",
+             "--input-slot", "query:x", "--auth-context", "anonymous"],
+            str(tmp_path),
+        )
+    err = capsys.readouterr().err
+    assert "See: vigil assess contract record-attempt" in err

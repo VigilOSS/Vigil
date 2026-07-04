@@ -115,9 +115,10 @@ def test_blocked_technique_roundtrip_defaults_retry_state_pending(client, isolat
 
 
 def test_resume_brief_attempts_section_surfaces_all_three_sources(client, isolate_settings) -> None:
-    """build_resume_brief.attempts surfaces (1) recorded blocked techniques,
-    (2) non-covering probe runs (result_status NOT IN tested/signal), and
-    (3) findings flagged roe_blocked in details_json."""
+    """build_resume_brief.attempts surfaces (1) recorded blocked techniques and
+    (2) findings flagged roe_blocked in details_json. Probe runs (covering AND
+    non-covering) move to the per_input_coverage grid — asserted here too so the
+    Attempts/Per-Input split stays pinned."""
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
 
@@ -135,8 +136,9 @@ def test_resume_brief_attempts_section_surfaces_all_three_sources(client, isolat
         },
     ).status_code == 201
 
-    # (2) a no-signal probe run (non-covering) + a covering 'tested' run that
-    # must NOT appear in attempts.
+    # (2) a no-signal probe run (non-covering) + a covering 'tested' run — both
+    # now surface in the per_input_coverage grid (covering included), NOT in the
+    # flat attempts ledger.
     assert client.post(
         f"{BASE}/probe-runs",
         json={
@@ -166,7 +168,8 @@ def test_resume_brief_attempts_section_surfaces_all_three_sources(client, isolat
     _seed_finding(client, eng, "VA-051", details={})
     _seed_finding(client, eng, "VA-052", details={"roe_blocked": False})
 
-    attempts = client.get(f"{BASE}/resume-brief").json()["attempts"]
+    brief = client.get(f"{BASE}/resume-brief").json()
+    attempts = brief["attempts"]
 
     blocked = attempts["blocked_techniques"]
     assert [row["technique"] for row in blocked] == ["BFLA"]
@@ -174,10 +177,19 @@ def test_resume_brief_attempts_section_surfaces_all_three_sources(client, isolat
     # notes (the documented unblock-requirement home) is projected into the brief.
     assert blocked[0]["notes"] == "retry after VA-101 yields an org-admin session token"
 
-    probes = attempts["noncovering_probe_runs"]
-    assert [row["result_status"] for row in probes] == ["no-signal"]
-    assert attempts["noncovering_probe_runs_count"] == 1
-    assert all(row["result_status"] not in ("tested", "signal") for row in probes)
+    # Probe runs moved out of the flat attempts ledger into the grid.
+    assert "noncovering_probe_runs" not in attempts
+    grid = brief["per_input_coverage"]
+    by_family = {c["attack_family"]: c for c in grid["cells"]}
+    # non-covering no-signal probe: a cell, marked NOT covering.
+    assert by_family["sqli"]["latest_status"] == "no-signal"
+    assert by_family["sqli"]["covering"] is False
+    assert by_family["sqli"]["count"] == 1
+    # covering 'tested' probe is INCLUDED (grid is a coverage view, not a
+    # dead-ends ledger) and marked covering.
+    assert by_family["xss"]["latest_status"] == "tested"
+    assert by_family["xss"]["covering"] is True
+    assert grid["cells_count"] == 2
 
     roe = attempts["roe_blocked_findings"]
     roe_slugs = {row["slug"] for row in roe}
@@ -230,10 +242,77 @@ def test_resume_brief_attempts_since_filters(client, isolate_settings) -> None:
     ).status_code == 201
     _seed_finding(client, eng, "VA-060", details={"roe_blocked": True})
 
-    future = client.get(f"{BASE}/resume-brief", params={"since": "2099-01-01T00:00:00Z"}).json()["attempts"]
+    full = client.get(f"{BASE}/resume-brief", params={"since": "2099-01-01T00:00:00Z"}).json()
+    future = full["attempts"]
     assert future["blocked_techniques"] == []
-    assert future["noncovering_probe_runs"] == []
     assert future["roe_blocked_findings"] == []
+    # The per-input grid is since-filtered too: no cells under a future cutoff,
+    # even though cells_count remains an absolute snapshot.
+    assert full["per_input_coverage"]["cells"] == []
+
+
+def test_resume_brief_per_input_coverage_grid(client, isolate_settings) -> None:
+    """The per_input_coverage grid groups probes by
+    (host × path × attack_family × input_slot × auth_context) into cells, each
+    carrying a count, a covering flag, the latest verdict, the observed_http_status
+    wall code, and the latest lens. Covering probes are INCLUDED; two identities on
+    the same input are two cells; probes differing only by lens (not a grouping
+    axis) accumulate in one cell's count."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+    base = {
+        "attack_family": "idor",
+        "tool_name": "manual",
+        "target_host": "app.example.com",
+        "target_path": "/orders/1001",
+        "input_slot": "path:id",
+    }
+    # cell 1 — member identity, a COVERING 'tested' probe with a 200.
+    assert client.post(
+        f"{BASE}/probe-runs",
+        json={
+            **base,
+            "result_status": "tested",
+            "observed_http_status": 200,
+            "auth_context": "member",
+            "evidence_ref": "scans/idor.txt",
+            "lens": "tenant-boundary",
+        },
+    ).status_code == 201
+    # cell 2 — anonymous identity, two non-covering 'blocked' 403s differing only
+    # by lens. lens is in the probe key (distinct rows) but NOT a grouping axis,
+    # so both collapse into ONE cell with count 2.
+    for lens in ("anon-sweep", "forced-browse"):
+        assert client.post(
+            f"{BASE}/probe-runs",
+            json={
+                **base,
+                "result_status": "blocked",
+                "observed_http_status": 403,
+                "auth_context": "anonymous",
+                "lens": lens,
+            },
+        ).status_code == 201
+
+    grid = client.get(f"{BASE}/resume-brief").json()["per_input_coverage"]
+    assert grid["cells_count"] == 2  # two identities -> two distinct cells
+    cells = {c["auth_context"]: c for c in grid["cells"]}
+
+    member = cells["member"]
+    assert member["attack_family"] == "idor"
+    assert member["input_slot"] == "path:id"
+    assert member["covering"] is True
+    assert member["latest_status"] == "tested"
+    assert member["observed_http_status"] == 200
+    assert member["count"] == 1
+    assert member["lens"] == "tenant-boundary"
+
+    anon = cells["anonymous"]
+    assert anon["covering"] is False
+    assert anon["latest_status"] == "blocked"
+    assert anon["observed_http_status"] == 403  # the auth-wall code is surfaced
+    assert anon["count"] == 2  # both lenses collapse into one cell
 
 
 def test_finding_links_generic_unblocked_by(client, isolate_settings) -> None:

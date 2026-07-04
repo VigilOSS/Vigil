@@ -59,6 +59,7 @@ finding, chain, dispatch/agent, surface, request variant, or command run.
 - Treat `artifact search` as the engagement memory index — `.md` files under the engagement directory that are not in the index are scratch.
 - Use `vigil assess agent render-handoff <agent-id>` for prior dispatch context — it stays bounded where raw transcripts grow linearly.
 - Read command history before re-running probes — the history is canonical, and rerunning is warranted only when the variant differs.
+- Read the brief's **Per-Input Coverage** grid before re-probing a surface — it shows which specific input was tested for which attack family as which identity, and any wall code, so a covered (host × input × identity × class) cell is not blindly re-tested.
 
 After hydration, summarize the resume state in one compact operator note:
 - confirmed, suspicious, killed, and open findings

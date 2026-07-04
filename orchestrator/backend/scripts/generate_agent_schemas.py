@@ -572,7 +572,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Authentication state when the finding was triggered. Use 'anonymous', a role name (e.g. 'user', 'admin'), or credential slug.",
                     },
                     "canonical_location": {
-                        "maxLength": 1024,
+                        "maxLength": 4096,
                         "description": "Primary affected location. URL for network findings (e.g. 'https://target.example/search?q'); 'file:path:line' for code findings.",
                     },
                     "summary": {

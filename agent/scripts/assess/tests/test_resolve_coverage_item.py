@@ -108,7 +108,21 @@ def test_resolve_coverage_item_rejects_unknown_status(tmp_path, monkeypatch, cap
             ["resolve-coverage-item", "5", "--status", "bogus", "--rationale", "x"],
             str(tmp_path),
         )
+    err = capsys.readouterr().err
+    # Scoped enum rejection (kali _enum_reject_message shape) + contract pointer
+    # on the ERROR path, no multi-line usage dump.
+    assert "--status 'bogus' is not valid" in err
+    assert "See: vigil assess contract resolve-coverage-item" in err
+    assert "usage:" not in err
     assert fake.patches == []
+
+
+def test_resolve_coverage_item_missing_required_flag_shows_pointer(tmp_path, monkeypatch, capsys):
+    """A missing argparse-required flag surfaces the contract pointer on the
+    ERROR path (argparse would otherwise show the epilog only on --help)."""
+    with pytest.raises(SystemExit):
+        _parse(["resolve-coverage-item", "5"], str(tmp_path))  # no --status/--rationale
+    assert "See: vigil assess contract resolve-coverage-item" in capsys.readouterr().err
 
     # NOTE: the CLI-mirror-vs-backend-enum drift guard lives in the backend
     # suite (orchestrator/backend/tests/test_coverage_probe_cli_sync.py), where

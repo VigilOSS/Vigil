@@ -108,7 +108,10 @@ def test_record_probe_requires_evidence(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
-        ["record-probe", "--result-status", "tested", "--attack-family", "ssrf", "--target-host", "h"],
+        [
+            "record-probe", "--result-status", "tested", "--attack-family", "ssrf",
+            "--target-host", "h", "--input-slot", "query:x", "--auth-context", "anonymous",
+        ],
         str(tmp_path),
     )
     with pytest.raises(SystemExit):
@@ -139,6 +142,8 @@ def test_record_probe_resolves_finding_slug(tmp_path, monkeypatch, capsys):
             "--result-status", "signal",
             "--attack-family", "ssrf",
             "--target-host", "api.example.com",
+            "--input-slot", "query:url",
+            "--auth-context", "anonymous",
             "--evidence-ref", "scans/ssrf.txt",
             "--finding", "VA-047",
         ],
@@ -154,10 +159,119 @@ def test_record_probe_unknown_family_warns_but_records(tmp_path, monkeypatch, ca
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
-        ["record-probe", "--result-status", "tested", "--attack-family", "not-a-real-class", "--evidence-ref", "e"],
+        [
+            "record-probe", "--result-status", "tested", "--attack-family", "not-a-real-class",
+            "--target-host", "h", "--input-slot", "query:x", "--auth-context", "anonymous",
+            "--evidence-ref", "e",
+        ],
         str(tmp_path),
     )
     record_probe.run(args)
     err = capsys.readouterr().err
     assert "WARN" in err and "not a known" in err
     assert fake.posts[0][1]["attack_family"] == "not-a-real-class"
+
+
+# -- WS3 required-input guards (run()-time, block-not-warn) --------------------
+
+def _probe_argv(**overrides) -> list[str]:
+    """A record-probe argv that PASSES every guard; overrides tweak one field."""
+    base = {
+        "--result-status": "tested",
+        "--attack-family": "idor",
+        "--target-host": "app.example.com",
+        "--input-slot": "path:id",
+        "--auth-context": "member",
+        "--evidence-ref": "scans/e.txt",
+    }
+    base.update(overrides)
+    argv = ["record-probe"]
+    for k, v in base.items():
+        if v is not None:
+            argv += [k, v]
+    return argv
+
+
+def test_record_probe_rejects_missing_input_slot(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    # Omit --input-slot entirely (default "" => the sentinel-empty rejection).
+    args = _parse(_probe_argv(**{"--input-slot": None}), str(tmp_path))
+    with pytest.raises(SystemExit):
+        record_probe.run(args)
+    err = capsys.readouterr().err
+    assert "--input-slot is required" in err
+    assert "See: vigil assess contract record-probe" in err
+    assert fake.posts == []
+
+
+def test_record_probe_rejects_unknown_input_slot(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(_probe_argv(**{"--input-slot": "unknown"}), str(tmp_path))
+    with pytest.raises(SystemExit):
+        record_probe.run(args)
+    assert "--input-slot is required" in capsys.readouterr().err
+    assert fake.posts == []
+
+
+def test_record_probe_input_slot_bad_prefix_did_you_mean(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(_probe_argv(**{"--input-slot": "quer:uid"}), str(tmp_path))
+    with pytest.raises(SystemExit):
+        record_probe.run(args)
+    err = capsys.readouterr().err
+    assert "not a known slot class" in err
+    assert "Did you mean: query?" in err
+    assert "See: vigil assess contract record-probe" in err
+    assert fake.posts == []
+
+
+def test_record_probe_rejects_missing_auth_context(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(_probe_argv(**{"--auth-context": None}), str(tmp_path))
+    with pytest.raises(SystemExit):
+        record_probe.run(args)
+    err = capsys.readouterr().err
+    assert "--auth-context is required" in err
+    assert "See: vigil assess contract record-probe" in err
+    assert fake.posts == []
+
+
+def test_record_probe_rejects_missing_target_anchor(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    # No --target-host and no FK anchor => unmappable => reject.
+    args = _parse(_probe_argv(**{"--target-host": None}), str(tmp_path))
+    with pytest.raises(SystemExit):
+        record_probe.run(args)
+    err = capsys.readouterr().err
+    assert "--target-host is required" in err
+    assert fake.posts == []
+
+
+def test_record_probe_target_anchor_satisfied_by_fk(tmp_path, monkeypatch, capsys):
+    """A --request-variant-id FK anchors the probe even with no --target-host."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        _probe_argv(**{"--target-host": None}) + ["--request-variant-id", "42"],
+        str(tmp_path),
+    )
+    record_probe.run(args)
+    capsys.readouterr()
+    assert fake.posts[0][1]["request_variant_id"] == 42
+
+
+def test_record_probe_bad_enum_shows_scoped_error_and_pointer(tmp_path, monkeypatch, capsys):
+    """A --result-status miss re-renders through the kali scoped formatter (did-you-mean,
+    no usage dump) and appends the contract pointer — on the parse ERROR path."""
+    with pytest.raises(SystemExit):
+        _parse(_probe_argv(**{"--result-status": "blocked"}), str(tmp_path))
+    err = capsys.readouterr().err
+    assert "--result-status 'blocked' is not valid" in err
+    assert "allowed: tested, signal" in err
+    assert "See: vigil assess contract record-probe" in err
+    assert "usage:" not in err  # scoped: no multi-line usage dump
