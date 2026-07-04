@@ -318,6 +318,48 @@ def test_read_client_log_sanitizes_name():
     assert "/" not in label
 
 
+# ── client_payload_host scans the WHOLE log (busy-client registration fix) ──
+
+
+def test_client_payload_host_greps_whole_log_not_a_tail():
+    # The artifact: the one-time registration banner sits near the TOP of a busy
+    # client log; the old tail-400 read scrolled past it and reported the client
+    # unregistered ("flapping"). client_payload_host must now grep the whole log.
+    from vigil_cli.docker import DockerResult
+
+    banner = "[\x1b[34mINF\x1b[0m] researcher.example"
+    seen = {}
+
+    def runner(argv, **_):
+        cmd = argv[-1]
+        seen["cmd"] = cmd
+        # Emulate `grep -F researcher.example <log>`: only the domain-bearing
+        # lines come back — here just the banner.
+        return DockerResult(0, banner + "\n", "")
+
+    host = oob.client_payload_host("va003-browser-cb", runner=runner, oob_domain="researcher.example")
+    assert host == "researcher.example"
+    assert "grep" in seen["cmd"] and "tail -n" not in seen["cmd"]  # whole-log scan, not a window
+    assert "/data/oob/clients/va003-browser-cb.log" in seen["cmd"]
+
+
+def test_read_client_registration_log_greps_domain_over_whole_file():
+    from vigil_cli.docker import DockerResult
+
+    seen = {}
+
+    def runner(argv, **_):
+        seen["cmd"] = argv[-1]
+        return DockerResult(0, "", "")
+
+    oob.read_client_registration_log("agent-1", runner=runner, oob_domain="researcher.example")
+    cmd = seen["cmd"]
+    assert cmd.startswith("grep")
+    assert "researcher.example" in cmd
+    assert "/data/oob/clients/agent-1.log" in cmd
+    assert "tail" not in cmd  # must not fall back to a bounded tail
+
+
 # ── vigil oob mint CLI smoke (docker + backend mocked) ──────────────────────
 
 
@@ -592,7 +634,8 @@ def _status_runner(scenario):
             return DockerResult(0, "".join(f"{n}\n" for n in scenario["running"]), "")
         if "clients/*.json" in cmd:
             return DockerResult(0, "".join(f"{n}\n" for n in scenario.get("configured", [])), "")
-        if cmd.startswith("tail -n") and ".log" in cmd:
+        if cmd.startswith("grep") and "clients/" in cmd and ".log" in cmd:
+            # registration probe: client_payload_host greps the whole client log
             name = cmd.split("clients/")[1].split(".log")[0]
             return DockerResult(0, scenario["logs"].get(name, ""), "")
         if cmd.startswith("dig"):
@@ -643,7 +686,7 @@ def test_oob_status_shallow_skips_probes_and_does_not_false_degrade(monkeypatch)
     # deep=False (the `vigil status`/`vigil up` path) must NOT read per-client logs
     # or DNS, and must NOT report degraded just because registration is unknown.
     monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
-    calls = {"tail": 0, "dig": 0}
+    calls = {"reg": 0, "dig": 0}
     scenario_runner = _status_runner({
         "server": True, "frpc": True, "running": ["ssrf-a", "ssrf-b"],
         "configured": ["ssrf-a", "ssrf-b"], "logs": {}, "dig": "",
@@ -651,14 +694,14 @@ def test_oob_status_shallow_skips_probes_and_does_not_false_degrade(monkeypatch)
 
     def counting_runner(argv, **kw):
         cmd = argv[-1]
-        if cmd.startswith("tail -n") and ".log" in cmd:
-            calls["tail"] += 1
+        if cmd.startswith("grep") and ".log" in cmd:
+            calls["reg"] += 1
         if cmd.startswith("dig"):
             calls["dig"] += 1
         return scenario_runner(argv, **kw)
 
     payload = oob.oob_status(oob_domain="researcher.example", runner=counting_runner, deep=False)
-    assert calls["tail"] == 0 and calls["dig"] == 0  # no per-client / DNS probes on the hot path
+    assert calls["reg"] == 0 and calls["dig"] == 0  # no per-client / DNS probes on the hot path
     assert payload["health"] == "ok"                 # unknown registration != degraded
     assert payload["domain_resolves"] is None
     assert all(c["registered"] is None for c in payload["client_health"])
@@ -693,6 +736,111 @@ def test_print_oob_status_ok_exits_zero_and_reports_health(capsys):
     out = capsys.readouterr().out
     assert "health=ok" in out
     assert "registered=1/1" in out
+
+
+# ── vigil oob clean: prune old, non-running client artifacts ────────────────
+
+_DAY = 86400
+
+
+def test_select_prunable_oob_clients_prunes_old_idle_only():
+    now = 1_000_000_000.0
+    d = oob.OOB_CLIENTS_DIR
+    files = [
+        (f"{d}/old-a.log", now - 10 * _DAY),      # every artifact old + not running -> prune
+        (f"{d}/old-a.json", now - 10 * _DAY),
+        (f"{d}/old-a.session", now - 9 * _DAY),
+        (f"{d}/live-b.log", now - 30 * _DAY),     # old but RUNNING -> keep
+        (f"{d}/live-b.json", now - 30 * _DAY),
+        (f"{d}/fresh-c.log", now - 1 * _DAY),      # recent activity -> keep
+        (f"{d}/fresh-c.json", now - 30 * _DAY),    # (even though metadata is old)
+    ]
+    clients, paths = oob.select_prunable_oob_clients(files, {"live-b"}, now=now, max_age_days=5)
+    assert clients == ["old-a"]
+    assert paths == sorted([f"{d}/old-a.log", f"{d}/old-a.json", f"{d}/old-a.session"])
+
+
+def test_select_prunable_oob_clients_keeps_client_with_any_recent_artifact():
+    now = 2_000_000_000.0
+    d = oob.OOB_CLIENTS_DIR
+    files = [(f"{d}/mix.log", now - 1 * _DAY), (f"{d}/mix.json", now - 20 * _DAY)]
+    clients, paths = oob.select_prunable_oob_clients(files, set(), now=now, max_age_days=5)
+    assert clients == [] and paths == []
+
+
+def test_select_prunable_oob_clients_ignores_paths_outside_clients_dir():
+    now = 3_000_000_000.0
+    d = oob.OOB_CLIENTS_DIR
+    files = [
+        ("/etc/passwd", now - 999 * _DAY),                 # outside clients dir
+        (f"{d}/sub/nested.log", now - 999 * _DAY),         # nested, not direct child
+        (f"{d}/notes.txt", now - 999 * _DAY),              # unknown suffix
+    ]
+    clients, paths = oob.select_prunable_oob_clients(files, set(), now=now, max_age_days=5)
+    assert clients == [] and paths == []
+
+
+def test_clean_oob_clients_removes_selected_and_spares_running_and_fresh(monkeypatch):
+    from vigil_cli.docker import DockerResult
+    monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
+    now = 1_700_000_000
+    d = oob.OOB_CLIENTS_DIR
+    listing = (
+        f"NOW {now}\n"
+        f"{now - 10 * _DAY} {d}/old-a.log\n"
+        f"{now - 10 * _DAY} {d}/old-a.json\n"
+        f"{now - 1 * _DAY} {d}/fresh-c.log\n"
+        f"{now - 30 * _DAY} {d}/live-b.log\n"
+    )
+    rm = {"cmd": None}
+
+    def runner(argv, **_):
+        cmd = argv[-1]
+        if "find" in cmd and "clients" in cmd:
+            return DockerResult(0, listing, "")
+        if "tmux list-sessions" in cmd:
+            return DockerResult(0, "live-b\n", "")  # live-b is running
+        if cmd.startswith("rm -f --"):
+            rm["cmd"] = cmd
+            return DockerResult(0, "", "")
+        return DockerResult(0, "", "")
+
+    payload = oob.clean_oob_clients(max_age_days=5, runner=runner)
+    assert payload["clients"] == ["old-a"]
+    assert payload["removed"] is True
+    assert payload["kept_running"] == ["live-b"]
+    assert rm["cmd"] is not None
+    assert "old-a.log" in rm["cmd"] and "old-a.json" in rm["cmd"]
+    assert "fresh-c" not in rm["cmd"] and "live-b" not in rm["cmd"]
+
+
+def test_clean_oob_clients_dry_run_selects_but_does_not_delete(monkeypatch):
+    from vigil_cli.docker import DockerResult
+    monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
+    now = 1_700_000_000
+    listing = f"NOW {now}\n{now - 100 * _DAY} {oob.OOB_CLIENTS_DIR}/ancient.log\n"
+    rm_called = {"v": False}
+
+    def runner(argv, **_):
+        cmd = argv[-1]
+        if "find" in cmd:
+            return DockerResult(0, listing, "")
+        if "tmux list-sessions" in cmd:
+            return DockerResult(0, "", "")
+        if cmd.startswith("rm -f"):
+            rm_called["v"] = True
+        return DockerResult(0, "", "")
+
+    payload = oob.clean_oob_clients(max_age_days=5, dry_run=True, runner=runner)
+    assert payload["clients"] == ["ancient"]
+    assert payload["removed"] is False
+    assert rm_called["v"] is False
+
+
+def test_clean_oob_clients_rejects_days_below_one(monkeypatch):
+    monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
+    with pytest.raises(SystemExit):
+        oob.clean_oob_clients(max_age_days=0, runner=lambda *a, **k: None)
 
 
 # ── interaction dedup hash is collision-safe across `|`-placement ──────────
