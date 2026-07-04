@@ -610,24 +610,193 @@ def read_client_log(
     return result.stdout or ""
 
 
+def read_client_registration_log(
+    name: str,
+    container_name: str | None = None,
+    *,
+    runner: docker.Runner = docker.run_command,
+    oob_domain: str = DEFAULT_OOB_DOMAIN,
+) -> str:
+    """Return the client-log lines that mention the OOB domain (whole file).
+
+    The interactsh registration banner (``[INF] <id>.<oob_domain>``) is printed
+    exactly ONCE, at registration, right after the client starts — then a busy
+    client appends thousands of interaction lines on top of it. The previous
+    approach tailed a fixed window, so on any client fielding more than a few
+    hundred callbacks the banner scrolled out of view and a perfectly-registered
+    client reported as ``registered: False`` (the false-negative that made OOB
+    look like it was "flapping"). Grepping the whole log for the domain keeps the
+    banner findable regardless of log size while staying cheap — ``grep`` streams
+    the file and emits only the handful of host-bearing lines, and
+    :func:`parse_client_payload_host` still does the strict banner filtering.
+    Best-effort: a missing log yields ``""``.
+    """
+    container_name = container_name or default_runtime_container()
+    client = sanitize_name(name)
+    log_path = f"{OOB_ROOT}/clients/{shlex.quote(client)}.log"
+    domain = oob_domain.strip().rstrip(".")
+    # -a keeps grep from bailing to "binary file matches" on the control bytes
+    # interactsh -v emits; -F/-i match the domain literally, case-insensitively.
+    command = f"grep -aiF -- {shlex.quote(domain)} {log_path} 2>/dev/null || true"
+    result = _run_exec(container_name, command, runner=runner, check=False)
+    return result.stdout or ""
+
+
 def client_payload_host(
     name: str,
     container_name: str | None = None,
     *,
     runner: docker.Runner = docker.run_command,
     oob_domain: str = DEFAULT_OOB_DOMAIN,
-    lines: int = 400,
 ) -> str:
     """Live interactsh payload host for client ``name`` (``<id>.<oob_domain>``), or "".
 
-    Reads the client's interaction log (same source as :func:`read_client_log`)
-    and extracts the registered-payload line via
-    :func:`parse_client_payload_host`. Empty means the client is not running or
-    has not registered an interactsh id yet — in which case a minted nonce
-    cannot be bound to it and could not be correlated by ``vigil oob poll``.
+    Scans the client's WHOLE interaction log (via
+    :func:`read_client_registration_log`) for the one-time registration banner
+    and extracts it via :func:`parse_client_payload_host`. Empty means the client
+    is not running or has not registered an interactsh id yet — in which case a
+    minted nonce cannot be bound to it and could not be correlated by
+    ``vigil oob poll``. Whole-log scan (not a tail) so a busy client with a large
+    log is still detected as registered.
     """
-    log_text = read_client_log(name, container_name, runner=runner, lines=lines)
+    log_text = read_client_registration_log(name, container_name, runner=runner, oob_domain=oob_domain)
     return parse_client_payload_host(log_text, oob_domain)
+
+
+# ── OOB client artifact cleanup (manual retention) ───────────────────────
+#
+# `vigil oob clean` reclaims space from long-finished engagements. It removes
+# the per-client log/metadata/session files for clients that are (a) NOT
+# currently running and (b) whose EVERY artifact is older than the cutoff.
+# Nothing runs it on a schedule — the operator invokes it by hand.
+
+OOB_CLIENTS_DIR = f"{OOB_ROOT}/clients"
+_OOB_CLIENT_SUFFIXES = (".log", ".json", ".session")
+_SECONDS_PER_DAY = 86400
+
+
+def _oob_client_name_from_path(path: str) -> str:
+    """Client name owning ``path``, or "" if it is not a per-client artifact.
+
+    Only files DIRECTLY under ``OOB_CLIENTS_DIR`` with a known suffix map to a
+    client; anything else (a nested path, an unknown extension, a path outside
+    the clients dir) yields "" so the pruner can never select an unrelated file.
+    """
+    prefix = OOB_CLIENTS_DIR + "/"
+    if not path.startswith(prefix):
+        return ""
+    base = path[len(prefix):]
+    if "/" in base:
+        return ""
+    for suffix in _OOB_CLIENT_SUFFIXES:
+        if base.endswith(suffix) and len(base) > len(suffix):
+            return base[: -len(suffix)]
+    return ""
+
+
+def select_prunable_oob_clients(
+    files: list[tuple[str, float]],
+    running: set[str] | list[str],
+    *,
+    now: float,
+    max_age_days: int,
+) -> tuple[list[str], list[str]]:
+    """Pick OOB clients safe to prune (PURE — no I/O).
+
+    ``files`` is ``(path, mtime_epoch)`` for everything under the clients dir. A
+    client is prunable iff it is NOT in ``running`` AND every one of its
+    artifacts is older than ``max_age_days`` — so a client that received a
+    callback within the window (recent ``.log`` mtime) or is live is kept even if
+    its metadata file is old. Returns ``(client_names_sorted, paths_sorted)``.
+    """
+    cutoff = now - max_age_days * _SECONDS_PER_DAY
+    running_set = {str(n) for n in running}
+    by_client: dict[str, list[tuple[str, float]]] = {}
+    for path, mtime in files:
+        name = _oob_client_name_from_path(path)
+        if name:
+            by_client.setdefault(name, []).append((path, float(mtime)))
+    prune_clients: list[str] = []
+    prune_paths: list[str] = []
+    for name, entries in by_client.items():
+        if name in running_set:
+            continue
+        if entries and all(mtime < cutoff for _, mtime in entries):
+            prune_clients.append(name)
+            prune_paths.extend(path for path, _ in entries)
+    return sorted(prune_clients), sorted(prune_paths)
+
+
+def _gather_oob_client_files(container_name: str, *, runner: docker.Runner) -> tuple[float, list[tuple[str, float]]]:
+    """Return ``(now_epoch, [(path, mtime_epoch), ...])`` for the clients dir.
+
+    ``now`` is read from the container clock so the age comparison uses the same
+    clock that stamped the mtimes. Best-effort: a missing dir yields ``(now, [])``.
+    """
+    command = (
+        f'echo "NOW $(date +%s)"; '
+        f"find {shlex.quote(OOB_CLIENTS_DIR)} -maxdepth 1 -type f -printf '%T@ %p\\n' 2>/dev/null || true"
+    )
+    result = _run_exec(container_name, command, runner=runner, check=False)
+    now = 0.0
+    files: list[tuple[str, float]] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("NOW "):
+            try:
+                now = float(line[4:].strip())
+            except ValueError:
+                pass
+            continue
+        mtime_str, _, path = line.partition(" ")
+        if path:
+            try:
+                files.append((path, float(mtime_str)))
+            except ValueError:
+                continue
+    return now, files
+
+
+def _remove_oob_files(container_name: str, paths: list[str], *, runner: docker.Runner) -> None:
+    if not paths:
+        return
+    quoted = " ".join(shlex.quote(p) for p in paths)
+    _run_exec(container_name, f"rm -f -- {quoted}", runner=runner, check=False)
+
+
+def clean_oob_clients(
+    container_name: str | None = None,
+    *,
+    max_age_days: int = 5,
+    dry_run: bool = False,
+    runner: docker.Runner = docker.run_command,
+) -> dict[str, object]:
+    """Remove per-client OOB artifacts for non-running clients older than N days.
+
+    The command behind ``vigil oob clean``. Running clients are always kept
+    (their files are in use), as is any client touched within the window. With
+    ``dry_run`` it selects but does not delete. Returns a summary dict for the
+    CLI to render.
+    """
+    container_name = container_name or default_runtime_container()
+    if max_age_days < 1:
+        raise SystemExit("oob clean: --days must be >= 1 (refusing to prune everything).")
+    _require_runtime(container_name, runner=runner)
+    now, files = _gather_oob_client_files(container_name, runner=runner)
+    running = set(list_running_oob_clients(container_name, runner=runner))
+    clients, paths = select_prunable_oob_clients(files, running, now=now, max_age_days=max_age_days)
+    if paths and not dry_run:
+        _remove_oob_files(container_name, paths, runner=runner)
+    return {
+        "removed": bool(paths) and not dry_run,
+        "dry_run": dry_run,
+        "max_age_days": max_age_days,
+        "clients": clients,
+        "files": paths,
+        "kept_running": sorted(running),
+    }
 
 
 def _kill_stale_oob_processes(container_name: str, *, runner: docker.Runner) -> None:
