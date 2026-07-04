@@ -34,7 +34,7 @@
     },
     "input_slot": {
       "default": "unknown",
-      "maxLength": 64,
+      "maxLength": 128,
       "minLength": 1,
       "title": "Input Slot",
       "type": "string",

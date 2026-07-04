@@ -116,6 +116,7 @@ def _render_markdown(brief: dict) -> str:
     _render_surfaces(lines, brief.get("surfaces") or {})
     _render_work_buffer(lines, brief.get("work_buffer") or {})
     _render_attempts(lines, brief.get("attempts") or {})
+    _render_per_input_coverage(lines, brief.get("per_input_coverage") or {})
     lines.extend(["", "## Dispatches"])
     dispatches = brief.get("dispatches") or {}
     for row in dispatches.get("stale_in_progress_dispatches") or []:
@@ -261,18 +262,18 @@ _ATTEMPTS_RENDER_LIMIT = 8
 
 def _render_attempts(lines: list, attempts: dict) -> None:
     """Render the ## Attempts do-today ledger (P1-C). No-op when the brief
-    carries no attempts block (older backend) or all three sources are empty —
-    a fresh engagement should not accrue a noise section.
+    carries no attempts block (older backend) or both sources are empty — a
+    fresh engagement should not accrue a noise section.
 
-    Surfaces three previously resume-invisible signals so a re-dispatch reads
-    what was already tried-and-walled-off on a surface: recorded blocked
-    techniques, non-covering probe runs, and roe_blocked findings."""
+    Surfaces two previously resume-invisible signals so a re-dispatch reads what
+    was already tried-and-walled-off on a surface: recorded blocked techniques
+    and roe_blocked findings. Per-input probe coverage moved to its own
+    ## Per-Input Coverage section (see _render_per_input_coverage)."""
     if not attempts:
         return
     blocked = attempts.get("blocked_techniques") or []
-    probes = attempts.get("noncovering_probe_runs") or []
     roe = attempts.get("roe_blocked_findings") or []
-    if not (blocked or probes or roe):
+    if not (blocked or roe):
         return
     lines.extend(["", "## Attempts"])
 
@@ -294,20 +295,6 @@ def _render_attempts(lines: list, attempts: dict) -> None:
         lines.append(line)
     _render_attempts_more(lines, len(shown_blocked), blocked_count)
 
-    probes_count = attempts.get("noncovering_probe_runs_count", len(probes))
-    lines.append(f"- non-covering probe runs ({probes_count}):")
-    if not probes:
-        lines.append("  - none")
-    shown_probes = probes[:_ATTEMPTS_RENDER_LIMIT]
-    for row in shown_probes:
-        host_path = f"{row.get('target_host') or '-'}{row.get('target_path') or ''}"
-        lines.append(
-            f"  - #{row.get('id')} {row.get('attack_family') or '-'} "
-            f"[{row.get('result_status') or '-'}] {row.get('tool_name') or '-'} "
-            f"{_trim(host_path, 80)}"
-        )
-    _render_attempts_more(lines, len(shown_probes), probes_count)
-
     roe_count = attempts.get("roe_blocked_findings_count", len(roe))
     lines.append(f"- roe-blocked findings ({roe_count}):")
     if not roe:
@@ -325,6 +312,55 @@ def _render_attempts_more(lines: list, shown: int, total: int) -> None:
     the hint keeps the reconciliation unambiguous, mirroring the Findings section."""
     if shown < total:
         lines.append(f"  - … showing {shown} of {total}")
+
+
+_PER_INPUT_RENDER_LIMIT = 20
+
+
+def _render_per_input_coverage(lines: list, per_input: dict) -> None:
+    """Render the ## Per-Input Coverage grid (WS2). No-op when the brief carries
+    no grid (older backend) or no cells — a fresh engagement gets no section.
+
+    Each cell is one (host × path × attack_family × input_slot × auth_context)
+    tuple; cells are grouped under their host+path so the operator reads, per
+    surface, which input was tested for which class as which identity, the latest
+    verdict, and the wall code (e.g. a 403). Both covering (tested/signal) and
+    non-covering probes appear — the verdict word distinguishes them — so this is
+    a coverage view, not just a dead-ends ledger. It supersedes the old flat
+    non-covering probe list that used to live under ## Attempts."""
+    if not per_input:
+        return
+    cells = per_input.get("cells") or []
+    if not cells:
+        return
+    total = per_input.get("cells_count", len(cells))
+    lines.extend(["", "## Per-Input Coverage"])
+
+    shown = cells[:_PER_INPUT_RENDER_LIMIT]
+    # Group by host+path, preserving the backend's recency order.
+    groups: dict[str, list] = {}
+    for cell in shown:
+        host_path = f"{cell.get('target_host') or '-'}{cell.get('target_path') or ''}"
+        groups.setdefault(_trim(host_path, 80), []).append(cell)
+
+    for host_path, group in groups.items():
+        lines.append(f"- {host_path}:")
+        for cell in group:
+            family = cell.get("attack_family") or "-"
+            slot = _trim(cell.get("input_slot") or "-", 48)
+            auth = cell.get("auth_context") or "-"
+            status = cell.get("latest_status") or "-"
+            wall = cell.get("observed_http_status")
+            verdict = f"{status}({wall})" if wall is not None else status
+            count = cell.get("count") or 1
+            line = f"  - {family} {slot} [{auth}] {verdict} x{count}"
+            lens = _trim(cell.get("lens") or "", 40)
+            if lens:
+                line += f" — {lens}"
+            lines.append(line)
+
+    if len(shown) < total:
+        lines.append(f"- … showing {len(shown)} of {total} input-cells")
 
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}

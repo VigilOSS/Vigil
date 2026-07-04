@@ -1,6 +1,10 @@
 # ADR 0001 — Coverage and depth as a harness, not a gate
 
 - **Status:** Accepted (planning) — implementation pending, tracked by `docs/plans/harness-master-plan.md`.
+  **Superseded-in-part by [ADR 0012](0012-coverage-grain-selective-load-bearing-depth.md):** the coarse,
+  family-level scope of the terminal block (decision 2, and the "strict per-item gate" rejection under
+  Alternatives considered) is narrowed to a decisive-unit, class-level exception; decision 3 (never gate
+  on self-attested/free-text signal) and everything else here stand unchanged.
 - **Date:** 2026-06-08
 - **Deciders:** Engagement operator (project owner) + Claude (planning).
 - **Supersedes / relates to:** establishes `docs/adr/`. Implemented by `docs/plans/harness-master-plan.md`

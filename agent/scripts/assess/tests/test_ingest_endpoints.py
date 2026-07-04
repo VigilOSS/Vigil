@@ -390,6 +390,71 @@ def test_ingest_endpoints_carries_request_response_payloads_when_present(
     assert rows[0]["response_snippet"] == '{"order_id": 42, "status": "created"}'
 
 
+def test_ingest_endpoints_captures_header_schema_from_json_row(
+    tmp_path, monkeypatch, capsys
+):
+    """A2.1: when a JSON/HAR row carries `headers`, the observation's
+    header_schema is populated from the header NAMES (values discarded), with
+    hop-by-hop / browser / already-captured noise dropped — so the depth ledger's
+    CORS/proxy presence triggers fire on this slice instead of always seeing {}.
+    """
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")
+    db_init(str(db))
+    line = json.dumps(
+        {
+            "method": "GET",
+            "url": "https://h.example/fetch",
+            "headers": {
+                "X-Forwarded-Host": "evil.example",  # attack-relevant → kept
+                "X-Api-Key": "demo",                  # app-specific → kept
+                "Host": "h.example",                  # target identity → dropped
+                "User-Agent": "curl/8",               # browser noise → dropped
+                "Cookie": "sid=abc",                  # own schema slot → dropped
+                "Authorization": "Bearer x",          # auth_context → dropped
+            },
+        }
+    )
+    input_file = tmp_path / "endpoints.jsonl"
+    input_file.write_text(line + "\n", encoding="utf-8")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(ingest_endpoints, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
+    monkeypatch.setattr(ingest_endpoints, "auth_active_context", lambda *a, **k: "anonymous")
+    monkeypatch.setattr(ingest_endpoints, "AssessmentClient", lambda *a, **k: fake_client)
+
+    ingest_endpoints.run(_ingest_ns(str(db), str(input_file), str(tmp_path)))
+    capsys.readouterr()
+
+    assert len(fake_client.observations) == 1
+    header_schema = fake_client.observations[0]["header_schema"]
+    assert set(header_schema) == {"X-Forwarded-Host", "X-Api-Key"}
+    assert all(v == "" for v in header_schema.values())  # names only, no values
+
+
+def test_ingest_endpoints_bare_url_leaves_header_schema_empty(
+    tmp_path, monkeypatch, capsys
+):
+    """A2.1: bare-URL sources carry no headers, so header_schema stays {} — a
+    clean no-op, never a faked schema."""
+    db = tmp_path / "cases.db"
+    db.write_bytes(b"")
+    db_init(str(db))
+    input_file = tmp_path / "endpoints.jsonl"
+    input_file.write_text("https://h.example/plain\n", encoding="utf-8")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(ingest_endpoints, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
+    monkeypatch.setattr(ingest_endpoints, "auth_active_context", lambda *a, **k: "anonymous")
+    monkeypatch.setattr(ingest_endpoints, "AssessmentClient", lambda *a, **k: fake_client)
+
+    ingest_endpoints.run(_ingest_ns(str(db), str(input_file), str(tmp_path)))
+    capsys.readouterr()
+
+    assert len(fake_client.observations) == 1
+    assert fake_client.observations[0]["header_schema"] == {}
+
+
 def test_ingest_endpoints_bare_url_leaves_payloads_empty(
     tmp_path, monkeypatch, capsys
 ):

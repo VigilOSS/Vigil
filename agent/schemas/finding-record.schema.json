@@ -104,7 +104,7 @@
     },
     "canonical_location": {
       "default": "",
-      "maxLength": 1024,
+      "maxLength": 4096,
       "title": "Canonical Location",
       "type": "string",
       "description": "Primary affected location. URL for network findings (e.g. 'https://target.example/search?q'); 'file:path:line' for code findings."

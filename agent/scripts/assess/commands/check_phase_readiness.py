@@ -101,7 +101,13 @@ _PHASE_REQUIRE_STAGE: dict[str, str | None] = {
     "report": None,
 }
 
-_DEPTH_PHASES = frozenset({"consume", "verify"})
+# ``report`` is a depth phase for RENDERING only: it previews the depth ledger
+# and the would-block set (coverage-grain unbundle / ADR 0012) so the terminal
+# depth block is legible BEFORE `transition-phase report` runs it. The preview
+# NEVER changes this advisory command's exit code — the hard block lives on the
+# transition-phase precondition. (`complete` is not a phase of this command, so
+# it is not listed; its block is previewed under `report`.)
+_DEPTH_PHASES = frozenset({"consume", "verify", "report"})
 
 _COVERAGE_PHASES = frozenset({"recon", "collect", "consume", "verify", "exploit"})
 
@@ -364,6 +370,33 @@ def _run_report_phase(
         text_lines.extend(rr_blockers)
     text_lines.extend(rr_advisories)
 
+    # Depth-harness PREVIEW (coverage-grain unbundle / ADR 0012). ``report`` is a
+    # depth phase (`report in _DEPTH_PHASES`) for rendering: surface the depth
+    # ledger (incl. per-class `signal_classes_uncovered`) and the would-block set
+    # so the terminal depth block is legible here, BEFORE `transition-phase
+    # report` enforces it. This NEVER flips this command's exit code — the hard
+    # block is a transition-phase precondition, not this advisory.
+    if "report" in _DEPTH_PHASES:
+        ledger = backend.get("depth_ledger")
+        if ledger is None:
+            try:
+                ledger = client.get("application-units/depth-ledger")
+            except AssessError:
+                ledger = {"skipped": True, "units": [], "summary": {}}
+        projection["depth_ledger"] = ledger
+        text_lines.extend(
+            _render_depth_ledger(ledger, by_app_unit=getattr(args, "by_app_unit", False))
+        )
+
+        would_block = None
+        try:
+            would_block = client.get("application-units/terminal-block")
+        except AssessError:
+            would_block = None
+        if isinstance(would_block, dict):
+            projection["depth_would_block"] = would_block
+            text_lines.extend(_render_terminal_block_preview(would_block))
+
     intel = backend.get("intel")
     if intel is None:
         try:
@@ -609,6 +642,84 @@ def _render_depth_ledger(ledger: Any, *, by_app_unit: bool) -> list[str]:
             )
         if not top:
             lines.append("  (all deep_required units depth-satisfied)")
+
+    # Per-class signal gaps (coverage-grain unbundle / ADR 0012). Always surfaced
+    # — including for units that are family-`depth_satisfied` — because a specific
+    # BLOCK_HIGH class flagged via gf coverage_items can still be uncovered while
+    # the family looks covered. For DECISIVE / high-confidence units this is a
+    # deferred-terminal obligation (it will block `transition-phase report`); for
+    # the rest it is advisory. WS3 Part D: previously --json only.
+    flagged = [u for u in units if (u.get("signal_classes_uncovered") or [])]
+    if flagged:
+        lines.append(
+            "  per-class signal gaps (BLOCK_HIGH class flagged, not class-tested):"
+        )
+        for u in flagged:
+            unit = u.get("unit") or {}
+            label = f"{unit.get('host', '?')}{unit.get('path_prefix', '/')}"
+            classes = ", ".join(str(c) for c in u["signal_classes_uncovered"])
+            decisive = (
+                bool(u.get("decisive_surface"))
+                or str(u.get("confidence") or "") == "high"
+            )
+            if decisive:
+                lines.append(
+                    f"    - {label}: {classes} — will block at report unless "
+                    "covered or deferred"
+                )
+            else:
+                lines.append(f"    - {label}: {classes} (advisory; per-class gap)")
+    return lines
+
+
+def _render_terminal_block_preview(result: Any) -> list[str]:
+    """Render the terminal depth-block WOULD-BLOCK set as a phase-`report`
+    preview (coverage-grain unbundle / ADR 0012).
+
+    This is a legibility preview only — it lists the app units that WOULD block
+    `transition-phase report`/`complete` and how to clear each. It NEVER changes
+    this advisory command's exit code (the hard block is a transition-phase
+    precondition). WEB-ONLY: a ``skipped`` result (code/blue) renders nothing.
+    """
+    lines: list[str] = []
+    if not isinstance(result, dict) or result.get("skipped"):
+        return lines
+    blocking = result.get("blocking") or []
+    deferral_count = int(result.get("deferral_count") or 0)
+    lines.append("")
+    if not blocking:
+        lines.append(
+            "depth backstop preview: no app unit would block the report/complete "
+            f"transition ({deferral_count} depth_deferral(s) recorded)."
+        )
+        return lines
+    lines.append(
+        f"depth backstop preview: {len(blocking)} app unit(s) WOULD BLOCK the "
+        "report/complete transition unless covered or deferred "
+        f"({deferral_count} depth_deferral(s) recorded):"
+    )
+    for b in blocking:
+        unit = b.get("unit") or {}
+        label = f"{unit.get('host', '?')}{unit.get('path_prefix', '/')}"
+        if b.get("block_grain") == "class":
+            classes = ", ".join(
+                str(c) for c in (b.get("uncovered_classes") or [])
+            ) or "?"
+            lines.append(
+                f"  x {label} — uncovered BLOCK_HIGH class(es): {classes}"
+            )
+        else:
+            fams = ", ".join(
+                str(f) for f in (b.get("missing_block_families") or [])
+            ) or "?"
+            lines.append(
+                f"  x {label} — untested/undeferred/untouched; missing family: {fams}"
+            )
+    lines.append(
+        "  -> cover the class/family (tested/signal probe or evidence-bearing "
+        "coverage-item), record a depth_deferral naming the class(es), or "
+        "transition with --force --reason. Preview only; this command never blocks."
+    )
     return lines
 
 

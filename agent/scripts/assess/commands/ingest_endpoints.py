@@ -24,7 +24,13 @@ from assess.lib.classify_buckets import classify_from_fields, weak_tokens_for_ke
 from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.db import db_init, db_insert_out_of_scope_work_item, db_insert_work_item
-from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
+from assess.lib.params import (
+    extract_url_path,
+    extract_query_params,
+    extract_path_params,
+    generate_params_sig,
+    header_schema_from_headers,
+)
 from assess.lib.scope import host_admitted, ingest_scope_filter
 
 
@@ -462,6 +468,11 @@ def run(args) -> None:
             body = ""
             response_headers = ""
             response_snippet = ""
+            # Request header NAMES for the observation's header_schema. Populated
+            # only when a JSON/HAR producer supplies `headers` (below); bare-URL
+            # sources (katana/gau/recon) carry none, so this stays {} — a clean
+            # no-op, never a faked schema. See _flush handling at the observation.
+            header_schema: dict = {}
 
             if line.startswith("{"):
                 try:
@@ -495,6 +506,10 @@ def run(args) -> None:
                 # db_insert_work_item stores them as TEXT. body/response_snippet
                 # are already text (or absent -> "").
                 headers = _payload_text(row.get("headers"))
+                # Derive the observation header_schema from the RAW headers value
+                # (a HAR-style dict / list of names / JSON string) BEFORE it is
+                # stringified for cases.db storage. Names only, noise filtered.
+                header_schema = header_schema_from_headers(row.get("headers"))
                 body = _payload_text(row.get("body"))
                 response_headers = _payload_text(row.get("response_headers"))
                 response_snippet = _payload_text(row.get("response_snippet"))
@@ -664,7 +679,9 @@ def run(args) -> None:
                 "body_schema": body_params if isinstance(body_params, dict) else json.loads(body_params),
                 "path_schema": path_params if isinstance(path_params, dict) else json.loads(path_params),
                 "cookie_schema": cookie_params if isinstance(cookie_params, dict) else json.loads(cookie_params),
-                "header_schema": {},
+                # Populated from a JSON/HAR row's `headers` (names only, filtered);
+                # {} for bare-URL sources that carry no headers to capture.
+                "header_schema": header_schema,
                 "path_template": "",
                 "discovery_source": source,
                 "notes": "",

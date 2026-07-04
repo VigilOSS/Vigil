@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import argparse
+import functools
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 from .intel_types import INTEL_TYPES
-from .kali_audit import ALLOWED_PHASES
+from .kali_audit import ALLOWED_PHASES, _enum_reject_message
 from .schema_validation import load_schema
 
 
@@ -737,19 +740,20 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Record a NON-covering probe attempt (attempted|blocked|no-signal|error) under a lens so a touched-but-inconclusive target is on the ledger without counting as coverage.",
         schema_name="backend ProbeRunRecordRequest (POST /probe-runs)",
         preferred_invocations=(
-            "vigil assess record-attempt --result-status blocked --attack-family ssrf --lens tenant-boundary --target-host api.example.com --target-path /fetch --notes 'WAF 403 on every internal host' --finding VA-047",
+            "vigil assess record-attempt --result-status blocked --attack-family ssrf --lens tenant-boundary --target-host api.example.com --target-path /fetch --input-slot query:url --auth-context anonymous --notes 'WAF 403 on every internal host' --finding VA-047",
             "vigil assess record-attempt --result-status no-signal --attack-family idor --target-host app.example.com --target-path /orders/1001 --auth-context member --input-slot path",
-            "vigil assess record-attempt --result-status attempted --attack-family open-redirect --lens blind-oob --evidence-ref scans/redirect-probe.txt",
+            "vigil assess record-attempt --result-status attempted --attack-family open-redirect --target-host app.example.com --target-path /login --input-slot query:next --auth-context anonymous --lens blind-oob --evidence-ref scans/redirect-probe.txt",
         ),
         author_supplied_fields=(
             "--result-status (attempted|blocked|no-signal|error — non-covering only)",
             "--attack-family (a vuln_taxonomy class)",
-            "--lens / --target-host / --target-path / --target-port / --auth-context as applicable",
+            "--input-slot (REQUIRED — 'slot:name' or a bare coarse slot; 'unknown'/empty rejected)",
+            "--auth-context (REQUIRED — explicit identity; no silent anonymous)",
+            "--target-host (REQUIRED — a non-covering lead is target-anchored by host/path)",
+            "--lens / --target-path / --target-port as applicable",
         ),
         helper_defaults=(
             ("tool_name", "manual"),
-            ("auth_context", "anonymous"),
-            ("input_slot", "unknown"),
             ("lens", '"" (part of the probe key: a different lens is a distinct attempt)'),
         ),
         notes=(
@@ -771,19 +775,19 @@ _CONTRACTS: dict[str, CommandContract] = {
         schema_name="backend ProbeRunRecordRequest (POST /probe-runs)",
         preferred_invocations=(
             "vigil assess record-probe --result-status tested --attack-family idor --target-host app.example.com --target-path /orders/1001 --input-slot path:id --auth-context member --evidence-ref scans/idor-orders.txt --coverage-item-id 77",
-            "vigil assess record-probe --result-status signal --attack-family ssrf --target-host api.example.com --target-path /fetch --input-slot query:url --lens blind-oob --evidence-ref scans/ssrf-oob.txt --finding VA-047",
+            "vigil assess record-probe --result-status signal --attack-family ssrf --target-host api.example.com --target-path /fetch --input-slot query:url --auth-context anonymous --lens blind-oob --evidence-ref scans/ssrf-oob.txt --finding VA-047",
         ),
         author_supplied_fields=(
             "--result-status (tested|signal — covering only)",
             "--attack-family (a vuln_taxonomy class)",
             "--evidence-ref (REQUIRED — a covering verdict without evidence is not coverage)",
-            "--target-host / --target-path / --input-slot / --auth-context as applicable",
+            "--input-slot (REQUIRED — 'slot:name' or a bare coarse slot; 'unknown'/empty rejected)",
+            "--auth-context (REQUIRED — explicit identity; no silent anonymous)",
+            "--target-host (REQUIRED unless a --request-variant-id/--service-id anchor is passed) / --target-path as applicable",
             "--request-variant-id / --service-id / --coverage-item-id from the fetched work-item (links the probe to the exact request/coverage item)",
         ),
         helper_defaults=(
             ("tool_name", "manual"),
-            ("auth_context", "anonymous"),
-            ("input_slot", "unknown"),
             ("lens", '"" (part of the probe key: a different lens is a distinct probe)'),
         ),
         notes=(
@@ -854,7 +858,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             "First resume primitive — use instead of manually chaining findings, handoffs, command-runs, and local notes.",
             "Output is bounded; use get-command-run and artifact get for drill-down.",
             "Carries aggregate Surfaces (status×type + top uncovered) and Work Buffer (pending coverage by gf-bucket) rollups plus coverage/read-first intel notes — drill into per-item coverage-items / request-variants / work-buffer only when a rollup flags a bucket.",
-            "Carries an Attempts do-today ledger (recorded blocked techniques, non-covering probe runs, and roe_blocked findings) — read it BEFORE re-dispatching a surface so a walled-off technique is not silently re-attempted.",
+            "Carries an Attempts do-today ledger (recorded blocked techniques and roe_blocked findings) — read it BEFORE re-dispatching a surface so a walled-off technique is not silently re-attempted.",
+            "Carries a Per-Input Coverage grid grouping every probe by (host × path × attack_family × input_slot × auth_context) — covering AND non-covering, with the latest verdict and any wall code (e.g. 403). Read it to see which specific input was tested for which class as which identity before re-probing; it supersedes the old flat non-covering probe list.",
         ),
         common_mistakes=(
             ("loading local notes first", "run resume-brief, then artifact search/get for linked files"),
@@ -1771,6 +1776,84 @@ def render_contract(name: str) -> str:
             lines.append(json.dumps(example, indent=2, ensure_ascii=False))
 
     return "\n".join(lines)
+
+
+# argparse renders an enum miss as:
+#   argument --status: invalid choice: 'bogus' (choose from 'pending', 'queued', ...)
+# Capture the flag, the offending value, and the choices list so the write-verb
+# error path can re-render it through the SAME scoped formatter the kali verbs
+# use (_enum_reject_message: did-you-mean first, no multi-line usage dump).
+_WRITE_INVALID_CHOICE_RE = re.compile(
+    r"argument\s+(?P<flag>-\S+):\s+invalid choice:\s+'(?P<value>.*?)'\s+"
+    r"\(choose from (?P<choices>.+)\)",
+    re.DOTALL,
+)
+
+
+class ContractErrorParser(argparse.ArgumentParser):
+    """ArgumentParser that keeps the ``vigil assess contract <verb>`` pointer
+    visible on the ERROR path, not only on ``--help``.
+
+    argparse prints a command's epilog exclusively on ``--help``; a caller who
+    fails on a missing/invalid flag never sees the contract pointer. This parser,
+    used by the coverage/probe write verbs, (1) re-renders an enum ``invalid
+    choice`` miss through :func:`_enum_reject_message` — the same scoped
+    did-you-mean formatter the kali verbs use, with no usage dump — and (2)
+    appends ``See: vigil assess contract <verb>`` to every other parse error.
+    Mirrors ``ScopedErrorParser`` (``kali_cli.py``).
+    """
+
+    def __init__(self, *args: Any, contract_name: str = "", **kwargs: Any) -> None:
+        self._contract_name = contract_name
+        super().__init__(*args, **kwargs)
+
+    def _pointer(self) -> str:
+        return f"See: vigil assess contract {self._contract_name}" if self._contract_name else ""
+
+    def error(self, message: str) -> None:  # noqa: D102 - argparse override
+        match = _WRITE_INVALID_CHOICE_RE.search(message or "")
+        if match:
+            # argparse renders the choice list either quoted ('a', 'b') or bare
+            # (a, b) depending on the Python version — accept both.
+            choices_raw = match.group("choices")
+            quoted = re.findall(r"'([^']*)'", choices_raw)
+            allowed = tuple(quoted) if quoted else tuple(
+                tok.strip() for tok in choices_raw.split(",") if tok.strip()
+            )
+            if allowed:
+                lines = [f"ERROR: {_enum_reject_message(match.group('flag'), match.group('value'), allowed)}"]
+                pointer = self._pointer()
+                if pointer:
+                    lines.append(pointer)
+                print("\n".join(lines), file=sys.stderr)
+                self.exit(2)
+        # Every other parse error: default argparse rendering (usage + message)
+        # PLUS the contract pointer appended last so it is the final, most
+        # visible line. Replicates ArgumentParser.error so behavior is unchanged
+        # except for the trailing pointer.
+        self.print_usage(sys.stderr)
+        out = f"{self.prog}: error: {message}\n"
+        pointer = self._pointer()
+        if pointer:
+            out += f"{pointer}\n"
+        self.exit(2, out)
+
+
+def add_contract_subparser(subparsers, name: str, *, contract_name: str, **kwargs):
+    """Register a subcommand parser that is a :class:`ContractErrorParser`.
+
+    argparse binds the parser class at ``add_subparsers(parser_class=...)`` time,
+    so a single subparser cannot opt into a different class via ``add_parser``.
+    This temporarily swaps the group's parser factory to inject ``contract_name``,
+    registers the one subparser, then restores it — leaving every other verb on
+    the group's default parser untouched.
+    """
+    saved = subparsers._parser_class
+    subparsers._parser_class = functools.partial(ContractErrorParser, contract_name=contract_name)
+    try:
+        return subparsers.add_parser(name, **kwargs)
+    finally:
+        subparsers._parser_class = saved
 
 
 def render_contract_epilog(name: str) -> str:

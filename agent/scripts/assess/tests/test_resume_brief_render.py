@@ -1,0 +1,136 @@
+"""CLI render tests for `vigil assess resume-brief` — the Per-Input Coverage grid.
+
+resume_brief.py renders the backend brief JSON to markdown. These pin the new
+## Per-Input Coverage section: the empty-state no-op, host+path grouping, the
+covering/non-covering verdict word, the observed_http_status wall code, the
+per-cell count, the lens suffix, and the truncation hint. They also assert the
+old flat "non-covering probe runs" line no longer renders under ## Attempts, and
+that Per-Input Coverage renders AFTER Attempts.
+"""
+from __future__ import annotations
+
+from assess.commands import resume_brief
+
+
+def test_per_input_coverage_empty_is_noop():
+    lines: list = []
+    resume_brief._render_per_input_coverage(lines, {})
+    assert lines == []
+    resume_brief._render_per_input_coverage(lines, {"cells": [], "cells_count": 0})
+    assert lines == []
+
+
+def test_per_input_coverage_grid_groups_and_formats():
+    per_input = {
+        "cells": [
+            {
+                "target_host": "app.example.com", "target_path": "/orders/1001",
+                "attack_family": "idor", "input_slot": "path:id",
+                "auth_context": "member", "count": 2, "covering": True,
+                "latest_status": "tested", "observed_http_status": 200,
+                "lens": "tenant-boundary",
+            },
+            {
+                "target_host": "app.example.com", "target_path": "/orders/1001",
+                "attack_family": "idor", "input_slot": "path:id",
+                "auth_context": "anonymous", "count": 1, "covering": False,
+                "latest_status": "blocked", "observed_http_status": 403,
+                "lens": "",
+            },
+        ],
+        "cells_count": 2,
+    }
+    lines: list = []
+    resume_brief._render_per_input_coverage(lines, per_input)
+    out = "\n".join(lines)
+    assert "## Per-Input Coverage" in out
+    # both cells share one host+path group header (rendered once)
+    assert out.count("- app.example.com/orders/1001:") == 1
+    # covering cell: verdict(wall) + count + lens suffix
+    assert "  - idor path:id [member] tested(200) x2 — tenant-boundary" in out
+    # non-covering cell: wall code surfaced, no lens suffix
+    assert "  - idor path:id [anonymous] blocked(403) x1" in out
+
+
+def test_per_input_coverage_no_wall_code_omits_parens():
+    per_input = {
+        "cells": [{
+            "target_host": "h", "target_path": "/p", "attack_family": "ssrf",
+            "input_slot": "query:url", "auth_context": "member", "count": 1,
+            "covering": False, "latest_status": "no-signal",
+            "observed_http_status": None, "lens": "",
+        }],
+        "cells_count": 1,
+    }
+    lines: list = []
+    resume_brief._render_per_input_coverage(lines, per_input)
+    out = "\n".join(lines)
+    assert "no-signal x1" in out
+    assert "no-signal(" not in out  # None wall -> no parenthesized code
+
+
+def test_per_input_coverage_truncation_hint():
+    cells = [
+        {
+            "target_host": f"h{i}", "target_path": "/p", "attack_family": "idor",
+            "input_slot": "path:id", "auth_context": "member", "count": 1,
+            "covering": False, "latest_status": "attempted",
+            "observed_http_status": None, "lens": "",
+        }
+        for i in range(resume_brief._PER_INPUT_RENDER_LIMIT)
+    ]
+    per_input = {"cells": cells, "cells_count": 50}
+    lines: list = []
+    resume_brief._render_per_input_coverage(lines, per_input)
+    out = "\n".join(lines)
+    assert f"… showing {resume_brief._PER_INPUT_RENDER_LIMIT} of 50 input-cells" in out
+
+
+def test_attempts_no_longer_renders_noncovering_probe_list():
+    """The flat 'non-covering probe runs' sub-list was removed from ## Attempts;
+    probe coverage renders only in ## Per-Input Coverage now."""
+    # both sources empty -> whole section is a no-op
+    lines: list = []
+    resume_brief._render_attempts(lines, {
+        "blocked_techniques": [], "blocked_techniques_count": 0,
+        "roe_blocked_findings": [], "roe_blocked_findings_count": 0,
+    })
+    assert lines == []
+    # with a blocked technique, the section renders but carries NO probe line
+    lines = []
+    resume_brief._render_attempts(lines, {
+        "blocked_techniques": [{
+            "id": 1, "technique": "SSRF", "retry_state": "pending",
+            "target_kind": "host", "target_ref": "h", "reason": "wall", "notes": "",
+        }],
+        "blocked_techniques_count": 1,
+        "roe_blocked_findings": [], "roe_blocked_findings_count": 0,
+    })
+    out = "\n".join(lines)
+    assert "## Attempts" in out
+    assert "non-covering probe runs" not in out
+
+
+def test_render_markdown_orders_per_input_after_attempts():
+    brief = {
+        "attempts": {
+            "blocked_techniques": [{
+                "id": 1, "technique": "SSRF", "retry_state": "pending",
+                "target_kind": "host", "target_ref": "h", "reason": "wall", "notes": "",
+            }],
+            "blocked_techniques_count": 1,
+            "roe_blocked_findings": [], "roe_blocked_findings_count": 0,
+        },
+        "per_input_coverage": {
+            "cells": [{
+                "target_host": "h", "target_path": "/p", "attack_family": "idor",
+                "input_slot": "path:id", "auth_context": "member", "count": 1,
+                "covering": True, "latest_status": "tested",
+                "observed_http_status": 200, "lens": "",
+            }],
+            "cells_count": 1,
+        },
+    }
+    out = resume_brief._render_markdown(brief)
+    assert "## Attempts" in out and "## Per-Input Coverage" in out
+    assert out.index("## Attempts") < out.index("## Per-Input Coverage")

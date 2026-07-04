@@ -29,7 +29,7 @@ import json
 from assess.lib import probe_args
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.contracts import render_contract_epilog
+from assess.lib.contracts import add_contract_subparser, render_contract_epilog
 
 
 # The non-covering result_status vocabulary. The backend's ProbeRunRecordRequest
@@ -39,8 +39,10 @@ _NONCOVERING_STATUSES = ("attempted", "blocked", "no-signal", "error")
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser(
+    p = add_contract_subparser(
+        subparsers,
         "record-attempt",
+        contract_name="record-attempt",
         help="Record a non-covering probe attempt (attempted|blocked|no-signal|error) under a lens.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=render_contract_epilog("record-attempt"),
@@ -57,6 +59,7 @@ def register(subparsers) -> None:
 
 
 def run(args) -> None:
+    probe_args.enforce_required_inputs(args, "record-attempt")
     attack_family = probe_args.normalize_attack_family(args.attack_family, "record-attempt")
     payload = probe_args.build_probe_payload(
         args, attack_family=attack_family, result_status=args.result_status
