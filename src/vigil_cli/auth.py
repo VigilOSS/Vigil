@@ -553,6 +553,30 @@ def probe_liveness(
     }
 
 
+def persist_liveness(
+    engagement_dir: Path,
+    identity: str,
+    verdict: str,
+    probed_at: str | None = None,
+) -> dict[str, Any]:
+    """Persist an LLM/operator-owned per-session liveness verdict (WS4).
+
+    POSTs the classified ``verdict`` (``live|dead|unknown``) to the backend
+    ``/credentials/{identity}/liveness`` route, which reconciles the session's
+    ``state`` (dead->dead, live->available clearing a stale flag, unknown leaves
+    state untouched — never a false verdict). ``probed_at`` defaults to now (UTC).
+    Only called for an explicit ``--identity`` probe; the active-identity path
+    stays read-only. Returns the updated material.
+    """
+    if probed_at is None:
+        probed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = _api(
+        engagement_dir, "POST", f"/{identity}/liveness",
+        {"verdict": verdict, "probed_at": probed_at},
+    )
+    return result if isinstance(result, dict) else {}
+
+
 def _empty_auth() -> dict[str, object]:
     return {
         "mode": "manual",

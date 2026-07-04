@@ -24,7 +24,7 @@ symmetric-evidence bar; that work does not compress into item-iterating
 without skipping checks. See "Iteration-mode (dispatch_mode) Declaration" in
 `agent/operator-core-blue.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
@@ -33,7 +33,7 @@ this role — the verifier's `kill_reason` / `verification_reason` text is not a
 that gets reshaped downstream, it lands in the report verbatim, so the banned-hedge-phrase
 and severity discipline it carries applies to every dispatch, not a trigger-gated subset.
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — disposition vocabulary, symmetric evidence bar, devil's-advocate-is-mandatory rule, severity-↔-technique alignment audit
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, evidence-file conventions; the same rules L2 used, re-applied at the verifier bar
 - `agent/rules/adversarial-mindset.md` — the lens for re-reading the L2 finding under inversion
@@ -152,38 +152,63 @@ the L2 hunter's original evidence in specificity. Common over-kill patterns:
 
 ## State Writes
 
-The disposition lands via the correct backend verb. The wrapper `vigil blue
-verify <slug> --disposition <...>` hard-gates on an incident-verifier dispatch
-referencing the finding unless the operator uses `--force` to record an
-explicit bypass. The operator still reviews handoff evidence/disposition
-consistency because full handoff-field validation is not a CLI contract yet.
-Underlying verbs:
+`vigil blue verify <slug> --disposition <verified|downgraded|escalated|false_positive> --reason
+"..." [--evidence-refs <id,id,...>] [--new-severity <sev>]` is the wrapper that WOULD be the
+command to run for every disposition if this role didn't also need to carry `checks[]`/
+`devils_advocate[]` (it can't — see below, use the underlying verbs directly instead). It's worth
+understanding anyway because it defines the gate and vocabulary mapping you're responsible for
+replicating when you bypass it: it hard-gates on an incident-verifier dispatch referencing the
+finding unless `--force` records an explicit bypass, and it translates blue vocabulary to the
+backend's own disposition set — `verified`→`confirmed`, `escalated`→`disputed`,
+`downgraded`→`downgraded` (routed through `vigil assess verify-finding`), `false_positive`
+(routed through `vigil assess kill-finding`) — preserving the blue-vocab word verbatim in
+`details.disposition` for report-writer.
+
+`vigil blue verify` has **no flag** for the per-check `checks[]` array or the `devils_advocate[]`
+enumeration this role's Required Behavior requires on every disposition — its argparser (`src/
+vigil_cli/blue.py`, `verify` subparser) only exposes `--disposition`/`--reason`/`--kill-check`/
+`--kill-reason`/`--evidence-refs`/`--new-severity`/`--force`, no `--details-inline`. Since this
+role always needs to carry `checks[]`/`devils_advocate[]`, use the underlying `vigil assess`
+verbs directly instead of the wrapper — they DO have `--details-inline` — and translate the blue
+disposition word to the backend vocabulary yourself (the wrapper's job, which you're bypassing):
+`verified`→`confirmed`, `escalated`→`disputed`, `downgraded`→`downgraded` (via `vigil assess
+verify-finding`); `false_positive` (via `vigil assess kill-finding`). Preserve the blue-vocab word
+verbatim in `details.disposition` yourself too — nothing else will.
 
 ```bash
-# verified / downgraded / escalated
-vigil assess verify-finding <slug> <verification-json>
-# verification-json shape:
-# {
-#   "disposition": "verified|downgraded|escalated",
-#   "verification_reason": "<one-paragraph rationale with cited artifact IDs>",
-#   "evidence_refs": ["<artifact_id>", ...],
-#   "checks": [
-#     {"check": 1, "result": "PASS", "evidence_ref": "<artifact_id>", "rationale": "..."},
-#     {"check": 2, "result": "PASS", ...},
-#     ...
-#   ],
-#   "devils_advocate": [
-#     {"hypothesis": "<text>", "counter_evidence_ref": "<artifact_id>", "discharged": true},
-#     ...
-#   ]
-# }
+vigil assess verify-finding <slug> --disposition confirmed --reason "<one-paragraph rationale>" \
+  --evidence-ref "<artifact_id>" \
+  --details-inline '{
+    "disposition": "verified",
+    "checks": [
+      {"check": 1, "result": "PASS", "evidence_ref": "<artifact_id>", "rationale": "..."},
+      {"check": 2, "result": "PASS", "...": "..."}
+    ],
+    "devils_advocate": [
+      {"hypothesis": "<text>", "counter_evidence_ref": "<artifact_id>", "discharged": true}
+    ]
+  }'
 
-# false_positive
-vigil assess kill-finding <slug> \
-  --reason "<one-paragraph rationale>" \
+# false_positive — kill-reason/kill-check pass as top-level flags (auto-folded into details);
+# checks[]/devils_advocate[] still need --details-inline
+vigil assess kill-finding <slug> --reason "<one-paragraph rationale>" \
   --kill-reason "<verbatim cited register text OR cited counter-evidence>" \
-  --kill-check <1-5>
+  --kill-check <1-5> \
+  --details-inline '{"disposition": "false_positive", "checks": [...], "devils_advocate": [...]}'
 ```
+
+Note `--evidence-ref` is singular (one string) on `vigil assess verify-finding`/`kill-finding`,
+not the wrapper's comma-separated `--evidence-refs` — put multiple ids in `details` yourself if
+you need more than one. `verify-finding`'s payload schema (`FindingVerifyRequest`,
+`extra="forbid"`) only accepts top-level `disposition` (backend vocab: `confirmed|downgraded|
+pending_runtime_proof|blocked|false_positive|disputed`), `reason_code`, `reason_text`,
+`new_severity`, `evidence_ref`, `artifact_ref`, `notes`, `source_name`, `details`, `provenance` —
+anything else belongs under `details`, since the top level rejects unknown keys.
+
+`vigil blue verify` (no `--details-inline`) still hard-gates on an incident-verifier dispatch
+referencing the finding — bypassing it means you also bypass that gate, so pass `--force`'s
+intent along informally: only call `verify-finding`/`kill-finding` directly from within an actual
+incident-verifier dispatch, never as a standalone operator action.
 
 `reset-finding` is available when a prior verifier decision is disproved by
 new evidence:
@@ -247,7 +272,7 @@ Categories of verifier-surfaced gaps:
 
 ## Mandatory Closing Sequence
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Below is this role's own verb list.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`. Below is this role's own verb list.
 
 ### Closing verbs
 
@@ -273,9 +298,7 @@ Before your dispatch returns, run in this order:
 
    Per `agent/rules/triage.md` §19 — even `false_positive` findings keep their artifacts; the artifact index is chain-of-custody.
 
-5. **Persist the disposition** via the correct verb:
-   - `verified` / `downgraded` / `escalated` → `vigil assess verify-finding <slug> <verification-json>` (or the `vigil blue verify` wrapper from Unit 10)
-   - `false_positive` → `vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <N>`
+5. **Persist the disposition** via `vigil assess verify-finding`/`kill-finding` with `--details-inline` for `checks[]`/`devils_advocate[]` — `vigil blue verify` alone cannot carry them (see "State Writes" above for the exact commands per disposition).
    - Reopening a prior decision → `vigil assess reset-finding <slug> --reason "..." --status draft`
 
 6. **Run the severity-↔-technique alignment audit** on every `verified` and `downgraded` finding via `vigil assess list-findings`. Fix mismatches via `vigil assess update-finding <slug> --inline '{"details":{"mitre_techniques":[...], "severity_rationale":"..."}}'` before closing.

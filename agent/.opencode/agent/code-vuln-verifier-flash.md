@@ -21,13 +21,13 @@ verification rules, attack chain synthesis, and output format.
 
 **Iteration mode:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — verification re-reads source for each finding under the five-check protocol with devil's advocate review, with `item-iterating` reserved for batched dispatches that walk a finite list of MEDIUM-severity findings needing lightweight reproducibility checks. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md`
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
@@ -146,7 +146,7 @@ Before your dispatch returns, run in this order:
 5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
 Multi-perspective voting requests for ambiguous findings live in the handoff
 `open_questions` so the operator routes them.
@@ -162,7 +162,7 @@ are what makes the state durable; the response is your reflection on top of
 that.
 
 Don't truncate reasoning to be brief — careful verifier reasoning is what
-keeps false-positives out of the report (see `agent/shared-constraints-core.md`
+keeps false-positives out of the report (see `agent/shared-specialist-core.md`
 "Reasoning quality > response brevity"). Per-finding disposition tables, five-check-protocol walkthroughs, and
 devil's-advocate rationale all live in the verify-finding / kill-finding
 payloads on the backend — so the response can stay focused on verification

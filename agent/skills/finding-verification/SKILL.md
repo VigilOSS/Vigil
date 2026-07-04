@@ -1,6 +1,6 @@
 ---
 name: finding-verification
-description: Adversarial Phase-5 verification of runtime/web findings produced by other agents — reproduce the PoC, ground severity in the trust boundary, run the C1-C6 FP & severity gate, and author the report-ready story. Loaded by vulnerability-analyst in review mode. The web analog of code-finding-verification.
+description: Adversarial Phase-5 verification of runtime/web findings produced by other agents — reproduce the PoC, ground severity in the trust boundary, run the C1-C7 FP & severity gate, and author the report-ready story. Loaded by vulnerability-analyst in review mode. The web analog of code-finding-verification.
 origin: Vigil
 ---
 
@@ -66,11 +66,11 @@ This skill operationalizes gates that live elsewhere; read them rather than re-d
 - **8-Question Gate, Four Validation Gates, Chain-Only List, Fast Kill Signals** —
   `agent/agents/vulnerability-analyst.md`. These are your reviewer toolkit; they are part of
   your role prompt already.
-- **C1–C6 FP & severity-downgrade gate** — `agent/references/finding-fp-and-severity-gate.md`.
+- **C1–C7 FP & severity-downgrade gate** — `agent/references/finding-fp-and-severity-gate.md`.
   Run every confirmed debate-skipped runtime-proven finding through it (data-exposure, write, auth-bypass, race, business-logic): it catches the real-world-impact
   gaps a CVSS-band check misses (no-PII "reads", orphan writes, insider-only enumerability,
   inflated `S:C`/`I:H`).
-- **Severity ↔ CVSS bands** — `agent/shared-constraints-core.md` "Finding IDs and the `record-finding` Contract" (the canonical band table).
+- **Severity ↔ CVSS bands** — `agent/shared-specialist-core.md` "Finding IDs and the `record-finding` Contract" (the canonical band table).
 
 ## Methodology
 
@@ -100,7 +100,7 @@ For each finding under review:
    report-readiness until an exploit-developer runtime pass completes the extraction and re-verifies
    it `confirmed`/`downgraded`. This is the disposition that keeps blind injections — the class most
    dependent on slow extraction — from being silently dropped at the gate.
-4. **Run the C1–C6 FP & severity gate** (above) on any debate-skipped runtime-proven finding.
+4. **Run the C1–C7 FP & severity gate** (above) on any debate-skipped runtime-proven finding.
 5. **Recompute the CVSS vector** from the reproduced impact; correct `cvss_vector` / `cvss_score`
    if the band drifted.
 
@@ -148,6 +148,6 @@ root as the broadest attacker-controllable cause. See "Root-Cause Review Mode" i
 ## Extended Resources
 
 - `agent/agents/vulnerability-analyst.md` — 8-Question Gate, Four Validation Gates, Chain-Only List
-- `agent/references/finding-fp-and-severity-gate.md` — C1–C6 FP & severity gate
+- `agent/references/finding-fp-and-severity-gate.md` — C1–C7 FP & severity gate
 - `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission gate that re-applies the overclaim catalog on the submission bytes (this skill is the in-context Phase-5 version)
 - `agent/skills/code-finding-verification/SKILL.md` — the source-only analog (five-check protocol)

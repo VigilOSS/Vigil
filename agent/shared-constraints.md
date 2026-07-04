@@ -23,7 +23,7 @@ Read `scope.json` before making target-facing decisions. Confirm:
   proceeds (`pause` and `selected` are mechanically identical); `full_send` bypasses that review
   gate entirely
 - Auth state from the engagement's backend credential store (`vigil auth status`) — use credentials only when a record is populated and marked active
-  - Liveness is ground truth: a populated/active record is NOT proof the session is live — never trust cookie presence or the `stale` flag. There is NO auto-detection of where a site handles auth; to confirm with `vigil auth status --probe --probe-url <authed-endpoint>` you MUST first declare `material.liveness = {expect_status, authed_marker, dead_marker}` (via `vigil auth import`/`edit`). Pick an `authed_marker` that appears ONLY when logged in (the logged-in username, an account/settings link, a per-user CSRF token field) and a `dead_marker` from the login page — the same logged-in/logged-out markers a DAST scanner (InsightAppSec/Burp) uses to validate a session. No signature ⇒ liveness stays `unknown`.
+  - Liveness is ground truth: a populated/active record is NOT proof the session is live — never trust cookie presence or the `stale` flag. Enumerate what's stored for a host with `vigil assess auth list --host <host> [--include-dead] [--json]` (identity name, `auth_context`, `state`, liveness verdict, age, cookie names only — never raw values; active identity marked `*`). Whoever takes an identity for a task owns proving it live: there is NO auto-detection of where a site handles auth, so first declare `material.liveness = {expect_status, authed_marker, dead_marker}` on that identity (via `vigil auth import`/`edit`), then probe it BY NAME with `vigil assess auth-status --probe --identity <name> --probe-url <authed-endpoint>` before trusting any result or recording a "dead"/"unreachable" verdict. Pick an `authed_marker` that appears ONLY when logged in (the logged-in username, an account/settings link, a per-user CSRF token field) and a `dead_marker` from the login page — the same logged-in/logged-out markers a DAST scanner (InsightAppSec/Burp) uses to validate a session. Redirects are never followed; `live` clears a `stale` mark, `dead` is set only by a proven-dead probe, and no signature or a transport error ⇒ liveness stays `unknown` — never a false verdict.
 
 `exploit_policy` governs *exploitation*, and it is resolved once **before** dispatch — not a
 per-action approval you re-request mid-task. The invariants that hold regardless of its value: stay
@@ -431,7 +431,7 @@ task is complete. Findings that exist only in your output text and were not reco
 script are considered lost data.
 
 Finding-ID prefix table, title formula, and the CVSS↔severity band table are canonical in
-`agent/shared-constraints-core.md` "Finding IDs and the `record-finding` Contract" — read it
+`agent/shared-specialist-core.md` "Finding IDs and the `record-finding` Contract" — read it
 there, do not re-derive it here.
 
 **Deduplication:** Before recording, query existing findings via `vigil assess fetch findings`. If the same root cause on the same endpoint already exists, update the existing finding rather than creating a new one. Same vulnerability class across multiple parameter values of the same endpoint is one finding, not one per value.
@@ -554,7 +554,7 @@ mapping a finding to a category). API-specific checklists: `agent/references/api
 
 ## 9. Script Path Convention
 
-Canonical in `agent/shared-constraints-core.md` "Script Path Convention" — `vigil assess
+Canonical in `agent/shared-specialist-core.md` "Script Path Convention" — `vigil assess
 <subcommand>` from any directory, JSON payloads always in files. Read it there, do not
 re-derive it here.
 
@@ -579,14 +579,14 @@ warns on stderr when `$ENGAGEMENT_DIR` disagrees with the resolved engagement.
 Record state immediately using `vigil assess` with JSON files:
 
 - **Attack chains:** `vigil assess record-chain <agent-name> <chain-json-file>`
-- **Credentials:** `vigil assess post credentials <credential-json-file>`
+- **Credentials:** `vigil assess post credentials <credential-json-file>` — recording a discovered credential (`status=discovered`) automatically flags a candidate finding and, when the secret is a session artifact (a session-hint cookie or a bearer/JWT), mints a usable identity from it and cross-links the two; a plain password records as intel plus a candidate finding only. List every identity a host holds with `vigil assess auth list --host <host> [--include-dead] [--json]`.
 - **Credential tests:** `vigil assess post credential-tests <json-file>`
 - **Access records:** `vigil assess post access-records <json-file>`
-- **Coverage updates:** `vigil assess patch coverage-items/<id> <json-file>`
+- **Coverage updates:** `vigil assess resolve-coverage-item <id> --status <covered|not_applicable|deferred|blocked|queued|pending> --rationale "..."` — advance a class-typed coverage item (one per implied vuln-class on a surface; resolve EVERY implied class, not just the cluster winner). `covered`/`not_applicable` require a non-empty rationale. Raw `patch coverage-items/<id>` is redirected here.
 - **Blocked techniques:** `vigil assess block-technique --technique <TECHNIQUE> --target-kind <kind> --target-ref <ref> --reason <why>` (the technique-key auto-derives; override with `--technique-key`. Review with `vigil assess list-blocked-techniques`). Prefer this first-class verb over the raw `vigil assess post blocked-techniques <json-file>`.
 - **Captured HTTP traffic:** `vigil assess http list --host <host> --method <verb> --content-type <family>` queries the canonical full-flow store (`vigil assess http show <flow_uid>` for one flow, `vigil assess http search <text>` for a LIKE query, `vigil assess http export-har -o <file>` / `vigil assess http import-har <file>` for HAR round-trips). Capture is a per-engagement policy, not a proxy selector — review it with `vigil assess http policy` and toggle raw-body capture with `vigil assess http policy set --enabled --capture-request-bodies` (raw-body capture is OFF by default).
-- **Probe runs:** `vigil assess post probe-runs <json-file>`
-- **Non-covering probe attempts:** `vigil assess record-attempt --result-status <attempted|blocked|no-signal|error> --attack-family <class> --lens <lens> --target-host <host> [--finding <slug>]` records a touched-but-inconclusive target (a lead, not a verdict) on the resume-brief Attempts ledger without counting as coverage. Covering `tested`/`signal` verdicts go through the normal probe pipeline with evidence, not here.
+- **Covering probe runs:** `vigil assess record-probe --result-status <tested|signal> --attack-family <class> --target-host <host> --input-slot <slot:name> --evidence-ref <path> [--coverage-item-id <id>] [--finding <slug>]` — a probe that exercised a class to a verdict. `--evidence-ref` is REQUIRED (a covering verdict without evidence is not coverage). Name the specific input as `slot:name` (`header:X-Forwarded-Host`, `query:uid`) so per-input coverage stays queryable. Raw `post probe-runs` is redirected here.
+- **Non-covering probe attempts:** `vigil assess record-attempt --result-status <attempted|blocked|no-signal|error> --attack-family <class> --lens <lens> --target-host <host> --input-slot <slot:name> [--finding <slug>]` records a touched-but-inconclusive target (a lead, not a verdict) on the resume-brief Attempts ledger without counting as coverage. Covering `tested`/`signal` verdicts go through `record-probe` (evidence required), not here.
 
 Write payloads to `/tmp/<type>-<slug>.json` before calling — inline JSON shell arguments cause escaping damage and are not auditable.
 
@@ -709,7 +709,7 @@ Root: `scope.json`, `report.md`, and the transient worker buffer only. Credentia
 
 ## 16. Mandatory Closing Sequence
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 Every specialist runs this before returning:
 

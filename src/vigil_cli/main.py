@@ -55,6 +55,7 @@ from .oob import (
     OOB_ROOT,
     OobOptions,
     callback_urls,
+    clean_oob_clients,
     client_payload_host,
     list_oob_clients,
     list_running_oob_clients,
@@ -675,6 +676,26 @@ def main(argv: list[str] | None = None) -> None:
         "test",
         help="Fire a self-test callback to confirm the OOB server is reachable end-to-end.",
     )
+    oob_clean_p = oob_sub.add_parser(
+        "clean",
+        help="Remove OOB client logs/metadata for non-running clients older than N days.",
+        description=(
+            "Manual retention cleanup. Deletes the log, metadata, and session files for OOB "
+            "clients that are NOT currently running AND whose every artifact is older than "
+            "--days days. Running clients, and any client touched within the window, are never "
+            "removed. Use --dry-run to preview what would go.\n\n"
+            "  vigil oob clean                 # remove non-running clients idle > 5 days\n"
+            "  vigil oob clean --days 14        # keep the last two weeks\n"
+            "  vigil oob clean --dry-run        # preview only, delete nothing"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    oob_clean_p.add_argument(
+        "--days", type=int, default=5,
+        help="Age threshold in days (default 5); non-running clients idle longer than this are removed.",
+    )
+    oob_clean_p.add_argument("--dry-run", action="store_true", help="List what would be removed without deleting.")
+    oob_clean_p.add_argument("--json", action="store_true", help="Emit the cleanup summary as JSON.")
     oob_mint = oob_sub.add_parser(
         "mint",
         help="Mint a unique OAST nonce callback URL and record a probe to the backend.",
@@ -1613,6 +1634,15 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
                 detail += f"\thttp_status={result['http_status']}"
             if result.get("error"):
                 detail += f"\terror={result['error']}"
+            # WS4 opt-in persistence: when a SPECIFIC identity is probed, persist
+            # the classified verdict (live->available, dead->dead, unknown leaves
+            # state untouched — never a false verdict). The active-identity probe
+            # (no --identity) stays read-only.
+            if identity:
+                persisted = auth_module.persist_liveness(
+                    engagement, identity, result["liveness"]
+                )
+                detail += f"\tpersisted={bool(persisted)}"
             print(f"liveness={result['liveness']}\t{detail}")
     elif args.auth_command == "show":
         print(json.dumps(auth_module.read_auth(engagement), indent=2, sort_keys=True))
@@ -1696,6 +1726,27 @@ def _print_oob_status(payload: dict[str, object], *, as_json: bool) -> None:
         raise SystemExit(1)
 
 
+def _print_oob_clean(payload: dict[str, object], *, as_json: bool) -> None:
+    """Render `vigil oob clean`: a one-line summary plus the pruned client names."""
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return
+    clients_raw = payload.get("clients")
+    clients = clients_raw if isinstance(clients_raw, list) else []
+    files_raw = payload.get("files")
+    files = files_raw if isinstance(files_raw, list) else []
+    days = payload.get("max_age_days")
+    dry = bool(payload.get("dry_run"))
+    if not clients:
+        print(f"oob clean\tnothing to remove — no non-running clients older than {days}d")
+        return
+    verb = "would remove" if dry else "removed"
+    suffix = " [dry-run]" if dry else ""
+    print(f"oob clean\t{verb} {len(clients)} client(s), {len(files)} file(s) older than {days}d{suffix}")
+    for name in clients:
+        print(f"  - {name}")
+
+
 def _oob(args: argparse.Namespace, install_root: Path) -> None:
     options = _oob_options(install_root)
     if args.oob_command == "start":
@@ -1710,6 +1761,9 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
         _print_oob_status(payload, as_json=args.json)
     elif args.oob_command == "test":
         test_oob(options, runner=docker_run_command)
+    elif args.oob_command == "clean":
+        payload = clean_oob_clients(max_age_days=args.days, dry_run=args.dry_run, runner=docker_run_command)
+        _print_oob_clean(payload, as_json=args.json)
     elif args.oob_command == "mint":
         _oob_mint(args, install_root, options)
     elif args.oob_command == "poll":

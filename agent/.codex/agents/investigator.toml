@@ -21,13 +21,13 @@ that share actor / target / window; `deep-manual` for single-alert deep dives
 needing 5–15 platform pulls. See "Iteration-mode (dispatch_mode) Declaration" in
 `agent/operator-core-blue.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — outcome-before-theory, severity discipline, disposition vocabulary, 30-day default look-back, UTC, MITRE-on-every-finding rule
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, confidence labels on attribution claims, evidence-file conventions, platform-specific event routing surprises
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read after audit pulls land
@@ -125,20 +125,10 @@ No `host-exec` required (no tenant data): `jq` over a registered artifact,
 
 ## Default 30-Day Look-Back
 
-Per `agent/rules/triage.md` §6: the default audit window is **T-30d from the
+Full rule (trigger-source priority order, the T-60d boundary extension, the
+rationale) is canonical in `agent/rules/triage.md` §6 (in your Load First) — not
+restated here. The essential number: default audit window is **T-30d from the
 earliest plausible trigger**, not from "when the user reported the alert."
-
-Trigger sources in priority order:
-
-1. The earliest log event the alert cites
-2. The earliest related event in the same actor's session timeline
-3. The earliest related event in the same target's session timeline
-4. The user-reported observation timestamp (lower bound only — never the upper bound)
-
-Extend on boundary: if anomalous events cluster near the 30-day edge, push to
-T-60d before declaring the look-back complete. Short look-back misses
-initial-access; the cost of extra pulls is lower than the cost of explaining
-a finding without its entry point.
 
 ## Evidence Ladder Construction
 
@@ -197,10 +187,9 @@ Linking is automatic via `record-intel --finding <slug>`; verify with
 
 - Build the evidence ladder rung-by-rung. Skipping a rung earns a `coverage_gaps` entry from the verifier
 - Every timeline row is UTC ISO-8601 with `Z` or `+00:00`, with `source_file` (artifact path) and `command_run_id` (producing pull) — per `agent/rules/ir-evidence.md` rule 3
-- Confidence label is set by IR-evidence gate count, not gut feel:
-  - `high` = two IR-evidence gates pass + reproduction or cross-source signal
-  - `medium` = two of three IR-evidence gates pass; one gate incomplete
-  - `low` = single signal; suggestive but not corroborated
+- Confidence label is set by IR-evidence gate count, not gut feel — the three-tier
+  criteria (`high`/`medium`/`low`) are canonical in `agent/shared-constraints-blue.md`
+  §8 (in your Load First)
 - Severity follows the MITRE technique and proved impact, not the alert's `severity_hint`. A `high` finding must satisfy the `high` row of `agent/rules/triage.md` §2
 - Cross-tenant artifacts NEVER enter the engagement evidence tree. Cross-tenant indicators surface as redacted `intel-note` cross-tenant claims
 - Stay read-only. WRITE-class actions (containment, account state mutations, mailbox-rule deletions) belong to L4 via `vigil blue propose-contain` and operator-approved execution. An L2 dispatch that runs a WRITE has destroyed evidence
@@ -208,7 +197,7 @@ Linking is automatic via `record-intel --finding <slug>`; verify with
 
 ## Mandatory Closing Sequence
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Below is this role's own verb list.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`. Below is this role's own verb list.
 
 ### Closing verbs
 

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 from typing import Any
 from fastapi import HTTPException, status
 
 from ..events import _engagement_or_404
+from .. import credentials as _credential_store
 
 from . import _common
+from . import findings as _findings
 from ._common import _fetch_all, _json_text, _merge_object_text, _normalize_severity, _resolve_existing_finding_slug, _slugify
 
 
@@ -228,7 +233,7 @@ def record_credential(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
-        return _upsert_simple_entity(
+        record = _upsert_simple_entity(
             connection,
             table="assessment_credentials",
             engagement_id=engagement.id,
@@ -245,6 +250,304 @@ def record_credential(
                 "identity": identity or "",
             },
         )
+    # WS7 (multi-identity session store): a genuinely-DISCOVERED credential
+    # (status 'discovered' — a find, not an operator-supplied known cred) is
+    # auto-bridged to (a) a candidate finding whose severity the LLM confirms
+    # from what it unlocks, and (b) — iff the secret is a session artifact — a
+    # replayable engagement-credential identity, cross-linked back onto this row.
+    # Operator-known creds (any other status) are recorded exactly as before.
+    if (status_value or "").strip().lower() == "discovered":
+        bridged = _bridge_discovered_credential(
+            engagement.id,
+            record,
+            kind=kind,
+            secret=secret,
+            source_name=source_name,
+            provenance=provenance,
+        )
+        if bridged is not None:
+            record = bridged
+    return record
+
+
+# --- WS7: found-credential -> intel + minted-identity + candidate-finding bridge ---
+
+# Credential ``kind`` values (case-insensitive) that name a bearer/token secret
+# outright, so a non-JWT opaque bearer still mints a replayable identity.
+_BEARER_CREDENTIAL_KINDS = frozenset(
+    {"bearer", "jwt", "token", "access_token", "session_token", "api_token", "session"}
+)
+
+
+def _looks_like_jwt(token: str) -> bool:
+    """True when ``token`` has the three-segment shape of a JWT whose payload
+    base64url-decodes to a JSON object (no signature check).
+
+    Classification-only ("is this a session bearer?"); distinct from
+    :func:`credentials._jwt_payload_claim`, which extracts an identity anchor and
+    returns ``None`` for a valid-but-anchorless JWT.
+    """
+    parts = token.split(".")
+    if len(parts) != 3 or not all(parts):
+        return False
+    payload = parts[1]
+    try:
+        padded = payload + "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+        return isinstance(json.loads(decoded.decode("utf-8")), dict)
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+
+
+def _session_material_for_secret(kind: str, secret: str) -> dict[str, Any] | None:
+    """Return engagement-credential material to mint when ``secret`` is a session
+    artifact (a bearer/JWT, or a ``name=value`` session cookie), else ``None``.
+
+    Reuses the session-cookie hint set + dequoting from
+    :mod:`app.services.credentials` (import, don't duplicate) so this
+    classification stays aligned with the capture-path derivation. A plain login
+    password is NOT a session artifact -> ``None`` (the LLM will try logging in);
+    the credential is still recorded as intel and still flags a candidate finding.
+    """
+    secret = (secret or "").strip()
+    if not secret:
+        return None
+    kind_l = (kind or "").strip().lower()
+
+    # 1. name=value session cookie — the NAME must be a known session-cookie hint
+    #    (a plain `user=alice` or a rotating anti-CSRF cookie is not a session).
+    if "=" in secret:
+        name, _, raw_value = secret.partition("=")
+        name = name.strip()
+        value = _credential_store._dequote_cookie_value(raw_value.strip())
+        if (
+            name.lower() in _credential_store._SESSION_HINT_COOKIE_NAMES
+            and isinstance(value, str)
+            and value
+        ):
+            return {"cookies": {name: value}}
+
+    # 2. bearer / JWT token — either it decodes as a JWT, or the credential kind
+    #    explicitly names a bearer/token secret (opaque bearers have no shape).
+    token = secret
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if token and (_looks_like_jwt(token) or kind_l in _BEARER_CREDENTIAL_KINDS):
+        return {
+            "headers": {"Authorization": f"Bearer {token}"},
+            "tokens": {"access_token": token},
+        }
+    return None
+
+
+def _mint_discovered_identity(
+    engagement_id: int, *, kind: str, secret: str, credential_key: str
+) -> str | None:
+    """Mint a replayable engagement-credential identity from a discovered session
+    artifact and return its ``identity_name``; ``None`` when the secret is not a
+    session artifact (a plain password) so nothing is minted.
+
+    The identity name is derived by the SAME
+    :func:`credentials.derive_capture_identity` the proxy capture path uses, so a
+    discovered session and a later proxy capture of the same login coalesce to one
+    row (idempotent + churn-free) instead of appending a duplicate.
+    """
+    material = _session_material_for_secret(kind, secret)
+    if material is None:
+        return None
+    identity_name = _credential_store.derive_capture_identity(
+        material.get("cookies", {}) or {},
+        material.get("headers", {}) or {},
+        material.get("tokens", {}) or {},
+    )
+    if not identity_name:
+        # Defensive: a session artifact should always derive an anchor, but never
+        # skip minting on a surprise — fall back to a stable per-credential name.
+        identity_name = "disc-" + hashlib.sha1(
+            (credential_key or secret).encode("utf-8")
+        ).hexdigest()[:10]
+    material.setdefault("mode", "discovered")
+    material.setdefault("auth_context", "authenticated")
+    material.setdefault(
+        "notes", f"Minted from discovered credential {credential_key}"
+    )
+    _credential_store.upsert_material(
+        engagement_id, identity_name, material, make_active=False
+    )
+    return identity_name
+
+
+def _flag_discovered_credential_finding(
+    engagement_id: int,
+    *,
+    credential_key: str,
+    credential_id: int | None,
+    principal: str,
+    kind: str,
+    source_name: str,
+    minted_identity: str | None,
+    provenance: dict[str, Any] | None,
+) -> str:
+    """Record (or refresh) a conservative candidate finding for a discovered
+    credential and return its slug.
+
+    Dedup is by the finding service's own semantic tuple — a stable
+    ``root_cause_key``/``canonical_location`` derived from ``credential_key`` means
+    re-recording the same credential UPDATES the one finding rather than spawning a
+    duplicate. Severity is left at ``info`` (a placeholder) for the LLM to confirm
+    from what the credential unlocks; the credential is referenced via the finding
+    details/provenance and a ``credential`` link (no new schema column).
+    """
+    who = principal or kind or "unknown"
+    if minted_identity:
+        impact = (
+            "A replayable session identity was minted from this secret "
+            f"({minted_identity}); list it via the credential store, pick it, and "
+            "probe what it unlocks."
+        )
+    else:
+        impact = (
+            "This looks like a login credential (not a session artifact); attempt "
+            "authentication to establish what it unlocks."
+        )
+    summary = (
+        f"Discovered credential recorded (principal {who!r}, kind {kind or 'unknown'}"
+        f", source {source_name or 'unknown'}). {impact} Severity is a conservative "
+        "placeholder — confirm real impact from what this credential grants."
+    )
+    details = {
+        "discovered_credential": {
+            "credential_key": credential_key,
+            "credential_id": credential_id,
+            "principal": principal,
+            "kind": kind,
+            "minted_identity": minted_identity,
+            "session_minted": bool(minted_identity),
+        }
+    }
+    finding_provenance = dict(provenance or {})
+    finding_provenance.setdefault("discovered_credential_key", credential_key)
+    links = [
+        {
+            "link_kind": "related",
+            "target_kind": "credential",
+            "target_id": credential_id,
+            "target_ref": credential_key,
+            "notes": "",
+            "provenance": {},
+        }
+    ]
+    result = _findings.create_finding(
+        engagement_id,
+        slug=None,
+        title=(
+            f"Discovered credential ({who}) — impact depends on what it unlocks"
+        ),
+        severity="info",
+        workflow_status="draft",
+        verification_state="unreviewed",
+        verification_disposition="none",
+        defect_family="exposed-credential",
+        root_cause_key=f"discovered-credential:{credential_key}",
+        auth_context="unauthenticated",
+        canonical_location=f"credential:{credential_key}",
+        summary=summary,
+        evidence_ref="",
+        notes="",
+        source_name=source_name or "operator",
+        details=details,
+        provenance=finding_provenance,
+        request_variant_id=None,
+        service_id=None,
+        surface_id=None,
+        links=links,
+    )
+    return str(result["finding"]["slug"])
+
+
+def _bridge_discovered_credential(
+    engagement_id: int,
+    credential_row: dict[str, Any],
+    *,
+    kind: str,
+    secret: str,
+    source_name: str,
+    provenance: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Bridge a just-recorded DISCOVERED credential to intel + finding + identity.
+
+    Fires only from the ``status == 'discovered'`` record path. Always flags a
+    candidate finding; additionally mints a replayable identity iff the secret is a
+    session artifact. Finally cross-links this credential row back to the minted
+    identity (``identity`` column) and the originating finding (``provenance_json``)
+    and returns the refreshed row. Idempotent: the finding dedups on a stable tuple
+    and the mint UPSERTs on a derived ``identity_name``, so re-recording the same
+    credential neither duplicates the finding nor appends a second identity.
+    """
+    credential_key = str(credential_row.get("credential_key") or "")
+    principal = str(credential_row.get("principal") or "")
+    credential_id = credential_row.get("id")
+
+    minted_identity = _mint_discovered_identity(
+        engagement_id, kind=kind, secret=secret, credential_key=credential_key
+    )
+    finding_slug = _flag_discovered_credential_finding(
+        engagement_id,
+        credential_key=credential_key,
+        credential_id=credential_id,
+        principal=principal,
+        kind=kind,
+        source_name=source_name,
+        minted_identity=minted_identity,
+        provenance=provenance,
+    )
+    return _crosslink_discovered_credential(
+        engagement_id,
+        credential_key,
+        minted_identity=minted_identity,
+        finding_slug=finding_slug,
+    )
+
+
+def _crosslink_discovered_credential(
+    engagement_id: int,
+    credential_key: str,
+    *,
+    minted_identity: str | None,
+    finding_slug: str,
+) -> dict[str, Any] | None:
+    """Cross-link the credential row to its minted identity + candidate finding.
+
+    Sets ``identity`` to the minted identity name (preserving an
+    operator-supplied identity if one is already present) and records the
+    originating finding slug in ``provenance_json`` — both via existing columns,
+    no schema change. Returns the refreshed row (or ``None`` if it vanished).
+    """
+    with _common.get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_credentials WHERE engagement_id = ? AND credential_key = ?",
+            (engagement_id, credential_key),
+        ).fetchone()
+        if row is None:
+            return None
+        new_identity = str(row["identity"] or "") or (minted_identity or "")
+        crosslink: dict[str, Any] = {"candidate_finding_slug": finding_slug}
+        if minted_identity:
+            crosslink["minted_identity"] = minted_identity
+        merged_provenance = _merge_object_text(row["provenance_json"], crosslink)
+        connection.execute(
+            """
+            UPDATE assessment_credentials
+            SET identity = ?, provenance_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (new_identity, merged_provenance, row["id"]),
+        )
+        refreshed = connection.execute(
+            "SELECT * FROM assessment_credentials WHERE id = ?",
+            (row["id"],),
+        ).fetchone()
+    return dict(refreshed) if refreshed is not None else None
 
 def list_credentials(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
