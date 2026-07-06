@@ -397,13 +397,69 @@ that an entire application went untested — exactly the failure this harness
 exists to catch.
 
 The backend scores each app unit (structure × risk − suppressors) and marks
-the ones worth a dedicated deep campaign as `deep_required`. The score is an
-**advisory** signal, not a wall — it tells you where to dig, it does not
-block you. Inspect it with `vigil assess app-unit list`; re-run discovery
-after more collection with `vigil assess app-unit score`. When you know a
-unit deserves (or does not deserve) a deep pass regardless of the score, set
-a durable manual override with `vigil assess app-unit mark-deep <id>
---reason ...` or `vigil assess app-unit clear-deep <id> --reason ...` — a
-manual mark always wins over the scorer. Treat a `deep_required` unit as a
-whole application: a dedicated dispatch across every applicable vuln class
-and auth context, not a single surface glance.
+the ones worth a dedicated deep campaign as `deep_required`. Mid-engagement
+this scoring is **advisory and EV-ranked** — it tells you where to dig next,
+and nothing in Phases 1–6 refuses a transition or exits non-zero on it. But
+that advisory posture does not hold all the way to report: app-unit depth is
+where depth is *measured*, at two grains, and a **decisive-surface or
+high-confidence** `deep_required` unit that fails either one is a
+**deferred-terminal obligation**, not advisory:
+
+- **Family grain** (`kind=depth_unsatisfied_units`) — the unit was never
+  touched at all for a BLOCK_HIGH family (`access-control`, `auth`,
+  `injection`, `ssrf`, `file`).
+- **Class grain** (`kind=depth_uncovered_classes`) — the family LOOKS covered
+  or touched, but a specific class its gf coverage_items flagged
+  (`signal_classes_uncovered`) was never class-specifically probed — a
+  sibling class (e.g. `ssti`) can satisfy the whole `injection` family while
+  `sqli` was never demanded. This is the single-class blind spot the
+  family-only view used to miss entirely, and it fires even on a unit that
+  is otherwise family-satisfied or touched.
+
+Both block the terminal `report`/`complete` edge unless you deep-test the
+gap or clear it with a recorded `depth_deferral` decision (exact escape
+command, the touched-but-unfinished WARN downgrade, and the non-decisive/
+low-confidence exemption: `agent/phases/phase-8-report.md` Definition of Done
+and `agent/operator-core.md` Mandatory Phase-Exit Passes). This is not
+"advisory until it suddenly blocks" — the discontinuity was the bug.
+`check-phase-readiness --phase report` previews the same ledger every phase
+from Phase 4 on, so the hold is legible the whole way and never a surprise at
+report time.
+
+Inspect the ledger with `vigil assess app-unit list` and
+`check-phase-readiness --by-app-unit`; re-run discovery after more collection
+with `vigil assess app-unit score`. When you know a unit deserves (or does
+not deserve) a deep pass regardless of the score, set a durable manual
+override with `vigil assess app-unit mark-deep <id> --reason ...` or `vigil
+assess app-unit clear-deep <id> --reason ...` — a manual mark always wins
+over the scorer. Treat a `deep_required` unit as a whole application: a
+dedicated dispatch across every applicable vuln class and auth context, not
+a single surface glance.
+
+## Attack headers are ordinary injected inputs, not special-cased
+
+A header the application (or a fronting proxy/CDN) trusts as authoritative is an
+injected-at-test-time input like any query param or body field — you choose which
+ones are plausible for the observed architecture, probe them, and record the
+result exactly like any other named input. The standard set worth trying wherever
+a proxy, CDN, or load balancer sits in front of the target:
+
+| Header | What it typically confuses |
+|---|---|
+| `X-Forwarded-Host` | Origin routing, password-reset/link-generation host, cache-key host |
+| `X-Original-URL` / `X-Rewrite-URL` | Reverse-proxy path rewriting — path-based auth bypass |
+| `X-Http-Method-Override` / `X-HTTP-Method` | Verb-based access control (a blocked `DELETE`/`PUT` re-sent as `GET` + override) |
+| `X-Forwarded-For` / `X-Real-IP` | IP-allowlist / rate-limit / geofence bypass, log/audit poisoning |
+
+This is a starting menu, not a checklist to exhaust mechanically — the same
+"surface what exists, LLM chooses, evidence lands in the grid" principle that
+governs every other input applies here uniformly; headers are not special. Inject
+the ones plausible for the architecture you observed (a CDN-fronted host →
+`X-Forwarded-*`; a path-rewriting reverse proxy → `X-Original-URL`/`X-Rewrite-URL`),
+then record the attempt the same way you would a query or body probe:
+`vigil assess record-probe --input-slot header:X-Forwarded-Host ...` (covering) or
+`record-attempt --input-slot header:X-Forwarded-Host ...` (inconclusive) — full
+template in `agent/shared-constraints.md` §10. A header probe earns no special
+coverage-item; it lands in the same per-input grid cell a query or body probe
+does. For exploitation depth once a header vector shows signal, see
+`agent/skills/host-header-injection/SKILL.md`.

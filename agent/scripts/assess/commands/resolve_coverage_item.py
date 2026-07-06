@@ -3,9 +3,8 @@
 The class-typed coverage items are seeded ``pending`` by the gf-bucket bridge at
 ingest (one per implied vuln-class on a surface). A specialist advances a
 coverage item's status once it has tested (or ruled out) that class on that
-surface. This drives ``PATCH /assessment/coverage-items/{id}`` so agents don't
-fall back to raw ``vigil assess patch coverage-items/<id> <json>`` (which is now
-redirected here).
+surface. This drives ``PATCH /assessment/coverage-items/{id}`` — the dedicated
+typed verb for resolving a coverage item.
 
 Statuses mirror the backend ``CoverageStatus`` vocabulary (source of truth:
 ``orchestrator/backend/app/services/state_manager/coverage.py``): ``covered`` /
@@ -28,6 +27,7 @@ import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.contracts import add_contract_subparser, render_contract_epilog
 
 # Mirrors backend CoverageStatus (coverage.py). The CLI cannot import the
 # backend, so this list is kept in sync by test (test_coverage_probe_cli_sync in
@@ -38,19 +38,13 @@ COVERAGE_STATUSES = ("pending", "queued", "deferred", "covered", "not_applicable
 
 def register(subparsers) -> None:
     valid_statuses = ", ".join(COVERAGE_STATUSES)
-    p = subparsers.add_parser(
+    p = add_contract_subparser(
+        subparsers,
         "resolve-coverage-item",
+        contract_name="resolve-coverage-item",
         help="PATCH a coverage item by id (set status + rationale).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            '  vigil assess resolve-coverage-item 77 --status covered --rationale "idor tested across two identities on /orders/{id}; user_b got 403"\n'
-            '  vigil assess resolve-coverage-item 88 --status not_applicable --rationale "no id-bearing param; static render"\n'
-            '  vigil assess resolve-coverage-item 91 --status deferred --rationale "low-signal; revisit after auth is issued"\n'
-            f"\nValid statuses: {valid_statuses}\n"
-            "--rationale is required for every status (audit trail); the backend "
-            "additionally enforces it for covered / not_applicable."
-        ),
+        epilog=render_contract_epilog("resolve-coverage-item"),
     )
     p.add_argument("coverage_item_id", type=int, help="Backend id of the coverage item row")
     p.add_argument(

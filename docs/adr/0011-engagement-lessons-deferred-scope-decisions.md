@@ -24,6 +24,11 @@ helping it hunt.
 
 ### 1. Coverage stays an advisory harness, not a gate (workflow specification §7 L1/L3 declined)
 
+> **Superseded-in-part by [ADR 0012](0012-coverage-grain-selective-load-bearing-depth.md):** the
+> route-count ≥N-uncovered-routes gate declined below stays declined — ADR 0012 is a different, narrower
+> mechanism (a per-class block for decisive units only, on signal already proven durable), not a
+> reopening of this decision.
+
 The route-count + per-host-verdict coverage join already exists and works
 (`coverage_checks.py` `build_coverage_ledger`), but it ships **non-blocking** by
 construction. The §7-L1/L3 proposal was to wire it to **BLOCK** a phase transition

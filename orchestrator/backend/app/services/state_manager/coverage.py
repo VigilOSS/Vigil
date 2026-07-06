@@ -51,6 +51,25 @@ _COVERAGE_STATUS_SYNONYMS = {
 # Derived membership set (frozenset of members, NOT an alias of the class).
 COVERAGE_STATUSES = frozenset(CoverageStatus)
 
+
+class SurfaceStatus(enum.StrEnum):
+    """Per-surface resolution status. ``StrEnum`` so members serialize/compare
+    as their bare string identically to the prior raw-string constants and to
+    the values already stored in ``assessment_surfaces.status`` — no migration."""
+
+    DISCOVERED = "discovered"
+    COVERED = "covered"
+    NOT_APPLICABLE = "not_applicable"
+    DEFERRED = "deferred"
+    PARTIALLY_COVERED = "partially-covered"
+
+
+# Full membership set (frozenset of members, NOT an alias of the class).
+SURFACE_STATUSES = frozenset(SurfaceStatus)
+# Resolution set drops the seed state: ``discovered`` is assigned at ingest,
+# and operators resolve a surface to one of the remaining four.
+SURFACE_RESOLUTION_STATUSES = SURFACE_STATUSES - {SurfaceStatus.DISCOVERED}
+
 PROBE_RESULT_STATUSES: tuple[str, ...] = (
     "tested",
     "signal",
@@ -625,6 +644,20 @@ def _auto_request_coverage_candidates(
         candidates.append({"input_slot": "header", "attack_family": "header-review", "status": "pending", "notes": "Auto-generated from request observation"})
     return candidates
 
+
+def _slot_class(input_slot: str | None) -> str:
+    """Base slot class of an ``input_slot``, tolerating the ``slot:name`` probe
+    convention (``header:X-Forwarded-Host`` -> ``header``).
+
+    Coverage-item candidates are always coarse today (``endpoint|query|body|path|
+    cookie|header|service``), so this is a forward guard, not a live-bug fix: if a
+    prefixed slot ever reaches candidate linkage, the service-vs-request-variant
+    decision still keys on the base class instead of mis-linking on the full
+    string. For a coarse value with no ``:`` it returns the value unchanged, so
+    existing behavior is preserved exactly.
+    """
+    return str(input_slot or "unknown").split(":", 1)[0]
+
 def record_target(
     engagement_id: int,
     *,
@@ -918,9 +951,10 @@ def _ingest_request_observation(
     coverage_items: list[dict[str, Any]] = []
     seen_keys: set[tuple[int | None, int | None, str, str, str]] = set()
     for candidate in candidates:
+        is_service = _slot_class(candidate.get("input_slot")) == "service"
         key = (
-            request_variant["id"] if candidate.get("input_slot") != "service" else None,
-            service["id"] if candidate.get("input_slot") == "service" else None,
+            request_variant["id"] if not is_service else None,
+            service["id"] if is_service else None,
             auth_context,
             str(candidate.get("input_slot", "unknown")),
             str(candidate.get("attack_family", "review")),
@@ -1267,11 +1301,10 @@ def update_surface(
     ``_upsert_surface``) so the audit trail accumulates context.
     """
     engagement = _engagement_or_404(engagement_id)
-    valid_statuses = {"covered", "not_applicable", "deferred", "discovered", "partially-covered"}
-    if status_value is not None and status_value not in valid_statuses:
+    if status_value is not None and status_value not in SURFACE_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"invalid surface status '{status_value}'; allowed: {sorted(valid_statuses)}",
+            detail=f"invalid surface status '{status_value}'; allowed: {sorted(s.value for s in SURFACE_STATUSES)}",
         )
     # Empty strings for source_name / evidence_ref are not a valid clear
     # signal: callers must pass null to leave the field untouched, or a
@@ -2064,26 +2097,6 @@ def _build_finding_verdicts_by_host(
         verdict["verification_states"].sort()
         verdict["slugs"].sort()
     return by_host
-
-
-def per_host_finding_verdicts(engagement_id: int) -> dict[str, dict[str, Any]]:
-    """Standalone per-host finding-VERDICT projection (sibling of
-    :func:`per_host_coverage`).
-
-    Exposed for callers that only need the verdict join (and for direct test
-    coverage). ``per_host_coverage`` reuses the same builder so the inline
-    ``finding_verdict`` and this map never drift.
-    """
-    engagement = _engagement_or_404(engagement_id)
-    with _common.get_connection() as connection:
-        finding_rows = _fetch_all(
-            connection,
-            "SELECT slug, canonical_location, status, verification_state, "
-            "verification_disposition, severity, auth_context, merged_into_finding_id "
-            "FROM assessment_findings WHERE engagement_id = ?",
-            (engagement.id,),
-        )
-    return _build_finding_verdicts_by_host(finding_rows)
 
 
 def per_host_coverage(engagement_id: int) -> dict[str, Any]:

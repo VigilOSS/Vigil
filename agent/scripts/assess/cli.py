@@ -97,6 +97,14 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="vigil assess",
         description="Vigil — assessment coordination CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Discovery:\n"
+            "  vigil assess list-commands            # every verb, grouped by phase\n"
+            "  vigil assess list-commands --phase consume-test\n"
+            "  vigil assess contract <verb>          # the full contract for one verb "
+            "(examples, required fields, common mistakes)\n"
+        ),
     )
     parser.add_argument(
         "--engagement-dir",
@@ -210,7 +218,6 @@ def main(argv: list[str] | None = None) -> None:
         log_entry,
         merge_finding,
         merge_session,
-        patch,
         reset_finding,
         resolve_surface,
         resume_brief,
@@ -247,7 +254,6 @@ def main(argv: list[str] | None = None) -> None:
         list_findings,
         list_intel,
         post,
-        patch,
         update_finding,
         update_intel,
         supersede_intel,

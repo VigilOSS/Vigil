@@ -2405,6 +2405,13 @@ def _run_phase_report(monkeypatch, tmp_path: Path, payload: dict):
                               "open_high_cves": [], "open_leads": [],
                               "exploited_unlinked_cves": [], "dangling_links": []},
                 }
+            # report is a depth phase (ADR 0012): the report gate now PREVIEWS the
+            # depth ledger + the would-block set. Both are web-only skipped here.
+            if endpoint == "application-units/depth-ledger":
+                return {"skipped": True, "units": [], "summary": {}}
+            if endpoint == "application-units/terminal-block":
+                return {"skipped": True, "blocking": [], "warned_under_observed": [],
+                        "deferred": [], "deferral_count": 0}
             raise AssertionError(f"unexpected endpoint {endpoint}")
 
         def get_engagement(self, endpoint: str, query: str = ""):

@@ -4279,6 +4279,75 @@ def test_transition_report_depth_force_reason_proceeds_and_records(monkeypatch, 
                for b in decisions[0]["payload"]["overridden_blockers"])
 
 
+# ---------------------------------------------------------------------------
+# Coverage-grain unbundle (ADR 0012): the CLASS-grain terminal block. A
+# decisive/high-confidence unit with `block_grain="class"` + uncovered_classes
+# surfaces a `depth_uncovered_classes` blocker (naming the classes + the
+# deferral escape), same ONE gate, same --force/--reason and depth_deferral
+# valves as the family-grain `depth_unsatisfied_units` block.
+# ---------------------------------------------------------------------------
+_CLASS_BLOCKING_UNIT = {
+    "unit": {"id": 2, "host": "api.example.com", "path_prefix": "/v2/orders",
+             "port_class": "web", "depth_tier": "app-unit", "confidence": "high"},
+    "block_set_via": "high-confidence deep_required",
+    "decisive_surface": False,
+    "block_grain": "class",
+    "uncovered_classes": ["sqli", "idor"],
+    "missing_block_families": [],
+}
+
+
+def test_transition_report_class_grain_block_names_classes(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_depth_classblock", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        terminal_block=_terminal_block_payload(blocking=[_CLASS_BLOCKING_UNIT],
+                                               deferral_count=1),
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "report"))
+    err = capsys.readouterr().err
+    assert "depth_uncovered_classes" in err
+    assert "api.example.com/v2/orders" in err
+    assert "sqli" in err and "idor" in err
+    assert "depth_deferral" in err
+    assert "--force --reason" in err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "exploit"
+
+
+def test_transition_report_class_grain_block_force_records(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_depth_classforce", "agent/scripts/assess/commands/transition_phase.py")
+    eng, decisions = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        terminal_block=_terminal_block_payload(blocking=[_CLASS_BLOCKING_UNIT]),
+    )
+    module.run(_transition_args(eng, "report", force=True,
+                                reason="sqli/idor class-tested out-of-band, evidence attached"))
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+    assert len(decisions) == 1
+    assert decisions[0]["kind"] == "forced_transition_override"
+    assert any(b["kind"] == "depth_uncovered_classes"
+               for b in decisions[0]["payload"]["overridden_blockers"])
+
+
+def test_transition_report_both_grains_block_together(monkeypatch, tmp_path, capsys):
+    module = _load_assess_module("tp_depth_bothgrain", "agent/scripts/assess/commands/transition_phase.py")
+    eng, _ = _setup_transition_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        terminal_block=_terminal_block_payload(
+            blocking=[_BLOCKING_UNIT, _CLASS_BLOCKING_UNIT]),
+    )
+    with pytest.raises(SystemExit):
+        module.run(_transition_args(eng, "report"))
+    err = capsys.readouterr().err
+    assert "depth_unsatisfied_units" in err       # family grain
+    assert "depth_uncovered_classes" in err       # class grain
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "exploit"
+
+
 def test_transition_report_under_observed_warns_not_blocks(monkeypatch, tmp_path, capsys):
     module = _load_assess_module("tp_depth_warn", "agent/scripts/assess/commands/transition_phase.py")
     warned_unit = {
@@ -4549,7 +4618,7 @@ def test_transition_chain_gate_also_fires_on_complete(monkeypatch, tmp_path, cap
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
 
 
-def test_check_coverage_reports_partially_covered_surfaces(
+def test_check_phase_readiness_reports_partially_covered_surfaces(
     monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The folded surface-coverage gate (old `check-coverage`, now

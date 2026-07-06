@@ -25,6 +25,7 @@ from ..services.state_manager.coverage import (
     MAX_ASSESSMENT_LIST_LIMIT,
     MAX_PROBE_RUN_LIST_LIMIT,
     MAX_REQUEST_LIST_LIMIT,
+    SurfaceStatus,
 )
 from ..services.state_manager.http_flows import (
     DEFAULT_HTTP_FLOW_LIMIT,
@@ -162,7 +163,10 @@ class ProbeRunRecordRequest(BaseModel):
     service_id: int | None = None
     coverage_item_id: int | None = None
     auth_context: str = Field(default="anonymous", min_length=1, max_length=128)
-    input_slot: str = Field(default="unknown", min_length=1, max_length=64)
+    # 128 (not 64) so the `slot:name` probe convention survives intact — a
+    # prefixed input name like `header:X-Forwarded-Host` or a nested
+    # `body:data.attributes.owner.id` would truncate at 64.
+    input_slot: str = Field(default="unknown", min_length=1, max_length=128)
     attack_family: str = Field(min_length=1, max_length=64)
     payload_family: str = Field(default="", max_length=128)
     payload_value: str = Field(default="", max_length=16384)
@@ -199,7 +203,10 @@ class CoverageItemRecordRequest(BaseModel):
     request_variant_id: int | None = None
     service_id: int | None = None
     auth_context: str = Field(default="anonymous", min_length=1, max_length=128)
-    input_slot: str = Field(default="endpoint", min_length=1, max_length=64)
+    # Coarse in practice (endpoint|query|body|path|cookie|header|service), but
+    # kept aligned with ProbeRunRecordRequest.input_slot at 128 so the two fields
+    # for the same concept cannot drift apart.
+    input_slot: str = Field(default="endpoint", min_length=1, max_length=128)
     attack_family: str = Field(min_length=1, max_length=64)
     status_value: str = Field(default="pending", min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)
@@ -421,7 +428,10 @@ class SurfaceUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["covered", "deferred", "discovered", "not_applicable", "partially-covered"] | None = None
+    # ``SurfaceStatus`` is the canonical backend vocabulary (state_manager.coverage).
+    # The create model (SurfaceRecordRequest) keeps a narrower Literal that omits
+    # ``partially-covered`` deliberately — that status is only reachable via update.
+    status: SurfaceStatus | None = None
     rationale: str | None = Field(default=None, max_length=4096)
     source_name: str | None = Field(default=None, min_length=1, max_length=128)
     evidence_ref: str | None = Field(default=None, min_length=1, max_length=1024)
@@ -501,7 +511,7 @@ class CredentialRecordRequest(BaseModel):
     credential_key: str = Field(min_length=1, max_length=256)
     kind: str = Field(min_length=1, max_length=64)
     principal: str = Field(min_length=1, max_length=256)
-    secret: str = Field(default="", max_length=1024, description="Literal secret value (password, token, key material). Redact if policy prohibits storage; record 'REDACTED' and describe in notes.")
+    secret: str = Field(default="", max_length=8192, description="Literal secret value (password, token, key material). Redact if policy prohibits storage; record 'REDACTED' and describe in notes.")
     source_name: str = Field(default="", max_length=128)
     status: str = Field(default="discovered", min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)
@@ -624,7 +634,7 @@ class FindingRecordRequest(BaseModel):
     defect_family: str = Field(default="", max_length=128)
     root_cause_key: str = Field(default="", max_length=256)
     auth_context: str = Field(default="anonymous", min_length=1, max_length=128)
-    canonical_location: str = Field(default="", max_length=1024)
+    canonical_location: str = Field(default="", max_length=4096)
     summary: str = Field(default="", max_length=4096)
     evidence_ref: str = Field(default="", max_length=1024)
     notes: str = Field(default="", max_length=20000)
@@ -669,7 +679,7 @@ class FindingPatchRequest(BaseModel):
     defect_family: str | None = Field(default=None, max_length=128)
     root_cause_key: str | None = Field(default=None, max_length=256)
     auth_context: str | None = Field(default=None, min_length=1, max_length=128)
-    canonical_location: str | None = Field(default=None, max_length=1024)
+    canonical_location: str | None = Field(default=None, max_length=4096)
     summary: str | None = Field(default=None, max_length=4096)
     evidence_ref: str | None = Field(default=None, max_length=1024)
     notes: str | None = Field(default=None, max_length=20000)

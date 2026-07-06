@@ -31,6 +31,7 @@ from mitmproxy import http, ctx
 
 from assess.lib.classify import classify_type
 from assess.lib.db import db_init, db_insert_work_item
+from assess.lib.params import header_schema_from_headers
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -983,6 +984,7 @@ class CaseCollector:
         response_status: int,
         evidence_ref: str,
         observation_payload: dict,
+        request_headers: dict | None = None,
     ) -> dict | None:
         if not self._backend_configured():
             self._warn_backend_unavailable()
@@ -1010,7 +1012,12 @@ class CaseCollector:
             "body_schema": body_schema,
             "path_schema": json.loads(params.get("path_params") or "{}"),
             "cookie_schema": json.loads(params.get("cookie_params") or "{}"),
-            "header_schema": {},
+            # Capture the request header NAMES (values discarded; hop-by-hop /
+            # browser noise filtered — see header_schema_from_headers) so the
+            # depth ledger's CORS/proxy presence triggers fire on live-proxy
+            # traffic, not only the spec/candidate slice. The full headers are
+            # still preserved verbatim in observation_payload.request_headers.
+            "header_schema": header_schema_from_headers(request_headers),
             "path_template": parsed.path or "",
             "discovery_source": "proxy",
             "notes": "",
@@ -1573,6 +1580,7 @@ class CaseCollector:
                 "request_headers": req_headers_dict,
                 "response_headers": dict(resp.headers),
             },
+            request_headers=req_headers_dict,
         )
 
         request_variant_id = None

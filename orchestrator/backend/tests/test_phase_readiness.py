@@ -133,6 +133,17 @@ def test_report_phase_json_ready_reflects_strict_intel_failure():
         def get_engagement(self, *_a, **_k):
             raise AssertionError("intel provided in backend; the fallback must not fire")
 
+        def get(self, endpoint: str):
+            # report is a depth phase (ADR 0012): the report gate previews the
+            # depth ledger + would-block set. Both are web-only skipped here so the
+            # preview is a no-op that must NOT change the strict-intel exit verdict.
+            if endpoint == "application-units/depth-ledger":
+                return {"skipped": True, "units": [], "summary": {}}
+            if endpoint == "application-units/terminal-block":
+                return {"skipped": True, "blocking": [], "warned_under_observed": [],
+                        "deferred": [], "deferral_count": 0}
+            raise AssertionError(f"unexpected endpoint {endpoint}")
+
     args = SimpleNamespace(strict=True)
     backend = {
         "report_readiness": {"ready": True, "blockers": [], "advisories": []},

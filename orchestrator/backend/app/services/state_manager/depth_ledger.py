@@ -577,11 +577,15 @@ def _unit_ledger(
         "decisive_surface": decisive_surface,
         "confidence": str(unit.get("confidence") or ""),
         "ev_rank": ev_rank,
-        # Advisory per-class gap (see computation above): specific high-signal vuln
-        # classes this unit's gf coverage_items implied that still lack a
-        # class-specific probe. Empty for units with no per-class signal. Does NOT
-        # affect depth_satisfied; the operator drains these per the depth-ledger
-        # doctrine in operator-core.md.
+        # Per-class gap (see computation above): specific high-signal (BLOCK_HIGH)
+        # vuln classes this unit's gf coverage_items implied that still lack a
+        # class-specific covering probe / evidence-bearing coverage_item and are
+        # not deferred. Empty for units with no per-class signal. It does NOT
+        # affect the family verdict `depth_satisfied` (which stays byte-identical),
+        # but it IS load-bearing at the terminal edge: `terminal_depth_block`
+        # promotes a non-empty set to a CLASS-LEVEL hard block for decisive /
+        # high-confidence units only (ADR 0012). Non-decisive units keep it
+        # advisory-only.
         "signal_classes_uncovered": signal_classes_uncovered,
     }
 
@@ -924,11 +928,18 @@ def terminal_depth_block(engagement_id: int) -> dict[str, Any]:
           "deferral_count": int,            # active depth_deferral decision rows
         }
 
-    ``blocking`` is the BLOCKING set defined above. ``warned_under_observed``
-    lists block-set / under-observed units that are surfaced but never block
-    (touched-but-unsatisfied, OR low-confidence non-decisive deep_required
-    units). ``deferred`` lists units whose block classes are covered by an
-    active ``depth_deferral`` so the "option D" write-off stays a counted,
+    ``blocking`` is the BLOCKING set. Each entry carries a ``block_grain``:
+    ``"family"`` — the historical block: a decisive/high-confidence unit that is
+    unsatisfied AND undeferred AND UNTOUCHED (``missing_block_families`` names the
+    uncovered BLOCK_HIGH families); or ``"class"`` — the coverage-grain-unbundle
+    block (ADR 0012): a decisive/high-confidence unit with a non-empty
+    ``signal_classes_uncovered`` (``uncovered_classes`` names the specific
+    BLOCK_HIGH classes flagged but never class-specifically covered), which fires
+    even when the family looks covered/touched. ``warned_under_observed`` lists
+    block-set / under-observed units that are surfaced but never block
+    (touched-but-unsatisfied at the family level, OR low-confidence non-decisive
+    deep_required units). ``deferred`` lists units whose block classes are covered
+    by an active ``depth_deferral`` so the "option D" write-off stays a counted,
     recorded decision (``deferral_count`` makes the deferral rate visible).
     """
     score_application_units(engagement_id)
@@ -959,11 +970,44 @@ def terminal_depth_block(engagement_id: int) -> dict[str, Any]:
                                                   "no decisive surface)"))
             continue
 
+        block_set_via = ("high-confidence deep_required" if high_conf
+                         else "decisive risk surface")
+
         if u.get("deferred"):
             deferred.append({
                 "unit": unit,
                 "deferred_families": [e["family"] for e in u["deferred"]],
             })
+
+        # CLASS-LEVEL hard block (coverage-grain unbundle / ADR 0012), for
+        # DECISIVE / HIGH-CONFIDENCE units ONLY. ``signal_classes_uncovered`` is
+        # the already-computed set of specific BLOCK_HIGH *classes* this unit was
+        # flagged for (via its gf coverage_items) that still lack a class-specific
+        # covering probe or evidence-bearing coverage_item and are NOT deferred —
+        # carrying the SAME anti-self-attestation guards as the family gate
+        # (whitelisted ``result_status`` / notes-bearing coverage_item;
+        # ``status="completed"`` alone never counts) and the SAME ``depth_deferral``
+        # subtraction. Making it load-bearing here closes the single-class blind
+        # spot the family collapse leaves open (a sibling-class probe — e.g.
+        # ``ssti`` — marking the whole ``injection`` family covered while ``sqli``
+        # was never demanded), so it can fire even when the unit is family-
+        # ``depth_satisfied`` or merely touched. NON-decisive / non-high-confidence
+        # units never reach this branch — their family-level behaviour and the
+        # touched->WARN downgrade below are UNCHANGED — and because the set is
+        # already restricted to BLOCK_HIGH classes, a BLOCK_WARN class never enters
+        # the hard set alone. Cleared by covering the class, a ``depth_deferral``
+        # naming it, or ``--force --reason`` (same valves as the family block).
+        uncovered_classes = list(u.get("signal_classes_uncovered") or [])
+        if uncovered_classes:
+            blocking.append({
+                "unit": unit,
+                "block_set_via": block_set_via,
+                "decisive_surface": decisive,
+                "block_grain": "class",
+                "uncovered_classes": uncovered_classes,
+                "missing_block_families": [e["family"] for e in u.get("missing_block", [])],
+            })
+            continue
 
         satisfied = bool(u.get("depth_satisfied"))
         if satisfied:
@@ -981,9 +1025,9 @@ def terminal_depth_block(engagement_id: int) -> dict[str, Any]:
 
         blocking.append({
             "unit": unit,
-            "block_set_via": "high-confidence deep_required" if high_conf
-                             else "decisive risk surface",
+            "block_set_via": block_set_via,
             "decisive_surface": decisive,
+            "block_grain": "family",
             "missing_block_families": [e["family"] for e in u["missing_block"]],
         })
 
@@ -1004,6 +1048,7 @@ def _warn_detail(unit_ledger: dict[str, Any], *, reason: str) -> dict[str, Any]:
         "decisive_surface": bool(unit_ledger.get("decisive_surface")),
         "missing_block_families": [e["family"] for e in unit_ledger.get("missing_block", [])],
         "missing_warn_families": [e["family"] for e in unit_ledger.get("missing_warn", [])],
+        "signal_classes_uncovered": list(unit_ledger.get("signal_classes_uncovered") or []),
     }
 
 

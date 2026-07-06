@@ -246,19 +246,30 @@ _TOP_UNCOVERED_SURFACE_LIMIT = 6
 _RESUME_NOTE_TAGS = frozenset({"coverage", "read-first"})
 _RESUME_NOTE_LIMIT = 8
 
-# "Do-today" attempt ledger surfacing (P1-C). The Attempts section pulls three
+# "Do-today" attempt ledger surfacing (P1-C). The Attempts section pulls two
 # already-persisted but previously resume-invisible signals so the operator
 # reads what has been TRIED-AND-WALLED-OFF before re-dispatching the same
-# surface: recorded blocked techniques, non-covering probe runs, and findings
-# flagged roe_blocked in details_json. Each list is bounded (pointers + counts,
-# never bodies) consistent with the other sections.
+# surface: recorded blocked techniques and findings flagged roe_blocked in
+# details_json. (Per-input probe coverage moved to its own Per-Input Coverage
+# section — see _per_input_coverage_section.) Each list is bounded (pointers +
+# counts, never bodies) consistent with the other sections.
 _ATTEMPTS_ROW_LIMIT = 8
 # The covering subset mirrors state_manager.coverage.PROBE_RESULT_STATUSES_
 # COVERING; a probe run outside it (blocked / no-signal / attempted / error) is
-# an attempt that did NOT establish coverage — exactly what "what did I already
-# try here" wants. Kept as a local literal (the brief must not depend on the
-# coverage module) but pinned to the same two values.
+# an attempt that did NOT establish coverage. Used by the Per-Input Coverage
+# grid to mark a cell covering vs non-covering. Kept as a local literal (the
+# brief must not depend on the coverage module) but pinned to the same values.
 _PROBE_COVERING_STATUSES = ("tested", "signal")
+
+# Per-Input Coverage grid (WS2). A generated per-(host × path × attack_family ×
+# input_slot × auth_context) view over assessment_probe_runs — the queryable
+# "which input was tested for which class, as which identity" surface that the
+# named `--input-slot slot:name` convention produces. _FETCH scans a recent
+# window to build cells; _ROW caps the cells returned (bounded like every other
+# worklist). The absolute distinct-cell total is reported separately so a capped
+# grid still signals true breadth.
+_PER_INPUT_FETCH_LIMIT = 400
+_PER_INPUT_ROW_LIMIT = 20
 
 
 def _surfaces_section(connection, engagement_id: int) -> dict[str, Any]:
@@ -372,18 +383,20 @@ def _resume_note_pointers(engagement_id: int, *, since: str) -> list[dict[str, A
 
 
 def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str, Any]:
-    """Do-today attempt ledger (P1-C) — three already-persisted signals that the
+    """Do-today attempt ledger (P1-C) — two already-persisted signals that the
     brief never surfaced, so a re-dispatch could unknowingly retry a walled-off
     surface.
 
     - ``blocked_techniques``: recent ``assessment_blocked_techniques`` rows
       (wires the previously CLI-less table into resume).
-    - ``noncovering_probe_runs``: ``assessment_probe_runs`` whose result_status
-      is NOT in the covering subset (tested/signal) — i.e. blocked / no-signal /
-      attempted / error attempts that established no coverage.
     - ``roe_blocked_findings``: findings whose ``details_json`` has
       ``roe_blocked`` set true (value-aware json_extract, mirroring the
       chain_required predicate). Projected as finding pointers.
+
+    Per-input probe coverage (the old ``noncovering_probe_runs`` flat list) moved
+    to :func:`_per_input_coverage_section`, which groups covering AND non-covering
+    probes by (host × path × class × input × identity) — a richer view of the
+    same rows, so the brief does not render probe data twice.
 
     Each list is bounded and, where the row carries a timestamp, since-filtered.
     Counts are the pre-truncation totals so a truncated list still signals depth.
@@ -419,39 +432,6 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
         field="updated_at",
     )[:_ATTEMPTS_ROW_LIMIT]
 
-    placeholders = ", ".join("?" for _ in _PROBE_COVERING_STATUSES)
-    probe_rows = connection.execute(
-        f"""
-        SELECT id, attack_family, result_status, tool_name, agent_name,
-               target_host, target_path, signal_type, evidence_ref, created_at
-        FROM assessment_probe_runs
-        WHERE engagement_id = ?
-          AND result_status NOT IN ({placeholders})
-        ORDER BY created_at DESC, id DESC
-        LIMIT ?
-        """,
-        (engagement_id, *_PROBE_COVERING_STATUSES, _ATTEMPTS_ROW_LIMIT * 3),
-    ).fetchall()
-    noncovering_probe_runs = _since_filter(
-        [
-            {
-                "id": row["id"],
-                "attack_family": row["attack_family"] or "",
-                "result_status": row["result_status"] or "",
-                "tool_name": row["tool_name"] or "",
-                "agent_name": row["agent_name"] or "",
-                "target_host": row["target_host"] or "",
-                "target_path": row["target_path"] or "",
-                "signal_type": row["signal_type"] or "",
-                "evidence_ref": row["evidence_ref"] or "",
-                "created_at": row["created_at"],
-            }
-            for row in probe_rows
-        ],
-        since=since,
-        field="created_at",
-    )[:_ATTEMPTS_ROW_LIMIT]
-
     roe_blocked_findings = _limited_findings(
         connection,
         engagement_id,
@@ -466,11 +446,6 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
         "SELECT COUNT(*) FROM assessment_blocked_techniques WHERE engagement_id = ?",
         (engagement_id,),
     ).fetchone()[0]
-    noncovering_total = connection.execute(
-        f"SELECT COUNT(*) FROM assessment_probe_runs "
-        f"WHERE engagement_id = ? AND result_status NOT IN ({placeholders})",
-        (engagement_id, *_PROBE_COVERING_STATUSES),
-    ).fetchone()[0]
     roe_blocked_total = connection.execute(
         "SELECT COUNT(*) FROM assessment_findings "
         "WHERE engagement_id = ? AND json_extract(details_json,'$.roe_blocked') = 1",
@@ -480,11 +455,126 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
     return {
         "blocked_techniques": blocked_techniques,
         "blocked_techniques_count": blocked_total,
-        "noncovering_probe_runs": noncovering_probe_runs,
-        "noncovering_probe_runs_count": noncovering_total,
         "roe_blocked_findings": roe_blocked_findings,
         "roe_blocked_findings_count": roe_blocked_total,
     }
+
+
+def _per_input_coverage_section(
+    connection, engagement_id: int, *, since: str
+) -> dict[str, Any]:
+    """Per-input coverage grid (WS2) — the generated, queryable answer to "which
+    input was tested for which class, as which identity, and did it hit a wall".
+
+    Groups ``assessment_probe_runs`` by
+    ``(target_host, target_path, attack_family, input_slot, auth_context)`` and
+    reports, per cell: the probe count, whether any probe was COVERING
+    (tested/signal) vs only non-covering (attempted/blocked/no-signal/error), the
+    latest ``result_status``, the latest non-null ``observed_http_status`` (the
+    403/auth-wall signal — previously an orphan column read by nothing), and the
+    latest non-empty ``lens``.
+
+    Both covering and non-covering probes are included: the grid is a true
+    coverage view (what WAS tested), not just a dead-ends ledger. It supersedes
+    the old flat ``noncovering_probe_runs`` list in :func:`_attempts_section` — the
+    same rows, grouped, so the brief never renders probe data twice.
+
+    Bounded like every other worklist: a recent window of rows is scanned to build
+    cells, the cell list is capped, and the ABSOLUTE distinct-cell total (not
+    since-filtered) is reported so a capped grid still signals true breadth. The
+    cell list itself is since-filtered — a cell only appears if it has a probe in
+    the window — so a future ``--since`` cutoff yields no cells.
+    """
+    rows = connection.execute(
+        """
+        SELECT id, attack_family, result_status, tool_name,
+               target_host, target_path, input_slot, auth_context, lens,
+               observed_http_status, evidence_ref, created_at
+        FROM assessment_probe_runs
+        WHERE engagement_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        """,
+        (engagement_id, _PER_INPUT_FETCH_LIMIT),
+    ).fetchall()
+    probes = _since_filter(
+        [
+            {
+                "id": row["id"],
+                "attack_family": row["attack_family"] or "",
+                "result_status": row["result_status"] or "",
+                "tool_name": row["tool_name"] or "",
+                "target_host": row["target_host"] or "",
+                "target_path": row["target_path"] or "",
+                "input_slot": row["input_slot"] or "",
+                "auth_context": row["auth_context"] or "",
+                "lens": row["lens"] or "",
+                "observed_http_status": row["observed_http_status"],
+                "evidence_ref": row["evidence_ref"] or "",
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ],
+        since=since,
+        field="created_at",
+    )
+
+    # Group into cells. Rows are DESC by created_at, so the FIRST time a cell key
+    # is seen is its most-recent probe — dict insertion order is therefore
+    # recency-of-latest-activity, and the "latest_*" fields take the first
+    # (most-recent) non-empty value encountered.
+    cells: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for probe in probes:
+        key = (
+            probe["target_host"],
+            probe["target_path"],
+            probe["attack_family"],
+            probe["input_slot"],
+            probe["auth_context"],
+        )
+        covering = probe["result_status"] in _PROBE_COVERING_STATUSES
+        cell = cells.get(key)
+        if cell is None:
+            cell = {
+                "target_host": probe["target_host"],
+                "target_path": probe["target_path"],
+                "attack_family": probe["attack_family"],
+                "input_slot": probe["input_slot"],
+                "auth_context": probe["auth_context"],
+                "count": 0,
+                "covering": False,
+                "latest_status": probe["result_status"],
+                "observed_http_status": None,
+                "lens": "",
+                "evidence_ref": "",
+            }
+            cells[key] = cell
+        cell["count"] += 1
+        if covering:
+            cell["covering"] = True
+        if cell["observed_http_status"] is None and probe["observed_http_status"] is not None:
+            cell["observed_http_status"] = probe["observed_http_status"]
+        if not cell["lens"] and probe["lens"]:
+            cell["lens"] = probe["lens"]
+        if not cell["evidence_ref"] and covering and probe["evidence_ref"]:
+            cell["evidence_ref"] = probe["evidence_ref"]
+
+    cell_list = list(cells.values())[:_PER_INPUT_ROW_LIMIT]
+
+    # Absolute distinct-cell total (NOT since-filtered), like the other counts —
+    # so a capped/filtered grid still signals the true number of probed inputs.
+    total_cells = connection.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT target_host, target_path, attack_family, input_slot, auth_context
+            FROM assessment_probe_runs
+            WHERE engagement_id = ?
+        )
+        """,
+        (engagement_id,),
+    ).fetchone()[0]
+
+    return {"cells": cell_list, "cells_count": total_cells}
 
 
 def build_resume_brief(
@@ -545,6 +635,9 @@ def build_resume_brief(
         surfaces_section = _surfaces_section(connection, engagement_id)
         work_buffer_section = _work_buffer_section(connection, engagement_id)
         attempts_section = _attempts_section(connection, engagement_id, since=since)
+        per_input_coverage_section = _per_input_coverage_section(
+            connection, engagement_id, since=since
+        )
 
     command_matches_all = (
         state_manager.list_command_runs(
@@ -614,6 +707,7 @@ def build_resume_brief(
         "surfaces": surfaces_section,
         "work_buffer": work_buffer_section,
         "attempts": attempts_section,
+        "per_input_coverage": per_input_coverage_section,
         "target_finding": target_finding,
         "findings": findings,
         "recent_decisions": _recent_decisions(engagement_id, since=since),
