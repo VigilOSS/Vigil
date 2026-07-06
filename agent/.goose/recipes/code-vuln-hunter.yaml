@@ -195,6 +195,13 @@ instructions: |2
 
   When a vulnerability hypothesis forms and survives the 5 Whys:
 
+  - **How 0 (net-new capability — the counterweight to How 4's escalation)**: What can the attacker
+    already do WITHOUT this bug? Run the `hunting.md §3` net-new test — if the attacker already controls
+    the whole input the tool ingests (repo/PR/template/archive/build), a flaw that only reproduces what
+    their own source/config already achieves by design grants zero net-new capability, so its severity
+    ceiling is low however impressive the sink. Set severity as a CEILING before How 4 pushes it up; only
+    escalate if the bug reaches a genuinely different trust context (a victim's deployment/tenant/
+    credentials, or a control the attacker's visible source could not evade).
   - **How 1**: How does attacker-controlled data reach this point? Trace the complete path
     from entry point through every function boundary, transformation, and branch to the
     vulnerable line. Name every function in the chain.

@@ -1,13 +1,14 @@
 ---
-description: "General FP + severity-downgrade gate (C1–C7) run at Phase-4 verification on any debate-skipped runtime-proven finding (data-exposure/write-impact, auth-bypass, race, business-logic): data-sensitivity / public-data / boundary-crossing / id-enumerability checks, per-metric CVSS-vector discipline, orphan-write read-back, by-design/documented/precedent check, kill-trigger catalog, severity ladder. The live/web analog of code-finding-verification."
+description: "Shared FP + severity-downgrade gate (C1–C7) — the single home for the impact/overclaim/severity-calibration checks used by BOTH live/web verification (vulnerability-analyst, Phase-4) and code-finding verification (code-finding-verification, Phase-3, which establishes bug-existence then defers its severity-calibration half here): data-sensitivity / public-data / boundary-crossing / id-enumerability checks, per-metric CVSS-vector discipline, orphan-write read-back, by-design/documented/precedent check, net-new/redundancy trigger, kill-trigger catalog, severity ladder."
 category: Finding Verification Gates
 ---
 
 # Finding FP & Severity-Downgrade Gate — real-world impact, not CVSS-fitting
 
-> Run during Phase 4 verification (`vulnerability-analyst`), before a finding is recorded
-> `confirmed`/`downgraded`. The live/web-finding analog of the code-side
-> `agent/skills/code-finding-verification/SKILL.md` five-check protocol. It asks the question a CVSS
+> The shared impact/severity-calibration gate, run before a finding is recorded
+> `confirmed`/`downgraded` — by `vulnerability-analyst` at live/web Phase-4 verification AND by
+> `code-finding-verification` at code Phase-3 (which establishes bug-existence with its five-check
+> protocol, then defers the severity-calibration half here). It asks the question a CVSS
 > calculator cannot: *would a real attacker actually achieve meaningful harm here, and is the
 > data/impact what we claim?* Score what is **proven and meaningful**, not what fits a band.
 
@@ -26,6 +27,13 @@ in play; apply C5 (per-metric CVSS discipline), C6 (real-object proof, generaliz
 any claimed state change — an auth-bypass session, a race's won outcome, a business-logic state
 transition), and C7 (by-design/documented/precedent) universally, and read the Fast FP triggers as
 patterns to match by shape, not by class.
+
+**One gate, split by purpose — not by finding-origin.** The *bug-existence* half is track-specific
+(the code five-check protocol in `agent/skills/code-finding-verification/SKILL.md`; the live
+two-context/read-back mechanics in C1–C4 here); the *impact/overclaim* half — C5–C7 plus the
+`hunting.md §3` net-new test — is identical whatever the finding's origin, so it lives here once and
+both tracks run it. This is why a real, fully-reproduced source injection can still be correctly
+closed as no-impact: the five-check protocol answers "is it real?", never "is it net-new?"
 
 This file is the codified home of the recurring FP/overclaim catalog — when a new overclaim pattern
 recurs across engagements, land it here (as a kill/downgrade trigger below or a per-metric C-check),
@@ -87,7 +95,10 @@ cross-references the always-loaded rules rather than restating them.
     security/trust-boundary statement (a repo's `SECURITY.md`, a platform's trust-and-safety page)
     for the feature the finding touches. If the docs describe the exact behavior observed, the
     finding must show a boundary the docs mark as protected being crossed — not merely "the docs
-    describe capability X and X sounds dangerous."
+    describe capability X and X sounds dangerous." The canonical documented-OOS form is "expected
+    execution of the app's own build scripts" / the tool processing an artifact the attacker wholly
+    controls — when that applies, also run the net-new test (`hunting.md §3`; the "Redundant with the
+    attacker's own controlled input" trigger below).
   - **Is the affected resource meant to be public?** Broader than C2's data-exposure framing — also
     covers reachable-but-intentionally-open endpoints, features, or capabilities.
   - **What do the vendor docs actually say?** Cite the exact page/section/line. A finding argued
@@ -130,6 +141,11 @@ Overclaim / mis-framing (the recurring patterns an independent triager downgrade
   they control, supplied their own id/input, set the required state) then presents it as a
   naturally-occurring weakness. Score on the **incremental impact over the precondition**, not on the
   state the attacker created (`hunting.md §3`, `reporting.md §3`). **[KILL/DOWN]**
+- **Redundant with the attacker's own controlled input** — the attacker already controls the whole
+  artifact the tool ingests (repo/PR/template/archive/build), and the flaw only reproduces what
+  writing the payload into their own source/config already achieves by design — zero net-new
+  capability over "the victim builds the attacker's project" (`hunting.md §3`). The injection can be
+  fully real and still land here. **[KILL/DOWN]**
 - **Info-disclosure / stack-trace framed as Medium** — missing headers, stack traces, schema /
   version / path leakage are **informational** unless they **directly enable a proven higher-impact
   attack**; "it helps an attacker" is speculative chaining. Authoritative treatment lives in
@@ -193,6 +209,6 @@ compared against. See the "Four Validation Gates" (Gate 3) in `agent/agents/vuln
   vs. documented BOUNDARY, cited by URL/line) ahead of scoring a cluster of related findings
 - `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission blind gate that re-applies the same overclaim catalog on the submission bytes before publish (this gate is the in-context Phase-4 version)
 - `agent/agents/vulnerability-analyst.md` — the 8-Question Gate, Chain-Only List, Fast Kill Signals, Four Validation Gates
-- `agent/skills/code-finding-verification/SKILL.md` — the code-finding analog (five-check protocol); use that for source-only findings
+- `agent/skills/code-finding-verification/SKILL.md` — the code-side bug-EXISTENCE protocol (five-check: reachability, guards, build-config, feasibility, devil's advocate); it establishes that a source finding is real, then defers the severity-calibration half (C5/C7 + the `hunting.md §3` net-new test) to this gate
 - `agent/references/api-security/API01-broken-object-level-authz.md` — CWE taxonomy + BOLA/BOPLA/BFLA
 - `agent/references/access-control/idor-identifier-prediction.md` — id enumerability / prediction (C4)
