@@ -1224,15 +1224,27 @@ def required_header_attribution_gap(
     if not reached:
         return ""
     haystack = " ".join(cmd).lower()
-    # Match name:value tolerating any whitespace after the colon, so a manually
-    # supplied ``-H "X-Bug-Bounty:handle"`` (no space) is recognized as present
-    # rather than mistakenly refused — Layer-1 idempotency is name-only and does
-    # not re-canonicalize an operator's own spacing.
+    # Match name:value tolerating the punctuation that legitimately sits between
+    # the marker name and its value across the ways a command carries the header:
+    #   * ``-H "X-Bug-Bounty: handle"``  → ``name: value`` (curl, a space)
+    #   * ``-H "X-Bug-Bounty:handle"``   → ``name:value``  (no space; Layer-1 is
+    #     name-only and does not re-canonicalize an operator's spacing)
+    #   * ``{"x-bug-bounty": "handle"}`` → ``name": "value`` (a tool that threads
+    #     its attribution header JSON-encoded into argv rather than as a ``-H``
+    #     flag — e.g. the ``browser`` verb hands the driver a JSON headers blob it
+    #     sets over CDP ``Network.setExtraHTTPHeaders``). Without tolerating the
+    #     JSON key/value quoting the marker is PRESENT in the command yet the
+    #     backstop cannot see it and the run is falsely refused.
+    # The optional quote + whitespace on each side of the colon covers all three
+    # while staying purely lexical (ADR 0010): the name and value literals must
+    # still both appear adjacent, so this only ever recognizes a marker that is
+    # genuinely there — it never lets an un-attributed command through.
     missing = [
         f"{name}: {value}"
         for name, value in headers.items()
         if not re.search(
-            re.escape(name.lower()) + r":\s*" + re.escape(value.lower()), haystack
+            re.escape(name.lower()) + r'"?\s*:\s*"?' + re.escape(value.lower()),
+            haystack,
         )
     ]
     if not missing:

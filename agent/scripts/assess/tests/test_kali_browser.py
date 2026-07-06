@@ -59,6 +59,8 @@ def _browser_args(**overrides) -> SimpleNamespace:
         wait_selector="",
         page_timeout=30.0,
         settle=2.0,
+        eval_js="",
+        extra_headers=[],
         technique="RECON",
         intent="render flagged surface",
         probe_kind="baseline",
@@ -248,6 +250,77 @@ def test_run_required_headers_drop_malformed_pairs(tmp_path, monkeypatch):
     cap = _capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))
     cmd = cap["cmd"]
     assert json.loads(cmd[9]) == {"X-Bug-Bounty": "vigiloss"}
+
+
+# --------------------------------------------------------------------------- #
+# run() — operator --header merge and --eval threading (LLM-friendly additions)
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_header_args_splits_first_colon_and_trims():
+    got = kb._parse_header_args(
+        ["X-Debug: 1", "X-Trace:abc", "Authorization: Bearer a:b:c"]
+    )
+    assert got == {"X-Debug": "1", "X-Trace": "abc", "Authorization": "Bearer a:b:c"}
+
+
+def test_parse_header_args_skips_malformed():
+    assert kb._parse_header_args(["no-colon", "", ": empty-name", "  : x"]) == {}
+
+
+def test_run_merges_operator_headers_into_driver_argv(tmp_path, monkeypatch):
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    cap = _capture_run(
+        monkeypatch,
+        _browser_args(engagement_dir=str(eng_dir), extra_headers=["X-Debug: 1"]),
+    )
+    assert json.loads(cap["cmd"][9]) == {"X-Bug-Bounty": "vigiloss", "X-Debug": "1"}
+
+
+def test_run_required_header_wins_over_operator_same_name(tmp_path, monkeypatch):
+    # An operator --header must NEVER strip/override a program attribution header
+    # of the same name — required headers win the merge.
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    cap = _capture_run(
+        monkeypatch,
+        _browser_args(
+            engagement_dir=str(eng_dir), extra_headers=["X-Bug-Bounty: attacker"]
+        ),
+    )
+    assert json.loads(cap["cmd"][9])["X-Bug-Bounty"] == "vigiloss"
+
+
+def test_run_threads_eval_js_as_final_argv(monkeypatch):
+    cap = _capture_run(monkeypatch, _browser_args(eval_js="return document.title"))
+    cmd = cap["cmd"]
+    # eval rides AFTER the headers positional (list index 9); the driver reads it
+    # as sys.argv[8] (list index 10).
+    assert cmd[10] == "return document.title"
+    assert cmd[-1] == "return document.title"
+
+
+def test_run_eval_js_defaults_empty(monkeypatch):
+    cap = _capture_run(monkeypatch, _browser_args())
+    assert cap["cmd"][10] == ""
+
+
+def test_register_wires_eval_and_header_flags():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers()
+    kb.register(sub)
+    args = parser.parse_args(
+        [
+            "browser", "https://t.example/x",
+            "--technique", "RECON", "--intent", "render",
+            "--probe-kind", "baseline", "--phase", "recon", "--timeout", "120",
+            "--eval", "window.__xss_fired",
+            "--header", "X-Debug: 1", "--header", "X-Trace: 2",
+        ]
+    )
+    assert args.eval_js == "window.__xss_fired"
+    assert args.extra_headers == ["X-Debug: 1", "X-Trace: 2"]
 
 
 # --------------------------------------------------------------------------- #

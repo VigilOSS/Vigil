@@ -148,6 +148,77 @@ def test_unknown_future_tool_reaching_in_scope_is_refused() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# JSON-threaded attribution (the ``browser`` verb): the marker rides argv as a
+# JSON headers blob ``{"X-Bug-Bounty": "handle"}`` the driver sets over CDP
+# (``Network.setExtraHTTPHeaders``), NOT as a ``-H`` flag. The ``name": "value``
+# quoting must be recognized as PRESENT — otherwise a render of an in-scope host
+# is falsely refused even though it carries the attribution header.
+# --------------------------------------------------------------------------- #
+
+def _browser_cmd(url: str, headers_json: str) -> list[str]:
+    # Mirrors commands/kali_browser.py's argv layout: python3 -c <driver> url
+    # screenshot dom page_timeout settle wait_selector headers_json.
+    return [
+        "python3", "-c", "<selenium driver body>", url,
+        "scans/browser/x.png", "scans/browser/x.html", "30.0", "2.0", "",
+        headers_json,
+    ]
+
+
+def test_browser_json_threaded_marker_present_passes() -> None:
+    gap = kali_output.required_header_attribution_gap(
+        _browser_cmd("https://app.example.com/x", '{"X-Bug-Bounty": "vigiloss"}'),
+        "browser", dict(HDR), _allow("app.example.com"),
+    )
+    assert gap == ""
+
+
+def test_browser_json_threaded_marker_sorted_keys_present_passes() -> None:
+    # json.dumps(..., sort_keys=True) is exactly what the verb emits.
+    headers = {"X-Bug-Bounty": "vigiloss", "X-HackerOne": "h1user"}
+    blob = json.dumps(headers, sort_keys=True)
+    gap = kali_output.required_header_attribution_gap(
+        _browser_cmd("https://app.example.com/x", blob),
+        "browser", dict(headers), _allow("app.example.com"),
+    )
+    assert gap == ""
+
+
+def test_browser_json_threaded_no_space_variant_present_passes() -> None:
+    # A compact separator emitter ``{"x-bug-bounty":"vigiloss"}`` (no space after
+    # the colon) must also be recognized.
+    gap = kali_output.required_header_attribution_gap(
+        _browser_cmd("https://app.example.com/x", '{"x-bug-bounty":"vigiloss"}'),
+        "browser", dict(HDR), _allow("app.example.com"),
+    )
+    assert gap == ""
+
+
+def test_browser_reaching_in_scope_without_marker_is_refused() -> None:
+    # Empty headers blob "{}" — the marker is genuinely absent, so a render of an
+    # in-scope host must STILL be refused. The JSON-tolerant matcher must not
+    # defeat the backstop's fail-closed guarantee.
+    gap = kali_output.required_header_attribution_gap(
+        _browser_cmd("https://app.example.com/x", "{}"),
+        "browser", dict(HDR), _allow("app.example.com"),
+    )
+    assert gap
+    assert "X-Bug-Bounty: vigiloss" in gap
+
+
+def test_browser_json_threaded_partial_attribution_is_refused_naming_missing() -> None:
+    # Only one of two required markers present in the JSON blob → refuse, naming
+    # the missing one (parity with the -H multi-header test).
+    headers = {"X-Bug-Bounty": "vigiloss", "X-HackerOne": "h1user"}
+    gap = kali_output.required_header_attribution_gap(
+        _browser_cmd("https://app.example.com/x", '{"X-Bug-Bounty": "vigiloss"}'),
+        "browser", dict(headers), _allow("app.example.com"),
+    )
+    assert gap
+    assert "X-HackerOne: h1user" in gap
+
+
+# --------------------------------------------------------------------------- #
 # Wiring: kali_exec REFUSES (no exec) when the backstop trips
 # --------------------------------------------------------------------------- #
 

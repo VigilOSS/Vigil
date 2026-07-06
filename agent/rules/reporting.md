@@ -250,6 +250,36 @@ Common patterns that require consolidation:
 - Credential exposure as a direct consequence of an auth bypass on the same system
 - Multiple unauthenticated routes on the same API when the root cause is a single missing-auth control
 
+### Cross-finding dedup pass — pick a lead, flag dup-risk siblings
+
+Consolidation (above) collapses findings into one. The other axis is **which findings a program
+will treat as duplicates of each other even when you file them separately.** Blind pre-submission
+triage cannot catch this: it judges one finding's bytes in isolation and never sees the cluster.
+The vulnerability hunt is per-surface and never sees it either. So before submitting two-or-more
+findings that share a root cause, run an explicit **cross-finding pass** over the whole submittable
+set:
+
+1. **Cluster by root cause** — group findings that share the same vulnerable control, component, or
+   endpoint family (not merely the same host). A shared *selector* — e.g. every handler trusting the
+   same client-supplied `userId`/`id`/`eps_sirp_id` — is a cluster signal.
+2. **Pick the lead** — the highest-impact finding in the cluster is the canonical submission and
+   carries the cluster's severity. A cross-user *write* leads a cross-user *read*; an RCE leads the
+   info-leak that enabled it.
+3. **Decide consolidate vs separate-with-framing** using the dup-risk heuristic:
+   - **Same endpoint family + same selector/object class → high dup risk.** Consolidate into the lead
+     as "root cause + all demonstrated impacts", or — if filing separately — expect a merge and frame
+     each sibling by its *distinct primitive* (the read is the *discovery/harvest* primitive; the
+     write is the *tampering* primitive) so the incremental value is explicit.
+   - **Different endpoint + different object + different authority/impact axis → low dup risk.** File
+     separately; a one-line cross-reference to the shared root is enough.
+4. **Record the decision** so it is not re-litigated: `link-finding <sibling> --root-cause <lead>`
+   for the backend cluster, and state the lead-vs-sibling framing in each submission's dedup notes.
+
+The failure mode this prevents: filing a P3 read and a P2 write on the same broken endpoint family as
+two independent tickets, then having the read dup-closed into the write — burning triage goodwill and
+a submission slot. One root cause, one lead; siblings either merge in or carry an explicit
+distinct-primitive justification.
+
 ## 19. Keep internal sections out of external reports
 
 These sections are engagement-internal — strip them from client-facing deliverables:
