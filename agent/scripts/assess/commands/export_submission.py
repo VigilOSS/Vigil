@@ -14,14 +14,45 @@ path (docs/plans/submission-first-reporting-2026-07.md). Two modes:
     (Bugcrowd VRT / HackerOne weakness), an attacker-impact statement, and at
     least one concrete proof are all present.
 
-Field selection and PoC formatting reuse ``assess.lib.finding_render`` so a
-submission never drifts from ``export-findings`` / the markdown-tree export. The
-rendered structure mirrors the platform templates under
-``agent/skills/report-generation/templates/{bugcrowd,hackerone,direct}.md`` (this
-command references them by path; it does not read their bytes).
+BACKEND FINDING IS THE SOURCE OF TRUTH. The submission is rendered FROM the
+finding's fields; the report-writer writes final content back to the finding
+(``update-finding``), so a re-render at publish time is reproducible and loses no
+hand edits, and PII masking is safe — the MASKED evidence is stored in the finding
+and reaches the copy-paste body, while the raw tool output stays in ``scans/`` and
+is never rendered here.
 
-Command evidence is sourced ONLY from explicit ``finding-links``
-(``target_kind="command_run"``) — never a fuzzy command search (plan decision 4).
+OUTPUT SHAPE — the real platform copy-paste layout, matching the scaffolds under
+``agent/skills/report-generation/templates/{bugcrowd,hackerone,direct}.md`` (this
+command references them by path; it does not read their bytes):
+
+  * header field lines — ``**Title:**``, then ``**VRT:**`` (Bugcrowd) or
+    ``**Weakness:**`` (HackerOne; ``direct`` drops both), then ``**Severity:**``
+    and ``**CVSS:**``;
+  * a ``---`` separator (so the operator selects the whole body in one paste);
+  * the stable ``### `` sections — Summary, Steps to Reproduce, Evidence,
+    (Attack Scenario), Impact, Remediation;
+  * a second ``---`` and ONE "OPERATOR DETAILS — NOT FOR SUBMISSION" reference
+    section. Everything below that second ``---`` is reference the operator never
+    pastes — the report-writer authors the body sections (Evidence especially)
+    FROM it. It carries, in order: the finding metadata (CWE / OWASP / location /
+    auth context / references) to weave into the body; any internal-identifier
+    hygiene warnings to strip; the structured proof (``poc_code`` /
+    ``poc_request`` / ``poc_response`` / ``evidence_ref``) to mask and weave into
+    Evidence; and the explicitly linked command runs to author Evidence from. The
+    section is present in BOTH draft and final — it sits below the never-paste
+    line, so keeping it in both avoids any draft/final structural divergence.
+
+EVIDENCE IS AUTHORED, NOT SYNTHESIZED. The ``### Evidence`` section renders ONLY
+the finding's authored ``details.evidence`` prose (``[NEEDS: evidence]`` in a draft
+when absent; empty in final, since ``details.evidence`` is authored prose, not a
+strict-gate field). The raw structured proof and the linked command runs are
+deliberately NOT rendered into Evidence: a real submission carries hand-annotated,
+PII-masked proof, so the tool surfaces them ONCE, as reference under the single
+OPERATOR DETAILS section (mirrored by the ``linked_command_runs`` array in the
+context JSON), for the report-writer to author Evidence FROM. Linked runs are
+sourced ONLY from explicit ``finding-links`` (``target_kind="command_run"``) —
+never a fuzzy command search (plan decision 4).
+
 The generated ``submission.md`` is registered as a finding-linked artifact
 (``kind="submission"``); the finding's ``submission_status`` is never written
 (omitting the field preserves it).
@@ -185,15 +216,20 @@ def _evaluate(finding: dict, platform: str, vrt_category: str, weakness: str) ->
     }
 
 
-def _command_evidence(client, slug: str) -> list[dict]:
-    """Command-run evidence for ``slug`` from EXPLICIT finding-links only.
+def _linked_command_runs(client, slug: str) -> list[dict]:
+    """Linked command runs for ``slug`` from EXPLICIT finding-links only.
 
     Sources command runs strictly from ``finding-links`` rows whose
     ``target_kind == "command_run"`` for this finding, then fetches each linked
     run for its command string. There is deliberately NO fuzzy
     ``command-runs?q=`` search here (plan decision 4): the report-writer agent
     runs the targeted ``list-command-runs`` search itself and links the exact
-    reproducing run; this command only renders what was explicitly linked.
+    reproducing run; this command only surfaces what was explicitly linked.
+
+    These runs are REFERENCE, not final Evidence — they are handed to the
+    report-writer (context JSON ``linked_command_runs`` + the "Linked command runs"
+    entry under the single OPERATOR DETAILS section) to author the Evidence section
+    from, never auto-formatted into it.
     """
     try:
         links = client.get("finding-links")
@@ -225,7 +261,7 @@ def _command_evidence(client, slug: str) -> list[dict]:
         seen.add(run_id)
         run_ids.append(run_id)
 
-    evidence: list[dict] = []
+    runs: list[dict] = []
     for run_id in run_ids:
         try:
             row = client.get(f"command-runs/{run_id}")
@@ -233,8 +269,8 @@ def _command_evidence(client, slug: str) -> list[dict]:
             print(f"WARN export-submission: command-run {run_id} unavailable: {exc}", file=sys.stderr)
             continue
         if isinstance(row, dict) and _nonempty(row.get("command")):
-            evidence.append(row)
-    return evidence
+            runs.append(row)
+    return runs
 
 
 def _poc_lines(finding: dict) -> list[str]:
@@ -273,110 +309,246 @@ def _poc_lines(finding: dict) -> list[str]:
     return lines
 
 
-def _command_evidence_lines(command_evidence: list[dict]) -> list[str]:
-    lines: list[str] = []
-    for row in command_evidence:
-        command = _nonempty(row.get("command"))
-        if not command:
-            continue
-        intent = _nonempty(row.get("intent"))
-        rc = row.get("return_code")
-        rc_str = "" if rc is None else f" (rc={rc})"
-        header = f"**Reproducing command{rc_str}:**" + (f" {intent}" if intent else "")
-        fence = _fence_for(command)
-        lines += [header, f"{fence}\n{command}\n{fence}", ""]
-    return lines
-
-
 def _section(title: str, body: list[str]) -> list[str]:
-    return [f"## {title}", "", *body, ""]
+    """A stable ``### `` body section (copy-paste block)."""
+    return [f"### {title}", "", *body, ""]
 
 
-def _render_markdown(finding: dict, resolved: dict, platform: str, command_evidence: list[dict]) -> str:
-    # The slug identifies the draft via its directory + context JSON; it is kept OUT
-    # of the body (bugbounty-submission-format.md "No internal identifiers") so the
-    # outward-facing copy needs no slug edit.
-    title = _needs(resolved["title"], "title")
-    heading = f"# {title}"
+def _evidence_body(finding: dict, draft: bool) -> list[str]:
+    """The Evidence section renders ONLY the finding's authored ``details.evidence``.
 
-    lines: list[str] = [heading, ""]
+    The structured proof (``poc_*`` / ``evidence_ref``) and the linked command runs
+    are deliberately NOT here — they live in the single OPERATOR DETAILS reference
+    section below the second divider, which the report-writer masks and weaves into
+    this authored prose. Draft mode marks an absent evidence body with
+    ``[NEEDS: evidence]``; final mode leaves it empty, because ``details.evidence``
+    is authored prose, not a strict-gate proof field (the gate presence-checks the
+    structured proof instead).
+    """
+    evidence_text = _nonempty(detail_value(finding, "evidence", ""))
+    if evidence_text:
+        return [evidence_text]
+    if draft:
+        return ["[NEEDS: evidence]"]
+    return []
 
-    # Metadata block ---------------------------------------------------------
-    lines.append(f"- **Platform**: {_PLATFORM_LABEL[platform]}")
-    severity = resolved["severity"]
-    lines.append(f"- **Severity**: {severity.upper() if severity else '[NEEDS: severity]'}")
-    cvss = _needs(resolved["cvss_vector"], "CVSS vector")
-    if resolved["cvss_vector"] and resolved["cvss_score"] is not None:
-        cvss = f"{cvss} ({resolved['cvss_score']})"
-    lines.append(f"- **CVSS**: {cvss}")
-    if platform == "bugcrowd":
-        lines.append(f"- **VRT Category**: {_needs(resolved['vrt'], 'VRT category')}")
-    elif platform == "hackerone":
-        lines.append(f"- **Weakness**: {_needs(resolved['weakness'], 'weakness')}")
 
+def _metadata_reference_lines(finding: dict) -> list[str]:
+    """Finding metadata that isn't a copy-paste header field, for OPERATOR DETAILS.
+
+    CWE / OWASP / location / auth-context / references are kept out of the
+    outward-facing header (which is Title / VRT-or-Weakness / Severity / CVSS
+    only) so nothing is lost while the copy-paste block stays clean — the
+    report-writer weaves these into the body prose where useful.
+    """
+    lines: list[str] = []
     cwe = _nonempty(detail_value(finding, "cwe_id", ""))
     if cwe:
-        lines.append(f"- **CWE**: {cwe}")
+        lines.append(f"- CWE: {cwe}")
     owasp = _nonempty(detail_value(finding, "owasp_category", ""))
     if owasp:
-        lines.append(f"- **OWASP**: {owasp}")
+        lines.append(f"- OWASP: {owasp}")
     location = _nonempty(finding.get("canonical_location"))
     if location:
         method = _nonempty(details_object(finding).get("request_method"))
-        lines.append(f"- **Location**: {f'{method} {location}' if method else location}")
+        # Some findings bake the method into canonical_location ("POST https://…");
+        # only prepend request_method when it is not already the prefix (avoids
+        # "POST POST https://…").
+        if method and not location.upper().startswith(method.upper()):
+            location = f"{method} {location}"
+        lines.append(f"- Location: {location}")
     auth_context = _nonempty(finding.get("auth_context"))
     if auth_context:
-        lines.append(f"- **Auth Context**: {auth_context}")
-    lines.append("")
+        lines.append(f"- Auth context: {auth_context}")
+    references = string_list(detail_value(finding, "references", []))
+    if references:
+        lines.append(f"- References: {', '.join(references)}")
+    return lines
 
-    # Summary ----------------------------------------------------------------
-    summary = _nonempty(finding.get("summary"))
-    if summary:
-        lines += _section("Summary", [summary])
 
-    # Steps to Reproduce -----------------------------------------------------
-    steps = string_list(detail_value(finding, "steps_to_reproduce", []))
-    if steps:
-        lines += _section(
-            "Steps to Reproduce",
-            [f"{i}. {step}" for i, step in enumerate(steps, 1)],
-        )
+def _finding_record_lines(finding: dict) -> list[str]:
+    """The rest of the finding record, surfaced under OPERATOR DETAILS so the
+    report-writer edits with the full picture at hand — dedup/merge state, root
+    cause, chain/propagation analysis, and verification. Everything is below the
+    never-paste line, where more context beats less.
+    """
+    d = details_object(finding)
+    out: list[str] = []
 
-    # Evidence (proof) -------------------------------------------------------
-    evidence_body: list[str] = []
-    evidence_body += _poc_lines(finding)
+    # Dedup / merge / root cause — decisive when a finding is consolidated.
+    dedup: list[str] = []
+    merged = _nonempty(finding.get("merged_into_slug"))
+    if merged:
+        dedup.append(f"- Merged into: {merged} — this finding is consolidated; file the lead, not this one")
+    for label, key in (("Root cause key", "root_cause_key"), ("Root cause note", "root_cause_note"), ("Defect family", "defect_family")):
+        value = _nonempty(finding.get(key))
+        if value:
+            dedup.append(f"- {label}: {value}")
+    if dedup:
+        out += ["**Dedup / root cause:**", "", *dedup, ""]
+
+    # Chain / propagation analysis.
+    chain: list[str] = []
+    for label, key in (("Chain required", "chain_required"), ("Chain rationale", "chain_rationale"), ("Propagation verdict", "propagation_verdict")):
+        value = _nonempty(d.get(key))
+        if value:
+            chain.append(f"- {label}: {value}")
+    if chain:
+        out += ["**Chain / propagation:**", "", *chain, ""]
+
+    # Verification provenance.
+    ver: list[str] = []
+    for label, key in (("Verification state", "verification_state"), ("Verification disposition", "verification_disposition")):
+        value = _nonempty(finding.get(key))
+        if value:
+            ver.append(f"- {label}: {value}")
+    discovered = _nonempty(d.get("discovered_by")) or _nonempty(finding.get("source_name"))
+    if discovered:
+        ver.append(f"- Discovered by: {discovered}")
+    if ver:
+        out += ["**Verification:**", "", *ver, ""]
+
+    return out
+
+
+def _notes_reference_lines(finding: dict) -> list[str]:
+    """The finding's freeform ``notes`` (mechanism / reachability / caveats) as a
+    reference block — the largest reference, so it sits last under OPERATOR DETAILS."""
+    notes = _nonempty(finding.get("notes"))
+    if not notes:
+        return []
+    return ["**Investigation notes** (working record — mine for detail, do not paste verbatim):", "", notes, ""]
+
+
+def _operator_details_block(
+    finding: dict,
+    resolved: dict,
+    linked_runs: list[dict],
+    hygiene_warnings: list[str],
+    draft: bool,
+) -> list[str]:
+    """The single OPERATOR DETAILS reference section below the second ``---``.
+
+    ONE section consolidates everything the operator never pastes and the
+    report-writer authors the body FROM: the finding metadata to weave in, any
+    internal-identifier hygiene warnings to strip, the structured proof
+    (``poc_*`` / ``evidence_ref``) to mask into Evidence, and the explicitly
+    linked command runs to author Evidence from. It renders in BOTH draft and
+    final (it sits below the never-paste line) so the structure never diverges
+    between modes. The finding slug is deliberately never emitted here — it would
+    otherwise self-trip the hygiene gate.
+    """
+    lines = [
+        "---",
+        "",
+        "## OPERATOR DETAILS — NOT FOR SUBMISSION (reference only — never paste anything below this line)",
+        "",
+    ]
+
+    meta = _metadata_reference_lines(finding)
+    if meta:
+        lines += ["**Finding metadata** (weave into the body as needed):", "", *meta, ""]
+
+    # Dedup/root-cause, chain/propagation, and verification — the full record.
+    lines += _finding_record_lines(finding)
+
+    if hygiene_warnings:
+        lines += ["**Hygiene warnings** (strip every one before an external submission):", ""]
+        lines += [f"- {warning}" for warning in hygiene_warnings]
+        lines.append("")
+
+    proof_lines = _poc_lines(finding)
     if resolved["evidence_ref"]:
-        evidence_body += [f"- **Evidence reference**: {resolved['evidence_ref']}", ""]
-    evidence_body += _command_evidence_lines(command_evidence)
-    if not resolved["has_proof"]:
-        evidence_body.append(
-            "[NEEDS: proof — a reproducing request/response, PoC code, or evidence reference]"
-        )
-    lines += _section("Evidence", evidence_body)
+        proof_lines += [f"- **Evidence reference:** {resolved['evidence_ref']}", ""]
+    lines += ["**Structured proof** (mask + weave into the Evidence section above; do NOT paste raw):", ""]
+    if proof_lines:
+        lines += proof_lines
+    elif draft:
+        lines += [
+            "[NEEDS: proof — a reproducing request/response, PoC code, or evidence reference]",
+            "",
+        ]
 
-    # Attack Scenario (optional) --------------------------------------------
+    if linked_runs:
+        lines += [
+            "**Linked command runs** (author Evidence from these; run "
+            "`vigil assess list-command-runs` to find more):",
+            "",
+        ]
+        for row in linked_runs:
+            command = _nonempty(row.get("command"))
+            if not command:
+                continue
+            intent = _nonempty(row.get("intent"))
+            rc = row.get("return_code")
+            rc_str = "" if rc is None else f" (rc={rc})"
+            header = f"- **Run{rc_str}**" + (f" — {intent}" if intent else "") + ":"
+            fence = _fence_for(command)
+            lines += [header, f"{fence}\n{command}\n{fence}", ""]
+
+    # Freeform investigation notes go last — the largest reference block.
+    lines += _notes_reference_lines(finding)
+
+    return lines
+
+
+def _render_markdown(
+    finding: dict,
+    resolved: dict,
+    platform: str,
+    linked_runs: list[dict],
+    draft: bool,
+    hygiene_warnings: list[str],
+) -> str:
+    # --- header field lines (the platform copy-paste layout) ----------------
+    # The slug is NOT emitted in the body (submission-format.md "No internal
+    # identifiers"); it lives in the directory name + context JSON.
+    lines: list[str] = [f"**Title:** {_needs(resolved['title'], 'title')}", ""]
+
+    if platform == "bugcrowd":
+        lines += [f"**VRT:** {_needs(resolved['vrt'], 'VRT category')}", ""]
+    elif platform == "hackerone":
+        lines += [f"**Weakness:** {_needs(resolved['weakness'], 'weakness')}", ""]
+    # direct: no platform-taxonomy line (VRT / weakness dropped).
+
+    severity = resolved["severity"]
+    lines += [f"**Severity:** {severity.upper() if severity else '[NEEDS: severity]'}", ""]
+
+    cvss = _needs(resolved["cvss_vector"], "CVSS vector")
+    if resolved["cvss_vector"] and resolved["cvss_score"] is not None:
+        cvss = f"{cvss} ({resolved['cvss_score']})"
+    lines += [f"**CVSS:** {cvss}", ""]
+
+    lines += ["---", ""]
+
+    # --- stable body sections (### headers) ---------------------------------
+    summary = _nonempty(finding.get("summary"))
+    lines += _section("Summary", [summary or "[NEEDS: summary]"])
+
+    steps = string_list(detail_value(finding, "steps_to_reproduce", []))
+    step_body = [f"{i}. {step}" for i, step in enumerate(steps, 1)] or ["[NEEDS: steps to reproduce]"]
+    lines += _section("Steps to Reproduce", step_body)
+
+    lines += _section("Evidence", _evidence_body(finding, draft))
+
     attack_scenario = _nonempty(detail_value(finding, "attack_scenario", ""))
     if attack_scenario:
         lines += _section("Attack Scenario", [attack_scenario])
 
-    # Impact -----------------------------------------------------------------
     lines += _section("Impact", [_needs(resolved["impact"], "attacker-impact statement")])
 
-    # Remediation ------------------------------------------------------------
     remediation = _nonempty(finding.get("remediation")) or _nonempty(detail_value(finding, "remediation", ""))
-    if remediation:
-        lines += _section("Remediation", [remediation])
+    lines += _section("Remediation", [remediation or "[NEEDS: remediation]"])
 
-    # References -------------------------------------------------------------
-    references = string_list(detail_value(finding, "references", []))
-    if references:
-        lines += _section("References", [f"- {ref}" for ref in references])
+    # --- single OPERATOR DETAILS reference section below the second divider --
+    # (never pasted; the report-writer authors the body sections FROM it).
+    lines += _operator_details_block(finding, resolved, linked_runs, hygiene_warnings, draft)
 
     text = "\n".join(lines).rstrip()
     return text + "\n"
 
 
-def _internal_ids(finding: dict, command_evidence: list[dict]) -> list[str]:
+def _internal_ids(finding: dict, linked_runs: list[dict]) -> list[str]:
     """UUID-shaped internal identifiers to FLAG (never rewrite) in the output.
 
     Only ids the backend assigns to its own records — this finding, its
@@ -388,7 +560,7 @@ def _internal_ids(finding: dict, command_evidence: list[dict]) -> list[str]:
     ids: list[str] = []
     for key in ("id", "engagement_id", "merged_into_finding_id"):
         ids.append(_nonempty(finding.get(key)))
-    for row in command_evidence:
+    for row in linked_runs:
         for key in ("producer_agent_id", "agent_id", "engagement_id", "finding_id"):
             ids.append(_nonempty(row.get(key)))
     seen: set[str] = set()
@@ -449,7 +621,7 @@ def _build_context(
     platform: str,
     draft: bool,
     resolved: dict,
-    command_evidence: list[dict],
+    linked_runs: list[dict],
     submission_rel: str,
     hygiene_warnings: list[str],
 ) -> dict:
@@ -466,13 +638,16 @@ def _build_context(
             "has_proof": resolved["has_proof"],
         },
         "taxonomy": {"vrt_category": resolved["vrt"], "weakness": resolved["weakness"]},
-        "command_evidence": [
+        # Clean REFERENCE for the report-writer to author Evidence from — surfaced
+        # under OPERATOR DETAILS, never auto-rendered into the Evidence section.
+        "linked_command_runs": [
             {
-                "command": _nonempty(row.get("command")),
+                "id": row.get("id"),
                 "intent": _nonempty(row.get("intent")),
+                "command": _nonempty(row.get("command")),
                 "return_code": row.get("return_code"),
             }
-            for row in command_evidence
+            for row in linked_runs
         ],
         # Advisory only — the report-writer strips these before external submission.
         "hygiene_warnings": hygiene_warnings,
@@ -501,8 +676,8 @@ def run(args) -> None:
         if not isinstance(finding, dict):
             raise AssessError(f"export-submission: unexpected response fetching finding {slug!r}")
 
-        command_evidence = _command_evidence(client, slug)
-        internal_ids = _internal_ids(finding, command_evidence)
+        linked_runs = _linked_command_runs(client, slug)
+        internal_ids = _internal_ids(finding, linked_runs)
         resolved = _evaluate(finding, platform, args.vrt_category, args.weakness)
 
         # Final mode: refuse to write an incomplete submission (plan decision 3).
@@ -527,11 +702,17 @@ def run(args) -> None:
         submission_rel = _engagement_relative(submission_md, engagement_dir)
 
         # FAITHFUL render — no content rewriting. Internal identifiers are flagged
-        # (not stripped) so the report-writer removes them deliberately.
-        markdown = _render_markdown(finding, resolved, platform, command_evidence)
-        hygiene_warnings = _hygiene_warnings(markdown, slug, internal_ids, engagement_dir)
+        # (not stripped) so the report-writer removes them deliberately. Render
+        # once WITHOUT the hygiene-warnings sub-block to scan the real content, then
+        # re-render with the resulting warnings woven into OPERATOR DETAILS — the
+        # warning strings themselves quote the leaked value (a UUID, a `cases.db`
+        # literal), so scanning a render that already contains them would flag the
+        # advisory text as if it were a fresh leak.
+        scan_markdown = _render_markdown(finding, resolved, platform, linked_runs, draft, [])
+        hygiene_warnings = _hygiene_warnings(scan_markdown, slug, internal_ids, engagement_dir)
+        markdown = _render_markdown(finding, resolved, platform, linked_runs, draft, hygiene_warnings)
         context = _build_context(
-            slug, platform, draft, resolved, command_evidence, submission_rel or str(submission_md), hygiene_warnings
+            slug, platform, draft, resolved, linked_runs, submission_rel or str(submission_md), hygiene_warnings
         )
         context_text = json.dumps(context, indent=2, ensure_ascii=False)
 
@@ -582,7 +763,7 @@ def run(args) -> None:
             "path": display_path,
             "missing": resolved["missing"],
             "has_proof": resolved["has_proof"],
-            "command_evidence": len(command_evidence),
+            "linked_command_runs": len(linked_runs),
             "artifact_registered": artifact_registered,
             "hygiene_warnings": hygiene_warnings,
         }

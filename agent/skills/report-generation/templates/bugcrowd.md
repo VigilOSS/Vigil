@@ -8,9 +8,10 @@ category: Disclosure & Reporting Formats
 
 Bugcrowd-specific scaffold for `vigil assess export-submission <slug> --platform bugcrowd`.
 Every shared rule — voice, section budgets, PII redaction, PoC authoring, de-harnessing, the
-pre-submission checklist — lives in `agent/references/bugbounty-submission-format.md`. This file
-only adds what's Bugcrowd-specific: the VRT field, and how Bugcrowd's own P1-P4 scale sits next to
-the CVSS vector.
+pre-submission checklist, and the finding-is-source-of-truth flow (author each section, write it
+back to the finding, re-render) — lives in `agent/references/submission-format.md`. This
+file only adds what's Bugcrowd-specific: the VRT field, and how Bugcrowd's own P1-P4 scale sits next
+to the CVSS vector.
 
 ## Strict-gate fields
 
@@ -34,9 +35,9 @@ that's the normal report-writer entrypoint.
 
 **VRT:** [Bugcrowd VRT category path, most specific leaf — e.g. Broken Access Control > IDOR]
 
-**Severity:** [P1-P4] ([Critical/High/Medium/Low]) — CVSS:3.1/[vector] ([score])
+**Severity:** [P1-P4] ([Critical/High/Medium/Low])
 
-[PoC block — see bugbounty-submission-format.md "PoC block". Omit for inline-only reproductions.]
+**CVSS:** CVSS:3.1/[vector] ([score])
 
 ---
 
@@ -47,7 +48,9 @@ that's the normal report-writer entrypoint.
 [Numbered. One action per step. No narrative between steps.]
 
 ### Evidence
-[Request/response or PoC output, truncated to the proof lines, annotated.]
+[AUTHORED from the OPERATOR DETAILS section's structured proof + linked runs + a targeted
+`list-command-runs` search, PII-masked, truncated to the proof lines, annotated with <-- proof
+markers. Stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
 
 ### Attack Scenario
 [2-3 sentences. Concrete adversary class + action + outcome.]
@@ -70,6 +73,10 @@ that's the normal report-writer entrypoint.
   broken access control a default P2 even when the calculated vector lands in the CVSS "Medium"
   range. Report the calculated CVSS honestly; justify a priority above the raw score by naming the
   VRT default, not by inflating the vector.
+- **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
+  it as `submissions/<slug>/poc.<ext>` and attach it in the Bugcrowd form — see
+  `submission-format.md` "PoC block". `export-submission` emits no PoC line into the body; a
+  hand-inserted one is wiped on the next `--overwrite`.
 - Bugcrowd programs frequently require a deconfliction line (researcher ID / source IP / UTC
   window) for active-testing categories. If the brief asks for one, add it after Remediation — 3
   lines max, see "Section budgets" in the generic format.

@@ -157,8 +157,8 @@ Before dispatching a final report, resolve readiness blockers so `vigil assess l
 - The source finding's status becomes `merged` and is excluded from final report output
 
 After draft generation, dispatch a fresh `report-writer` in review-and-fix QA mode. The QA writer
-checks the rendered `report.md` against backend report state and the 13-check post-generation
-self-review, fixes report-local issues, and returns `QA PASS` or `QA BLOCKED`. Only publish the
+checks the rendered `report.md` against backend report state and the consolidated post-generation
+self-review checklist, fixes report-local issues, and returns `QA PASS` or `QA BLOCKED`. Only publish the
 report, mark findings `reported`, and complete the engagement after `QA PASS`.
 
 ## Wildcard Mode Specifics
