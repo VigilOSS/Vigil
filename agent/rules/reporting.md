@@ -290,7 +290,7 @@ These sections are engagement-internal — strip them from client-facing deliver
 
 ## 20. Write like a human in external submissions
 
-External submissions (bug bounty, disclosure email) are read by humans. The patterns below signal automated authorship and undermine credibility. The full gate checklist lives in `agent/references/bugbounty-submission-format.md`.
+External submissions (bug bounty, disclosure email) are read by humans. The patterns below signal automated authorship and undermine credibility. The full gate checklist lives in `agent/references/submission-format.md`.
 
 **Report what you found, not what you ruled out.** The submission covers the vulnerability. If a negative result is genuinely material, state it in one sentence without a probe count — sections cataloguing failed attack variants ("Defender-positive", "Dead ends", "Negative findings") signal automated enumeration.
 

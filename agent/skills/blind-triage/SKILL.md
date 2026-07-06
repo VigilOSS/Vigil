@@ -27,7 +27,7 @@ submission in place:
 
 - format and structure,
 - AI-tells (Rule 20 human-voice check),
-- PoC script hygiene (`bugbounty-submission-format.md` § "PoC Script Authoring" — minimal,
+- PoC script hygiene (`submission-format.md` § "PoC Script Authoring" — minimal,
   de-harnessed, no decorative banners or agent-env handling),
 - CVSS stated exactly once and consistent with the claimed severity,
 - repro-step correctness,
@@ -38,7 +38,7 @@ whether **impact was actually demonstrated** — that is what Pass 2 exists for.
 Pass 1 produces the clean submission bytes that Pass 2 then judges blind.
 
 (Pass 1 is the existing `agent/skills/report-generation/SKILL.md` "Review-and-Fix
-QA Mode" / the `agent/references/bugbounty-submission-format.md` pre-submission
+QA Mode" / the `agent/references/submission-format.md` pre-submission
 checklist — frame that pass as Pass 1 of this gate; it returns QA PASS / QA
 BLOCKED. Do not re-implement it here.)
 
@@ -147,6 +147,6 @@ on any of them should **not** get an `Accept`:
   submission.
 - `agent/skills/report-generation/SKILL.md` "Review-and-Fix QA Mode" — Pass 1 of
   this gate.
-- `agent/references/bugbounty-submission-format.md` — the in-context
+- `agent/references/submission-format.md` — the in-context
   pre-submission checklist (Rule 20 AI-tell + "I is not H" overclaim check) that
   Pass 1 applies.
