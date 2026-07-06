@@ -25,6 +25,7 @@ from ..services.state_manager.coverage import (
     MAX_ASSESSMENT_LIST_LIMIT,
     MAX_PROBE_RUN_LIST_LIMIT,
     MAX_REQUEST_LIST_LIMIT,
+    SurfaceStatus,
 )
 from ..services.state_manager.http_flows import (
     DEFAULT_HTTP_FLOW_LIMIT,
@@ -427,7 +428,10 @@ class SurfaceUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["covered", "deferred", "discovered", "not_applicable", "partially-covered"] | None = None
+    # ``SurfaceStatus`` is the canonical backend vocabulary (state_manager.coverage).
+    # The create model (SurfaceRecordRequest) keeps a narrower Literal that omits
+    # ``partially-covered`` deliberately — that status is only reachable via update.
+    status: SurfaceStatus | None = None
     rationale: str | None = Field(default=None, max_length=4096)
     source_name: str | None = Field(default=None, min_length=1, max_length=128)
     evidence_ref: str | None = Field(default=None, min_length=1, max_length=1024)

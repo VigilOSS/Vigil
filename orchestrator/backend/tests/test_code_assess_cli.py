@@ -65,10 +65,6 @@ def _load_post_module():
     return _load_assess_module("post.py", "test_post_command")
 
 
-def _load_patch_module():
-    return _load_assess_module("patch.py", "test_patch_command")
-
-
 def _load_record_finding_module():
     return _load_assess_module("record_finding.py", "test_record_finding_command")
 
@@ -1576,25 +1572,23 @@ def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
     assert "vigil assess contract verify-finding" in err
 
 
-def test_patch_rejects_raw_finding_patch_and_points_to_helper(capsys):
-    module = _load_patch_module()
+def test_raw_finding_patch_is_rejected_and_points_to_helper():
+    """A raw PATCH to findings/{slug} is rejected and points operators at the
+    typed update-finding / reset-finding verbs.
 
-    with pytest.raises(SystemExit) as excinfo:
-        module.run(
-            SimpleNamespace(
-                engagement_dir=Path("/tmp/eng"),
-                endpoint="findings/VA-001",
-                payload='{"workflow_status":"draft"}',
-                inline_payload=None,
-            )
-        )
+    The generic ``patch`` verb was removed in WS5, but the ``_RAW_ENDPOINT_RULES``
+    redirect survives as the client-layer guard, so this asserts the guard
+    directly (mirrors test_coverage_probe_cli_sync's redirect test)."""
+    from assess.lib import contracts
 
-    assert excinfo.value.code == 1
-    err = capsys.readouterr().err
-    assert "update-finding" in err
-    assert "reset-finding" in err
-    assert "vigil assess contract update-finding" in err
-    assert "vigil assess contract reset-finding" in err
+    error = contracts.raw_endpoint_error(
+        "PATCH", "findings/VA-001", {"workflow_status": "draft"}
+    )
+    assert error is not None
+    assert "update-finding" in error
+    assert "reset-finding" in error
+    assert "vigil assess contract update-finding" in error
+    assert "vigil assess contract reset-finding" in error
 
 
 def test_contract_prints_record_finding_contract(capsys):

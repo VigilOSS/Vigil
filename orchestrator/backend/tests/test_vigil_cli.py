@@ -4618,7 +4618,7 @@ def test_transition_chain_gate_also_fires_on_complete(monkeypatch, tmp_path, cap
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
 
 
-def test_check_coverage_reports_partially_covered_surfaces(
+def test_check_phase_readiness_reports_partially_covered_surfaces(
     monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The folded surface-coverage gate (old `check-coverage`, now

@@ -243,10 +243,6 @@ def family_of(name: str) -> str | None:
     return entry[0] if entry else None
 
 
-def classes_in_family(family: str) -> tuple[str, ...]:
-    return tuple(cls for cls, (fam, _desc) in VULN_CLASSES.items() if fam == family)
-
-
 def normalize_class(name: str) -> str:
     """Canonicalize a class token (lowercase, hyphen-separated)."""
     if not name:
@@ -337,7 +333,6 @@ __all__ = [
     "all_classes",
     "is_valid_class",
     "family_of",
-    "classes_in_family",
     "normalize_class",
     "parse_vuln_class_field",
     "load_skill_vuln_classes",
