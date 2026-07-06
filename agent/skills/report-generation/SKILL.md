@@ -8,8 +8,15 @@ origin: Vigil
 
 ## When to Activate
 
-- Phase 7 (Report) — operator dispatches report-writer after Verify and exploit work complete
+- Phase 7/8 (Report) — operator dispatches report-writer after Verify and exploit work complete
 - On-demand interim report requested by the operator mid-engagement
+
+**Default closeout: per-finding submissions.** For red, code, and android engagements, the default
+terminal deliverable is a per-finding submission drafted via `vigil assess export-submission`, not
+a `report.md` monolith — see "Submission-First Closeout" below. The `report.md` structure later in
+this file is retained for on-demand internal summaries (an operator or client wants one narrative
+document mid-engagement) but is no longer the default final artifact. Blue incident reporting is
+unaffected by any of this — see "Blue Mode" at the bottom of this file, unchanged.
 
 ## Query Backend First
 
@@ -82,7 +89,79 @@ evidence formatting, remediation specificity, filler/padding, and section length
 **Executive summary exception:** The executive summary is for non-technical stakeholders.
 Use business language there. "An attacker can download all customer records" not "IDOR on /api/users."
 
-## Report Structure
+## Submission-First Closeout (Default Procedure)
+
+This is the default closeout for red, code, and android engagements: each finding intended for
+final delivery becomes a standalone submission, not a section of a bundled `report.md`. It reuses
+the same evidence bar as the legacy report path — "Pre-Report Validation", "CVSS Sourcing and
+Calculation", and "Proof Standard by Finding Class" below apply per-finding here exactly as they
+do for the internal report — plus a mandatory blind triage gate before anything external ships.
+
+1. **Confirm proof readiness.** Before drafting, check the finding against "Proof Standard by
+   Finding Class" below and the CVSS↔severity / missing-field checks in "Pre-Report Validation"
+   (checks 3-5). A finding that fails these is not ready to draft — send it back to the operator
+   rather than drafting around the gap.
+2. **Draft.** Run:
+   ```bash
+   vigil assess export-submission <slug> --platform bugcrowd|hackerone|direct --draft \
+     [--vrt-category <c> | --weakness <w>] [--output <dir>] [--overwrite] [--json]
+   ```
+   `--draft` always writes `$ENGAGEMENT_DIR/submissions/<slug>/submission.md` +
+   `submission-context.json`, with `[NEEDS: ...]` markers for any missing proof field — this is the
+   normal report-writer entrypoint, not the final gate. Pick the platform by audience: `bugcrowd` /
+   `hackerone` for an active program, `direct` for a company-facing writeup with no external
+   program (the code track's default — see `agent/operator-core-code.md`). Template references for
+   hand-editing: `agent/skills/report-generation/templates/bugcrowd.md`,
+   `agent/skills/report-generation/templates/hackerone.md`,
+   `agent/skills/report-generation/templates/direct.md`.
+3. **Resolve `[NEEDS: ...]` markers.** Never fabricate to fill a marker. For a missing reproducing
+   command, run a *targeted* `vigil assess list-command-runs --q <the finding's url/param/header/
+   file/function>` — keyed tightly to this finding, not a broad sweep of the engagement — to locate the exact command and
+   embed it. Otherwise pull from the finding's own `poc_code`, `poc_request`/`poc_response`, or
+   `evidence_ref`. If nothing resolves a marker, the finding is not ready — do not submit around it.
+4. **QA pass.** Run the "Post-Generation Self-Review" checks below (Rule-based: banned language,
+   active voice, evidence formatting, one root cause per submission, etc.) against the drafted
+   `submission.md`, same as the internal-report pass — this is Pass 1 of the blind-triage gate; see
+   "Review-and-Fix QA Mode" below for the reusable QA procedure.
+5. **Blind triage — mandatory for every Medium-or-above finding.** Run
+   `agent/skills/blind-triage/SKILL.md` Pass 2 (the zero-context blind reviewer) against the QA'd
+   submission. Only a verdict starting `Accept` clears the finding for submission; anything else
+   routes back to fix or kill and re-run. Record the verdict:
+   ```bash
+   vigil assess agent decision --kind blind_triage_verdict --payload-json \
+     '{"finding_slug":"<slug>","verdict":"<Accept@P1..P5|Need-More-Info|Not-Applicable|Out-of-Scope|Duplicate>","claimed_severity":"<sev>","weak_points":"..."}'
+   ```
+6. **Publish.** Re-run `export-submission <slug> --platform <same platform>` without `--draft` once
+   the strict final gate is satisfiable: title; severity + CVSS vector; platform taxonomy (VRT
+   category for Bugcrowd / weakness for HackerOne — omitted for `direct`); an attacker-impact
+   statement; and ≥1 concrete proof (`poc_request` **and** `poc_response`, OR `poc_code`, OR a
+   non-empty `evidence_ref`). The command exits non-zero if any of these is missing — resolve the
+   gap, do not bypass it. Final mode registers the rendered `submission.md` as a finding-linked
+   artifact (`kind="submission"`) and **never sets `submission_status`** — it omits the field
+   entirely, so `create` lands `none` and `upsert` preserves whatever is already there. Set
+   `submission_status` explicitly, per "Submission Status Lifecycle" below, only once the finding
+   is actually delivered to its audience.
+7. **Mark the finding reported.** Same as the internal-report publish step below: set
+   `workflow_status=reported` for each finding once its submission is delivered. This lifecycle
+   transition is independent of `submission_status` and independent of program response.
+
+**Internal-ID hygiene (advisory, not automatic).** `export-submission` is FAITHFUL — it never
+rewrites the finding's content, so a target-application UUID, a filename, or a path in a PoC reaches
+you verbatim (a blanket scrub used to redact the very identifier a PoC proves). Instead it FLAGS any
+internal identifier that leaked — engagement / finding / `producer_agent_id` UUIDs, absolute
+`$ENGAGEMENT_DIR` paths, `cases.db` references — as `hygiene_warnings` in `submission-context.json`
+and on stderr. The finding slug is kept out of the body by design. Strip every flagged identifier
+while editing `submission.md` (the pre-submission checklist's "internal identifiers" items enforce
+this) — a draft is an internal working copy, but the outward-facing copy the operator pastes must be
+clean.
+
+## Report Structure (Legacy Internal Report — On-Demand Only)
+
+The structure below produces `$ENGAGEMENT_DIR/report.md`: one bundled narrative document covering
+every finding. It is no longer the default closeout (see "Submission-First Closeout" above) — use
+it only when the operator explicitly wants a single internal summary document, e.g. an interim
+client update mid-engagement. For final closeout on red/code/android engagements, use per-finding
+submissions instead.
 
 ### 1. Executive Summary (ONE PAGE MAX)
 
@@ -217,7 +296,10 @@ Each finding class has a minimum evidence bar. If the evidence does not meet thi
 | Information Disclosure | The specific sensitive data exposed, with confirmation it is not intentionally public. |
 | CSRF | State change on victim's account triggered from attacker-controlled origin, with before/after proof. |
 
-## Generation Procedure
+## Generation Procedure (Legacy Internal Report)
+
+Steps below build `report.md` (see "Report Structure" above for when this mode applies instead of
+the default submission-first closeout).
 
 1. **Pull backend state** using the queries in "Query Backend First" above
 2. **Use `vigil assess list-report-findings --mode final --json`** as the authoritative final finding structure, or `vigil assess list-report-findings --mode draft --json` for interim drafts. Render one section per group root; include siblings as downstream outcomes under the root narrative, and explicitly call out `eliminates_attack_path` siblings as residual remediation paths.
@@ -228,7 +310,7 @@ Each finding class has a minimum evidence bar. If the evidence does not meet thi
 7. Write executive summary LAST — it depends on the complete finding set and chain analysis
 8. Verify: severity counts in executive summary match the actual finding list
 
-## After Writing the Draft
+## After Writing the Draft (Legacy Internal Report)
 
 1. **Write report to `$ENGAGEMENT_DIR/report.md`**
 2. **Run the post-generation self-review below**
@@ -239,7 +321,9 @@ Publication (`report.generated`, `closeout.generated`, marking findings `reporte
 
 ## Post-Generation Self-Review
 
-After writing the report, verify every finding against `agent/rules/reporting.md`. If any check fails, fix it.
+Runs against either deliverable: `report.md` (legacy internal report) or a drafted
+`submissions/<slug>/submission.md` (submission-first closeout, step 4 above). Verify every finding
+against `agent/rules/reporting.md`. If any check fails, fix it.
 
 1. First sentence states attacker outcome (Rule 6)
 2. No title echo in description (Rule 11)
@@ -257,11 +341,15 @@ After writing the report, verify every finding against `agent/rules/reporting.md
 
 ## Review-and-Fix QA Mode
 
-When the operator dispatches report-writer in review-and-fix QA mode, load the existing `$ENGAGEMENT_DIR/report.md`, pull the same backend report state, and run the 13 checks above against the rendered report.
+When the operator dispatches report-writer in review-and-fix QA mode, load the existing rendered
+artifact — `$ENGAGEMENT_DIR/report.md` for the legacy internal report, or
+`$ENGAGEMENT_DIR/submissions/<slug>/submission.md` for a submission-first closeout — pull the same
+backend report state, and run the 13 checks above against it. This is Pass 1 of the blind-triage
+gate (`agent/skills/blind-triage/SKILL.md`) when the artifact is a submission.
 
-- Fix report-local failures directly in `report.md`: wording, structure, counts, missing annotations, overlong evidence, title echoes, passive voice, and non-load-bearing sentences.
+- Fix local failures directly in the artifact: wording, structure, counts, missing annotations, overlong evidence, title echoes, passive voice, and non-load-bearing sentences.
 - Return `QA PASS` only when all 13 checks pass after fixes.
-- Return `QA BLOCKED` when the report cannot be corrected without new backend state: missing evidence, missing remediation, unresolved duplicate findings, severity/CVSS mismatch, or a finding that no longer belongs in final output. Include exact finding slugs and the required operator action.
+- Return `QA BLOCKED` when the artifact cannot be corrected without new backend state: missing evidence, missing remediation, unresolved duplicate findings, severity/CVSS mismatch, or a finding that no longer belongs in final output. Include exact finding slugs and the required operator action.
 
 ### Stale-text scrub (runs before every QA pass)
 
@@ -291,9 +379,12 @@ vigil assess update-finding <slug> \
 
 The field name on `update-finding --inline` is `details` (dict), not `details_json`. Re-run the scan after the fix to confirm zero hits, then proceed with the 13 checks. `QA BLOCKED` if any finding still carries stale text after the fix attempt.
 
-## Publish After QA Pass
+## Publish After QA Pass (Legacy Internal Report)
 
-Run these publication steps only after the operator confirms the report QA gate passed:
+This is the legacy `report.md` publish sequence. For the default submission-first closeout, publish
+is step 6 of "Submission-First Closeout" above (`export-submission` non-draft, artifact registration,
+`submission_status` left untouched by the command). Run the steps below only for the on-demand
+internal `report.md`, only after the operator confirms the report QA gate passed:
 
 1. **Emit a runtime event** so the orchestrator and UI know the artifact exists.
    For red engagements and blue verified-incident reports:
@@ -342,37 +433,52 @@ The `submissions/<slug>/` directory is the staging tree for all external deliver
 
 ## Bug Bounty Submissions
 
-When the operator requests bug bounty submissions (Bugcrowd, HackerOne, or similar),
-each finding becomes a standalone submission — never bundle findings.
+This is the default closeout path for red/code/android engagements — see "Submission-First
+Closeout" above for the full draft → QA → blind-triage → publish procedure. Each finding is a
+standalone submission — never bundle findings.
 
-Load before writing:
-- `agent/references/bugbounty-submission-format.md` — authoritative spec (structure, rules)
+`vigil assess export-submission <slug> --platform bugcrowd|hackerone|direct --draft` generates
+`submission.md` directly from backend finding state; it is the normal entrypoint, not a manual
+authoring step. Reference material for hand-editing the draft (structure, taxonomy fields, PoC
+hygiene) and for the two Bugcrowd/HackerOne-style platforms plus the no-program `direct` writeup:
+- `agent/skills/report-generation/templates/bugcrowd.md`, `.../hackerone.md`, `.../direct.md` —
+  per-platform structure the generated draft follows
+- `agent/references/bugbounty-submission-format.md` — authoritative structure/rules reference
+  (platform-agnostic; the templates above are the platform-specific renderings of it)
 - `agent/references/examples/bugbounty-submission-ldap-injection.md` — working example with POC
 
-Output path: `$ENGAGEMENT_DIR/submissions/<slug>/submission.md`
+Output path: `$ENGAGEMENT_DIR/submissions/<slug>/submission.md` (+ `submission-context.json` from
+the draft step).
 
 The `submissions/<slug>/` directory is the staging tree for all external deliverables for that finding (see "Per-Finding Submission Staging" below).
 
 ## Per-Finding Submission Staging
 
-Each finding that is submitted externally gets a dedicated staging directory under the engagement root:
+Each finding closed out via submission gets a dedicated staging directory under the engagement root:
 
 ```
 $ENGAGEMENT_DIR/submissions/<slug>/
-    submission.md       # the drafted submission text (bug bounty platform body)
-    disclosure.txt      # or: the disclosure email text (email disclosure mode)
-    poc.<ext>           # any PoC artifact referenced in the submission
+    submission.md            # the drafted submission text (platform body)
+    submission-context.json  # export-submission's sourcing record ([NEEDS: ...] markers, evidence used)
+    disclosure.txt           # or: the disclosure email text (email disclosure mode)
+    poc.<ext>                # any PoC artifact referenced in the submission
 ```
 
 Rules for the staging tree:
 - The directory name is the finding slug (e.g., `submissions/VA-003/`). The slug is internal and never appears inside the submission body — only in the directory name.
-- `submission.md` maps directly to the `bugbounty-submission-format.md` structure (title, VRT, severity, PoC block, body). The operator copies content from it into the platform's submission form.
+- `submission.md` maps to the matching platform template (`bugcrowd.md` / `hackerone.md` / `direct.md`) — title, VRT/weakness (omitted for `direct`), severity, PoC block, body. The operator copies content from it into the platform's submission form, or delivers it directly to the client for `direct`.
 - PoC artifacts live alongside `submission.md` in the same directory — NOT under `tools/exploit-state/pocs/`, which is the exploitation artifact store, not a submission staging area.
-- The directory is created when the operator dispatches report-writer in bug bounty submission mode; it does not exist for findings that are not submitted externally.
+- The directory is created by `export-submission --draft`; it does not exist for findings that have not been drafted for external/final closeout.
 
 ## Submission Status Lifecycle
 
 `submission_status` is an independent axis on every finding, orthogonal to `workflow_status`. A finding can be `workflow_status=reported` (included in the internal report) AND `submission_status=accepted` (confirmed by the program) simultaneously — setting one never changes the other.
+
+`export-submission` never sets this field — draft and final modes both omit `submission_status`
+entirely, so `create` lands `none` and `upsert` preserves whatever is already there. Only the
+transitions below, run explicitly once the finding is actually delivered, change it. For `direct`
+mode (no external program), read "program" below as "client" — the same four post-delivery states
+apply to a company-facing writeup.
 
 Allowed values: `none` (default) | `submitted` | `accepted` | `needs_info` | `rejected` | `duplicate`
 
@@ -474,6 +580,9 @@ The macros section at the bottom of `templates/blue.md` lists the exact backend 
 
 - `agent/references/runtime-guides/engagement-methodology.md` — methodology narrative source
 - `agent/references/disclosure-email-format.md` — email disclosure format and rules
-- `agent/references/bugbounty-submission-format.md` — bug bounty submission format
+- `agent/references/bugbounty-submission-format.md` — bug bounty submission format (platform-agnostic reference behind the templates below)
 - `agent/references/examples/` — working examples for both output modes
+- `agent/skills/report-generation/templates/bugcrowd.md` — Bugcrowd submission template
+- `agent/skills/report-generation/templates/hackerone.md` — HackerOne submission template
+- `agent/skills/report-generation/templates/direct.md` — direct/company-facing writeup template (no external program)
 - `agent/skills/report-generation/templates/blue.md` — blue incident report template

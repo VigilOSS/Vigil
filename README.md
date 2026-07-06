@@ -66,17 +66,32 @@ Vigil's docs are spread across operator prompts, a code map, and a deep referenc
 # 1. Install the CLI
 uv tool install --from git+https://github.com/vigil-oss/vigil.git vigil
 
-# 2. Install a working root and bring the local stack up (Kali runtime + orchestrator)
+# 2. Run the onboarding wizard: it checks host prerequisites, reports missing
+#    recon tools, and prints the ordered setup checklist for your install root.
+vigil quickstart
+
+# Pass --install-host-tools to actually run the host-tool install commands
+# (default is plan/print only); --json for a machine-readable readiness report.
+```
+
+`vigil quickstart` is the front door — it never mutates the host unless you pass
+`--install-host-tools`, so it is safe to run first to see exactly what is missing.
+It then hands you the ordered commands to finish setup:
+
+```bash
+# 3. Install a working root and bring the local stack up (Kali runtime + orchestrator)
 vigil install ~/vigil && vigil up
 
-# 3. Create an engagement against an authorized target
+# 4. Create an engagement against an authorized target
 vigil engagement create https://target.example --hosts target.example
 
-# 4. Start the operator on it
+# 5. Start the operator on it
 vigil engagement start <engagement-key> --client codex   # or --client claude
 ```
 
-The full install / update / stack walkthrough is below; heavier operational tuning lives under [Operations](#operations).
+Steps 3-5 are the manual/recovery path — run them directly at any time. The full
+install / update / stack walkthrough is below; heavier operational tuning lives under
+[Operations](#operations).
 
 ### Install the CLI and workspace
 
@@ -169,9 +184,10 @@ On **native Linux / remote Docker** there is no userspace proxy, so everything c
 and the host tools are optional (the split is a transparent no-op).
 
 `vigil assess recon` and `--runtime host` **enforce** this split on Docker Desktop — if a required
-host binary is missing they fail the preflight rather than silently degrade. Install the host-side
-recon binaries yourself (these are the only tools the host path needs). Most are `go install`
-targets (cross-platform — Go handles the OS); `massdns` is not, so use your package manager:
+host binary is missing they fail the preflight rather than silently degrade. The quickest way to
+install them is `vigil quickstart --install-host-tools` (it computes the same commands and runs
+them); the manual list below is the recovery path. Most are `go install` targets (cross-platform —
+Go handles the OS); `massdns` is not, so use your package manager:
 
 ```bash
 # Essentials (the --runtime host / vigil assess recon path requires these):
@@ -634,6 +650,7 @@ actually saying. Override the wait via the `frpc_ready_timeout` argument to
 
 | Command | Purpose |
 |---------|---------|
+| `vigil quickstart` | Onboarding wizard: probe host prerequisites/recon tools and print the setup checklist. Runs host-tool installs only with `--install-host-tools`. |
 | `vigil install [path]` (alias `vigil update`) | Install/upgrade the working root in place; sync code, prompts, skills, scripts. Engagements, DB, and `.env` are preserved. |
 | `vigil up` | Sync source, build stale images, start the local stack (runtime + orchestrator + optional mitmproxy/OOB). |
 | `vigil doctor` | Check local readiness and prerequisites. |

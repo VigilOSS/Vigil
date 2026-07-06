@@ -43,6 +43,28 @@ def canonical_phase(phase: str) -> str:
     return _PHASE_FILTER_ALIASES.get(key, key)
 
 
+# Canonical cross-cutting "goal" vocabulary for `vigil assess list-commands
+# --goal <goal>`. A goal is an intent-oriented lens ORTHOGONAL to `phase`: it
+# groups commands by what a caller is trying to accomplish (submit a finding,
+# reason about scope, probe HTTP, ...) rather than by when in the engagement
+# they run. Only clearly-matching contracts are tagged; an untagged command
+# simply never matches a `--goal` filter. Dynamically-built contracts (kali
+# verbs, record-intel <type>, agent <verb>) default to no goals.
+COMMAND_GOALS: tuple[str, ...] = (
+    "submission",
+    "scope",
+    "recon",
+    "discovery",
+    "dns",
+    "http-probe",
+    "artifact",
+    "finding-lifecycle",
+    "dispatch",
+    "code-analysis",
+    "oob",
+)
+
+
 SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
     "hypothesis-driven",
     "item-iterating",
@@ -423,11 +445,17 @@ class CommandContract:
     # --phase <N>`. An empty tuple means a phase-agnostic utility (recorded /
     # queried in any phase) — it is grouped separately, not under a phase.
     phase: tuple[str, ...] = ()
+    # Cross-cutting intent tags drawn from COMMAND_GOALS, ORTHOGONAL to `phase`.
+    # Drives `vigil assess list-commands --goal <goal>`. Only clearly-matching
+    # commands are tagged; the empty-tuple default means the command never
+    # matches a `--goal` filter. Dynamically-built contracts default to ().
+    goals: tuple[str, ...] = ()
 
 
 _CONTRACTS: dict[str, CommandContract] = {
     "record-intel": CommandContract(
         name="record-intel",
+        goals=("recon",),
         phase=("recon", "collect"),
         summary="Record one structured intel row through a type-specific intel schema.",
         schema_name="type-specific intel schema",
@@ -460,6 +488,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "record-finding": CommandContract(
         name="record-finding",
+        goals=("finding-lifecycle",),
         phase=("consume-test", "verify", "exploit", "code-hunt"),
         summary="Create or upsert a finding through helper-normalized lifecycle defaults.",
         schema_name="finding-record.schema.json",
@@ -606,6 +635,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "link-finding": CommandContract(
         name="link-finding",
+        goals=("finding-lifecycle",),
         phase=("verify", "report"),
         summary="Group findings by root cause, attach intel, or record a generic typed finding link (incl. the unblock path for blocked findings).",
         schema_name="backend RootCauseLinkRequest / FindingLinkRequest",
@@ -803,6 +833,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "list-finding-group": CommandContract(
         name="list-finding-group",
+        goals=("finding-lifecycle",),
         phase=("report",),
         summary="Inspect a root-cause finding group as the backend will present it to reporting and the UI.",
         schema_name="backend finding group projection",
@@ -819,6 +850,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "list-report-findings": CommandContract(
         name="list-report-findings",
+        goals=("finding-lifecycle",),
         phase=("report",),
         summary="Fetch the grouped report finding projection that report-writer consumes.",
         schema_name="backend grouped report-findings projection",
@@ -867,6 +899,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "artifact": CommandContract(
         name="artifact",
+        goals=("artifact",),
         summary="Register, refresh, search, fetch, or scratch-mark indexed engagement-local artifact metadata.",
         schema_name="assessment_artifacts table + /assessment/artifacts endpoints",
         preferred_invocations=(
@@ -901,6 +934,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "verify-finding": CommandContract(
         name="verify-finding",
+        goals=("finding-lifecycle",),
         phase=("verify", "code-verify"),
         summary="Apply a verification transition to an existing finding through the audit ledger.",
         schema_name="backend FindingVerifyRequest",
@@ -935,6 +969,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "kill-finding": CommandContract(
         name="kill-finding",
+        goals=("finding-lifecycle",),
         phase=("verify", "code-verify"),
         summary="Persist a false_positive verification with the required kill metadata.",
         schema_name="backend FindingVerifyRequest (false_positive)",
@@ -966,6 +1001,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "update-finding": CommandContract(
         name="update-finding",
+        goals=("finding-lifecycle",),
         summary="Patch non-verification finding fields on an existing slug.",
         schema_name="backend FindingPatchRequest",
         preferred_invocations=(
@@ -1031,6 +1067,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "reset-finding": CommandContract(
         name="reset-finding",
+        goals=("finding-lifecycle",),
         summary="Reopen a previously verified or false-positive finding for re-triage.",
         schema_name="backend FindingPatchRequest (reopen)",
         preferred_invocations=(
@@ -1127,6 +1164,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "update-intel": CommandContract(
         name="update-intel",
+        goals=("recon",),
         summary="PATCH an existing intel row by id without inserting a new history record.",
         schema_name="backend IntelUpdateRequest (per-type updatable column whitelist)",
         preferred_invocations=(
@@ -1151,6 +1189,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "supersede-intel": CommandContract(
         name="supersede-intel",
+        goals=("recon",),
         summary="Insert a replacement intel row; old row stays for audit but is filtered from reports.",
         schema_name="type-specific intel schema for the new payload",
         preferred_invocations=(
@@ -1181,6 +1220,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-dispatch": CommandContract(
         name="code-dispatch",
+        goals=("dispatch", "code-analysis"),
         phase=("code-classify", "code-hunt"),
         summary="Operate the backend code-analysis queue and cross-file trigger lifecycle.",
         schema_name="backend code-analysis queue / trigger request models",
@@ -1220,6 +1260,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-index": CommandContract(
         name="code-index",
+        goals=("code-analysis",),
         phase=("code-ingest",),
         summary="Build the structural index under the engagement analysis-state directory.",
         schema_name="structural-index aggregate manifest, per-repo manifest, and per-file index JSON",
@@ -1252,6 +1293,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-classify": CommandContract(
         name="code-classify",
+        goals=("code-analysis",),
         phase=("code-classify",),
         summary="Bulk-classify code files and persist architect-assigned analysis priority.",
         schema_name="code-file-classification.schema.json",
@@ -1292,6 +1334,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-record-modules": CommandContract(
         name="code-record-modules",
+        goals=("code-analysis",),
         phase=("code-ingest", "code-classify"),
         summary="Record repository module boundaries from the architecture mapping pass.",
         schema_name="backend CodeModuleRecord list",
@@ -1322,6 +1365,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-record-threat-model": CommandContract(
         name="code-record-threat-model",
+        goals=("code-analysis",),
         phase=("code-ingest", "code-classify"),
         summary="Record the repository threat model produced by code-architect.",
         schema_name="backend threat_model object",
@@ -1343,6 +1387,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "code-record-analysis": CommandContract(
         name="code-record-analysis",
+        goals=("code-analysis",),
         phase=("code-hunt", "code-verify"),
         summary="Record a code-vuln-hunter result against the claimed queue item that produced it.",
         schema_name="code-analysis-result.schema.json",
@@ -1404,27 +1449,32 @@ _CONTRACTS: dict[str, CommandContract] = {
     # `get_contract` -> `_CONTRACTS.get(name)` with no extra wiring.
     "list-commands": CommandContract(
         name="list-commands",
+        goals=("discovery",),
         summary="Per-phase catalog of helper-owned assess commands (this command); each row points at `vigil assess contract <verb>`.",
         schema_name="assess.lib.contracts registry (CommandContract + kali verb table)",
         preferred_invocations=(
             "vigil assess list-commands",
             "vigil assess list-commands --phase consume-test",
+            "vigil assess list-commands --goal submission",
             "vigil assess list-commands --kali-only --grep sqlmap",
             "vigil assess list-commands --json",
         ),
         author_supplied_fields=(),
         helper_defaults=(
             ("--phase", "unset (show every phase group plus the phase-agnostic utilities)"),
+            ("--goal", "unset (show all; set to filter to a task goal — AND-composes with --phase)"),
         ),
         notes=(
             "Discovery command — the commands analogue of `list-skills` / `list-references`. Sourced from the contract registry, so a new command with a `phase` tag is picked up automatically (never hand-maintained).",
             "`--phase <N>` accepts the canonical kali_audit.ALLOWED_PHASES vocabulary; the `consume` short alias resolves to `consume-test`.",
+            "`--goal <g>` filters by task goal (submission, scope, recon, discovery, dns, http-probe, artifact, finding-lifecycle, dispatch, code-analysis, oob); it AND-composes with `--phase` and surfaces in each row and in `contract <verb>`. Use it to answer 'which command produces the final submission?' (`--goal submission`).",
             "`--kali-only` restricts to `kali <verb>` wrappers; `--grep <s>` substring-filters name/summary; `--json` emits the structured rows (the downstream contract).",
             "Phase-agnostic utilities (empty phase tuple) group separately at the bottom and are omitted from a `--phase` filter.",
         ),
     ),
     "list-skills": CommandContract(
         name="list-skills",
+        goals=("discovery",),
         summary="List available skills with compact descriptions.",
         schema_name="agent/skills/*/SKILL.md frontmatter",
         preferred_invocations=(
@@ -1439,6 +1489,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "list-references": CommandContract(
         name="list-references",
+        goals=("discovery",),
         summary="List available reference docs with compact descriptions.",
         schema_name="agent/references/**/*.md frontmatter",
         preferred_invocations=(
@@ -1454,6 +1505,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "contract": CommandContract(
         name="contract",
+        goals=("discovery",),
         summary="Show schema, defaults, and examples for a helper-owned CLI contract.",
         schema_name="assess.lib.contracts.render_contract",
         preferred_invocations=(
@@ -1468,6 +1520,53 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "The detail half of the discovery pair: `list-commands` finds the command, `contract` shows its full schema (preferred invocations, helper defaults, author-supplied fields, common mistakes, JSON examples).",
             "Generated from the same source as the CLI's argparse, so it never drifts from the real command.",
+        ),
+    ),
+    "export-submission": CommandContract(
+        name="export-submission",
+        goals=("submission",),
+        phase=("report",),
+        summary="Render one finding into a platform-shaped, submission-ready submission.md (+ context JSON); --draft always writes, final mode gates on proof completeness.",
+        schema_name="backend GET /findings/{slug} + finding_render.py (details_json poc_* / evidence_ref)",
+        preferred_invocations=(
+            "vigil assess export-submission <slug> --platform direct --draft",
+            "vigil assess export-submission <slug> --platform bugcrowd --vrt-category <c>",
+            "vigil assess export-submission <slug> --platform hackerone --weakness <w>",
+            "vigil assess export-submission <slug> --platform direct --json",
+        ),
+        author_supplied_fields=(
+            "slug (finding slug to render, e.g. VA-047)",
+            "--platform bugcrowd|hackerone|direct (required)",
+            "--vrt-category <c> (Bugcrowd; else read from details.vrt_category)",
+            "--weakness <w> (HackerOne; else read from details.weakness)",
+        ),
+        helper_defaults=(
+            ("--draft", "unset (final mode: strict proof gate; --draft always writes with [NEEDS: ...] markers)"),
+            ("--output", "$ENGAGEMENT_DIR/submissions/<slug>/"),
+        ),
+        notes=(
+            "The submission-first replacement for the retired red/code report.md path. --draft is the normal report-writer entrypoint; final (default) exits non-zero unless title, severity + CVSS vector, platform taxonomy, an attacker-impact statement, and >=1 concrete proof are all present.",
+            "Command evidence comes ONLY from explicit finding-links (target_kind=command_run) plus evidence_ref/poc_* — no fuzzy command search. Run a targeted `list-command-runs --q <url/param>` to find and link the reproducing command first.",
+            "Registers submission.md as a finding-linked artifact kind=submission; never sets submission_status. FAITHFUL render — it does not rewrite content; it FLAGS internal UUIDs / absolute engagement paths / cases.db references as hygiene_warnings (context JSON + stderr) for the report-writer to strip before external submission.",
+        ),
+    ),
+    "scope-explain": CommandContract(
+        name="scope-explain",
+        goals=("scope",),
+        summary="Explain the scope verdict for one or more URLs/hosts: admitted/denied, the matching allow/deny entry, required headers, rate limit, vendor-SaaS warning (read-only, no network).",
+        schema_name="assess.lib.scope (scope.json allow/deny entries)",
+        preferred_invocations=(
+            "vigil assess scope-explain https://api.example.com",
+            "vigil assess scope-explain 10.0.0.5 example.com --json",
+            "vigil assess scope-explain --input-file hosts.txt --json",
+        ),
+        author_supplied_fields=(
+            "targets (zero or more URLs/hosts to explain)",
+            "--input-file <path> (read additional URLs/hosts one per line; '-' for stdin)",
+        ),
+        notes=(
+            "Read-only scope oracle — pure composition over the scope primitives, no writes and no backend/network call. Every verdict names the exact allow/deny entry that drove the decision (denylist wins).",
+            "--json emits the verdict structs; the text view emits a vendor-SaaS WARN to stderr when a host matches a known SaaS-fronted suffix.",
         ),
     ),
     "check-phase-readiness": CommandContract(
@@ -1527,6 +1626,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "list-findings": CommandContract(
         name="list-findings",
+        goals=("finding-lifecycle",),
         summary="List findings with common CLI-side filters (severity, workflow/verification state, root-cause group, free-text search).",
         schema_name="GET /assessment/findings",
         preferred_invocations=(
@@ -1543,6 +1643,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "list-intel": CommandContract(
         name="list-intel",
+        goals=("recon",),
         summary="List intel records per-type or via full-text search.",
         schema_name="GET /assessment/intel (+ /intel/search)",
         preferred_invocations=(
@@ -1706,9 +1807,17 @@ def render_contract(name: str) -> str:
         f"Command: {contract.name}",
         f"Summary: {contract.summary}",
         f"Schema: {contract.schema_name}",
-        "",
-        "Preferred invocation:",
     ]
+    if contract.goals:
+        lines.append(f"Goals: {', '.join(contract.goals)}")
+    if contract.phase:
+        lines.append(f"Phase: {', '.join(contract.phase)}")
+    lines.extend(
+        [
+            "",
+            "Preferred invocation:",
+        ]
+    )
     lines.extend(f"  - {entry}" for entry in contract.preferred_invocations)
     lines.extend(
         [

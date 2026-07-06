@@ -1,11 +1,12 @@
 # Code Phase 4 — Fuzz
 
 **Read-on-phase-entry.** When you ENTER Code Phase 4 (Fuzz — conditional), Read this doc to
-evaluate the entry gate (run vs. skip directly to report) before dispatching anything, and re-read
-it on a method re-anchor. It carries the conditional run/skip criteria, the entry-gate commands, 4A
-Target Selection + Harness Construction (`code-fuzz-engineer` dispatch fields), 4B Campaign Execution
-(the traditional-tool libFuzzer/AFL++ bash), 4C Crash Triage, the Phase 4 exit gate, and the terminal
-Report Dispatch step that applies whether Phase 3 skipped straight to report or Phase 4 ran first.
+evaluate the entry gate (run vs. skip directly to the submission closeout) before dispatching
+anything, and re-read it on a method re-anchor. It carries the conditional run/skip criteria, the
+entry-gate commands, 4A Target Selection + Harness Construction (`code-fuzz-engineer` dispatch
+fields), 4B Campaign Execution (the traditional-tool libFuzzer/AFL++ bash), 4C Crash Triage, the
+Phase 4 exit gate, and the terminal submission closeout step that applies whether Phase 3 skipped
+straight to closeout or Phase 4 ran first.
 Cross-phase machinery — the Core Loop, the Agent Roster, and the Dispatch Context Template /
 Pre-Dispatch Checklist — stays in `agent/operator-core-code.md`; this doc does not restate it.
 `code-fuzz-engineer` carries no family mindset lens (see "Phased mindset flow (code)" in
@@ -158,17 +159,40 @@ ls tools/fuzz-state/reports/*-triage.json
 vigil assess transition-phase complete --track code
 ```
 
-**Report dispatch:**
-For a final report, run `vigil assess check-phase-readiness --phase report` before dispatching
-`report-writer`. Report-writer runs `vigil assess list-report-findings --mode final --json` for final output and
-`vigil assess list-report-findings --mode draft --json` for interim output; both include code and web findings from the
-shared backend with root-cause grouping applied. Fuzz findings (CF-xxx) include crash inputs and ASAN reports as evidence.
-Use the same draft → review-and-fix QA → publish gate as runtime engagements: draft generation
-writes `report.md` and returns the 13-check checklist, a fresh `report-writer` reviews and fixes
-the rendered report, and publication plus `reported` lifecycle transitions wait for `QA PASS`.
+**Submission closeout:**
+The code track has no separate `report.md` deliverable — its terminal output is a per-finding
+submission, the same as web/runtime engagements. Before dispatching `report-writer`, run
+`vigil assess check-phase-readiness --phase report` (the shared readiness gate: coverage,
+root-cause consolidation, severity/CVSS alignment) and `vigil assess list-report-findings --mode
+final --json` (or `--mode draft --json` for interim) to confirm the finding set — this includes
+code and web findings from the shared backend with root-cause grouping applied. Fuzz findings
+(CF-xxx) carry crash inputs and ASAN reports as evidence.
+
+For each finding to close out, `report-writer` follows the "Submission-First Closeout" procedure
+in `agent/skills/report-generation/SKILL.md`:
+1. `vigil assess export-submission <slug> --draft --platform direct` — code findings default to
+   `--platform direct` (source review, no external bug-bounty program) unless the code work runs
+   under an active bounty engagement (see "Integration with Web Engagement" above), in which case
+   use `--platform bugcrowd`/`--platform hackerone` to match the live program. Draft mode always
+   writes `submissions/<slug>/submission.md` + `submission-context.json`, with `[NEEDS: ...]`
+   markers for anything missing.
+2. Edit the draft to resolve `[NEEDS: ...]` markers: pull the exact reproducing command with a
+   *targeted* `vigil assess list-command-runs --q <finding's file/function/parameter>` (keyed tightly
+   to this finding, not a broad sweep of the engagement) or the finding's own `poc_code`/`evidence_ref`.
+3. Run the same review-and-fix QA pass runtime engagements use (the 13-check self-review) against
+   the drafted `submission.md`, then blind triage — mandatory for every Medium-or-above finding
+   (`agent/skills/blind-triage/SKILL.md`). Only an `Accept*` verdict clears a finding for
+   submission; anything else routes back to `report-writer` or the specialist that owns the finding.
+4. Publish: re-run `export-submission <slug> --platform <same platform>` (non-draft) once the
+   strict final gate is satisfiable (title; severity + CVSS vector; platform taxonomy where
+   applicable; an attacker-impact statement; and ≥1 concrete proof). It registers `submission.md`
+   as a finding-linked artifact (`kind="submission"`) and never sets `submission_status` — set
+   that explicitly, per "Submission Status Lifecycle" in `agent/skills/report-generation/SKILL.md`,
+   only once the finding is actually delivered. Mark included findings `workflow_status=reported`
+   the same way as web engagements once delivered.
 
 ---
 
 Phase index (path → purpose) lives in `agent/operator-core-code.md` under "Phase Index". Prior:
-`agent/phases/code-phase-3-verify-variant.md`. This is the last code-track phase doc; report
-generation is described above.
+`agent/phases/code-phase-3-verify-variant.md`. This is the last code-track phase doc; the
+submission closeout is described above.

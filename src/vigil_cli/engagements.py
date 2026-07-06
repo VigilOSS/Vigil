@@ -523,6 +523,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         repos=list(plan.repos),
         date_label=plan.date_label,
     )
+    _write_issues_doc(eng_dir)
     _write_engagement_brief_stub(agent_root, eng_dir)
     # No auth.json scaffold: credentials live in the centralized store and an
     # engagement with no credentials reads as anonymous (vigil auth import /
@@ -1064,9 +1065,24 @@ _CHROME_PATHS = [
 
 
 def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
+    # Blue incident engagements still scaffold a report.md; render it as before.
+    # Red/code/android engagements no longer seed one — their closeout is the
+    # per-finding submissions tree (`vigil assess export-submission` writes
+    # submissions/<slug>/submission.md), so fall back to rendering that tree.
     report_md = eng_dir / "report.md"
-    if not report_md.exists():
-        raise SystemExit(f"report.md not found in {eng_dir}")
+    if report_md.exists():
+        sources: list[Path] = [report_md]
+    else:
+        sources = sorted(
+            p for p in eng_dir.glob("submissions/*/submission.md") if p.is_file()
+        )
+        if not sources:
+            raise SystemExit(
+                f"nothing to export in {eng_dir}: no report.md and no "
+                "submissions/<slug>/submission.md. Generate per-finding submissions "
+                "first with `vigil assess export-submission <finding-slug> "
+                "--platform <bugcrowd|hackerone|direct>`."
+            )
 
     pandoc = shutil.which("pandoc")
     if not pandoc:
@@ -1082,7 +1098,8 @@ def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
     html_path = eng_dir / ".report_tmp.html"
     try:
         subprocess.run(
-            [pandoc, str(report_md), "-o", str(html_path), "--standalone", "--embed-resources",
+            [pandoc, *[str(src) for src in sources], "-o", str(html_path),
+             "--standalone", "--embed-resources",
              "--metadata", "title=Engagement Report"],
             check=True,
         )
@@ -1447,28 +1464,46 @@ def export_engagement_tree(
 
 
 def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, target: str, repos: list[dict[str, str]], date_label: str) -> None:
+    # Red-family engagements (web/code/both/android, and any default/fallback
+    # type) no longer seed a `report.md`: their closeout artifact is the
+    # per-finding submissions tree written by `vigil assess export-submission`
+    # and rendered to PDF by `export_pdf`. Only blue incident engagements keep a
+    # scaffolded `report.md` for the report-writer to render into.
+    if engagement_type != "blue":
+        return
+    # Blue report variant lives behind plan unit 16. Until then we seed a
+    # minimal scaffold so report-writer dispatch always has a report.md to
+    # render into.
     lines = ["# Engagement Report", ""]
-    if engagement_type == "code":
-        lines.append(f"- **Name**: {name}")
-        display = ", ".join(repo["path"] for repo in repos) if repos else "(none - add source to ./source/)"
-        lines.append(f"- **Repositories**: {display}")
-    elif engagement_type == "android":
-        lines.append(f"- **Name**: {name}")
-        lines.append("- **Scope Mode**: Android artifact-only")
-    elif engagement_type == "web":
-        lines.append(f"- **Target**: {target}")
-    elif engagement_type == "blue":
-        # Blue report variant lives behind plan unit 16. Until then we seed a
-        # minimal scaffold mirroring the other branches so report-writer
-        # dispatch always has a report.md to render into.
-        lines.append(f"- **Customer**: {name or '-'}")
-        lines.append(f"- **Scope**: {target}")
-        lines.append("- **Report Kind**: Incident (blue)")
-    else:
-        lines.append(f"- **Name**: {name}")
-        lines.append(f"- **Target**: {target}")
+    lines.append(f"- **Customer**: {name or '-'}")
+    lines.append(f"- **Scope**: {target}")
+    lines.append("- **Report Kind**: Incident (blue)")
     lines.extend([f"- **Engagement Date**: {date_label}", "- **Status**: Pending - report not yet generated", "", "---", ""])
     (eng_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_issues_doc(eng_dir: Path) -> None:
+    """Seed ISSUES-AND-ENHANCEMENTS.md — the operator's log of REUSABLE lessons.
+
+    This file is for product / prompt / tooling improvements noticed DURING the
+    engagement that outlive it (a confusing CLI flag, a missing skill step, a
+    tool that needs a wrapper). It is deliberately NOT a findings log: findings,
+    evidence, reproducing commands, and specialist handoffs stay backend-owned
+    (recorded via `vigil assess`) and are never duplicated here.
+    """
+    lines = [
+        "# Issues & Enhancements",
+        "",
+        "> Operator-owned log of REUSABLE product / prompt / tooling lessons from",
+        "> this engagement — things worth fixing in Vigil itself (a confusing flag,",
+        "> a missing skill step, a tool that needs a wrapper), not per-target notes.",
+        ">",
+        "> NOT a findings log. Findings, evidence, reproducing commands, and",
+        "> specialist handoffs stay backend-owned — record them via `vigil assess`,",
+        "> do not duplicate them here.",
+        "",
+    ]
+    (eng_dir / "ISSUES-AND-ENHANCEMENTS.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 # Canonical program-brief section headings (PROMPT-TODO §2 / CONSOLIDATED-PLAN
