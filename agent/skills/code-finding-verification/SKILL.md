@@ -248,6 +248,17 @@ as Medium at most, often hardening or documentation. See
 `agent/references/code-vuln-patterns/algorithmic-dos.md` "Decompression Bombs"
 for concrete examples of the boundary between High and Medium.
 
+### Severity Calibration — defer to the shared impact gate (before `confirmed`)
+
+Checks 1–5 establish the bug is **real** (existence); they do not judge whether a *real* bug's impact
+is **overclaimed** — a separate, cross-track axis. Before recording `confirmed` at the hunter's
+severity, run the shared gate (`agent/references/finding-fp-and-severity-gate.md`): **C5** (per-metric
+CVSS discipline), **C7** (by-design/documented/precedent), and the **`hunting.md §3` net-new test**
+(a real injection that only reproduces what the attacker's own controlled repo/PR/template/build
+already achieves grants zero net-new capability). A finding can PASS all five existence checks and
+still DOWNGRADE/KILL there — cite the gate check, not a failed existence check. This calibration's
+absence is what let real-but-redundant build-tool injections ship as High.
+
 ## Multi-Perspective Voting Protocol
 
 Entered when any of Checks 1-5 returns **ESCALATE** — the evidence fits neither the PASS bar nor the KILL bar for that check. Check 5 is one entry point; Checks 1-4 may also escalate when their specific ambiguity is recorded.
@@ -468,4 +479,4 @@ When you persist structured verification state, include:
 - Full filesystem access — read source files directly for independent verification of taint paths and guards
 - **CWE pattern reference (REQUIRED)** — load the `agent/references/code-vuln-patterns/*.md` file matching each finding's CWE. Pattern knowledge is needed for guard completeness evaluation (Check 2: are ALL variant forms of this bug class guarded?) and exploitation feasibility assessment (Check 4: what does a real exploit look like for this pattern?)
 - Variant findings from Phase 3 — load variant context for variant-aware verification
-- **Live-finding FP & severity gate** — `agent/references/finding-fp-and-severity-gate.md`: the parallel C1–C7 checklist for live/web findings (data-sensitivity, public-data, two-context boundary, id-enumerability, per-metric CVSS, orphan-write read-back). Use it when a finding has a runtime PoC; this skill stays authoritative for source-only findings.
+- **Shared impact & severity-calibration gate** — `agent/references/finding-fp-and-severity-gate.md`: the cross-track home for the impact/overclaim checks (C5 per-metric CVSS, C7 by-design/documented/precedent, and C1–C4 live data-exposure mechanics). This skill's five checks establish bug-EXISTENCE; run the gate's C5/C7 + the `hunting.md §3` net-new test to calibrate severity before `confirmed` — see "Severity Calibration" above. Shared with the live/web verifier, not web-only.
