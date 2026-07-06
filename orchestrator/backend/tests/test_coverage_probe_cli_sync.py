@@ -54,6 +54,28 @@ def test_coverage_statuses_mirror_backend_enum() -> None:
     )
 
 
+def test_surface_statuses_mirror_backend_enum() -> None:
+    """lib/surfaces.py's status sets must equal backend SurfaceStatus.
+
+    ``VALID_STATUSES`` mirrors the full ``SurfaceStatus`` vocabulary and
+    ``RESOLVABLE_STATUSES`` mirrors ``SURFACE_RESOLUTION_STATUSES`` (the full
+    set minus the ``discovered`` seed state). The CLI cannot import the backend,
+    so this guard fails loudly if either mirror drifts.
+    """
+    from app.services.state_manager.coverage import (
+        SURFACE_RESOLUTION_STATUSES,
+        SurfaceStatus,
+    )
+    from assess.lib import surfaces
+
+    assert surfaces.VALID_STATUSES == {s.value for s in SurfaceStatus}, (
+        "surfaces.VALID_STATUSES drifted from backend SurfaceStatus"
+    )
+    assert surfaces.RESOLVABLE_STATUSES == {s.value for s in SURFACE_RESOLUTION_STATUSES}, (
+        "surfaces.RESOLVABLE_STATUSES drifted from backend SURFACE_RESOLUTION_STATUSES"
+    )
+
+
 def test_cli_registers_new_probe_coverage_verbs() -> None:
     imported = _cli_imported_commands()
     registered = _cli_registered_commands()

@@ -3,9 +3,8 @@
 The class-typed coverage items are seeded ``pending`` by the gf-bucket bridge at
 ingest (one per implied vuln-class on a surface). A specialist advances a
 coverage item's status once it has tested (or ruled out) that class on that
-surface. This drives ``PATCH /assessment/coverage-items/{id}`` so agents don't
-fall back to raw ``vigil assess patch coverage-items/<id> <json>`` (which is now
-redirected here).
+surface. This drives ``PATCH /assessment/coverage-items/{id}`` — the dedicated
+typed verb for resolving a coverage item.
 
 Statuses mirror the backend ``CoverageStatus`` vocabulary (source of truth:
 ``orchestrator/backend/app/services/state_manager/coverage.py``): ``covered`` /

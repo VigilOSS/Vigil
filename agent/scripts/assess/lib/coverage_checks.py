@@ -42,7 +42,7 @@ from assess.lib.scope import (
 
 
 # ===========================================================================
-# check-coverage — surface-resolution gate (old check_coverage.py body)
+# surface-coverage — surface-resolution gate (former check-coverage body)
 # ===========================================================================
 def render_surface_coverage(readiness: Any) -> tuple[bool, list[str], list[str]]:
     """Render the surface-coverage gate from a ``/coverage-readiness`` payload.
@@ -53,7 +53,7 @@ def render_surface_coverage(readiness: Any) -> tuple[bool, list[str], list[str]]
     success line. The caller decides exit code + stream.
     """
     if not isinstance(readiness, dict):
-        return False, [], ["check-coverage: unexpected response from backend"]
+        return False, [], ["surface-coverage: unexpected response from backend"]
 
     unresolved = readiness.get("unresolved_surfaces") or []
     partially_covered = readiness.get("partially_covered_surfaces") or []

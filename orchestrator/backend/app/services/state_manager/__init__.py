@@ -58,6 +58,8 @@ from .dispatches import (
 )
 from .coverage import (
     COVERAGE_STATUSES,
+    SURFACE_STATUSES,
+    SURFACE_RESOLUTION_STATUSES,
     PROBE_RESULT_STATUSES,
     PROBE_RESULT_STATUSES_COVERING,
     PROBE_RESULT_STATUS_DEFAULT,
@@ -84,7 +86,6 @@ from .coverage import (
     coverage_readiness,
     PER_HOST_OBJECTIVES,
     per_host_coverage,
-    per_host_finding_verdicts,
     web_uncovered_high_route_hosts,
     update_coverage_item_status,
     vendor_saas_hosts_pending_decision,
@@ -221,6 +222,8 @@ __all__ = [
     "list_decisions",
     "update_decision",
     "COVERAGE_STATUSES",
+    "SURFACE_STATUSES",
+    "SURFACE_RESOLUTION_STATUSES",
     "PROBE_RESULT_STATUSES",
     "PROBE_RESULT_STATUSES_COVERING",
     "PROBE_RESULT_STATUS_DEFAULT",
@@ -247,7 +250,6 @@ __all__ = [
     "coverage_readiness",
     "PER_HOST_OBJECTIVES",
     "per_host_coverage",
-    "per_host_finding_verdicts",
     "web_uncovered_high_route_hosts",
     "update_coverage_item_status",
     "vendor_saas_hosts_pending_decision",
