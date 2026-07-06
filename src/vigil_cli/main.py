@@ -81,6 +81,7 @@ from .orchestrator import (
     stop_orchestrator,
 )
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
+from .quickstart import QuickstartOptions, run_quickstart
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_image_build_state, runtime_status, start_runtime, stop_runtime
 from .status import collect_doctor_checks, collect_status, print_doctor, print_status, write_install_meta
 from .up import UpOptions, run_up
@@ -143,6 +144,44 @@ def main(argv: list[str] | None = None) -> None:
     update_p.add_argument("--dry-run", action="store_true")
     update_p.add_argument("--force-image", action="store_true")
     update_p.add_argument("--skip-image-check", action="store_true")
+
+    quickstart_p = sub.add_parser(
+        "quickstart",
+        help="Onboarding wizard: probe host prerequisites/recon tools and print the setup checklist",
+        description=(
+            "macOS-first onboarding wizard. Reports the bootstrap prerequisites "
+            "(uv/git/docker/go/npm), detects missing host-side recon tools, and "
+            "prints the ordered next-command checklist for the resolved install "
+            "root. It only mutates the host when --install-host-tools is passed "
+            "(and never under --dry-run); without it the host-tool installs are "
+            "planned/printed, not run."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    quickstart_p.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Never prompt; use flags/defaults only (implied when stdin is not a TTY)",
+    )
+    quickstart_p.add_argument(
+        "--yes",
+        dest="assume_yes",
+        action="store_true",
+        help="Assume yes to prompts (e.g. run the host-tool installs without confirmation)",
+    )
+    quickstart_p.add_argument(
+        "--install-host-tools",
+        action="store_true",
+        help="Actually run the host-tool install commands (default: plan/print only)",
+    )
+    quickstart_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Plan everything, execute nothing (overrides --install-host-tools)",
+    )
+    quickstart_p.add_argument("--target", help="First engagement target URL/host for the checklist")
+    quickstart_p.add_argument("--hosts", help="In-scope hosts (comma-separated) for the checklist")
+    quickstart_p.add_argument("--json", action="store_true", help="Emit the readiness report as JSON")
 
     sub.add_parser("doctor")
     status_p = sub.add_parser("status")
@@ -792,6 +831,21 @@ def main(argv: list[str] | None = None) -> None:
         print_doctor(collect_doctor_checks(install_root, runner=docker_run_command))
     elif args.command == "status":
         print_status(collect_status(install_root, runner=docker_run_command), json_output=args.json)
+    elif args.command == "quickstart":
+        exit_code = run_quickstart(
+            QuickstartOptions(
+                install_root=install_root,
+                non_interactive=args.non_interactive,
+                assume_yes=args.assume_yes,
+                install_host_tools=args.install_host_tools,
+                dry_run=args.dry_run,
+                json_output=args.json,
+                target=args.target,
+                hosts=args.hosts,
+            )
+        )
+        if exit_code:
+            raise SystemExit(exit_code)
     elif args.command == "up":
         if args.yes_restart_runtime and args.no_restart_runtime:
             raise SystemExit("Specify only one of --yes-restart-runtime or --no-restart-runtime.")

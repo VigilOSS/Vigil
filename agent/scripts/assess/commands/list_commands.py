@@ -16,6 +16,8 @@ Filters:
   --phase <N>   show only commands meaningful in a canonical engagement phase
                 (kali_audit.ALLOWED_PHASES; the `consume` short alias for
                 `consume-test` is accepted).
+  --goal <g>    show only commands tagged with a cross-cutting intent goal
+                (contracts.COMMAND_GOALS); AND-composes with --phase.
   --kali-only   restrict to `kali <verb>` runtime-tool wrappers.
   --grep <s>    substring filter on command name or summary.
   --json        emit the structured rows (the downstream contract) instead of
@@ -36,6 +38,11 @@ from assess.lib import contracts
 # `--phase` accepts every canonical phase plus the readiness command's short
 # `consume` alias (both resolve via contracts.canonical_phase).
 _PHASE_CHOICES = (*contracts.CATALOG_PHASES, "consume", "consume_test")
+
+# `--goal` accepts the canonical cross-cutting goal vocabulary (a command's
+# `goals` tags are a subset of this). Sourced from contracts so a new goal is
+# auto-covered as a valid filter value.
+_GOAL_CHOICES = contracts.COMMAND_GOALS
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -58,6 +65,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "Show only commands meaningful in this phase (canonical "
             "kali_audit.ALLOWED_PHASES vocabulary; `consume` is accepted as the "
             "short alias for `consume-test`)."
+        ),
+    )
+    p.add_argument(
+        "--goal",
+        dest="goal",
+        choices=_GOAL_CHOICES,
+        default=None,
+        help=(
+            "Show only commands tagged with this cross-cutting intent goal "
+            "(contracts.COMMAND_GOALS). AND-composes with --phase."
         ),
     )
     p.add_argument(
@@ -92,6 +109,8 @@ def run(args: argparse.Namespace) -> None:
         rows = [r for r in rows if term in f"{r['name']} {r['summary']}".lower()]
     if phase_filter:
         rows = [r for r in rows if phase_filter in r["phases"]]
+    if args.goal:
+        rows = [r for r in rows if args.goal in r["goals"]]
 
     if args.as_json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
@@ -112,6 +131,7 @@ def _collect_rows() -> list[dict]:
                 "name": contract.name,
                 "summary": contract.summary,
                 "phases": list(contract.phase),
+                "goals": list(contract.goals),
                 "kali": contract.name.startswith("kali "),
                 "contract": f"vigil assess contract {contract.name}",
             }

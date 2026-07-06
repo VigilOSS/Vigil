@@ -1,12 +1,24 @@
 ---
-description: "Bug bounty submission format for Bugcrowd/HackerOne: per-finding submissions with POC, VRT, evidence"
+description: "Bug bounty submission selector + shared authoring rules (voice, PII redaction, PoC authoring, pre-submission checklist); per-platform scaffolds live in templates/{bugcrowd,hackerone,direct}.md"
 skill: report-generation
 category: Disclosure & Reporting Formats
 ---
 
 # Bug Bounty Submission Format
 
-Use this format when the operator requests a bug bounty submission (Bugcrowd, HackerOne, or similar platform). Each finding is a standalone submission.
+Use this when the operator requests a bug bounty submission (Bugcrowd, HackerOne, or similar platform). Each finding is a standalone submission.
+
+## Platform selector
+
+`vigil assess export-submission <slug> --platform <p> --draft` generates the per-finding draft; pick the platform below and use its scaffold for the platform-specific fields. This doc holds the cross-platform authoring rules all three share (voice, section budgets, PII redaction, PoC authoring, de-harnessing, and the pre-submission checklist) — the templates link back here rather than repeating them.
+
+| Target | Scaffold | Platform-specific field |
+|---|---|---|
+| Bugcrowd | `agent/skills/report-generation/templates/bugcrowd.md` | VRT category + P1–P4 priority |
+| HackerOne | `agent/skills/report-generation/templates/hackerone.md` | CWE weakness |
+| Direct (company / vendor) | `agent/skills/report-generation/templates/direct.md` | none (VRT / H1 fields dropped) |
+
+For a vendor/CERT disclosure *email* rather than a platform submission, use `agent/references/disclosure-email-format.md` instead.
 
 ## Staging Convention
 
@@ -251,6 +263,9 @@ Verify every item before handing the submission file to the operator. Any failin
 - [ ] Contractions appear where natural (doesn't, it's, I've, won't) — the prose is not uniformly formal
 - [ ] At least one sentence carries a first-person observation or hunch (e.g. "I traced the failure to…") — not uniform third-person narration. (External submissions only; the internal report.md stays impersonal.)
 
-## Example
+## Examples
 
-See `agent/references/examples/bugbounty-submission-ldap-injection.md` for a complete example of this format applied to an LDAP injection finding with a working POC.
+- `agent/references/examples/submission-bugcrowd-idor-invoice-access.md` — Bugcrowd IDOR (VRT category, inline request/response proof)
+- `agent/references/examples/submission-hackerone-ssrf-webhook.md` — HackerOne SSRF (CWE weakness, `poc_code` proof)
+- `agent/references/examples/submission-direct-sql-injection-login.md` — Direct disclosure SQL injection (no platform-specific fields)
+- `agent/references/examples/bugbounty-submission-ldap-injection.md` — LDAP injection with a working PoC

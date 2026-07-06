@@ -532,6 +532,82 @@ def host_admitted(
     return host_in_scope(host, allow_entries) and not host_in_scope(host, deny_entries)
 
 
+def explain_target(
+    token: str,
+    allow_entries: list[dict[str, str]],
+    deny_entries: list[dict[str, str]],
+    scope: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a read-only scope verdict struct for one url-or-host ``token``.
+
+    Pure composition over the existing scope primitives — no new matching logic,
+    no writes, no network. Parses ``token`` to a host with
+    :func:`host_from_token`, then reports the admission decision AND *which*
+    entries drove it: :func:`host_admitted` only returns a bool, so the matching
+    allow/deny entries are recovered by iterating :func:`entry_matches_host` over
+    the pre-classified ``allow_entries`` / ``deny_entries``. Denylist wins (same
+    rule as :func:`host_admitted`): a host covered by an in-scope wildcard but
+    also by an ``out_of_scope`` carve-out is denied.
+
+    The struct carries a stable key set (every key always present):
+    ``target`` (the raw token), ``host`` (parsed host or ``None`` for an
+    unparseable token), ``admitted`` (bool), ``reason`` (human-readable),
+    ``allow_entry`` / ``allow_entry_kind`` (the matched allowlist scope string +
+    its kind, or ``None``), ``deny_entry`` / ``deny_entry_kind`` (matched
+    carve-out, or ``None``), ``required_headers`` (program attribution headers),
+    ``rate_limit`` (per-invocation req/s ceiling or ``None``), and
+    ``vendor_saas`` (vendor label when the host's shape matches a known
+    SaaS-fronted suffix, else ``None``).
+    """
+    host = host_from_token(token)
+    headers = required_headers(scope)
+    rl = rate_limit(scope)
+
+    if not host:
+        return {
+            "target": token,
+            "host": None,
+            "admitted": False,
+            "reason": "invalid token: could not parse a host",
+            "allow_entry": None,
+            "allow_entry_kind": None,
+            "deny_entry": None,
+            "deny_entry_kind": None,
+            "required_headers": headers,
+            "rate_limit": rl,
+            "vendor_saas": None,
+        }
+
+    allow_match = next(
+        (e for e in allow_entries if entry_matches_host(e, host)), None
+    )
+    deny_match = next(
+        (e for e in deny_entries if entry_matches_host(e, host)), None
+    )
+    admitted = host_admitted(host, allow_entries, deny_entries)
+
+    if deny_match is not None:
+        reason = f"denied by out-of-scope entry '{deny_match['scope_entry']}'"
+    elif allow_match is None:
+        reason = "not in scope: no allowlist entry matches"
+    else:
+        reason = f"in scope via allow entry '{allow_match['scope_entry']}'"
+
+    return {
+        "target": token,
+        "host": host,
+        "admitted": admitted,
+        "reason": reason,
+        "allow_entry": allow_match["scope_entry"] if allow_match else None,
+        "allow_entry_kind": allow_match["entry_kind"] if allow_match else None,
+        "deny_entry": deny_match["scope_entry"] if deny_match else None,
+        "deny_entry_kind": deny_match["entry_kind"] if deny_match else None,
+        "required_headers": headers,
+        "rate_limit": rl,
+        "vendor_saas": host_is_vendor_saas(host),
+    }
+
+
 def ingest_scope_filter(
     engagement_dir: str,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], bool]:

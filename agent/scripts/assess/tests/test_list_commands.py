@@ -63,7 +63,7 @@ def test_json_round_trips_and_carries_contract_pointer(capsys):
     # Round-trip: re-serializing the parsed rows yields the same structure.
     assert json.loads(json.dumps(rows)) == rows
     for row in rows:
-        assert set(row) == {"name", "summary", "phases", "kali", "contract"}
+        assert set(row) == {"name", "summary", "phases", "goals", "kali", "contract"}
         assert row["contract"] == f"vigil assess contract {row['name']}"
         assert isinstance(row["phases"], list)
 

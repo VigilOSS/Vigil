@@ -142,7 +142,7 @@ The per-phase walkthrough — sub-steps, exit gates, `check-phase-readiness` cal
 | 4 — Consume & Test | `agent/phases/phase-4-consume-test.md` | Depth Doctrine / Per-Domain VA fan-out, Phased mindset flow, nuclei coverage audit (step a), per-type consumption loop (steps b–h), system-level cross-surface synthesis (step i). |
 | 5 — Verify | `agent/phases/phase-5-verify.md` | Adversarial review of Phase-4 findings, disposition set (confirmed/upgraded/downgraded/killed), dedup + chain-primitive passes, exit gate, `transition-phase exploit`. |
 | 6 — Exploit (+ 7 Athena) | `agent/phases/phase-6-exploit.md` | osint-analyst dispatch, `exploit_policy` resolution + invariants, exploit-state recording, CVE-validation gating; folds **Phase 7** Athena / log investigation. |
-| 8 — Report | `agent/phases/phase-8-report.md` | Draft → QA → blind pre-submission triage → publish gate, per-finding submission mode, and the **Definition of Done** (judgment-only closeout no command can check). |
+| 8 — Report | `agent/phases/phase-8-report.md` | Draft → targeted-evidence → checklist/QA → blind pre-submission triage → publish gate for the **default per-finding submission closeout** (`export-submission`; android runs this same flow), the optional internal `report.md` mode, and the **Definition of Done** (judgment-only closeout no command can check). |
 
 (Tiny-phase folds: **Phase 3 Perimeter / Auth-Gate Bypass** → `phase-2-collect.md`; **Phase 7 Athena / Log Investigation** → `phase-6-exploit.md`. The Recon Dispatch Resource Policy that used to sit at the end of Phase Flow now lives at `agent/references/runtime-guides/dispatch-resource-policy.md`.)
 
@@ -238,7 +238,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 | exploit-developer | Exploit verified findings, chain analysis, impact | Phase 6 |
 | fuzzer | High-volume testing (100+ payloads) | When FUZZER_NEEDED |
 | osint-analyst | CVE/breach/DNS/social research backed by backend intel tables | Phase 6 (parallel with exploit) |
-| report-writer | Final or interim report | Phase 8 |
+| report-writer | Per-finding submission (default) or internal report (operator-requested) | Phase 8 |
 
 This section runs 13 subsections deep — jump to the one you need:
 
@@ -511,7 +511,7 @@ Each item below is scoped to the dispatch's actual outcome — a recon / collect
 
 - [ ] **Attacker outcome stated:** Can you read the finding and immediately say what the attacker gains? ("Attacker extracts session token and accesses victim's vault" — not "TLS validation is disabled")
 - [ ] **Outcome demonstrated:** Did the agent show the exploitation step, not just the vulnerability? Captured credentials must be replayed. Leaked tokens must be used. File read primitives must read a meaningful file. If the agent stopped at "vulnerability exists," send it back with the specific next step.
-- [ ] **Proof is submission-ready:** Would a Bugcrowd/HackerOne triager accept this as demonstrated impact? If the proof requires the triager to imagine the next step, the agent's work is not done.
+- [ ] **Proof is submission-ready:** Would a Bugcrowd/HackerOne triager accept this as demonstrated impact? This is what `vigil assess export-submission`'s strict (non-`--draft`) gate ultimately checks per finding — title, severity + CVSS vector, platform taxonomy, an attacker-impact statement, and concrete proof. If the proof requires the triager to imagine the next step, the agent's work is not done.
 - [ ] **Finding story authored, not just disposed.** For confirmed/downgraded findings, the verifier wrote the report-ready `evidence` / `impact` / `remediation` and the justified CVSS vector into `details` (per `agent/references/finding-fp-and-severity-gate.md` + the Four Validation Gates Gate 3). The report-writer formats this story; it does not re-derive it.
 
 **When the dispatch reports "no results" as the headline outcome** (a tool ran and produced nothing, on any dispatch type including recon):

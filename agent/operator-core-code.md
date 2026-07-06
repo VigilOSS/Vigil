@@ -31,6 +31,12 @@ before the report dispatch; `report-writer` and the code specialists that draft
 report-bound text (`code-vuln-hunter`, `code-vuln-verifier`) still load it
 directly via their own Load-First lists.
 
+The code track's terminal deliverable is a **submission-first closeout**, not a
+`report.md` monolith: per-finding submissions via `export-submission`, defaulting to
+`--platform direct` for a source review with no external bug-bounty program. See the
+"Submission closeout" step in `agent/phases/code-phase-4-fuzz.md` and the shared
+"Submission-First Closeout" procedure in `agent/skills/report-generation/SKILL.md`.
+
 CLI path convention is owned by `agent/shared-constraints-code.md` §9.
 
 ## Map of This File
@@ -161,7 +167,7 @@ do not duplicate.
 | `code-variant-hunter` | Systematic variant scanning for confirmed bug patterns | Phase 3 (parallel with verifier) |
 | `code-vuln-verifier` | FP elimination with devil's advocate verification + clean-file spot-check | Phase 3 (parallel with variant) |
 | `code-fuzz-engineer` | AI-driven fuzz campaigns: target selection, harness construction, crash triage | Phase 4 (conditional, C/C++ only) |
-| `report-writer` | Final report generation (reused from web engagement) | After Phase 3 or 4 completes |
+| `report-writer` | Per-finding submission closeout — `export-submission --platform direct` by default (reused from web engagement) | After Phase 3 or 4 completes |
 
 **Finding prefixes** per agent (CA / CH / CV / VF / CF) are canonical in
 `agent/shared-constraints-code.md` §4 ("Findings Use the Existing Backend") — the
