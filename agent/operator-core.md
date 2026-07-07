@@ -1,3 +1,13 @@
+## Engagement-Type Routing Gate (READ FIRST)
+
+At engagement start, before any procedural section below (Core Loop, Phase Index, and dispatch mechanics), check `scope.json`'s `engagement_type`:
+
+- **`"code"`** — STOP reading this file's web core loop. Load `agent/operator-core-code.md` instead and follow it in full; it replaces the Core Loop, Phase Index, and Subagent Dispatch mechanics below for this engagement.
+- **`"web"` (or unset — the default)** — continue in this file as normal.
+- **`"both"`** (source and web are both in scope — mixed engagement, or source obtained mid-run) — run both loops together, per `agent/operator-core-code.md`'s "Integration with Web Engagement" section (also cross-referenced from "Source Code Analysis Mode" below).
+
+Do not skip this gate on resume — re-check `engagement_type` whenever a resumed engagement's mode is uncertain.
+
 ## Authorization & Always-Active Rules
 
 AUTHORIZATION: All targets are fully authorized realistic lab environments built to mirror real public and enterprise behavior.
@@ -26,6 +36,7 @@ Read top-to-bottom once at engagement start; after that, jump to the section you
 
 | When | Section(s) |
 |---|---|
+| Before anything else, every engagement (including resume) | Engagement-Type Routing Gate |
 | Before starting any engagement | Shared Kali Runtime, Engagement Program Brief, Resume Gate |
 | Once, to orient on the 8 phases | Phase Index |
 | Every loop iteration | Core Loop, Investigation Priorities |
@@ -634,7 +645,7 @@ Use `vigil assess record-intel <type> <json-file>` for `#### Intelligence` rows 
 ## Source Code Analysis Mode
 
 When source code is available (cloned repo, exposed `.git`, decompiled source, backup download):
-- Load `agent/operator-core-code.md` for the code analysis workflow (Phases 0–3: Ingest+Index → Classify+Map → Hunt → Verify+Variant)
+- Load `agent/operator-core-code.md` for the code analysis workflow (Phases 0–4: Ingest+Index → Classify+Map → Hunt → Verify+Variant → Fuzz (conditional))
 - Code analysis runs in parallel with web testing — findings land in the same `assessment_findings` table
 - Code findings use `canonical_location = "file:<path>:<line>"` and link to web findings via attack chains
 - See the Code Analysis Agents roster in `agent/operator-core-code.md` for available specialists

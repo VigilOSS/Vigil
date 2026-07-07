@@ -78,7 +78,7 @@ def _coverage(
     }
 
 
-def _setup_env(monkeypatch, module, tmp_path, *, scope, coverage, findings=None):
+def _setup_env(monkeypatch, module, tmp_path, *, scope, coverage, findings=None, decisions=None):
     engagement = tmp_path / "agent" / "engagements" / "eng-code"
     engagement.mkdir(parents=True, exist_ok=True)
     (engagement / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
@@ -93,6 +93,8 @@ def _setup_env(monkeypatch, module, tmp_path, *, scope, coverage, findings=None)
                 return findings if findings is not None else [_ACTIVE_CODE_FINDING]
             if path == "code/coverage":
                 return coverage
+            if path.startswith("dispatch-decisions"):
+                return list(decisions or [])
             return []
 
         def record_decision(self, payload):
@@ -270,3 +272,59 @@ def test_complete_blocks_on_uncovered_high_risk_file(monkeypatch, tmp_path, caps
         module.run(_args(eng, "complete"))
     assert "uncovered_high_risk_file" in capsys.readouterr().err
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "fuzz"
+
+
+# ---------------------------------------------------------------------------
+# A-R2: the track-agnostic blind-triage gate also guards the CODE complete edge
+# (code-phase-4-fuzz.md makes the blind Pass-2 mandatory for every Medium+
+# finding). Mirrors the web report/complete blind-triage precondition.
+# ---------------------------------------------------------------------------
+
+
+_MEDIUM_CODE_FINDING = {
+    "slug": "code-med-1",
+    "severity": "medium",
+    "verification_state": "verified",
+    "workflow_status": "active",
+    "canonical_location": "file:src/handler.py:42",
+}
+
+# Clean coverage so ONLY the blind-triage gate can block: no crit/high files to
+# analyze, no pending triggers, no uncovered high-risk files.
+_CLEAN_COVERAGE = _coverage(critical=(0, 0), high=(0, 0), uncovered=[])
+
+
+def test_code_complete_blocks_without_blind_triage_verdict(monkeypatch, tmp_path, capsys):
+    module = _load_transition_module("tp_blind_triage_code_block")
+    eng, _ = _setup_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "code", "current_phase": "fuzz"},
+        coverage=_CLEAN_COVERAGE,
+        findings=[_MEDIUM_CODE_FINDING],
+        decisions=[],
+    )
+    with pytest.raises(SystemExit):
+        module.run(_args(eng, "complete", track="code"))
+    err = capsys.readouterr().err
+    assert "missing_blind_triage" in err
+    assert "code-med-1" in err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "fuzz"
+
+
+def test_code_complete_allowed_with_blind_triage_accept(monkeypatch, tmp_path, capsys):
+    module = _load_transition_module("tp_blind_triage_code_allow")
+    eng, _ = _setup_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "code", "current_phase": "fuzz"},
+        coverage=_CLEAN_COVERAGE,
+        findings=[_MEDIUM_CODE_FINDING],
+        decisions=[
+            {
+                "kind": "blind_triage_verdict",
+                "payload": {"finding_slug": "code-med-1", "verdict": "Accept@P3"},
+            }
+        ],
+    )
+    module.run(_args(eng, "complete", track="code"))
+    assert "missing_blind_triage" not in capsys.readouterr().err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "complete"

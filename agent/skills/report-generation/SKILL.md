@@ -336,6 +336,8 @@ Each finding class has a minimum evidence bar. If the evidence does not meet thi
 | File Read / Path Traversal | Contents of a file outside the web root (e.g., /etc/passwd, application config). |
 | Information Disclosure | The specific sensitive data exposed, with confirmation it is not intentionally public. |
 | CSRF | State change on victim's account triggered from attacker-controlled origin, with before/after proof. |
+| Buffer Overflow / Memory Safety (fuzz-confirmed) | The crash input plus an ASAN/UBSAN report showing the invalid access (out-of-bounds read/write, use-after-free), with the reproducing harness command. Not just "the fuzzer found a crash." |
+| Static Taint-Path Finding (code review, no crash) | Concrete `poc_code` that calls the vulnerable entrypoint and shows the corrupted or leaked value. Source reading alone is theory — the no-theory rule applies here as everywhere else. |
 
 ## Generation Procedure (Legacy Internal Report)
 

@@ -1279,6 +1279,38 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
+    "code-ingest": CommandContract(
+        name="code-ingest",
+        goals=("code-analysis",),
+        phase=("code-ingest",),
+        summary="Walk a source repository, fingerprint analyzable files, and register them with the code-analysis backend.",
+        schema_name="backend code/repos + code/files ingest (no JSON author-file)",
+        preferred_invocations=(
+            "vigil assess code-ingest <repo-path>",
+            "vigil assess code-ingest <repo-path> --name <repo-name> --repo-key <repo-key>",
+            "vigil assess code-ingest <repo-path> --include-path '**/ResetPassword.min.js'",
+        ),
+        author_supplied_fields=(
+            "repo_path (positional, required)",
+            "--name / --repo-key when the derived defaults need overriding",
+        ),
+        helper_defaults=(
+            ("--name", "repository directory basename"),
+            ("--repo-key", "stable name+realpath hash"),
+            ("--language", "unset (does NOT auto-tag unknown files)"),
+            ("--default-language-for-unknown", "unset (unknown-extension files stay language-less)"),
+            ("--max-included-skipped-bytes", "2000000"),
+            ("--skipped-manifest", "tools/analysis-state/skipped-artifacts/<repo-key>.json"),
+        ),
+        notes=(
+            "First code step: run before code-index / code-index-sync. It creates the backend repo row (returning a repo_id, also written into scope.json source_repos) and bulk-registers analyzable files with language, LOC, hash, header snippet, and git churn/security-history metadata.",
+            "Generated/binary/minified files and skip-dirs (node_modules, vendor, dist, ...) are excluded and accounted in the skipped-artifacts manifest. --include-minified, --include-skipped, and --include-path <glob> (repeatable) opt specific artifacts back in, capped by --max-included-skipped-bytes.",
+            "--language sets only the repo's primary language; use --default-language-for-unknown to stamp a language on unrecognized-extension files (use sparingly — a wrong stamp pollutes coverage math and structural indexing).",
+        ),
+        common_mistakes=(
+            ("--language to tag unknown files", "--language sets the repo primary language only; use --default-language-for-unknown to stamp unrecognized-extension files"),
+        ),
+    ),
     "code-index": CommandContract(
         name="code-index",
         goals=("code-analysis",),
@@ -1310,6 +1342,37 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("running outside engagement context", "pass --engagement-dir or --output-dir explicitly"),
             ("sync cannot find manifest", "use the default tools/analysis-state output or pass the same explicit output path consistently"),
             ("legacy manifest with multiple repos", "pass --repo-id or rebuild the index so repo_key metadata is available"),
+        ),
+    ),
+    "code-index-sync": CommandContract(
+        name="code-index-sync",
+        goals=("code-analysis",),
+        phase=("code-ingest",),
+        summary="Push structural-index metadata (function/entry-point/sink/export counts) from the analysis-state manifest to the backend.",
+        schema_name="code/files bulk-structural-metadata (reads structural-index manifest + per-file index JSON)",
+        preferred_invocations=(
+            "vigil assess code-index-sync",
+            "vigil assess code-index-sync --repo-key <repo-key>",
+            "vigil assess code-index-sync --repo-id <repo-id>",
+        ),
+        author_supplied_fields=(
+            "--repo-key or --repo-id only to restrict sync to one repo",
+            "--manifest / --index-dir only for non-default analysis-state locations",
+        ),
+        helper_defaults=(
+            ("--manifest", "<engagement_dir>/tools/analysis-state/structural-index-manifest.json"),
+            ("--index-dir", "<manifest-dir>/structural-index/"),
+            ("--repo-id", "unset (sync every repo in the manifest)"),
+            ("--repo-key", "unset (sync every repo in the manifest)"),
+        ),
+        notes=(
+            "Run after code-index has built the structural index into the default analysis-state tree; this consumes that manifest, so both must share the same output directory (the code-index default).",
+            "The aggregate manifest is keyed by repo_key, so multiple source repos sync from one engagement tree. Use --repo-key (or --repo-id) to re-sync just one repo.",
+            "A legacy single-repo manifest with no repo identity requires --repo-id when the engagement has more than one backend repo; otherwise rebuild the index with current code-index so repo_key metadata is recorded.",
+        ),
+        common_mistakes=(
+            ("manifest not found", "run code-index first, or point --manifest at the same output dir code-index wrote"),
+            ("--repo-id against an aggregate manifest with no matching identity", "pass --repo-key, or rebuild the index so repo_key/repo_path metadata matches the backend repo"),
         ),
     ),
     "code-classify": CommandContract(
@@ -1459,6 +1522,60 @@ _CONTRACTS: dict[str, CommandContract] = {
                 ],
                 "cross_file_triggers": [],
             },
+        ),
+    ),
+    "code-coverage": CommandContract(
+        name="code-coverage",
+        goals=("code-analysis",),
+        phase=("code-hunt", "code-verify"),
+        summary="Display code-analysis coverage, per-file CWE effort, and the coverage-gate verdict.",
+        schema_name="backend code/coverage projection (read-only)",
+        preferred_invocations=(
+            "vigil assess code-coverage",
+            "vigil assess code-coverage --cwe-matrix",
+            "vigil assess code-coverage --require-gate-pass",
+            "vigil assess code-coverage --repo-id <repo-id> --cwe-matrix --require-gate-pass",
+        ),
+        author_supplied_fields=(
+            "--repo-id to scope one repo",
+            "--cwe-matrix / --require-gate-pass flags as needed",
+        ),
+        helper_defaults=(
+            ("--repo-id", "unset (aggregate across all repos)"),
+            ("--cwe-matrix", "off (summary view; on shows the per-file CWE effort matrix)"),
+            ("--require-gate-pass", "off (informational; on exits non-zero unless the gate passes)"),
+        ),
+        notes=(
+            "The code Core-Loop coverage check — read it each iteration to see which files and vuln classes are under-tested before dispatching more hunt work.",
+            "--cwe-matrix renders the per-file CWE effort table with a structural-verification cross-check (functions_analyzed vs the structural index) and flags critical/high files below their effort threshold.",
+            "--require-gate-pass makes the command a gate: it exits non-zero when the backend coverage gate has not passed (or, under --cwe-matrix, when a critical file has an effort gap), so it can front a phase transition.",
+        ),
+    ),
+    "code-size-summary": CommandContract(
+        name="code-size-summary",
+        goals=("code-analysis",),
+        phase=("code-ingest", "code-classify"),
+        summary="Summarize backend-indexed code_files: counts, LOC buckets, ownership splits, and large-file candidates.",
+        schema_name="backend code/files projection (read-only aggregate)",
+        preferred_invocations=(
+            "vigil assess code-size-summary",
+            "vigil assess code-size-summary --repo-id <repo-id>",
+            "vigil assess code-size-summary --large-threshold 1500 --top 30",
+            "vigil assess code-size-summary --json",
+        ),
+        author_supplied_fields=(
+            "--repo-id to scope one repo",
+            "--large-threshold / --top / --json as needed",
+        ),
+        helper_defaults=(
+            ("--repo-id", "unset (aggregate across all repos)"),
+            ("--large-threshold", "1000 (minimum LOC for critical/high large-file candidates)"),
+            ("--top", "20 (maximum large candidates printed)"),
+            ("--json", "off (text summary; on emits the structured summary object)"),
+        ),
+        notes=(
+            "Sizing view for the ingest/classify pass: shows LOC buckets, language and analysis-status splits, and app-owned vs generated vs vendor ownership so classification effort lands on app-owned surface, not vendored/generated bulk.",
+            "large_candidates lists only critical/high-classified files at or above --large-threshold LOC — the oversized attack surface worth splitting into focused hunt dispatches.",
         ),
     ),
     # --- Discovery / navigation / read-query utilities (phase-agnostic) ---
