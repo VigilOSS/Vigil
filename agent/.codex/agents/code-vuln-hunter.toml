@@ -587,6 +587,13 @@ Every `analysis-json` payload must include the fetched `queue_item_id` and `audi
 - `cross_ref_usage`: actual ctags/grep/Read lookups performed during analysis
 - `pattern_refs`: the `agent/references/code-vuln-patterns/*.md` files consulted for that verdict
 
+**On a RESUMED engagement**, Phase-2D parallel swarm workers can independently re-discover a
+finding a prior Phase-3 verification pass already killed as `false_positive` on the same
+file/pattern. `record-finding` refuses that re-mint via the backend's D4 guard (matching
+`defect_family` + canonical-location signal against an existing kill) — expected, not a bug.
+Pass `--allow-remint` only when the candidate is a genuinely distinct bug at that location
+(different variable, different guard failure, different sink).
+
 ## Mandatory Closing Sequence
 
 Before your dispatch returns, run in this order:

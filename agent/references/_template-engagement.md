@@ -14,6 +14,17 @@ category: Engagement Setup
 > capability-neutral judgment (why these constraints exist and how to reason about edge
 > cases) lives in `agent/shared-constraints.md` and `agent/rules/hunting.md`; this file
 > carries only the per-program values.
+>
+> **Applicability:** every ROE constraint below (scope headers, rate caps, no-fire
+> endpoints, deconfliction markers, exfiltration limits) governs LIVE target-facing
+> testing — the web/network operator (`agent/operator-core.md`) and any Kali-runtime
+> probing. The static CODE operator (`agent/operator-core-code.md`), doing pure
+> whitebox source review with no traffic to the target, is NOT bound by the header/
+> rate/no-fire/deconfliction/exfil rules below while reading source. BUT every one of
+> them RE-APPLIES the instant the code track runs any live probe — a Phase-4 fuzz
+> campaign (`agent/phases/code-phase-4-fuzz.md`) against a running target, or web
+> testing running alongside the code review (`operator-core-code.md` "Integration
+> with Web Engagement").
 
 ---
 

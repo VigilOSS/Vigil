@@ -157,7 +157,7 @@ Include the pattern references matching the batch's slot types and language when
 | NETWORK-INPUT, PROTOCOL-FIELD (C/C++) | `buffer-overflow.md`, `integer-overflow.md` | `format-string.md` if printf-family sinks |
 | NETWORK-INPUT, PROTOCOL-FIELD (Python/JS/Java/Go) | `web-app-injection.md`, `web-app-auth.md` | `race-condition.md` if async handlers |
 | URL-COMPONENT | `injection.md`, `auth-bypass.md` | `web-app-auth.md` if web framework |
-| FILE-CONTENT | `injection.md`, `buffer-overflow.md` | `type-confusion.md` if parser with unions/variants |
+| FILE-CONTENT | `injection.md`, `buffer-overflow.md`, `path-traversal.md`, `file-upload.md` | `type-confusion.md` if parser with unions/variants; `xxe.md` if XML/SOAP/WSDL parser in scope |
 | CMD-ARGUMENT | `injection.md` | `format-string.md` if logging sinks |
 | CALLBACK-DATA | `use-after-free.md`, `race-condition.md` | `type-confusion.md` if void*/interface{} casts |
 | PROTOCOL-FIELD + state machine | `race-condition.md` | `use-after-free.md` if connection lifecycle |

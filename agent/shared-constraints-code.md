@@ -165,6 +165,16 @@ Coverage finding counts (`vigil assess list-findings` with a count flag or equiv
 intentionally include only findings whose `canonical_location` starts with `file:` — web
 findings with URL-based locations are excluded from code-analysis queue accounting.
 
+**Committed secrets with live-target reach also get recorded as credentials.** A committed secret
+found in source that has live-target reach against the in-scope web app — a session cookie value,
+an API key, a JWT signing secret, or a DB/service credential usable against the deployed app —
+should ALSO be recorded via `vigil assess post credentials <credential-json-file> --status
+discovered`, alongside the normal `record-finding` call for the code finding itself. Recording a
+discovered credential automatically flags a candidate finding and, when the secret is a session
+artifact (a session-hint cookie or a bearer/JWT), mints a usable identity from it and cross-links
+the two — so on a mixed code+web engagement the secret auto-surfaces as a usable identity for the
+parallel web track instead of sitting inert in a code finding's `details`.
+
 ---
 
 ## 5. No Theoretical Findings

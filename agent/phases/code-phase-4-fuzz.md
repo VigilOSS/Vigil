@@ -155,14 +155,17 @@ ls tools/fuzz-state/reports/*-triage.json
 - [ ] Harness bugs fixed and campaigns re-run (if applicable)
 - [ ] Campaign summary written to `tools/fuzz-state/reports/campaign-summary.json`
 
-```bash
-vigil assess transition-phase complete --track code
-```
-
 **Submission closeout:**
 The code track has no separate `report.md` deliverable — its terminal output is a per-finding
-submission, the same as web/runtime engagements. Before dispatching `report-writer`, run
-`vigil assess check-phase-readiness --phase report` (the shared readiness gate: coverage,
+submission, the same as web/runtime engagements. Before dispatching `report-writer`, run a
+proactive severity↔CVSS alignment audit, modeled on `agent/operator-core.md` "Mandatory Phase-Exit
+Passes" ("Exploit → Report: severity-CVSS alignment audit"): query `vigil assess list-findings` and
+verify each finding's `severity` matches its `details.cvss_score` band (`high` requires
+`cvss_score >= 7.0`, `medium` requires `4.0 <= cvss_score <= 6.9`, `low` requires `cvss_score <
+4.0`); fix any mismatch via `vigil assess update-finding <slug> --inline '{"details":
+{"cvss_score": <n>, "cvss_vector": "..."}}'` (the JSON field is `details`, not `details_json`) —
+this catches the most common cleanup-time defect before the transition bounces on it, not after.
+Then run `vigil assess check-phase-readiness --phase report` (the shared readiness gate: coverage,
 root-cause consolidation, severity/CVSS alignment) and `vigil assess list-report-findings --mode
 final --json` (or `--mode draft --json` for interim) to confirm the finding set — this includes
 code and web findings from the shared backend with root-cause grouping applied. Fuzz findings
@@ -170,7 +173,9 @@ code and web findings from the shared backend with root-cause grouping applied. 
 
 For each finding to close out, `report-writer` follows the "Submission-First Closeout" procedure in
 `agent/skills/report-generation/SKILL.md` — the finding is the source of truth and `submission.md`
-is a render of it, so each section is authored once, written back to the finding, and re-rendered:
+is a render of it, so each section is authored once, written back to the finding, and re-rendered.
+See `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` for a worked
+`--platform direct` example (FUZZ-CONFIRMED buffer overflow, crash input + ASAN report proof):
 1. **Scaffold:** `vigil assess export-submission <slug> --draft --platform direct` — code findings
    default to `--platform direct` (source review, no external bug-bounty program) unless the code
    work runs under an active bounty engagement (see "Integration with Web Engagement" above), in
@@ -194,8 +199,14 @@ is a render of it, so each section is authored once, written back to the finding
    --platform <same> --draft --overwrite`), run the same review-and-fix QA pass runtime engagements
    use (the consolidated self-review checklist) against the re-rendered `submission.md`, fixing at the source (the
    finding), then blind triage — mandatory for every Medium-or-above finding
-   (`agent/skills/blind-triage/SKILL.md`). Only an `Accept*` verdict clears a finding for
-   submission; anything else routes back to `report-writer` or the specialist that owns the finding.
+   (`agent/skills/blind-triage/SKILL.md`). Record the verdict before publish:
+   ```bash
+   vigil assess agent decision --kind blind_triage_verdict --payload-json \
+     '{"finding_slug":"<slug>","verdict":"<Accept@P1..P5|Need-More-Info|Not-Applicable|Out-of-Scope|Duplicate>","claimed_severity":"<sev>","weak_points":"..."}'
+   ```
+   Only an `Accept*` verdict clears a finding for submission; anything else routes back to
+   `report-writer` or the specialist that owns the finding — an un-recorded verdict reads as no
+   triage at all, so record it even for a clean `Accept`.
 4. **Publish:** re-run `export-submission <slug> --platform <same platform> --overwrite` (non-draft)
    once the strict final gate is satisfiable (title; severity + CVSS vector; platform taxonomy where
    applicable; an attacker-impact statement; and ≥1 concrete proof); it reproduces the authored
@@ -204,6 +215,41 @@ is a render of it, so each section is authored once, written back to the finding
    Status Lifecycle" in `agent/skills/report-generation/SKILL.md`, only once the finding is actually
    delivered. Mark included findings `workflow_status=reported` the same way as web engagements once
    delivered.
+
+## Definition of Done
+
+The command-checkable readiness gates are enforced by `check-phase-readiness` (per-phase) and
+`vigil assess check-phase-readiness --phase report` (the terminal report gate). Resolve every
+blocker those report before proceeding — do not re-walk them here by hand. What remains is the
+judgment no command can check, modeled on `agent/phases/phase-8-report.md` "Definition of Done":
+
+- [ ] **Cross-finding dedup / lead-selection pass run (judgment: no self-inflicted duplicates).**
+  Before submitting any cluster of ≥2 findings that share a root cause, run the explicit
+  cross-finding pass in `agent/rules/reporting.md` §18 "Cross-finding dedup pass": cluster the
+  submittable set by root cause, designate the lead (highest-impact) finding, and for each
+  dup-risk sibling record either a consolidation or a distinct-primitive framing plus
+  `vigil assess link-finding <sibling-slug> --root-cause <lead-slug>`. `code-variant-hunter`
+  output is the textbook case for this here — a confirmed buffer-overflow or taint-path pattern
+  found across multiple files/call sites by the variant pass is exactly the multi-file
+  same-root-cause cluster §18 exists for; do not file each variant hit as an independent
+  submission without running this pass first.
+- [ ] **Stale-text scrub clean (judgment: prose vs. current state).** Read each active finding's
+  `summary` and `details` text and strip phrases that contradict current state ("severity adjusted
+  from X to Y" when it's no longer Y, "originally rated as Z", "merged from W" after W was split
+  off, "previously low"/"downgraded to medium" mismatched against the current `severity`). The
+  `vigil assess list-findings --status active --json | jq -r '.[].slug'` scan loop in
+  `agent/skills/report-generation/SKILL.md` "Stale-text scrub" is the executable recipe.
+- [ ] **Backend reflects submissions (external reality).** Findings actually delivered (or marked
+  accepted/duplicate) have a `submission_status`/`workflow_status` that matches reality — nothing
+  stays `draft` if it was sent out. No command can observe the external side of this; only the
+  operator can reconcile it.
+
+When `check-phase-readiness --phase report` is clean AND the judgment items above hold, and every
+reportable finding is `reported`, transition phase:
+
+```bash
+vigil assess transition-phase complete --track code
+```
 
 ---
 

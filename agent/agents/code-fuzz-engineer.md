@@ -198,6 +198,19 @@ Omit the `slug` field from new fuzz finding JSON. `vigil assess
 record-finding code-fuzz-engineer <finding-json>` allocates the next `CF-*`
 slug under a lock and prints the canonical slug.
 
+### Blocked-claim self-check (run BEFORE the handoff)
+
+Before any `handoff_status=blocked`, `runtime_issues[].severity=blocker`, or a "could not run" /
+"build failed" / "sanitizer build failed" / "campaign could not start" / "corpus generation
+errored" claim, cross-verify against `vigil assess list-command-runs` (`--tool-bin
+<compiler-or-fuzzer-bin> --show-matches`, then `vigil assess get-command-run <id>` to confirm what
+the command actually produced). A build that ran and exited non-zero with a specific compiler
+diagnostic, or a fuzz campaign that completed its time budget with zero crashes, is a real
+failure or a `dry` no-signal result — NOT `blocked`. Reserve `blocked` for a step that genuinely
+never executed (compiler/fuzzer binary missing from the runtime image, build system unreachable,
+target repo not mounted). code-fuzz-engineer runs `kali binary-triage`/crash-repro through the
+runtime, so this claim risk is real — cross-check before it reaches the handoff.
+
 ### Closing verbs
 
 Before your dispatch returns, run in this order:

@@ -913,6 +913,17 @@ def _check_code_preconditions(
         except Exception as exc:
             blockers.append(_precondition_check_failed("complete code findings", exc))
         blockers.extend(_code_coverage_blockers(client))
+        # The blind-triage gate is track-agnostic: every Medium-or-above active
+        # finding must carry a recorded Accept* blind_triage_verdict before the
+        # terminal edge (code-phase-4-fuzz.md makes the blind Pass-2 review
+        # mandatory for code findings too). ``_blind_triage_blockers`` filters
+        # findings + dispatches verdicts generically, so it applies unchanged.
+        # ``_chain_construction_blockers`` and ``_depth_backstop_blockers`` are
+        # intentionally NOT applied to the code track: chain-construction keys
+        # on the web-only exploit-developer A->B chain role, and depth-backstop
+        # is the web app-unit ledger (the backend returns skipped=true for code
+        # engagements), so neither is meaningful here.
+        blockers.extend(_blind_triage_blockers(client))
 
     return blockers
 
