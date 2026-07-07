@@ -1,6 +1,6 @@
 ---
-description: Canonical cross-track vuln-class taxonomy — the single vocabulary the web, code, and blue tracks share. Lists the 59 canonical classes grouped into families, and which surface_types / gf-buckets / techniques / skills map to which class. Source of truth is assess.lib.vuln_taxonomy; this doc is the human-readable view.
-last_reviewed: 2026-06-09
+description: Canonical cross-track vuln-class taxonomy — the single vocabulary the web, code, and blue tracks share. Lists the 63 canonical classes grouped into families, and which surface_types / gf-buckets / techniques / skills map to which class. Source of truth is assess.lib.vuln_taxonomy; this doc is the human-readable view.
+last_reviewed: 2026-07-07
 origin: Vigil
 ---
 
@@ -65,12 +65,15 @@ family.
 - `cmdi` — OS command / code execution injection.
 - `ssti` — Server-side template injection.
 - `xxe` — XML external entity / XML injection.
+- `ssi-injection` — Server-Side Includes (SSI) directive injection.
 - `ldap-injection` — LDAP injection.
+- `xpath-injection` — XPath injection.
 - `graphql-injection` — GraphQL query/mutation abuse & injection.
 - `elasticsearch-injection` — Elasticsearch/search-DSL injection.
 - `mass-assignment` — Mass assignment / over-posting.
 - `crlf` — CRLF / header injection.
 - `deserialization` — Unsafe deserialization _(code track)_.
+- `csv-injection` — CSV/spreadsheet formula (DDE) injection via exported data.
 - `injection` — Generic injection (code-track coarse family) _(code track)_.
 - `web-app-injection` — Web-app injection _(code track)_.
 
@@ -103,6 +106,7 @@ family.
 - `csrf` — Cross-site request forgery.
 - `cors` — CORS misconfiguration.
 - `prototype-pollution` — Prototype pollution.
+- `clickjacking` — Clickjacking / UI redress via frame embedding.
 
 ### protocol — HTTP/transport-layer defects: smuggling, headers, cache, ws.
 - `request-smuggling` — HTTP request smuggling/desync.
@@ -142,7 +146,7 @@ catch-alls (`misconfiguration` / `informational`) map to disclosure-only.
 | `object_reference` | `idor`, `bola`, `bfla` |
 | `privileged_write` | `bfla`, `path-authz`, `mass-assignment` |
 | `file_handling` | `file-upload`, `lfi`, `path-traversal` |
-| `dynamic_render` | `xss`, `ssti` |
+| `dynamic_render` | `xss`, `ssti`, `ssi-injection` |
 | `api_documentation` | `bola`, `bfla`, `mass-assignment`, `graphql-injection` |
 | `workflow_token` | `business-logic`, `race-condition` |
 | `misconfiguration` | `info-disclosure`, `debug-exposure` |
@@ -150,27 +154,54 @@ catch-alls (`misconfiguration` / `informational`) map to disclosure-only.
 
 ## gf-bucket → class
 
-The 15 gf-buckets (`assess.lib.classify_buckets._BUCKETS`) are the web-recon
-signal. A bucket with no single class is a **generic family-level hint** the
+The 40 gf-buckets (`assess.lib.classify_buckets._BUCKETS`) are the web-recon
+signal, listed here in declaration order (which is also weight-descending and
+governs tie-break precedence when multiple buckets match the same row). A
+bucket with no single class is a **generic family-level hint** the
 recommender treats as low-confidence.
 
-| gf-bucket | class |
-|---|---|
-| `rce` | `cmdi` |
-| `ssrf` | `ssrf` |
-| `sqli` | `sqli` |
-| `lfi` | `lfi` |
-| `img_traversal` | `img-traversal` |
-| `trust_surface` | _(generic — family-level hint)_ |
-| `idor` | `idor` |
-| `upload_fields` | `file-upload` |
-| `debug_logic` | `debug-exposure` |
-| `redirect` | `open-redirect` |
-| `ssti` | `ssti` |
-| `cors` | `cors` |
-| `xss` | `xss` |
-| `interestingparams` | _(generic — family-level hint)_ |
-| `interestingext` | `secrets-exposure` |
+| gf-bucket | weight | class |
+|---|---|---|
+| `rce` | 50 | `cmdi` |
+| `graphql` | 45 | `graphql-injection` |
+| `secret_vault` | 45 | `secrets-exposure` |
+| `ssrf` | 40 | `ssrf` |
+| `cloud_metadata` | 40 | `ssrf` |
+| `sqli` | 40 | `sqli` |
+| `lfi` | 40 | `lfi` |
+| `auth` | 40 | `auth-bypass` |
+| `deserialization` | 40 | `deserialization` |
+| `dotnet_handler` | 40 | `deserialization` |
+| `xxe` | 40 | `xxe` |
+| `img_traversal` | 35 | `img-traversal` |
+| `oauth-oidc` | 35 | `oauth` |
+| `sso` | 35 | `saml` |
+| `trust_surface` | 35 | _(generic — family-level hint)_ |
+| `idor` | 35 | `idor` |
+| `idp_admin` | 35 | `auth-bypass` |
+| `wordpress` | 35 | `user-enumeration` |
+| `cms_db_admin` | 35 | `auth-bypass` |
+| `nosqli` | 35 | `nosqli` |
+| `prototype-pollution` | 35 | `prototype-pollution` |
+| `upload_fields` | 30 | `file-upload` |
+| `debug_logic` | 30 | `debug-exposure` |
+| `websocket` | 30 | `websocket` |
+| `webhook` | 30 | `ssrf` |
+| `jwt` | 30 | `jwt` |
+| `servicenow` | 30 | `idor` |
+| `privileged_action` | 30 | `bfla` |
+| `mass-assignment` | 30 | `mass-assignment` |
+| `devops_console` | 30 | `debug-exposure` |
+| `ssi` | 30 | `ssi-injection` |
+| `redirect` | 25 | `open-redirect` |
+| `ssti` | 25 | `ssti` |
+| `cors` | 25 | `cors` |
+| `api-versioning` | 25 | _(generic — family-level hint)_ |
+| `object-storage` | 25 | `info-disclosure` |
+| `api` | 20 | _(generic — family-level hint)_ |
+| `xss` | 20 | `xss` |
+| `interestingparams` | 15 | _(generic — family-level hint)_ |
+| `interestingext` | 10 | `secrets-exposure` |
 
 `classify_buckets.BUCKET_SKILLS` is **derived** from this table + the skill
 `vuln_class:` frontmatter (`vuln_taxonomy.derive_bucket_skills()`) — there is no
@@ -253,12 +284,15 @@ completeness drift test stays honest.
 | `cmdi` | `command-injection` |
 | `ssti` | `ssti-testing` |
 | `xxe` | `xxe-testing` |
+| `ssi-injection` | _(no dedicated skill — allowlisted)_ |
 | `ldap-injection` | _(no dedicated skill — allowlisted)_ |
+| `xpath-injection` | _(no dedicated skill — allowlisted)_ |
 | `graphql-injection` | `graphql-testing` |
 | `elasticsearch-injection` | `elasticsearch-injection` |
 | `mass-assignment` | `bff-parameter-override`, `mass-assignment` |
 | `crlf` | `crlf-injection` |
 | `deserialization` | `code-variant-analysis`, `code-vulnerability-analysis`, `deserialization-testing` |
+| `csv-injection` | _(no dedicated skill — allowlisted)_ |
 | `injection` | `code-variant-analysis`, `code-vulnerability-analysis` |
 | `web-app-injection` | `code-variant-analysis`, `code-vulnerability-analysis` |
 | `ssrf` | `ssrf-testing` |
@@ -281,6 +315,7 @@ completeness drift test stays honest.
 | `csrf` | `csrf-testing` |
 | `cors` | `cors-testing` |
 | `prototype-pollution` | `prototype-pollution` |
+| `clickjacking` | _(no dedicated skill — allowlisted)_ |
 | `request-smuggling` | `request-smuggling` |
 | `host-header-injection` | `host-header-injection` |
 | `cache-poisoning` | `cache-poisoning` |

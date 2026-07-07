@@ -69,6 +69,24 @@ def test_per_input_coverage_no_wall_code_omits_parens():
     assert "no-signal(" not in out  # None wall -> no parenthesized code
 
 
+def test_per_input_coverage_marks_covered_when_latest_status_is_noncovering():
+    per_input = {
+        "cells": [{
+            "target_host": "h", "target_path": "/p", "attack_family": "idor",
+            "input_slot": "path:id", "auth_context": "member", "count": 2,
+            "covering": True, "latest_status": "blocked",
+            "observed_http_status": 403, "lens": "tenant-boundary",
+            "evidence_ref": "traffic/probes/idor-a.txt",
+        }],
+        "cells_count": 1,
+    }
+    lines: list = []
+    resume_brief._render_per_input_coverage(lines, per_input)
+    out = "\n".join(lines)
+    assert "covered; latest=blocked(403) x2" in out
+    assert "— tenant-boundary" in out
+
+
 def test_per_input_coverage_truncation_hint():
     cells = [
         {

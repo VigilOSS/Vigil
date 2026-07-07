@@ -16,14 +16,41 @@ internal services, and cross-protocol smuggling (gopher/file/dict/ldap).
 
 ## Load this reference when
 
-- The corpus contains at least one `url=`, `redirect=`, `callback=`, `feed=`, or `next=` query key
+- The corpus contains at least one `url=`, `uri=`, `feed=`, or `window=` query key, or one of
+  the curated `*_url`/`*_uri` server-fetch compounds below
 - Path fragments `/proxy/` or `/fetch/` appear in crawl or historical data
 - Operator is choosing between `ssrf` and `redirect` buckets and needs tie-breaking context
 
 ## Parameter keys that match
 
-`url, uri, host, port, path, redirect, feed, callback, data, continue, next, window, view,
-link, src, dest`
+`url, uri, host, port, feed, window`
+
+### Curated server-fetch compound family (Fix 4, 2026-06)
+
+Both `snake_case` and concatenated (camelCase-lowercased) forms of names that mean "a URL the
+**server** fetches" (as opposed to `redirect`'s "a URL the **browser** follows"):
+
+`fetch_url, fetchurl, proxy_url, proxyurl, remote_url, remoteurl, webhook_url, webhookurl,
+feed_url, feedurl, dest_uri, desturi, target_uri, targeturi, request_uri, requesturi`
+
+### Image/avatar-fetch compound family (deepened, vuln-taxonomy-audit 2026-07)
+
+"SSRF via avatar/profile-picture URL" (the server downloads a user-supplied image URL
+server-side to resize/re-host it) is one of the most frequently reported bug-bounty SSRF
+variants and was previously unclassified — the bare `image`/`photo`/`avatar` keys exist only
+in `img_traversal` (local path traversal) and `upload_fields` (multipart upload), neither of
+which carries server-fetch-a-remote-URL semantics:
+
+`image_url, imageurl, avatar_url, avatarurl, photo_url, photourl, picture_url, pictureurl,
+logo_url, logourl, thumbnail_url, thumbnailurl, icon_url, iconurl`
+
+### Historical note — key set narrowed (override #7)
+
+`redirect, callback, continue, next, link, dest` were **moved OUT** of this bucket's key set
+to `redirect` during a prior precision review: the prior generic set produced too many false
+positives on benign navigation params. `ssrf` still fires on a `/proxy/`/`/fetch/`-pathed
+request carrying those params via the path fragments below, just not via the bare param key
+alone. See `redirect.md` and `DRIFT.md` → "Fix 4" for the full rationale.
 
 ## Path patterns that match
 
@@ -31,16 +58,20 @@ link, src, dest`
 
 ## Weight and priority interpretation
 
-- Baseline priority score: 45 (second only to `rce`)
+- Baseline priority score: 40 (tied with `sqli`/`lfi`/`auth`/`deserialization`/`dotnet_handler`/
+  `xxe`; below `rce`(50) and `graphql`/`secret_vault`(45))
 - Terminal reasons that suppress this bucket: `inert_type` (image/video/font/archive are skipped at ingest)
 
 ## Example URLs that match
 
 - `https://target.example/api/fetch?url=http://evil.example` — ssrf via url=
-- `https://target.example/image-proxy?src=http://169.254.169.254/latest/meta-data/` — cloud metadata probe
-- `https://target.example/webhook/callback?callback=https://attacker.example/exfil` — callback control
 - `https://target.example/proxy/anything?uri=gopher://internal:6379/_info` — protocol smuggling via proxy path
 - `https://target.example/feed/load?feed=http://localhost:8500/v1/catalog/services` — Consul metadata via feed=
+- `https://target.example/profile/upload?avatar_url=http://169.254.169.254/latest/meta-data/` —
+  avatar-fetch SSRF against cloud metadata (co-fires `cloud_metadata` too, via the IMDS-address
+  regex, independent of the param name)
+- `https://target.example/integrations/register?webhook_url=http://internal-service:8080/admin` —
+  webhook-registration SSRF against an internal service
 
 ## What it does NOT classify
 

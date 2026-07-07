@@ -1,5 +1,6 @@
 ---
 description: "Example: HackerOne submission for SSRF via webhook test-send stealing cloud IAM credentials"
+skill: report-generation
 category: Disclosure & Reporting Formats
 ---
 

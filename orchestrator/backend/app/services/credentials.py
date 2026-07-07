@@ -78,12 +78,14 @@ def load_identities(
     sessions usable at that host (subdomain-aware); ``include_dead`` surfaces
     probe-proven-dead sessions that are hidden by default.
     """
+    active_material = db.get_active_credential(engagement_id)
+    active = (
+        str(active_material.get("identity_name") or DEFAULT_IDENTITY)
+        if active_material is not None
+        else DEFAULT_IDENTITY
+    )
     rows = db.list_credentials(engagement_id, host=host, include_dead=include_dead)
     identities = {row["identity_name"]: row for row in rows}
-    active = next(
-        (row["identity_name"] for row in rows if row.get("is_active")),
-        next(iter(identities), DEFAULT_IDENTITY),
-    )
     return {"identities": identities, "active_identity": active}
 
 

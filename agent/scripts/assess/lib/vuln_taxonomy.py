@@ -36,7 +36,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-LAST_REVIEWED = "2026-06-09"
+LAST_REVIEWED = "2026-07-07"
 
 
 FAMILIES: dict[str, str] = {
@@ -73,12 +73,15 @@ VULN_CLASSES: dict[str, tuple[str, str]] = {
     "cmdi": ("injection", "OS command / code execution injection."),
     "ssti": ("injection", "Server-side template injection."),
     "xxe": ("injection", "XML external entity / XML injection."),
+    "ssi-injection": ("injection", "Server-Side Includes (SSI) directive injection."),
     "ldap-injection": ("injection", "LDAP injection."),
+    "xpath-injection": ("injection", "XPath injection."),
     "graphql-injection": ("injection", "GraphQL query/mutation abuse & injection."),
     "elasticsearch-injection": ("injection", "Elasticsearch/search-DSL injection."),
     "mass-assignment": ("injection", "Mass assignment / over-posting."),
     "crlf": ("injection", "CRLF / header injection."),
     "deserialization": ("injection", "Unsafe deserialization."),
+    "csv-injection": ("injection", "CSV/spreadsheet formula (DDE) injection via exported data."),
     "injection": ("injection", "Generic injection (code-track coarse family)."),
     "web-app-injection": ("injection", "Web-app injection (code track)."),
     "ssrf": ("ssrf", "Server-side request forgery."),
@@ -101,6 +104,7 @@ VULN_CLASSES: dict[str, tuple[str, str]] = {
     "csrf": ("client-side", "Cross-site request forgery."),
     "cors": ("client-side", "CORS misconfiguration."),
     "prototype-pollution": ("client-side", "Prototype pollution."),
+    "clickjacking": ("client-side", "Clickjacking / UI redress via frame embedding."),
     "request-smuggling": ("protocol", "HTTP request smuggling/desync."),
     "host-header-injection": ("protocol", "Host-header injection."),
     "cache-poisoning": ("protocol", "Web cache poisoning/deception."),
@@ -126,10 +130,12 @@ GF_BUCKET_TO_CLASS: dict[str, str | None] = {
     "cloud_metadata": "ssrf",
     "sqli": "sqli",
     "nosqli": "nosqli",
+    "prototype-pollution": "prototype-pollution",
     "lfi": "lfi",
     "auth": "auth-bypass",
     "deserialization": "deserialization",
     "dotnet_handler": "deserialization",
+    "xxe": "xxe",
     "secret_vault": "secrets-exposure",
     "img_traversal": "img-traversal",
     "idp_admin": "auth-bypass",
@@ -139,7 +145,9 @@ GF_BUCKET_TO_CLASS: dict[str, str | None] = {
     "idor": "idor",
     "servicenow": "idor",
     "privileged_action": "bfla",
+    "mass-assignment": "mass-assignment",
     "devops_console": "debug-exposure",
+    "ssi": "ssi-injection",
     "oauth-oidc": "oauth",
     "sso": "saml",
     "upload_fields": "file-upload",
@@ -169,7 +177,7 @@ SURFACE_TYPE_TO_CLASSES: dict[str, tuple[str, ...]] = {
     "object_reference": ("idor", "bola", "bfla"),
     "privileged_write": ("bfla", "path-authz", "mass-assignment"),
     "file_handling": ("file-upload", "lfi", "path-traversal"),
-    "dynamic_render": ("xss", "ssti"),
+    "dynamic_render": ("xss", "ssti", "ssi-injection"),
     "api_documentation": ("bola", "bfla", "mass-assignment", "graphql-injection"),
     "workflow_token": ("business-logic", "race-condition"),
     "misconfiguration": ("info-disclosure", "debug-exposure"),
