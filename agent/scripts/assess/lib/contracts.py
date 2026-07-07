@@ -530,6 +530,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Do not put `link_kind=root_cause` in the `links` array. Record the finding first, then `vigil assess link-finding` after verification — root/sibling grouping is an explicit lifecycle action.",
             "evidence_ref must point at an existing engagement file (auto-registered and linked on record). URL refs, prose refs, and path-shaped refs with no file are REJECTED — they cannot satisfy report-readiness artifact indexing. Put external URLs in details.references; pass --allow-unindexed-evidence only for a theoretical/code-inferred finding with no file.",
             "Dedup keys on (defect_family + root_cause_key + auth_context + canonical_location). A net-new record whose tuple collides with an EXISTING reported/active finding under a different slug is REFUSED, not silently merged. For a genuinely-distinct sibling on the same root cause, give it its OWN root_cause_key/defect_family and attach it with link-finding; pass --update <slug> ONLY to intentionally modify that exact existing finding.",
+            "Kill re-mint guard (D4): a net-new record that shares the same defect_family (technique) AND a normalized endpoint/canonical-location signal with a finding previously KILLED as false_positive is REFUSED — this catches a source-line vs runtime rediscovery that would otherwise resurrect a disproven finding at a different canonical_location. If the earlier kill was wrong, reopen it with `reset-finding <slug>`; if this is a genuinely NEW finding that only coincides on endpoint + technique, re-record with --allow-remint (a.k.a. --force).",
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
@@ -641,6 +642,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         schema_name="backend RootCauseLinkRequest / FindingLinkRequest",
         preferred_invocations=(
             "vigil assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_finding",
+            "vigil assess link-finding <sib1> <sib2> <sib3> --root-cause <root-slug>",
             "vigil assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_attack_path --note 'Root removes this exploit chain; residual XXE remains.'",
             "vigil assess link-finding <sibling-slug> --clear-root-cause",
             "vigil assess link-finding <blocked-slug> --link-kind unblocked_by --target-kind finding --target-ref <unblocking-slug>",
@@ -659,6 +661,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("link_kind", "related (generic mode)"),
         ),
         notes=(
+            "Batch: list several sibling slugs positionally to attach them all to one --root-cause (or apply the same --intel / generic / --clear-root-cause op to each) in a resilient loop with a per-slug failure tally.",
             "Root-cause mode (--root-cause): use after findings are verified enough to consolidate. Records intentional grouping without touching root_cause_key, so dedup and human grouping stay separate.",
             "Use --effect eliminates_attack_path when fixing the root removes only the demonstrated chain and the sibling still needs standalone remediation; use eliminates_finding when the root fix retires the sibling entirely.",
             "Generic mode (--link-kind + --target-kind + --target-id/--target-ref): records an arbitrary typed link (POST /findings/{slug}/links). link_kind=root_cause is refused here — use --root-cause.",
@@ -939,9 +942,12 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Apply a verification transition to an existing finding through the audit ledger.",
         schema_name="backend FindingVerifyRequest",
         preferred_invocations=(
-            "vigil assess verify-finding <slug> <verification-json>",
+            'vigil assess verify-finding <slug> --disposition confirmed --reason "..."',
             'vigil assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity low',
             'vigil assess verify-finding <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check 2',
+            "vigil assess verify-finding <slug> --inline '{\"disposition\":\"confirmed\",\"reason_text\":\"...\"}'",
+            "vigil assess verify-finding <slug> --payload-file verify.json",
+            'vigil assess verify-finding VA-001 VA-002 VA-003 --disposition confirmed --reason "batch: all reproduced"',
         ),
         author_supplied_fields=(
             "disposition",
@@ -950,6 +956,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Use for confirmed, downgraded, and disputed verification outcomes.",
             "For false_positive, either pass details.kill_reason/details.kill_check here, or use kill-finding for the shorter flow.",
+            "The JSON payload is passed via --inline '<json>' or --payload-file <path>; the trailing positional payload arg was REMOVED, so a JSON blob passed positionally is rejected with a pointer to the flags.",
+            "Batch: list several slugs positionally to apply the SAME disposition/payload/flags to each (resilient loop with a per-slug failure tally).",
         ),
         common_mistakes=(
             ("rationale", "use reason_text"),
@@ -975,6 +983,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         schema_name="backend FindingVerifyRequest (false_positive)",
         preferred_invocations=(
             'vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>',
+            "vigil assess kill-finding <slug> --payload-file kill.json",
+            'vigil assess kill-finding VA-004 VA-005 --reason "..." --kill-reason "..." --kill-check 2',
         ),
         author_supplied_fields=(
             "reason_text",
@@ -983,6 +993,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Use when you have the kill rationale and do not need a custom JSON payload file.",
+            "A custom JSON payload goes via --inline '<json>' or --payload-file <path>; the trailing positional payload arg was REMOVED (a JSON blob passed positionally is rejected).",
+            "Batch: list several slugs positionally to kill them all with the SAME payload/flags (resilient loop with a per-slug failure tally).",
         ),
         common_mistakes=(
             ("rationale", "use reason_text"),
@@ -1005,16 +1017,19 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Patch non-verification finding fields on an existing slug.",
         schema_name="backend FindingPatchRequest",
         preferred_invocations=(
-            "vigil assess update-finding <slug> <patch-json-file>",
+            "vigil assess update-finding <slug> --payload-file patch.json",
             'vigil assess update-finding <slug> --status reported --reason "Published in report"',
             'vigil assess update-finding <slug> --inline \'{"workflow_status":"draft","reason_text":"Needs more evidence"}\'',
             'vigil assess update-finding <slug> --details-inline \'{"chain_required":true,"chain_rationale":"...","required_followup":["..."]}\'',
             'vigil assess update-finding <slug> --details-inline \'{"cvss_score":9.1}\' --details-replace',
+            'vigil assess update-finding VA-006 VA-007 --status reported --reason "batch: published"',
         ),
         author_supplied_fields=(
             "at least one patch field",
         ),
         notes=(
+            "The patch payload goes via --inline '<json>' or --payload-file <path>; the trailing positional payload arg was REMOVED (a JSON blob passed positionally is rejected).",
+            "Batch: list several slugs positionally to apply the SAME patch payload/flags to each (resilient loop with a per-slug failure tally).",
             "Use for workflow and metadata updates that are NOT verification lifecycle transitions.",
             "Reopening a verified or false-positive finding for re-triage belongs in reset-finding.",
             "Verification disposition changes, disputed reviews, and false_positive kills belong in verify-finding or kill-finding.",
@@ -1073,6 +1088,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         preferred_invocations=(
             'vigil assess reset-finding <slug> --reason "..." --status draft',
             'vigil assess reset-finding <slug> --reason "Retest disproved the kill" --status active',
+            'vigil assess reset-finding VA-008 VA-009 --reason "batch: retest disproved both" --status draft',
         ),
         author_supplied_fields=(
             "reason_text",
@@ -1081,6 +1097,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Use when new evidence means a verified or false-positive finding should return to the active workflow.",
             "Reopening a false-positive finding resets verification_state to unreviewed and verification_disposition to none server-side.",
+            "Batch: list several slugs positionally to reset them all with the SAME --status/--reason (resilient loop with a per-slug failure tally).",
         ),
         common_mistakes=(
             ("verification_state", "reopening is a reset-finding transition, not a manual verification_state patch"),
@@ -1105,6 +1122,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             'vigil assess resolve-surface <id> --status not_applicable --rationale "..."',
             'vigil assess resolve-surface <id> --status deferred --rationale "..."',
             'vigil assess resolve-surface <id> --status partially-covered --rationale "..." --followup-condition "..."',
+            'vigil assess resolve-surface 42 99 17 --status covered --rationale "batch: same triage verdict"',
         ),
         author_supplied_fields=(
             "status",
@@ -1115,6 +1133,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Resolve a discovered surface after triage instead of falling back to direct SQL.",
             "Rationale is appended to existing rationale, so the audit trail accumulates context across resolutions.",
             "--followup-condition is REQUIRED when --status=partially-covered: the one-line condition the follow-up coverage pass must satisfy.",
+            "Batch: list several surface ids positionally to resolve them all with the SAME --status/--rationale (resilient loop with a per-id failure tally).",
         ),
         common_mistakes=(
             ("status=discovered", "discovered is the seed state; resolve to covered, not_applicable, deferred, or partially-covered"),
@@ -1146,6 +1165,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             'vigil assess resolve-coverage-item <id> --status covered --rationale "idor tested across two identities; user_b got 403"',
             'vigil assess resolve-coverage-item <id> --status not_applicable --rationale "no id-bearing param; static render"',
             'vigil assess resolve-coverage-item <id> --status deferred --rationale "low-signal; revisit after auth is issued"',
+            'vigil assess resolve-coverage-item 77 88 99 --status covered --rationale "batch: same class verdict"',
         ),
         author_supplied_fields=(
             "status (pending|queued|deferred|covered|not_applicable|blocked)",
@@ -1153,6 +1173,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Coverage items are seeded `pending` at ingest — one per implied vuln-class on a surface (the gf-bucket bridge). Resolve each implied class, not just the cluster winner: a surface's `covered` on one class does NOT cover its sibling classes.",
+            "Batch: list several coverage-item ids positionally to resolve them all with the SAME --status/--rationale (resilient loop with a per-id failure tally).",
             "--rationale is required for EVERY status (audit trail); the backend additionally rejects an empty rationale for `covered` / `not_applicable`. A resolved-positive verdict must state what was tested and why; a deferral must state why.",
             "Rationale is appended to the item's existing notes, so the audit trail accumulates across resolutions.",
             "Replaces the old raw `patch coverage-items/<id> <json>` (that raw form is now redirected here).",
@@ -2835,9 +2856,10 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "vigil assess agent done <agent-id> --status completed --finding-slugs <slug1,slug2>",
                 "vigil assess agent done <agent-id> --status failed",
                 "vigil assess agent done <agent-id> --status aborted",
+                "vigil assess agent done AG-1 AG-2 AG-3 --status completed",
             ),
             author_supplied_fields=(
-                "<agent-id>",
+                "<agent-id> (one or more; batch applies the same flags to each)",
                 "--status (in-progress|completed|failed|aborted|blocked)",
             ),
             helper_defaults=(
@@ -2866,13 +2888,15 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             preferred_invocations=(
                 "vigil assess agent close <agent-id>",
                 "vigil assess agent close <agent-id> --reason \"ready handoff reviewed\"",
+                "vigil assess agent close AG-1 AG-2 AG-3",
             ),
             author_supplied_fields=(
-                "<agent-id>",
+                "<agent-id> (one or more; batch closes each ready/blocked handoff)",
                 "--reason",
             ),
             notes=(
                 "Use after a specialist checkpoint marks handoff_status=ready or blocked. Checkpointed handoffs stay open.",
+                "Batch: list several agent-ids to close each in a resilient loop; a non-closable/checkpointed dispatch is reported and skipped, not fatal.",
                 "Records a dispatch_closed_from_handoff decision row so automated/stale closure stays auditable.",
             ),
         )

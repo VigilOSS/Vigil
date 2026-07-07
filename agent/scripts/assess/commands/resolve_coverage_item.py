@@ -46,7 +46,13 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=render_contract_epilog("resolve-coverage-item"),
     )
-    p.add_argument("coverage_item_id", type=int, help="Backend id of the coverage item row")
+    p.add_argument(
+        "coverage_item_id",
+        type=int,
+        nargs="+",
+        help="One or more backend coverage-item ids. Batch: every listed item gets the same "
+             "--status/--rationale (resilient loop with a per-id failure tally).",
+    )
     p.add_argument(
         "--status",
         required=True,
@@ -68,13 +74,35 @@ def run(args) -> None:
 
     payload = {"status": args.status, "notes": args.rationale}
 
+    item_ids = args.coverage_item_id if isinstance(args.coverage_item_id, list) else [args.coverage_item_id]
     cfg = load_config(args.engagement_dir)
+    records: list = []
+    failed = 0
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        record = client.patch(f"coverage-items/{args.coverage_item_id}", payload)
+        for item_id in item_ids:
+            try:
+                record = client.patch(f"coverage-items/{item_id}", payload)
+            except Exception as exc:  # noqa: BLE001 - one bad id must not drop the rest
+                failed += 1
+                print(f"resolve-coverage-item: item {item_id} failed: {exc}", file=sys.stderr)
+                continue
+            if not isinstance(record, dict) or "id" not in record:
+                failed += 1
+                print(
+                    f"resolve-coverage-item: item {item_id} returned an unexpected response",
+                    file=sys.stderr,
+                )
+                continue
+            records.append(record)
 
-    if not isinstance(record, dict) or "id" not in record:
-        print("resolve-coverage-item: backend returned an unexpected response", file=sys.stderr)
-        print(json.dumps(record, indent=2, ensure_ascii=False))
+    if len(item_ids) == 1 and records:
+        print(json.dumps(records[0], indent=2, ensure_ascii=False))
+    else:
+        for record in records:
+            print(json.dumps(record, ensure_ascii=False))
+        print(
+            f"[resolve-coverage-item] resolved {len(records)} item(s); {failed} failed.",
+            file=sys.stderr,
+        )
+    if failed:
         sys.exit(1)
-
-    print(json.dumps(record, indent=2, ensure_ascii=False))

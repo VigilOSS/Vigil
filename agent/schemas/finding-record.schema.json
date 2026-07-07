@@ -462,6 +462,11 @@
       },
       "title": "Links",
       "type": "array"
+    },
+    "allow_remint": {
+      "default": false,
+      "title": "Allow Remint",
+      "type": "boolean"
     }
   },
   "required": [

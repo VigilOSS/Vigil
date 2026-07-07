@@ -823,7 +823,7 @@ def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys
         SimpleNamespace(
             engagement_dir=tmp_path,
             finding_slug="VA-001",
-            payload=str(payload_path),
+            payload_file=str(payload_path),
             inline_payload=None,
         )
     )
@@ -1651,7 +1651,7 @@ def test_verify_finding_help_is_rendered_from_contract_registry(capsys):
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "vigil assess verify-finding <slug> <verification-json>" in out
+    assert "vigil assess verify-finding <slug> --disposition confirmed --reason" in out
     assert "vigil assess contract verify-finding" in out
     assert "Contract:" not in out
 

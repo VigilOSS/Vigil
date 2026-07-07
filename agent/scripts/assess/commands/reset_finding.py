@@ -18,7 +18,12 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=render_contract_epilog("reset-finding"),
     )
-    p.add_argument("finding_slug", help="Canonical finding slug")
+    p.add_argument(
+        "finding_slug",
+        nargs="+",
+        help="One or more canonical finding slugs. Batch: every listed slug is reset with the "
+             "same --status/--reason/flags (resilient loop with a per-slug failure tally).",
+    )
     p.add_argument("--workflow-status", "--status", dest="workflow_status", default="draft")
     p.add_argument("--severity")
     p.add_argument("--reason", dest="reason_text", required=True, help="Why the finding is being reset")
@@ -56,8 +61,26 @@ def run(args) -> None:
     }
     payload = {key: value for key, value in payload.items() if value is not None}
 
+    slugs = args.finding_slug if isinstance(args.finding_slug, list) else [args.finding_slug]
     cfg = load_config(args.engagement_dir)
+    results: list = []
+    failed = 0
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.patch(f"findings/{args.finding_slug}", payload)
+        for slug in slugs:
+            try:
+                results.append(client.patch(f"findings/{slug}", payload))
+            except Exception as exc:  # noqa: BLE001 - one bad slug must not drop the rest
+                failed += 1
+                print(f"reset-finding: {slug} failed: {exc}", file=sys.stderr)
 
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if len(slugs) == 1 and results:
+        print(json.dumps(results[0], indent=2, ensure_ascii=False))
+    else:
+        for result in results:
+            print(json.dumps(result, ensure_ascii=False))
+        print(
+            f"[reset-finding] reset {len(results)} finding(s); {failed} failed.",
+            file=sys.stderr,
+        )
+    if failed:
+        sys.exit(1)

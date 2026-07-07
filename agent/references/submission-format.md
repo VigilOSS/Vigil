@@ -14,11 +14,11 @@ three targets; each finding is a standalone submission.
 
 `vigil assess export-submission <slug> --platform <p> --draft` generates the per-finding draft; pick the platform below and use its scaffold for the platform-specific fields. This doc holds the cross-platform authoring rules all three share (voice, section budgets, PII redaction, PoC authoring, de-harnessing, and one consolidated pre-submission / report QA checklist) — the templates link back here rather than repeating them.
 
-| Target | Scaffold | Platform-specific field |
-|---|---|---|
-| Bugcrowd | `agent/skills/report-generation/templates/bugcrowd.md` | VRT category + P1–P4 priority |
-| HackerOne | `agent/skills/report-generation/templates/hackerone.md` | CWE weakness |
-| Direct (company / vendor) | `agent/skills/report-generation/templates/direct.md` | none (VRT / H1 fields dropped) |
+| Target | Scaffold | Platform-specific field | Taxonomy lookup |
+|---|---|---|---|
+| Bugcrowd | `agent/skills/report-generation/templates/bugcrowd.md` | VRT category + P1–P4 priority | `agent/references/reporting/bugcrowd-vrt.md` (leaf table in `bugcrowd-vrt.tsv`) |
+| HackerOne | `agent/skills/report-generation/templates/hackerone.md` | CWE weakness | `agent/references/reporting/hackerone-weaknesses.md` (leaf table in `hackerone-weaknesses.tsv`) |
+| Direct (company / vendor) | `agent/skills/report-generation/templates/direct.md` | none (VRT / H1 fields dropped) | n/a |
 
 For a vendor/CERT disclosure *email* rather than a platform submission, use `agent/references/disclosure-email-format.md` instead.
 
@@ -141,6 +141,7 @@ Choose the form that fits the reproduction:
 Omit the block. Steps to Reproduce contains everything the triager needs to run.
 
 **Single file:**
+
 ```
 **POC:** `<filename>` — attach
 **Run:** `<runtime> <filename>`
@@ -148,6 +149,7 @@ Omit the block. Steps to Reproduce contains everything the triager needs to run.
 ```
 
 **Multiple files:**
+
 ```
 **POC:** `<main>`, `<file2>`, `<file3>` — attach all
 **Run:** `<runtime> <main>`

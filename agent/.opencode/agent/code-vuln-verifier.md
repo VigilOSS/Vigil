@@ -120,7 +120,7 @@ so the backend clears the prior verification state and the finding returns to ac
 
 ```bash
 # Persist confirm/downgrade/dispute decisions through the verification endpoint
-vigil assess verify-finding <slug> <verification-json>
+vigil assess verify-finding <slug> --disposition <verdict> --reason "<rationale>"
 
 # Persist kills with the dedicated helper (enforces kill_reason + kill_check fields)
 vigil assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
@@ -139,7 +139,7 @@ vigil assess record-finding code-vuln-verifier <new-finding-json>
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess verify-finding <slug> <verification-json>` for each confirm/downgrade/dispute decision
+1. `vigil assess verify-finding <slug> --disposition <verdict> --reason "<rationale>"` for each confirm/downgrade/dispute decision
 2. `vigil assess kill-finding <slug> ...` for each kill decision
 3. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
 4. `vigil assess record-finding code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)

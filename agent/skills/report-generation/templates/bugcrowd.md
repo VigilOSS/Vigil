@@ -67,7 +67,10 @@ markers. Stored back on the finding as `details.evidence`; the raw output stays 
 - **VRT is the platform-taxonomy field for this template.** HackerOne uses a CWE weakness instead
   — see `templates/hackerone.md`. Resolve against the live taxonomy at
   bugcrowd.com/vulnerability-rating-taxonomy and pick the leaf, not the category head. Never leave
-  it blank, "TBD", or "N/A" — the strict gate rejects those the same as an empty field.
+  it blank, "TBD", or "N/A" — the strict gate rejects those the same as an empty field. Offline,
+  grep `agent/references/reporting/bugcrowd-vrt.tsv` for the leaf, its default P1–P5 priority, and
+  suggested CVSS; for the IDOR Iterable-vs-Complex fork, the harvestable-identifier exception, and
+  other ambiguous-leaf calls, consult `agent/references/reporting/bugcrowd-vrt.md`.
 - **P1-P4 is Bugcrowd's own priority scale, not a CVSS band.** A category's default VRT priority
   can sit above its raw CVSS score — Bugcrowd's technical-severity matrix assigns categories like
   broken access control a default P2 even when the calculated vector lands in the CVSS "Medium"

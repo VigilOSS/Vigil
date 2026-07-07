@@ -216,6 +216,164 @@ def test_false_positive_rerecord_is_not_clobber_guarded(client, isolate_settings
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# D4: killed (false_positive) re-mint guard — a BROADER (technique + endpoint)
+# match than the exact dedup tuple, so a source-line vs runtime rediscovery of a
+# DISPROVEN finding cannot silently resurrect at a different canonical_location.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _killed_ssrf(slug, **over) -> dict:
+    """A finding KILLED as false_positive at a runtime SSRF endpoint (with query)."""
+    return _finding(
+        slug,
+        workflow_status="false_positive",
+        verification_state="verified",
+        verification_disposition="false_positive",
+        defect_family="ssrf",
+        root_cause_key="unvalidated-fetch",
+        canonical_location="https://app.example/api/fetch?url=http://169.254.169.254",
+        title="SSRF via fetch url param",
+        summary="killed: egress firewalled, metadata unreachable",
+        **over,
+    )
+
+
+def test_d4_remint_of_killed_at_shared_endpoint_is_refused(client, isolate_settings):
+    # (a) A net-new record sharing the SAME technique + normalized endpoint with a
+    # killed finding, but a DIFFERENT canonical_location/root_cause_key/title (so it
+    # misses the exact dedup tuple), is refused with an actionable message.
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_killed_ssrf("VA-050")).status_code == 201
+
+    resp = client.post(
+        f"{_base()}/findings",
+        json=_finding(
+            "VA-051",
+            workflow_status="active",
+            defect_family="ssrf",
+            root_cause_key="ssrf-source-line",
+            canonical_location="https://app.example/api/fetch",  # same endpoint, no query
+            title="SSRF reachable at fetch endpoint",
+            summary="rediscovered from source analysis",
+        ),
+    )
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert "Refusing to re-mint" in detail
+    assert "VA-050" in detail
+    assert "reset-finding VA-050" in detail
+    assert "--allow-remint" in detail
+    # The killed finding is untouched and the re-mint was NOT created.
+    assert {r["slug"] for r in client.get(f"{_base()}/findings").json()} == {"VA-050"}
+
+
+def test_d4_remint_allowed_with_override_flag(client, isolate_settings):
+    # (b) --allow-remint / allow_remint=true forces an intentional distinct re-mint.
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_killed_ssrf("VA-050")).status_code == 201
+
+    payload = _finding(
+        "VA-051",
+        workflow_status="active",
+        defect_family="ssrf",
+        root_cause_key="ssrf-source-line",
+        canonical_location="https://app.example/api/fetch",
+        title="SSRF reachable at fetch endpoint",
+    )
+    payload["allow_remint"] = True
+    resp = client.post(f"{_base()}/findings", json=payload)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["finding"]["slug"] == "VA-051"
+    assert {r["slug"] for r in client.get(f"{_base()}/findings").json()} == {"VA-050", "VA-051"}
+
+
+def test_d4_different_class_at_same_endpoint_is_not_refused(client, isolate_settings):
+    # (c) Same endpoint, GENUINELY different vuln class (defect_family) => the
+    # technique gate misses => not refused. A shared endpoint alone is not enough.
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_killed_ssrf("VA-050")).status_code == 201
+
+    resp = client.post(
+        f"{_base()}/findings",
+        json=_finding(
+            "VA-051",
+            workflow_status="active",
+            defect_family="reflected-xss",
+            root_cause_key="unescaped-echo",
+            canonical_location="https://app.example/api/fetch",
+            title="Reflected XSS in fetch response",
+        ),
+    )
+    assert resp.status_code == 201, resp.text
+    assert {r["slug"] for r in client.get(f"{_base()}/findings").json()} == {"VA-050", "VA-051"}
+
+
+def test_d4_same_technique_different_endpoint_is_not_refused(client, isolate_settings):
+    # Boundary: same technique but a genuinely different endpoint => no shared
+    # signal => allowed (the guard is technique AND endpoint, not technique alone).
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_killed_ssrf("VA-050")).status_code == 201
+
+    resp = client.post(
+        f"{_base()}/findings",
+        json=_finding(
+            "VA-051",
+            workflow_status="active",
+            defect_family="ssrf",
+            root_cause_key="ssrf-proxy",
+            canonical_location="https://app.example/api/proxy",
+            title="SSRF at proxy endpoint",
+        ),
+    )
+    assert resp.status_code == 201, resp.text
+    assert {r["slug"] for r in client.get(f"{_base()}/findings").json()} == {"VA-050", "VA-051"}
+
+
+def test_d4_active_reported_clobber_guard_unchanged(client, isolate_settings):
+    # (d) The D4 killed-guard is additive: the reported/active clobber guard on the
+    # EXACT tuple still fires (and D4 does not double-refuse or change its message).
+    _seed(client, isolate_settings)
+    assert client.post(
+        f"{_base()}/findings", json=_finding("VA-001", workflow_status="reported")
+    ).status_code == 201
+    resp = client.post(
+        f"{_base()}/findings",
+        json=_finding("VA-002", workflow_status="active", summary="rediscovered"),
+    )
+    assert resp.status_code == 409, resp.text
+    assert "Refusing to clobber" in resp.json()["detail"]
+
+
+def test_d4_reset_finding_reopens_killed(client, isolate_settings):
+    # (e) reset-finding (PATCH reopen) still works on a killed finding, and after
+    # reopening it is no longer false_positive so the D4 guard no longer keys on it.
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_killed_ssrf("VA-050")).status_code == 201
+
+    resp = client.patch(
+        f"{_base()}/findings/VA-050",
+        json={"workflow_status": "draft", "reason_text": "retest disproved the kill"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["finding"]["workflow_status"] == "draft"
+
+    # With VA-050 reopened (no longer false_positive), a fresh record at the same
+    # endpoint + technique is not blocked by the killed-remint guard.
+    resp2 = client.post(
+        f"{_base()}/findings",
+        json=_finding(
+            "VA-051",
+            workflow_status="active",
+            defect_family="ssrf",
+            root_cause_key="ssrf-source-line",
+            canonical_location="https://app.example/api/fetch",
+            title="SSRF reachable at fetch endpoint",
+        ),
+    )
+    assert resp2.status_code == 201, resp2.text
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # CLI boundary enforcement (record_finding.py)
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -312,3 +470,89 @@ def test_contract_documents_update_flag():
 
     text = contracts.render_contract("record-finding")
     assert "--update" in text
+
+
+def _run_record_finding_with_flags(monkeypatch, tmp_path, *, allow_remint: bool) -> dict:
+    """Drive record_finding.run against a stubbed client and return the POSTed body."""
+    import contextlib
+    import types
+
+    rf = _record_finding()
+    posted: dict = {}
+
+    class FakeClient:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def close(self) -> None:
+            pass
+
+        def get(self, endpoint):
+            return []  # no existing findings => no clobber
+
+        def post(self, endpoint, payload):
+            posted["endpoint"] = endpoint
+            posted["payload"] = payload
+            return {"finding": {"slug": payload.get("slug", "VA-100"), "title": "t"}}
+
+        def post_event(self, body):
+            posted["event"] = body
+
+    cfg = types.SimpleNamespace(base_url="http://x", engagement_key="k", engagement_dir=str(tmp_path))
+    monkeypatch.setattr(rf, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(rf, "AssessmentClient", lambda *a, **k: FakeClient())
+    monkeypatch.setattr(rf, "collect_validation_errors", lambda *a, **k: [])
+    monkeypatch.setattr(rf, "file_lock", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rf, "finding_lock_path", lambda *a, **k: str(tmp_path / "lock"))
+
+    finding_json = tmp_path / "finding.json"
+    finding_json.write_text(
+        json.dumps(
+            {
+                "slug": "VA-100",
+                "title": "SSRF via fetch",
+                "defect_family": "ssrf",
+                "canonical_location": "https://app.example/api/fetch",
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        engagement_dir=str(tmp_path),
+        agent_name="vulnerability-analyst",
+        json_file=str(finding_json),
+        allow_unindexed_evidence=True,
+        update_slug="",
+        allow_remint=allow_remint,
+    )
+    rf.run(args)
+    return posted
+
+
+def test_cli_allow_remint_injects_flag_into_post(monkeypatch, tmp_path):
+    posted = _run_record_finding_with_flags(monkeypatch, tmp_path, allow_remint=True)
+    assert posted["endpoint"] == "findings"
+    assert posted["payload"].get("allow_remint") is True
+
+
+def test_cli_allow_remint_absent_by_default(monkeypatch, tmp_path):
+    posted = _run_record_finding_with_flags(monkeypatch, tmp_path, allow_remint=False)
+    assert "allow_remint" not in posted["payload"]
+
+
+def test_cli_register_adds_allow_remint_flag():
+    rf = _record_finding()
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers()
+    rf.register(sub)
+    for flag in ("--allow-remint", "--force"):
+        args = parser.parse_args(["record-finding", "vulnerability-analyst", "finding.json", flag])
+        assert args.allow_remint is True
+    args_default = parser.parse_args(["record-finding", "vulnerability-analyst", "finding.json"])
+    assert args_default.allow_remint is False

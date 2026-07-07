@@ -46,6 +46,17 @@ def register(subparsers) -> None:
              "<slug> only when you mean to change that exact finding; for a distinct sibling on the "
              "same root cause, give it a distinct root_cause_key/defect_family and use link-finding.",
     )
+    p.add_argument(
+        "--allow-remint",
+        "--force",
+        dest="allow_remint",
+        action="store_true",
+        help="D4 override: mint this finding even though it shares an endpoint + technique with a "
+             "finding previously KILLED as false_positive. Without this flag such a re-mint is "
+             "REFUSED so a disproven finding cannot silently resurrect at a different "
+             "canonical_location. Use only for a genuinely NEW finding that merely coincides on "
+             "endpoint + technique; if the prior kill was wrong, run `reset-finding <slug>` instead.",
+    )
     p.set_defaults(func=run)
 
 
@@ -178,10 +189,12 @@ def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str,
 # stay semantically sticky — both are outside the guard set, matching the backend.
 _CLOBBER_GUARDED_STATUSES = frozenset({"active", "reported"})
 
-# Marker phrase the backend embeds in its clobber-refusal 409 detail. Used to
-# translate a backstop refusal (e.g. a title-tier match the CLI tuple-check does
-# not model, or a race) into a clean operator message instead of a raw HTTP dump.
+# Marker phrases the backend embeds in its refusal 409 details. Used to translate
+# a backstop refusal (e.g. a title-tier clobber match the CLI tuple-check does not
+# model, a race, or the D4 killed-finding re-mint guard which has no CLI mirror)
+# into a clean operator message instead of a raw HTTP dump.
 _BACKEND_CLOBBER_MARKER = "Refusing to clobber"
+_BACKEND_REMINT_MARKER = "Refusing to re-mint"
 
 
 def _find_clobbered_finding(
@@ -290,11 +303,13 @@ def _guard_finding_clobber(payload: dict, *, candidate_slug: str, base_url: str,
 
 
 def _print_backend_clobber_refusal(exc: AssessError) -> bool:
-    """If ``exc`` is the backend clobber-guard 409, print its actionable detail
-    and return True (caller should exit 1). Otherwise return False so the caller
-    re-raises and other errors keep their existing handling."""
+    """If ``exc`` is a backend clobber-guard or D4 re-mint-guard 409, print its
+    actionable detail and return True (caller should exit 1). Otherwise return
+    False so the caller re-raises and other errors keep their existing handling."""
     message = str(exc)
-    if "HTTP 409" not in message or _BACKEND_CLOBBER_MARKER not in message:
+    if "HTTP 409" not in message or (
+        _BACKEND_CLOBBER_MARKER not in message and _BACKEND_REMINT_MARKER not in message
+    ):
         return False
     _, _, body = message.partition("\n")
     detail = body
@@ -378,6 +393,12 @@ def run(args) -> None:
                 base_url=cfg.base_url,
                 engagement_key=cfg.engagement_key,
             )
+
+        # D4 override: injected AFTER schema validation (it is a control flag, not a
+        # finding-record.schema.json field) so the backend's killed-remint guard is
+        # skipped for an intentional distinct re-mint.
+        if getattr(args, "allow_remint", False):
+            payload["allow_remint"] = True
 
         with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
             try:

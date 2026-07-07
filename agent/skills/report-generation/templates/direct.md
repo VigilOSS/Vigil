@@ -78,9 +78,11 @@ markers. Stored back on the finding as `details.evidence`; the raw output stays 
 - Add a contact line if the vendor's intake doesn't already capture the researcher elsewhere (the
   writeup may be attached to a portal ticket or a cover email that already carries a From:
   address):
+
 ```
 **Researcher:** [name] — [email]
 ```
+
   This line is optional; the strict gate doesn't check it.
 
 ## Worked example

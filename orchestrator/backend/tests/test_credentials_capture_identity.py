@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from datetime import datetime, timedelta, timezone
+
+# The opaque hash fallback name: `cap-` + exactly 10 lowercase hex chars.
+_BARE_HASH_RE = re.compile(r"^cap-[0-9a-f]{10}$")
 
 from test_engagements_api import write_engagement
 
@@ -121,6 +125,107 @@ def test_derive_logout_only_cookies_is_none():
 
 
 # ---------------------------------------------------------------------------
+# Human-readable principal labels (B3b) — derive a readable `cap-<claim>` name
+# from a JWT sub/uid/user_id/email principal instead of the opaque hash.
+# ---------------------------------------------------------------------------
+
+def test_derive_jwt_sub_yields_human_label_not_bare_hash():
+    # (a) A `sub` claim surfaces as a readable label, not `cap-<sha1>`.
+    name = creds.derive_capture_identity(
+        {}, {"Authorization": f"Bearer {_jwt({'sub': 'acme-user'})}"}, {}
+    )
+    assert name == "cap-acme-user"
+    assert not _BARE_HASH_RE.match(name)  # decisively not the opaque hash
+
+
+def test_derive_email_claim_is_sanitized_and_readable():
+    # An email principal is sanitized (lowercase, `@`->`_`) and stays readable;
+    # a disambiguating hash is appended only because sanitization is lossy.
+    name = creds.derive_capture_identity(
+        {}, {}, {"access_token": _jwt({"email": "User@Example.com"})}
+    )
+    assert name.startswith("cap-user_example.com")
+    assert "User" not in name and "@" not in name  # sanitized, never raw
+    assert not _BARE_HASH_RE.match(name)
+
+
+def test_derive_same_principal_is_stable_across_refresh():
+    # (b) Two DIFFERENT raw JWTs with the same principal -> same readable name,
+    # so a token refresh REFRESHES one row (label is durable, not cookie-bound).
+    t1 = _jwt({"sub": "acct-alice", "iat": 1, "exp": 100})
+    t2 = _jwt({"sub": "acct-alice", "iat": 999, "exp": 9999})
+    assert t1 != t2
+    a = creds.derive_capture_identity({}, {"Authorization": f"Bearer {t1}"}, {})
+    b = creds.derive_capture_identity({}, {"Authorization": f"Bearer {t2}"}, {})
+    assert a == b == "cap-acct-alice"
+    # Stable even when the co-captured session cookie rotates: the name derives
+    # from the durable claim, never the rotating cookie.
+    with_cookie = creds.derive_capture_identity(
+        {"sid": "rotates-every-login"}, {"Authorization": f"Bearer {t1}"}, {}
+    )
+    assert with_cookie == "cap-acct-alice"
+
+
+def test_derive_distinct_principals_get_distinct_names():
+    # (c) Different principals -> different readable names (multi-identity).
+    alice = creds.derive_capture_identity(
+        {}, {"Authorization": f"Bearer {_jwt({'sub': 'alice'})}"}, {}
+    )
+    bob = creds.derive_capture_identity(
+        {}, {"Authorization": f"Bearer {_jwt({'sub': 'bob'})}"}, {}
+    )
+    assert alice == "cap-alice"
+    assert bob == "cap-bob"
+    assert alice != bob
+
+
+def test_derive_lossy_collision_disambiguated_by_hash():
+    # Two DISTINCT principals whose claims sanitize to the SAME label must NOT
+    # collapse into one identity (never a wrong cross-account merge).
+    one = creds.derive_capture_identity(
+        {}, {}, {"access_token": _jwt({"sub": "a+tag@x.com"})}
+    )
+    two = creds.derive_capture_identity(
+        {}, {}, {"access_token": _jwt({"sub": "a_tag@x.com"})}
+    )
+    assert one.startswith("cap-a_tag_x.com")
+    assert two.startswith("cap-a_tag_x.com")
+    assert one != two  # disambiguating hash keeps distinct principals distinct
+
+
+def test_derive_case_only_principals_stay_distinct():
+    # Labels are forced lowercase; if the backend treats `sub` case-sensitively,
+    # `ADMIN` and `admin` are two accounts and must NOT collapse to one identity.
+    lower = creds.derive_capture_identity(
+        {}, {"Authorization": f"Bearer {_jwt({'sub': 'admin'})}"}, {}
+    )
+    upper = creds.derive_capture_identity(
+        {}, {"Authorization": f"Bearer {_jwt({'sub': 'ADMIN'})}"}, {}
+    )
+    assert lower == "cap-admin"                 # already lowercase -> clean
+    assert upper.startswith("cap-admin-")       # case-folded -> disambiguated
+    assert lower != upper
+
+
+def test_derive_no_claim_keeps_bare_hash_fallback():
+    # (d) No identifiable principal keeps the opaque `cap-<sha1>` fallback:
+    # cookie-only session, and a raw (non-JWT) opaque bearer.
+    cookie_only = creds.derive_capture_identity({"sid": "AAA-session-1234"}, {}, {})
+    assert _BARE_HASH_RE.match(cookie_only)
+    raw_bearer = creds.derive_capture_identity(
+        {}, {"Authorization": "Bearer opaque-not-a-jwt"}, {}
+    )
+    assert _BARE_HASH_RE.match(raw_bearer)
+
+
+def test_derive_anchorless_flow_still_mints_nothing():
+    # (e) Anchor-less / pre-login / pure-logout captures mint nothing.
+    assert creds.derive_capture_identity({}, {}, {}) is None
+    assert creds.derive_capture_identity({"cookie_consent": "yes"}, {}, {}) is None
+    assert creds.derive_capture_identity({"sid": "deleted"}, {}, {}) is None
+
+
+# ---------------------------------------------------------------------------
 # Capture -> multi-identity rows (via the service, DB-backed)
 # ---------------------------------------------------------------------------
 
@@ -199,6 +304,35 @@ def test_jwt_same_sub_two_raw_tokens_one_row(client, isolate_settings):
     _capture(eng, "api.example.com", {}, headers={"Authorization": f"Bearer {_jwt({'sub': 'u1', 'iat': 1})}"})
     _capture(eng, "api.example.com", {}, headers={"Authorization": f"Bearer {_jwt({'sub': 'u1', 'iat': 2})}"})
     assert len(db.list_credentials(eng)) == 1
+
+
+def test_capture_names_row_after_principal_and_refresh_coalesces(client, isolate_settings):
+    # A JWT-principal capture names the stored row readably; a refreshed token
+    # for the same principal REFRESHES that one row (append-in-place dedup).
+    eng = _seed(client, isolate_settings)
+    first = _capture(
+        eng, "api.example.com", {},
+        headers={"Authorization": f"Bearer {_jwt({'sub': 'acme-user', 'iat': 1})}"},
+    )
+    assert first["identity_name"] == "cap-acme-user"
+    second = _capture(
+        eng, "api.example.com", {},
+        headers={"Authorization": f"Bearer {_jwt({'sub': 'acme-user', 'iat': 2})}"},
+    )
+    assert second["identity_name"] == "cap-acme-user"
+    rows = db.list_credentials(eng, include_dead=True)
+    assert len(rows) == 1
+    assert rows[0]["identity_name"] == "cap-acme-user"
+
+
+def test_capture_distinct_principals_make_two_named_rows(client, isolate_settings):
+    # Two different principals append as two distinct, readably-named rows —
+    # this is the account-A vs account-B distinction for IDOR/BOLA testing.
+    eng = _seed(client, isolate_settings)
+    _capture(eng, "api.example.com", {}, headers={"Authorization": f"Bearer {_jwt({'sub': 'alice'})}"})
+    _capture(eng, "api.example.com", {}, headers={"Authorization": f"Bearer {_jwt({'sub': 'bob'})}"})
+    names = {r["identity_name"] for r in db.list_credentials(eng)}
+    assert names == {"cap-alice", "cap-bob"}
 
 
 # ---------------------------------------------------------------------------

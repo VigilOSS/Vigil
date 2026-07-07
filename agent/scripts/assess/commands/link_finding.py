@@ -24,7 +24,13 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=render_contract_epilog("link-finding"),
     )
-    p.add_argument("finding_slug", help="Finding slug the link is recorded on")
+    p.add_argument(
+        "finding_slug",
+        nargs="+",
+        help="One or more finding slugs the link is recorded on. Batch: attach many siblings to "
+             "one --root-cause (or apply the same --intel / generic / --clear-root-cause op to "
+             "each) in a resilient loop with a per-slug failure tally.",
+    )
     p.add_argument("--root-cause", dest="root_cause_slug", help="Root-cause finding slug")
     p.add_argument("--order", dest="sibling_order", type=int, help="Display order within the root-cause group")
     p.add_argument(
@@ -218,35 +224,55 @@ def run(args) -> None:
         print("provenance JSON must be an object", file=sys.stderr)
         sys.exit(1)
 
-    cfg = load_config(args.engagement_dir)
-    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        if intel_ids:
-            try:
-                result = _link_intel(client, args.finding_slug, intel_ids, args.note)
-            except ValueError as exc:
-                print(str(exc), file=sys.stderr)
-                sys.exit(1)
-        elif generic_selected:
-            payload = {
-                "link_kind": link_kind,
-                "target_kind": target_kind,
-                "target_id": target_id,
-                "target_ref": target_ref,
-                "notes": args.note,
-                "provenance": provenance,
-            }
-            result = client.post(f"findings/{args.finding_slug}/links", payload)
-        elif args.clear_root_cause:
-            result = client.delete(f"findings/{args.finding_slug}/root-cause")
-        else:
-            payload = {
-                "root_cause_slug": args.root_cause_slug,
-                "sibling_order": args.sibling_order,
-                "root_cause_effect": args.root_cause_effect,
-                "note": args.note,
-                "source_name": args.source_name,
-                "provenance": provenance,
-            }
-            result = client.put(f"findings/{args.finding_slug}/root-cause", payload)
+    # The selected mode's payload does not depend on the slug, so build it once and
+    # apply it to every listed slug. Batch = link many siblings to one --root-cause
+    # (or the same --intel / generic / --clear-root-cause op across siblings).
+    generic_payload = {
+        "link_kind": link_kind,
+        "target_kind": target_kind,
+        "target_id": target_id,
+        "target_ref": target_ref,
+        "notes": args.note,
+        "provenance": provenance,
+    } if generic_selected else None
+    root_cause_payload = {
+        "root_cause_slug": args.root_cause_slug,
+        "sibling_order": args.sibling_order,
+        "root_cause_effect": args.root_cause_effect,
+        "note": args.note,
+        "source_name": args.source_name,
+        "provenance": provenance,
+    }
 
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    slugs = args.finding_slug if isinstance(args.finding_slug, list) else [args.finding_slug]
+    cfg = load_config(args.engagement_dir)
+    results: list = []
+    failed = 0
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        for slug in slugs:
+            try:
+                if intel_ids:
+                    result = _link_intel(client, slug, intel_ids, args.note)
+                elif generic_selected:
+                    result = client.post(f"findings/{slug}/links", generic_payload)
+                elif args.clear_root_cause:
+                    result = client.delete(f"findings/{slug}/root-cause")
+                else:
+                    result = client.put(f"findings/{slug}/root-cause", root_cause_payload)
+            except Exception as exc:  # noqa: BLE001 - one bad sibling must not drop the rest
+                failed += 1
+                print(f"link-finding: {slug} failed: {exc}", file=sys.stderr)
+                continue
+            results.append(result)
+
+    if len(slugs) == 1 and results:
+        print(json.dumps(results[0], indent=2, ensure_ascii=False))
+    else:
+        for result in results:
+            print(json.dumps(result, ensure_ascii=False))
+        print(
+            f"[link-finding] linked {len(results)} finding(s); {failed} failed.",
+            file=sys.stderr,
+        )
+    if failed:
+        sys.exit(1)
