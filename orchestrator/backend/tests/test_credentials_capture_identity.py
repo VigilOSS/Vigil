@@ -14,15 +14,15 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 
-# The opaque hash fallback name: `cap-` + exactly 10 lowercase hex chars.
-_BARE_HASH_RE = re.compile(r"^cap-[0-9a-f]{10}$")
-
 from test_engagements_api import write_engagement
 
 from app import db
 from app.services import credentials as creds
 
 KEY = "2026-03-30-121000-multi-id"
+
+# The opaque hash fallback name: `cap-` + exactly 10 lowercase hex chars.
+_BARE_HASH_RE = re.compile(r"^cap-[0-9a-f]{10}$")
 
 
 def _seed(client, isolate_settings):
@@ -372,6 +372,17 @@ def test_list_host_filter_shows_host_agnostic_bearer_identity(client, isolate_se
     assert on_unrelated[0]["headers"].get("Authorization", "").startswith("Bearer ")
 
 
+def test_host_filtered_load_preserves_global_active_identity(client, isolate_settings):
+    eng = _seed(client, isolate_settings)
+    active = _capture(eng, "app.example.com", {"sid": "GLOBAL-ACTIVE"})
+    other = _capture(eng, "shop.example.com", {"sid": "HOST-MATCHING-OTHER"})
+
+    listing = creds.load_identities(eng, host="shop.example.com")
+
+    assert set(listing["identities"]) == {other["identity_name"]}
+    assert listing["active_identity"] == active["identity_name"]
+
+
 # ---------------------------------------------------------------------------
 # Age backstops (8h -> stale, 5d -> hard-delete)
 # ---------------------------------------------------------------------------
@@ -437,6 +448,38 @@ def test_set_liveness_dead_sets_state_and_hides_by_default(client, isolate_setti
     # Dead excluded by default, surfaced with include_dead.
     assert db.list_credentials(eng) == []
     assert len(db.list_credentials(eng, include_dead=True)) == 1
+
+
+def test_get_active_credential_skips_probe_dead_active_identity(client, isolate_settings):
+    eng = _seed(client, isolate_settings)
+    active = _capture(eng, "app.example.com", {"sid": "ACTIVE-THEN-DEAD"})
+    fallback = _capture(eng, "app.example.com", {"sid": "FALLBACK-STILL-LIVE"})
+
+    db.set_liveness(eng, active["identity_name"], "dead", "2026-07-03T10:00:00Z")
+
+    resolved = db.get_active_credential(eng)
+    assert resolved is not None
+    assert resolved["identity_name"] == fallback["identity_name"]
+    assert resolved["state"] == "available"
+
+
+def test_set_liveness_live_refreshes_last_seen_before_age_sweep(client, isolate_settings):
+    eng = _seed(client, isolate_settings)
+    mat = _capture(eng, "app.example.com", {"sid": "STALE-BUT-LIVE"})
+    name = mat["identity_name"]
+    probed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    old_seen = (datetime.now(timezone.utc) - timedelta(hours=9)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    _backdate(eng, name, datetime.now(timezone.utc) - timedelta(hours=9))
+
+    updated = db.set_liveness(eng, name, "live", probed)
+
+    assert updated["state"] == "available"
+    assert updated["liveness_verdict"] == "live"
+    assert updated["last_probed_at"] == probed
+    assert updated["last_seen_at"] != old_seen
+    assert db.get_credential(eng, name)["state"] == "available"
 
 
 def test_set_liveness_non_dead_does_not_change_state(client, isolate_settings):

@@ -7,6 +7,8 @@ from urllib.parse import quote, urlencode
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
+_COVERING_STATUSES = {"tested", "signal"}
+
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
@@ -352,6 +354,8 @@ def _render_per_input_coverage(lines: list, per_input: dict) -> None:
             status = cell.get("latest_status") or "-"
             wall = cell.get("observed_http_status")
             verdict = f"{status}({wall})" if wall is not None else status
+            if cell.get("covering") and status not in _COVERING_STATUSES:
+                verdict = f"covered; latest={verdict}"
             count = cell.get("count") or 1
             line = f"  - {family} {slot} [{auth}] {verdict} x{count}"
             lens = _trim(cell.get("lens") or "", 40)

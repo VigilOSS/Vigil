@@ -3653,11 +3653,12 @@ def get_credential(engagement_id: int, identity_name: str) -> dict[str, Any] | N
 
 def get_active_credential(engagement_id: int) -> dict[str, Any] | None:
     """Return the active identity's material, or the first one if none is
-    explicitly active, or None when the engagement has no credentials."""
+    explicitly active, or None when the engagement has no live credentials."""
     with get_connection() as connection:
         _sweep_credential_age(connection, engagement_id)
         row = connection.execute(
-            "SELECT * FROM engagement_credentials WHERE engagement_id = ? "
+            "SELECT * FROM engagement_credentials "
+            "WHERE engagement_id = ? AND state != 'dead' "
             "ORDER BY is_active DESC, identity_name LIMIT 1",
             (engagement_id,),
         ).fetchone()
@@ -3752,27 +3753,30 @@ def set_liveness(
     ``--include-dead``); ``unknown`` leaves ``state`` untouched (never a false
     verdict). Returns the updated material, or None when no such identity exists.
     """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with get_connection() as connection:
         if verdict == "dead":
             connection.execute(
                 "UPDATE engagement_credentials "
-                "SET liveness_verdict = ?, last_probed_at = ?, state = 'dead' "
+                "SET liveness_verdict = ?, last_probed_at = ?, state = 'dead', "
+                "updated_at = ? "
                 "WHERE engagement_id = ? AND identity_name = ?",
-                (verdict, probed_at, engagement_id, identity_name),
+                (verdict, probed_at, now, engagement_id, identity_name),
             )
         elif verdict == "live":
             connection.execute(
                 "UPDATE engagement_credentials "
-                "SET liveness_verdict = ?, last_probed_at = ?, state = 'available' "
+                "SET liveness_verdict = ?, last_probed_at = ?, state = 'available', "
+                "last_seen_at = ?, updated_at = ? "
                 "WHERE engagement_id = ? AND identity_name = ?",
-                (verdict, probed_at, engagement_id, identity_name),
+                (verdict, probed_at, now, now, engagement_id, identity_name),
             )
         else:
             connection.execute(
                 "UPDATE engagement_credentials "
-                "SET liveness_verdict = ?, last_probed_at = ? "
+                "SET liveness_verdict = ?, last_probed_at = ?, updated_at = ? "
                 "WHERE engagement_id = ? AND identity_name = ?",
-                (verdict, probed_at, engagement_id, identity_name),
+                (verdict, probed_at, now, engagement_id, identity_name),
             )
     return get_credential(engagement_id, identity_name)
 

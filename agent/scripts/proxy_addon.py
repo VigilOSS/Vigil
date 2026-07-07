@@ -32,6 +32,7 @@ from mitmproxy import http, ctx
 from assess.lib.classify import classify_type
 from assess.lib.db import db_init, db_insert_work_item
 from assess.lib.params import header_schema_from_headers
+from assess.lib.scope import required_headers as _scope_required_headers
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -188,6 +189,9 @@ class EngagementEntry:
     scope_priority: int = 0
     updated_at: str = ""
     capture_policy: dict = field(default_factory=dict)
+    # Program-mandated attribution headers (e.g. BugCrowd ``X-Bug-Bounty``) the
+    # ``request`` hook injects onto this engagement's outbound in-scope requests.
+    required_headers: dict = field(default_factory=dict)
     db: sqlite3.Connection | None = None
 
 
@@ -537,6 +541,7 @@ class CaseCollector:
                     existing.scope_priority = entry.scope_priority
                     existing.updated_at = entry.updated_at
                     existing.capture_policy = entry.capture_policy
+                    existing.required_headers = entry.required_headers
                     new_registry[entry.key] = existing
                 else:
                     new_registry[entry.key] = entry
@@ -629,6 +634,13 @@ class CaseCollector:
                 scope_priority = 0
             updated_at = str(row.get("updated_at") or "")
             capture_policy = _normalize_capture_policy(row.get("capture_policy"))
+            # The backend ``/engagements`` payload does not carry
+            # ``required_headers``, so read them from the engagement's on-disk
+            # scope.json (authoritative). The addon always knows the root even on
+            # the backend path, so injection works whether or not the backend is
+            # up — without this the marker would silently never inject in the
+            # common case where the backend registry fetch succeeds.
+            required_headers = self._required_headers_from_root(root)
             entries.append(
                 EngagementEntry(
                     key=key,
@@ -638,6 +650,7 @@ class CaseCollector:
                     scope_priority=scope_priority,
                     updated_at=updated_at,
                     capture_policy=capture_policy,
+                    required_headers=required_headers,
                 )
             )
         return entries
@@ -686,6 +699,9 @@ class CaseCollector:
             except OSError:
                 updated_at = ""
             capture_policy = self._capture_policy_from_root(engagement_dir)
+            # scope_data is already parsed here; reuse it rather than re-reading
+            # scope.json from disk like the backend path must.
+            required_headers = _scope_required_headers(scope_data)
             entries.append(
                 EngagementEntry(
                     key=engagement_dir.name,
@@ -695,6 +711,7 @@ class CaseCollector:
                     scope_priority=scope_priority,
                     updated_at=updated_at,
                     capture_policy=capture_policy,
+                    required_headers=required_headers,
                 )
             )
         return entries
@@ -711,6 +728,26 @@ class CaseCollector:
         except (OSError, json.JSONDecodeError):
             return _normalize_capture_policy({})
         return _normalize_capture_policy(raw)
+
+    @staticmethod
+    def _required_headers_from_root(engagement_dir: Path) -> dict:
+        """Read program-mandated attribution ``required_headers`` from the
+        engagement's ``scope.json`` (the filesystem read the backend registry
+        path needs, since ``/engagements`` does not serialize the field).
+
+        An absent/unreadable/malformed scope yields ``{}`` so the no-header path
+        is the unchanged default. Shares ``assess.lib.scope.required_headers``
+        coercion (string→string pairs only, name stripped) so the proxy injects
+        exactly what the tool-exec attribution path (ADR 0010) does."""
+        scope_path = engagement_dir / "scope.json"
+        try:
+            with scope_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return _scope_required_headers(data)
 
     @staticmethod
     def _scope_patterns_from_dict(scope_data: dict) -> list[str]:
@@ -763,6 +800,7 @@ class CaseCollector:
                     "out_of_scope": list(entry.out_of_scope_patterns),
                     "scope_priority": entry.scope_priority,
                     "updated_at": entry.updated_at,
+                    "required_headers": dict(entry.required_headers),
                 }
                 for entry in self.registry.values()
             ),
@@ -1482,6 +1520,54 @@ class CaseCollector:
             )
 
     # -- main entry point ---------------------------------------------------
+
+    def _any_required_headers(self) -> bool:
+        """True if any active engagement mandates attribution headers.
+
+        Lets the ``request`` hook skip its per-request scope match entirely on
+        the common (capture-only) path, so proxying stays zero-overhead for
+        engagements that do not configure ``required_headers``."""
+        with self._registry_lock:
+            return any(entry.required_headers for entry in self.registry.values())
+
+    def request(self, flow: http.HTTPFlow):
+        """Inject a matched engagement's scope.json ``required_headers`` onto its
+        outbound in-scope requests (ROE researcher-attribution markers, e.g.
+        BugCrowd's ``X-Bug-Bounty``).
+
+        The shared proxy is the single chokepoint every browser/proxied request
+        passes through, so this closes the attribution gap the tool-exec fail-
+        closed backstop (ADR 0010) cannot see: manual browsing / login capture
+        through FoxyProxy, and any proxied client that did not set the marker
+        itself. On a required-headers program, un-attributed in-scope traffic is
+        a ban-risk, not a nicety.
+
+        Gated + non-destructive: fires only for a request whose hostname a live
+        engagement claims (the SAME ``_match_engagement`` scope + out-of-scope
+        gating the capture path uses) AND that declares ``required_headers``;
+        never overwrites a header the client already set; leaves out-of-scope
+        hosts and header-less engagements untouched."""
+        if self.engagements_root is None:
+            return
+        # Fast path: nothing to inject unless some engagement mandates a header.
+        if not self._any_required_headers():
+            return
+        req = flow.request
+        hostname = (urlparse(req.pretty_url).hostname or "").lower()
+        if not hostname:
+            return
+        # The upstream server IP may be unresolved at request time (pre-connect);
+        # that is fine — _match_engagement keys on hostname and only uses the IP
+        # to tighten the out-of-scope CIDR carve-out.
+        resolved_ip = self._resolved_server_ip(flow)
+        entry = self._match_engagement(hostname, resolved_ip=resolved_ip)
+        if entry is None or not entry.required_headers:
+            return
+        for name, value in entry.required_headers.items():
+            # mitmproxy Headers membership is case-insensitive — never overwrite
+            # or duplicate a marker the client already sent.
+            if name not in req.headers:
+                req.headers[name] = value
 
     def response(self, flow: http.HTTPFlow):
         """Called by mitmproxy for every completed request/response pair."""

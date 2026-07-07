@@ -239,6 +239,18 @@ The proxy runs `mitmdump` with `proxy_addon.py`, which:
   URL, or CIDR) always drops the flow. A host no engagement claims is not
   captured. This is why capture is a per-engagement **policy**, not a launch-time
   selector.
+- **Injects program-mandated attribution headers on outbound in-scope
+  requests.** For an engagement whose `scope.json` declares `required_headers`
+  (e.g. a BugCrowd program that mandates `X-Bug-Bounty: <handle>`), the addon
+  adds those headers to each in-scope request it forwards — the same
+  `required_headers` the tool-exec path injects (ADR 0010), now applied to
+  browser/proxied traffic too. This makes **manual browsing and login capture
+  through FoxyProxy ROE-compliant** without you setting the header per request.
+  It is gated by the same hostname scope + `out_of_scope` carve-out as capture
+  (out-of-scope hosts get nothing) and is non-destructive — a header the client
+  already set is never overwritten. Engagements without `required_headers` are
+  unaffected. Run `vigil mitmproxy routes` to see which headers each engagement
+  will inject.
 - Filters noise (analytics, CDNs, tracking pixels)
 - Classifies requests by type (API, form, page, JS, GraphQL, WebSocket, etc.)
 - Detects login flows and POSTs captured session material to the backend credential store, which derives the identity name from the capture's session-anchor material so distinct logins append rather than overwrite (see "Multi-Identity Capture" above)

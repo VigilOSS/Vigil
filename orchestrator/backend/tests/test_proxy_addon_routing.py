@@ -57,6 +57,7 @@ def _seed_engagement(
     hosts: list[str],
     scope_priority: int = 0,
     out_of_scope: list[str] | None = None,
+    required_headers: dict[str, str] | None = None,
 ) -> Path:
     engagement_dir = engagements_root / key
     engagement_dir.mkdir(parents=True, exist_ok=True)
@@ -65,6 +66,8 @@ def _seed_engagement(
         scope["scope_priority"] = scope_priority
     if out_of_scope:
         scope["out_of_scope"] = out_of_scope
+    if required_headers is not None:
+        scope["required_headers"] = required_headers
     (engagement_dir / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
     return engagement_dir
 
@@ -326,6 +329,14 @@ class _FakeHeaders:
     def __getitem__(self, key: str) -> str:
         return self._items[key.lower()]
 
+    # mitmproxy's real Headers matches/sets case-insensitively; the request hook
+    # relies on ``name in headers`` and ``headers[name] = value`` behaving so.
+    def __contains__(self, key: str) -> bool:
+        return key.lower() in self._items
+
+    def __setitem__(self, key: str, value: str) -> None:
+        self._items[key.lower()] = value
+
 
 class _FakeRequest:
     def __init__(
@@ -383,6 +394,234 @@ def _record_captures(collector):
         lambda entry, **kw: calls.append((entry.key, kw))
     )
     return calls
+
+
+# ---------------------------------------------------------------------------
+# ROE required-header injection (the `request` hook)
+#
+# On a required-headers program (e.g. BugCrowd's mandated `X-Bug-Bounty`),
+# un-attributed in-scope traffic is a ban-risk. The tool-exec path is covered by
+# ADR 0010; the shared proxy is the chokepoint for browser/proxied traffic, so
+# the `request` hook injects the marker there — gated by the same
+# `_match_engagement` scope logic and non-destructive.
+# ---------------------------------------------------------------------------
+
+
+def _run_request_hook(
+    collector,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    server_conn: "_FakeConn | None" = None,
+) -> _FakeRequest:
+    """Drive the addon's `request` hook for one outbound request and return the
+    (possibly mutated) request so the caller can assert on its headers."""
+    req = _FakeRequest(url=url, headers=headers or {})
+    flow = _FakeFlow(req, None, server_conn=server_conn)  # response is None pre-connect
+    collector.request(flow)
+    return req
+
+
+def test_request_hook_injects_required_header_on_in_scope_request(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root, "eng-a", hosts=["app.example.com"],
+        required_headers={"X-Bug-Bounty": "vigiloss"},
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    req = _run_request_hook(collector, "https://app.example.com/dashboard")
+    assert req.headers.get("X-Bug-Bounty") == "vigiloss"
+
+
+def test_request_hook_does_not_overwrite_client_supplied_header(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root, "eng-a", hosts=["app.example.com"],
+        required_headers={"X-Bug-Bounty": "vigiloss"},
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    # Client already carries the marker (mixed case) — value must be preserved,
+    # not clobbered or duplicated.
+    req = _run_request_hook(
+        collector, "https://app.example.com/x",
+        headers={"x-bug-bounty": "operator-set"},
+    )
+    assert req.headers.get("X-Bug-Bounty") == "operator-set"
+    assert list(dict(req.headers)) == ["x-bug-bounty"]  # exactly one, no duplicate
+
+
+def test_request_hook_leaves_out_of_scope_host_untouched(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root, "eng-a", hosts=["app.example.com"],
+        required_headers={"X-Bug-Bounty": "vigiloss"},
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    # A host no engagement claims must receive nothing.
+    req = _run_request_hook(collector, "https://unrelated.test/x")
+    assert "x-bug-bounty" not in req.headers
+
+
+def test_request_hook_respects_out_of_scope_carve_out(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root, "eng-a", hosts=["*.example.com"],
+        out_of_scope=["blocked.example.com"],
+        required_headers={"X-Bug-Bounty": "vigiloss"},
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    # In-scope under the wildcard → injected.
+    ok = _run_request_hook(collector, "https://ok.example.com/x")
+    assert ok.headers.get("X-Bug-Bounty") == "vigiloss"
+
+    # Covered by the out_of_scope carve-out → NOT injected (same gating as capture).
+    blocked = _run_request_hook(collector, "https://blocked.example.com/x")
+    assert "x-bug-bounty" not in blocked.headers
+
+
+def test_request_hook_noop_when_engagement_has_no_required_headers(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["app.example.com"])  # no required_headers
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    assert collector._any_required_headers() is False  # fast path short-circuits
+    req = _run_request_hook(collector, "https://app.example.com/x")
+    assert dict(req.headers) == {}
+
+
+def test_filesystem_registry_parses_required_headers(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root, "eng-a", hosts=["app.example.com"],
+        required_headers={"X-Bug-Bounty": "vigiloss", "X-Bad": 5, " ": "blank"},
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    # Only str→str pairs survive (shared scope.required_headers coercion).
+    assert collector.registry["eng-a"].required_headers == {"X-Bug-Bounty": "vigiloss"}
+
+
+def test_backend_registry_reads_required_headers_from_scope_json(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The backend /engagements payload does NOT serialize required_headers, so
+    the backend registry path must read them from the on-disk scope.json. This is
+    the load-bearing production path (backend up → this branch wins)."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    # scope.json on disk declares the marker; the backend row below omits it.
+    _seed_engagement(
+        root, "eng-from-backend", hosts=["api.example.com"],
+        required_headers={"X-Bug-Bounty": "vigiloss"},
+    )
+
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector.orchestrator_base_url = "http://orchestrator.test"
+
+    payload = [
+        {
+            "key": "eng-from-backend",
+            "engagement_root": "/install/agent/engagements/eng-from-backend",
+            "scope_hosts": ["api.example.com"],
+            "scope_priority": 0,
+            "updated_at": "2026-05-18T10:00:00Z",
+            # NOTE: no "required_headers" key — mirrors the real backend response.
+        }
+    ]
+
+    class _Response:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            return None
+
+    monkeypatch.setattr(
+        module, "urlopen",
+        lambda *_a, **_k: _Response(json.dumps(payload).encode("utf-8")),
+    )
+    entries = collector._fetch_registry_from_backend()
+    assert entries is not None and len(entries) == 1
+    assert entries[0].required_headers == {"X-Bug-Bounty": "vigiloss"}
+
+
+def test_reload_updates_required_headers_after_scope_edit(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root, "eng-a", hosts=["app.example.com"],
+        required_headers={"X-Bug-Bounty": "old-handle"},
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    entry_before = collector.registry["eng-a"]
+    assert entry_before.required_headers == {"X-Bug-Bounty": "old-handle"}
+
+    # Operator edits scope.json, then `vigil mitmproxy reload` re-scans.
+    _seed_engagement(
+        root, "eng-a", hosts=["app.example.com"],
+        required_headers={"X-Bug-Bounty": "new-handle"},
+    )
+    collector._reload_registry(force=True)
+
+    # The existing entry object is reused (Change 5 merge branch) with the new value.
+    assert collector.registry["eng-a"] is entry_before
+    assert entry_before.required_headers == {"X-Bug-Bounty": "new-handle"}
+
+
+def test_routes_cache_includes_required_headers(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root, "eng-a", hosts=["app.example.com"],
+        required_headers={"X-Bug-Bounty": "vigiloss"},
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    payload = json.loads((root / module.ROUTES_CACHE).read_text(encoding="utf-8"))
+    rows = {row["key"]: row for row in payload["engagements"]}
+    assert rows["eng-a"]["required_headers"] == {"X-Bug-Bounty": "vigiloss"}
 
 
 def test_capture_auth_posts_to_matched_engagement_only(tmp_path: Path) -> None:
