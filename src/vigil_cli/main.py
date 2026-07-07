@@ -653,7 +653,22 @@ def main(argv: list[str] | None = None) -> None:
                     "`vigil assess kali --identity` injects. Safe methods omit it."
                 ),
             )
-    auth_import = auth_sub.add_parser("import")
+    auth_import = auth_sub.add_parser(
+        "import",
+        help="Import identity material (cookies/headers/tokens) from a JSON file or stdin.",
+        description=(
+            "Import credential material into the engagement's centralized store from a "
+            "JSON file (or '-'/stdin).\n\n"
+            "The JSON MAY also include a `material.liveness` block —\n"
+            '  {"expect_status": 200, "authed_marker": "...", "dead_marker": "sessionExpired"}\n'
+            "(every key optional) — which is stored via the backend's extra-keys "
+            "passthrough and is what makes `vigil auth status --probe` and "
+            "`vigil auth keepalive` return a real live/dead verdict instead of "
+            "'unknown'. Matching is case-sensitive substring against the probe "
+            "response (status line + headers incl. Location + body)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     auth_import.add_argument("engagement", nargs="?")
     auth_import.add_argument("--source")
     auth_import.add_argument("--select", action="store_true")
@@ -664,6 +679,100 @@ def main(argv: list[str] | None = None) -> None:
     auth_activate.add_argument("engagement", nargs="?")
     auth_activate.add_argument("--select", action="store_true")
     auth_activate.add_argument("--identity", required=True, help="Identity to activate")
+
+    auth_keepalive = auth_sub.add_parser(
+        "keepalive",
+        help=(
+            "Keep long-lived (enterprise SSO / reverse-proxy) sessions live during "
+            "long engagements; name the anchor cookie(s) with --anchor-cookie."
+        ),
+        description=(
+            "Fire ONE read-only authed GET per identity every --interval seconds to "
+            "reset the enterprise IDLE timeout, teeing a LIVE/DEAD + userId verdict to "
+            "a log. Each cycle re-resolves the freshest full-anchor capture per "
+            "distinct login (skipping captured logouts), so re-logins are auto-"
+            "followed; --identity overrides that. The live probe — routed through "
+            "`vigil assess kali exec` for correct egress + audit + identity injection "
+            "— is the AUTHORITATIVE liveness oracle (cookie age is never trusted "
+            "alone).\n\n"
+            "ANCHOR COOKIES ARE ENGAGEMENT-SPECIFIC and REQUIRED: Vigil bakes in NO "
+            "target-specific cookie names. Declare this engagement's session-anchor "
+            "cookie name(s) with --anchor-cookie (repeatable) — their value identifies "
+            "a distinct login (for freshest-per-login dedup) and a Set-Cookie: "
+            "<anchor>=deleted marks a server logout to skip.\n\n"
+            "HARD CEILINGS: this defeats the IDLE timeout ONLY. It does NOT extend the "
+            "absolute/max-session lifetime, and it cannot survive a same-user browser "
+            "re-login (which emits Set-Cookie: <anchor>=deleted and kills the prior "
+            "session). For multi-hour runs you still need a fresh browser login "
+            "periodically.\n\n"
+            "Use --detach to run it as a background daemon (double-fork; PID file "
+            "under <engagement>/pids/) that outlives the launching shell."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    auth_keepalive.add_argument("engagement", nargs="?")
+    auth_keepalive.add_argument("--select", action="store_true")
+    auth_keepalive.add_argument(
+        "--identity",
+        action="append",
+        help=(
+            "Identity to keep alive (repeatable). Omit to auto-resolve the freshest "
+            "--caps captures per session anchor each cycle."
+        ),
+    )
+    auth_keepalive.add_argument(
+        "--anchor-cookie",
+        dest="anchor_cookie",
+        action="append",
+        metavar="NAME",
+        help=(
+            "REQUIRED (repeatable). Name(s) of THIS engagement's session-anchor "
+            "cookie(s) — the cookie whose value identifies a distinct login and that "
+            "the server sets to `deleted` on logout. Engagement-specific: Vigil "
+            "assumes no default. Example: --anchor-cookie SESSIONID --anchor-cookie "
+            "AUTHTOKEN."
+        ),
+    )
+    auth_keepalive.add_argument(
+        "--probe-url",
+        dest="probe_url",
+        help=(
+            "REQUIRED. Authed URL to GET each cycle (an endpoint that returns logged-"
+            "in content). Matched against material.liveness when present, else the "
+            "default HTTP-200/no-sessionExpired check."
+        ),
+    )
+    auth_keepalive.add_argument(
+        "--interval",
+        type=int,
+        default=285,
+        help="Seconds between cycles; keep below the target's idle window (default: 285).",
+    )
+    auth_keepalive.add_argument(
+        "--iters",
+        type=int,
+        default=120,
+        help="Number of cycles to run (default: 120, i.e. ~9.5h at 285s).",
+    )
+    auth_keepalive.add_argument(
+        "--caps",
+        type=int,
+        default=4,
+        help="Freshest captures to probe per cycle when auto-resolving (default: 4).",
+    )
+    auth_keepalive.add_argument(
+        "--log",
+        dest="log",
+        help="Log path (default: <engagement>/tools/keepalive.log).",
+    )
+    auth_keepalive.add_argument(
+        "--detach",
+        action="store_true",
+        help=(
+            "Fork into a background daemon (double-fork), write a PID file under "
+            "<engagement>/pids/, redirect output to the log, and print the PID."
+        ),
+    )
 
     backup_p = sub.add_parser("backup")
     backup_sub = backup_p.add_subparsers(dest="backup_command", required=True)
@@ -1721,6 +1830,20 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
     elif args.auth_command == "import":
         auth_module.import_auth(engagement, args.source, identity or auth_module.DEFAULT_IDENTITY)
         print(f"imported credentials into {engagement.name} (identity={identity or auth_module.DEFAULT_IDENTITY})")
+    elif args.auth_command == "keepalive":
+        # ``--identity`` is action="append" here, so ``args.identity`` is a list
+        # (or None) — the per-login anchor auto-resolution kicks in when it's empty.
+        auth_module.keepalive(
+            engagement,
+            identities=getattr(args, "identity", None),
+            anchor_cookies=getattr(args, "anchor_cookie", None),
+            interval=args.interval,
+            iters=args.iters,
+            caps=args.caps,
+            probe_url=getattr(args, "probe_url", None),
+            log_path=getattr(args, "log", None),
+            detach=bool(getattr(args, "detach", False)),
+        )
 
 
 def _backup(args: argparse.Namespace, install_root: Path) -> None:

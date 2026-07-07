@@ -3438,8 +3438,9 @@ def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypa
 
     calls: list[str] = []
 
-    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_proxy", lambda *args, **kwargs: calls.append("mitmproxy"))
@@ -3461,8 +3462,9 @@ def test_up_starts_oob_when_only_client_sessions_exist(tmp_path: Path, monkeypat
 
     calls: list[str] = []
 
-    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
@@ -3488,7 +3490,7 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
 
     calls: list[str] = []
 
-    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: name == "vigil")
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
@@ -3530,7 +3532,7 @@ def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(up_module, "resolve_source_root", lambda *_args, **_kwargs: tmp_path)
     monkeypatch.setattr(up_module, "install_from_source", lambda *args, **kwargs: None)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: False)
-    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: True)
+    monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: True)
     monkeypatch.setattr(up_module, "_start_or_restart_runtime", lambda *args, **kwargs: None)
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: None)
     monkeypatch.setattr(up_module, "_start_mitmproxy_if_needed", lambda *args, **kwargs: None)
@@ -3549,6 +3551,250 @@ def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: 
 
     assert seen["runtime_runner"] is fake_runner
     assert seen["mitmproxy_runner"] is fake_runner
+
+
+# ---------------------------------------------------------------------------
+# Image freshness + proxy container/image drift
+# ---------------------------------------------------------------------------
+
+
+def _make_mitmproxy_inputs(install_root: Path) -> tuple[Path, Path]:
+    """Create the Dockerfile + addon that gate mitmproxy image freshness."""
+    dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    addon = install_root / "agent" / "scripts" / "proxy_addon.py"
+    addon.parent.mkdir(parents=True)
+    addon.write_text("# addon\n", encoding="utf-8")
+    return dockerfile, addon
+
+
+def test_mitmproxy_build_reports_current_when_image_newer_than_inputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import mitmproxy as mitmproxy_module
+    from vigil_cli.docker import DockerResult
+
+    install_root = tmp_path / "install"
+    dockerfile, addon = _make_mitmproxy_inputs(install_root)
+    # Inputs are OLD (2001); the image Created stamp is NEW (2030).
+    old = 1_000_000_000
+    os.utime(dockerfile, (old, old))
+    os.utime(addon, (old, old))
+
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:4] == ["docker", "image", "inspect", "-f"]:
+            return DockerResult(0, "2030-01-01T00:00:00Z\n", "")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
+
+    mitmproxy_module.build_image(install_root, runner=runner)
+
+    out = capsys.readouterr().out
+    assert "image current (up to date with source)" in out
+    assert not any(cmd[:2] == ["docker", "build"] for cmd in commands)
+
+
+def test_mitmproxy_build_rebuilds_when_inputs_newer_than_image(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import mitmproxy as mitmproxy_module
+    from vigil_cli.docker import DockerResult
+
+    install_root = tmp_path / "install"
+    _make_mitmproxy_inputs(install_root)  # written now -> newest mtime
+
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        # The tag EXISTS (image_exists True) but was Created back in 2001, so
+        # the freshly-written addon/Dockerfile are newer -> must rebuild. This
+        # is exactly the false-"current" the bare tag-exists check reported.
+        if argv[:4] == ["docker", "image", "inspect", "-f"]:
+            return DockerResult(0, "2001-01-01T00:00:00Z\n", "")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
+
+    mitmproxy_module.build_image(install_root, runner=runner)
+
+    out = capsys.readouterr().out
+    assert "image current" not in out
+    assert any(cmd[:3] == ["docker", "build", "-t"] for cmd in commands)
+    assert "image built" in out
+
+
+def test_mitmproxy_build_force_uses_no_cache_even_when_fresh(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import mitmproxy as mitmproxy_module
+    from vigil_cli.docker import DockerResult
+
+    install_root = tmp_path / "install"
+    dockerfile, addon = _make_mitmproxy_inputs(install_root)
+    old = 1_000_000_000
+    os.utime(dockerfile, (old, old))
+    os.utime(addon, (old, old))
+
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:4] == ["docker", "image", "inspect", "-f"]:
+            return DockerResult(0, "2030-01-01T00:00:00Z\n", "")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
+
+    mitmproxy_module.build_image(install_root, force=True, runner=runner)
+
+    build_command = next(cmd for cmd in commands if cmd[:2] == ["docker", "build"])
+    assert "--no-cache" in build_command
+    assert "image current" not in capsys.readouterr().out
+
+
+def test_proxy_image_drift_true_when_container_predates_image() -> None:
+    from vigil_cli import image_freshness
+    from vigil_cli import up as up_module
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "inspect", "-f"] and argv[3] == "{{.Image}}":
+            return DockerResult(0, "sha256:old-container-image\n", "")
+        if argv[:4] == ["docker", "image", "inspect", "-f"] and argv[4] == "{{.Id}}":
+            return DockerResult(0, "sha256:new-tag-image\n", "")
+        return DockerResult(0, "", "")
+
+    assert image_freshness.proxy_image_drift(runner=runner) is True
+    # up.py's thin wrapper single-sources the same verdict.
+    assert up_module._proxy_image_drift(runner=runner) is True
+
+
+def test_proxy_image_drift_false_when_ids_match() -> None:
+    from vigil_cli import image_freshness
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "inspect", "-f"] and argv[3] == "{{.Image}}":
+            return DockerResult(0, "sha256:same\n", "")
+        if argv[:4] == ["docker", "image", "inspect", "-f"] and argv[4] == "{{.Id}}":
+            return DockerResult(0, "sha256:same\n", "")
+        return DockerResult(0, "", "")
+
+    assert image_freshness.proxy_image_drift(runner=runner) is False
+
+
+def test_proxy_image_drift_false_when_container_absent() -> None:
+    from vigil_cli import image_freshness
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "inspect", "-f"] and argv[3] == "{{.Image}}":
+            return DockerResult(1, "", "No such object")
+        if argv[:4] == ["docker", "image", "inspect", "-f"] and argv[4] == "{{.Id}}":
+            return DockerResult(0, "sha256:new-tag-image\n", "")
+        return DockerResult(0, "", "")
+
+    assert image_freshness.proxy_image_drift(runner=runner) is False
+
+
+def test_up_warns_when_proxy_container_predates_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import up as up_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(up_module, "install_from_source", lambda *a, **k: None)
+    monkeypatch.setattr(up_module, "image_outdated", lambda *a, **k: False)
+    monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *a, **k: False)
+    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda **k: True)
+    monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
+    monkeypatch.setattr(up_module, "start_runtime", lambda *a, **k: calls.append("runtime"))
+    monkeypatch.setattr(up_module, "start_proxy", lambda *a, **k: calls.append("mitmproxy"))
+    monkeypatch.setattr(up_module, "start_orchestrator", lambda *a, **k: calls.append("orchestrator"))
+    monkeypatch.setattr(
+        up_module,
+        "oob_status",
+        lambda *a, **k: {"state": "partial", "server": True, "frpc": True, "clients": []},
+    )
+    monkeypatch.setattr(up_module, "start_oob", lambda *a, **k: calls.append("oob"))
+
+    up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *a, **k: None)
+
+    out = capsys.readouterr().out
+    assert "running old image; restart to pick up rebuilt image" in out
+    assert "Run `vigil mitmproxy start` to recreate the container on the current image." in out
+    # The proxy is already running, so `up` warns instead of recreating it.
+    assert "mitmproxy" not in calls
+
+
+def test_status_payload_reports_mitmproxy_image_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import status as status_module
+    from vigil_cli.docker import DockerResult
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil-proxy\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and argv[3] == "{{.Image}}":
+            return DockerResult(0, "sha256:old\n", "")
+        if argv[:4] == ["docker", "image", "inspect", "-f"] and argv[4] == "{{.Id}}":
+            return DockerResult(0, "sha256:new\n", "")
+        return DockerResult(0, "", "")
+
+    status = status_module.collect_status(install_root, runner=runner)
+    assert status["mitmproxy"]["image_drift"] is True
+
+    status_module.print_status(status)
+
+
+def test_status_print_shows_restart_needed_on_drift(capsys: pytest.CaptureFixture[str]) -> None:
+    from vigil_cli.status import print_status
+
+    print_status(_minimal_status(mitmproxy={"state": "running", "ca_volume": True, "image_drift": True}))
+    out = capsys.readouterr().out
+    mitm_line = next(line for line in out.splitlines() if line.startswith("mitmproxy\t"))
+    assert "restart-needed" in mitm_line
+
+
+def test_doctor_reports_mitmproxy_container_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import status as status_module
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil-proxy\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and argv[3] == "{{.Image}}":
+            return DockerResult(0, "sha256:old\n", "")
+        if argv[:4] == ["docker", "image", "inspect", "-f"] and argv[4] == "{{.Id}}":
+            return DockerResult(0, "sha256:new\n", "")
+        return DockerResult(0, "ok", "")
+
+    monkeypatch.setattr(status_module.shutil, "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(
+        status_module.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0, "ok", ""),
+    )
+    monkeypatch.setattr(status_module, "runtime_status", lambda **k: "stopped")
+
+    checks = status_module.collect_doctor_checks(tmp_path, runner=runner)
+    drift = next(c for c in checks if c.name == "mitmproxy-container-drift")
+    assert drift.status == "STALE"
+    assert "vigil mitmproxy start" in drift.detail
 
 
 # ---------------------------------------------------------------------------

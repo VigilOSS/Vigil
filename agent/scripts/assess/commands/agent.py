@@ -233,16 +233,21 @@ def _agent_id_extra(args) -> list[str]:
 
 
 def _done(args) -> None:
-    if not getattr(args, "agent_id", None):
-        if args.extra:
-            args.agent_id = args.extra[0]
-        else:
-            print("agent done: agent id required as positional arg or --agent-id", file=sys.stderr)
-            sys.exit(1)
+    # Batch: `agent done a b c` closes all three with the same shared flags. Collect
+    # every positional id (falling back to --agent-id) and hand the full list to the
+    # dispatch handler, which iterates with a per-id failure tally.
+    ids = [str(x).strip() for x in (getattr(args, "extra", None) or []) if str(x).strip()]
+    if not ids and getattr(args, "agent_id", None):
+        ids = [str(args.agent_id).strip()]
+    if not ids:
+        print("agent done: agent id required as positional arg or --agent-id", file=sys.stderr)
+        sys.exit(1)
     if not getattr(args, "dispatch_status", None):
         args.dispatch_status = "completed"
-    _warn_if_handoff_is_closable(args)
-    dispatch._update_dispatch_status(args, [])  # noqa: SLF001
+    for agent_id in ids:
+        args.agent_id = agent_id
+        _warn_if_handoff_is_closable(args)
+    dispatch._update_dispatch_status(args, ids)  # noqa: SLF001
 
 
 def _warn_if_handoff_is_closable(args) -> None:
@@ -284,10 +289,44 @@ def _utcnow_iso() -> str:
 
 
 def _close(args) -> None:
-    agent_id = getattr(args, "agent_id", None) or (args.extra[0] if args.extra else "")
-    if not agent_id:
+    # Batch: `agent close a b c` closes each ready/blocked handoff. A single id keeps
+    # the detailed non-closable guidance below; multiple ids run a resilient loop
+    # where a non-closable/checkpointed dispatch is reported and skipped, not fatal.
+    ids = [str(x).strip() for x in (getattr(args, "extra", None) or []) if str(x).strip()]
+    if not ids and getattr(args, "agent_id", None):
+        ids = [str(args.agent_id).strip()]
+    if not ids:
         print("agent close: agent id required as positional arg or --agent-id", file=sys.stderr)
         sys.exit(1)
+    if len(ids) == 1:
+        _close_one(args, ids[0])
+        return
+    client, _ = dispatch._client_for(args)  # noqa: SLF001
+    closed = 0
+    failed = 0
+    reason = getattr(args, "reason", "") or "agent close"
+    try:
+        for agent_id in ids:
+            try:
+                result = _close_via_client(client, agent_id, reason=reason)
+            except _ReconcileSkipped as exc:
+                failed += 1
+                print(f"agent close: {agent_id} skipped: {exc}", file=sys.stderr)
+                continue
+            except Exception as exc:  # noqa: BLE001 - one bad id must not drop the rest
+                failed += 1
+                print(f"agent close: {agent_id} failed: {exc}", file=sys.stderr)
+                continue
+            closed += 1
+            print(json.dumps({"dispatch": result["dispatch"], "decision": result["decision"]}, ensure_ascii=False))
+    finally:
+        client.close()
+    print(f"[agent close] closed {closed} dispatch(es); {failed} failed/skipped.", file=sys.stderr)
+    if failed:
+        sys.exit(1)
+
+
+def _close_one(args, agent_id: str) -> None:
     client, _ = dispatch._client_for(args)  # noqa: SLF001
     try:
         handoff = client.get_handoff(agent_id)

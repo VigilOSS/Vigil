@@ -657,6 +657,11 @@ class FindingRecordRequest(BaseModel):
     service_id: int | None = None
     surface_id: int | None = None
     links: list[FindingLinkRequest] = Field(default_factory=list)
+    # D4 (kill re-mint override): control flag, NOT a stored column. When true it
+    # skips the killed-finding re-mint guard so an intentional distinct re-mint of
+    # a finding that only coincidentally shares an endpoint + technique with a prior
+    # false_positive still lands. Plumbed from `record-finding --allow-remint/--force`.
+    allow_remint: bool = Field(default=False)
 
     @model_validator(mode="after")
     def _root_cause_links_use_helper(self) -> "FindingRecordRequest":
@@ -2156,6 +2161,7 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
             service_id=request.service_id,
             surface_id=request.surface_id,
             links=[item.model_dump() for item in request.links],
+            allow_remint=request.allow_remint,
         )
     )
     await anyio.to_thread.run_sync(

@@ -115,7 +115,7 @@ If the verifier's clean-file spot-check discovers a missed vulnerability:
 
 ```bash
 # Record verification results (updates existing findings)
-vigil assess verify-finding <slug> <verification-json>
+vigil assess verify-finding <slug> --disposition <verdict> --reason "<rationale>"
 # Or use the dedicated false-positive helper when you already have the kill rationale
 vigil assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 # Reopen a previously verified or false-positive finding when new evidence requires re-triage

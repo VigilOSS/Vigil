@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from typing import Any
+from urllib.parse import urlsplit
 from fastapi import HTTPException, status
 
 from ..events import _engagement_or_404
@@ -125,6 +126,119 @@ def _raise_finding_clobber_conflict(
             f"`vigil assess link-finding <new-slug> --root-cause {existing_slug}`; to "
             f"intentionally modify '{existing_slug}', re-record with --update {existing_slug} "
             f"(or POST with slug={existing_slug!r})."
+        ),
+    )
+
+
+# D4 (kill re-mint guard): a KILLED (``false_positive``) finding is deliberately
+# OUTSIDE the reported/active clobber-guard set above, and the sticky-FP coalesce
+# (``_coalesce_workflow_status``) only fires on the EXACT dedup tuple. So two
+# agents that express the SAME underlying defect at DIFFERENT canonical_locations
+# — a source-line ``file:x:42`` vs a runtime endpoint URL — miss the tuple, and
+# one silently RE-MINTS a finding the other already DISPROVED, with no flag.
+# Guard it with a BROADER match than the exact tuple: same ``defect_family``
+# (technique) AND a shared endpoint/canonical-location signal. Refuse-with-
+# override — the operator either reopens the real prior kill with ``reset-finding``
+# (the earlier kill was wrong), or forces an intentional distinct re-mint with
+# ``--allow-remint`` / ``--force`` (a genuinely new finding that only coincidentally
+# shares the endpoint + technique). ``merged`` stays out (it is a different concept
+# — a duplicate folded elsewhere, reachable via its canonical target).
+def _canonical_location_endpoint(location: str) -> str:
+    """Normalize a canonical_location to a comparable endpoint signal.
+
+    URL locations collapse to ``netloc + path`` (query/fragment/trailing-slash
+    stripped) so ``/api/fetch?url=…`` and ``/api/fetch`` share a signal; ``file:``
+    locations collapse to the file path (a trailing ``:line[:col]`` stripped) so two
+    source findings in the same file share a signal; anything else compares by its
+    stripped/lower-cased self. Empty in → empty out (an empty signal never matches).
+    """
+    text = (location or "").strip().lower()
+    if not text:
+        return ""
+    if text.startswith(("http://", "https://")):
+        parts = urlsplit(text)
+        path = parts.path.rstrip("/")
+        combined = f"{parts.netloc}{path}"
+        return combined or text
+    if text.startswith("file:"):
+        segments = text[len("file:"):].split(":")
+        while len(segments) > 1 and segments[-1].isdigit():
+            segments.pop()
+        return "file:" + ":".join(segments)
+    return text
+
+
+def _find_killed_remint_collision(
+    connection,
+    engagement_id: int,
+    *,
+    defect_family: str,
+    root_cause_key: str,
+    auth_context: str,
+    canonical_location: str,
+) -> dict[str, Any] | None:
+    """Return a KILLED finding this net-new record would silently re-mint, or None.
+
+    Broader than the exact dedup tuple: matches an existing ``false_positive``
+    finding that shares the same (non-empty) ``defect_family`` AND either the exact
+    tuple OR a shared endpoint/canonical-location signal. Same ``defect_family`` is
+    REQUIRED so a genuinely-different vuln class at the same endpoint is NOT caught.
+    """
+    family = (defect_family or "").strip()
+    if not family:
+        # No technique to key on; the exact-tuple sticky-FP upsert (handled by the
+        # normal ``_semantic_finding_match`` path) is the only backstop here.
+        return None
+    new_endpoint = _canonical_location_endpoint(canonical_location)
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM assessment_findings
+        WHERE engagement_id = ?
+          AND status = 'false_positive'
+        ORDER BY id ASC
+        """,
+        (engagement_id,),
+    ).fetchall()
+    for row in rows:
+        existing = dict(row)
+        if str(existing.get("defect_family") or "").strip() != family:
+            continue
+        exact_tuple = (
+            str(existing.get("root_cause_key") or "") == (root_cause_key or "")
+            and str(existing.get("auth_context") or "") == (auth_context or "")
+            and str(existing.get("canonical_location") or "") == (canonical_location or "")
+        )
+        if exact_tuple:
+            return existing
+        existing_endpoint = _canonical_location_endpoint(
+            str(existing.get("canonical_location") or "")
+        )
+        if new_endpoint and existing_endpoint and new_endpoint == existing_endpoint:
+            return existing
+    return None
+
+
+def _raise_killed_remint_conflict(
+    killed: dict[str, Any],
+    *,
+    defect_family: str,
+    canonical_location: str,
+) -> None:
+    killed_slug = str(killed.get("slug", ""))
+    killed_location = str(killed.get("canonical_location", ""))
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"Refusing to re-mint disproven finding '{killed_slug}': it was killed "
+            f"(false_positive) for defect_family={defect_family!r} at canonical_location "
+            f"{killed_location!r}, and this net-new record targets the SAME technique + "
+            f"endpoint at {canonical_location!r} under a different location/slug — minting it "
+            f"would silently resurrect a disproven finding as a fresh duplicate. If the earlier "
+            f"kill was WRONG and this should re-open, run "
+            f"`vigil assess reset-finding {killed_slug} --reason \"...\"`. If this is a genuinely "
+            f"NEW finding that only coincidentally shares the endpoint + technique, re-record "
+            f"with --allow-remint (a.k.a. --force) to override."
         ),
     )
 
@@ -415,6 +529,7 @@ def create_finding(
     explicit_verification_disposition_override: bool = False,
     explicit_severity_override: bool = False,
     allow_existing_noncanonical_slug: bool = False,
+    allow_remint: bool = False,
     transition_action: str | None = None,
     transition_reason_code: str = "",
     transition_reason_text: str = "",
@@ -466,6 +581,28 @@ def create_finding(
                     defect_family=defect_family,
                     root_cause_key=root_cause_key,
                     auth_context=auth_context,
+                    canonical_location=canonical_location,
+                )
+        # D4: a true net-new INSERT (no slug/tuple/title match resolved ``existing``)
+        # that nonetheless re-mints an already-DISPROVEN (false_positive) finding
+        # under the broader technique+endpoint match is refused unless forced. Only
+        # fires when ``existing is None`` — an exact-tuple upsert onto a sticky-FP,
+        # an ``--update`` by slug, and a live active/reported dedup match all resolve
+        # ``existing`` and are handled by the paths above, so this never disturbs the
+        # existing sticky-FP coalesce or the reported/active clobber guard.
+        if existing is None and not allow_remint:
+            killed = _find_killed_remint_collision(
+                connection,
+                engagement.id,
+                defect_family=defect_family,
+                root_cause_key=root_cause_key,
+                auth_context=auth_context,
+                canonical_location=canonical_location,
+            )
+            if killed is not None:
+                _raise_killed_remint_conflict(
+                    killed,
+                    defect_family=defect_family,
                     canonical_location=canonical_location,
                 )
         # A ``blocked`` disposition REQUIRES a ``block_reason`` on the create/record

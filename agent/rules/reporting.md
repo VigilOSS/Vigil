@@ -310,7 +310,7 @@ External submissions (bug bounty, disclosure email) are read by humans. The patt
 
 **Remediation: ≤3 items.** Primary fix, optional defense-in-depth, optional audit step.
 
-**Header metadata lives in the header.** CWE, CVSS, and VRT declared in header fields need no in-body explanation. One field, one place.
+**Header metadata lives in the header.** CWE, CVSS, and VRT declared in header fields need no in-body explanation. One field, one place. Resolve the exact VRT leaf or CWE weakness offline via `agent/references/reporting/` (`bugcrowd-vrt.md` / `hackerone-weaknesses.md`) rather than guessing the category.
 
 **Preferred phrase:** `this finding` (not `this submission`).
 

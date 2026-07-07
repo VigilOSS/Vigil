@@ -243,7 +243,7 @@ No unexplained jargon. "SQL injection (direct database access)" not just "SQL in
 
 Length discipline: see `agent/rules/reporting.md` Rule 10.
 
-```markdown
+````markdown
 ### 001: [Title] [SEVERITY]
 **OWASP:** A03:2021  **CWE:** CWE-89  **CVSS:** 7.5 (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N)
 
@@ -266,7 +266,7 @@ Length discipline: see `agent/rules/reporting.md` Rule 10.
 
 #### Remediation
 [1-2 sentences. Specific technology and control. References: CWE link.]
-```
+````
 
 ### 4. Attack Path Narrative
 
@@ -483,6 +483,10 @@ Bugcrowd/HackerOne-style platforms plus the no-program `direct` writeup:
   per-platform structure the generated draft follows
 - `agent/references/submission-format.md` — authoritative structure/rules reference
   (platform-agnostic; the templates above are the platform-specific renderings of it)
+- `agent/references/reporting/bugcrowd-vrt.md` — offline VRT leaf + P1-P5 priority + CVSS lookup
+  (data in `bugcrowd-vrt.tsv`); holds the IDOR Iterable-vs-Complex fork and other leaf-selection judgment
+- `agent/references/reporting/hackerone-weaknesses.md` — offline CWE weakness lookup (data in
+  `hackerone-weaknesses.tsv`); holds the CVSS→severity-band table and the weakness != severity guardrail
 - `agent/references/examples/bugbounty-submission-ldap-injection.md` — working example with POC
 
 Output path: `$ENGAGEMENT_DIR/submissions/<slug>/submission.md` (+ `submission-context.json` from
@@ -619,6 +623,8 @@ The macros section at the bottom of `templates/blue.md` lists the exact backend 
 - `agent/references/runtime-guides/engagement-methodology.md` — methodology narrative source
 - `agent/references/disclosure-email-format.md` — email disclosure format and rules
 - `agent/references/submission-format.md` — submission format (platform-agnostic reference behind the templates below)
+- `agent/references/reporting/bugcrowd-vrt.md` — Bugcrowd VRT leaf/priority/CVSS offline lookup
+- `agent/references/reporting/hackerone-weaknesses.md` — HackerOne CWE weakness offline lookup
 - `agent/references/examples/` — working examples for both output modes
 - `agent/skills/report-generation/templates/bugcrowd.md` — Bugcrowd submission template
 - `agent/skills/report-generation/templates/hackerone.md` — HackerOne submission template

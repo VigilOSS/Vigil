@@ -36,10 +36,17 @@ def register(subparsers) -> None:
             "  vigil assess resolve-surface 99 --status not_applicable --rationale \"static asset, no input vector\"\n"
             "  vigil assess resolve-surface 17 --status deferred --rationale \"low-signal, revisit after Phase 5\"\n"
             "  vigil assess resolve-surface 31 --status partially-covered --rationale \"unauth path tested\" --followup-condition \"needs auth re-test\"\n"
+            "  vigil assess resolve-surface 42 99 17 --status covered --rationale \"same triage verdict for all three\"\n"
             f"\nValid statuses: {valid_statuses}"
         ),
     )
-    p.add_argument("surface_id", type=int, help="Backend id of the surface row")
+    p.add_argument(
+        "surface_id",
+        type=int,
+        nargs="+",
+        help="One or more backend surface-row ids. Batch: every listed surface gets the same "
+             "--status/--rationale/flags (resilient loop with a per-id failure tally).",
+    )
     p.add_argument(
         "--status",
         required=True,
@@ -92,13 +99,35 @@ def run(args) -> None:
     if args.followup_condition:
         payload["followup_condition"] = args.followup_condition
 
+    surface_ids = args.surface_id if isinstance(args.surface_id, list) else [args.surface_id]
     cfg = load_config(args.engagement_dir)
+    records: list = []
+    failed = 0
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        record = client.patch(f"surfaces/{args.surface_id}", payload)
+        for surface_id in surface_ids:
+            try:
+                record = client.patch(f"surfaces/{surface_id}", payload)
+            except Exception as exc:  # noqa: BLE001 - one bad id must not drop the rest
+                failed += 1
+                print(f"resolve-surface: surface {surface_id} failed: {exc}", file=sys.stderr)
+                continue
+            if not isinstance(record, dict) or "id" not in record:
+                failed += 1
+                print(
+                    f"resolve-surface: surface {surface_id} returned an unexpected response",
+                    file=sys.stderr,
+                )
+                continue
+            records.append(record)
 
-    if not isinstance(record, dict) or "id" not in record:
-        print("resolve-surface: backend returned an unexpected response", file=sys.stderr)
-        print(json.dumps(record, indent=2, ensure_ascii=False))
+    if len(surface_ids) == 1 and records:
+        print(json.dumps(records[0], indent=2, ensure_ascii=False))
+    else:
+        for record in records:
+            print(json.dumps(record, ensure_ascii=False))
+        print(
+            f"[resolve-surface] resolved {len(records)} surface(s); {failed} failed.",
+            file=sys.stderr,
+        )
+    if failed:
         sys.exit(1)
-
-    print(json.dumps(record, indent=2, ensure_ascii=False))

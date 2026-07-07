@@ -19,9 +19,19 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=render_contract_epilog("verify-finding"),
     )
-    p.add_argument("finding_slug", help="Canonical finding slug to verify")
-    p.add_argument("payload", nargs="?", help="Path to JSON verification payload or inline JSON object")
+    p.add_argument(
+        "finding_slug",
+        nargs="+",
+        help="One or more canonical finding slugs to verify. Batch: every listed slug receives the "
+             "SAME disposition/payload/flags (resilient loop with a per-slug failure tally).",
+    )
     p.add_argument("--inline", dest="inline_payload", help="Raw JSON verification payload")
+    p.add_argument(
+        "--payload-file",
+        dest="payload_file",
+        help="Path to a JSON verification payload file (replaces the removed trailing positional "
+             "payload arg; use --inline for raw JSON).",
+    )
     p.add_argument(
         "--disposition",
         choices=("confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"),
@@ -59,21 +69,49 @@ def register(subparsers) -> None:
 _KNOWN_DISPOSITIONS = frozenset({"confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"})
 
 
+def _looks_like_payload(token: str) -> bool:
+    """True when a positional token looks like a JSON payload rather than a slug."""
+    t = (token or "").strip()
+    return bool(t) and (t.startswith(("{", "[")) or t.endswith(".json") or Path(t).is_file())
+
+
 def run(args) -> None:
+    slugs = args.finding_slug if isinstance(args.finding_slug, list) else [args.finding_slug]
+    # The trailing positional payload arg was removed (it collided with a variadic
+    # slug list). Catch a legacy JSON blob / disposition passed positionally and
+    # point the caller at the flag form.
+    example_slug = slugs[0] if slugs else "<slug>"
+    for token in slugs:
+        t = str(token).strip()
+        if t in _KNOWN_DISPOSITIONS:
+            print(
+                f"'{t}' looks like a disposition, not a finding slug.\n"
+                f"Use: vigil assess verify-finding {example_slug} --disposition {t} --reason \"...\"",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if _looks_like_payload(t):
+            print(
+                f"'{t}' looks like a JSON payload, not a finding slug. The positional payload arg "
+                f"was removed — pass the JSON via --inline '<json>' or --payload-file <path>, and "
+                f"list only finding slugs positionally.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     inline_payload = getattr(args, "inline_payload", None)
-    raw_payload = inline_payload if inline_payload is not None else getattr(args, "payload", None)
-    if raw_payload is not None and raw_payload in _KNOWN_DISPOSITIONS:
-        print(
-            f"'{raw_payload}' looks like a disposition, not a payload file.\n"
-            f"Use: vigil assess verify-finding {args.finding_slug} --disposition {raw_payload} --reason \"...\"",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    payload_file = getattr(args, "payload_file", None)
+    if inline_payload is not None:
+        raw_payload, raw_inline = inline_payload, True
+    elif payload_file:
+        raw_payload, raw_inline = payload_file, False
+    else:
+        raw_payload, raw_inline = None, False
     if raw_payload is not None:
         try:
             payload, _ = parse_json_argument(
                 raw_payload,
-                inline=inline_payload is not None,
+                inline=raw_inline,
                 description="verification payload",
             )
         except ValueError as exc:
@@ -162,16 +200,35 @@ def run(args) -> None:
             )
             sys.exit(1)
 
+    results: list = []
+    failed = 0
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.post(f"findings/{args.finding_slug}/verify", payload)
-        if narrative_path:
-            narrative_payload = {
-                "path": narrative_path,
-                "kind": "verification-narrative",
-                "related_finding_slug": args.finding_slug,
-            }
-            if producer_role:
-                narrative_payload["producer_agent_role"] = producer_role
-            result["narrative_artifact"] = client.post("artifacts", narrative_payload)
+        for slug in slugs:
+            try:
+                result = client.post(f"findings/{slug}/verify", payload)
+                if narrative_path:
+                    narrative_payload = {
+                        "path": narrative_path,
+                        "kind": "verification-narrative",
+                        "related_finding_slug": slug,
+                    }
+                    if producer_role:
+                        narrative_payload["producer_agent_role"] = producer_role
+                    result["narrative_artifact"] = client.post("artifacts", narrative_payload)
+            except Exception as exc:  # noqa: BLE001 - one bad slug must not drop the rest
+                failed += 1
+                print(f"verify-finding: {slug} failed: {exc}", file=sys.stderr)
+                continue
+            results.append(result)
 
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if len(slugs) == 1 and results:
+        print(json.dumps(results[0], indent=2, ensure_ascii=False))
+    else:
+        for result in results:
+            print(json.dumps(result, ensure_ascii=False))
+        print(
+            f"[verify-finding] verified {len(results)} finding(s); {failed} failed.",
+            file=sys.stderr,
+        )
+    if failed:
+        sys.exit(1)

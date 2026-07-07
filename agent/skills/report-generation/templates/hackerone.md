@@ -67,10 +67,13 @@ markers. Stored back on the finding as `details.evidence`; the raw output stays 
 ## HackerOne-specific notes
 
 - **Weakness replaces VRT.** Pick the single most specific CWE the fault maps to (`CWE-89`, not
-  `CWE-20`). If two CWEs are plausible, use the one the PoC actually exercises.
+  `CWE-20`). If two CWEs are plausible, use the one the PoC actually exercises. Offline, grep
+  `agent/references/reporting/hackerone-weaknesses.tsv` for the candidate CWE.
 - **Severity is CVSS-derived, not a separate scale.** HackerOne computes the Critical/High/
   Medium/Low bucket directly from the submitted CVSS:3.1 vector through its own calculator — don't
-  hand-pick a severity that disagrees with the vector; fix the vector instead.
+  hand-pick a severity that disagrees with the vector; fix the vector instead. See
+  `agent/references/reporting/hackerone-weaknesses.md` for the CVSS→band table and the guardrail
+  that weakness and severity are decoupled — never carry a Bugcrowd P-rating into this field.
 - **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
   it as `submissions/<slug>/poc.<ext>` and attach it in the HackerOne form — see
   `submission-format.md` "PoC block". `export-submission` emits no PoC line into the body; a
