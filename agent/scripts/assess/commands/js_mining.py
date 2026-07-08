@@ -415,11 +415,20 @@ def run(args) -> None:
     # extractor emits raw endpoints resolved against the body's source URL.
     resolved: list[str] = []
     seen: set[str] = set()
+    malformed: list[str] = []
 
     def _accept(url: str) -> None:
         if not url:
             return
-        host = (urlparse(url).hostname or "").lower()
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except ValueError:
+            # jsluice/regex output is untrusted parser input: a malformed URL
+            # literal (e.g. an unbracketed IPv6-like authority) makes urlparse
+            # raise ``Invalid IPv6 URL``. Quarantine it instead of letting one
+            # bad literal abort the whole mining run and lose every good endpoint.
+            malformed.append(url)
+            return
         if args.target and host and not _host_matches_target(host, args.target):
             return
         # Drop endpoints on out-of-scope hosts (allow AND not deny). Only when an
@@ -448,12 +457,28 @@ def run(args) -> None:
         if not source_url:
             continue
         for ep in eps:
-            absolute = resolve_js_endpoint(ep, base_url=source_url)
+            try:
+                absolute = resolve_js_endpoint(ep, base_url=source_url)
+            except ValueError:
+                # resolve_js_endpoint urlparses the raw endpoint; a malformed
+                # one is quarantined, not fatal (same untrusted-input rationale).
+                malformed.append(ep)
+                continue
             if absolute:
                 _accept(absolute)
 
     endpoints_host, _ = _paths(cfg, "js_endpoints.txt")
     endpoints_host.write_text("\n".join(resolved) + "\n", encoding="utf-8")
+
+    # Quarantine sidecar: malformed URL literals that could not be parsed. Kept
+    # for a browser-semantic/salvage follow-up rather than silently dropped.
+    if malformed:
+        malformed_host, _ = _paths(cfg, "js_endpoints_malformed.txt")
+        malformed_host.write_text("\n".join(malformed) + "\n", encoding="utf-8")
+        _warn(
+            f"{len(malformed)} malformed URL(s) quarantined to {malformed_host} "
+            "(not fatal; good endpoints still mined)."
+        )
 
     ingested = 0
     if not getattr(args, "no_ingest", False) and resolved:

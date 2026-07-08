@@ -265,6 +265,26 @@ def _host_json_path(args, json_path: str) -> str | None:
     return os.path.join(eng_dir, json_path)
 
 
+def _precreate_json_parent(args, json_path: str) -> None:
+    """Create the ``-oJ`` parent directory BEFORE the run.
+
+    Arjun writes the ``-oJ`` file during the run but does NOT create parent
+    directories itself, so a first run against a novel target (whose
+    ``scans/arjun/<token>/<digest>/`` dir does not exist yet) crashes at export
+    and loses the whole run. The engagement tree is bind-mounted into the kali
+    container, so a host-side mkdir makes the path exist in-container too.
+    Best-effort — never raises into the verb (the post-run
+    :func:`_ensure_json_artifact` still backfills a placeholder if needed).
+    """
+    host = _host_json_path(args, json_path)
+    if not host:
+        return
+    try:
+        Path(host).parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+
 def _ensure_json_artifact(args, json_path: str, *, incomplete: bool = False) -> None:
     """Write a placeholder at the -oJ path if arjun produced no file.
 
@@ -417,6 +437,11 @@ def run(args) -> None:
                 "raise --rate-limit/-t so the run finishes before the wall."
             ),
         )
+
+    # Pre-create the -oJ parent dir so arjun can write its output on a first run
+    # against a novel target (arjun does not create parent dirs and crashes at
+    # export otherwise). Best-effort; the post-run guard still backfills.
+    _precreate_json_parent(args, json_path)
 
     result = kali_exec(cmd, tool_name="arjun", **kali_args_to_kwargs(args))
 

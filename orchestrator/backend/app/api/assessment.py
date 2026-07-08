@@ -1175,11 +1175,25 @@ def get_coverage_items(
 @router.get("/probe-runs")
 def get_probe_runs(
     engagement_key: str,
+    attack_family: str = "",
+    target_host: str = "",
+    target_path: str = "",
+    auth_context: str = "",
+    result_status: str = "",
     limit: int = Query(default=DEFAULT_PROBE_RUN_LIMIT, ge=1, le=MAX_PROBE_RUN_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_probe_runs(engagement.id, limit=limit, offset=offset)
+    return state_manager.list_probe_runs(
+        engagement.id,
+        attack_family=attack_family,
+        target_host=target_host,
+        target_path=target_path,
+        auth_context=auth_context,
+        result_status=result_status,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/command-runs")
@@ -1251,6 +1265,9 @@ def get_resume_brief(
     agent_id: str = "",
     max_age_hours: float | None = Query(default=None, gt=0, le=24 * 30),
     since: str = "",
+    per_input_limit: int = Query(
+        default=assessment_memory._PER_INPUT_ROW_LIMIT, ge=0, le=100000
+    ),
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return assessment_memory.build_resume_brief(
@@ -1260,6 +1277,7 @@ def get_resume_brief(
         agent_id=agent_id,
         max_age_hours=max_age_hours,
         since=since,
+        per_input_limit=per_input_limit,
     )
 
 

@@ -39,6 +39,23 @@ def register(subparsers) -> None:
             "72h for code-fuzz-engineer."
         ),
     )
+    p.add_argument(
+        "--per-input-limit",
+        dest="per_input_limit",
+        type=int,
+        default=None,
+        help=(
+            "Cap on Per-Input Coverage cells returned (default 20). The grid also "
+            "reports the true total (cells_count), so a capped sample still signals "
+            "breadth. Use a larger N, or --all-cells, when you need every cell."
+        ),
+    )
+    p.add_argument(
+        "--all-cells",
+        dest="all_cells",
+        action="store_true",
+        help="Return every Per-Input Coverage cell (no cap). Equivalent to --per-input-limit 0.",
+    )
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(func=run)
 
@@ -58,6 +75,10 @@ def run(args) -> None:
     since = getattr(args, "since", "")
     if since:
         params.append(("since", since))
+    if getattr(args, "all_cells", False):
+        params.append(("per_input_limit", "0"))
+    elif getattr(args, "per_input_limit", None) is not None:
+        params.append(("per_input_limit", str(int(args.per_input_limit))))
     endpoint = "resume-brief"
     if params:
         endpoint += "?" + urlencode(params, quote_via=quote)
