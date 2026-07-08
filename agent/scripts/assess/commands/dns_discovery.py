@@ -1040,6 +1040,13 @@ def _apply_arg_defaults(args) -> None:
 def run(args) -> None:
     _apply_arg_defaults(args)
     cfg = load_config(args.engagement_dir)
+    # ``args.engagement_dir`` is the raw CLI flag and is ``None`` on the common
+    # active-pointer path (no explicit ``--engagement-dir``). Downstream readers
+    # -- ``_host_dispatch`` required-header injection and the ``_puredns_brute``
+    # ``network_heavy_lock`` -- consume it directly and crash / silently skip on
+    # ``None``. Canonicalize it to the resolved path so every stage, including
+    # ``--brute``, sees a real directory.
+    args.engagement_dir = cfg.engagement_dir
     out_dir = Path(cfg.engagement_dir) / "scans" / "dns-discovery"
     out_dir.mkdir(parents=True, exist_ok=True)
     apexes = [a.strip() for a in args.apexes if a.strip()]

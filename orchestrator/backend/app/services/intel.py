@@ -723,6 +723,17 @@ _INTEL_TABLE_BY_TYPE: dict[str, str] = {
 }
 
 
+# The free-text column a supersede ``--rationale`` is appended to differs by
+# table: ``intel_notes`` stores prose in ``body_markdown``; every other intel
+# table has a dedicated ``notes`` column. Keyed by intel_type so the append in
+# ``supersede_intel`` targets the column that actually exists on each table
+# (targeting ``notes`` on ``intel_notes`` raises "no such column: notes" -> 500).
+_INTEL_RATIONALE_COLUMN: dict[str, str] = {
+    intel_type: ("body_markdown" if intel_type == "note" else "notes")
+    for intel_type in _INTEL_TABLE_BY_TYPE
+}
+
+
 _INTEL_UPDATABLE_FIELDS: dict[str, set[str]] = {
     "tech-component": {
         "component", "version", "source_name", "confidence", "evidence_ref",
@@ -1253,11 +1264,12 @@ def supersede_intel(
         # Capture rationale on the old row's notes when supplied so the audit
         # trail includes why supersede was issued without changing the schema.
         if rationale:
-            old_notes = str(existing.get("notes", "") or "")
+            rationale_column = _INTEL_RATIONALE_COLUMN[intel_type]
+            old_notes = str(existing.get(rationale_column, "") or "")
             tag = f"[superseded-by id={new_id}] {rationale}".strip()
             new_notes = (old_notes + ("\n" if old_notes else "") + tag) if tag else old_notes
             connection.execute(
-                f"UPDATE {table} SET notes = ?, superseded_by_id = ?, "
+                f"UPDATE {table} SET {rationale_column} = ?, superseded_by_id = ?, "
                 f"superseded_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP "
                 f"WHERE engagement_id = ? AND id = ?",
                 (new_notes, new_id, engagement.id, intel_id),

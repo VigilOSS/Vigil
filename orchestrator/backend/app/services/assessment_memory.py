@@ -473,7 +473,7 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
 
 
 def _per_input_coverage_section(
-    connection, engagement_id: int, *, since: str
+    connection, engagement_id: int, *, since: str, row_limit: int = _PER_INPUT_ROW_LIMIT
 ) -> dict[str, Any]:
     """Per-input coverage grid (WS2) — the generated, queryable answer to "which
     input was tested for which class, as which identity, and did it hit a wall".
@@ -571,7 +571,11 @@ def _per_input_coverage_section(
         if not cell["evidence_ref"] and covering and probe["evidence_ref"]:
             cell["evidence_ref"] = probe["evidence_ref"]
 
-    cell_list = list(cells.values())[:_PER_INPUT_ROW_LIMIT]
+    all_cells = list(cells.values())
+    # ``row_limit <= 0`` returns every cell (the resume-brief ``--all-cells``
+    # escape valve for the ~790-cell case); a positive limit caps the sample. The
+    # absolute total below still reports true breadth regardless of the cap.
+    cell_list = all_cells if row_limit <= 0 else all_cells[:row_limit]
 
     # Absolute distinct-cell total (NOT since-filtered), like the other counts —
     # so a capped/filtered grid still signals the true number of probed inputs.
@@ -597,6 +601,7 @@ def build_resume_brief(
     agent_id: str = "",
     max_age_hours: float | None = None,
     since: str = "",
+    per_input_limit: int = _PER_INPUT_ROW_LIMIT,
 ) -> dict[str, Any]:
     if since and _parse_iso(since) is None:
         # Silent fallback would hide the bug — the operator types
@@ -648,7 +653,7 @@ def build_resume_brief(
         work_buffer_section = _work_buffer_section(connection, engagement_id)
         attempts_section = _attempts_section(connection, engagement_id, since=since)
         per_input_coverage_section = _per_input_coverage_section(
-            connection, engagement_id, since=since
+            connection, engagement_id, since=since, row_limit=per_input_limit
         )
 
     command_matches_all = (

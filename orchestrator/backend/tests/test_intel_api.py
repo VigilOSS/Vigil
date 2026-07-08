@@ -598,6 +598,43 @@ def test_note_post_get_upsert_and_extra_forbid(client, isolate_settings):
     assert _assert_present_in_search(client, "Recon")
 
 
+def test_supersede_note_with_rationale_appends_to_body_markdown(client, isolate_settings):
+    # Regression: `supersede-intel note --rationale` 500'd because the rationale
+    # was appended to a `notes` column that intel_notes does not have (its free
+    # text is body_markdown). The note type must append to body_markdown; every
+    # other intel type keeps using its `notes` column (covered above).
+    _seed_engagement(client, isolate_settings)
+    created = client.post(
+        f"{INTEL_BASE}/notes",
+        json={"title": "Lead v1", "body_markdown": "## Lead\n- initial", "source_agent": "operator"},
+    )
+    assert created.status_code == 201, created.text
+    old_id = created.json()["id"]
+
+    # A DIFFERENT title is a supersede (same title would upsert in place -> 409).
+    superseded = client.post(
+        f"{INTEL_BASE}/notes/{old_id}/supersede",
+        json={
+            "payload": {
+                "title": "Lead v2",
+                "body_markdown": "## Lead\n- refined",
+                "source_agent": "operator",
+            },
+            "rationale": "Re-scoped after source-map pass",
+        },
+    )
+    assert superseded.status_code == 201, superseded.text  # regression: previously 500
+    body = superseded.json()
+    new_id = body["current"]["id"]
+    assert new_id != old_id
+    old = body["superseded"]
+    assert old["superseded_by_id"] == new_id
+    assert old["superseded_at"]
+    # The rationale landed in body_markdown (the column that exists), not `notes`.
+    assert "[superseded-by id=" in old["body_markdown"]
+    assert "Re-scoped after source-map pass" in old["body_markdown"]
+
+
 def test_note_lead_status_lifecycle(client, isolate_settings):
     """A note with lead_status is a tracked lead; list_leads(open_only) is the
     worklist; PATCH to a terminal status drops it; bad status is 422; the migration

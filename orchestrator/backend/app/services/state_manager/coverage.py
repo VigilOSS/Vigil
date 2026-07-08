@@ -1223,22 +1223,44 @@ def record_probe_run(
 def list_probe_runs(
     engagement_id: int,
     *,
+    attack_family: str = "",
+    target_host: str = "",
+    target_path: str = "",
+    auth_context: str = "",
+    result_status: str = "",
     limit: int = DEFAULT_PROBE_RUN_LIMIT,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     limit, offset = _bounded_probe_run_window(limit, offset)
+    # Optional exact-match filters (empty string = no filter). Column names are a
+    # fixed allowlist, never caller text, so the f-string interpolation is safe;
+    # every value is bound. Lets `fetch probe-runs?attack_family=sqli` return only
+    # that family instead of the full unfiltered set (the silent no-op it was).
+    clauses = ["engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    for column, value in (
+        ("attack_family", attack_family),
+        ("target_host", target_host),
+        ("target_path", target_path),
+        ("auth_context", auth_context),
+        ("result_status", result_status),
+    ):
+        if value:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    params.extend([limit, offset])
     with _common.get_connection() as connection:
         return _fetch_all(
             connection,
-            """
+            f"""
             SELECT *
             FROM assessment_probe_runs
-            WHERE engagement_id = ?
+            WHERE {" AND ".join(clauses)}
             ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
-            (engagement.id, limit, offset),
+            tuple(params),
         )
 
 def record_surface(
