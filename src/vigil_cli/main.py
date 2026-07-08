@@ -1995,10 +1995,9 @@ def _build_assessment_client(install_root: Path, engagement_key: str):
     given engagement, reusing the same orchestrator base-url resolution as
     the rest of the CLI and the assess library shipped under agent/scripts.
 
-    The import is deferred and path-bridged exactly like
-    ``engagements._init_cases_db`` so the installable ``src`` package keeps a
-    single source of truth for the HTTP client without a hard dependency on
-    the agent tree at import time.
+    The import is deferred and path-bridged (via ``paths.add_assess_import_path``)
+    so the installable ``src`` package keeps a single source of truth for the
+    HTTP client without a hard dependency on the agent tree at import time.
     """
     from .paths import add_assess_import_path, resolve_orchestrator_base_url
 

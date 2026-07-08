@@ -24,6 +24,7 @@ from ._common import (
     _scalar_row,
 )
 from .dispatches import _serialize_decision
+from .work_buffer import _derive_work_item
 
 
 
@@ -873,6 +874,7 @@ def _ingest_request_observation(
     banner: str,
     coverage_candidates: list[dict[str, Any]] | None,
     auto_generate_coverage: bool,
+    work_item: dict[str, Any] | None = None,
     deferred_service_refreshes: set[int] | None = None,
 ) -> dict[str, Any]:
     scheme, host, _, _ = _parse_url(url)
@@ -978,12 +980,23 @@ def _ingest_request_observation(
         if deferred_service_refreshes is not None and coverage_item["service_id"] is not None:
             deferred_service_refreshes.add(int(coverage_item["service_id"]))
         coverage_items.append(coverage_item)
+    derived_work_item = _derive_work_item(
+        connection,
+        engagement_id,
+        request_variant=request_variant,
+        service=service,
+        coverage_items=coverage_items,
+        auth_context=auth_context,
+        discovery_source=discovery_source,
+        work_item=work_item,
+    )
     return {
         "target": target,
         "service": service,
         "request_variant": request_variant,
         "request_observation": observation,
         "coverage_items": coverage_items,
+        "work_item": derived_work_item,
     }
 
 
@@ -1013,6 +1026,7 @@ def ingest_request_observation(
     banner: str,
     coverage_candidates: list[dict[str, Any]] | None,
     auto_generate_coverage: bool,
+    work_item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -1042,6 +1056,7 @@ def ingest_request_observation(
             banner=banner,
             coverage_candidates=coverage_candidates,
             auto_generate_coverage=auto_generate_coverage,
+            work_item=work_item,
         )
 
 

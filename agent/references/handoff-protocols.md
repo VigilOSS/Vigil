@@ -58,7 +58,7 @@ Output: endpoint lists, technologies, JS file URLs, parameters, surface candidat
 Output: new API endpoints, routes, secrets/tokens, config objects, coverage gaps
 
 1. **Read `#### Coverage Gaps` first** — if JS analysis was incomplete (files behind auth, opaque minification), re-dispatch with additional context before proceeding.
-2. New requestable endpoints → `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis`
+2. New requestable endpoints → `vigil assess ingest-endpoints source-analysis`
 3. Secrets/tokens → durable findings immediately via `vigil assess record-finding` + credential backend record via `vigil assess post credentials <credential-json-file>` (assessment_credentials table)
 4. API routes, object references, mutation paths, parameter names → queued for Phase 4 dispatch (these enter the work buffer via endpoint ingestion, not via immediate agent dispatch)
 
@@ -66,7 +66,7 @@ Output: new API endpoints, routes, secrets/tokens, config objects, coverage gaps
 
 After both recon-specialist and source-analyzer return:
 1. Verify coverage gaps are resolved or accepted
-2. Dispatch surface-collector with Phase 1 endpoint artifacts, targets from scope.json, credential state (from `vigil auth status`), and `$DIR/cases.db` path — **bring `agent/skills/surface-collection/SKILL.md`**
+2. Dispatch surface-collector with Phase 1 endpoint artifacts, targets from scope.json, and credential state (from `vigil auth status`) — **bring `agent/skills/surface-collection/SKILL.md`**
 
 ## Phase 2 Returns
 
@@ -76,7 +76,7 @@ Output: priority manifest, work-buffer stats, intelligence, coverage gaps, recor
 
 1. Translate each `#### Intelligence` row into a JSON payload and record it via `vigil assess record-intel <type> <json-file>` (one call per row). Verify with `vigil assess list-intel`.
 2. Review `#### Priority Attack Surfaces` for Phase 4 dispatch ordering
-3. Inspect work-buffer stats: `vigil assess work-buffer "$DIR/cases.db" stats`
+3. Inspect work-buffer stats: `vigil assess work-buffer stats`
 4. Update scope.json phase to `consume-test`
 
 ## Phase 4 Returns (CONSUME & TEST)

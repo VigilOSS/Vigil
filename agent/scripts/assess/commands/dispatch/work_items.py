@@ -1,38 +1,28 @@
-"""Work-buffer (cases.db) implementation helpers.
+"""Work-buffer verb implementations (HTTP client over the backend ledger).
 
-The ``vigil assess work-buffer`` verbs operate on the local SQLite work buffer:
-stats / peek / fetch / fetch-by-priority / defer-* / done / error /
-reset-stale / retry-errors / requeue. ``_stamp_liveness`` reaches the
-orchestrator backend (via ``AssessmentClient``) to annotate claimed rows with
-the host's current liveness verdict; it is best-effort and never blocks a
-fetch.
+The ``vigil assess work-buffer`` verbs operate on ``assessment_work_items`` in
+the orchestrator backend (ADR 0013 — the former per-engagement cases.db queue
+folded into the ledger). Each verb is a thin call over ``AssessmentClient`` that
+prints byte-identical output to the former local-SQLite implementation, so
+operator scripts and dashboards that parse this output are unaffected.
+
+The atomic dispatch claim (``fetch`` / ``fetch-by-priority``), the type→agent
+routing, and the per-fetch liveness stamp now run server-side in a single
+transaction; the client just renders what the backend returns.
 """
 from __future__ import annotations
 
 import json
 import sys
 
-from urllib.parse import quote
-
-from assess.lib.classify_buckets import MANUAL_CLASSIFIER_VERSION, reason_tag_of
-from assess.lib.client import AssessmentClient
-from assess.lib.discovery import normalize_host
-from assess.lib.db import (
-    db_query,
-    db_exec,
-    db_exec_returning,
-    db_connect,
-    db_insert_work_item,
-)
-from assess.lib.params import extract_url_path, generate_params_sig
+from assess.lib.classify_buckets import reason_tag_of
 
 from assess.commands.dispatch._shared import _validate_id_list
 
 
-# Actions that DO need a cases.db (work-buffer SQLite) — listed once so the
-# Unknown-action help text and the operator-facing docs stay aligned with the
-# actual dispatch surface. Add new actions here and the help string updates
-# automatically.
+# Actions the work-buffer command exposes (kept here so the CLI choices, the
+# Unknown-action help text, and the operator docs stay aligned). ``migrate`` is
+# gone: the backend owns the schema via init_db(), there is nothing to migrate.
 _DB_ACTIONS = (
     "stats",
     "peek",
@@ -45,53 +35,34 @@ _DB_ACTIONS = (
     "error",
     "reset-stale",
     "retry-errors",
-    "migrate",
     "requeue",
 )
 
 
-def _stats(db_path: str, *, by: str = "status") -> None:
-    """Print work-buffer statistics grouped by ``by``.
+def _stats(client, *, by: str = "status") -> None:
+    """Print work-buffer statistics grouped by ``by`` (backend-computed).
 
-    Default (``status``) preserves the legacy three-block output that every
-    operator script and dashboard depends on. Alternative axes (``source``,
-    ``cluster``, ``host``) emit a single grouped block keyed by the chosen
-    axis so the operator can decide which specialist to dispatch next from
-    the same dataset.
+    Output is byte-identical to the former local implementation so every
+    operator script and dashboard that parses it keeps working.
     """
+    data = client.get(f"work-items/stats?by={by}")
+
     if by == "status":
         print("--- Work Buffer Statistics ---")
-        rows = db_query(
-            db_path,
-            "SELECT status, type, COUNT(*) as count FROM work_items "
-            "GROUP BY status, type ORDER BY status, type",
-        )
-        for row in rows:
+        for row in data.get("status_type", []):
             print(f"{row['status']}|{row['type']}|{row['count']}")
         print()
         print("--- Summary ---")
-        rows = db_query(
-            db_path,
-            "SELECT status, COUNT(*) as count FROM work_items GROUP BY status ORDER BY status",
-        )
-        for row in rows:
+        for row in data.get("status", []):
             print(f"{row['status']}|{row['count']}")
         print()
-        rows = db_query(
-            db_path,
-            "SELECT 'TOTAL' as label, COUNT(*) as count FROM work_items",
-        )
-        for row in rows:
-            print(f"{row['label']}|{row['count']}")
+        print(f"TOTAL|{data.get('total', 0)}")
         return
+
+    rows = data.get("rows", [])
 
     if by == "source":
         print("--- Work Buffer by Source ---")
-        rows = db_query(
-            db_path,
-            "SELECT COALESCE(source, '') AS source, status, COUNT(*) as count "
-            "FROM work_items GROUP BY source, status ORDER BY source, status",
-        )
         for row in rows:
             label = row["source"] or "(none)"
             print(f"{label}|{row['status']}|{row['count']}")
@@ -99,85 +70,28 @@ def _stats(db_path: str, *, by: str = "status") -> None:
 
     if by == "cluster":
         print("--- Work Buffer by Cluster ---")
-        rows = db_query(
-            db_path,
-            "SELECT COALESCE(cluster_key, '') AS cluster_key, status, COUNT(*) as count, "
-            "MAX(priority_score) as max_priority "
-            "FROM work_items GROUP BY cluster_key, status "
-            "ORDER BY max_priority DESC, cluster_key",
-        )
         for row in rows:
             label = row["cluster_key"] or "(none)"
-            print(
-                f"{label}|{row['status']}|{row['count']}|max_priority={row['max_priority'] or 0}"
-            )
+            print(f"{label}|{row['status']}|{row['count']}|max_priority={row['max_priority'] or 0}")
         return
 
     if by == "classifier_version":
-        # Group by the classifier version stamp so an operator can see, at a
-        # glance, how much of the buffer was scored under the current
-        # `classify_buckets.CLASSIFIER_VERSION` vs an old taxonomy (stale) vs
-        # NULL (legacy, never stamped) vs 'manual' (hand-tuned, protected from
-        # `--reclassify-stale`). This is the read side of the reclassify-stale
-        # workflow — run it before/after a `_BUCKETS` change to size the drift.
         print("--- Work Buffer by Classifier Version ---")
-        rows = db_query(
-            db_path,
-            "SELECT COALESCE(classifier_version, '(none)') AS classifier_version, "
-            "status, COUNT(*) as count "
-            "FROM work_items GROUP BY classifier_version, status "
-            "ORDER BY classifier_version, status",
-        )
         for row in rows:
             print(f"{row['classifier_version']}|{row['status']}|{row['count']}")
         return
 
     if by == "host":
         print("--- Work Buffer by Host ---")
-        # url_path stores everything after the host; we extract the host from
-        # the full URL via SQL substring functions so this stays a single
-        # GROUP BY without per-row Python work. Schemeless URLs (instr(url,
-        # '://') = 0) bucket under 'unknown' instead of slicing into the path.
-        rows = db_query(
-            db_path,
-            """
-            SELECT
-                CASE
-                    WHEN instr(url, '://') = 0 THEN 'unknown'
-                    WHEN instr(substr(url, instr(url, '://') + 3), '/') > 0
-                        THEN substr(
-                            substr(url, instr(url, '://') + 3),
-                            1,
-                            instr(substr(url, instr(url, '://') + 3), '/') - 1
-                        )
-                    ELSE substr(url, instr(url, '://') + 3)
-                END AS host,
-                status,
-                COUNT(*) as count
-            FROM work_items
-            WHERE url IS NOT NULL AND url != ''
-            GROUP BY host, status
-            ORDER BY host, status
-            """,
-        )
         for row in rows:
             host = row["host"] or "(none)"
             print(f"{host}|{row['status']}|{row['count']}")
         return
 
     if by == "reason":
-        # Group skipped/deferred rows by their structured reason tag so a query
-        # can tell a correct exclusion from a bare, un-reasoned drop. The tag is
-        # derived in Python (classify_buckets.reason_tag_of) because terminal_reason
-        # is free-text; `untagged` is the state worth watching ("dropped without
-        # a machine-readable reason").
+        # terminal_reason is free-text; the machine-readable tag is derived here
+        # (classify_buckets.reason_tag_of) so the classifier stays client-side.
         print("--- Work Buffer by Reason Tag (skipped/deferred) ---")
-        rows = db_query(
-            db_path,
-            "SELECT COALESCE(terminal_reason, '') AS terminal_reason, COUNT(*) AS count "
-            "FROM work_items WHERE status IN ('skipped', 'deferred') "
-            "GROUP BY terminal_reason",
-        )
         by_tag: dict[str, int] = {}
         for row in rows:
             tag = reason_tag_of(row["terminal_reason"]) or "none"
@@ -187,46 +101,47 @@ def _stats(db_path: str, *, by: str = "status") -> None:
         return
 
 
-def _peek(db_path: str, type_val: str, limit: int) -> None:
-    """Read-only preview of pending items of the given type.
-
-    Unlike ``fetch``, this leaves the rows in ``pending`` so the operator
-    can inspect them before claiming. Use this when you need to decide
-    whether to ``defer-cluster``, ``defer-items``, or dispatch a
-    specialist.
-    """
-    rows = db_query(
-        db_path,
-        """
-        SELECT * FROM work_items
-        WHERE status = 'pending' AND type = ?
-        ORDER BY priority_score DESC, cluster_key, id
-        LIMIT ?
-        """,
-        (type_val, limit),
-    )
+def _peek(client, type_val: str, limit: int) -> None:
+    """Read-only preview of pending items of the given type (leaves them pending)."""
+    rows = client.get(f"work-items?type={type_val}&limit={limit}")
     print(json.dumps(rows, indent=2, ensure_ascii=False))
 
 
-def _defer_items(db_path: str, id_list, reason: str) -> None:
-    """Mark specific work-item ids as skipped with a terminal reason.
+def _fetch(client, type_val: str, limit: int, agent: str) -> None:
+    resp = client.post("work-items/fetch", {"type": type_val, "limit": limit, "agent": agent})
+    print(json.dumps(resp.get("claimed", []), indent=2, ensure_ascii=False))
 
-    Symmetric to ``defer-cluster`` but per-id. Only flips pending rows so a
-    processing dispatch is not clobbered mid-work; rerun ``reset-stale``
-    first if you need to defer in-flight rows. When zero rows match, exit
-    non-zero so an operator typo (or stale id list) does not look like a
-    successful defer.
-    """
+
+def _fetch_by_priority(client, limit: int, agent: str) -> None:
+    """Claim the top-K pending rows by priority (routing + claim server-side)."""
+    resp = client.post("work-items/fetch-by-priority", {"limit": limit, "agent": agent})
+    if resp.get("error") == "not-routed-agent":
+        print(
+            "fetch-by-priority: agent is not a routed agent; use 'auto', "
+            "'vulnerability-analyst', or 'source-analyzer'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    claimed = resp.get("claimed", [])
+    non_routable = resp.get("non_routable", [])
+    if not claimed and non_routable:
+        total = sum(int(pair["count"]) for pair in non_routable)
+        types_summary = ", ".join(f"{pair['type']}={pair['count']}" for pair in non_routable)
+        allowed = ", ".join(resp.get("allowed_types", []))
+        print(
+            f"WARN fetch-by-priority: queue has {total} pending item(s) "
+            f"but all are in non-routable types ({types_summary}); "
+            f"routable types are: {allowed}.",
+            file=sys.stderr,
+        )
+    print(json.dumps(claimed, indent=2, ensure_ascii=False))
+
+
+def _defer_items(client, id_list, reason: str) -> None:
+    """Mark specific pending work-item ids skipped with a terminal reason."""
     ids = _validate_id_list(id_list)
-    placeholders = ",".join("?" * len(ids))
-    affected = db_exec(
-        db_path,
-        f"""UPDATE work_items
-            SET status = 'skipped',
-                terminal_reason = ?
-            WHERE status = 'pending' AND id IN ({placeholders})""",
-        (reason, *ids),
-    )
+    resp = client.post("work-items/defer", {"ids": ids, "reason": reason})
+    affected = int(resp.get("affected", 0))
     ids_repr = ",".join(str(i) for i in ids)
     if affected == 0:
         print(
@@ -237,30 +152,14 @@ def _defer_items(db_path: str, id_list, reason: str) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    print(
-        f"Deferred {affected} pending item(s): {ids_repr} (reason: {reason})"
-    )
+    print(f"Deferred {affected} pending item(s): {ids_repr} (reason: {reason})")
 
 
-def _mark_manual(db_path: str, id_list) -> None:
-    """Stamp `classifier_version='manual'` on specific work-item ids.
-
-    This is the escape hatch that protects hand-tuned rows (a priority bump or
-    a custom cluster_key an operator set by hand) from `classify-work
-    --reclassify-stale`, which restamps every row whose version is NULL or !=
-    the current digest but explicitly SKIPS the `manual` sentinel. Only
-    `--reclassify-all` (the nuclear option) overwrites a manual row. Unlike
-    defer, this touches ONLY the version stamp — status/priority/cluster are
-    left exactly as the operator tuned them. When zero rows match, exit
-    non-zero so a typo (or stale id list) does not look like a successful mark.
-    """
+def _mark_manual(client, id_list) -> None:
+    """Stamp classifier_version='manual' on ids so --reclassify-stale skips them."""
     ids = _validate_id_list(id_list)
-    placeholders = ",".join("?" * len(ids))
-    affected = db_exec(
-        db_path,
-        f"UPDATE work_items SET classifier_version = ? WHERE id IN ({placeholders})",
-        (MANUAL_CLASSIFIER_VERSION, *ids),
-    )
+    resp = client.post("work-items/mark-manual", {"ids": ids})
+    affected = int(resp.get("affected", 0))
     ids_repr = ",".join(str(i) for i in ids)
     if affected == 0:
         print(
@@ -269,297 +168,57 @@ def _mark_manual(db_path: str, id_list) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    print(
-        f"Marked {affected} item(s) manual (protected from --reclassify-stale): "
-        f"{ids_repr}"
-    )
+    print(f"Marked {affected} item(s) manual (protected from --reclassify-stale): {ids_repr}")
 
 
-def _fetch(db_path: str, type_val: str, limit: int, agent: str) -> None:
-    result = db_exec_returning(
-        db_path,
-        """UPDATE work_items
-           SET status = 'processing',
-               assigned_agent = ?,
-               consumed_at = datetime('now')
-           WHERE id IN (
-               SELECT id FROM work_items
-               WHERE status = 'pending' AND type = ?
-               LIMIT ?
-           )
-           RETURNING *""",
-        (agent, type_val, limit),
-    )
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-
-
-_VULN_ANALYST_TYPES = (
-    "api",
-    "api-spec",
-    "form",
-    "upload",
-    "graphql",
-    "websocket",
-    "auth_entry",
-    "workflow",
-    "api_route",
-    "event_feed",
-    "debug_config",
-    "portal_session",
-)
-_SOURCE_ANALYZER_TYPES = ("page", "javascript", "stylesheet", "data")
-_ROUTED_TYPES = _VULN_ANALYST_TYPES + _SOURCE_ANALYZER_TYPES
-_VULN_SIGNAL_FALLBACK_TYPES = ("unknown",)
-
-
-def _agent_route(agent: str) -> tuple[str, ...] | None:
-    """Return the work-item types this agent can safely receive."""
-    normalized = (agent or "").strip().lower()
-    if not normalized:
-        return None
-    if "vulnerability" in normalized or normalized.startswith("vuln"):
-        return _VULN_ANALYST_TYPES + _VULN_SIGNAL_FALLBACK_TYPES
-    if "source" in normalized:
-        return _SOURCE_ANALYZER_TYPES
-    return None
-
-
-def _is_vuln_signal_fallback(row) -> bool:
-    """Unknown type with explicit gf signal is vulnerability-analyst work.
-
-    `unknown` is not broadly routable because many rows are low-context
-    leftovers. The inline classifier can still assign strong gf buckets from
-    path or parameter signal (for example `gf:trust_surface`); those rows
-    should not wait for manual type fetches.
-    """
-    return (
-        row["type"] in _VULN_SIGNAL_FALLBACK_TYPES
-        and int(row["priority_score"] or 0) > 0
-        and str(row["cluster_key"] or "").startswith("gf:")
-    )
-
-
-def _assigned_agent_for_row(row) -> str | None:
-    case_type = row["type"]
-    if case_type in _VULN_ANALYST_TYPES or _is_vuln_signal_fallback(row):
-        return "vulnerability-analyst"
-    if case_type in _SOURCE_ANALYZER_TYPES:
-        return "source-analyzer"
-    return None
-
-
-def _stamp_liveness(conn, result: list[dict], cfg) -> None:
-    """Best-effort: stamp each claimed row's ``live_status`` with the host's
-    current ledger verdict + age (e.g. ``live@9m``, ``blackholed@5m``), so the
-    dispatched specialist starts from "this host answered N minutes ago" instead
-    of re-probing or writing it off on a stale sample (§10.5, context-only —
-    informational, never blocks). Silently skips when there is no backend, no
-    rows, or no liveness data; the fetch always succeeds.
-    """
-    if not result or cfg is None:
-        return
-    hosts = sorted({normalize_host(r.get("url") or "") for r in result})
-    hosts = [h for h in hosts if h]
-    if not hosts:
-        return
-    try:
-        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-            rows = client.get("host-liveness?host=" + quote(",".join(hosts)))
-    except Exception:
-        return
-    if not isinstance(rows, list):
-        return
-    by_host: dict[str, str] = {}
-    for lv in rows:
-        if not isinstance(lv, dict):
-            continue
-        host = (lv.get("host") or "").lower()
-        klass = lv.get("reachability_class") or "unknown"
-        age = lv.get("age_seconds")
-        # Clamp to >=0: a future/skewed probed_at yields a negative age; a
-        # nonsense `@-NNNm` stamp is worse than omitting the age.
-        age_str = f"@{int(age // 60)}m" if isinstance(age, (int, float)) and age >= 0 else ""
-        by_host[host] = f"{klass}{age_str}"
-    stamped = False
-    for r in result:
-        stamp = by_host.get(normalize_host(r.get("url") or ""))
-        if stamp:
-            r["live_status"] = stamp
-            try:
-                conn.execute("UPDATE work_items SET live_status = ? WHERE id = ?", (stamp, r["id"]))
-                stamped = True
-            except Exception:
-                pass
-    if stamped:
-        conn.commit()
-
-
-def _fetch_by_priority(db_path: str, limit: int, agent: str, cfg=None) -> None:
-    """Claim the top-K pending rows ranked by priority_score DESC.
-
-    Priority mode still respects type-to-agent ownership. ``auto`` claims the
-    highest-signal routable rows globally and assigns each row to the canonical
-    specialist for its type. A concrete specialist name claims only the types
-    that specialist can handle, preserving custom instance labels like
-    ``vulnerability-analyst-1`` without handing it JavaScript/page work.
-
-    We exclude rows with terminal_reason set because classify-work already
-    stamped those as skip-worthy. High-signal `unknown` rows are a narrow
-    vulnerability-analyst fallback when inline classification assigned a
-    positive `gf:*` bucket; plain unknown rows remain unrouted.
-    """
-    agent = (agent or "auto").strip()
-    auto_route = agent.lower() in {"auto", "routed", "route"}
-    allowed_types = (_ROUTED_TYPES + _VULN_SIGNAL_FALLBACK_TYPES) if auto_route else _agent_route(agent)
-    if allowed_types is None:
-        print(
-            "fetch-by-priority: agent is not a routed agent; use 'auto', "
-            "'vulnerability-analyst', or 'source-analyzer'",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    placeholders = ",".join("?" * len(allowed_types))
-    with db_connect(db_path) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        candidates = conn.execute(
-            f"""SELECT *
-                FROM work_items
-                WHERE status = 'pending'
-                  AND terminal_reason IS NULL
-                  AND type IN ({placeholders})
-                  AND (
-                      type NOT IN ({",".join("?" * len(_VULN_SIGNAL_FALLBACK_TYPES))})
-                      OR (priority_score > 0 AND cluster_key LIKE 'gf:%')
-                  )
-                ORDER BY priority_score DESC, cluster_key, id
-                LIMIT ?""",
-            (*allowed_types, *_VULN_SIGNAL_FALLBACK_TYPES, limit),
-        ).fetchall()
-        claimed: list[dict] = []
-        for row in candidates:
-            row_agent = _assigned_agent_for_row(row) if auto_route else agent
-            if not row_agent:
-                continue
-            updated = conn.execute(
-                """UPDATE work_items
-                   SET status = 'processing',
-                       assigned_agent = ?,
-                       consumed_at = datetime('now')
-                   WHERE id = ? AND status = 'pending'
-                   RETURNING *""",
-                (row_agent, row["id"]),
-            ).fetchone()
-            if updated is not None:
-                claimed.append(dict(updated))
-        conn.commit()
-        # Preserve the SELECT ordering for downstream dispatch context.
-        result = sorted(
-            claimed,
-            key=lambda r: (
-                -(r.get("priority_score") or 0),
-                r.get("cluster_key") or "",
-                r.get("id") or 0,
-            ),
-        )
-        if not result:
-            non_routable = conn.execute(
-                """SELECT type, COUNT(*) as count
-                   FROM work_items
-                   WHERE status = 'pending' AND terminal_reason IS NULL
-                   GROUP BY type""",
-            ).fetchall()
-            non_routable_pairs = [
-                (row["type"], row["count"]) for row in non_routable if row["type"] not in allowed_types
-            ]
-            if non_routable_pairs:
-                total = sum(count for _, count in non_routable_pairs)
-                types_summary = ", ".join(f"{t}={c}" for t, c in non_routable_pairs)
-                print(
-                    f"WARN fetch-by-priority: queue has {total} pending item(s) "
-                    f"but all are in non-routable types ({types_summary}); "
-                    f"routable types are: {', '.join(allowed_types)}.",
-                    file=sys.stderr,
-                )
-        _stamp_liveness(conn, result, cfg)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-
-
-def _defer_cluster(db_path: str, cluster_key: str, reason: str) -> None:
-    """Mark every pending row in a cluster as skipped with a terminal reason.
-
-    Operators use this after review to silence low-signal clusters from the
-    priority dispatcher. We only flip pending rows so that an in-flight
-    `processing` dispatch is not clobbered mid-work; the operator can
-    reset-stale + defer if they want to pull a cluster back.
-    """
-    affected = db_exec(
-        db_path,
-        """UPDATE work_items
-           SET status = 'skipped',
-               terminal_reason = ?
-           WHERE status = 'pending' AND cluster_key = ?""",
-        (reason, cluster_key),
-    )
+def _defer_cluster(client, cluster_key: str, reason: str) -> None:
+    """Mark every pending row in a cluster skipped with a terminal reason."""
+    resp = client.post("work-items/defer-cluster", {"cluster_key": cluster_key, "reason": reason})
+    affected = int(resp.get("affected", 0))
     print(f"Deferred {affected} pending item(s) in cluster '{cluster_key}' (reason: {reason})")
 
 
-def _done(db_path: str, id_list) -> None:
+def _done(client, id_list) -> None:
     ids = _validate_id_list(id_list)
-    placeholders = ",".join("?" * len(ids))
-    db_exec(db_path, f"UPDATE work_items SET status='done' WHERE id IN ({placeholders})", tuple(ids))
+    client.post("work-items/done", {"ids": ids})
     print(f"Marked done: {','.join(str(i) for i in ids)}")
 
 
-def _error(db_path: str, id_list) -> None:
+def _error(client, id_list) -> None:
     ids = _validate_id_list(id_list)
-    placeholders = ",".join("?" * len(ids))
-    db_exec(
-        db_path,
-        f"UPDATE work_items SET status='error', retry_count = COALESCE(retry_count,0) + 1 WHERE id IN ({placeholders})",
-        tuple(ids),
-    )
+    client.post("work-items/error", {"ids": ids})
     print(f"Marked error: {','.join(str(i) for i in ids)}")
 
 
-def _reset_stale(db_path: str, minutes: int) -> None:
-    rows = db_query(
-        db_path,
-        "SELECT COUNT(*) as count FROM work_items WHERE status='processing' AND consumed_at < datetime('now', ?)",
-        (f"-{minutes} minutes",),
-    )
-    before = rows[0]["count"] if rows else 0
-    db_exec(
-        db_path,
-        "UPDATE work_items SET status='pending', assigned_agent=NULL, consumed_at=NULL WHERE status='processing' AND consumed_at < datetime('now', ?)",
-        (f"-{minutes} minutes",),
-    )
-    print(f"Reset {before} stale work item(s) (stuck > {minutes} min)")
+def _reset_stale(client, minutes: int) -> None:
+    resp = client.post("work-items/reset-stale", {"minutes": minutes})
+    print(f"Reset {int(resp.get('affected', 0))} stale work item(s) (stuck > {minutes} min)")
 
 
-def _retry_errors(db_path: str, max_retries: int) -> None:
-    rows = db_query(
-        db_path,
-        "SELECT COUNT(*) as count FROM work_items WHERE status='error' AND COALESCE(retry_count,0) < ?",
-        (max_retries,),
-    )
-    before = rows[0]["count"] if rows else 0
-    db_exec(
-        db_path,
-        "UPDATE work_items SET status='pending', assigned_agent=NULL, consumed_at=NULL WHERE status='error' AND COALESCE(retry_count,0) < ?",
-        (max_retries,),
-    )
-    print(f"Retried {before} error work item(s) (max retries: {max_retries})")
+def _retry_errors(client, max_retries: int) -> None:
+    resp = client.post("work-items/retry-errors", {"max_retries": max_retries})
+    print(f"Retried {int(resp.get('affected', 0))} error work item(s) (max retries: {max_retries})")
 
 
-def _requeue(db_path: str) -> None:
-    count = 0
+def _requeue(client) -> None:
+    """Re-admit JSONL work rows (stdin) into the backend work buffer.
+
+    Each row is classified CLIENT-SIDE (the classifier globs the agent skills
+    tree, so it stays out of the backend) and POSTed to ``work-items/bulk`` in
+    one batch. Mirrors the former local requeue's scoring so re-admitted rows are
+    dispatch-ranked identically.
+    """
+    import json as _json
+
+    from assess.lib.classify_buckets import CLASSIFIER_VERSION, classify_from_fields
+    from assess.lib.params import extract_url_path, generate_params_sig
+
+    items: list[dict] = []
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
-
-        row = json.loads(line)
+        row = _json.loads(line)
         method = row.get("method") or "GET"
         url = row.get("url") or ""
         url_path_val = row.get("url_path") or ""
@@ -595,10 +254,19 @@ def _requeue(db_path: str) -> None:
 
         if not url_path_val:
             url_path_val = extract_url_path(url)
+
+        def _to_text(value):
+            return _json.dumps(value) if isinstance(value, (dict, list)) else str(value)
+
+        qp_str = _to_text(query_params)
+        bp_str = _to_text(body_params)
+        pp_str = _to_text(path_params)
+        cp_str = _to_text(cookie_params)
+        rh_str = _to_text(response_headers)
+        h_str = _to_text(headers)
+
         if not params_key_sig:
-            qp = json.dumps(query_params) if isinstance(query_params, dict) else str(query_params)
-            bp = json.dumps(body_params) if isinstance(body_params, dict) else str(body_params)
-            params_key_sig = generate_params_sig(qp, bp)
+            params_key_sig = generate_params_sig(qp_str, bp_str)
 
         if not queue_key:
             if request_variant_id and str(request_variant_id).isdigit():
@@ -615,44 +283,54 @@ def _requeue(db_path: str) -> None:
             print("ERROR: requeue line missing usable url/url_path", file=sys.stderr)
             sys.exit(1)
 
-        # Serialize dicts to JSON strings for storage
-        qp_str = json.dumps(query_params) if isinstance(query_params, dict) else str(query_params)
-        bp_str = json.dumps(body_params) if isinstance(body_params, dict) else str(body_params)
-        pp_str = json.dumps(path_params) if isinstance(path_params, dict) else str(path_params)
-        cp_str = json.dumps(cookie_params) if isinstance(cookie_params, dict) else str(cookie_params)
-        rh_str = json.dumps(response_headers) if isinstance(response_headers, dict) else str(response_headers)
-        h_str = json.dumps(headers) if isinstance(headers, dict) else str(headers)
-
-        rv_id = int(request_variant_id) if request_variant_id and str(request_variant_id).isdigit() else None
-        s_id = int(service_id) if service_id and str(service_id).isdigit() else None
-        c_id = int(coverage_item_id) if coverage_item_id and str(coverage_item_id).isdigit() else None
-
-        db_insert_work_item(
-            db_path,
-            queue_key=queue_key,
-            method=method,
-            url=url,
+        assignment = classify_from_fields(
+            case_type=case_type,
             url_path=url_path_val,
             query_params=qp_str,
             body_params=bp_str,
             path_params=pp_str,
-            cookie_params=cp_str,
-            headers=h_str,
-            body=body,
-            content_type=content_type,
-            content_length=content_length,
-            response_status=response_status,
-            response_headers=rh_str,
-            response_size=response_size,
-            response_snippet=response_snippet,
-            case_type=case_type,
+            url=url,
             source=source,
-            params_key_sig=params_key_sig,
-            request_variant_id=rv_id,
-            service_id=s_id,
-            coverage_item_id=c_id,
-            auth_context=auth_context,
         )
-        count += 1
+        items.append({
+            "queue_key": queue_key,
+            "request_variant_id": int(request_variant_id) if request_variant_id and str(request_variant_id).isdigit() else None,
+            "service_id": int(service_id) if service_id and str(service_id).isdigit() else None,
+            "coverage_item_id": int(coverage_item_id) if coverage_item_id and str(coverage_item_id).isdigit() else None,
+            "auth_context": auth_context,
+            "method": method,
+            "url": url,
+            "url_path": url_path_val,
+            "query_params": qp_str,
+            "body_params": bp_str,
+            "path_params": pp_str,
+            "cookie_params": cp_str,
+            "headers": h_str,
+            "body": body,
+            "content_type": content_type,
+            "content_length": content_length,
+            "request_body_truncated": bool(row.get("request_body_truncated")),
+            "response_status": response_status,
+            "response_headers": rh_str,
+            "response_size": response_size,
+            "response_snippet": response_snippet,
+            "response_truncated": bool(row.get("response_truncated")),
+            "type": case_type,
+            "source": source,
+            "params_key_sig": params_key_sig,
+            "priority_score": assignment["priority_score"],
+            "priority_reason": assignment["priority_reason"],
+            "cluster_key": assignment["cluster_key"],
+            "terminal_reason": assignment["terminal_reason"],
+            "classifier_version": CLASSIFIER_VERSION,
+        })
+
+    count = 0
+    for start in range(0, len(items), 500):
+        chunk = items[start:start + 500]
+        if not chunk:
+            continue
+        resp = client.post("work-items/bulk", {"items": chunk})
+        count += int(resp.get("count", len(chunk)))
 
     print(f"Requeued {count} new work item(s)")

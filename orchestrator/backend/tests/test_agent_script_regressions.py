@@ -4,7 +4,6 @@ import argparse
 import importlib.util
 import json
 import re
-import sqlite3
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -259,7 +258,10 @@ def test_check_phase_readiness_scope_gate_fetches_all_surfaces(monkeypatch, tmp_
         return {"ready": True}
 
     monkeypatch.setattr(module.cc, "_vendor_saas_decided_hosts", lambda _client: set())
-    monkeypatch.setattr(module.cc, "_load_work_items_by_host", lambda _path: {})
+    # `_load_work_items_by_host` now takes an AssessmentClient (it rolls the work
+    # buffer up from the backend via `client.get_all_pages("work-items")`), not a
+    # cases.db Path.
+    monkeypatch.setattr(module.cc, "_load_work_items_by_host", lambda _client: {})
     monkeypatch.setattr(module.cc, "build_scope_coverage_report", fake_build_scope_coverage_report)
 
     cfg = SimpleNamespace(engagement_key="eng", engagement_dir=str(tmp_path))
@@ -640,29 +642,8 @@ def test_ingest_candidates_preserve_metadata_and_route(
         "test_ingest_candidates_module",
         "agent/scripts/assess/commands/ingest_candidates.py",
     )
-    dispatch_module = _load_script_module(
-        "test_ingest_candidate_dispatch_module",
-        "agent/scripts/assess/commands/dispatch/__init__.py",
-    )
-    db_module = _load_script_module(
-        "test_ingest_candidate_db_module",
-        "agent/scripts/assess/lib/db.py",
-    )
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
-    db_path = engagement_dir / "cases.db"
-    db_path.touch()
-    db_module.db_init(str(db_path))
-    db_module.db_insert_work_item(
-        str(db_path),
-        queue_key="variant:701:unknown",
-        request_variant_id=701,
-        method="GET",
-        url="https://portal.agency.example/taap-core/api/logout",
-        url_path="/taap-core/api/logout",
-        case_type="unknown",
-        source="plain-url-ingest",
-    )
 
     candidate_path = tmp_path / "candidate_records.jsonl"
     candidate_path.write_text(
@@ -725,58 +706,43 @@ def test_ingest_candidates_preserve_metadata_and_route(
 
     ingest_module.run(
         SimpleNamespace(
-            db_path=str(db_path),
             source="surface-collector-curated",
             records_file=str(candidate_path),
             engagement_dir=engagement_dir,
         )
     )
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            """SELECT type, status, priority_score, priority_reason, cluster_key,
-                      signals, selected_by, triage_rationale, live_status
-               FROM work_items
-               WHERE queue_key = ?""",
-            ("variant:701:auth_entry",),
-        ).fetchone()
-        row_count = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
-    finally:
-        conn.close()
+    # The command no longer writes a local cases.db; it POSTs one
+    # request-observation per candidate carrying the curated work-item
+    # derivation block (the backend derives the assessment_work_items row +
+    # routing server-side, ADR 0013). Assert on the captured observation payload
+    # instead of on cases.db rows — the candidate's metadata is preserved and its
+    # case_type/cluster_key (which drive server-side routing to the
+    # vulnerability-analyst) are correct.
+    assert len(posts) == 1
+    endpoint, observation = posts[0]
+    assert endpoint == "request-observations"
+    assert observation["url"] == "https://portal.agency.example/taap-core/api/logout"
+    assert observation["method"] == "GET"
 
-    assert row_count == 1
-    assert row[0:5] == (
-        "auth_entry",
-        "pending",
-        245,
-        "TAAP auth API workflow",
-        "gf:auth_workflow",
+    work_item = observation["work_item"]
+    assert work_item["url_path"] == "/taap-core/api/logout"
+    assert work_item["case_type"] == "auth_entry"
+    assert work_item["status"] == "pending"
+    assert work_item["priority_score"] == 245
+    assert work_item["priority_reason"] == "TAAP auth API workflow"
+    assert work_item["cluster_key"] == "gf:auth_workflow"
+    assert json.loads(work_item["signals"]) == ["api", "auth", "workflow"]
+    assert work_item["selected_by"] == "auth"
+    assert (
+        work_item["triage_rationale"]
+        == "Selected from GAU because it is an auth workflow endpoint."
     )
-    assert json.loads(row[5]) == ["api", "auth", "workflow"]
-    assert row[6:] == (
-        "auth",
-        "Selected from GAU because it is an auth workflow endpoint.",
-        "live",
+    assert work_item["live_status"] == "live"
+    assert (
+        observation["observation_payload"]["candidate_metadata"]["priority_score"]
+        == 245
     )
-    assert posts[0][1]["observation_payload"]["candidate_metadata"]["priority_score"] == 245
-
-    capsys.readouterr()
-    dispatch_module.run(
-        SimpleNamespace(
-            db_path=str(db_path),
-            action="fetch-by-priority",
-            extra=["10", "auto"],
-            by="status",
-            reason="",
-            max_lines=40,
-            include_evidence=False,
-        )
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-    assert [item["queue_key"] for item in payload] == ["variant:701:auth_entry"]
-    assert payload[0]["assigned_agent"] == "vulnerability-analyst"
 
 
 def test_ingest_candidates_route_real_bia_candidate_shapes(
@@ -788,19 +754,8 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
         "test_ingest_real_candidate_shapes_module",
         "agent/scripts/assess/commands/ingest_candidates.py",
     )
-    dispatch_module = _load_script_module(
-        "test_ingest_real_candidate_shapes_dispatch_module",
-        "agent/scripts/assess/commands/dispatch/__init__.py",
-    )
-    db_module = _load_script_module(
-        "test_ingest_real_candidate_shapes_db_module",
-        "agent/scripts/assess/lib/db.py",
-    )
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
-    db_path = engagement_dir / "cases.db"
-    db_path.touch()
-    db_module.db_init(str(db_path))
 
     candidate_path = tmp_path / "candidate_records.jsonl"
     records = [
@@ -853,6 +808,8 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
     )
     monkeypatch.setattr(ingest_module, "auth_active_context", lambda _eng_dir: "anonymous")
 
+    posts: list[dict[str, object]] = []
+
     class FakeClient:
         def __init__(self, base_url: str, engagement_key: str) -> None:
             self.base_url = base_url
@@ -862,7 +819,8 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
         def post(self, endpoint: str, payload: dict[str, object]):
             if endpoint == "request-observations/bulk":
                 records = []
-                for _item in payload.get("items", []):
+                for item in payload.get("items", []):
+                    posts.append(item)
                     self.next_id += 1
                     records.append({"request_variant": {"id": self.next_id}})
                 return {"count": len(records), "records": records}
@@ -881,71 +839,59 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
 
     ingest_module.run(
         SimpleNamespace(
-            db_path=str(db_path),
             source="surface-collector-curated",
             records_file=str(candidate_path),
             engagement_dir=engagement_dir,
         )
     )
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        rows = {
-            row[0]: row[1:]
-            for row in conn.execute(
-                """SELECT url, type, priority_score, priority_reason, cluster_key,
-                          signals, selected_by, triage_rationale
-                   FROM work_items
-                   ORDER BY url"""
-            ).fetchall()
-        }
-    finally:
-        conn.close()
+    # No cases.db: each candidate is POSTed as a request-observation whose
+    # work_item derivation block carries the curated type/score/reason/cluster.
+    # Assert the per-URL classification + metadata on the captured observations
+    # (the case_type/cluster_key are what route each to the vulnerability-analyst
+    # server-side).
+    rows = {
+        observation["url"]: observation["work_item"] for observation in posts
+    }
+    assert set(rows) == {
+        "https://www.agency.example/org-event-feed/37221",
+        "https://www.agency.example/fb.log",
+        "https://www.agency.example/web-guidance",
+    }
 
-    assert rows["https://www.agency.example/org-event-feed/37221"][0:4] == (
-        "event_feed",
-        95,
-        "current Drupal workflow/auth route; operator/Phase 1 artifact; source-map/source-analysis route",
-        "gf:current_drupal_workflow_auth_route",
+    feed = rows["https://www.agency.example/org-event-feed/37221"]
+    assert feed["case_type"] == "event_feed"
+    assert feed["priority_score"] == 95
+    assert feed["priority_reason"] == (
+        "current Drupal workflow/auth route; operator/Phase 1 artifact; "
+        "source-map/source-analysis route"
     )
-    assert rows["https://www.agency.example/fb.log"][0:4] == (
-        "debug_config",
-        80,
-        "admin/debug/config/secret signal",
-        "gf:backup_config",
+    assert feed["cluster_key"] == "gf:current_drupal_workflow_auth_route"
+
+    debug = rows["https://www.agency.example/fb.log"]
+    assert debug["case_type"] == "debug_config"
+    assert debug["priority_score"] == 80
+    assert debug["priority_reason"] == "admin/debug/config/secret signal"
+    assert debug["cluster_key"] == "gf:backup_config"
+
+    guidance = rows["https://www.agency.example/web-guidance"]
+    assert guidance["case_type"] == "unknown"
+    assert guidance["priority_score"] == 105
+    assert guidance["priority_reason"] == (
+        "OSINT priority URL; operator/Phase 1 artifact; "
+        "source-map/source-analysis route"
     )
-    assert rows["https://www.agency.example/web-guidance"][0:4] == (
-        "unknown",
-        105,
-        "OSINT priority URL; operator/Phase 1 artifact; source-map/source-analysis route",
-        "gf:osint_priority_url",
-    )
-    assert json.loads(rows["https://www.agency.example/web-guidance"][4]) == [
+    assert guidance["cluster_key"] == "gf:osint_priority_url"
+    assert json.loads(guidance["signals"]) == [
         "osint_priority_url",
         "operator_phase_1_artifact",
         "source-map_source-analysis_route",
     ]
-    assert rows["https://www.agency.example/web-guidance"][5:] == (
-        "osint_priority_url",
-        "OSINT priority URL; operator/Phase 1 artifact; source-map/source-analysis route",
+    assert guidance["selected_by"] == "osint_priority_url"
+    assert guidance["triage_rationale"] == (
+        "OSINT priority URL; operator/Phase 1 artifact; "
+        "source-map/source-analysis route"
     )
-
-    capsys.readouterr()
-    dispatch_module.run(
-        SimpleNamespace(
-            db_path=str(db_path),
-            action="fetch-by-priority",
-            extra=["10", "auto"],
-            by="status",
-            reason="",
-            max_lines=40,
-            include_evidence=False,
-        )
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-    assert len(payload) == 3
-    assert {item["assigned_agent"] for item in payload} == {"vulnerability-analyst"}
 
 
 def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) -> None:
@@ -3231,22 +3177,24 @@ def test_update_finding_notes_replace_without_notes_errors():
 
 
 def _run_ingest_spec(monkeypatch, tmp_path: Path, spec: dict, scope: dict):
-    """Drive ingest-spec.run against an in-process FakeClient, returning the
-    list of posted observation payloads and the ingested work_items rows."""
+    """Drive ingest-spec.run against an in-process FakeClient.
+
+    ingest-spec no longer writes a local cases.db; it POSTs one
+    request-observation per operation (in bulk) whose ``work_item`` derivation
+    block carries the per-op url/method/params (ADR 0013 — the backend derives
+    the assessment_work_items row). Returns ``(posts, rows)`` where ``posts`` is
+    the list of captured observation payloads and ``rows`` reconstructs the
+    ``(url, method, query_params, body_params, path_params, cookie_params)``
+    tuples the old cases.db ``work_items`` SELECT produced (params as JSON text),
+    so the S10/S11 callers assert unchanged.
+    """
     module = _load_script_module(
         "test_ingest_spec_module",
         "agent/scripts/assess/commands/ingest_spec.py",
     )
-    db_module = _load_script_module(
-        "test_ingest_spec_db_module",
-        "agent/scripts/assess/lib/db.py",
-    )
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
-    db_path = engagement_dir / "cases.db"
-    db_path.touch()
-    db_module.db_init(str(db_path))
 
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
@@ -3266,11 +3214,20 @@ def _run_ingest_spec(monkeypatch, tmp_path: Path, spec: dict, scope: dict):
 
     class FakeClient:
         def __init__(self, *a, **k) -> None:
-            pass
+            self._next_id = 200
 
         def post(self, endpoint, payload):
+            if endpoint == "request-observations/bulk":
+                records = []
+                for observation in payload.get("items", []):
+                    posts.append(observation)
+                    self._next_id += 1
+                    records.append({"request_variant": {"id": self._next_id}})
+                return {"count": len(records), "records": records}
+            # Individual-fallback path (bulk endpoint missing / payload error).
             posts.append(payload)
-            return {"request_variant": {"id": 200 + len(posts)}}
+            self._next_id += 1
+            return {"request_variant": {"id": self._next_id}}
 
         def close(self) -> None:
             return None
@@ -3285,20 +3242,22 @@ def _run_ingest_spec(monkeypatch, tmp_path: Path, spec: dict, scope: dict):
 
     module.run(
         SimpleNamespace(
-            db_path=str(db_path),
             spec_file=str(spec_path),
             engagement_dir=str(engagement_dir),
         )
     )
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        rows = conn.execute(
-            "SELECT url, method, query_params, body_params, path_params, cookie_params "
-            "FROM work_items ORDER BY id"
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = [
+        (
+            observation["url"],
+            observation["method"],
+            observation["work_item"]["query_params"],
+            observation["work_item"]["body_params"],
+            observation["work_item"]["path_params"],
+            observation["work_item"]["cookie_params"],
+        )
+        for observation in posts
+    ]
     return posts, rows
 
 

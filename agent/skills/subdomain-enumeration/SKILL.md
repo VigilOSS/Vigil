@@ -470,7 +470,7 @@ vigil assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/san_candidates.txt 
   --probe-kind fingerprint --phase recon --timeout 600
 ```
 
-`san_live.txt` is the primary input to `vigil assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum` for this dispatch. The full openssl extraction loop, the cross-host collision counter, and the vhost-cert match check live in `agent/references/tools/recon/openssl-sans.md` — call into it from this section rather than duplicating mechanics here.
+`san_live.txt` is the primary input to `vigil assess ingest-endpoints subdomain-enum` for this dispatch. The full openssl extraction loop, the cross-host collision counter, and the vhost-cert match check live in `agent/references/tools/recon/openssl-sans.md` — call into it from this section rather than duplicating mechanics here.
 
 This section does NOT replace the Phase 3 TLS SAN feedback loop above; it sits alongside it. The Phase 3 loop is the breadth-first sweep across the merged sub list (post-Phase 0/1/2). The SAN-as-primary section fires when the cross-host signal is already strong (a shared multi-tenant cert was detected, or a vhost-cert mismatch was found), so the enumeration is depth-first against the cert's actual coverage set rather than breadth-first against the apex's enumerated subset.
 
@@ -554,7 +554,7 @@ vigil assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_live_only.txt
 # Stage 2: ingest verified live subs into the work buffer
 awk '{print $1}' "$ENGAGEMENT_DIR/scans/subdomains_live.txt" | sort -u | while IFS= read -r sub; do
   echo "GET https://$sub"
-done | vigil assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum
+done | vigil assess ingest-endpoints subdomain-enum
 ```
 
 After ingestion, the operator triggers a reactive nuclei sweep against the newly-live subdomains — see `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode".

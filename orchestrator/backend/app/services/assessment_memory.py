@@ -48,6 +48,14 @@ def _finding_summary(row: Any) -> dict[str, Any]:
         "evidence_ref": row["evidence_ref"] or "",
         "chain_required": bool(details.get("chain_required")),
         "chain_rationale": str(details.get("chain_rationale") or "")[:500],
+        # Blocked-for-provisioning marker: a disposition='blocked' finding is held
+        # OUT of the report and otherwise renders in the brief as a bare
+        # active/verified line, so surface WHY it stalled via the required
+        # block_reason. Empty for non-blocked findings; bounded so the brief stays
+        # compact. Rendered by resume_brief._finding_line via the shared
+        # finding_render.blocked_reason_summary helper. (Surfacing
+        # unblock_requirements is deferred — see roadmap.md.)
+        "block_reason": str(details.get("block_reason") or "")[:300],
         "updated_at": row["updated_at"],
     }
 
@@ -330,26 +338,30 @@ def _surfaces_section(connection, engagement_id: int) -> dict[str, Any]:
 
 
 def _work_buffer_section(connection, engagement_id: int) -> dict[str, Any]:
-    """Pending coverage-item rollup ("work buffer") keyed by gf-bucket (gap #2).
+    """Pending work-buffer rollup keyed by gf-bucket cluster (gap #2).
 
-    The gf-bucket → coverage bridge records one ``assessment_coverage_items``
-    row per matched bucket, storing the canonical attack-class that the bucket
-    maps to (``GF_BUCKET_TO_CLASS[bucket]``) in ``attack_family`` — so grouping
-    by ``attack_family`` rolls up the pending work by bucket-derived class. A
-    coverage item is pending until it is ``covered`` / ``not_applicable``.
-    Counts are an absolute snapshot, NOT since-filtered. ``by_bucket`` is
-    ordered by descending count.
+    Reads the real dispatch queue (``assessment_work_items``) — the transient
+    triage buffer folded into the backend ledger (ADR 0013) — rather than a
+    coverage-item proxy. A row is pending work until it is claimed / done /
+    skipped / deferred; rows carrying a ``terminal_reason`` are excluded. Keyed
+    by ``cluster_key`` (the gf-bucket identity, e.g. ``gf:trust_surface``),
+    falling back to ``type:<type>`` when unclustered. Counts are an absolute
+    snapshot, NOT since-filtered. ``by_bucket`` is ordered by descending count.
     """
     rows = connection.execute(
-        "SELECT attack_family, status FROM assessment_coverage_items WHERE engagement_id = ?",
+        "SELECT cluster_key, type, status, terminal_reason "
+        "FROM assessment_work_items WHERE engagement_id = ?",
         (engagement_id,),
     ).fetchall()
     by_bucket: Counter = Counter()
     for row in rows:
         status_value = str(row["status"] or "pending").strip().lower()
-        if status_value in _RETIRED_COVERAGE_STATUSES:
+        if status_value != "pending":
             continue
-        by_bucket[str(row["attack_family"] or "unknown")] += 1
+        if row["terminal_reason"]:
+            continue
+        key = row["cluster_key"] or f"type:{row['type'] or 'unknown'}"
+        by_bucket[str(key)] += 1
     return {
         "pending_total": sum(by_bucket.values()),
         "by_bucket": dict(by_bucket.most_common()),

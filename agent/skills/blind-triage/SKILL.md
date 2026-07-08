@@ -58,7 +58,7 @@ engagement. It is the decisive gate.
   (b) the submission `.md` itself. Nothing else.
 - **Hard isolation.** The reviewer reads **ONLY the submission `.md`**. It must
   **NOT** read any repo file, run any `vigil` / CLI / `curl` command, query
-  `cases.db`, or pull in any other engagement artifact. If a claim is not proven
+  the work buffer, or pull in any other engagement artifact. If a claim is not proven
   *inside the submission bytes*, it is unproven for triage purposes — that is the
   reviewer judging exactly what an external triager can see.
 

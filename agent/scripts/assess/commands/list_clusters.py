@@ -2,7 +2,7 @@
 
 Groups pending work_items by `cluster_key` and emits per-cluster summaries so
 the operator can decide which clusters deserve specialist dispatch and which
-should be deferred (via `vigil assess work-buffer <db> defer-cluster …`). The ordering — by max
+should be deferred (via `vigil assess work-buffer defer-cluster …`). The ordering — by max
 priority_score DESC then count DESC — mirrors the priority-first dispatch
 heuristic: the cluster with the single highest-signal row wins, and for ties
 the noisier cluster surfaces first because deferring it buys the most
@@ -17,10 +17,11 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
-import sqlite3
+from collections import defaultdict
 from typing import Any
 
-from assess.lib.db import db_init
+from assess.lib.client import AssessmentClient
+from assess.lib.config import load_config
 
 
 _DEFAULT_LIMIT = 100
@@ -33,7 +34,6 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "list-clusters",
         help="Summarize pending work_items grouped by cluster_key",
     )
-    p.add_argument("db_path", help="Path to cases.db")
     p.add_argument(
         "--limit",
         type=int,
@@ -57,7 +57,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "(e.g. --host example.com matches https://example.com/x and https://example.com:8443/y "
             "but NOT api.example.com). Wildcard syntax with leading '*' uses fnmatch "
             "(e.g. --host '*.example.com' matches api.example.com and admin.example.com). "
-            "The filter runs in SQL across ALL items in each cluster, not just the 5 representative "
+            "The filter runs across ALL items in each cluster, not just the 5 representative "
             "samples, so a host present anywhere in the cluster surfaces it."
         ),
     )
@@ -102,127 +102,102 @@ def _host_matches(item_host: str, host_filter: str) -> bool:
 
 
 def run(args: argparse.Namespace) -> None:
-    db_path = args.db_path
     limit = max(1, int(args.limit))
     status = args.status
     host_filter = (args.host or "").strip().lower()
 
-    db_init(db_path)
+    # Read every work_item of the chosen status from the backend and do the
+    # cluster rollup / host-filter / sampling in Python. The former in-SQL
+    # GROUP BY / ORDER BY / LIMIT is reproduced verbatim below so the printed
+    # manifest is byte-for-byte identical to the local-SQLite version.
+    cfg = load_config(args.engagement_dir)
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        rows = client.get_all_pages(f"work-items?status={status}")
 
-    conn = sqlite3.connect(db_path, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
+    matching_clusters: set | None = None
+    if host_filter:
+        # Walk every work_item under the chosen status and collect the
+        # cluster_keys whose URLs map to the requested host. Doing the host
+        # match in Python keeps the wildcard semantics consistent with the
+        # documented contract (exact-or-fnmatch) while still considering
+        # ALL items, not just the 5 sample rows the legacy filter looked at.
+        matching_clusters = set()
+        for row in rows:
+            url = row.get("url")
+            if not url:
+                continue
+            if _host_matches(_url_host(url), host_filter):
+                matching_clusters.add(row.get("cluster_key"))
+        if not matching_clusters:
+            print(json.dumps({
+                "status": status,
+                "host_filter": host_filter,
+                "cluster_count": 0,
+                "clusters": [],
+            }, ensure_ascii=False, indent=2))
+            return
 
-        matching_clusters: set | None = None
-        if host_filter:
-            # Walk every work_item under the chosen status and collect the
-            # cluster_keys whose URLs map to the requested host. Doing the host
-            # match in Python keeps the wildcard semantics consistent with the
-            # documented contract (exact-or-fnmatch) while still considering
-            # ALL items, not just the 5 sample rows the legacy filter looked at.
-            url_rows = conn.execute(
-                "SELECT cluster_key, url FROM work_items WHERE status = ? "
-                "AND url IS NOT NULL AND url != ''",
-                (status,),
-            ).fetchall()
-            matching_clusters = set()
-            for row in url_rows:
-                if _host_matches(_url_host(row["url"]), host_filter):
-                    matching_clusters.add(row["cluster_key"])
-            if not matching_clusters:
-                print(json.dumps({
-                    "status": status,
-                    "host_filter": host_filter,
-                    "cluster_count": 0,
-                    "clusters": [],
-                }, ensure_ascii=False, indent=2))
-                return
+    # Group by cluster_key (NULL/None is a single group, mirroring GROUP BY).
+    grouped: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[row.get("cluster_key")].append(row)
 
-        if matching_clusters is None:
-            cluster_rows = conn.execute(
-                """
-                SELECT cluster_key,
-                       COUNT(*) AS count,
-                       MAX(priority_score) AS max_priority,
-                       AVG(priority_score) AS avg_priority,
-                       MIN(created_at) AS earliest_created_at,
-                       MAX(created_at) AS latest_created_at
-                FROM work_items
-                WHERE status = ?
-                GROUP BY cluster_key
-                ORDER BY max_priority DESC, count DESC, cluster_key
-                LIMIT ?
-                """,
-                (status, limit),
-            ).fetchall()
-        else:
-            null_in_set = None in matching_clusters
-            non_null = [k for k in matching_clusters if k is not None]
-            params: list[Any] = [status]
-            null_clause = ""
-            if non_null and null_in_set:
-                placeholders_nn = ",".join("?" * len(non_null))
-                null_clause = f"(cluster_key IS NULL OR cluster_key IN ({placeholders_nn}))"
-                params.extend(non_null)
-            elif non_null:
-                placeholders_nn = ",".join("?" * len(non_null))
-                null_clause = f"cluster_key IN ({placeholders_nn})"
-                params.extend(non_null)
-            else:
-                null_clause = "cluster_key IS NULL"
-            params.append(limit)
-            cluster_rows = conn.execute(
-                f"""
-                SELECT cluster_key,
-                       COUNT(*) AS count,
-                       MAX(priority_score) AS max_priority,
-                       AVG(priority_score) AS avg_priority,
-                       MIN(created_at) AS earliest_created_at,
-                       MAX(created_at) AS latest_created_at
-                FROM work_items
-                WHERE status = ? AND {null_clause}
-                GROUP BY cluster_key
-                ORDER BY max_priority DESC, count DESC, cluster_key
-                LIMIT ?
-                """,
-                tuple(params),
-            ).fetchall()
+    rollups: list[dict[str, Any]] = []
+    for cluster_key, items in grouped.items():
+        if matching_clusters is not None and cluster_key not in matching_clusters:
+            continue
+        priorities = [int(item.get("priority_score") or 0) for item in items]
+        max_priority = max(priorities) if priorities else 0
+        avg_priority = (sum(priorities) / len(priorities)) if priorities else 0.0
+        created = [item.get("created_at") for item in items if item.get("created_at")]
+        rollups.append({
+            "cluster_key": cluster_key,
+            "count": len(items),
+            "max_priority": max_priority,
+            "avg_priority": avg_priority,
+            "earliest_created_at": min(created) if created else None,
+            "latest_created_at": max(created) if created else None,
+            "items": items,
+        })
 
-        clusters: list[dict[str, Any]] = []
-        for row in cluster_rows:
-            sample_rows = conn.execute(
-                """
-                SELECT method, url
-                FROM work_items
-                WHERE status = ?
-                  AND ((? IS NULL AND cluster_key IS NULL) OR cluster_key = ?)
-                ORDER BY priority_score DESC, id ASC
-                LIMIT ?
-                """,
-                (status, row["cluster_key"], row["cluster_key"], _SAMPLE_URLS),
-            ).fetchall()
+    # ORDER BY max_priority DESC, count DESC, cluster_key — with the SQLite
+    # tie-break semantics: NULL cluster_key sorts FIRST in the ascending
+    # cluster_key leg (the `is not None` flag makes None precede any string).
+    rollups.sort(
+        key=lambda c: (
+            -c["max_priority"],
+            -c["count"],
+            (c["cluster_key"] is not None, c["cluster_key"] or ""),
+        )
+    )
+    rollups = rollups[:limit]
 
-            sample_urls = [
-                f"{sample['method']} {sample['url']}"
-                for sample in sample_rows
-            ]
+    clusters: list[dict[str, Any]] = []
+    for rollup in rollups:
+        # Up to 5 representative rows per cluster, ORDER BY priority_score DESC,
+        # id ASC — the same tie-break the SQL sample query used.
+        sample_rows = sorted(
+            rollup["items"],
+            key=lambda item: (-(int(item.get("priority_score") or 0)), int(item.get("id") or 0)),
+        )[:_SAMPLE_URLS]
+        sample_urls = [
+            f"{sample.get('method')} {sample.get('url')}"
+            for sample in sample_rows
+        ]
 
-            clusters.append({
-                "cluster_key": row["cluster_key"],
-                "count": row["count"],
-                "max_priority_score": row["max_priority"],
-                "avg_priority_score": round(row["avg_priority"] or 0.0, 2),
-                "earliest_created_at": row["earliest_created_at"],
-                "latest_created_at": row["latest_created_at"],
-                "sample_urls": sample_urls,
-            })
+        clusters.append({
+            "cluster_key": rollup["cluster_key"],
+            "count": rollup["count"],
+            "max_priority_score": rollup["max_priority"],
+            "avg_priority_score": round(rollup["avg_priority"] or 0.0, 2),
+            "earliest_created_at": rollup["earliest_created_at"],
+            "latest_created_at": rollup["latest_created_at"],
+            "sample_urls": sample_urls,
+        })
 
-        print(json.dumps({
-            "status": status,
-            "host_filter": host_filter or None,
-            "cluster_count": len(clusters),
-            "clusters": clusters,
-        }, ensure_ascii=False, indent=2))
-    finally:
-        conn.close()
+    print(json.dumps({
+        "status": status,
+        "host_filter": host_filter or None,
+        "cluster_count": len(clusters),
+        "clusters": clusters,
+    }, ensure_ascii=False, indent=2))

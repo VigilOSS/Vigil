@@ -23,7 +23,6 @@ raw tool output into a prioritized, attack-signal-enriched work buffer that driv
 Set variables from dispatch context:
 ```bash
 DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
-DB="$DIR/cases.db"
 ```
 
 ### Step 1: Ingest Phase 1 Endpoints
@@ -32,13 +31,13 @@ Recon-specialist and source-analyzer produce endpoint lists during Phase 1. Inge
 as the baseline work-buffer seed:
 
 ```bash
-cat "$DIR/scans/endpoints.txt" | vigil assess ingest-endpoints "$DB" recon
+cat "$DIR/scans/endpoints.txt" | vigil assess ingest-endpoints recon
 ```
 
 If source-analyzer produced a separate endpoint file, ingest it with a distinct source tag:
 
 ```bash
-cat "$DIR/scans/source-endpoints.txt" | vigil assess ingest-endpoints "$DB" source-analysis
+cat "$DIR/scans/source-endpoints.txt" | vigil assess ingest-endpoints source-analysis
 ```
 
 ### Step 2: Live Crawl via Katana
@@ -92,7 +91,7 @@ output files or ingest each separately with the same source tag.
 
 Ingest:
 ```bash
-cat "$DIR/scans/katana_output.txt" | vigil assess ingest-endpoints "$DB" katana
+cat "$DIR/scans/katana_output.txt" | vigil assess ingest-endpoints katana
 ```
 
 If triage produced metadata-rich candidate JSONL (for example `candidate_records.jsonl`
@@ -100,14 +99,14 @@ with curated score, signals, rationale, selected signal, bucket, or live status)
 that file through the metadata-preserving path instead of flattening it to URLs:
 
 ```bash
-vigil assess ingest-candidates "$DB" surface-collector-curated \
+vigil assess ingest-candidates surface-collector-curated \
   "$DIR/scans/surface-collector/candidate_records.jsonl"
 ```
 
 ### Step 3: Historical URL Enrichment via gau
 
 Use the cache-aware pipeline wrapper. It runs gau (or reuses a fresh cached corpus),
-ingests the URLs into `work_items` with inline classification, and emits a structured
+ingests the URLs into the work buffer (`assessment_work_items`) with inline classification, and emits a structured
 JSON summary with `cache_reused: true|false` so the dispatch decision is auditable.
 
 ```bash
@@ -147,7 +146,7 @@ were never linked anywhere except inside compiled JS.
 If Phase 1 discovered API specifications (source-analyzer may have saved them to `scans/`):
 
 ```bash
-vigil assess ingest-spec "$DB" "$DIR/scans/openapi.json"
+vigil assess ingest-spec "$DIR/scans/openapi.json"
 ```
 
 This creates `api-spec` work items with full endpoint/parameter schemas and generates
@@ -158,7 +157,7 @@ coverage candidates automatically.
 After all sources are ingested, verify the work buffer is clean:
 
 ```bash
-vigil assess work-buffer "$DB" stats
+vigil assess work-buffer stats
 ```
 
 The ingestion pipeline handles param-structure deduplication automatically (same endpoint
@@ -174,8 +173,8 @@ There is no per-host URL cap. Volume control happens at ingest:
   `archive`, `sourcemap`, and `manifest` types are stamped `status='skipped'` in
   `db_insert_work_item()` so they never enter the priority-mode dispatch.
 - **Classification runs inline at ingestion** so every URL gets a `cluster_key` and
-  `priority_score` immediately. Run `vigil assess list-clusters "$DB"` to review the
-  resulting cluster set and `vigil assess work-buffer "$DB" defer-cluster <key> --reason "…"`
+  `priority_score` immediately. Run `vigil assess list-clusters` to review the
+  resulting cluster set and `vigil assess work-buffer defer-cluster <key> --reason "…"`
   to drop low-signal clusters before Phase 4.
 - **Egress-blocked hosts still defer** (see "Egress-blocked hosts" below) — that is a
   network-failure class, not a volume cap.
@@ -224,16 +223,16 @@ replacement.
 
 **Retrieve work items for analysis:**
 ```bash
-vigil assess work-buffer "$DB" fetch api 50 surface-collector
-vigil assess work-buffer "$DB" fetch page 50 surface-collector
-vigil assess work-buffer "$DB" fetch unknown 50 surface-collector
+vigil assess work-buffer fetch api 50 surface-collector
+vigil assess work-buffer fetch page 50 surface-collector
+vigil assess work-buffer fetch unknown 50 surface-collector
 ```
 
 Analyze the fetched URLs (without testing them — triage is classification, not probing)
 and produce the priority manifest. Then release them back:
 
 ```bash
-vigil assess work-buffer "$DB" reset-stale 0
+vigil assess work-buffer reset-stale 0
 ```
 
 **Auth-gate redirect classification:** A URL that returns a 302 (or 301/307/308) redirect to a login page, SSO entry point, or policy wall is NOT a terminal "covered / gated" classification — it is a **bypass-test LEAD.** The redirect proves the route exists and is being enforced, which is exactly the signal the auth-bypass sweep needs. Emit a `bypass-lead` surface record for it rather than closing the work item:
@@ -263,11 +262,14 @@ For each category, produce:
 
 URL / host fields inside admin / settings POST and PUT bodies are SSRF candidates regardless of where the URL appears in the request *path*. The triage in Step 6 keys on URL path patterns; this step keys on *body field names* so SSRF-shaped fields are not missed.
 
-Run this against every captured POST/PUT body in the work buffer:
+Run this against every captured POST/PUT body in the work buffer. There is no single
+"dump every type" verb, so loop `peek` (read-only; does not claim rows) across the
+POST/PUT-bearing types and slurp the per-type arrays together before filtering:
 
 ```bash
-vigil assess work-buffer "$DB" --json \
-  | jq -r '.[] | select(.method=="POST" or .method=="PUT")
+for t in api api-spec form upload graphql websocket auth_entry workflow api_route event_feed debug_config portal_session; do
+  vigil assess work-buffer peek "$t" 500
+done | jq -s -r 'add // [] | .[] | select(.method=="POST" or .method=="PUT")
            | "\(.url)\t\(.body_params // empty)"' \
   | grep -iE '\b(url|uri|host|hostname|endpoint|callback|webhook|notify|postback|target|destination|return|redirect|next|continue|origin|fetch|import|source|metadata|discovery)\b\s*[:=]'
 ```
@@ -291,7 +293,7 @@ the param-poor dynamic endpoints with a **bounded first pass** (focused wordlist
 ```bash
 # Gate the target list (live + dynamic + template-deduped + param-poor).
 # This engagement has no liveness ledger? add --include-unknown.
-vigil assess arjun-select "$DB" -o "$DIR/scans/arjun/targets.txt" --param-poor-only --max-per-host 5
+vigil assess arjun-select -o "$DIR/scans/arjun/targets.txt" --param-poor-only --max-per-host 5
 
 # arjun-select also writes a per-method list (targets.txt.GET / .POST / .JSON / .XML) for each verb
 # the buffer exposes on a route. `kali arjun -i` takes ONE global -m, so scanning the union under a
@@ -310,7 +312,7 @@ for M in GET POST JSON XML; do
 done
 
 # Fold discovered params back in — they re-route the endpoint to its real bucket:
-vigil assess ingest-arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
+vigil assess ingest-arjun /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
 ```
 
 For more depth on a high-value endpoint, drop `-w` (full default list) and/or add `--passive`
@@ -340,7 +342,7 @@ vigil assess record-finding surface-collector <finding-json-file>
 
 Produce the final stats:
 ```bash
-vigil assess work-buffer "$DB" stats
+vigil assess work-buffer stats
 ```
 
 Build the priority manifest in the output — a ranked list of attack surface clusters

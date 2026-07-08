@@ -19,7 +19,7 @@ Run all target-facing Arjun via `vigil assess kali arjun` (typed verb, audit-fla
 
 ## One-shot: `vigil assess arjun-sweep`
 The three steps below (select → per-method scan → ingest) are composed into a single audited verb:
-`vigil assess arjun-sweep <cases.db> [--param-poor-only] [--max-per-host N] [--include-unknown]
+`vigil assess arjun-sweep [--param-poor-only] [--max-per-host N] [--include-unknown]
 --technique PARAM-DISCOVERY --intent "..." --probe-kind fingerprint --phase consume-test --timeout 1800`.
 It gates the list, scans **each method-list under its own `-m`** (so POST/JSON/XML body surfaces are
 not scanned as GET), and **always ingests** — removing the foot-guns (single-`-m` union scan,
@@ -38,14 +38,14 @@ harvesting or per-call control.
 
 ## Workflow — discover → enrich → route → test
 1. **Gate the target list.** NEVER aim Arjun at a raw URL dump or inert assets — on a content-heavy target that's thousands of requests for nothing. Build a disciplined list first:
-   `vigil assess arjun-select <cases.db> -o <list> [--param-poor-only] [--max-per-host N]`
+   `vigil assess arjun-select -o <list> [--param-poor-only] [--max-per-host N]`
    (live + dynamic + path-template-deduped + param-poor — collapses id-varied URLs to one route, but keeps **method variants separate**: a route exposed as both GET and POST/JSON is two entries). Besides the union `<list>`, it writes a **per-method list `<list>.GET` / `<list>.POST` / `<list>.JSON` / `<list>.XML`** for each verb present (the JSON `summary.method_outputs` names them).
 2. **Run — bounded first, escalate for depth.** `kali arjun -i` applies ONE global `-m`, so scan **each method-list under its own verb** — running the union under a single `-m` would scan POST/JSON body surfaces as GET and miss their hidden params. Start with a focused `-w` list and `--stable --rate-limit` so each run stays gentle; Arjun's default wordlist expands to ~100+ request chunks per host, enough to overload a rate-sensitive or production target if left unbounded:
    `for M in GET POST JSON XML; do [ -s <list>.$M ] && vigil assess kali arjun -i <list>.$M -m "$M" -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 --technique PARAM-DISCOVERY …; done`
    Escalate for depth by dropping `-w` (Arjun's full ~25k default list) and/or adding `--passive`.
    - **Reach for `--passive` to deepen coverage on a single `-u` endpoint** — it folds wayback/commoncrawl/otx parameter names into the wordlist and then scans actively, so it raises request volume rather than lowering it. Keep `--stable --rate-limit` set, and give it a `-u` target (an `-i` list leaves it no domain to harvest from).
    - **Run high-value endpoints with `-u`, or keep `-i` batches small via `arjun-select --max-per-host`** — for politeness and a small blast radius. (Upstream Arjun 2.2.7 aborts the whole `-i` batch when a single endpoint returns a 4xx/5xx — a `request.status_code` bug in its error path that a 429 trips — so the runtime ships a patched Arjun that skips a bad endpoint instead of ending the run; `agent/docker/patches/arjun-batch-resilience.py`.) The verb also writes an empty `{}` artifact even on a failed or partial run, so `ingest-arjun` always has a file to read.
-3. **Enrich:** `vigil assess ingest-arjun <cases.db> <arjun.json>` folds the discovered params onto the matching work-buffer row (GET→`query_params`, POST/JSON/XML→`body_params`; header-mode params recorded as a signal) and re-runs the EXISTING classifier. The now-parameterized endpoint **auto-routes** — `url=`→`gf:ssrf`, `file=`→`gf:lfi`, `id=`→`gf:idor`/`gf:sqli` — with no new classification logic. Rows are stamped `selected_by=arjun`, the discovered params land in `signals`, and an LLM instruction in `triage_rationale`.
+3. **Enrich:** `vigil assess ingest-arjun <arjun.json>` folds the discovered params onto the matching work-buffer row (GET→`query_params`, POST/JSON/XML→`body_params`; header-mode params recorded as a signal) and re-runs the EXISTING classifier. The now-parameterized endpoint **auto-routes** — `url=`→`gf:ssrf`, `file=`→`gf:lfi`, `id=`→`gf:idor`/`gf:sqli` — with no new classification logic. Rows are stamped `selected_by=arjun`, the discovered params land in `signals`, and an LLM instruction in `triage_rationale`.
 
 ## SQLMAP doctrine
 When an enriched row routes to a DB-backed surface (`gf:sqli`, or an `id=`/numeric param on a DB-ish route), `ingest-arjun` names **`vigil assess kali sqlmap`** in the `triage_rationale` as the next step. Division of labor: **Arjun + the classifier ISOLATE the injectable parameter; sqlmap CONFIRMS and does the high-volume blind/time-based extraction** across DBMS variants. A capable LLM can spot error-based/obvious SQLi, but blind/time-based extraction is hundreds-to-thousands of timed inference requests — mechanical work sqlmap does deterministically. sqlmap is **suggested and operator-invoked, never auto-fired.**

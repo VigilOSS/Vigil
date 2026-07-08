@@ -36,7 +36,7 @@ Before starting any target-facing work, verify:
 - [ ] You loaded `agent/skills/surface-collection/SKILL.md` as your primary skill
 - [ ] You read the skill's `## Extended Resources` section and loaded the listed references
 - [ ] You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, credential state (from `vigil auth status`)
-- [ ] You have `$DIR/cases.db` path and the engagement directory set
+- [ ] You have the engagement directory set (work-buffer and ingest verbs resolve the engagement automatically — no separate DB path to track)
 - [ ] You checked command history as a coverage map before probing — see `agent/shared-constraints.md` §2b.
 - [ ] You checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies to the collection source. If it does, load it and collect the browser-vs-baseline delta before declaring coverage complete.
 
@@ -157,7 +157,7 @@ When the engagement's credential record (`vigil auth status`) has `use_for_reque
 - Keep all URL crawling and historical enrichment in `vigil assess kali katana` / `vigil assess gau-endpoints` — host-side crawling bypasses the audit pipeline that downstream specialists rely on
 - Use browser-semantic collection only for evidence-correctness triggers because API-only and high-volume work stays more accurate in the normal gau/httpx/fuzzing path.
 - Deduplicate before ingestion to avoid inflating work-buffer counts
-- Use `vigil assess ingest-endpoints` for raw URL work-buffer writes and `vigil assess ingest-candidates` for curated candidate JSONL — direct DB inserts bypass backend sync, and flattening curated records to URL lines discards the metadata Phase 4 dispatch needs
+- Use `vigil assess ingest-endpoints` for raw URL work-buffer writes and `vigil assess ingest-candidates` for curated candidate JSONL — calling the backend API directly skips the classification/dedup these verbs apply, and flattening curated records to URL lines discards the metadata Phase 4 dispatch needs
 - Use `vigil assess record-surface` for all surface writes — calling helpers directly bypasses backend sync
 - Use `vigil assess record-finding` for any decisive findings — unrecorded findings are lost data
 - Report tool failures clearly in Coverage Gaps — the operator needs to know which sources failed
@@ -200,8 +200,8 @@ For any collection source you could NOT complete, declare it in `#### Coverage G
 1. `vigil assess record-finding surface-collector <finding-json>` for each finding (already required)
 2. `vigil assess record-intel <type> <intel-json>` for each intel row
 3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate (priority signals carry on the surface row's `priority_*` fields, not in markdown)
-4. `vigil assess ingest-endpoints "$DIR/cases.db" katana|recon|source-analysis` for each raw URL ingestion source not already handled by `vigil assess gau-endpoints`
-5. `vigil assess ingest-candidates "$DIR/cases.db" surface-collector-curated "$DIR/scans/surface-collector/candidate_records.jsonl"` when you produced curated candidate records
+4. `vigil assess ingest-endpoints katana|recon|source-analysis` for each raw URL ingestion source not already handled by `vigil assess gau-endpoints`
+5. `vigil assess ingest-candidates surface-collector-curated "$DIR/scans/surface-collector/candidate_records.jsonl"` when you produced curated candidate records
 6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `urls_ingested`, `clusters`, `deferred_clusters`)
 7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 

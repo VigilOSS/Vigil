@@ -354,7 +354,8 @@ def _run_js(args, cfg) -> int:
     katana = Path(cfg.engagement_dir) / "scans" / "web-discovery" / "katana.jsonl"
     sentinel = Path(cfg.engagement_dir) / "scans" / "web-discovery" / "js-mining" / "js-mining.done"
     sentinel.parent.mkdir(parents=True, exist_ok=True)
-    db_path = str(Path(cfg.engagement_dir) / "cases.db")
+    # Endpoint ingest goes to the backend work buffer (js-mining ingests by
+    # default); no cases.db path to thread through.
     ns = SimpleNamespace(
         urls_file=str(katana) if katana.is_file() else "",
         target="",
@@ -364,7 +365,6 @@ def _run_js(args, cfg) -> int:
         cap_body_bytes=2097152,
         verify=False,
         no_secrets=False,
-        db_path=db_path,
         stage_timeout=int(args.stage_timeout),
         engagement_dir=args.engagement_dir,
     )

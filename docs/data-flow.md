@@ -8,38 +8,43 @@
 >
 > **Audience.** Anyone reviewing or extending the ingestion/coverage machinery. Anchors are
 > `file:line` (backend paths under `orchestrator/backend/app/`, CLI under `agent/scripts/assess/`).
-> Verified 2026-07-05. Companion: `CODE-MAP.md` (ownership/registration), and
-> `docs/adr/0001-coverage-as-harness-not-gate.md` (the gating philosophy this doc reflects) as calibrated
-> by `docs/adr/0012-coverage-grain-selective-load-bearing-depth.md` (the decisive-unit class-gate).
+> Verified 2026-07-05, updated 2026-07-08 for the work-buffer fold. Companion: `CODE-MAP.md`
+> (ownership/registration), `docs/adr/0001-coverage-as-harness-not-gate.md` (the gating philosophy
+> this doc reflects) as calibrated by `docs/adr/0012-coverage-grain-selective-load-bearing-depth.md`
+> (the decisive-unit class-gate), and `docs/adr/0013-work-buffer-folded-into-backend-ledger.md` (the
+> single-store work-buffer decision this doc now assumes throughout).
 
 ---
 
 ## 0. The one-paragraph mental model
 
-Recon/discovery tools produce **URLs and requests**. Those land first in a **local, ephemeral triage
-queue** (`cases.db` `work_items`, priority-scored and classified) and, when they clear scope, are
-POSTed into the **durable backend ledger** as **request-observations**. The backend folds each
-observation into a deduped **request-variant** and auto-generates a coarse **coverage-item** to-do list
-(one item per *input class* × *implied vuln-class*). Specialists then run **probes** against those
-inputs and record **findings**. Downstream, an **app-unit scorer** + **depth ledger** decide whether each app-unit was tested deeply
-enough; a small set of **hard gates** in `transition_phase.py` are the *only* things that actually block
-phase progress. Everything else — the resume-brief, the coverage rollups, the per-host audit — is
-advisory orientation. This "gate at the family level — and, for decisive/high-confidence units, at the
-class level — keep everything else finer advisory" split is a deliberate architecture decision (ADR 0001,
-calibrated by ADR 0012 for the decisive-unit exception).
+Recon/discovery tools produce **URLs and requests**. Those are POSTed into the **durable backend
+ledger** as **request-observations**. The backend folds each admitted observation into a deduped
+**request-variant**, auto-generates a coarse **coverage-item** to-do list (one item per *input class*
+× *implied vuln-class*), and — in the same transaction — derives a **work-item** row
+(`assessment_work_items`, priority-scored and gf-classified) for the triage/dispatch queue (ADR 0013;
+there is no separate local queue). Specialists then run **probes** against those inputs and record
+**findings**. Downstream, an **app-unit scorer** + **depth ledger** decide whether each app-unit was
+tested deeply enough; a small set of **hard gates** in `transition_phase.py` are the *only* things that
+actually block phase progress. Everything else — the resume-brief, the coverage rollups, the per-host
+audit — is advisory orientation. This "gate at the family level — and, for decisive/high-confidence
+units, at the class level — keep everything else finer advisory" split is a deliberate architecture
+decision (ADR 0001, calibrated by ADR 0012 for the decisive-unit exception).
 
 ---
 
-## 1. Two stores, two jobs
+## 1. One store, one job
 
 | Store | What it is | Written by | Read by |
 |---|---|---|---|
-| **Local `cases.db`** (`work_items`) | Ephemeral, engagement-scoped **triage/dispatch queue**. Priority-scored + gf-classified *at insert*. | Every ingest verb (`ingest-endpoints/candidates/spec`, proxy addon); `ingest-arjun` writes here **only**. | Work-buffer triage (`list-clusters`, `fetch-by-priority`) → specialist dispatch routing. |
-| **Backend ledger** (SQLite via FastAPI) | Durable canonical state: targets/services/request-variants/observations, coverage-items, probes, surfaces, findings, chains, intel, host-liveness, command-runs. | Ingest verbs (via `/request-observations` etc.) + the record/resolve CLI verbs + the machine auto-emit path. | Everything downstream: coverage, depth gate, resume-brief, phase gates, report readiness, frontend. |
+| **Backend ledger** (SQLite via FastAPI) | Durable canonical state: targets/services/request-variants/observations, coverage-items, probes, surfaces, findings, chains, intel, host-liveness, command-runs, **and the work-buffer queue** (`assessment_work_items`) — engagement-scoped via a real `engagement_id` FK, priority-scored + gf-classified *at insert*. | Ingest verbs (via `/request-observations[/bulk]`, which carries a `work_item` derivation block the backend persists server-side in the same transaction — ADR 0013) + `ingest-arjun`/out-of-scope-skip rows via `/work-items/bulk` directly + the record/resolve CLI verbs + the machine auto-emit path. | Everything downstream: coverage, depth gate, resume-brief, phase gates, report readiness, frontend, **and** work-buffer triage (`list-clusters`, `fetch-by-priority`) → specialist dispatch routing. |
 
-A `work_items` row gets its backend FKs (`request_variant_id`/`service_id`/`coverage_item_id`) only
-*after* the matching observation POST succeeds. Tools that skip the backend (`dns-discovery`,
-`gau-secrets`, `ingest-arjun`) leave data either purely local or on disk with no exporter.
+Before ADR 0013, the work-item row lived in a separate per-engagement SQLite file (`cases.db`) written
+by a second, decoupled step after the observation POST, so its backend FKs
+(`request_variant_id`/`service_id`/`coverage_item_id`) could transiently lag the observation that
+produced them. The backend now derives the work-item row in the **same transaction** as the
+observation/coverage-item write, so that lag window no longer exists. `dns-discovery` still leaves data
+on disk with no exporter — that is orthogonal to the work-buffer fold.
 
 ---
 
@@ -51,12 +56,12 @@ A `work_items` row gets its backend FKs (`request_variant_id`/`service_id`/`cove
 | `ingest-candidates` (curated JSONL) | `/request-observations/bulk` + `/surface-request-variant-links` | same + `SurfaceRequestVariantLinkRequest` | same + `surface_request_variant_links` | **populated** *if the JSONL supplies `headers`* (`_coerce_header_params`) — no automated producer feeds it |
 | `ingest-spec` (OpenAPI import) | `/request-observations/bulk` | same | same | **populated** from `in: header` params (`ingest_spec.py:469-518`) |
 | `ingest-httpx` (host liveness) | `/host-liveness` | `HostLivenessUpsertRequest` | `assessment_host_liveness` | n/a (host-level, no request) |
-| **mitmproxy** `proxy_addon.py` (derived observation) | `/request-observations` | `RequestObservationIngestRequest` | request-variants/observations/coverage-items + local `cases.db` | **populated** into `header_schema` from the `dict(req.headers)` the proxy already holds (`:1013`); full headers also still dumped into an opaque `raw_payload` blob |
+| **mitmproxy** `proxy_addon.py` (derived observation) | `/request-observations` | `RequestObservationIngestRequest` | request-variants/observations/coverage-items + `assessment_work_items` (derived server-side, ADR 0013 — the addon no longer opens a local SQLite connection) | **populated** into `header_schema` from the `dict(req.headers)` the proxy already holds (`:1013`); full headers also still dumped into an opaque `raw_payload` blob |
 | mitmproxy (full-flow capture) | `/http-flows` | `HttpFlowIngestRequest` | `assessment_http_flows` | **full headers** — but **opt-in** (off by default) and orthogonal to coverage |
 | `dns-discovery` | — | — | local files only | n/a |
 | `web-discovery` | `/host-liveness` + delegates to `ingest-endpoints` | — | host-liveness + (delegated) | **populated** (inherits `ingest-endpoints`'s capture; katana run `-or -ob`) |
 | `gau-endpoints` / `gau-js-endpoints` | delegate to `ingest-endpoints` | — | (delegated) | **populated** (inherits `ingest-endpoints`'s capture) |
-| `ingest-arjun` | **none — local `cases.db` only** | — | `work_items` | header-discovery is **dead code** (`arjun_enrich.py` hardcodes `[]`; arjun's `--headers` = auth headers, not discovery) |
+| `ingest-arjun` | `/work-items/bulk` (direct — no observation POST) | `WorkItemBulkIngestRequest` | `assessment_work_items` | header-discovery is **dead code** (`arjun_enrich.py` hardcodes `[]`; arjun's `--headers` = auth headers, not discovery) |
 | `record-surface` / `resolve-surface` / `link-surface-work-items` | `/surfaces`, `/surface-request-variant-links` | `SurfaceRecordRequest` etc. | `assessment_surfaces`, links | n/a |
 | `record-probe` / `record-attempt` | `/probe-runs` | `ProbeRunRecordRequest` | `assessment_probe_runs` | only the free-text `input_slot="header:Name"` convention |
 | `resolve-coverage-item` | `PATCH /coverage-items/{id}` | `CoverageItemUpdateRequest` | `assessment_coverage_items` | n/a |
@@ -108,7 +113,7 @@ local classifier's signal becomes durable state the depth gate can read.
 | **Resume brief** (`assessment_memory.py:580`) | ~everything | 12-section operating picture incl. **`## Per-Input Coverage`** grid | **Never blocks** (display) |
 | **Phase readiness** (`phase_readiness.py:306`) | coverage_readiness + per_host + depth_ledger + report_readiness + intel | assembled per-phase payload | Assembly only |
 | **`check-phase-readiness`** (CLI) | the above | text/JSON + exit code | **Mixed** (see §5) |
-| **Work-buffer triage** (`classify_buckets.py`, `dispatch/work_items.py`) | local `work_items` | priority/cluster/terminal-reason; claimed dispatch batches | Advisory routing |
+| **Work-buffer triage** (`classify_buckets.py`, `dispatch/work_items.py`) | backend `assessment_work_items` | priority/cluster/terminal-reason; claimed dispatch batches | Advisory routing |
 | **`transition_phase.py`** (CLI) | scope, findings, dispatches, report-readiness, `terminal-block` | writes `scope.json[current_phase]` | **The only hard, process-exiting gates** |
 | **Report readiness** (`report_readiness.py:51`) | findings, coverage, links, artifacts, chains, handoffs | `{ready, blockers[], advisories[]}` (~18 blocker kinds) | **Blocks** report finalize + `report` transition |
 
@@ -273,23 +278,33 @@ section) and gate selectivity (§4/§5) are independent choices — ADR 0012 cha
 ## 8. The dependency graph
 
 ```
-recon/discovery tools  ──►  local cases.db work_items  ──►  classify_row (inline, at insert)
-   (ingest-endpoints/                    │                        │
-    candidates/spec/arjun,               │                        ├─ list-clusters / fetch-by-priority
-    proxy_addon)                         │                        │     ──► specialist dispatch (advisory)
-                                         │                        └─ classify-work (idempotent re-classify)
-                                         ▼
-   backend: request_observation ──► request_variant  (query/body/path/cookie/HEADER schema_json;
-                    │                     │            header_schema is PART of the dedup hash; now
-                    │                     │            populated by ingest-endpoints + proxy_addon too)
-                    │                     ├─► _auto_request_coverage_candidates  (COARSE: 1 item per
-                    │                     │       input CLASS × implied vuln-class)
-                    │                     └─► header_schema_json ──► depth_ledger._header_has_token
-                    │                            (CORS / proxy-CDN PRESENCE trigger; both BLOCK_WARN
-                    │                             families — advisory only, never the hard gate alone)
-                    │
-                    └─► gf-bucket bridge ──► class-typed coverage_items (attack_family=class,
-                                              input_slot ALWAYS "endpoint")
+recon/discovery tools  ──►  classify_from_fields (inline, client-side, unchanged;
+   (ingest-endpoints/          same _BUCKETS taxonomy as before) ──► folded into the
+    candidates/spec)           observation's `work_item` derivation block
+        │
+        ▼
+   backend: request_observation
+        │
+        ├─► assessment_work_items  (derived SERVER-SIDE, SAME transaction — ADR 0013,
+        │        │                  no dual write)
+        │        ├─ list-clusters / fetch-by-priority
+        │        │     ──► specialist dispatch (advisory)
+        │        └─ classify-work (idempotent re-classify)
+        │
+        ├─► request_variant  (query/body/path/cookie/HEADER schema_json;
+        │        │            header_schema is PART of the dedup hash; now
+        │        │            populated by ingest-endpoints + proxy_addon too)
+        │        ├─► _auto_request_coverage_candidates  (COARSE: 1 item per
+        │        │       input CLASS × implied vuln-class)
+        │        └─► header_schema_json ──► depth_ledger._header_has_token
+        │               (CORS / proxy-CDN PRESENCE trigger; both BLOCK_WARN
+        │                families — advisory only, never the hard gate alone)
+        │
+        └─► gf-bucket bridge ──► class-typed coverage_items (attack_family=class,
+                                  input_slot ALWAYS "endpoint")
+
+   ingest-arjun / out-of-scope-skip rows ──► POST directly to /work-items/bulk (no
+   observation — these reuse an already-in-scope URL or record a skip) ──► assessment_work_items
                                    │
                                    ▼
                  assessment_coverage_items  (key: eng×variant×service×auth_context×input_slot×family)

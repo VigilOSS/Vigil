@@ -2834,30 +2834,29 @@ def _dispatch_root_contract() -> CommandContract:
 def _work_buffer_contract() -> CommandContract:
     return CommandContract(
         name="work-buffer",
-        summary="Operate on the local cases.db work-buffer queue.",
-        schema_name="local cases.db work_items schema",
+        summary="Operate on the backend assessment_work_items work-buffer queue.",
+        schema_name="backend assessment_work_items schema",
         preferred_invocations=(
-            "vigil assess work-buffer <cases.db> stats --by status|source|cluster|host",
-            "vigil assess work-buffer <cases.db> peek <type> [limit]",
-            "vigil assess work-buffer <cases.db> fetch <type> <limit> <agent-name>",
-            "vigil assess work-buffer <cases.db> fetch-by-priority <limit> auto",
-            "vigil assess work-buffer <cases.db> done <id1,id2,...>",
-            "vigil assess work-buffer <cases.db> defer-cluster <cluster_key> --reason \"...\"",
+            "vigil assess work-buffer stats --by status|source|cluster|host",
+            "vigil assess work-buffer peek <type> [limit]",
+            "vigil assess work-buffer fetch <type> <limit> <agent-name>",
+            "vigil assess work-buffer fetch-by-priority <limit> auto",
+            "vigil assess work-buffer done <id1,id2,...>",
+            "vigil assess work-buffer defer-cluster <cluster_key> --reason \"...\"",
         ),
         author_supplied_fields=(
-            "<cases.db>",
             "<action>",
             "action-specific item ids, type, limit, agent name, or reason",
         ),
         notes=(
-            "Work-buffer rows are local batching state, NOT backend agent lifecycle rows. "
-            "Use `vigil assess agent …` for backend dispatch rows, handoffs, and decisions.",
+            "Work-buffer rows are backend batching state (assessment_work_items), NOT backend agent "
+            "lifecycle rows. Use `vigil assess agent …` for backend dispatch rows, handoffs, and decisions.",
             "Mark items done only after the specialist has written durable backend state "
             "(findings, surfaces, probe runs, or coverage) for the work.",
         ),
         common_mistakes=(
             ("using agent handoff syntax here", "`work-buffer` never records handoffs; use `vigil assess agent handoff`"),
-            ("reading cases.db directly", "use the helper so migrations, status transitions, and terminal_reason semantics stay consistent"),
+            ("calling the backend work-items API directly", "use the CLI verb so classification, status transitions, and terminal_reason semantics stay consistent"),
         ),
     )
 

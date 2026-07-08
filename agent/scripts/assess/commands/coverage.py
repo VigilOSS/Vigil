@@ -5,7 +5,7 @@ real_app?, dedicated_lane?, finding verdict, the computed coverage-state, and
 the C40 objectives — so an uncovered in-scope host is obvious at a glance.
 
 The ledger joins three sources:
-  * local cases.db work buffer  → distinct LIVE url_path (route count) +
+  * backend work buffer  → distinct LIVE url_path (route count) +
     API/auth/GraphQL surface signal (``coverage_checks.load_route_stats_by_host``);
   * the backend per-host C40 projection (``coverage-readiness/by-host``), which
     now also carries the per-host finding-VERDICT join;
@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from assess.lib import coverage_checks as cc
 from assess.lib.client import AssessError, AssessmentClient
@@ -71,13 +70,19 @@ def run(args: argparse.Namespace) -> None:
     cfg = load_config(args.engagement_dir)
     scope_data = load_scope(cfg.engagement_dir)
 
-    db_path = Path(cfg.engagement_dir) / "cases.db"
-    route_stats = cc.load_route_stats_by_host(db_path)
-
+    route_stats: dict[str, dict] = {}
     per_host_payload = _empty_per_host_payload()
     dispatched_hosts: dict[str, list[str]] = {}
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        try:
+            route_stats = cc.load_route_stats_by_host(client)
+        except AssessError as exc:
+            print(
+                f"coverage: backend work-buffer fetch failed ({exc}); "
+                "rendering ledger without route stats",
+                file=sys.stderr,
+            )
         try:
             payload = client.get("coverage-readiness/by-host")
             if isinstance(payload, dict):

@@ -33,7 +33,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from assess.commands import arjun_select, ingest_arjun
-from assess.lib.config import anchor_engagement_relative, load_config
+from assess.lib.client import AssessmentClient
+from assess.lib.config import load_config
 from assess.lib.kali import (
     add_required_kali_flags,
     count_list_targets,
@@ -96,7 +97,6 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Gated hidden-param discovery end to end: select -> per-method arjun -> ingest.",
     )
     add_required_kali_flags(p)
-    p.add_argument("db_path", help="Path to cases.db")
     # Selection gates (mirror arjun-select).
     p.add_argument("--include-unknown", dest="include_unknown", action="store_true",
                    help="Also include rows with NULL/unknown live_status (default: live only). "
@@ -128,25 +128,19 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.set_defaults(func=run)
 
 
-_SELECT_QUERY = (
-    "SELECT url, url_path, method, type, status, live_status, "
-    "query_params, body_params, path_params FROM work_items"
-)
-
-
 def run(args: argparse.Namespace) -> None:
-    db_path = anchor_engagement_relative(args.db_path, getattr(args, "engagement_dir", None))
-    if not Path(db_path).is_file():
-        print(f"arjun-sweep: database not found: {db_path}", file=sys.stderr)
-        sys.exit(1)
-
     cfg = load_config(getattr(args, "engagement_dir", None))
     eng_dir = Path(cfg.engagement_dir)
     eng_key = cfg.engagement_key
 
-    from assess.lib.db import db_query
-
-    rows = db_query(db_path, _SELECT_QUERY)
+    # Read the whole work buffer from the backend; select_targets operates on the
+    # row dicts (url/url_path/method/type/status/live_status/*_params columns are
+    # all present on a full work-item row).
+    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    try:
+        rows = client.get_all_pages("work-items")
+    finally:
+        client.close()
     drop_stats: dict = {}
     targets = arjun_select.select_targets(
         rows,
@@ -250,7 +244,6 @@ def run(args: argparse.Namespace) -> None:
         _ensure_json_artifact(json_host, incomplete=bool(note))
 
         ingest_arjun.run(SimpleNamespace(
-            db_path=db_path,
             json_file=str(json_host),
             source="arjun",
             default_method=method,
@@ -272,7 +265,6 @@ def run(args: argparse.Namespace) -> None:
     any_incomplete = any(r["incomplete"] for r in per_method)
     print(json.dumps({
         "verb": "arjun-sweep",
-        "db_path": db_path,
         "selected": len(targets),
         "by_method": {m: len(u) for m, u in sorted(by_method.items())},
         "runs": per_method,

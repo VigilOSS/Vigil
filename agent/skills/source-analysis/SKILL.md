@@ -137,9 +137,9 @@ Extract `url()` refs, `@import` paths, source map refs.
 ### 5. API Schema Discovery
 Probe: /swagger.json, /openapi.json, /api-docs, /graphql (introspection), /application.wadl
 
-If an OpenAPI / Swagger spec is accessible, ingest it into the canonical backend assessment state.
-The local queue can still be populated as a transient batching aid, but the operator contract is
-the backend ledger:
+If an OpenAPI / Swagger spec is accessible, ingest it into the canonical backend assessment state —
+the backend derives the work-buffer row from the same POST, in one transaction (ADR 0013), so
+there is no separate local queue to populate:
 
 ```bash
 vigil assess kali exec --technique DISCOVERY \
@@ -147,12 +147,12 @@ vigil assess kali exec --technique DISCOVERY \
   --probe-kind fingerprint --phase recon --timeout 60 -- \
   curl -sL "https://TARGET/openapi.json" -o /engagements/$ENGAGEMENT_KEY/scans/openapi.json
 # Host-side: ingest the downloaded spec into the backend work buffer
-vigil assess ingest-spec "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
-vigil assess work-buffer "$ENGAGEMENT_DIR/cases.db" stats
+vigil assess ingest-spec "$ENGAGEMENT_DIR/scans/openapi.json"
+vigil assess work-buffer stats
 ```
 
-This creates durable request/service coverage candidates and, when the local buffer is in use,
-`api-spec` work items that should be routed to `vulnerability-analyst`.
+This creates durable request/service coverage candidates and `api-spec` work items that
+should be routed to `vulnerability-analyst`.
 
 ### 6. Source Map Analysis
 Fetch .map → extract `sources` array → reconstruct original source for analysis.
@@ -282,7 +282,7 @@ consistently.
 |---|---|
 | `#### Summary` | One-paragraph headline: bundles analyzed, route count extracted, secret-scan hits, vendor-platform fingerprint hits, app-version pinned. |
 | `#### Findings` | Decisive findings the source pass already proved (e.g., a live API key with non-empty value, a secret string verified against a third-party endpoint). Each must also be recorded via `vigil assess record-finding`. |
-| `#### Surface Candidates` | Requestable endpoints, API bases, hidden routes, GraphQL endpoints, admin paths extracted from JS / source maps / inline config — each surfaced via `vigil assess record-surface` and ingested via `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis`. |
+| `#### Surface Candidates` | Requestable endpoints, API bases, hidden routes, GraphQL endpoints, admin paths extracted from JS / source maps / inline config — each surfaced via `vigil assess record-surface` and ingested via `vigil assess ingest-endpoints source-analysis`. |
 | `#### Secrets` | Secret-scan hits (API keys, JWT samples, AWS access-key prefixes, internal hostnames, tokens) with confidence and matched pattern. Confirmed-live secrets escalate to `#### Findings`; unverified hits stay here as leads. |
 | `#### Backend Hypotheses` | Inferred backend shape from frontend evidence — auth role checks, feature flags, internal-only branches, tenant IDs, callback routes, proxy base paths, debugging toggles. Drives the next-step list for vulnerability-analyst dispatch. |
 | `#### Intelligence` | Tech components from bundle fingerprinting, vendor-product fingerprints (Salesforce / ServiceNow / Drupal / Pexip), APP_VERSION / BUILD_HASH / Sentry-release constants for osint-analyst triangulation, vendor-template CSP / CORS placeholder hits — each row landed via `vigil assess record-intel <type>`. |

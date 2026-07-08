@@ -911,144 +911,12 @@ def test_backend_registry_skips_rows_whose_root_is_missing(
 
 
 # ---------------------------------------------------------------------------
-# DB insert: stale-connection detection and recovery
+# Work items are now derived server-side from the request-observation POST —
+# the proxy no longer opens SQLite (there is no _insert_case / cases.db write).
+# The former healthy-connection and stale-connection-recovery tests were
+# removed; see tests/test_work_buffer_backend.py for the server-side
+# assessment_work_items derivation.
 # ---------------------------------------------------------------------------
-
-
-def _make_entry(module, engagements_root: Path, key: str):
-    """Build a registry EngagementEntry with an initialized cases.db."""
-    engagement_dir = engagements_root / key
-    engagement_dir.mkdir(parents=True, exist_ok=True)
-    return module.EngagementEntry(
-        key=key,
-        root=engagement_dir,
-        scope_patterns=["x.example"],
-        scope_priority=0,
-    )
-
-
-def _insert_one(module, collector, entry, *, queue_key: str) -> None:
-    collector._insert_case(
-        entry,
-        queue_key=queue_key,
-        request_variant_id=1,
-        service_id=1,
-        auth_context="unauthenticated",
-        method="GET",
-        url=f"https://x.example/{queue_key}",
-        url_path=f"/{queue_key}",
-        params={
-            "query_params": "{}",
-            "body_params": "{}",
-            "path_params": "{}",
-            "cookie_params": "{}",
-        },
-        headers="{}",
-        body=None,
-        content_type="text/html",
-        content_length=0,
-        request_body_truncated=False,
-        response_status=200,
-        response_headers="{}",
-        response_size=0,
-        response_snippet=None,
-        response_truncated=False,
-        case_type="page",
-        params_key_sig="sig",
-    )
-
-
-def test_insert_case_persists_through_healthy_connection(tmp_path: Path) -> None:
-    import sqlite3
-
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir(parents=True, exist_ok=True)
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    entry = _make_entry(module, root, "eng-a")
-
-    _insert_one(module, collector, entry, queue_key="variant:1:page")
-    healthy_conn = entry.db
-
-    db_path = entry.root / "cases.db"
-    rows = (
-        sqlite3.connect(str(db_path))
-        .execute("SELECT queue_key FROM work_items")
-        .fetchall()
-    )
-    assert ("variant:1:page",) in rows
-    # No spurious reconnect: the original cached connection is reused as-is.
-    assert entry.db is healthy_conn
-    assert entry.db is not None
-
-
-def test_insert_case_recovers_from_connection_invisible_to_readers(
-    tmp_path: Path,
-) -> None:
-    """Reproduce the production failure mode without mocking the probe.
-
-    The cached connection is a *real* sqlite3.Connection whose commits succeed
-    and whose own SELECTs see the row — but it is bound to a detached database
-    file, so its writes never reach the canonical cases.db that independent
-    readers (backend, CLI) open. This is the inode-replacement / external
-    rebuild scenario from the incident.
-
-    A read-back on the writing connection would see the detached row and wrongly
-    report success; only the fresh-connection probe in _row_persisted detects
-    that the write is invisible to other readers and triggers recovery.
-    """
-    import sqlite3
-
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir(parents=True, exist_ok=True)
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    entry = _make_entry(module, root, "eng-a")
-
-    # Establish the canonical cases.db (schema initialized) that readers see.
-    _insert_one(module, collector, entry, queue_key="variant:1:page")
-    canonical = entry.root / "cases.db"
-    assert canonical.exists()
-
-    # Swap in a real connection bound to a detached DB with the same schema.
-    detached = entry.root / "detached.db"
-    detached.touch()
-    module.db_init(str(detached))
-    stale = sqlite3.connect(str(detached), check_same_thread=False)
-    entry.db.close()
-    entry.db = stale
-
-    _insert_one(module, collector, entry, queue_key="variant:2:page")
-
-    # Recovery happened: the stale connection was dropped and replaced.
-    assert entry.db is not stale
-    assert isinstance(entry.db, sqlite3.Connection)
-
-    # The row landed in the canonical file where independent readers see it.
-    canonical_rows = (
-        sqlite3.connect(str(canonical))
-        .execute(
-            "SELECT queue_key FROM work_items WHERE queue_key = ?",
-            ("variant:2:page",),
-        )
-        .fetchall()
-    )
-    assert canonical_rows == [("variant:2:page",)]
-
-    # The stale connection genuinely committed (no error) — it just wrote to the
-    # wrong file. This proves the failure was invisibility, not a write error,
-    # so the same-connection read-back probe would have been fooled.
-    orphan_rows = (
-        sqlite3.connect(str(detached))
-        .execute(
-            "SELECT queue_key FROM work_items WHERE queue_key = ?",
-            ("variant:2:page",),
-        )
-        .fetchall()
-    )
-    assert orphan_rows == [("variant:2:page",)]
 
 
 # ---------------------------------------------------------------------------
@@ -1427,8 +1295,11 @@ def test_post_request_observation_coerces_non_dict_body_schema(tmp_path: Path, m
 
 
 def test_request_body_saved_when_response_is_binary(tmp_path: Path):
-    """A JSON request body answered by an image/png response must still be saved:
-    the body save is gated on the REQUEST content type, not the response type."""
+    """A JSON request body answered by an image/png response must still be
+    captured: the request-body save is gated on the REQUEST content type, not the
+    response type, and the observation is still POSTed despite the binary
+    response. The proxy no longer opens SQLite, so the captured request body/params
+    ride in the request-observation POST's work_item block."""
     module = _load_proxy_addon_module()
     root = tmp_path / "engagements"
     root.mkdir()
@@ -1436,15 +1307,15 @@ def test_request_body_saved_when_response_is_binary(tmp_path: Path):
     collector = module.CaseCollector()
     collector.engagements_root = root
     collector._reload_registry(force=True)
-    collector._match_engagement("a.example.com")
 
-    captured: dict = {}
+    posted: list[dict] = []
     collector._capture_auth = lambda *a, **k: None
-    collector._post_request_observation = lambda **kw: {
-        "request_variant": {"id": 1},
-        "service": {"id": 1},
-    }
-    collector._insert_case = lambda entry, **kw: captured.update(kw)
+
+    def _fake_post_observation(**kw):
+        posted.append(kw)
+        return {"request_variant": {"id": 1}, "service": {"id": 1}}
+
+    collector._post_request_observation = _fake_post_observation
 
     request = _FakeRequest(
         url="https://a.example.com/upload",
@@ -1459,9 +1330,15 @@ def test_request_body_saved_when_response_is_binary(tmp_path: Path):
     )
     collector.response(_FakeFlow(request, response))
 
-    assert captured.get("body") == '{"k": "v"}'
-    # The stored content_type is the REQUEST type (consistent with the saved body).
-    assert captured.get("content_type") == "application/json"
+    # The observation was POSTed even though the RESPONSE body is binary ...
+    assert len(posted) == 1
+    kw = posted[0]
+    # ... and the REQUEST body + parsed body_params were preserved (saved on the
+    # request content type, not the image/png response type). The stored
+    # request_content_type is the REQUEST type, consistent with the saved body.
+    assert kw["body"] == '{"k": "v"}'
+    assert kw["request_content_type"] == "application/json"
+    assert json.loads(kw["params"]["body_params"]) == {"k": "v"}
 
 
 # ---------------------------------------------------------------------------

@@ -254,15 +254,16 @@ The proxy runs `mitmdump` with `proxy_addon.py`, which:
 - Filters noise (analytics, CDNs, tracking pixels)
 - Classifies requests by type (API, form, page, JS, GraphQL, WebSocket, etc.)
 - Detects login flows and POSTs captured session material to the backend credential store, which derives the identity name from the capture's session-anchor material so distinct logins append rather than overwrite (see "Multi-Identity Capture" above)
-- Records intercepted traffic to `cases.db` for work-buffer ingestion
-- Posts request observations to the orchestrator backend (when available)
+- Posts request observations to the orchestrator backend (when available), which derives the
+  work-buffer row (`assessment_work_items`) server-side in the same transaction — no local
+  database write (ADR 0013)
 - When an engagement's capture policy is enabled, additionally persists the
   **full request/response flow** — body sidecars + a JSONL flow index under the
   engagement root — and posts a compact flow record to the backend (see below)
 
 ## Full-Flow Capture Policy
 
-Beyond the compact request-observation + `cases.db` snippet the addon always
+Beyond the compact request-observation + derived work-item the addon always
 records, each engagement has an opt-in **full-flow capture policy**. When
 enabled, the addon writes the raw request/response bodies as engagement-local
 sidecars and a JSONL flow index, and posts a compact per-flow record (sha256s,

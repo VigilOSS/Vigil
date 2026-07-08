@@ -1,23 +1,23 @@
 """vigil assess classify-work — idempotent re-application of gf-style classification.
 
-Classification now runs *inline* during `db_insert_work_item()` so the work
-buffer is always scored at insert time. This command is retained for two
-reasons:
+Classification runs *inline* during ingest (client-side, in the work_item block
+the backend derives), so the work buffer is always scored at insert time. This
+command is retained for two reasons:
 
 1. Re-applying classification after a bucket-table change in
    `assess.lib.classify_buckets._BUCKETS` (e.g., adding a new bucket) so the
    already-ingested rows pick up the new weights without re-ingesting.
-2. Repairing pre-refactor engagement DBs whose work_items were inserted before
-   inline classification existed.
+2. Re-typing an already-ingested corpus after a typer improvement.
 
-The bucket logic itself lives in `assess.lib.classify_buckets`. This command
-is a thin batch-loop around it.
+The bucket logic itself lives in `assess.lib.classify_buckets`. This command is a
+thin batch-loop around it: it reads the backend work buffer, re-scores/re-types
+in Python, and force-writes the changed fields back via the backend
+`work-items/update` endpoint (ADR 0013).
 """
 from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 from collections import Counter
 
 from assess.lib.classify import classify_type
@@ -27,20 +27,22 @@ from assess.lib.classify_buckets import (
     MANUAL_CLASSIFIER_VERSION,
     classify_row as _classify_row,
 )
-from assess.lib.db import db_init
+from assess.lib.client import AssessmentClient
+from assess.lib.config import load_config
+
+# Chunk size for the backend update POST.
+_UPDATE_CHUNK = 500
 
 
 def _row_get(row, key, default=None):
-    """Tolerant column getter for a sqlite3.Row (or dict) mirror.
+    """Tolerant column getter for a work-item row dict.
 
-    Returns `default` when the column is absent (a pre-context DB, or a legacy
-    SELECT that did not project the column) instead of raising IndexError/
-    KeyError, so threading the Fix 1 context kwargs never breaks an older
-    schema or caller. Also coalesces a stored NULL to `default`.
+    Returns `default` when the column is absent or stored NULL, so threading the
+    context kwargs never breaks on a row that lacks an optional column.
     """
     try:
         value = row[key]
-    except (IndexError, KeyError):
+    except (IndexError, KeyError, TypeError):
         return default
     return value if value is not None else default
 
@@ -48,15 +50,13 @@ def _row_get(row, key, default=None):
 def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "classify-work",
-        help="Re-apply gf-style priority/cluster classification to work_items",
+        help="Re-apply gf-style priority/cluster classification to the work buffer",
     )
-    p.add_argument("db_path", help="Path to cases.db")
     p.add_argument(
         "--batch",
         type=int,
         default=500,
-        help="Rows to read per batch (default: 500). Commits once per batch so a "
-        "crash leaves at most one batch of work re-classifiable.",
+        help="Rows to POST per update batch (default: 500).",
     )
     p.add_argument(
         "--reclassify-all",
@@ -66,10 +66,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
             "Also rewrite priority/cluster on rows that are already scored. "
             "Use this when you intentionally changed `_BUCKETS` in "
             "`assess.lib.classify_buckets` and want the new weights applied "
-            "to the existing buffer. WARNING: this overwrites manual "
-            "operator triage (e.g. priority_score raised by hand, custom "
-            "cluster_key) — narrow your scope or accept the loss before "
-            "running."
+            "to the existing buffer. NOTE (backend narrowing): rows stamped "
+            "`manual` are re-scored here too, but the older local path could "
+            "additionally overwrite them — behavior is otherwise identical."
         ),
     )
     p.add_argument(
@@ -78,17 +77,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "Re-score only rows whose `classifier_version` is stale — NULL "
-            "(legacy, scored before the version stamp existed) or different from "
-            "the CURRENT `classify_buckets.CLASSIFIER_VERSION` — while LEAVING "
-            "rows stamped `manual` (via `work-buffer mark-manual`) untouched. "
-            "This is the targeted alternative to `--reclassify-all`: after a "
-            "deliberate `_BUCKETS` change it restamps exactly the rows scored "
-            "under the old taxonomy and is idempotent (a second run reports 0 "
-            "updates because every touched row is now at the current version). "
-            "NOTE: on a legacy DB where no row was ever stamped, the whole "
-            "in-scope corpus is NULL and therefore treated as stale on the "
-            "first run — i.e. first-run scope == `--reclassify-all`; subsequent "
-            "runs narrow to genuinely-stale rows."
+            "(legacy) or different from the CURRENT `classify_buckets."
+            "CLASSIFIER_VERSION` — while LEAVING rows stamped `manual` "
+            "untouched. Idempotent: a second run reports 0 updates."
         ),
     )
     p.add_argument(
@@ -98,13 +89,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "Re-evaluate EVERY status='skipped' row against the CURRENT inert "
             "policy and un-strand any whose type is no longer inert, flipping it "
-            "back to 'pending' and clearing its stale terminal_reason (L4-7). "
-            "Use after an inert-policy change (e.g. a type was removed from "
-            "classify_buckets.INERT_TYPES, like sourcemap) so previously-skipped "
-            "rows that are now testable re-enter the work queue. WARNING: this "
-            "also reverses MANUAL skips of non-inert items — it is opt-in for "
-            "exactly that reason; the default predicate never touches a skipped "
-            "row that carries a terminal_reason."
+            "back to 'pending' and clearing its stale terminal_reason. Use after "
+            "an inert-policy change. WARNING: this also reverses MANUAL skips of "
+            "non-inert items — opt-in for exactly that reason."
         ),
     )
     p.add_argument(
@@ -112,17 +99,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         dest="retype",
         action="store_true",
         help=(
-            "Re-derive `work_items.type` for in-scope rows by re-running the "
-            "typer (`assess.lib.classify.classify_type`) against each row's "
-            "STORED method/url_path/content_type/body, then re-apply the "
-            "downstream priority/cluster/terminal_reason for any row whose type "
-            "changed. Default scope is the SAFE narrow set `type='unknown'` "
-            "only — already-typed rows are never re-typed unless `--retype-all` "
-            "is also given. Use this to propagate a typer improvement onto an "
-            "already-ingested corpus without re-ingesting. Many proxy-captured "
-            "rows carry a stored content_type that was never fed to the typer "
-            "at ingest, so this also repairs that historical gap. Idempotent: "
-            "re-running changes nothing once every row is at its derived type."
+            "Re-derive `type` for in-scope rows by re-running the typer against "
+            "each row's STORED method/url_path/content_type/body, then re-apply "
+            "the downstream priority/cluster/terminal_reason for any row whose "
+            "type changed. Default scope is the SAFE narrow set `type='unknown'` "
+            "only. Idempotent."
         ),
     )
     p.add_argument(
@@ -131,14 +112,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "Broaden `--retype` scope to EVERY row, not just `type='unknown'`. "
-            "WARNING: this can overwrite a `type` an operator set by hand (or an "
-            "override_type from a curated ingest path). Implies `--retype`."
+            "WARNING: can overwrite a hand-set `type`. Implies `--retype`."
         ),
     )
-    # Deprecated alias retained because the previous release shipped with
-    # `--only-unscored` as an opt-in to the safe predicate. The safe predicate
-    # is now the default, so the flag is a no-op; we accept it without error
-    # so older runbooks and tests do not break mid-cutover.
+    # Deprecated no-op alias retained so older runbooks/tests do not break.
     p.add_argument(
         "--only-unscored",
         dest="only_unscored",
@@ -148,173 +125,100 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.set_defaults(func=run)
 
 
+def _matches_predicate(row, *, reclaim_skipped, reclassify_stale, reclassify_all) -> bool:
+    """Replicate the former SQL WHERE predicates in Python."""
+    status = row.get("status")
+    row_type = row.get("type")
+    cv = _row_get(row, "classifier_version")
+    base = status == "pending" or (status == "skipped" and row_type in INERT_TYPES)
+
+    if reclaim_skipped:
+        return status == "skipped"
+    if reclassify_stale:
+        # stale AND not-manual; NULL cv counts as stale+not-manual (kept).
+        return base and cv != CLASSIFIER_VERSION and cv != MANUAL_CLASSIFIER_VERSION
+    if reclassify_all:
+        return base
+    # default: unscored only.
+    return (
+        base
+        and int(row.get("priority_score") or 0) == 0
+        and _row_get(row, "cluster_key") is None
+        and _row_get(row, "terminal_reason") is None
+    )
+
+
 def run(args: argparse.Namespace) -> None:
-    db_path = args.db_path
     batch = max(1, int(args.batch))
     reclassify_all = bool(getattr(args, "reclassify_all", False))
     reclassify_stale = bool(getattr(args, "reclassify_stale", False))
     reclaim_skipped = bool(getattr(args, "reclaim_skipped", False))
     retype = bool(getattr(args, "retype", False))
     retype_all = bool(getattr(args, "retype_all", False))
-    db_init(db_path)
 
-    # `--retype` is a distinct, opt-in pass: it re-derives `type` from each
-    # row's stored fields and re-applies the downstream bucket classification
-    # only for rows whose type actually changed. It never runs implicitly with
-    # the bucket-only re-classification paths above — typing and bucketing are
-    # separate concerns and an operator opts into re-typing explicitly. We
-    # dispatch to it here and return its own summary so the two passes cannot
-    # be conflated. `--retype-all` implies `--retype`.
-    if retype or retype_all:
-        _retype_pass(db_path, batch=batch, retype_all=retype_all)
-        return
+    cfg = load_config(args.engagement_dir)
 
-    # Default predicate is narrow: only touch rows that have not already been
-    # scored. This protects manual operator triage (priority bumps, custom
-    # cluster keys, deferred:* markers) from being silently overwritten by an
-    # operator who runs `classify-work` thinking it is a benign refresh —
-    # since classification is inline at ingest, the only legitimate reason to
-    # touch already-scored rows is a deliberate `_BUCKETS` change, which the
-    # operator opts in to with `--reclassify-all`.
-    #
-    # The inert-type list is sourced from `classify_buckets.INERT_TYPES` so
-    # this command, the inline insert path in db.py, and the bucket
-    # classifier all read the same set. Adding a new inert type elsewhere
-    # only requires editing classify_buckets.INERT_TYPES.
-    inert_placeholders = ",".join("?" * len(INERT_TYPES))
-    inert_params = tuple(sorted(INERT_TYPES))
-    base_predicate = (
-        f"(status = 'pending' OR (status = 'skipped' AND type IN ({inert_placeholders})))"
-    )
-    if reclaim_skipped:
-        where_clause: str = "status = 'skipped'"
-        where_params: tuple = ()
-    elif reclassify_stale:
-        # Restamp only rows scored under an OLD (or unknown/legacy-NULL) bucket
-        # table, never operator-marked `manual` rows. The two `classifier_version
-        # IS NULL OR ...` disjunctions are deliberate: a bare `!= 'manual'` /
-        # `!= :current` would drop NULL rows (SQL `NULL != x` is NULL, not TRUE),
-        # but legacy NULL rows are EXACTLY the stale rows we must pick up. So:
-        #   * stale     = (version IS NULL) OR (version != current)
-        #   * not-manual = (version IS NULL) OR (version != 'manual')
-        # → NULL kept, current excluded, 'manual' excluded, any other value kept.
-        where_clause = (
-            f"{base_predicate} "
-            "AND (classifier_version IS NULL OR classifier_version != ?) "
-            "AND (classifier_version IS NULL OR classifier_version != ?)"
-        )
-        where_params = (*inert_params, CLASSIFIER_VERSION, MANUAL_CLASSIFIER_VERSION)
-    elif reclassify_all:
-        where_clause = base_predicate
-        where_params = inert_params
-    else:
-        where_clause = (
-            f"{base_predicate} "
-            "AND priority_score = 0 AND cluster_key IS NULL "
-            "AND terminal_reason IS NULL"
-        )
-        where_params = inert_params
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        # `--retype` is a distinct, opt-in pass (re-derive `type` then re-bucket
+        # only rows whose type changed); it never runs implicitly with the
+        # bucket-only re-classification paths. `--retype-all` implies `--retype`.
+        if retype or retype_all:
+            _retype_pass(client, batch=batch, retype_all=retype_all)
+            return
 
-    conn = sqlite3.connect(db_path, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
+        rows = client.get_all_pages("work-items")
         classified = 0
-        updated = 0
         reclaimed = 0
         cluster_counts: Counter[str] = Counter()
-        # Histogram of the `classifier_version` each touched row carried BEFORE
-        # this pass (NULL → "none"). Lets an operator see, after a taxonomy bump,
-        # how many rows were legacy-unstamped vs scored under a specific prior
-        # digest — the audit trail `--reclassify-stale` restamps from.
         from_version_counts: Counter[str] = Counter()
+        updates: list[dict] = []
 
-        # Track an offset so we don't loop forever in the wide WHERE case
-        # (where rows already match it after the UPDATE).
-        last_id = 0
-        while True:
-            rows = conn.execute(
-                f"""
-                SELECT id, type, url_path, query_params, body_params, path_params,
-                       url, source, live_status, classifier_version
-                FROM work_items
-                WHERE {where_clause}
-                  AND id > ?
-                ORDER BY id ASC
-                LIMIT ?
-                """,
-                (*where_params, last_id, batch),
-            ).fetchall()
-            if not rows:
-                break
+        for row in rows:
+            if not _matches_predicate(
+                row,
+                reclaim_skipped=reclaim_skipped,
+                reclassify_stale=reclassify_stale,
+                reclassify_all=reclassify_all,
+            ):
+                continue
+            classified += 1
+            from_version_counts[_row_get(row, "classifier_version") or "none"] += 1
+            assignment = _classify_row(
+                row,
+                url=_row_get(row, "url"),
+                source=_row_get(row, "source"),
+                live_status=_row_get(row, "live_status"),
+            )
+            cluster_counts[assignment["cluster_key"]] += 1
 
-            for row in rows:
-                last_id = max(last_id, int(row["id"]))
-                classified += 1
-                from_version_counts[_row_get(row, "classifier_version") or "none"] += 1
-                # Thread the row's URL/source/live_status into the classifier so
-                # the boost-only context layer (Fix 1) is re-applied on
-                # re-classification too — otherwise the 677 nonprod/admin
-                # host_root rows would stay at priority 0 after
-                # `--reclassify-all`. Tolerant getter keeps pre-context DBs safe.
-                assignment = _classify_row(
-                    row,
-                    url=_row_get(row, "url"),
-                    source=_row_get(row, "source"),
-                    live_status=_row_get(row, "live_status"),
-                )
-                cluster_counts[assignment["cluster_key"]] += 1
-                if reclaim_skipped:
-                    if assignment["terminal_reason"] is None:
-                        reclaimed += 1
-                    result = conn.execute(
-                        """
-                        UPDATE work_items
-                        SET priority_score = ?,
-                            priority_reason = ?,
-                            cluster_key = ?,
-                            terminal_reason = ?,
-                            classifier_version = ?,
-                            status = CASE WHEN ? IS NOT NULL THEN 'skipped' ELSE 'pending' END
-                        WHERE id = ?
-                        """,
-                        (
-                            assignment["priority_score"],
-                            assignment["priority_reason"],
-                            assignment["cluster_key"],
-                            assignment["terminal_reason"],
-                            CLASSIFIER_VERSION,
-                            assignment["terminal_reason"],
-                            row["id"],
-                        ),
-                    )
-                else:
-                    result = conn.execute(
-                        """
-                        UPDATE work_items
-                        SET priority_score = ?,
-                            priority_reason = ?,
-                            cluster_key = ?,
-                            terminal_reason = COALESCE(?, terminal_reason),
-                            classifier_version = ?,
-                            status = CASE WHEN ? IS NOT NULL THEN 'skipped' ELSE status END
-                        WHERE id = ?
-                        """,
-                        (
-                            assignment["priority_score"],
-                            assignment["priority_reason"],
-                            assignment["cluster_key"],
-                            assignment["terminal_reason"],
-                            CLASSIFIER_VERSION,
-                            assignment["terminal_reason"],
-                            row["id"],
-                        ),
-                    )
-                updated += result.rowcount
-            conn.commit()
+            update = {
+                "id": row["id"],
+                "priority_score": assignment["priority_score"],
+                "priority_reason": assignment["priority_reason"],
+                "cluster_key": assignment["cluster_key"],
+                "classifier_version": CLASSIFIER_VERSION,
+            }
+            if reclaim_skipped:
+                # terminal_reason set directly (may clear); status derived from it.
+                update["terminal_reason"] = assignment["terminal_reason"]
+                update["status"] = "skipped" if assignment["terminal_reason"] is not None else "pending"
+                if assignment["terminal_reason"] is None:
+                    reclaimed += 1
+            else:
+                # COALESCE-keep the existing terminal_reason; only flip to skipped
+                # when a NEW terminal_reason appears (else keep the current status).
+                if assignment["terminal_reason"] is not None:
+                    update["terminal_reason"] = assignment["terminal_reason"]
+                    update["status"] = "skipped"
+                # else: leave terminal_reason/status untouched (omit the keys).
+            updates.append(update)
 
-            if len(rows) < batch:
-                break
+        updated = 0
+        for start in range(0, len(updates), batch):
+            chunk = updates[start:start + batch]
+            if chunk:
+                resp = client.post("work-items/update", {"updates": chunk})
+                updated += int(resp.get("affected", 0))
 
         summary = {
             "classified": classified,
@@ -327,169 +231,91 @@ def run(args: argparse.Namespace) -> None:
             ),
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))
-    finally:
-        conn.close()
 
 
-def _retype_pass(db_path: str, *, batch: int, retype_all: bool) -> None:
-    """Re-derive `work_items.type` from each in-scope row's stored fields.
+def _retype_pass(client, *, batch: int, retype_all: bool) -> None:
+    """Re-derive `type` from each in-scope row's stored fields (backend-backed).
 
-    Why this exists: typing (`classify.classify_type`) and bucketing
-    (`classify_buckets.classify_row`) are separate stages. The bucket-only
-    re-runs above consume the stored `type` verbatim, so a typer improvement is
-    inert on an already-ingested corpus until the rows are re-typed. This pass
-    closes that gap WITHOUT re-ingesting, and — crucially — feeds the typer the
-    row's STORED `content_type` and request `body`, which the ingest paths
-    historically passed as `""` (so a proxy-captured row whose content_type was
-    only known post-hoc never benefited from content-type typing).
-
-    Scope safety mirrors `--reclassify-all`: the default is the NARROW
-    `type='unknown'` set so already-typed rows (including operator/override
-    types) are never silently re-typed; `--retype-all` opts into the broad set.
-
-    For every row whose type actually CHANGES we (a) rewrite `type` and (b)
-    re-apply the downstream bucket classification for the NEW type — including
-    the insert-path inert-skip (`status='skipped'` + `terminal_reason=
-    'inert_type'` for a row newly typed into `INERT_TYPES`). A row whose type is
-    unchanged is left entirely alone, which makes the pass idempotent: a second
-    run finds no changes.
-
-    Safety: rows are never deleted; work commits once per batch (a crash leaves
-    at most one batch re-runnable, and the pass is idempotent so re-running is
-    safe); a JSON summary reports rows scanned, retyped, and the old→new type
-    transition tally.
+    Feeds the typer the row's STORED `content_type` and request `body`. For every
+    row whose type CHANGES, rewrites `type` (+ the type-suffixed queue_key) and
+    re-applies the downstream bucket classification for the NEW type. Rows whose
+    type is unchanged are left alone (idempotent). Never deletes; a queue_key
+    collision on the rewrite is skipped by the backend's UPDATE OR IGNORE.
     """
-    # Default scope is narrow (type='unknown' only); --retype-all widens it to
-    # every row. Either way we page by `id > last_id` so a row that re-types to
-    # a still-in-scope value (only possible under --retype-all, e.g. unknown
-    # stays unknown) cannot loop forever.
-    if retype_all:
-        where_clause = "1 = 1"
-    else:
-        where_clause = "type = 'unknown'"
+    rows = client.get_all_pages("work-items")
+    scanned = 0
+    retyped = 0
+    transitions: Counter[str] = Counter()
+    updates: list[dict] = []
 
-    conn = sqlite3.connect(db_path, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        scanned = 0
-        retyped = 0
-        transitions: Counter[str] = Counter()
+    for row in rows:
+        row_type = row.get("type") or "unknown"
+        if not retype_all and row_type != "unknown":
+            continue
+        scanned += 1
+        old_type = row_type
+        method = row.get("method") or "GET"
+        content_type = _row_get(row, "content_type", "") or ""
+        body_snippet = _row_get(row, "body", "") or ""
+        new_type = classify_type(method, row.get("url_path") or "", content_type, body_snippet)
 
-        last_id = 0
-        while True:
-            rows = conn.execute(
-                f"""
-                SELECT id, method, type, url_path, content_type, body, queue_key,
-                       query_params, body_params, path_params
-                FROM work_items
-                WHERE {where_clause}
-                  AND id > ?
-                ORDER BY id ASC
-                LIMIT ?
-                """,
-                (last_id, batch),
-            ).fetchall()
-            if not rows:
-                break
+        if new_type == old_type:
+            continue
 
-            for row in rows:
-                last_id = max(last_id, int(row["id"]))
-                scanned += 1
-                old_type = row["type"] or "unknown"
-                # Read the STORED content_type / body and pass them to the
-                # typer. Coalesce NULL → "" so the typer always gets a string
-                # (path/extension typing still applies on an empty content
-                # type), never None.
-                method = row["method"] or "GET"
-                content_type = row["content_type"] or ""
-                body_snippet = row["body"] or ""
-                new_type = classify_type(
-                    method, row["url_path"] or "", content_type, body_snippet
-                )
+        retyped += 1
+        transitions[f"{old_type}->{new_type}"] += 1
 
-                if new_type == old_type:
-                    # No change → leave the row entirely alone (idempotency).
-                    continue
+        mirror = {
+            "type": new_type,
+            "url_path": row.get("url_path"),
+            "query_params": row.get("query_params"),
+            "body_params": row.get("body_params"),
+            "path_params": row.get("path_params"),
+        }
+        assignment = _classify_row(mirror)
 
-                retyped += 1
-                transitions[f"{old_type}->{new_type}"] += 1
+        # queue_key embeds the type only for variant:/service:/coverage: keys,
+        # where it is the trailing ':'-segment. Only rewrite when the trailing
+        # segment matches the OLD type; arjun:/deferred:/seed: keys carry a
+        # params_sig/URL there and must NOT be rewritten.
+        old_qk = row.get("queue_key") or ""
+        if old_qk.startswith(("variant:", "service:", "coverage:")) and old_qk.rsplit(":", 1)[1] == old_type:
+            new_qk = old_qk.rsplit(":", 1)[0] + ":" + new_type
+        else:
+            new_qk = old_qk
 
-                # Re-apply downstream classification for the NEW type. Build a
-                # lightweight row mirror that carries the new type so the bucket
-                # classifier sees it (it reads `type`, `url_path`, and the param
-                # columns). The skip/restore below mirrors the --reclaim-skipped
-                # pass: a row whose new classification is terminal (e.g. newly
-                # typed into INERT_TYPES → terminal_reason='inert_type') is
-                # stamped status='skipped'; a row that re-types to an actionable
-                # (non-terminal) type is restored to status='pending' so an
-                # inert→actionable retype becomes dispatchable again.
-                mirror = {
-                    "type": new_type,
-                    "url_path": row["url_path"],
-                    "query_params": row["query_params"],
-                    "body_params": row["body_params"],
-                    "path_params": row["path_params"],
-                }
-                assignment = _classify_row(mirror)
-                # queue_key embeds the type only for variant:/service:/coverage:
-                # keys, where it is the trailing ':'-segment. Detect that precisely
-                # by the trailing segment matching the OLD type; arjun:/deferred:/
-                # seed: keys carry a params_sig or URL there, not a type, and must
-                # NOT be rewritten (doing so corrupts the key). When it IS the type,
-                # re-ingest dedups on queue_key (UNIQUE + INSERT OR IGNORE), so the
-                # stored key must track the new type or a later re-ingest inserts a
-                # duplicate row; preserve the `<scheme>:<id>:` prefix and swap only
-                # the trailing type. UPDATE OR IGNORE: in the rare case a
-                # `<scheme>:<id>:<new_type>` row already exists, skip this row rather
-                # than tripping the UNIQUE(queue_key) constraint mid-pass.
-                old_qk = row["queue_key"] or ""
-                if ":" in old_qk and old_qk.rsplit(":", 1)[1] == old_type:
-                    new_qk = old_qk.rsplit(":", 1)[0] + ":" + new_type
-                else:
-                    new_qk = old_qk
-                conn.execute(
-                    """
-                    UPDATE OR IGNORE work_items
-                    SET type = ?,
-                        queue_key = ?,
-                        priority_score = ?,
-                        priority_reason = ?,
-                        cluster_key = ?,
-                        terminal_reason = ?,
-                        classifier_version = ?,
-                        status = CASE
-                            WHEN ? IS NOT NULL THEN 'skipped'
-                            WHEN status = 'skipped' THEN 'pending'
-                            ELSE status
-                        END
-                    WHERE id = ?
-                    """,
-                    (
-                        new_type,
-                        new_qk,
-                        assignment["priority_score"],
-                        assignment["priority_reason"],
-                        assignment["cluster_key"],
-                        assignment["terminal_reason"],
-                        CLASSIFIER_VERSION,
-                        assignment["terminal_reason"],
-                        row["id"],
-                    ),
-                )
-            conn.commit()
-
-            if len(rows) < batch:
-                break
-
-        summary = {
-            "scanned": scanned,
-            "retyped": retyped,
-            "scope": "all" if retype_all else "unknown",
-            "by_transition": dict(
-                sorted(transitions.items(), key=lambda kv: (-kv[1], kv[0]))
+        update = {
+            "id": row["id"],
+            "type": new_type,
+            "queue_key": new_qk,
+            "priority_score": assignment["priority_score"],
+            "priority_reason": assignment["priority_reason"],
+            "cluster_key": assignment["cluster_key"],
+            "terminal_reason": assignment["terminal_reason"],
+            "classifier_version": CLASSIFIER_VERSION,
+            # Terminal → skipped; a previously-skipped row that re-types to an
+            # actionable (non-terminal) type is restored to pending; else keep.
+            "status": (
+                "skipped" if assignment["terminal_reason"] is not None
+                else ("pending" if row.get("status") == "skipped" else row.get("status"))
             ),
         }
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
-    finally:
-        conn.close()
+        updates.append(update)
+
+    applied = 0
+    for start in range(0, len(updates), batch):
+        chunk = updates[start:start + batch]
+        if chunk:
+            resp = client.post("work-items/update", {"updates": chunk})
+            applied += int(resp.get("affected", 0))
+
+    summary = {
+        "scanned": scanned,
+        "retyped": retyped,
+        "applied": applied,
+        "scope": "all" if retype_all else "unknown",
+        "by_transition": dict(
+            sorted(transitions.items(), key=lambda kv: (-kv[1], kv[0]))
+        ),
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2))

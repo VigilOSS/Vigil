@@ -129,6 +129,67 @@ def test_attempts_no_longer_renders_noncovering_probe_list():
     assert "non-covering probe runs" not in out
 
 
+def test_finding_line_appends_blocked_reason_for_provisioning_block():
+    # resume-brief _finding_summary shape: a disposition='blocked' finding is
+    # active/verified, so the base line says nothing about being blocked. The
+    # marker restores WHY it stalled (the block_reason).
+    row = {
+        "slug": "VA-047", "severity": "high",
+        "workflow_status": "active", "verification_state": "verified",
+        "verification_disposition": "blocked",
+        "block_reason": "Needs finance-admin account and this WONT be given",
+        "title": "IDOR on /orders",
+    }
+    line = resume_brief._finding_line(row)
+    assert line.startswith("VA-047 high active/verified IDOR on /orders")
+    assert "BLOCKED: Needs finance-admin account and this WONT be given" in line
+
+
+def test_finding_line_no_marker_for_non_blocked_finding_with_block_reason():
+    # A block_reason on a pending/none finding must NOT render as BLOCKED — the
+    # marker is gated on the disposition, not the field's presence.
+    row = {
+        "slug": "VA-048", "severity": "medium",
+        "workflow_status": "active", "verification_state": "verified",
+        "verification_disposition": "pending_runtime_proof",
+        "block_reason": "held pending CMS sandbox",
+        "title": "held vector",
+    }
+    line = resume_brief._finding_line(row)
+    assert "BLOCKED" not in line
+
+
+def test_finding_line_no_marker_for_normal_finding():
+    row = {
+        "slug": "VA-001", "severity": "low",
+        "workflow_status": "active", "verification_state": "verified",
+        "verification_disposition": "confirmed",
+        "block_reason": "",
+        "title": "Reflected XSS",
+    }
+    line = resume_brief._finding_line(row)
+    assert line == "VA-001 low active/verified Reflected XSS"
+    assert "BLOCKED" not in line
+
+
+def test_render_markdown_surfaces_blocked_reason_in_findings_bucket():
+    # End-to-end through the markdown renderer: a blocked finding in the verified
+    # bucket carries its reason so the operator never has to open the finding.
+    brief = {
+        "findings": {
+            "verified": [{
+                "slug": "VA-047", "severity": "high",
+                "workflow_status": "active", "verification_state": "verified",
+                "verification_disposition": "blocked",
+                "block_reason": "Needs finance-admin account and this WONT be given",
+                "title": "IDOR on /orders",
+            }],
+        },
+    }
+    out = resume_brief._render_markdown(brief)
+    assert "BLOCKED: Needs finance-admin account and this WONT be given" in out
+
+
 def test_render_markdown_orders_per_input_after_attempts():
     brief = {
         "attempts": {
