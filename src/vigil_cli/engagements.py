@@ -559,7 +559,9 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         # on a missing path. The launcher's grep falls through to the
         # default when the file has no ORCHESTRATOR_BASE_URL line.
         (eng_dir / ".orchestrator.env").write_text("", encoding="utf-8")
-    _init_cases_db(agent_root, eng_dir)
+    # No local work-buffer DB is created: the work buffer lives in the
+    # orchestrator backend (assessment_work_items) and is populated on first
+    # ingest (ADR 0013). Fresh engagements start with an empty backend buffer.
 
     client_kind = _install_client_kind(agent_root)
     _write_prompt_wrappers(agent_root, eng_dir, client_kind, engagement_type=options.engagement_type)
@@ -1171,8 +1173,8 @@ def _finding_render():
     physically lives under ``agent/scripts/assess/lib`` so the assess
     ``export-findings`` command can import it directly. This installable ``src``
     package reaches it through the same import bridge it already uses for
-    ``assess.lib.client`` / ``assess.lib.db`` (see ``paths.add_assess_import_path``
-    and ``_init_cases_db``): the production ``vigil engagement export`` path puts
+    ``assess.lib.client`` (see ``paths.add_assess_import_path`` and
+    ``_build_assessment_client``): the production ``vigil engagement export`` path puts
     ``agent/scripts`` on ``sys.path`` before this runs (via
     ``_build_assessment_client``), but tests and any direct caller may not — so
     fall back to discovering the repo root from this module's own location and
@@ -1592,36 +1594,6 @@ def _write_engagement_brief_stub(agent_root: Path, eng_dir: Path) -> None:
     for heading, guidance in _ENGAGEMENT_BRIEF_SECTIONS:
         lines.extend([f"## {heading}", "", f"<!-- {guidance} -->", ""])
     (eng_dir / "ENGAGEMENT.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-
-
-def _init_cases_db(agent_root: Path, eng_dir: Path) -> None:
-    """Initialize the engagement work-buffer DB.
-
-    Delegates to `agent/scripts/assess/lib/db.py:db_init` so a fresh DB ends
-    up with the same schema, priority-column migration, and
-    `work_items_per_host` view as one created via the assess CLI. Reaching
-    into the agent module here keeps a single source of truth for cases.db
-    initialization — direct `executescript(schema.sql)` would skip the
-    runtime-applied view that owns IPv6/port-strip host extraction.
-    """
-    db_path = eng_dir / "cases.db"
-    db_path.touch()
-
-    scripts_dir = agent_root / "scripts"
-    sys_path_added = False
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
-        sys_path_added = True
-    try:
-        from assess.lib.db import db_init  # type: ignore[import-not-found]
-
-        db_init(str(db_path))
-    finally:
-        if sys_path_added:
-            try:
-                sys.path.remove(str(scripts_dir))
-            except ValueError:
-                pass
 
 
 def _snapshot_orchestrator_database(install_root: Path) -> None:

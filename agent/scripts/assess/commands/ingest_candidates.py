@@ -10,9 +10,9 @@ from urllib.parse import urlparse
 from assess.lib.auth import auth_active_context
 from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE, post_request_observations_bulk
 from assess.lib.candidate_records import candidate_metadata, candidate_type, json_text, signal_tokens, surface_refs
+from assess.lib.classify_buckets import CLASSIFIER_VERSION, INERT_TYPES, tagged_terminal_reason
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.db import db_init, db_insert_out_of_scope_work_item, db_insert_work_item
 from assess.lib.params import extract_path_params, extract_query_params, extract_url_path, generate_params_sig
 from assess.lib.scope import host_admitted, ingest_scope_filter
 from assess.lib.surface_links import create_surface_request_variant_link
@@ -40,25 +40,18 @@ def register(subparsers) -> None:
         "ingest-candidates",
         help="Ingest metadata-rich surface candidate JSONL into assessment state",
     )
-    p.add_argument("db_path", help="Path to cases.db")
     p.add_argument("source", help="Source name (e.g. surface-collector-curated)")
     p.add_argument("records_file", help="Path to candidate_records.jsonl")
     p.set_defaults(func=run)
 
 
 def run(args) -> None:
-    db_path = args.db_path
     records_file = args.records_file
     source = args.source
 
-    if not Path(db_path).is_file():
-        print(f"ERROR: database not found: {db_path}", file=sys.stderr)
-        sys.exit(1)
     if not Path(records_file).is_file():
         print(f"ERROR: candidate records file not found: {records_file}", file=sys.stderr)
         sys.exit(1)
-
-    db_init(db_path)
 
     cfg = load_config(args.engagement_dir)
     eng_dir = cfg.engagement_dir
@@ -80,6 +73,17 @@ def run(args) -> None:
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         pending_rows: list[dict] = []
         pending_observations: list[dict] = []
+        pending_direct: list[dict] = []
+
+        def _flush_direct() -> None:
+            if not pending_direct:
+                return
+            items = list(pending_direct)
+            pending_direct.clear()
+            for start in range(0, len(items), DEFAULT_BULK_WRITE_SIZE):
+                chunk = items[start:start + DEFAULT_BULK_WRITE_SIZE]
+                if chunk:
+                    client.post("work-items/bulk", {"items": chunk})
 
         def _flush_observations() -> None:
             nonlocal count, skipped_backend, links_created, links_skipped
@@ -105,55 +109,14 @@ def run(args) -> None:
                         file=sys.stderr,
                     )
                     continue
+                # The work item is derived server-side from the observation's
+                # work_item block (ADR 0013). We still read the response's
+                # request_variant id to attach surface_refs links.
                 request_variant_id = None
-                service_id = None
                 try:
                     request_variant_id = response.get("request_variant", {}).get("id")
                 except (AttributeError, TypeError):
                     pass
-                try:
-                    service_id = response.get("service", {}).get("id")
-                except (AttributeError, TypeError):
-                    pass
-                if not request_variant_id and not service_id:
-                    print(
-                        f"ingest-candidates: backend response missing request_variant.id/service.id for {row['url']}",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-
-                if request_variant_id:
-                    queue_key = f"variant:{request_variant_id}:{row['case_type']}"
-                else:
-                    queue_key = f"service:{service_id}:{row['case_type']}"
-
-                metadata = row["metadata"]
-                db_insert_work_item(
-                    db_path,
-                    queue_key=queue_key,
-                    method=row["method"],
-                    url=row["url"],
-                    url_path=row["url_path"],
-                    query_params=json.dumps(row["query_params"]) if isinstance(row["query_params"], dict) else str(row["query_params"]),
-                    body_params=json.dumps(row["body_params"]) if isinstance(row["body_params"], dict) else str(row["body_params"]),
-                    path_params=json.dumps(row["path_params"]) if isinstance(row["path_params"], dict) else str(row["path_params"]),
-                    cookie_params=json.dumps(row["cookie_params"]) if isinstance(row["cookie_params"], dict) else str(row["cookie_params"]),
-                    headers=json.dumps(row["headers"]) if isinstance(row["headers"], dict) and row["headers"] else "",
-                    case_type=row["case_type"],
-                    source=source,
-                    params_key_sig=row["params_sig"],
-                    request_variant_id=int(request_variant_id) if request_variant_id else None,
-                    service_id=int(service_id) if service_id else None,
-                    auth_context=auth_context,
-                    priority_score=metadata.get("priority_score"),
-                    priority_reason=metadata.get("priority_reason"),
-                    cluster_key=metadata.get("cluster_key"),
-                    signals=json_text(metadata.get("signals")),
-                    selected_by=metadata.get("selected_by"),
-                    triage_rationale=metadata.get("triage_rationale"),
-                    live_status=metadata.get("live_status"),
-                    curated=True,
-                )
                 count += 1
 
                 if row["surface_refs"]:
@@ -251,21 +214,26 @@ def run(args) -> None:
                             f"(terminal_reason='out-of-scope') instead of admitting them.",
                             file=sys.stderr,
                         )
-                    db_insert_out_of_scope_work_item(
-                        db_path,
-                        method=method,
-                        url=url,
-                        url_path=url_path,
-                        query_params=query_params,
-                        body_params=body_params,
-                        path_params=path_params,
-                        cookie_params=cookie_params,
-                        case_type=case_type,
-                        source=source,
-                        params_key_sig=params_sig,
-                        auth_context=auth_context,
-                        host=cand_host,
-                    )
+                    pending_direct.append({
+                        "queue_key": f"skipped:out-of-scope:{cand_host}:{url}",
+                        "method": method,
+                        "url": url,
+                        "url_path": url_path,
+                        "host": cand_host,
+                        "query_params": json.dumps(query_params) if isinstance(query_params, dict) else str(query_params),
+                        "body_params": json.dumps(body_params) if isinstance(body_params, dict) else str(body_params),
+                        "path_params": json.dumps(path_params) if isinstance(path_params, dict) else str(path_params),
+                        "cookie_params": json.dumps(cookie_params) if isinstance(cookie_params, dict) else str(cookie_params),
+                        "type": case_type,
+                        "source": source,
+                        "status": "skipped",
+                        "params_key_sig": params_sig,
+                        "auth_context": auth_context,
+                        "cluster_key": "skipped:out-of-scope",
+                        "terminal_reason": tagged_terminal_reason("out-of-scope", cand_host),
+                    })
+                    if len(pending_direct) >= DEFAULT_BULK_WRITE_SIZE:
+                        _flush_direct()
                     continue
 
                 observation_payload: dict[str, object] = {
@@ -296,6 +264,30 @@ def run(args) -> None:
                     "banner": "",
                     "coverage_candidates": [],
                     "auto_generate_coverage": True,
+                    # Curated work-buffer derivation block — the backend derives
+                    # the assessment_work_items row from this in the same
+                    # transaction, carrying the candidate's curated metadata.
+                    "work_item": {
+                        "case_type": case_type,
+                        "source": source,
+                        "status": "skipped" if case_type in INERT_TYPES else "pending",
+                        "url_path": url_path,
+                        "query_params": json.dumps(query_params) if isinstance(query_params, dict) else str(query_params),
+                        "body_params": json.dumps(body_params) if isinstance(body_params, dict) else str(body_params),
+                        "path_params": json.dumps(path_params) if isinstance(path_params, dict) else str(path_params),
+                        "cookie_params": json.dumps(cookie_params) if isinstance(cookie_params, dict) else str(cookie_params),
+                        "headers": json.dumps(header_params) if isinstance(header_params, dict) and header_params else "",
+                        "params_key_sig": params_sig,
+                        "priority_score": metadata.get("priority_score") or 0,
+                        "priority_reason": metadata.get("priority_reason") or "",
+                        "cluster_key": metadata.get("cluster_key") or "",
+                        "terminal_reason": metadata.get("terminal_reason") or "",
+                        "classifier_version": CLASSIFIER_VERSION,
+                        "signals": json_text(metadata.get("signals")) if metadata.get("signals") else "",
+                        "selected_by": metadata.get("selected_by") or "",
+                        "triage_rationale": metadata.get("triage_rationale") or "",
+                        "live_status": metadata.get("live_status") or "",
+                    },
                 }
 
                 pending_rows.append(
@@ -319,6 +311,7 @@ def run(args) -> None:
                 if len(pending_observations) >= DEFAULT_BULK_WRITE_SIZE:
                     _flush_observations()
         _flush_observations()
+        _flush_direct()
 
     print(f"[ingest] Ingested {count} candidate records from source '{source}'")
     if links_created or links_skipped:
@@ -338,6 +331,6 @@ def run(args) -> None:
             f"{len(out_of_scope_warned_hosts)} out-of-scope host(s) "
             f"(status='skipped', terminal_reason='out-of-scope'). Reachable but not "
             f"in scope.json — fix scope.json and re-ingest to admit them; review with "
-            f"`vigil assess work-buffer <db> stats --by reason`.",
+            f"`vigil assess work-buffer stats --by reason`.",
             file=sys.stderr,
         )

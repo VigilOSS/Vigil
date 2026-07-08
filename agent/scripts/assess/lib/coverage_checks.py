@@ -23,7 +23,6 @@ module is CLI-side glue only.
 from __future__ import annotations
 
 import ipaddress
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -411,7 +410,7 @@ def _bucket_of_cluster_key(cluster_key: str) -> str:
 
 
 def _pending_buckets_for_host(
-    db_path: Path,
+    client: AssessmentClient,
     entry: dict[str, Any],
     deny_entries: list[dict[str, Any]] = (),
 ) -> dict[str, int]:
@@ -421,48 +420,39 @@ def _pending_buckets_for_host(
     is ``pending`` with no ``terminal_reason``, OR stuck in ``processing``, OR in
     ``error`` — in every case ``type != 'host_root'``. Reuses the stored
     ``cluster_key`` (``gf:<bucket>``) when present, re-classifying otherwise.
-    Returns ``{bucket_name: count}`` summed across matching hosts. A missing DB
-    yields ``{}``.
+    Returns ``{bucket_name: count}`` summed across matching hosts. Reads the
+    backend work buffer; an empty buffer yields ``{}``.
     """
-    if not db_path.is_file():
-        return {}
-
     tally: dict[str, int] = {}
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        cursor = conn.execute(
-            """
-            SELECT url, url_path, query_params, body_params, path_params,
-                   type, cluster_key
-            FROM work_items
-            WHERE type != 'host_root'
-              AND (
-                    (status = 'pending'
-                       AND (terminal_reason IS NULL OR terminal_reason = ''))
-                 OR status = 'processing'
-                 OR status = 'error'
-              )
-            """
-        )
-        for row in cursor.fetchall():
-            url = str(row[0] or "")
-            host = _endpoint_host(url)
-            if not host or not entry_matches_host(entry, host) or host_in_scope(host, deny_entries):
-                continue
-            bucket = _bucket_of_cluster_key(str(row[6] or ""))
-            if not bucket:
-                assignment = classify_from_fields(
-                    case_type=str(row[5] or "unknown"),
-                    url_path=str(row[1] or ""),
-                    query_params=str(row[2] or "{}"),
-                    body_params=str(row[3] or "{}"),
-                    path_params=str(row[4] or "{}"),
-                )
-                bucket = _bucket_of_cluster_key(str(assignment.get("cluster_key") or ""))
-            tally[bucket] = tally.get(bucket, 0) + 1
-    finally:
-        conn.close()
+    for row in client.get_all_pages("work-items"):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("type") or "") == "host_root":
+            continue
+        status = str(row.get("status") or "")
+        terminal_reason = str(row.get("terminal_reason") or "")
+        if not (
+            (status == "pending" and terminal_reason == "")
+            or status == "processing"
+            or status == "error"
+        ):
+            continue
+        # Prefer the row's stored ``host`` column (lowercased hostname, no port)
+        # over re-parsing the URL.
+        host = str(row.get("host") or "")
+        if not host or not entry_matches_host(entry, host) or host_in_scope(host, deny_entries):
+            continue
+        bucket = _bucket_of_cluster_key(str(row.get("cluster_key") or ""))
+        if not bucket:
+            assignment = classify_from_fields(
+                case_type=str(row.get("type") or "unknown"),
+                url_path=str(row.get("url_path") or ""),
+                query_params=str(row.get("query_params") or "{}"),
+                body_params=str(row.get("body_params") or "{}"),
+                path_params=str(row.get("path_params") or "{}"),
+            )
+            bucket = _bucket_of_cluster_key(str(assignment.get("cluster_key") or ""))
+        tally[bucket] = tally.get(bucket, 0) + 1
     return tally
 
 
@@ -608,7 +598,7 @@ def _build_recommendation(
     *,
     entry: dict[str, Any],
     stage: str,
-    db_path: Path,
+    client: AssessmentClient,
     skills_root: Path | None,
     deny_entries: list[dict[str, Any]] = (),
 ) -> dict[str, Any]:
@@ -617,7 +607,7 @@ def _build_recommendation(
     dropped_skills: list[str] = []
 
     if stage == "consumption":
-        bucket_tally = _pending_buckets_for_host(db_path, entry, deny_entries)
+        bucket_tally = _pending_buckets_for_host(client, entry, deny_entries)
         selection = _consumption_skill_selection(bucket_tally)
         if selection["confidence"] == "high" and _ambiguous_dominant(bucket_tally):
             shortlist: list[str] = []
@@ -741,7 +731,7 @@ def _format_task_skeleton(
 def build_redispatch_block(
     *,
     entries: list[dict[str, Any]],
-    db_path: Path,
+    client: AssessmentClient,
     skills_root: Path | None,
     prior_dispatches: list[dict[str, Any]] | None,
     dedup_degraded: bool,
@@ -758,7 +748,7 @@ def build_redispatch_block(
         if stage is None:
             continue
         rec = _build_recommendation(
-            entry=entry, stage=stage, db_path=db_path, skills_root=skills_root,
+            entry=entry, stage=stage, client=client, skills_root=skills_root,
             deny_entries=deny_entries,
         )
         key = (rec["role"], rec["scope_host"])
@@ -1102,51 +1092,34 @@ def _scope_metadata_lookup_key(entry: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# cases.db work buffer
+# backend work buffer
 # ---------------------------------------------------------------------------
-def _load_work_items_by_host(db_path: Path) -> dict[str, dict[str, int]]:
-    """Return a ``{host: {status: count, ...}}`` rollup from the local DB.
+def _load_work_items_by_host(client: AssessmentClient) -> dict[str, dict[str, int]]:
+    """Return a ``{host: {status: count, ...}}`` rollup from the backend work buffer.
 
     Tracks ``pending_without_terminal_reason`` so the consumption gate can
     distinguish "really pending" from "deferred by classify-work". ``host_root``
-    crawl seeds are excluded from that count. A missing DB yields an empty map.
+    crawl seeds are excluded from that count. An empty buffer yields an empty map.
     """
-    if not db_path.is_file():
-        return {}
-
-    rows: list[tuple[str, str, int]] = []
-    rows_with_reason: list[tuple[str, str, int]] = []
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        cursor = conn.execute(
-            """
-            SELECT url, status, COUNT(*) AS total
-            FROM work_items
-            GROUP BY url, status
-            """
-        )
-        rows = [(str(r[0] or ""), str(r[1] or ""), int(r[2] or 0)) for r in cursor.fetchall()]
-        cursor = conn.execute(
-            """
-            SELECT url, COUNT(*) AS total
-            FROM work_items
-            WHERE status = 'pending' AND (terminal_reason IS NULL OR terminal_reason = '')
-              AND type != 'host_root'
-            GROUP BY url
-            """
-        )
-        rows_with_reason = [(str(r[0] or ""), "pending_without_terminal_reason", int(r[1] or 0)) for r in cursor.fetchall()]
-    finally:
-        conn.close()
-
     agg: dict[str, dict[str, int]] = {}
-    for url, status, count in rows + rows_with_reason:
-        host = _endpoint_host(url)
+    for row in client.get_all_pages("work-items"):
+        if not isinstance(row, dict):
+            continue
+        # Prefer the row's stored ``host`` column over re-parsing the URL.
+        host = str(row.get("host") or "")
         if not host:
             continue
+        status = str(row.get("status") or "")
         bucket = agg.setdefault(host, {})
-        bucket[status] = bucket.get(status, 0) + count
+        bucket[status] = bucket.get(status, 0) + 1
+        if (
+            status == "pending"
+            and str(row.get("terminal_reason") or "") == ""
+            and str(row.get("type") or "") != "host_root"
+        ):
+            bucket["pending_without_terminal_reason"] = (
+                bucket.get("pending_without_terminal_reason", 0) + 1
+            )
     return agg
 
 
@@ -1193,48 +1166,30 @@ def _response_is_live(response_status: Any) -> bool:
     return response_status in _LIVE_RESPONSE_EXTRA
 
 
-def load_route_stats_by_host(db_path: Path) -> dict[str, dict[str, Any]]:
+def load_route_stats_by_host(client: AssessmentClient) -> dict[str, dict[str, Any]]:
     """Return ``{host: {live_routes, total_routes, api_like, auth_like,
-    graphql_like}}`` from the local cases.db work buffer.
+    graphql_like}}`` from the backend work buffer.
 
-    Mirrors :func:`_load_work_items_by_host` (same connection discipline + the
-    shared :func:`_endpoint_host` extractor) but counts DISTINCT ``url_path`` per
-    host instead of status rows, and flags API/auth/GraphQL surfaces for the
-    ledger's real_app OR-inclusion. A missing DB yields an empty map.
+    Mirrors :func:`_load_work_items_by_host` (same stored-``host`` grouping) but
+    counts DISTINCT ``url_path`` per host instead of status rows, and flags
+    API/auth/GraphQL surfaces for the ledger's real_app OR-inclusion. An empty
+    buffer yields an empty map.
     """
-    if not db_path.is_file():
-        return {}
-
-    raw: list[tuple[str, str, str, Any, str]] = []
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        cursor = conn.execute(
-            "SELECT url, url_path, type, response_status, live_status FROM work_items"
-        )
-        raw = [
-            (
-                str(r[0] or ""),
-                str(r[1] or ""),
-                str(r[2] or ""),
-                r[3],
-                str(r[4] or ""),
-            )
-            for r in cursor.fetchall()
-        ]
-    finally:
-        conn.close()
-
     acc: dict[str, dict[str, Any]] = {}
-    for url, url_path, wtype, response_status, live_status in raw:
-        if wtype.lower() == "host_root":
+    for row in client.get_all_pages("work-items"):
+        if not isinstance(row, dict):
             continue
-        path = url_path.strip()
+        if str(row.get("type") or "").lower() == "host_root":
+            continue
+        path = str(row.get("url_path") or "").strip()
         if not path:
             continue
-        host = _endpoint_host(url)
+        # Prefer the row's stored ``host`` column over re-parsing the URL.
+        host = str(row.get("host") or "")
         if not host:
             continue
+        response_status = row.get("response_status")
+        live_status = str(row.get("live_status") or "")
         bucket = acc.setdefault(
             host,
             {
@@ -1773,7 +1728,7 @@ def build_coverage_ledger(
 ) -> dict[str, Any]:
     """Assemble the per-host coverage ledger.
 
-    Joins the local route stats (cases.db) with the backend per-host C40
+    Joins the backend work-buffer route stats with the backend per-host C40
     outcomes and the finding-VERDICT projection, scoped to in-scope hosts
     (out-of-scope carve-outs win). Hosts with at least one signal (routes,
     backend outcome row, verdict, or lane) become ledger rows; in-scope scope

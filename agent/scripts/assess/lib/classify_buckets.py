@@ -1,8 +1,8 @@
 """Shared gf-style bucket classification used by both ingestion and re-runs.
 
 This module is the single source of truth for the priority/cluster assignments
-that `db_insert_work_item()` writes inline at insert time and that
-`vigil assess classify-work` re-applies idempotently. Keeping the logic in one
+that the ingest producers compute inline (into the work_item block the backend
+derives) and that `vigil assess classify-work` re-applies idempotently. Keeping the logic in one
 place ensures the two paths cannot drift — operators forgetting to run
 `classify-work` after an ingest used to leave the work buffer unscored, which
 broke priority-mode dispatch silently.
@@ -1212,9 +1212,9 @@ BUCKET_SKILLS: dict[str, tuple[str, ...]] = vuln_taxonomy.derive_bucket_skills()
 # across the codebase. Every consumer that needs the same set imports
 # `INERT_TYPES` from this module:
 #
-# - `agent/scripts/assess/lib/db.py:db_insert_work_item()` reads it to stamp
-#   `status='skipped'` at insert time so inert rows never enter the dispatch
-#   queue.
+# - the ingest producers (`ingest_endpoints`/`ingest_candidates`/`ingest_spec`,
+#   the proxy addon) read it to set `status='skipped'` in the work_item block
+#   they POST, so inert rows never enter the dispatch queue.
 # - `agent/scripts/assess/lib/classify_buckets.py:classify_row()` (this file)
 #   reads it to stamp `terminal_reason='inert_type'` so `fetch-by-priority`
 #   excludes them with one predicate.
@@ -1254,7 +1254,7 @@ _INERT_TYPES = INERT_TYPES
 # (`_IDOR_WEIGHT`, `_PRIVILEGED_ACTION_WEIGHT`, `_INTERESTINGEXT_WEIGHT`,
 # `_AUTH_KEY_SET`, `_SSO_PATH_FRAGMENTS`) are covered transitively — they cannot
 # change without `_BUCKETS` itself changing — so they are not re-listed.
-# `db_insert_work_item()` stamps it inline at ingest and
+# the ingest producers stamp it inline at ingest and
 # `classify-work` re-stamps it on every re-classification, so a later
 # `classify-work --reclassify-stale` can tell rows scored under an OLD taxonomy
 # from rows already at the current one — restamping only the stale
@@ -2044,12 +2044,11 @@ def classify_from_fields(
     live_status: str | None = None,
     demote_dead_archive: bool = False,
 ) -> dict[str, Any]:
-    """Adapter for ingest paths that don't have a sqlite Row yet.
+    """Adapter for ingest paths that classify from raw fields (no row yet).
 
-    `db_insert_work_item()` calls this immediately after the INSERT so it can
-    write `priority_score` / `priority_reason` / `cluster_key` /
-    `terminal_reason` in the same connection without round-tripping through
-    a SELECT. Returns the same shape as `classify_row()`.
+    The ingest producers call this while building the work_item block they POST
+    so the backend-derived row carries `priority_score` / `priority_reason` /
+    `cluster_key` / `terminal_reason`. Returns the same shape as `classify_row()`.
 
     `url`/`source`/`live_status` are the optional boost-only context inputs
     (Fix 1). They default to None so the legacy 5-keyword call convention (and

@@ -25,7 +25,7 @@ A multi-corpus label study (~8,000 templates across cms-gov + xfinity + zendesk,
 
 The cumulative cms-gov lower bound after three additional deep sweeps reached **1,711 actionable / 723 high-missed** templates — the original sample materially *undercounted* the gap. Two precision problems compounded the recall problem: the `_PATH_OBJECT_REF_SEGMENT` IDOR regex was diluted by `/2024/` year and `/page/2` pagination matches (and was blind to pre-normalized `{id}` templates), and the `ssrf` bucket's `next`/`redirect`/`callback` param keys mis-classified open-redirect surfaces as SSRF at weight 45.
 
-A third corpus — **Zendesk** (a live modern SaaS, used qualitatively because its `cases.db` is malformed) — independently corroborated the two highest-value classes: of 1,540 proxy-captured rows, **1,023 are `api`-typed** and **392 are `graphql`-typed**, confirming that `api` and `graphql` are dominant surface shapes in production API-first architectures rather than niche classes (see §4b cross-corpus validation, now recorded in the research `README.md`).
+A third corpus — **Zendesk** (a live modern SaaS, used qualitatively because its `cases.db` is malformed — `cases.db` has since been folded into the backend `assessment_work_items` ledger, see `docs/adr/0013-work-buffer-folded-into-backend-ledger.md`) — independently corroborated the two highest-value classes: of 1,540 proxy-captured rows, **1,023 are `api`-typed** and **392 are `graphql`-typed**, confirming that `api` and `graphql` are dominant surface shapes in production API-first architectures rather than niche classes (see §4b cross-corpus validation, now recorded in the research `README.md`).
 
 ## Decision
 

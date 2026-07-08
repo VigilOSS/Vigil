@@ -84,7 +84,7 @@ Before your dispatch returns, run in this order:
 
 1. `vigil assess record-finding fuzzer <finding-json>` for each confirmed finding
 2. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for any new surface fuzzing uncovered (newly-evidenced parameter, hidden directory, etc.)
-3. `vigil assess ingest-endpoints "$DIR/cases.db" fuzzer` for newly discovered paths
+3. `vigil assess ingest-endpoints fuzzer` for newly discovered paths
 4. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at the raw fuzzer hit log under `$DIR/scans/fuzzer/`), and role-specific extras (`payloads_tried`, `hits`, `hit_ratio`)
 5. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 

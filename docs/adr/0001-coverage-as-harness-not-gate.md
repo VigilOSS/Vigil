@@ -50,7 +50,7 @@ The existing coverage gates measure **breadth** and **resolution**, never **dept
   — which `classify-work` can set by *deferring*, not testing.
 - `per_host_coverage` (the one depth-ish projection) is recon-flavored (did fingerprinting happen) and WARN-only.
 
-There are **four disjoint vuln taxonomies** (gf-buckets in cases.db only; a hardcoded `BUCKET_SKILLS` mapping
+There are **four disjoint vuln taxonomies** (gf-buckets, at the time only in the local per-engagement `cases.db` — since folded into the backend `assessment_work_items` ledger, see `docs/adr/0013-work-buffer-folded-into-backend-ledger.md`; a hardcoded `BUCKET_SKILLS` mapping
 11/15 buckets; 8 `surface_type`s; free-text `attack_family`), and **24 of 35 offensive testing skills have no
 gf-bucket at all** — so a gate keyed on gf-buckets is blind to ~68% of capability, including the access-control,
 auth, and business-logic classes where the highest bounties live. The richer primitives that *could* measure

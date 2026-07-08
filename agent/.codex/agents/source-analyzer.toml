@@ -57,7 +57,7 @@ Before starting any target-facing work, verify:
 - [ ] You loaded the source-analysis skill (`agent/skills/source-analysis/SKILL.md`)
 - [ ] You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
 - [ ] You have the dispatch context (target URL, phase, task objective, prior findings)
-- [ ] You know the backend write paths for what you discover: requestable endpoints go through `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis`, durable surface candidates go through `vigil assess record-surface ...`, and confirmed findings go through `vigil assess record-finding ...`
+- [ ] You know the backend write paths for what you discover: requestable endpoints go through `vigil assess ingest-endpoints source-analysis`, durable surface candidates go through `vigil assess record-surface ...`, and confirmed findings go through `vigil assess record-finding ...`
 - [ ] You checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies. If it does, load it and hand off or run an audited browser-semantic pass rather than declaring the route set complete.
 
 If any item is unchecked, STOP and load it now. Working without the skill and its references means working without methodology — your source analysis quality will be significantly lower.
@@ -176,7 +176,7 @@ Before your dispatch returns, run in this order:
 1. `vigil assess record-finding source-analyzer <finding-json>` for each finding (already required)
 2. `vigil assess record-intel <type> <intel-json>` for each intel row (tech-component for fingerprints, note for prose, etc.)
 3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate
-4. `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis` for newly extracted requestable endpoints
+4. `vigil assess ingest-endpoints source-analysis` for newly extracted requestable endpoints
 5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `routes_extracted`, `secrets_found`, `app_version`)
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 

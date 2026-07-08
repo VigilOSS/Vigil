@@ -10,9 +10,9 @@ from urllib.parse import urljoin, urlparse
 from assess.lib.auth import auth_active_context
 from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE, post_request_observations_bulk
 from assess.lib.classify import classify_type
+from assess.lib.classify_buckets import CLASSIFIER_VERSION, INERT_TYPES, classify_from_fields
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.db import db_init, db_insert_work_item
 from assess.lib.params import extract_url_path, generate_params_sig
 from assess.lib.scope import host_admitted, ingest_scope_filter
 
@@ -21,7 +21,6 @@ _HTTP_METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "tr
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("ingest-spec", help="Ingest OpenAPI/Swagger spec into assessment state")
-    p.add_argument("db_path", help="Path to cases.db")
     p.add_argument("spec_file", help="Path to local spec file (no URLs)")
     p.set_defaults(func=run)
 
@@ -269,7 +268,6 @@ def _resolve_base_url(spec: dict, spec_version: str, engagement_dir: str) -> str
 
 
 def run(args) -> None:
-    db_path = args.db_path
     spec_file = args.spec_file
 
     if spec_file.startswith("http"):
@@ -277,14 +275,9 @@ def run(args) -> None:
         print("Fetch the spec through `vigil assess kali exec curl ...` first, save it locally, then rerun.", file=sys.stderr)
         sys.exit(1)
 
-    if not Path(db_path).is_file():
-        print(f"ERROR: database not found: {db_path}", file=sys.stderr)
-        sys.exit(1)
     if not Path(spec_file).is_file():
         print(f"ERROR: spec file not found: {spec_file}", file=sys.stderr)
         sys.exit(1)
-
-    db_init(db_path)
 
     cfg = load_config(args.engagement_dir)
     eng_dir = cfg.engagement_dir
@@ -356,49 +349,10 @@ def run(args) -> None:
         pending_observations: list[dict] = []
 
         def _record_response(row: dict, response: dict) -> bool:
-            nonlocal count, skipped
-            request_variant_id = None
-            service_id = None
-            try:
-                request_variant_id = response.get("request_variant", {}).get("id")
-            except (AttributeError, TypeError):
-                pass
-            try:
-                service_id = response.get("service", {}).get("id")
-            except (AttributeError, TypeError):
-                pass
-
-            if not request_variant_id and not service_id:
-                skipped += 1
-                _warn(
-                    f"backend response missing request_variant.id/service.id for "
-                    f"{row['url']}; skipping this operation"
-                )
-                return False
-
-            queue_key = ""
-            if request_variant_id:
-                queue_key = f"variant:{request_variant_id}:{row['case_type']}"
-            elif service_id:
-                queue_key = f"service:{service_id}:{row['case_type']}"
-
-            db_insert_work_item(
-                db_path,
-                queue_key=queue_key,
-                method=row["method"],
-                url=row["url"],
-                url_path=row["url_path"],
-                query_params=json.dumps(row["query_params"]),
-                body_params=json.dumps(row["body_params"]),
-                path_params=json.dumps(row["path_params"]),
-                cookie_params=json.dumps(row["cookie_params"]),
-                case_type=row["case_type"],
-                source="api-spec",
-                params_key_sig=row["params_sig"],
-                request_variant_id=int(request_variant_id) if request_variant_id else None,
-                service_id=int(service_id) if service_id else None,
-                auth_context=auth_context,
-            )
+            # The work item is derived server-side from the observation's
+            # work_item block (ADR 0013); a non-error response means the
+            # variant/coverage/work-item were created in one transaction.
+            nonlocal count
             count += 1
             return True
 
@@ -505,6 +459,23 @@ def run(args) -> None:
                 params_sig = generate_params_sig(query_params, body_params)
                 evidence_ref = str(operation.get("evidence_ref") or "")
 
+                qp_text = json.dumps(query_params)
+                bp_text = json.dumps(body_params)
+                pp_text = json.dumps(path_params)
+                cp_text = json.dumps(cookie_params)
+                try:
+                    assignment = classify_from_fields(
+                        case_type=case_type,
+                        url_path=url_path,
+                        query_params=qp_text,
+                        body_params=bp_text,
+                        path_params=pp_text,
+                        url=url_with_query,
+                        source="api-spec",
+                    )
+                except Exception:  # noqa: BLE001 — classification must never abort ingest
+                    assignment = {"priority_score": 0, "priority_reason": None, "cluster_key": None, "terminal_reason": None}
+
                 parsed = urlparse(url_with_query)
                 observation = {
                     "url": url_with_query,
@@ -530,6 +501,22 @@ def run(args) -> None:
                     "banner": "",
                     "coverage_candidates": [],
                     "auto_generate_coverage": True,
+                    "work_item": {
+                        "case_type": case_type,
+                        "source": "api-spec",
+                        "status": "skipped" if case_type in INERT_TYPES else "pending",
+                        "url_path": url_path,
+                        "query_params": qp_text,
+                        "body_params": bp_text,
+                        "path_params": pp_text,
+                        "cookie_params": cp_text,
+                        "params_key_sig": params_sig,
+                        "priority_score": assignment["priority_score"],
+                        "priority_reason": assignment["priority_reason"] or "",
+                        "cluster_key": assignment["cluster_key"] or "",
+                        "terminal_reason": assignment["terminal_reason"] or "",
+                        "classifier_version": CLASSIFIER_VERSION,
+                    },
                 }
 
                 pending_rows.append(

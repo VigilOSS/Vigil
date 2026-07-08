@@ -421,6 +421,7 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "assessment_request_variants",
     "assessment_request_observations",
     "assessment_coverage_items",
+    "assessment_work_items",
     "assessment_probe_runs",
     "assessment_surfaces",
     "assessment_findings",
@@ -3106,6 +3107,93 @@ def _run_data_migrations(connection: sqlite3.Connection) -> None:
 
 
 
+def _create_assessment_work_items_table(connection: sqlite3.Connection) -> None:
+    """Engagement-scoped work buffer — the transient queue of captured/ingested
+    HTTP requests awaiting triage and probing. Folds the former per-engagement
+    ``cases.db`` ``work_items`` table into the backend ledger (ADR 0013).
+
+    Keeps a denormalized request/response snapshot (refreshed on every re-ingest
+    by the service-layer UPSERT) so the dispatcher ``fetch`` returns a flat,
+    replayable row without a join, while carrying REAL foreign keys to the
+    request-variant / service / coverage-item so referential integrity is
+    enforced. ``UNIQUE(engagement_id, queue_key)`` is the idempotent-upsert key.
+    """
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_work_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL,
+            queue_key TEXT NOT NULL,
+            request_variant_id INTEGER,
+            service_id INTEGER,
+            coverage_item_id INTEGER,
+            auth_context TEXT NOT NULL DEFAULT 'anonymous',
+            method TEXT NOT NULL DEFAULT 'GET',
+            url TEXT NOT NULL,
+            url_path TEXT NOT NULL DEFAULT '',
+            host TEXT NOT NULL DEFAULT '',
+            query_params TEXT NOT NULL DEFAULT '{}',
+            body_params TEXT NOT NULL DEFAULT '{}',
+            path_params TEXT NOT NULL DEFAULT '{}',
+            cookie_params TEXT NOT NULL DEFAULT '{}',
+            headers TEXT NOT NULL DEFAULT '',
+            body TEXT,
+            content_type TEXT NOT NULL DEFAULT '',
+            content_length INTEGER NOT NULL DEFAULT 0,
+            request_body_truncated INTEGER NOT NULL DEFAULT 0,
+            response_status INTEGER NOT NULL DEFAULT 0,
+            response_headers TEXT NOT NULL DEFAULT '',
+            response_size INTEGER NOT NULL DEFAULT 0,
+            response_snippet TEXT,
+            response_truncated INTEGER NOT NULL DEFAULT 0,
+            type TEXT NOT NULL DEFAULT 'unknown',
+            source TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            assigned_agent TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            consumed_at TEXT,
+            params_key_sig TEXT NOT NULL DEFAULT '',
+            priority_score INTEGER NOT NULL DEFAULT 0,
+            priority_reason TEXT,
+            cluster_key TEXT,
+            terminal_reason TEXT,
+            classifier_version TEXT,
+            signals TEXT,
+            selected_by TEXT,
+            triage_rationale TEXT,
+            live_status TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(engagement_id, queue_key),
+            FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+            FOREIGN KEY(request_variant_id) REFERENCES assessment_request_variants(id) ON DELETE CASCADE,
+            FOREIGN KEY(service_id) REFERENCES assessment_services(id) ON DELETE SET NULL,
+            FOREIGN KEY(coverage_item_id) REFERENCES assessment_coverage_items(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_work_items_priority "
+        "ON assessment_work_items(engagement_id, status, priority_score DESC, cluster_key, id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_work_items_status_type "
+        "ON assessment_work_items(engagement_id, status, type)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_work_items_host "
+        "ON assessment_work_items(engagement_id, host, status)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_work_items_consumed "
+        "ON assessment_work_items(engagement_id, status, consumed_at)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_work_items_source "
+        "ON assessment_work_items(engagement_id, source)"
+    )
+
+
 def init_db() -> None:
     global _connection_generation, _startup_database_fingerprint
 
@@ -3123,6 +3211,7 @@ def init_db() -> None:
         _create_core_tables(connection)
         _create_credentials_table(connection)
         _create_assessment_entity_tables(connection)
+        _create_assessment_work_items_table(connection)
         _create_assessment_finding_tables(connection)
         _create_command_runs_table_and_fts(connection)
         _create_artifacts_table_and_fts(connection)

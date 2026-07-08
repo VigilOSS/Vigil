@@ -37,9 +37,10 @@ from assess.lib.arjun_enrich import (
     slot_for_method,
 )
 from assess.lib.auth import auth_active_context
-from assess.lib.classify_buckets import classify_from_fields
+from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE
+from assess.lib.classify_buckets import CLASSIFIER_VERSION, classify_from_fields
+from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
-from assess.lib.db import db_init, db_insert_work_item
 from assess.lib.params import extract_url_path, generate_params_sig
 
 
@@ -48,7 +49,6 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "ingest-arjun",
         help="Fold Arjun hidden-parameter discovery JSON into the work buffer (idempotent).",
     )
-    p.add_argument("db_path", help="Path to cases.db")
     p.add_argument("json_file", help="Arjun -oJ JSON output file")
     p.add_argument(
         "--source",
@@ -73,50 +73,52 @@ def _host_of(url: str) -> str:
         return ""
 
 
-def _match_existing_row(conn, *, method: str, url_path: str, url: str) -> dict | None:
-    """Find the work-buffer row this endpoint enriches.
+def _match_existing_row(rows: list[dict], *, method: str, url_path: str, url: str) -> dict | None:
+    """Find the work-buffer row this endpoint enriches (Python match over the
+    backend-fetched rows).
 
     Match precedence (most to least specific):
       1. exact method + full URL (host + path) — endpoints that SHARE a path
-         across hosts (e.g. `/portal/.../applications` on aps. vs elmo.) MUST NOT
-         collapse onto one row, so the host-bearing full URL is tried first.
-         Method is part of this match because the SAME url can exist as both a
-         GET and a POST work item (no UNIQUE(url) constraint; their queue_keys
-         differ by method), and a POST/JSON Arjun run must enrich the POST row's
-         body surface — not the lowest-id GET row, whose query surface is wrong.
+         across hosts MUST NOT collapse onto one row, so the host-bearing full
+         URL is tried first. Method is part of this match because the SAME url
+         can exist as both a GET and a POST work item.
       2. method + url_path, constrained to the SAME host.
       3. url_path alone, constrained to the SAME host.
 
-    Host equality on the fallbacks is checked in Python on the parsed hostname,
-    not via a `LIKE '%host%'` substring (which would let an apex endpoint match a
-    subdomain row — `cms.gov` vs `app.cms.gov` — or a substring host —
-    `cms.gov` vs `evilcms.gov` — i.e. a different origin). `url_path` is selective
-    enough that the candidate set per fallback is tiny. Returns the row dict, or
-    None (the caller then creates a candidate).
+    Host equality on the fallbacks is checked on the parsed hostname (not a
+    substring), so an apex endpoint never matches a subdomain / substring host.
+    Rows are pre-sorted by id (ascending) so ``ORDER BY id`` ties resolve
+    identically to the former SQL. Returns the row dict, or None.
     """
     target_host = _host_of(url)
 
-    exact = conn.execute(
-        "SELECT * FROM work_items WHERE method = ? AND url = ? ORDER BY id LIMIT 1",
-        (method, url),
-    ).fetchone()
-    if exact is not None:
-        return dict(exact)
+    for row in rows:
+        if row.get("method") == method and row.get("url") == url:
+            return row
 
-    for sql, params in (
-        ("SELECT * FROM work_items WHERE method = ? AND url_path = ? ORDER BY id", (method, url_path)),
-        ("SELECT * FROM work_items WHERE url_path = ? ORDER BY id", (url_path,)),
-    ):
-        for row in conn.execute(sql, params).fetchall():
-            if _host_of(row["url"]) == target_host:
-                return dict(row)
+    for row in rows:
+        if row.get("method") == method and row.get("url_path") == url_path \
+                and _host_of(row.get("url") or "") == target_host:
+            return row
+
+    for row in rows:
+        if row.get("url_path") == url_path and _host_of(row.get("url") or "") == target_host:
+            return row
     return None
 
 
-def _enrich_existing(conn, row: dict, record: dict) -> dict:
-    """Update an existing row in place with the discovered params + re-classify.
+def _enrich_existing(row: dict, record: dict) -> tuple[dict, dict]:
+    """Compute the enriched work item for an existing row + re-classify.
 
-    Returns a small summary dict for the run report.
+    Returns ``(summary, bulk_item)`` — the summary for the run report and the
+    ``work-items/bulk`` upsert payload (keyed on the row's ``queue_key``) that
+    the backend UPSERTs. The snapshot/identity/FK fields are carried through so
+    the UPSERT's always-refresh of those columns preserves them.
+
+    NOTE (behavioral narrowing vs the former local UPDATE): the local path reset
+    a non-skipped row to ``status='pending'`` on enrich; the backend UPSERT keeps
+    the existing lifecycle status (it only re-admits out-of-scope skips). In
+    practice enrichment targets pending rows, so this is a no-op there.
     """
     method = record["method"]
     params = record["params"]
@@ -194,37 +196,46 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
         final_reason = row.get("priority_reason")
     final_selected_by = row.get("selected_by") or "arjun"
 
-    conn.execute(
-        """
-        UPDATE work_items
-        SET query_params = ?,
-            body_params = ?,
-            params_key_sig = ?,
-            priority_score = ?,
-            priority_reason = ?,
-            cluster_key = ?,
-            terminal_reason = COALESCE(?, terminal_reason),
-            signals = ?,
-            selected_by = ?,
-            triage_rationale = ?,
-            status = CASE WHEN status = 'skipped' THEN status ELSE 'pending' END
-        WHERE id = ?
-        """,
-        (
-            new_query,
-            new_body,
-            params_sig,
-            final_priority,
-            final_reason,
-            final_cluster,
-            assignment["terminal_reason"],
-            json.dumps(merged_signals, sort_keys=True),
-            final_selected_by,
-            rationale,
-            row["id"],
-        ),
-    )
-    return {
+    item = {
+        "queue_key": row["queue_key"],
+        "request_variant_id": row.get("request_variant_id"),
+        "service_id": row.get("service_id"),
+        "coverage_item_id": row.get("coverage_item_id"),
+        "auth_context": row.get("auth_context") or "anonymous",
+        "method": row.get("method") or method,
+        "url": row.get("url"),
+        "url_path": row.get("url_path") or "",
+        "host": row.get("host") or "",
+        "query_params": new_query,
+        "body_params": new_body,
+        "path_params": row.get("path_params") or "{}",
+        "cookie_params": row.get("cookie_params") or "{}",
+        # Carry the ENTIRE existing snapshot forward so the UPSERT's
+        # always-refresh of these columns preserves them (omitting any would
+        # reset it to the model default on re-ingest — silent data loss).
+        "headers": row.get("headers") or "",
+        "body": row.get("body"),
+        "content_type": row.get("content_type") or "",
+        "content_length": row.get("content_length") or 0,
+        "request_body_truncated": row.get("request_body_truncated"),
+        "response_status": row.get("response_status") or 0,
+        "response_headers": row.get("response_headers") or "",
+        "response_size": row.get("response_size") or 0,
+        "response_snippet": row.get("response_snippet"),
+        "response_truncated": row.get("response_truncated"),
+        "type": case_type,
+        "source": row.get("source") or "",
+        "params_key_sig": params_sig,
+        "priority_score": final_priority,
+        "priority_reason": final_reason,
+        "cluster_key": final_cluster,
+        "terminal_reason": assignment["terminal_reason"] or row.get("terminal_reason"),
+        "classifier_version": row.get("classifier_version") or CLASSIFIER_VERSION,
+        "signals": json.dumps(merged_signals, sort_keys=True),
+        "selected_by": final_selected_by,
+        "triage_rationale": rationale,
+    }
+    summary = {
         "endpoint": record["endpoint"],
         "action": "enriched",
         "row_id": int(row["id"]),
@@ -234,14 +245,14 @@ def _enrich_existing(conn, row: dict, record: dict) -> dict:
         "priority_score": final_priority,
         "malformed_param_field": malformed_field,
     }
+    return summary, item
 
 
-def _create_candidate(db_path: str, *, conn, record: dict, source: str, auth_context: str) -> dict:
-    """Create a new candidate row for an Arjun endpoint not yet in the buffer.
+def _create_candidate(record: dict, *, source: str, auth_context: str) -> tuple[dict, dict]:
+    """Build a new candidate work item for an Arjun endpoint not yet buffered.
 
-    Routes through the same db_insert_work_item seam ingest-candidates uses, so
-    classification + dedup + the curated-metadata path stay identical. Reuses
-    the OPEN connection so the whole ingest is one transaction.
+    Classifies client-side (the classifier stays out of the backend) and returns
+    ``(summary, bulk_item)`` for the ``work-items/bulk`` UPSERT.
     """
     method = record["method"]
     params = record["params"]
@@ -261,53 +272,58 @@ def _create_candidate(db_path: str, *, conn, record: dict, source: str, auth_con
         url_path=url_path,
         header_params=header_params,
     )
-    # Include the full host-bearing URL (not the host-stripped url_path) so the
-    # same method/path/params on two in-scope hosts don't collapse to one row
-    # under the UNIQUE(queue_key) dedup in db_insert_work_item.
-    queue_key = f"arjun:{method}:{endpoint}:{params_sig}"
+    try:
+        assignment = classify_from_fields(
+            case_type="unknown",
+            url_path=url_path,
+            query_params=query_params,
+            body_params=body_params,
+            path_params="{}",
+            url=endpoint,
+            source=source,
+        )
+    except Exception:  # noqa: BLE001 — classification must never abort ingest
+        assignment = {"priority_score": 0, "priority_reason": None, "cluster_key": None, "terminal_reason": None}
 
-    db_insert_work_item(
-        db_path,
-        queue_key=queue_key,
-        method=method,
-        url=endpoint,
-        url_path=url_path,
-        query_params=query_params,
-        body_params=body_params,
-        case_type="unknown",
-        source=source,
-        params_key_sig=params_sig,
-        auth_context=auth_context,
-        signals=json.dumps(signals, sort_keys=True),
-        selected_by="arjun",
-        triage_rationale=rationale,
-        curated=True,
-        connection=conn,
-    )
-    return {
+    # Include the full host-bearing URL (not the host-stripped url_path) so the
+    # same method/path/params on two in-scope hosts don't collapse to one row.
+    queue_key = f"arjun:{method}:{endpoint}:{params_sig}"
+    item = {
+        "queue_key": queue_key,
+        "method": method,
+        "url": endpoint,
+        "url_path": url_path,
+        "host": _host_of(endpoint),
+        "query_params": query_params,
+        "body_params": body_params,
+        "type": "unknown",
+        "source": source,
+        "status": "pending",
+        "params_key_sig": params_sig,
+        "auth_context": auth_context,
+        "priority_score": assignment["priority_score"],
+        "priority_reason": assignment["priority_reason"] or "",
+        "cluster_key": assignment["cluster_key"] or "",
+        "terminal_reason": assignment["terminal_reason"] or "",
+        "classifier_version": CLASSIFIER_VERSION,
+        "signals": json.dumps(signals, sort_keys=True),
+        "selected_by": "arjun",
+        "triage_rationale": rationale,
+    }
+    summary = {
         "endpoint": endpoint,
         "action": "created",
         "slot": slot,
         "params": params,
     }
+    return summary, item
 
 
 def run(args: argparse.Namespace) -> None:
-    # Anchor a relative cases.db to the engagement dir (not the process cwd) so a
-    # subagent whose cwd drifted between bash calls can't mutate an unrelated cwd
-    # database — every row write below must target the engagement's DB.
-    db_path = anchor_engagement_relative(args.db_path, getattr(args, "engagement_dir", None))
-    if db_path != args.db_path:
-        print(
-            f"ingest-arjun: anchored relative db path '{args.db_path}' -> '{db_path}'",
-            file=sys.stderr,
-        )
-    # Anchor the Arjun artifact the SAME way as the DB. A relative `--json-file`
+    # Anchor the Arjun artifact to the engagement dir. A relative `json_file`
     # (e.g. `scans/arjun/foo.json`) resolved against a drifted subagent cwd would
     # miss the real file, and the missing-file branch below reports a CLEAN
     # zero-parameter no-op — silently dropping genuine `kali arjun` discoveries.
-    # Anchoring to the engagement keeps the no-op meaning "arjun wrote nothing"
-    # (its real empty-output behavior) instead of "I looked in the wrong dir".
     json_file = anchor_engagement_relative(args.json_file, getattr(args, "engagement_dir", None))
     if json_file != args.json_file:
         print(
@@ -315,9 +331,6 @@ def run(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
 
-    if not Path(db_path).is_file():
-        print(f"ERROR: database not found: {db_path}", file=sys.stderr)
-        sys.exit(1)
     if not Path(json_file).is_file():
         # Arjun writes NO -oJ file when it discovers 0 parameters (the common
         # case, confirmed against v2.2.7), so a missing file means "nothing to
@@ -327,7 +340,6 @@ def run(args: argparse.Namespace) -> None:
                 {
                     "verb": "ingest-arjun",
                     "json_file": json_file,
-                    "db_path": db_path,
                     "records": 0,
                     "enriched": 0,
                     "created": 0,
@@ -343,8 +355,6 @@ def run(args: argparse.Namespace) -> None:
             )
         )
         return
-
-    db_init(db_path)
 
     cfg = load_config(args.engagement_dir)
     auth_context = auth_active_context(cfg.engagement_dir)
@@ -371,14 +381,15 @@ def run(args: argparse.Namespace) -> None:
     created = 0
     skipped_empty = 0
 
-    from assess.lib.db import db_connect
+    # Idempotent: matching + UPSERT via work-items/bulk mean a second pass over
+    # the same JSON re-derives the same rows and changes nothing. Fetch the
+    # buffer once for matching, then bulk-upsert all enriched/created items.
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        existing_rows = client.get_all_pages("work-items")
+        # Pre-sort by id so `ORDER BY id` ties resolve identically to the former SQL.
+        existing_rows = sorted(existing_rows, key=lambda r: int(r.get("id") or 0))
+        pending_items: list[dict] = []
 
-    # One shared connection for the whole ingest. The enrich-in-place UPDATEs
-    # are committed explicitly here; db_insert_work_item (candidate path) manages
-    # its own commit on this same connection. There is no cross-record rollback
-    # because each write is independently idempotent (merge params + recompute
-    # the same classification), so a partial run is safe to re-run.
-    with db_connect(db_path) as conn:
         for record in records:
             if not record["params"] and not record.get("header_params"):
                 skipped_empty += 1
@@ -395,28 +406,29 @@ def run(args: argparse.Namespace) -> None:
                 continue
             url_path = extract_url_path(endpoint)
             row = _match_existing_row(
-                conn, method=record["method"], url_path=url_path, url=endpoint
+                existing_rows, method=record["method"], url_path=url_path, url=endpoint
             )
             if row is not None:
-                results.append(_enrich_existing(conn, row, record))
-                conn.commit()
+                summary_row, item = _enrich_existing(row, record)
+                results.append(summary_row)
+                pending_items.append(item)
                 enriched += 1
             else:
-                results.append(
-                    _create_candidate(
-                        db_path,
-                        conn=conn,
-                        record=record,
-                        source=args.source,
-                        auth_context=auth_context,
-                    )
+                summary_row, item = _create_candidate(
+                    record, source=args.source, auth_context=auth_context
                 )
+                results.append(summary_row)
+                pending_items.append(item)
                 created += 1
+
+        for start in range(0, len(pending_items), DEFAULT_BULK_WRITE_SIZE):
+            chunk = pending_items[start:start + DEFAULT_BULK_WRITE_SIZE]
+            if chunk:
+                client.post("work-items/bulk", {"items": chunk})
 
     summary = {
         "verb": "ingest-arjun",
         "json_file": json_file,
-        "db_path": db_path,
         "records": len(records),
         "enriched": enriched,
         "created": created,

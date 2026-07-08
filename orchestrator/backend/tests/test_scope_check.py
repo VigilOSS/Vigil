@@ -503,30 +503,17 @@ def _ingest_setup(
 ):
     """Common setup for ingest-endpoints `run` invocations.
 
-    Writes scope.json (when ``scope_payload`` is not None), an empty
-    cases.db with the canonical schema, and an input file with the URLs the
-    caller wants to feed in. Returns ``(module, args, fake_client)`` for the
-    caller to invoke.
+    Writes scope.json (when ``scope_payload`` is not None) and an input file with
+    the URLs the caller wants to feed in. ingest-endpoints no longer opens a
+    local cases.db — every admitted URL is POSTed as a request-observation and
+    every out-of-scope URL is recorded directly via ``work-items/bulk`` (both
+    captured by the fake client), so no on-disk DB is built here. Returns
+    ``(module, args, fake_client)`` for the caller to invoke.
     """
     if scope_payload is not None:
         (engagement_dir / "scope.json").write_text(
             json.dumps(scope_payload), encoding="utf-8"
         )
-    db_path = engagement_dir / "cases.db"
-    db_path.touch()
-
-    # Initialize cases.db schema via the shared db module.
-    scripts_root = _scripts_root()
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
-    db_spec = importlib.util.spec_from_file_location(
-        "test_ingest_db_module",
-        scripts_root / "assess" / "lib" / "db.py",
-    )
-    assert db_spec is not None and db_spec.loader is not None
-    db_module = importlib.util.module_from_spec(db_spec)
-    db_spec.loader.exec_module(db_module)
-    db_module.db_init(str(db_path))
 
     input_file = engagement_dir / "input.txt"
     input_file.write_text("\n".join(input_lines) + "\n", encoding="utf-8")
@@ -547,7 +534,6 @@ def _ingest_setup(
 
     args = SimpleNamespace(
         engagement_dir=str(engagement_dir),
-        db_path=str(db_path),
         source="test",
         input_file=str(input_file),
         egress_blocked_hosts=None,
@@ -589,16 +575,15 @@ def test_ingest_admits_apex_under_wildcard_scope(
     assert "https://example.test/login" in posted_urls
     assert "https://corp.example.test/api" in posted_urls
 
-    import sqlite3
-
-    conn = sqlite3.connect(str(eng / "cases.db"))
-    try:
-        rejected = conn.execute(
-            "SELECT COUNT(*) FROM work_items WHERE status='rejected'"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert rejected == 0
+    # Nothing was recorded out-of-scope: the wildcard admits the apex, so no URL
+    # is diverted to the direct `work-items/bulk` skipped path. This is the
+    # new-backend analog of the old `SELECT COUNT(*) ... status='rejected'` being
+    # zero (there is no `rejected` status in the assessment_work_items enum;
+    # out-of-scope URLs post as skipped rows via `work-items/bulk`).
+    skipped_posts = [
+        payload for endpoint, payload in fake.posts if endpoint == "work-items/bulk"
+    ]
+    assert skipped_posts == []
 
 
 def test_ingest_runs_without_scope_json(monkeypatch, tmp_path: Path, capsys) -> None:

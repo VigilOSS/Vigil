@@ -56,7 +56,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -446,13 +445,14 @@ def _run_scope_gate(
         sys.exit(1)
     decided_hosts = cc._vendor_saas_decided_hosts(client)
 
-    db_path = Path(cfg.engagement_dir) / "cases.db"
-    buffer_present = db_path.is_file()
     try:
-        work_by_host = cc._load_work_items_by_host(db_path)
-    except sqlite3.Error as exc:
+        work_by_host = cc._load_work_items_by_host(client)
+    except AssessError as exc:
         print(f"check-phase-readiness: unable to read work buffer: {exc}", file=sys.stderr)
         sys.exit(1)
+    # The backend work buffer is the single store; "buffer present" now means the
+    # buffer has any rows rather than a local cases.db existing on disk.
+    buffer_present = bool(work_by_host)
 
     report = cc.build_scope_coverage_report(
         engagement_key=cfg.engagement_key,
@@ -539,11 +539,10 @@ def _run_redispatch(
             ],
         }
     prior_dispatches, dedup_degraded = cc.fetch_prior_dispatches(client)
-    db_path = Path(cfg.engagement_dir) / "cases.db"
     skills_root = cc._agent_skills_root_for_recommendations()
     return cc.build_redispatch_block(
         entries=scope_report["entries"],
-        db_path=db_path,
+        client=client,
         skills_root=skills_root,
         prior_dispatches=prior_dispatches,
         dedup_degraded=dedup_degraded,

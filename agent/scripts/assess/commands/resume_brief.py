@@ -6,6 +6,7 @@ from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.finding_render import blocked_reason_summary
 
 _COVERING_STATUSES = {"tested", "signal"}
 
@@ -391,11 +392,19 @@ def _select_findings(rows: list) -> list:
 
 
 def _finding_line(row: dict) -> str:
-    return (
+    line = (
         f"{row.get('slug')} {row.get('severity')} "
         f"{row.get('workflow_status')}/{row.get('verification_state')} "
         f"{_trim(row.get('title') or '', 100)}"
     )
+    # A blocked-for-provisioning finding (verification_disposition='blocked')
+    # shows only workflow_status/verification_state above — usually active/verified
+    # — so nothing here says it is blocked or why. Append the reason so a resume
+    # reads it without opening the finding. No-op for non-blocked findings.
+    blocked = blocked_reason_summary(row)
+    if blocked:
+        line += f" — {_trim(blocked, 160)}"
+    return line
 
 
 def _trim(value: str, limit: int) -> str:

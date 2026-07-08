@@ -184,7 +184,7 @@ vigil assess kali dnsx \
 
 Tradeoff for one-call collapse: `dnsx` is on the runtime container's `$PATH`, so a single `kali exec ... -- bash -c '... dnsx ...'` heredoc would also run, but the audit row would be stamped against `bash` rather than `dnsx`, and downstream coverage queries (`list-command-runs --tool-bin dnsx`) would miss the run. Use the two-call form unless audit fidelity is explicitly out of scope.
 
-`san_live.txt` is the input to `vigil assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" subdomain-enum` — every confirmed live SAN-discovered name becomes a Phase 2 collection target.
+`san_live.txt` is the input to `vigil assess ingest-endpoints subdomain-enum` — every confirmed live SAN-discovered name becomes a Phase 2 collection target.
 
 ## What to record
 
