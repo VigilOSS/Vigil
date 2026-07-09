@@ -1406,8 +1406,10 @@ def list_attempts(
 
         # SQL applies the exact-match column filters (fixed allowlist, every value
         # bound). The surface filter cannot be a WHERE clause (path containment is
-        # segment-wise), so it is applied in Python; pagination is therefore sliced
-        # after filtering so ``count`` and the window stay consistent.
+        # segment-wise), so when it is active the window is sliced in Python after
+        # filtering (so ``count`` and the window stay consistent). When it is NOT
+        # active there is no post-fetch filter, so bound the window in SQL (like
+        # ``list_probe_runs``) instead of loading every matching probe row.
         clauses = ["probe.engagement_id = ?"]
         params: list[Any] = [engagement.id]
         if finding_id_filter is not None:
@@ -1423,9 +1425,7 @@ def list_attempts(
                 clauses.append(f"{column} = ?")
                 params.append(value)
 
-        rows = _fetch_all(
-            connection,
-            f"""
+        sql = f"""
             SELECT
                 probe.id, probe.target_host, probe.target_path, probe.target_port,
                 probe.auth_context, probe.attack_family, probe.lens, probe.result_status,
@@ -1439,9 +1439,12 @@ def list_attempts(
                 ON probe.finding_id = finding.id
             WHERE {" AND ".join(clauses)}
             ORDER BY probe.created_at DESC, probe.id DESC
-            """,
-            tuple(params),
-        )
+            """
+        fetch_params = list(params)
+        if not surface_active:
+            sql += "            LIMIT ? OFFSET ?\n            "
+            fetch_params.extend([limit, offset])
+        rows = _fetch_all(connection, sql, tuple(fetch_params))
 
     if surface_active:
         rows = [
@@ -1453,8 +1456,9 @@ def list_attempts(
                 surface_path=surface_path,
             )
         ]
-
-    window = rows[offset:offset + limit]
+        window = rows[offset:offset + limit]
+    else:
+        window = rows  # already bounded by SQL LIMIT/OFFSET above
     attempts = [_serialize_attempt(row) for row in window]
     return {"attempts": attempts, "count": len(attempts)}
 

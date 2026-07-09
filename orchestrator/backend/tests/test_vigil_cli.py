@@ -9677,6 +9677,97 @@ def test_detect_technique_cage_requires_two_signals() -> None:
     assert "--for-dispatch" in caged_warnings[0]
 
 
+def test_detect_technique_cage_ignores_benign_scope_list_but_catches_bug_menu() -> None:
+    """Regression (QC): a structured SCOPE list with one incidental class noun and
+    NO imperative verbs is not a cage and must not warn (avoids warning-fatigue);
+    a verb-less per-step BUG MENU (>=2 steps each pre-naming a class) IS a cage."""
+    from assess.lib.contracts import _detect_technique_cage
+
+    # Benign: numbered scope areas, one incidental class token, zero imperative
+    # verbs — a single class-naming step line is below the bug-menu threshold.
+    benign = (
+        "Review these areas in order:\n"
+        "1. the sqli-prone search endpoint\n"
+        "2. the account settings page\n"
+        "3. the admin dashboard\n"
+    )
+    assert _detect_technique_cage(benign) == []
+
+    # A cage without imperative verbs: each step pre-names a specific bug class.
+    bug_menu = (
+        "Cover these:\n"
+        "1. idor on /api/users/{id}\n"
+        "2. sqli on the login form\n"
+        "3. ssrf on the webhook url\n"
+    )
+    menu_warnings = _detect_technique_cage(bug_menu)
+    assert menu_warnings and "technique cage" in menu_warnings[0]
+
+
+def test_detect_technique_cage_needs_named_bug_not_bare_recipe() -> None:
+    """Regression (blind triage): a STRUCTURED imperative list that names no bug
+    to hunt is NOT a cage — an orientation checklist and a confirmed-finding PoC
+    both have >=3 steps + imperative verbs but pre-name no vuln class, so they
+    must stay quiet. A cage needs >=2 named bug classes on its recipe lines."""
+    from assess.lib.contracts import _detect_technique_cage
+
+    orientation = (
+        "Get your bearings first:\n"
+        "1. Enumerate the site routes\n"
+        "2. Confirm the login flow works\n"
+        "3. Verify the account page loads\n"
+    )
+    assert _detect_technique_cage(orientation) == []
+
+    poc = (
+        "Weaponize the confirmed finding:\n"
+        "1. Send a request to /latest/meta-data/\n"
+        "2. Confirm the metadata document is returned\n"
+        "3. Validate the returned creds against STS\n"
+    )
+    assert _detect_technique_cage(poc) == []
+
+    # Exactly two recipe lines pre-name a bug -> the >=2 threshold; warns.
+    two_named = (
+        "Run these:\n"
+        "1. Test sqli on the id param\n"
+        "2. Test xss on the name param\n"
+        "3. review the pricing page\n"
+    )
+    warned = _detect_technique_cage(two_named)
+    assert warned and "technique cage" in warned[0]
+
+
+def test_list_attempts_build_query_emits_route_param_names() -> None:
+    """Regression (blind triage): the `list-attempts` CLI must emit the EXACT
+    query-param names the GET /attempts route accepts (notably --surface ->
+    surface_id, --host -> target_host); a drift here silently returns unfiltered
+    results and no round-trip test would otherwise catch it."""
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlparse
+
+    from assess.commands.list_attempts import _build_query
+
+    args = SimpleNamespace(
+        finding="VA-1", surface="12", host="app.example.com",
+        attack_family="idor", result_status="no-signal", lens="tenant-boundary",
+        limit=25, offset=5,
+    )
+    query = _build_query(args)
+    assert query.startswith("attempts?")
+    params = parse_qs(urlparse("http://x/" + query).query)
+    assert params["surface_id"] == ["12"]
+    assert params["target_host"] == ["app.example.com"]
+    assert params["finding"] == ["VA-1"]
+    assert params["attack_family"] == ["idor"]
+    assert params["result_status"] == ["no-signal"]
+    assert params["lens"] == ["tenant-boundary"]
+    assert params["limit"] == ["25"]
+    assert params["offset"] == ["5"]
+    # The CLI-side dest names must NOT leak onto the wire.
+    assert "surface" not in params and "host" not in params
+
+
 def test_validate_dispatch_missing_mode_defaults_and_warns_not_errors() -> None:
     """L2-1: a missing dispatch_mode no longer hard-errors; it warns and names
     the role default rather than emitting `missing required field`."""

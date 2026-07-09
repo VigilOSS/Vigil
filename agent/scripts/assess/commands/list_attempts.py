@@ -61,9 +61,11 @@ def register(subparsers) -> None:
         "--result-status",
         dest="result_status",
         default="",
+        metavar="TOKEN",
         help=(
-            "Filter to a probe result_status: covering (tested|signal) or "
-            "non-covering (attempted|blocked|no-signal|error)."
+            "Filter to an EXACT probe result_status token — one of "
+            "tested|signal (covering) or attempted|blocked|no-signal|error "
+            "(non-covering). Pass a token, NOT the 'covering'/'non-covering' label."
         ),
     )
     p.add_argument(

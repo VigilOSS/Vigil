@@ -187,3 +187,134 @@ def test_attempts_surface_unknown_id_is_404(client, isolate_settings):
     _seed_attempts(client, isolate_settings)
     response = client.get(f"{BASE}/attempts?surface_id=999999")
     assert response.status_code == 404, response.text
+
+
+def test_attempts_pagination_no_surface_branch(client, isolate_settings):
+    """No-surface branch: pagination is SQL ``LIMIT/OFFSET``. With 3 probes on one
+    host, single-row windows at offsets 0,1,2 must each return one row, together
+    reproduce the full ordered match set with NO overlap/loss, and an offset past
+    the end returns zero. ``count == len(attempts)`` throughout.
+
+    Non-vacuous: drop the SQL LIMIT and offset=0 returns 3 (count 1 fails); ignore
+    OFFSET and offset=1 repeats offset=0's id (``!=`` fails); mishandle past-end
+    and the empty window is non-zero."""
+    ctx = _seed_attempts(client, isolate_settings)
+    # A 3rd distinguishable probe on HOST (seed has P1 bola + P2 idor on HOST).
+    _probe(ctx["eng_id"], attack_family="xss", payload_value="p4",
+           target_host=HOST, target_path="/api/other")
+
+    full = client.get(f"{BASE}/attempts?target_host={HOST}").json()
+    assert full["count"] == 3 == len(full["attempts"])
+    ids_full = [a["id"] for a in full["attempts"]]  # created_at DESC, id DESC
+
+    windows = []
+    for off in (0, 1, 2):
+        body = client.get(f"{BASE}/attempts?target_host={HOST}&limit=1&offset={off}").json()
+        assert body["count"] == 1 == len(body["attempts"])
+        windows.append(body["attempts"][0]["id"])
+
+    past = client.get(f"{BASE}/attempts?target_host={HOST}&limit=1&offset=10").json()
+    assert past["count"] == 0 == len(past["attempts"])
+
+    # Consecutive single-row windows partition the full match set: same order, no
+    # overlap, no loss.
+    assert windows == ids_full
+    assert len(set(windows)) == 3
+
+
+def test_attempts_pagination_surface_branch(client, isolate_settings):
+    """Surface branch: the window is a Python slice ``rows[offset:offset+limit]``
+    applied AFTER the containment filter, ONCE. With the 2 surface-matching probes,
+    offsets 0 and 1 each return one (the OTHER), offset 2 returns zero, and the two
+    windows partition ``{bola, idor}``.
+
+    Non-vacuous: if the slice applied to the RAW pre-filter rows (which include the
+    off-host P3 at the top), ``offset=0`` would slice out P3 and then filter it away
+    → count 0, failing the ``count == 1`` assert; a double-applied slice or an
+    SQL-pushed LIMIT would break the partition."""
+    ctx = _seed_attempts(client, isolate_settings)
+    sid = ctx["surface_id"]
+
+    full = client.get(f"{BASE}/attempts?surface_id={sid}").json()
+    assert full["count"] == 2 == len(full["attempts"])
+    ids_full = [a["id"] for a in full["attempts"]]
+    assert {a["attack_family"] for a in full["attempts"]} == {"bola", "idor"}
+
+    w0 = client.get(f"{BASE}/attempts?surface_id={sid}&limit=1&offset=0").json()
+    assert w0["count"] == 1 == len(w0["attempts"])
+    w1 = client.get(f"{BASE}/attempts?surface_id={sid}&limit=1&offset=1").json()
+    assert w1["count"] == 1 == len(w1["attempts"])
+    assert w1["attempts"][0]["id"] != w0["attempts"][0]["id"]
+    w2 = client.get(f"{BASE}/attempts?surface_id={sid}&limit=1&offset=2").json()
+    assert w2["count"] == 0 == len(w2["attempts"])
+
+    paged = [w0["attempts"][0]["id"], w1["attempts"][0]["id"]]
+    assert paged == ids_full
+    assert {w0["attempts"][0]["attack_family"], w1["attempts"][0]["attack_family"]} == {
+        "bola", "idor"
+    }
+
+
+def test_attempts_surface_over_match_guard(client, isolate_settings):
+    """The surface containment is SEGMENT-WISE, not a raw ``startswith``. A probe on
+    the same host under ``/apixyz/thing`` is NOT contained by surface ``/api`` and
+    must be ABSENT from the surface result.
+
+    Non-vacuous: a ``startswith`` regression would treat ``/apixyz`` as under
+    ``/api`` (``"/apixyz/thing".startswith("/api")`` is True), pulling the probe in
+    → count 3 and ``xss`` present, flipping both asserts."""
+    ctx = _seed_attempts(client, isolate_settings)
+    _probe(ctx["eng_id"], attack_family="xss", payload_value="overmatch",
+           target_host=HOST, target_path="/apixyz/thing")  # NULL request_variant_id
+
+    body = client.get(f"{BASE}/attempts?surface_id={ctx['surface_id']}").json()
+    assert body["count"] == 2
+    fams = {a["attack_family"] for a in body["attempts"]}
+    assert fams == {"bola", "idor"}
+    assert "xss" not in fams
+    assert "/apixyz/thing" not in {a["target_path"] for a in body["attempts"]}
+
+
+def test_attempts_lens_filter(client, isolate_settings):
+    """``lens`` is an exact-match SQL filter. Only P2 carries ``idor-vertical``."""
+    _seed_attempts(client, isolate_settings)
+    body = client.get(f"{BASE}/attempts?lens=idor-vertical").json()
+    assert body["count"] == 1
+    attempt = body["attempts"][0]
+    assert attempt["attack_family"] == "idor"
+    assert attempt["lens"] == "idor-vertical"
+
+
+def test_attempts_result_status_filter(client, isolate_settings):
+    """``result_status`` is an exact-match SQL filter. The seed's 3 probes are all
+    ``tested``; a 4th ``blocked`` probe is isolated by ``?result_status=blocked``."""
+    ctx = _seed_attempts(client, isolate_settings)
+    _probe(ctx["eng_id"], attack_family="xss", payload_value="walled",
+           target_host=HOST, target_path="/api/users/9", result_status="blocked")
+
+    blocked = client.get(f"{BASE}/attempts?result_status=blocked").json()
+    assert blocked["count"] == 1
+    assert blocked["attempts"][0]["result_status"] == "blocked"
+
+    tested = client.get(f"{BASE}/attempts?result_status=tested").json()
+    assert tested["count"] == 3
+    assert all(a["result_status"] == "tested" for a in tested["attempts"])
+
+
+def test_attempts_surface_and_attack_family_two_axis(client, isolate_settings):
+    """Two-axis combo: ``surface_id`` (Python containment) AND ``attack_family``
+    (SQL) must BOTH hold. ``idor`` is on-surface → 1; ``sqli`` exists but is the
+    off-surface P3 → 0.
+
+    Non-vacuous: ignore the surface axis and ``attack_family=sqli`` returns the
+    off-surface P3 (count 1, not 0); ignore the family axis and ``surface_id&
+    attack_family=idor`` returns both surface probes (count 2, not 1)."""
+    ctx = _seed_attempts(client, isolate_settings)
+    sid = ctx["surface_id"]
+
+    on_surface = client.get(f"{BASE}/attempts?surface_id={sid}&attack_family=idor").json()
+    assert on_surface["count"] == 1
+    assert on_surface["attempts"][0]["attack_family"] == "idor"
+
+    off_surface = client.get(f"{BASE}/attempts?surface_id={sid}&attack_family=sqli").json()
+    assert off_surface["count"] == 0
