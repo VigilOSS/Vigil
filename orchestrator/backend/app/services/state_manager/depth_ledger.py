@@ -343,12 +343,34 @@ def _unit_ledger(
 
     unit_variant_ids = {int(v["id"]) for v in unit_variants}
 
+    # Bucket each cross-cutting list to THIS unit ONCE. The covering scan, the
+    # touched fallback, the signal-class scan, and the dispatch work-evidence
+    # check each previously re-ran the same `_probe_maps_to_unit` /
+    # `_coverage_maps_to_unit` / `_finding_maps_to_unit` predicate over the FULL
+    # lists (and the dispatch check re-scanned every probe per dispatch), making
+    # the ledger O(units x dispatches x probes) and timing out at ~900 probes.
+    # Membership is IDENTICAL — only the recomputation is removed.
+    unit_probes = [
+        p for p in probes
+        if _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix)
+    ]
+    unit_coverage = [
+        ci for ci in coverage_items if _coverage_maps_to_unit(ci, unit_id, unit_variant_ids)
+    ]
+    unit_findings = [f for f in findings if _finding_maps_to_unit(f, host, prefix)]
+    unit_has_covering_probe = any(
+        str(p.get("result_status") or "").strip().lower() in PROBE_RESULT_STATUSES_COVERING
+        for p in unit_probes
+    )
+    # Dispatch work-evidence (S7) asks only "does this UNIT have a covering probe
+    # OR a finding" — it is dispatch-INDEPENDENT, so it is a per-unit constant, not
+    # a per-dispatch probe rescan.
+    unit_has_work_evidence = unit_has_covering_probe or bool(unit_findings)
+
     covering_probe_families: set[str] = set()
     covering_identities_by_family: dict[str, set[str]] = {}
     disclosure_concrete = False
-    for p in probes:
-        if not _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix):
-            continue
+    for p in unit_probes:
         rs = str(p.get("result_status") or "").strip().lower()
         if rs not in PROBE_RESULT_STATUSES_COVERING:
             continue
@@ -365,9 +387,7 @@ def _unit_ledger(
             disclosure_concrete = True
 
     covering_cov_families: set[str] = set()
-    for ci in coverage_items:
-        if not _coverage_maps_to_unit(ci, unit_id, unit_variant_ids):
-            continue
+    for ci in unit_coverage:
         status_val = str(ci.get("status") or "").strip().lower()
         if status_val not in ("covered", "not_applicable", "not-applicable"):
             continue
@@ -452,43 +472,25 @@ def _unit_ledger(
     dedicated = _dedicated_dispatch_satisfied(
         block_families=block_families,
         host=host,
-        port_class=port_class,
         prefix=prefix,
-        unit_id=unit_id,
-        unit_variant_ids=unit_variant_ids,
         dispatches=dispatches,
-        probes=probes,
-        findings=findings,
+        unit_has_work_evidence=unit_has_work_evidence,
     )
 
     depth_satisfied = (not missing_block) and dedicated
 
-    touched = bool(covering_probe_families) or bool(covering_cov_families)
-    if not touched:
-        for f in findings:
-            if _finding_maps_to_unit(f, host, prefix):
-                touched = True
-                break
-    if not touched:
-        for p in probes:
-            rs = str(p.get("result_status") or "").strip().lower()
-            if rs in PROBE_RESULT_STATUSES_COVERING and _probe_maps_to_unit(
-                p, unit_id, unit_variant_ids, host, port_class, prefix
-            ):
-                touched = True
-                break
-    if not touched:
-        for d in dispatches:
-            if str(d.get("status") or "").strip().lower() != "completed":
-                continue
-            if not _dispatch_contains_unit(d, host, prefix):
-                continue
-            if _dispatch_has_work_evidence(
-                d, unit_id, unit_variant_ids, host, port_class, prefix,
-                probes, findings,
-            ):
-                touched = True
-                break
+    # A unit is "touched" if there is ANY work evidence under it: a covering
+    # probe/coverage family, a covering probe whose family didn't resolve, or a
+    # finding. A completed dispatch adds nothing here — its work-evidence test is
+    # the SAME probe/finding-under-unit check already captured by
+    # `unit_has_covering_probe` / `unit_findings` — so the redundant
+    # O(dispatches x probes) dispatch scan is gone.
+    touched = (
+        bool(covering_probe_families)
+        or bool(covering_cov_families)
+        or unit_has_covering_probe
+        or bool(unit_findings)
+    )
 
     decisive_surface = bool(unit_surface_types & _DECISIVE_SURFACE_TYPES)
 
@@ -509,9 +511,7 @@ def _unit_ledger(
     # covering probe / coverage_item, so the operator can drain coverage per CLASS
     # rather than per family. Reuses the same unit-mapped probes/coverage_items.
     signal_classes_expected: set[str] = set()
-    for ci in coverage_items:
-        if not _coverage_maps_to_unit(ci, unit_id, unit_variant_ids):
-            continue
+    for ci in unit_coverage:
         cls = vuln_taxonomy.normalize_class(str(ci.get("attack_family") or ""))
         if not cls or not vuln_taxonomy.is_valid_class(cls):
             continue
@@ -521,17 +521,13 @@ def _unit_ledger(
 
     signal_classes_covered: set[str] = set()
     if signal_classes_expected:
-        for p in probes:
-            if not _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix):
-                continue
+        for p in unit_probes:
             if str(p.get("result_status") or "").strip().lower() not in PROBE_RESULT_STATUSES_COVERING:
                 continue
             signal_classes_covered.add(
                 vuln_taxonomy.normalize_class(str(p.get("attack_family") or ""))
             )
-        for ci in coverage_items:
-            if not _coverage_maps_to_unit(ci, unit_id, unit_variant_ids):
-                continue
+        for ci in unit_coverage:
             if str(ci.get("status") or "").strip().lower() not in (
                 "covered", "not_applicable", "not-applicable"
             ):
@@ -795,13 +791,9 @@ def _dedicated_dispatch_satisfied(
     *,
     block_families: set[str],
     host: str,
-    port_class: str,
     prefix: str,
-    unit_id: int,
-    unit_variant_ids: set[int],
     dispatches: list[dict[str, Any]],
-    probes: list[dict[str, Any]],
-    findings: list[dict[str, Any]],
+    unit_has_work_evidence: bool,
 ) -> bool:
     """≥1 completed dispatch with WORK EVIDENCE that, between qualifying
     dispatches, covers every block-level Expected class for the unit (S7).
@@ -809,62 +801,38 @@ def _dedicated_dispatch_satisfied(
     A dispatch QUALIFIES when:
       * ``status='completed'`` AND
       * (scope_host, scope_path_prefix) contains the unit AND
-      * it has corroborating durable output under the unit (≥1 covering probe
-        OR a recorded finding under the unit) — ``status='completed'`` ALONE,
-        or accompanied only by a self-attested handoff, does NOT satisfy.
+      * ``unit_has_work_evidence`` — the unit has corroborating durable output
+        (≥1 covering probe OR a recorded finding under it). ``status='completed'``
+        ALONE, or accompanied only by a self-attested handoff, does NOT satisfy:
+        the handoff ``summary``/``coverage_gaps`` are agent self-attestation and
+        the doctrine forbids counting a self-attested-without-evidence signal
+        (else one completed dispatch with a broad ``scope_path_prefix`` + a bare
+        handoff would satisfy every unit on the host). Legitimate work the harness
+        missed is recovered via the recorded depth-deferral / ``--force --reason``
+        valve, not by trusting free text.
+
+    Work evidence is a per-UNIT property (does the unit have a covering probe or a
+    finding), NOT per-dispatch — so the caller computes it ONCE and passes it in,
+    rather than re-scanning every probe per dispatch (the old O(dispatches x
+    probes) hot path). With no work evidence, no dispatch can qualify.
+
     The union of qualifying dispatches' resolved classes must cover every
     block-level family. When there are NO block-level families (degenerate), a
     deep_required unit still owes ≥1 qualifying dispatch.
     """
     covered_block: set[str] = set()
     any_qualifying = False
-    for d in dispatches:
-        if str(d.get("status") or "").strip().lower() != "completed":
-            continue
-        if not _dispatch_contains_unit(d, host, prefix):
-            continue
-        if not _dispatch_has_work_evidence(
-            d, unit_id, unit_variant_ids, host, port_class, prefix,
-            probes, findings,
-        ):
-            continue
-        any_qualifying = True
-        covered_block |= _dispatch_classes(d) & block_families
+    if unit_has_work_evidence:
+        for d in dispatches:
+            if str(d.get("status") or "").strip().lower() != "completed":
+                continue
+            if not _dispatch_contains_unit(d, host, prefix):
+                continue
+            any_qualifying = True
+            covered_block |= _dispatch_classes(d) & block_families
     if not block_families:
         return any_qualifying
     return block_families.issubset(covered_block)
-
-
-def _dispatch_has_work_evidence(
-    dispatch: dict[str, Any],
-    unit_id: int,
-    unit_variant_ids: set[int],
-    host: str,
-    port_class: str,
-    prefix: str,
-    probes: list[dict[str, Any]],
-    findings: list[dict[str, Any]],
-) -> bool:
-    """Corroborating durable output under the unit (S7): ≥1 covering probe_run
-    under the unit OR a recorded finding under the unit.
-
-    A dispatch handoff is NOT accepted here. The handoff ``summary`` (and the
-    free-form ``coverage_gaps``) are agent-authored self-attestation, and the
-    doctrine forbids counting a self-attested-without-evidence signal: otherwise
-    one completed dispatch with a broad ``scope_path_prefix`` and a bare handoff
-    would mark every unit on the host ``touched`` and downgrade the terminal
-    block from blocking to warning. Only real probe/finding artifacts satisfy;
-    legitimate work the harness missed is recovered via the recorded
-    depth-deferral / ``--force --reason`` valve, not by trusting free text."""
-    for p in probes:
-        if str(p.get("result_status") or "").strip().lower() not in PROBE_RESULT_STATUSES_COVERING:
-            continue
-        if _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix):
-            return True
-    for f in findings:
-        if _finding_maps_to_unit(f, host, prefix):
-            return True
-    return False
 
 
 def _finding_maps_to_unit(

@@ -36,6 +36,13 @@ not a prototype. Every change should leave the codebase clearer than it found it
   improvement lands (e.g. curated whole-keys + a capped weak-signal tier), not *whether* it lands. A
   simpler mechanism that misroutes or misses signal is not an acceptable trade for less code.
 
+# Explaining work (breakdowns & planning)
+
+When asked for a breakdown, an explanation, or to justify a change, answer at BOTH altitudes:
+a **high-level** framing (why it matters for Vigil's mission — precision, deep coverage, trustworthy
+state over vibe) and a **low-level** view (the concrete files/mechanics), and argue each change on how
+it helps quality and depth. Do not answer at one altitude only — a single-altitude answer is incomplete.
+
 # Version control: Jujutsu (jj)
 
 This repository is managed with **[Jujutsu (`jj`)](https://github.com/jj-vcs/jj)** (v0.40+),

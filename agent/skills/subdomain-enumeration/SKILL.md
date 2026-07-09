@@ -537,7 +537,7 @@ grep -viE '(^|\.)(_dmarc|_dkim|_domainkey|_acme-challenge)\.' \
 # here (it amplifies httpx memory under cgroup pressure → RC137 SIGKILL on large
 # lists). tech-detect the confirmed-live subset in Stage 1b only.
 vigil assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_denoised.txt \
-  -status-code -title -server -content-length -follow-redirects -silent \
+  -status-code -title -web-server -cl -follow-redirects --extra-args "-silent" \
   -o /engagements/$ENGAGEMENT_KEY/scans/subdomains_live.txt \
   --technique DISCOVERY --intent "live-host confirmation on de-noised sub list (status-only)" \
   --probe-kind fingerprint --phase recon --timeout 1200
@@ -546,7 +546,7 @@ vigil assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_denoised.txt 
 awk '{print $1}' /engagements/$ENGAGEMENT_KEY/scans/subdomains_live.txt | sort -u \
   > /engagements/$ENGAGEMENT_KEY/scans/subs_live_only.txt
 vigil assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/subs_live_only.txt \
-  -tech-detect -json -silent \
+  -tech-detect -json --extra-args "-silent" \
   -o /engagements/$ENGAGEMENT_KEY/scans/subdomains_tech.jsonl \
   --technique DISCOVERY --intent "tech-detect on confirmed-live subset only" \
   --probe-kind fingerprint --phase recon --timeout 600

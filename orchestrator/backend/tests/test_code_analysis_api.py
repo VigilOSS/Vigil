@@ -804,6 +804,141 @@ def test_reset_stale_queue_items_parses_iso_consumed_at(client, isolate_settings
     assert claimed_again.json()[0]["id"] == queue_item["id"]
 
 
+def test_retry_error_queue_item_returns_to_pending_with_audit_row(client, isolate_settings):
+    """C5.1: a queue item stuck at status='error' has no recovery path via
+    `reset_stale_queue_items` (processing-only, time-windowed). `retry-error`
+    is the id-scoped recovery: it flips 'error' -> 'pending', clears
+    assigned_agent/consumed_at so the item re-enters the fetch rotation, and
+    appends a `[retried: <reason>]` breadcrumb to the existing analysis_notes
+    rather than overwriting the prior failure context. It also records a
+    best-effort `activity_entries` audit row, matching the "queue completion
+    appends activity_entries" convention for every other queue mutation."""
+    engagement_key = "2026-07-08-code-retry-error"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="retry-error-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert claimed.status_code == 200
+    queue_item = claimed.json()[0]
+
+    errored = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/error",
+        json={"item_ids": [queue_item["id"]], "notes": "agent crashed mid-parse"},
+    )
+    assert errored.status_code == 200
+    assert errored.json()["updated"] == 1
+
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    with sqlite3.connect(str(db_path)) as connection:
+        row = connection.execute(
+            "SELECT status, assigned_agent, analysis_notes FROM code_analysis_queue WHERE id = ?",
+            (queue_item["id"],),
+        ).fetchone()
+    assert row[0] == "error"
+    assert row[1] == "code-vuln-hunter"
+    assert row[2] == "agent crashed mid-parse"
+
+    retried = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/retry-error",
+        json={"item_ids": [queue_item["id"]], "reason": "transient parser crash, retrying"},
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["retried"] == 1
+    assert retried.json()["item_ids"] == [queue_item["id"]]
+
+    with sqlite3.connect(str(db_path)) as connection:
+        row = connection.execute(
+            "SELECT status, assigned_agent, consumed_at, analysis_notes FROM code_analysis_queue WHERE id = ?",
+            (queue_item["id"],),
+        ).fetchone()
+    assert row[0] == "pending"
+    assert row[1] == ""
+    assert row[2] is None
+    # Prior failure context is preserved, not overwritten.
+    assert row[3] == "agent crashed mid-parse\n[retried: transient parser crash, retrying]"
+
+    # The item re-enters the fetch rotation like any other pending item.
+    reclaimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter-2"},
+    )
+    assert reclaimed.status_code == 200
+    assert reclaimed.json()[0]["id"] == queue_item["id"]
+
+    # Now 'processing' again — retry-error must refuse a non-'error' item.
+    rejected = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/retry-error",
+        json={"item_ids": [queue_item["id"]], "reason": "should not apply"},
+    )
+    assert rejected.status_code == 409
+    assert "unless they are error" in rejected.json()["detail"]
+
+    activity = client.get(
+        f"/engagements/{engagement_key}/activity-entries",
+        params={"q": "code-dispatch"},
+    )
+    assert activity.status_code == 200, activity.text
+    assert any(row["title"] == "code-dispatch retry-error" for row in activity.json()["items"])
+
+
+def test_retry_error_rejects_empty_reason_without_error(client, isolate_settings):
+    """`reason` is optional: retrying without one still lands a bare
+    `[retried]` breadcrumb rather than failing or leaving notes untouched."""
+    engagement_key = "2026-07-08-code-retry-error-no-reason"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="retry-error-no-reason-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+
+    queue_response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+    )
+    assert queue_response.status_code == 201
+
+    claimed = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert claimed.status_code == 200
+    queue_item = claimed.json()[0]
+
+    errored = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/error",
+        json={"item_ids": [queue_item["id"]]},
+    )
+    assert errored.status_code == 200
+
+    retried = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/retry-error",
+        json={"item_ids": [queue_item["id"]]},
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["retried"] == 1
+
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    with sqlite3.connect(str(db_path)) as connection:
+        row = connection.execute(
+            "SELECT status, analysis_notes FROM code_analysis_queue WHERE id = ?",
+            (queue_item["id"],),
+        ).fetchone()
+    assert row[0] == "pending"
+    assert row[1] == "\n[retried]"
+
+
 def test_queue_done_rejects_needs_context_disposition(client, isolate_settings):
     engagement_key = "2026-04-04-code-done-needs-context"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)

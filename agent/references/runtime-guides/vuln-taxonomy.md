@@ -7,10 +7,13 @@ origin: Vigil
 # Canonical Vuln-Class Taxonomy
 
 > **Source of truth:** `agent/scripts/assess/lib/vuln_taxonomy.py`. This doc is the
-> human-readable mirror — the module is authoritative and the drift tests in
-> `orchestrator/backend/tests/test_vuln_taxonomy.py` fail CI if the two disagree
-> (a skill, gf-bucket, surface_type, technique, or code family that references a
-> non-canonical class breaks the build).
+> human-readable mirror. The drift tests in
+> `orchestrator/backend/tests/test_vuln_taxonomy.py` guarantee the CODE side can't
+> drift from `vuln_taxonomy.py` — they check code against code (a skill, gf-bucket,
+> surface_type, technique, or code family that references a non-canonical class
+> breaks the build). They do **not** parse this `.md`, so it is hand-synced on each
+> review pass (see `last_reviewed:` below); if this file and the module ever
+> disagree, treat the module as authoritative.
 >
 > **Review cadence:** re-confirm against OWASP WSTG / OWASP ASVS / OWASP API
 > Security Top 10 (2023) / NIST SP 800-115 and the live skill roster each
@@ -38,6 +41,16 @@ Verification Standard), **OWASP API Security Top 10 (2023)**, and **NIST SP
 800-115** (Technical Guide to Information Security Testing and Assessment). When a
 new framework / API style / auth method appears (e.g. passkeys/WebAuthn, gRPC-web,
 tRPC), check these anchors and add the missing class here.
+
+## Recording a probe with `--attack-family`
+
+`vigil assess record-attempt --attack-family <value>` and `record-probe
+--attack-family <value>` (and the backend `attack_family` field) take one of the
+backtick-quoted **class** tokens listed under `## Families` below (e.g. `idor`,
+`sqli`, `ssrf`) — despite the flag's name, pass the CLASS, not the coarser family
+heading (`access-control`, `injection`). An out-of-vocab value WARNs but is still
+stored verbatim (`probe_args.normalize_attack_family`), so a new/unlisted class is
+recorded rather than rejected.
 
 ## Families
 
@@ -252,8 +265,9 @@ maps to a canonical class (operational tags map to nothing).
 | `RATE-LIMIT` | `rate-limit` |
 | `INFO-DISCLOSURE` | `info-disclosure` |
 
-Operational / non-vuln technique tags (no class): `RECON`, `DISCOVERY`, `FUZZ`,
-`OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`, `HEALTH`, `LOG-READ`, `OTHER`.
+Operational / non-vuln technique tags (no class): `RECON`, `DISCOVERY`,
+`PARAM-DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`,
+`HEALTH`, `LOG-READ`, `OTHER`.
 
 ## class → skills
 
@@ -261,10 +275,12 @@ Which `agent/skills/<name>/SKILL.md` declares each class in its `vuln_class:`
 frontmatter (derived live by `vuln_taxonomy.build_class_to_skills()`). The 11
 web-exclusive classes (`idor`, `sqli`, `ssrf`, `xss`, `ssti`, `lfi`,
 `img-traversal`, `cmdi`, `open-redirect`, `cors`, `file-upload`) are reserved to
-their web skills and never declared by a code skill. Two classes
-(`ldap-injection`, `path-authz`) intentionally have no dedicated skill yet — they
+their web skills and never declared by a code skill. Six classes
+(`ldap-injection`, `path-authz`, `ssi-injection`, `xpath-injection`,
+`clickjacking`, `csv-injection`) intentionally have no dedicated skill yet — they
 are tracked in the test's `KNOWN_SKILLLESS_CLASSES` allowlist so the
-completeness drift test stays honest.
+completeness drift test stays honest. `ssi-injection` DOES have a gf-bucket
+(`ssi`, extension-based) but still has no dedicated skill.
 
 | class | skills |
 |---|---|

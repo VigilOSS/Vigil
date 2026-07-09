@@ -24,7 +24,7 @@ from ._common import (
     _scalar_row,
 )
 from .dispatches import _serialize_decision
-from .work_buffer import _derive_work_item
+from .work_buffer import _derive_work_item, mark_work_items_done
 
 
 
@@ -1192,10 +1192,12 @@ def record_probe_run(
     target_port: int | None = None,
     lens: str = "",
     finding_id: int | None = None,
+    work_item_ids: list[int] | None = None,
+    resolve_surface_id: int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
-        return _upsert_probe_run(
+        record = _upsert_probe_run(
             connection,
             engagement.id,
             request_variant_id=request_variant_id,
@@ -1219,6 +1221,31 @@ def record_probe_run(
             lens=lens,
             finding_id=finding_id,
         )
+        # A3: drain the work buffer in the SAME transaction as the probe insert.
+        # ``get_connection`` is re-entrant and commits only at the outermost
+        # depth, so the nested ``mark_work_items_done`` reuses this connection and
+        # its writes commit atomically with the probe. Unknown ids are silently
+        # skipped (mirrors POST /work-items/done), so a stale id never rolls back
+        # the probe write; the ``affected`` count surfaces a short drain.
+        if work_item_ids:
+            record["work_items_done"] = mark_work_items_done(engagement.id, work_item_ids)
+        # A3 (opt-in): advance a mapped surface only on an explicit id — recording
+        # never auto-mutates surface state. A single probe partially covers, so the
+        # surface goes to ``partially-covered`` with a synthesized followup. A bad
+        # surface id 404s and rolls the whole txn back; the probe upsert is
+        # idempotent on its probe_key, so a corrected re-run is safe.
+        if resolve_surface_id is not None:
+            record["surface_resolved"] = update_surface(
+                engagement.id,
+                resolve_surface_id,
+                status_value="partially-covered",
+                rationale=(notes.strip() or f"probe recorded: {attack_family} {result_status}"),
+                followup_condition=(
+                    f"partially covered by a {attack_family} probe ({result_status}); "
+                    "remaining vuln families for this surface still need coverage"
+                ),
+            )
+        return record
 
 def list_probe_runs(
     engagement_id: int,
