@@ -272,6 +272,20 @@ def _warn_if_handoff_is_closable(args) -> None:
         except Exception:  # noqa: BLE001
             pass
     if not handoff:
+        # C4c: closing straight to a terminal status with NO handoff at all is
+        # silent state-loss — resume-brief's `terminal_no_handoff` list and
+        # `agent reconcile-stale` can only report this after the fact; there
+        # is no summary, no coverage_gaps, no next_steps. WARN only (never
+        # block) so a crash-recovery force-close stays possible.
+        if str(getattr(args, "dispatch_status", "") or "") in {"failed", "aborted"}:
+            print(
+                f"WARN agent done: no handoff found for {args.agent_id} closing as "
+                f"{args.dispatch_status!r}; this is silent state-loss — resume-brief and "
+                "`agent reconcile-stale` will only ever see a bare terminal_no_handoff row, "
+                "not why the dispatch died. Consider `vigil assess agent handoff ...` first, "
+                "or note the cause via `agent decision` before closing.",
+                file=sys.stderr,
+            )
         return
     status_value = str(handoff.get("handoff_status") or "")
     if status_value in {"ready", "blocked"}:
@@ -469,6 +483,38 @@ def _reconcile_stale(args) -> None:
                     else "handoff is checkpointed; specialist must mark ready|blocked before close"
                 )
             rows_out.append(item)
+        # C4c: terminal (failed/aborted) dispatches with no handoff row at all
+        # are silent state-loss — mirrors assessment_memory._recent_dispatch_
+        # picture's `terminal_no_handoff` list so `reconcile-stale` is a
+        # complete picture on its own. Unlike the in-progress rows above,
+        # these have no ready/blocked handoff to consume, so they can never
+        # be "closed" here — this is read-only reporting, dry_run or not.
+        for terminal_status in ("failed", "aborted"):
+            for row in client.list_dispatches(status=terminal_status, limit=1000):
+                # Defensive re-check: don't trust every client/backend combo to
+                # have filtered server-side by `status`.
+                if str(row.get("status") or "") != terminal_status:
+                    continue
+                agent_id = row.get("agent_id")
+                if handoffs.get(agent_id):
+                    continue
+                rows_out.append(
+                    {
+                        "agent_id": agent_id,
+                        "agent_role": row.get("agent_role"),
+                        "age_hours": None,
+                        "threshold_hours": None,
+                        "category": "terminal_no_handoff",
+                        "handoff_status": "none",
+                        "dispatch_status": terminal_status,
+                        "closed": False,
+                        "closed_status": None,
+                        "skip_reason": (
+                            "terminal dispatch has no handoff; not closable via reconcile "
+                            "(informational only — silent state-loss, see resume-brief)"
+                        ),
+                    }
+                )
     finally:
         client.close()
     print(json.dumps(rows_out, indent=2, ensure_ascii=False))

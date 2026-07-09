@@ -27,7 +27,7 @@ def register(subparsers) -> None:
     p = subparsers.add_parser("code-dispatch", help="Code analysis queue dispatch engine")
     p.add_argument(
         "action",
-        help="stats|fetch|done|error|needs-context|reset-stale|queue|requeue-triggers|list-triggers|resolve-triggers",
+        help="stats|fetch|done|error|needs-context|reset-stale|retry-error|queue|requeue-triggers|list-triggers|resolve-triggers",
     )
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
     p.set_defaults(func=run)
@@ -100,6 +100,12 @@ def run(args) -> None:
             print("ERROR: code-dispatch reset-stale requires minutes >= 1", file=sys.stderr)
             sys.exit(1)
         _reset_stale(cfg, minutes)
+    elif action == "retry-error":
+        if not extra:
+            print("Usage: code-dispatch retry-error <id1,id2,...> [reason]", file=sys.stderr)
+            sys.exit(1)
+        reason = " ".join(extra[1:])
+        _retry_error(cfg, extra[0], reason)
     elif action == "queue":
         if not extra:
             print("Usage: code-dispatch queue <queue-items-json-file>", file=sys.stderr)
@@ -125,7 +131,7 @@ def run(args) -> None:
     else:
         print(f"Unknown action: {action}", file=sys.stderr)
         print(
-            "Actions: stats, fetch, done, error, needs-context, reset-stale, queue, "
+            "Actions: stats, fetch, done, error, needs-context, reset-stale, retry-error, queue, "
             "requeue-triggers, list-triggers, resolve-triggers",
             file=sys.stderr,
         )
@@ -326,6 +332,35 @@ def _reset_stale(cfg, minutes: int) -> None:
     )
     reset_count = result.get('reset', 0) if isinstance(result, dict) else 0
     print(f"Reset {reset_count} stale item(s) (stuck > {minutes} min)")
+    print(f"Saved audit snapshot: {snapshot.name}")
+    if isinstance(result, dict) and result:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _retry_error(cfg, id_list: str, reason: str = "") -> None:
+    """C5.1: recover status='error' queue items back to 'pending' by id.
+
+    Unlike `reset-stale` (time-windowed, 'processing' only), this is
+    id-scoped and requires every id to currently be 'error' — the backend
+    409s if any id has already moved (e.g. re-fetched, completed) since the
+    operator listed it.
+    """
+    ids = _validate_id_list(id_list)
+    payload: dict = {'item_ids': ids}
+    if reason:
+        payload['reason'] = reason
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.post('code/analysis-queue/retry-error', payload)
+
+    snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-retry-error",
+        label="items",
+        payload=result,
+        metadata={"command": "code-dispatch retry-error", "item_ids": ids, "reason": reason},
+    )
+    retried = result.get('retried', 0) if isinstance(result, dict) else 0
+    print(f"Retried (error -> pending): {retried} item(s)")
     print(f"Saved audit snapshot: {snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))

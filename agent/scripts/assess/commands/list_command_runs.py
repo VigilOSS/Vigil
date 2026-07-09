@@ -83,7 +83,10 @@ def register(subparsers) -> None:
         dest="probe_kind",
         default="",
         help=(
-            "Filter by probe kind (exact match). Known values: "
+            "Filter by tool-EXECUTION kind (fingerprint/baseline/payload/…), NOT "
+            "the vuln family — so `--probe-kind sqli` correctly returns [] (sqli is "
+            "an attack_family, not an execution kind). For vuln-family coverage use "
+            "`fetch probe-runs?attack_family=…`. Exact match. Known values: "
             + ", ".join(PROBE_KIND_ENUM)
         ),
     )

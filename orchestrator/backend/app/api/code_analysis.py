@@ -137,6 +137,13 @@ class QueueResetStaleRequest(BaseModel):
     minutes: int = Field(default=10, ge=1, le=1440)
 
 
+class QueueRetryErrorRequest(BaseModel):
+    """C5.1: recover status='error' queue items back to 'pending' by id."""
+
+    item_ids: list[int] = Field(min_length=1)
+    reason: str = Field(default="", max_length=2000)
+
+
 class AnalysisResultRecord(BaseModel):
     queue_item_id: int
     file_id: int | None = None
@@ -521,6 +528,31 @@ async def reset_stale_queue_items(engagement_key: str, request: QueueResetStaleR
         )
     )
     await _broadcast(engagement.key, "queue_reset_stale", record)
+    return record
+
+
+@router.post("/analysis-queue/retry-error")
+async def retry_error_queue_items(engagement_key: str, request: QueueRetryErrorRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.retry_error_queue_items,
+            engagement.id,
+            item_ids=request.item_ids,
+            reason=request.reason,
+        )
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_code_mutation,
+            engagement.id,
+            title="code-dispatch retry-error",
+            action=f"item_ids={request.item_ids} reason={request.reason}",
+            result="",
+            metadata={"item_ids": request.item_ids, "reason": request.reason},
+        )
+    )
+    await _broadcast(engagement.key, "queue_retry_error", record)
     return record
 
 

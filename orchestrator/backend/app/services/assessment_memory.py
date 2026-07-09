@@ -158,6 +158,17 @@ def _stale_threshold_for(role: str | None, *, override: float | None) -> float:
     return _STALE_THRESHOLD_BY_ROLE.get(str(role or ""), _DEFAULT_STALE_THRESHOLD_HOURS)
 
 
+# C4c: a dispatch that lands on a terminal status (failed/aborted) with no
+# handoff row at all is silent state-loss — there is no artifact explaining
+# why it died, and (pre-fix) it was structurally invisible to this picture
+# because the in-progress-only gate below excluded it before the handoff-gap
+# check ever ran. `_TERMINAL_NO_HANDOFF_STATUSES` is the scope for the new
+# `terminal_no_handoff` list; keep it in sync with the `agent.py`
+# `_reconcile_stale` mirror (which reports the same rows read-only, since a
+# handoff-less terminal dispatch has no ready/blocked handoff to close).
+_TERMINAL_NO_HANDOFF_STATUSES = frozenset({"failed", "aborted"})
+
+
 def _recent_dispatch_picture(
     engagement_id: int,
     *,
@@ -168,14 +179,35 @@ def _recent_dispatch_picture(
     now = dt.datetime.now(dt.timezone.utc)
     stale: list[dict[str, Any]] = []
     gaps: list[dict[str, Any]] = []
+    terminal_no_handoff: list[dict[str, Any]] = []
     for row in dispatches:
-        if row.get("status") != "in-progress":
-            continue
         agent_id = row.get("agent_id")
         agent_role = row.get("agent_role")
+        status_value = str(row.get("status") or "")
         handoff = handoffs.get(agent_id)
+        # A handoff-less dispatch is surfaced by exactly ONE list, keyed on status
+        # so nothing is double-reported and normal rows aren't flagged:
+        #   * terminal (failed/aborted) -> `terminal_no_handoff` — silent
+        #     state-loss, the load-bearing case that used to be invisible to the
+        #     brief (the in-progress-only gate below excluded it before the
+        #     handoff check ran);
+        #   * in-progress -> `handoff_gaps` — running but not yet checkpointed.
+        # A `completed` dispatch with no handoff is normal (not every completed
+        # dispatch owes one), so neither list flags it.
         if not handoff:
-            gaps.append({"agent_id": agent_id, "agent_role": agent_role, "reason": "no_handoff"})
+            if status_value in _TERMINAL_NO_HANDOFF_STATUSES:
+                terminal_no_handoff.append(
+                    {
+                        "agent_id": agent_id,
+                        "agent_role": agent_role,
+                        "status": status_value,
+                        "completed_at": row.get("completed_at"),
+                    }
+                )
+            elif status_value == "in-progress":
+                gaps.append({"agent_id": agent_id, "agent_role": agent_role, "reason": "no_handoff"})
+        if status_value != "in-progress":
+            continue
         started = _parse_iso(row.get("dispatched_at"))
         age_hours = ((now - started).total_seconds() / 3600.0) if started else None
         threshold = _stale_threshold_for(agent_role, override=max_age_hours)
@@ -200,6 +232,7 @@ def _recent_dispatch_picture(
         "latest_handoffs": list(handoffs.values())[:10],
         "stale_in_progress_dispatches": stale,
         "handoff_gaps": gaps[:10],
+        "terminal_no_handoff": terminal_no_handoff[:10],
         "stale_threshold_hours": reported_threshold,
         "stale_threshold_role_overrides": dict(_STALE_THRESHOLD_BY_ROLE) if max_age_hours is None else {},
     }

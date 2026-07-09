@@ -2661,6 +2661,144 @@ def test_start_swarm_rejects_empty_items_file(monkeypatch, tmp_path: Path, capsy
 
 
 # ---------------------------------------------------------------------------
+# C4c — dispatch honesty: terminal handoff-less dispatches
+#
+# A dispatch that lands on a terminal status (failed/aborted) with NO handoff
+# row at all is silent state-loss: resume-brief's terminal_no_handoff list and
+# `agent reconcile-stale` can only ever report the bare fact afterward, never
+# why the dispatch died. `agent done` is the last chance to warn the operator
+# before that context is gone. WARN-only (never a hard gate) — crash-recovery
+# force-close must stay possible.
+# ---------------------------------------------------------------------------
+
+
+class _NoHandoffAssessmentClient:
+    """Fake AssessmentClient: no handoff exists for any agent_id."""
+
+    def __init__(self, *_a, **_k) -> None:
+        pass
+
+    def get_handoff(self, agent_id: str):
+        return None
+
+    def update_dispatch(self, agent_id: str, patch: dict) -> dict:
+        return {"agent_id": agent_id, **patch}
+
+    def close(self) -> None:
+        return None
+
+
+def _patch_dispatch_client(monkeypatch, module, client_cls) -> None:
+    """Patch the AssessmentClient class + load_config at their home module
+    (``dispatch.agent``, i.e. ``agent/scripts/assess/commands/dispatch/agent.py``).
+
+    `_client_for` is defined once in that module and re-exported by name onto
+    the `dispatch` package (`from .agent import _client_for`); every caller —
+    whether it reaches it as `dispatch._client_for` or as a bare `_client_for`
+    call from inside `dispatch.agent` itself (e.g. `_update_dispatch_status`)
+    — is the SAME function object, and it always resolves `AssessmentClient`
+    via its home module's globals. Patching `dispatch._client_for` directly
+    would miss the latter call path (used internally by `agent done`).
+    """
+    monkeypatch.setattr(module.dispatch.agent, "AssessmentClient", client_cls)
+    monkeypatch.setattr(
+        module.dispatch.agent,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+
+def test_agent_done_status_failed_warns_when_no_handoff_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_script_module(
+        "test_agent_done_no_handoff_warn_module",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    _patch_dispatch_client(monkeypatch, module, _NoHandoffAssessmentClient)
+
+    module.run(
+        SimpleNamespace(
+            action="done",
+            extra=["recon-died-1"],
+            agent_id=None,
+            dispatch_status="failed",
+            completed_at=None,
+            finding_slugs=None,
+            engagement_dir="/tmp/eng",
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "WARN agent done: no handoff found for recon-died-1 closing as 'failed'" in err
+    assert "silent state-loss" in err
+
+
+def test_agent_done_status_aborted_warns_when_no_handoff_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Same WARN fires for `--status aborted`, matching the `terminal_no_handoff`
+    scope (failed/aborted) used by resume-brief and `reconcile-stale`."""
+    module = _load_script_module(
+        "test_agent_done_no_handoff_warn_aborted_module",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    _patch_dispatch_client(monkeypatch, module, _NoHandoffAssessmentClient)
+
+    module.run(
+        SimpleNamespace(
+            action="done",
+            extra=["recon-died-2"],
+            agent_id=None,
+            dispatch_status="aborted",
+            completed_at=None,
+            finding_slugs=None,
+            engagement_dir="/tmp/eng",
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "WARN agent done: no handoff found for recon-died-2 closing as 'aborted'" in err
+
+
+def test_agent_done_status_completed_does_not_warn_when_no_handoff_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The terminal_no_handoff WARN is scoped to failed/aborted (the
+    `_TERMINAL_NO_HANDOFF_STATUSES` set in assessment_memory.py) — a normal
+    `--status completed` close with no handoff is common (many dispatches
+    never write one) and must NOT warn on every such close."""
+    module = _load_script_module(
+        "test_agent_done_no_handoff_completed_module",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    _patch_dispatch_client(monkeypatch, module, _NoHandoffAssessmentClient)
+
+    module.run(
+        SimpleNamespace(
+            action="done",
+            extra=["recon-finished-1"],
+            agent_id=None,
+            dispatch_status="completed",
+            completed_at=None,
+            finding_slugs=None,
+            engagement_dir="/tmp/eng",
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "no handoff found" not in err
+
+
+# ---------------------------------------------------------------------------
 # C64 — details_json / --inline drift guard
 #
 # The backend stores finding metadata in a column literally named

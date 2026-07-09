@@ -16,9 +16,12 @@ Run all target-facing httpx probes via `vigil assess kali httpx` — the typed v
 
 Flag reference (used inside `vigil assess kali httpx`):
 
-**Probe from file:** `-l /engagements/$ENGAGEMENT_KEY/scans/targets.txt -status-code -title -server -content-length`
+**Probe from file:** `-l /engagements/$ENGAGEMENT_KEY/scans/targets.txt -status-code -title -web-server -cl`
 **Follow redirects:** `-follow-redirects`
 **With path appended:** `-path /api/v1`
+**Alt-port liveness (I-6):** `-ports 80,443,8080,8443` — httpx defaults to 80/443 only, so an
+alt-port-only host (8080/8443/…) reads as dead and is never seeded/crawled unless you pass the
+port list explicitly. Reach for this whenever a target's scope includes non-standard ports.
 
 ## Fingerprinting
 
@@ -54,8 +57,26 @@ Flag reference (used inside `vigil assess kali httpx`):
 
 **JSON output:** `-json -o /engagements/$ENGAGEMENT_KEY/scans/httpx_live.jsonl`
 **CSV output:** `-csv -o /engagements/$ENGAGEMENT_KEY/scans/httpx_live.csv`
+**Save response bodies:** `-store-response -store-response-dir /engagements/$ENGAGEMENT_KEY/scans/httpx_bodies`
 
 Always write output to `/engagements/$ENGAGEMENT_KEY/scans/` — writing to `/tmp` loses artifacts on container recreate.
+
+## Passthrough flags (`--extra-args`)
+
+`--extra-args` shlex-splits a raw string and appends it to the argv after every typed flag above —
+prefer a typed flag when one exists (it is validated at parse time and documented here); reach for
+`--extra-args` only for the long tail below. Example: `--extra-args '-mr "(?i)internal"'`.
+
+Common passthrough flags not yet typed on the wrapper:
+
+- `-mr` / `-match-regex` — match response body/header against a regex.
+- `-body` / `-d` — send a request body (e.g. for `-x POST`).
+- `-method` / `-x` — HTTP method to use for the probe (default GET).
+- `-json` field selection (e.g. `-irr` / `-include-response` to embed the response body in each JSON row) — spelling has shifted across httpx releases, so confirm it first (see below).
+
+If you hit a flag that isn't typed and isn't in this list, check the live `-h` output first
+(`vigil assess kali tool-help httpx`) rather than guessing — the installed httpx version is the
+source of truth for exact spelling.
 
 **Pipeline usage:** httpx is glue between subdomain enumeration and scanning. Write subfinder/puredns output to a file first, then pass it to `vigil assess kali httpx -l <file>` so each step has its own audit row and the coverage map stays truthful. Piping between tools in a single `kali exec` heredoc loses the per-tool audit rows.
 

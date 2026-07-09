@@ -779,11 +779,13 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         author_supplied_fields=(
             "--result-status (attempted|blocked|no-signal|error — non-covering only)",
-            "--attack-family (a vuln_taxonomy class)",
+            "--attack-family (a vuln_taxonomy CLASS token — not a family heading; see agent/references/runtime-guides/vuln-taxonomy.md)",
             "--input-slot (REQUIRED — 'slot:name' or a bare coarse slot; 'unknown'/empty rejected)",
             "--auth-context (REQUIRED — explicit identity; no silent anonymous)",
             "--target-host (REQUIRED — a non-covering lead is target-anchored by host/path)",
             "--lens / --target-path / --target-port as applicable",
+            "--work-item-ids <id...> (optional — mark those work-buffer rows done atomically with the probe insert; unknown ids skipped)",
+            "--resolve-surface <id> (optional, OPT-IN — advance that surface to partially-covered; omit and surface state is untouched)",
         ),
         helper_defaults=(
             ("tool_name", "manual"),
@@ -795,6 +797,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Name the specific input as `--input-slot slot:name` (e.g. `header:X-Forwarded-Host`, `query:uid`) so 'which input was probed' stays queryable; a bare slot is fine for whole-slot probes.",
             "--finding <slug> backfills the attempt→finding link (finding_id); it is COALESCE-backfilled on a re-run of the same probe, so a later record-attempt can attach the link an earlier one omitted.",
             "An out-of-vocab --attack-family WARNs but is stored verbatim (the backend persists TEXT for forward-compatibility).",
+            "A3: --work-item-ids <id...> drains those work-buffer rows (marks them `done`) in the SAME transaction as the probe insert, so `vigil assess work-buffer stats` bucket counts actually decrement as probes land; unknown ids are skipped, not an error. --resolve-surface <id> is OPT-IN: it advances that surface to `partially-covered` via the resolve-surface path — recording never auto-mutates surface state, so omit it to leave the surface untouched.",
+            "Verdict → verb+status (there is NO `refuted` status — a runtime-refuted hypothesis is `no-signal`): confirmed vuln → `record-probe --result-status tested|signal`; the probe fired but proved nothing → `record-attempt --result-status attempted`; a WAF/auth/egress wall stopped it → `record-attempt --result-status blocked`; hypothesis disproven / nothing distinguishing the response → `record-attempt --result-status no-signal`; the probe itself errored (tool/network failure) → `record-attempt --result-status error`. Vocabulary source: coverage.py:PROBE_RESULT_STATUSES.",
         ),
         common_mistakes=(
             ("--result-status tested", "covering verdicts go to `record-probe` (evidence required), not record-attempt; use attempted/blocked/no-signal/error here"),
@@ -812,12 +816,14 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         author_supplied_fields=(
             "--result-status (tested|signal — covering only)",
-            "--attack-family (a vuln_taxonomy class)",
+            "--attack-family (a vuln_taxonomy CLASS token — not a family heading; see agent/references/runtime-guides/vuln-taxonomy.md)",
             "--evidence-ref (REQUIRED — a covering verdict without evidence is not coverage)",
             "--input-slot (REQUIRED — 'slot:name' or a bare coarse slot; 'unknown'/empty rejected)",
             "--auth-context (REQUIRED — explicit identity; no silent anonymous)",
             "--target-host (REQUIRED unless a --request-variant-id/--service-id anchor is passed) / --target-path as applicable",
             "--request-variant-id / --service-id / --coverage-item-id from the fetched work-item (links the probe to the exact request/coverage item)",
+            "--work-item-ids <id...> (optional — mark those work-buffer rows done atomically with the probe insert; unknown ids skipped)",
+            "--resolve-surface <id> (optional, OPT-IN — advance that surface to partially-covered; omit and surface state is untouched)",
         ),
         helper_defaults=(
             ("tool_name", "manual"),
@@ -828,6 +834,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`--evidence-ref` is mandatory: a covering probe with no evidence is exactly the self-attested signal the doctrine forbids, and the depth ledger only counts covering probes with a real result.",
             "Name the specific input as `--input-slot slot:name` (e.g. `header:X-Forwarded-Host`, `query:uid`) so per-input coverage stays queryable in the resume brief; a bare slot is fine for whole-slot probes.",
             "Replaces the old raw `post probe-runs <json>` for the covering path (that raw form is now redirected here).",
+            "A3: --work-item-ids <id...> drains those work-buffer rows (marks them `done`) in the SAME transaction as the probe insert, so `vigil assess work-buffer stats` bucket counts actually decrement as probes land; unknown ids are skipped, not an error. --resolve-surface <id> is OPT-IN: it advances that surface to `partially-covered` via the resolve-surface path — recording never auto-mutates surface state, so omit it to leave the surface untouched.",
+            "Verdict → verb+status (there is NO `refuted` status — a runtime-refuted hypothesis is `no-signal`): confirmed vuln → `record-probe --result-status tested|signal`; the probe fired but proved nothing → `record-attempt --result-status attempted`; a WAF/auth/egress wall stopped it → `record-attempt --result-status blocked`; hypothesis disproven / nothing distinguishing the response → `record-attempt --result-status no-signal`; the probe itself errored (tool/network failure) → `record-attempt --result-status error`. Vocabulary source: coverage.py:PROBE_RESULT_STATUSES.",
         ),
         common_mistakes=(
             ("--result-status blocked", "non-covering outcomes go to `record-attempt`; record-probe is for tested/signal only"),
@@ -1251,6 +1259,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess code-dispatch list-triggers [status]",
             "vigil assess code-dispatch resolve-triggers <triggers-json-file> <resolution-status> <note>",
             "vigil assess code-dispatch requeue-triggers <triggers-json-file>",
+            "vigil assess code-dispatch retry-error <id1,id2,...> [reason]",
         ),
         author_supplied_fields=(
             "queue item id(s)",
@@ -1263,6 +1272,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`resolve-triggers` records accepted terminal trigger gaps — use it when the target implementation is outside the supplied source snapshot, a source equivalent was analyzed, or the trigger family is genuinely not applicable.",
             "Do not inflate CWE effort numbers to satisfy the gate. Use `disposition=not_applicable` on the coverage entry, or `resolve-triggers` for cross-file gaps that cannot be queued.",
             "`list-triggers` defaults to pending triggers, so operators can inspect blockers before resolving or requeueing.",
+            "`retry-error` recovers queue items stuck at status='error' back to 'pending' so they re-enter the fetch rotation — `reset-stale` only recovers abandoned 'processing' rows on a time window and never touches 'error' rows.",
         ),
         common_mistakes=(
             ("cwe_coverage object wrapper", "`done` requires a bare JSON array, not {'cwe_coverage': [...]}"),
@@ -1276,6 +1286,9 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
             {
                 "command": "vigil assess code-dispatch done 42 clean cwe/42.json 'reviewed parser'",
+            },
+            {
+                "command": "vigil assess code-dispatch retry-error 42 'transient parser crash, retrying'",
             },
         ),
     ),
@@ -2216,6 +2229,19 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "stderr); pass your own `-exclude-tags` to override it verbatim. The result's `resolved_argv` "
         "shows the exact command that ran after injection.",
         "Long sweeps run synchronously with a generous --timeout. `vigil assess kali job start` is operator-only — specialists never background (see kali-exec skill).",
+    ),
+    "httpx": (
+        "Alt-port liveness (I-6): pass -ports/-p <comma-list> (e.g. 80,443,8080,8443) whenever "
+        "scope may include non-default ports — httpx probes only 80/443 by default, so an "
+        "alt-port-only host reads as dead and is never seeded/crawled without this.",
+        "Prefer typed flags over --extra-args: -web-server (Server header; there is NO -server "
+        "flag on this wrapper, only -web-server), -content-length/-cl (flag), -path <path> "
+        "(probe an appended path), -store-response/-sr + -store-response-dir/-srd (save response "
+        "bodies to disk).",
+        "--extra-args common passthrough (not yet typed): -mr/-match-regex (regex match), "
+        "-body/-d (request body), -method/-x (HTTP method, default GET), and -json field-selection "
+        "flags (e.g. -irr/-include-response). Confirm exact spelling with `vigil assess kali "
+        "tool-help httpx` before guessing — see references/tools/recon/httpx.md.",
     ),
     "katana": (
         "Deep + scope-safe + disk-bounded by DEFAULT: `-d 5`, `-fs fqdn` (crawl only the exact seeded "

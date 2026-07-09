@@ -343,6 +343,16 @@ class ProbeRunRecordRequest(BaseModel):
     # Optional attempt→finding linkage. Validated to belong to the engagement
     # (404 otherwise) and COALESCE-backfilled on a re-run of the same probe.
     finding_id: int | None = None
+    # A3: opt-in work-buffer drain. ids of assessment_work_items rows this probe
+    # satisfies — marked ``done`` in the SAME transaction as the probe insert so
+    # "remaining work" bucket counts and recorded probes can never disagree.
+    # Unknown ids are silently skipped (mirrors POST /work-items/done); an empty
+    # list leaves the buffer untouched.
+    work_item_ids: list[int] = Field(default_factory=list)
+    # A3: opt-in surface advance. When set, the surface is advanced to
+    # ``partially-covered`` via the resolve-surface path. Recording never
+    # auto-mutates surface state — this only fires on an explicit id.
+    resolve_surface_id: int | None = None
 
 
 class CoverageItemRecordRequest(BaseModel):

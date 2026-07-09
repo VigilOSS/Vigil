@@ -955,6 +955,51 @@ def test_resume_brief_stale_threshold_per_role(client, isolate_settings) -> None
     assert "exp-old" in stale_ids
 
 
+def test_resume_brief_surfaces_terminal_handoff_less_dispatch(client, isolate_settings) -> None:
+    """C4c: a dispatch that reads terminal (failed/aborted) with no handoff row
+    is silent state-loss — pre-fix, `_recent_dispatch_picture` excluded any
+    non-in-progress row before the handoff-gap check ever ran, so this case
+    was structurally invisible to resume-brief. It must now appear in the new
+    `terminal_no_handoff` list, while staying OUT of both `handoff_gaps` (which
+    is in-progress-only, so a terminal row isn't double-reported) and
+    `stale_in_progress_dispatches`."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "recon-died-1",
+            "agent_role": "recon-specialist",
+            "task": "enumerate subdomains",
+            "skills": "recon-methodology",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    closed = client.patch(
+        f"{BASE}/dispatches/recon-died-1",
+        json={"status": "failed", "completed_at": "2026-07-08T12:00:00Z"},
+    )
+    assert closed.status_code == 200, closed.text
+
+    brief = client.get(f"{BASE}/resume-brief")
+    assert brief.status_code == 200, brief.text
+    dispatches = brief.json()["dispatches"]
+
+    terminal_ids = [row["agent_id"] for row in dispatches.get("terminal_no_handoff") or []]
+    assert "recon-died-1" in terminal_ids
+    terminal_row = next(row for row in dispatches["terminal_no_handoff"] if row["agent_id"] == "recon-died-1")
+    assert terminal_row["status"] == "failed"
+    assert terminal_row["agent_role"] == "recon-specialist"
+
+    # A terminal handoff-less dispatch is surfaced ONLY by terminal_no_handoff,
+    # not double-reported in the in-progress-only handoff_gaps list.
+    gap_ids = [row["agent_id"] for row in dispatches.get("handoff_gaps") or []]
+    assert "recon-died-1" not in gap_ids
+
+    stale_ids = [row["agent_id"] for row in dispatches.get("stale_in_progress_dispatches") or []]
+    assert "recon-died-1" not in stale_ids
+
+
 def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:
     actions = _recommended_actions(
         finding="VA-047",

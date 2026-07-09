@@ -43,8 +43,11 @@ def add_common_probe_args(parser, *, include_links: bool) -> None:
         dest="attack_family",
         required=True,
         help=(
-            "Vuln-class family the probe exercised (a vuln_taxonomy class, e.g. "
-            "ssrf | idor | sqli | open-redirect). Unknown values WARN but are stored."
+            "Vuln-class the probe exercised — one of the backtick-quoted CLASS "
+            "tokens (e.g. ssrf | idor | sqli | open-redirect), NOT a coarse family "
+            "heading (access-control | injection). Full vocabulary: "
+            "agent/references/runtime-guides/vuln-taxonomy.md. Unknown values WARN "
+            "but are stored verbatim."
         ),
     )
     parser.add_argument(
@@ -101,6 +104,33 @@ def add_common_probe_args(parser, *, include_links: bool) -> None:
         dest="finding",
         default="",
         help="Optional finding slug (or numeric id) to backfill the probe→finding link.",
+    )
+    parser.add_argument(
+        "--work-item-ids",
+        dest="work_item_ids",
+        nargs="+",
+        type=int,
+        default=None,
+        metavar="ID",
+        help=(
+            "Optional work-buffer item ids this probe drains. They are marked "
+            "'done' in the SAME transaction as the probe insert, so 'remaining "
+            "work' bucket counts (vigil assess work-buffer stats) actually "
+            "decrement as probes land. Unknown ids are skipped, never an error."
+        ),
+    )
+    parser.add_argument(
+        "--resolve-surface",
+        dest="resolve_surface_id",
+        type=int,
+        default=None,
+        metavar="SURFACE_ID",
+        help=(
+            "OPT-IN: advance this surface id to 'partially-covered' as part of "
+            "recording. Recording never auto-mutates surface state — omit this and "
+            "the surface is left untouched. Drives the same path as "
+            "'vigil assess resolve-surface'."
+        ),
     )
     if include_links:
         parser.add_argument(
@@ -256,6 +286,13 @@ def build_probe_payload(args, *, attack_family: str, result_status: str) -> dict
         payload["target_port"] = int(args.target_port)
     if args.observed_http_status is not None:
         payload["observed_http_status"] = int(args.observed_http_status)
+    # A3: opt-in work-buffer drain + surface advance. Both are shared across the
+    # covering/non-covering verbs (added unconditionally in add_common_probe_args),
+    # so a bare integer list / id threads straight into ProbeRunRecordRequest.
+    if args.work_item_ids:
+        payload["work_item_ids"] = [int(x) for x in args.work_item_ids]
+    if args.resolve_surface_id is not None:
+        payload["resolve_surface_id"] = int(args.resolve_surface_id)
     for link in ("request_variant_id", "service_id", "coverage_item_id"):
         value = getattr(args, link, None)
         if value is not None:
