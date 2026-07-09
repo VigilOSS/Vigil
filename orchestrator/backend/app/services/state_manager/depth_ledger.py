@@ -724,7 +724,7 @@ def _expected_families(
     ):
         expected["file"] = "upload/download/file param or path"
 
-    expected["disclosure"] = "deep_required unit (always expected)"
+    expected["disclosure"] = "every application unit (always expected)"
 
     has_form = any(
         "form" in str(v.get("content_type_family") or "").lower() for v in unit_variants
@@ -1243,8 +1243,11 @@ def by_family_coverage(connection, engagement_id: int) -> dict[str, Any]:
                     deferred_families.add(fam)
 
         # Per-family probe stats off the SAME bucketed probes — never a per-family
-        # rescan. ``finding_id`` is the first non-null linkage in the family bucket
-        # (probes carry it; per-input coverage cells do not).
+        # rescan. ``finding_id`` is the MIN non-null linkage in the family bucket
+        # (probes carry it; per-input coverage cells do not) — ``min`` rather than
+        # "first row seen" so the reported id is DETERMINISTIC regardless of the
+        # unordered ``SELECT`` scan order. ``has_finding`` stays "any probe in the
+        # bucket carries a finding".
         probe_stats: dict[str, dict[str, Any]] = {}
         observed_families: set[str] = set()
         for p in unit_probes:
@@ -1261,8 +1264,10 @@ def by_family_coverage(connection, engagement_id: int) -> dict[str, Any]:
             if str(p.get("result_status") or "").strip().lower() in PROBE_RESULT_STATUSES_COVERING:
                 st["covering_probe_count"] += 1
             fid = p.get("finding_id")
-            if fid is not None and st["finding_id"] is None:
-                st["finding_id"] = int(fid)
+            if fid is not None:
+                fid = int(fid)
+                if st["finding_id"] is None or fid < st["finding_id"]:
+                    st["finding_id"] = fid
 
         ac_identities = covered["covering_identities_by_family"].get(ACCESS_CONTROL_FAMILY, set())
 

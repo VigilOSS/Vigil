@@ -147,7 +147,19 @@ def _run_for_dispatch(args: argparse.Namespace, cfg) -> None:
     path_prefix = (getattr(args, "path_prefix", "") or "").strip()
     payload = _fetch_by_family(cfg)
     if getattr(args, "as_json", False):
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        # Scope the JSON to --host [--path-prefix] too — the same filter the text
+        # COVERAGE block applies — so `--for-dispatch --json` doesn't silently
+        # dump the whole grid.
+        host_l = host.lower()
+        units = [
+            u
+            for u in (payload.get("units") or [])
+            if isinstance(u, dict)
+            and str(u.get("host") or "").strip().lower() == host_l
+            and (not path_prefix or str(u.get("path_prefix") or "") == path_prefix)
+        ]
+        scoped = {"scope": {"host": host_l, "path_prefix": path_prefix or None}, "units": units}
+        print(json.dumps(scoped, indent=2, ensure_ascii=False))
         return
     for line in cc.render_dispatch_coverage_block(
         payload, host=host, path_prefix=path_prefix or None

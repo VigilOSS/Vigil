@@ -2012,7 +2012,7 @@ def render_family_ledger_text(payload: dict[str, Any]) -> list[str]:
         f"{totals.get('with_finding', 0)} with finding"
     )
     if not units:
-        lines.append("  (no application-units with a deep-coverage expectation yet)")
+        lines.append("  (no application-units recorded yet)")
         return lines
 
     for unit in units:
@@ -2093,6 +2093,7 @@ def render_dispatch_coverage_block(
         pp = str(unit.get("path_prefix") or "")
         deep = "deep-required" if unit.get("deep_required") else "shallow-ok"
         covered_fams: list[str] = []
+        deferred_fams: list[str] = []
         open_fams: list[str] = []
         for fam in unit.get("families") or []:
             if not isinstance(fam, dict):
@@ -2100,6 +2101,8 @@ def render_dispatch_coverage_block(
             name = str(fam.get("family") or "")
             if _family_cell_is_gap(fam):
                 open_fams.append(name)
+            elif str(fam.get("status") or "") == "deferred":
+                deferred_fams.append(name)
             else:
                 flag = _family_finding_flag(fam)
                 covered_fams.append(f"{name}({flag})" if flag else name)
@@ -2107,6 +2110,8 @@ def render_dispatch_coverage_block(
         lines.append(
             f"    covered: {', '.join(covered_fams) if covered_fams else '(none)'}"
         )
+        if deferred_fams:
+            lines.append(f"    deferred: {', '.join(deferred_fams)}")
         lines.append(
             f"    OPEN gaps: {', '.join(open_fams) if open_fams else '(none)'}"
         )

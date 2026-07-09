@@ -220,18 +220,24 @@ _CAGE_VERB_RE = re.compile(
 def _detect_technique_cage(task: str) -> list[str]:
     """Warn (never error) when a ``--task`` reads as a prescriptive technique cage.
 
-    Requires >=2 of three co-occurring signals before it warns (conservative by
-    design — this must not warning-fatigue on legitimately structured tasks):
+    Conservative by design — it must not warning-fatigue on legitimately
+    structured tasks. It detects three signals:
 
       (i)   a numbered/bulleted STEP LIST — >=3 lines matching ``^\\s*\\d+[.)]``
             or ``^\\s*[-*•]``;
       (ii)  a run of IMPERATIVE test-verbs — >=3 lines starting (after any
             leading number/bullet) with test/check/verify/try/confirm/validate/
             attempt/send/run/fuzz/enumerate/...;
-      (iii) at least one pre-named VULN-CLASS token from the canonical taxonomy
+      (iii) pre-named VULN-CLASS tokens from the canonical taxonomy
             (``vuln_taxonomy.all_classes()`` — imported the way ``probe_args.py``
-            does, never a hardcoded parallel list), i.e. the task pre-commits to
-            which bug to look for.
+            does, never a hardcoded parallel list).
+
+    It warns ONLY when a STRUCTURED recipe (>=3 step-list lines (i) or >=3
+    imperative-verb lines (ii)) also PRE-COMMITS to >=2 named bug classes (iii)
+    ON its recipe lines — the cage is "hunt these specific bugs, this way". A
+    structured imperative list that names NO bug to hunt (an orientation
+    checklist, or a confirmed-finding PoC / reproduction) is NOT a cage; neither
+    is a scope list with a single incidental class noun. Both must stay quiet.
 
     Returns zero or more short WARN strings, each pointing at the alternative:
     ``vigil assess coverage --host <h> --for-dispatch``. WARN-ONLY — the caller
@@ -247,13 +253,29 @@ def _detect_technique_cage(task: str) -> list[str]:
 
     from assess.lib.vuln_taxonomy import all_classes
 
+    classes = tuple(all_classes())
+
+    def _names_a_class(fragment: str) -> bool:
+        low = fragment.lower()
+        return any(
+            re.search(r"(?<![a-z0-9])" + re.escape(cls) + r"(?![a-z0-9])", low)
+            for cls in classes
+        )
+
     lowered = text.lower()
     named_classes = sorted(
         cls
-        for cls in all_classes()
-        if re.search(
-            r"(?<![a-z0-9])" + re.escape(cls) + r"(?![a-z0-9])", lowered
-        )
+        for cls in classes
+        if re.search(r"(?<![a-z0-9])" + re.escape(cls) + r"(?![a-z0-9])", lowered)
+    )
+    # Recipe lines (a step OR imperative-verb line) that THEMSELVES pre-name a
+    # specific bug class. A cage pre-commits the specialist to >=2 named bug
+    # classes inside a structured list. A structured imperative list that names
+    # no bug to hunt (an orientation checklist, a confirmed-finding PoC), or a
+    # scope list with one incidental class noun, is NOT a cage.
+    cage_lines = sum(
+        1 for ln in lines
+        if (_CAGE_STEP_RE.match(ln) or _CAGE_VERB_RE.match(ln)) and _names_a_class(ln)
     )
 
     signals: list[str] = []
@@ -266,7 +288,13 @@ def _detect_technique_cage(task: str) -> list[str]:
         more = "" if len(named_classes) <= 4 else ", ..."
         signals.append(f"pre-named vuln class(es): {shown}{more}")
 
-    if len(signals) < 2:
+    # Warn only on a STRUCTURED recipe (>=3 step lines or >=3 imperative-verb
+    # lines) that also pre-commits to >=2 named bug classes ON its recipe lines.
+    # The named-bug requirement is what separates a cage ("hunt these specific
+    # bugs") from a legitimate imperative checklist / confirmed-finding PoC that
+    # prescribes actions but names no bug to hunt.
+    has_structure = step_lines >= 3 or verb_lines >= 3
+    if not (has_structure and cage_lines >= 2):
         return []
 
     return [
