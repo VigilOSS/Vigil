@@ -34,13 +34,17 @@ trigger-gated load other specialists use.
   `check-phase-readiness --phase report` is a generic red report gate and does not own
   containment semantics.
 - **Submission mode (default red/android closeout)** — run `vigil assess export-submission <slug>
-  --platform <bugcrowd|hackerone|direct> --draft` first; it stages `submission.md` from backend
-  state, so there is nothing to load before that call. Then load
-  `agent/references/bugbounty-submission-format.md` to resolve the draft's `[NEEDS: ...]` markers
-  and pass the pre-submission checklist — the same reference covers all three platforms
-  (`--platform direct` is the Bugcrowd-style structure with VRT/H1-only fields dropped). See
-  "Per-Finding Dispatch" below for the lighter context load this mode uses instead of the full
-  mandatory set.
+  --platform <bugcrowd|hackerone|direct> --draft` first; it renders `submission.md` FROM the
+  finding's own fields (the finding is the source of truth) and consolidates everything you author
+  the body FROM — the finding metadata, any hygiene warnings, the structured proof, and every linked
+  command run — into ONE "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section below the second
+  `---` (present in both draft and final; never pasted) — so there is nothing to load before that
+  call. Then load `agent/references/submission-format.md` to author each section, resolve the draft's
+  `[NEEDS: ...]` markers, and pass the pre-submission checklist — the same reference covers all three
+  platforms (`--platform direct` is the Bugcrowd-style structure with VRT/H1-only fields dropped).
+  You author each section once and write it BACK to the finding (see the Mandatory Closing
+  Sequence); `submission.md` is a render, not the durable copy. See "Per-Finding Dispatch" below for
+  the lighter context load this mode uses instead of the full mandatory set.
 - **Email disclosure mode** — a separate output (`disclosure.txt`, not `export-submission`'s
   `submission.md`) for a vendor/CERT audience; load `agent/references/disclosure-email-format.md`
   before writing it.
@@ -50,7 +54,7 @@ trigger-gated load other specialists use.
 Before writing anything, verify:
 
 - [ ] You loaded `agent/shared-constraints.md` for red submissions/reports or `agent/shared-constraints-blue.md` for blue reports
-- [ ] For submission mode (default), you loaded `agent/references/bugbounty-submission-format.md` or `agent/references/disclosure-email-format.md` per "Per-Finding Dispatch"; for internal-report or blue mode, you loaded the report-generation skill (`agent/skills/report-generation/SKILL.md`)
+- [ ] For submission mode (default), you loaded `agent/references/submission-format.md` or `agent/references/disclosure-email-format.md` per "Per-Finding Dispatch"; for internal-report or blue mode, you loaded the report-generation skill (`agent/skills/report-generation/SKILL.md`)
 - [ ] For blue reports, you loaded `agent/skills/report-generation/templates/blue.md` and are writing an incident closeout/report, not a vulnerability disclosure
 - [ ] You reviewed the Proof Standard by Finding Class in `agent/skills/report-generation/SKILL.md` (this one section, even in the lighter submission dispatch) — every finding must meet its class-specific evidence bar before inclusion
 - [ ] You have the dispatch context (engagement directory, phase, any operator instructions on report scope)
@@ -105,12 +109,13 @@ one, per `agent/phases/phase-8-report.md`).
 ### Per-finding submissions (primary closeout — program triage / client audience)
 
 Each dispatch produces one standalone deliverable for one finding. Follow the Mandatory Closing
-Sequence below end to end — it is the authoritative procedure (`export-submission --draft` → edit
-→ targeted command-evidence → checklist/QA → blind-triage Pass 2 → publish).
+Sequence below end to end — it is the authoritative procedure (`export-submission --draft` scaffold
+→ author each section and write it back to the finding → re-render + checklist/QA → blind-triage
+Pass 2 → publish, which re-renders the authored content from the finding).
 
 - **Bug bounty submission mode:** `vigil assess export-submission <slug> --platform bugcrowd` or
   `--platform hackerone --draft`. Output: `$ENGAGEMENT_DIR/submissions/<slug>/submission.md`. Load
-  `agent/references/bugbounty-submission-format.md` and the LDAP injection example to resolve the
+  `agent/references/submission-format.md` and the LDAP injection example to resolve the
   draft's `[NEEDS: ...]` markers and pass the checklist.
 - **Direct submission mode:** `vigil assess export-submission <slug> --platform direct --draft`.
   Same output path and structure, company-facing, VRT/H1-only fields dropped. Default platform for
@@ -121,7 +126,7 @@ Sequence below end to end — it is the authoritative procedure (`export-submiss
 
 Minimal context load for all of the above — see "Per-Finding Dispatch" below. Before delivering any
 external submission, run the full pre-submission checklist in
-`agent/references/bugbounty-submission-format.md`; `agent/rules/reporting.md` Rule 20 is the
+`agent/references/submission-format.md`; `agent/rules/reporting.md` Rule 20 is the
 authoritative rule behind it.
 
 ### Internal report — report.md (secondary, operator-requested)
@@ -136,7 +141,7 @@ A single submission does not need the full report-generation machinery (attack-c
 
 - `agent/shared-constraints.md`
 - `agent/rules/reporting.md`
-- `agent/references/bugbounty-submission-format.md` (or `disclosure-email-format.md` for email disclosure mode)
+- `agent/references/submission-format.md` (or `disclosure-email-format.md` for email disclosure mode)
 - The one finding's evidence: `vigil assess fetch findings/<slug>` or `vigil assess list-report-findings --mode draft --json` filtered to the slug
 
 Skip: `agent/skills/report-generation/SKILL.md` full procedure, `vigil assess fetch attack-chains`, `vigil assess fetch summary`, and executive summary machinery — none of those apply to a single-finding submission. The SKILL.md "Submission Status Lifecycle" section IS needed for the `--submission-status` lifecycle after the operator submits — load that section (referenced from the SKILL) without pulling the entire report generation flow.
@@ -169,13 +174,21 @@ CVSS sourcing and calculation: see `agent/skills/report-generation/SKILL.md`.
 
 ## Default Finding Structure
 
-For each finding, prefer:
+These are the stable sections `export-submission` renders from the finding's fields, in order. You
+author each one and write it back to the finding (see the Mandatory Closing Sequence); the render
+follows the copy-paste format in `agent/references/submission-format.md`
+(`**Title:** / **VRT:** or **Weakness:** / **Severity:** / **CVSS** / --- / ### sections`).
 
-- `Summary`: impact-first paragraph
-- `Vulnerability Details`: bug class, endpoint, auth context, severity/CVSS if used
-- `Steps to Reproduce`: numbered steps with exact request and inline response proof (request block + truncated response with annotated proof line per step)
-- `Impact`: concrete attacker outcome and affected scope
-- `Recommended Fix`: one or two precise remediation sentences
+- `Summary` (finding `summary`): impact-first paragraph — bug class, endpoint, and auth context
+  folded in
+- `Steps to Reproduce` (`details.steps_to_reproduce`): numbered steps, one action per step,
+  copy-pasteable
+- `Evidence` (`details.evidence`): the PII-masked, annotated proof — authored from the OPERATOR
+  DETAILS section's structured proof and linked command runs plus a targeted `list-command-runs`
+  search, truncated to the proof lines with a `<-- proof` marker on each
+- `Attack Scenario` (`details.attack_scenario`, optional): concrete adversary + action + outcome
+- `Impact` (`details.impact`): concrete attacker outcome and affected scope, quantified
+- `Remediation` (`details.remediation`): one or two precise remediation sentences naming the control
 
 ## Severity Defense Language
 
@@ -197,53 +210,94 @@ operator explicitly dispatched the internal-report mode (see "Operating Modes").
 
 ### Closing verbs (submission mode — default)
 
+**The finding is the source of truth; `submission.md` is a render of it.** You author each section
+ONCE, write it back to the finding, and let `export-submission` render it — so a re-render at
+publish reproduces your authored content exactly and never loses a hand edit. Do not treat
+`submission.md` as the durable copy: an edit made only in the file is overwritten on the next
+render, while a write to the finding is durable. Storing the MASKED, annotated Evidence in the
+finding is also what keeps a re-render from re-leaking PII — the raw tool output stays in `scans/`
+and is never rendered.
+
 1. **Confirm proof readiness.** Check the finding against "Proof Standard by Finding Class" and
    "Pre-Report Validation" checks 3-5 in `agent/skills/report-generation/SKILL.md`. A finding that
    fails these is not ready to draft — hand it back to the operator (see "Handoffs") rather than
    drafting around the gap.
-2. `vigil assess export-submission <slug> --platform <bugcrowd|hackerone|direct> --draft` — stages
-   `submission.md` + `submission-context.json` from backend finding state.
-3. Edit `submission.md`: resolve every `[NEEDS: ...]` marker with real backend-sourced content —
-   title, severity + CVSS vector, platform taxonomy (VRT category for Bugcrowd / weakness for
-   HackerOne), the attacker-impact statement, and concrete proof (`poc_request`+`poc_response`,
-   `poc_code`, or `evidence_ref`). **Targeted command-evidence step** for a missing reproducing
-   command: `export-submission` renders command evidence only from explicit finding-links
-   (`target_kind=command_run`), so LINK the exact run rather than pasting command text by hand — a
-   hand-pasted command is lost when the submission is re-rendered at publish; a link is durable.
-   Run the targeted search — `vigil assess list-command-runs --q "<the finding's url, param, header,
-   or URI value>"` (add `--show-matches` to see why a row matched, `--all` to require every query
-   term) — pick the run id that reproduces this finding, then `vigil assess link-finding <slug>
-   --link-kind evidence --target-kind command_run --target-id <run_id>`. `export-submission` renders
-   that command into the Evidence section on the next draft/publish. Verify any verb before citing it
-   — `vigil assess list-commands --grep command` or read `agent/scripts/assess/commands/` — never
-   reference a command that does not exist. If nothing resolves a marker, the finding is not ready —
-   do not submit around it; hand back instead of fabricating.
-4. **Checklist/QA (Pass 1 — in-context).** Run the "Post-Generation Self-Review" 13-check list in
-   `agent/skills/report-generation/SKILL.md` against the drafted `submission.md` (same checks as
-   the internal-report pass), plus the pre-submission checklist in
-   `agent/references/bugbounty-submission-format.md` (PII redaction, internal identifiers,
-   mandatory fields, banned phrasing per `agent/rules/reporting.md` Rule 20). Address every
-   `hygiene_warnings` entry `export-submission` reported (leaked internal UUIDs, absolute engagement
-   paths, `cases.db` references) — the generator flags them but deliberately never strips them, so
-   removing them is your job. Fix everything fixable directly in `submission.md`; return `QA PASS`
-   or `QA BLOCKED` with the exact gap.
+2. **Scaffold** — `vigil assess export-submission <slug> --platform <bugcrowd|hackerone|direct>
+   --draft`. This renders `submission.md` + `submission-context.json` FROM the finding's current
+   fields and consolidates the finding metadata, any hygiene warnings, the structured proof, and
+   every linked command run into ONE "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section below
+   the second `---` (present in both draft and final; never pasted — you author the body FROM it).
+   `--draft` marks any missing proof-critical field with `[NEEDS: ...]` (including `[NEEDS: evidence]`
+   in the empty Evidence section); it never sets `submission_status`, emits no event, and does not
+   mark the finding `reported`.
+3. **Author each section, then WRITE it back to the finding.** Author the stable sections — Summary,
+   Steps to Reproduce, Evidence, (Attack Scenario), Impact, Remediation — resolving every
+   `[NEEDS: ...]` marker with real backend-sourced content: title, severity + CVSS vector, platform
+   taxonomy (VRT category for Bugcrowd / weakness for HackerOne), and concrete proof.
+   - **Evidence is AUTHORED, not tool-dumped.** Build it from the OPERATOR DETAILS section's
+     structured proof and linked command runs PLUS a targeted search for reproducing commands the
+     linked set missed — the linked set may be incomplete: `vigil assess list-command-runs --q "<the
+     finding's url, param, header, or URI
+     value>"` (add `--show-matches` to see why a row matched, `--all` to require every query term).
+     For any reproducing run not already linked, link it so it stays durable reference:
+     `vigil assess link-finding <slug> --link-kind evidence --target-kind command_run --target-id
+     <run_id>`. Then AUTHOR the Evidence prose from those runs: mask customer PII (see
+     `agent/references/submission-format.md` "PII redaction"), truncate to the proof lines,
+     and annotate each with a `<-- proof` marker. Verify any verb before citing it —
+     `vigil assess list-commands --grep command` or read `agent/scripts/assess/commands/` — never
+     reference a command that does not exist.
+   - **Write the authored sections back to the finding** so it holds exactly what we would send:
+     ```bash
+     vigil assess update-finding <slug> \
+       --summary "<authored Summary — impact-first>" \
+       --details-inline '{
+         "steps_to_reproduce": ["<step 1>", "<step 2>"],
+         "evidence": "<PII-masked, annotated proof authored from the runs above>",
+         "attack_scenario": "<optional: concrete adversary + action + outcome>",
+         "impact": "<proven attacker outcome, quantified>",
+         "remediation": "<specific control + technology>"
+       }' \
+       --reason "Authored submission-ready sections to the finding (backend is source of truth)" \
+       --source-name report-writer
+     ```
+     `--summary` writes the top-level Summary; `--details-inline` MERGES the rest into the finding's
+     `details` (`steps_to_reproduce`, `evidence`, `attack_scenario`, `impact`, `remediation`)
+     without touching `cvss_vector`, `vrt_category`, or `poc_*`. The authored `details.evidence` is
+     what renders as the Evidence section; it does NOT by itself satisfy the strict gate's proof
+     requirement — the finding must ALSO carry `evidence_ref` (pointing at the raw file under
+     `scans/`, set with `--evidence-ref scans/<file>` if absent) OR `poc_request`+`poc_response` OR
+     `poc_code`. If nothing resolves a marker, the finding is not ready — do not submit around it;
+     hand back instead of fabricating.
+4. **Checklist/QA (Pass 1 — in-context).** Re-render from the finding — `vigil assess
+   export-submission <slug> --platform <same> --draft --overwrite` — then run the one consolidated
+   pre-submission / report QA checklist in `agent/references/submission-format.md` against the
+   re-rendered `submission.md` — the same checklist SKILL.md's "Post-Generation Self-Review" points
+   to (PII redaction, internal identifiers, mandatory fields, banned phrasing per
+   `agent/rules/reporting.md` Rule 20). Fix anything the
+   checks surface at its SOURCE — the finding (repeat step 3) — then re-render; a fix made only in
+   `submission.md` is lost on the next render. Address every `hygiene_warnings` entry
+   `export-submission` reported (leaked internal UUIDs, absolute engagement paths, `cases.db`
+   references) the same way — the generator flags them but deliberately never strips them, so
+   removing them (from the finding) is your job. Return `QA PASS` or `QA BLOCKED` with the exact gap.
 5. **Blind pre-submission triage (Pass 2) — mandatory for every Medium-or-above finding**, per
    `agent/skills/blind-triage/SKILL.md:11`, before the submission leaves the engagement. This is an
    operator-run dispatch of a separate zero-context agent (`agent/phases/phase-8-report.md` step
-   d), not a step you run yourself — your job here is to have produced a submission clean enough
-   to survive it, and to fix and re-run steps 3–4 if the recorded verdict is anything but `Accept`.
+   d), not a step you run yourself — your job here is to have authored a finding clean enough that
+   its render survives it, and to fix the finding and re-run steps 3–4 if the recorded verdict is
+   anything but `Accept`.
 6. **Publish:** for Medium-or-above findings, only after the blind verdict is recorded as `Accept`;
    for Low/Informational findings (no blind-triage gate), once `QA PASS`. Re-run `vigil assess
-   export-submission <slug> --platform <same platform>` **without** `--draft` — this is the strict
-   final gate (title; severity + CVSS vector; platform taxonomy; an attacker-impact statement; ≥1
-   concrete proof) and, on success, registers the rendered `submission.md` as a finding-linked
-   artifact (`kind="submission"`). It exits non-zero if any required field is missing and it never
-   sets `submission_status` — resolve any gap it reports rather than bypassing it. Then mark the
-   finding lifecycle: `vigil assess update-finding <slug> --status reported --reason "Submission
-   cleared for delivery" --source-name report-writer`. Once the operator has actually sent it to
-   the program, set `--submission-status submitted` (see "Per-Finding Dispatch" above) — a separate,
-   later operator action. Never mark `reported` before both the strict gate and its blind-triage
-   prerequisite (Medium+) clear — an unreviewed submission is not a closed finding.
+   export-submission <slug> --platform <same platform> --overwrite` **without** `--draft` — this
+   reproduces the authored content from the finding, applies the strict final gate (title; severity
+   + CVSS vector; platform taxonomy; an attacker-impact statement; ≥1 concrete proof) and, on
+   success, registers the rendered `submission.md` as a finding-linked artifact
+   (`kind="submission"`). It exits non-zero if any required field is missing and it never sets
+   `submission_status` — resolve any gap it reports (at the finding) rather than bypassing it. Then
+   mark the finding lifecycle: `vigil assess update-finding <slug> --status reported --reason
+   "Submission cleared for delivery" --source-name report-writer`. Once the operator has actually
+   sent it to the program, set `--submission-status submitted` (see "Per-Finding Dispatch" above) —
+   a separate, later operator action. Never mark `reported` before both the strict gate and its
+   blind-triage prerequisite (Medium+) clear — an unreviewed submission is not a closed finding.
 7. `vigil assess agent handoff --from-json <path>` to capture summary, runtime issues, working
    artifacts (point at `submissions/<slug>/submission.md`), open questions, and role-specific
    extras (`qa_status`, `blind_triage_verdict`).
@@ -259,7 +313,7 @@ surfaces present/missing state.
 ### Closing verbs (internal-report mode — operator-requested only)
 
 1. Write `report.md` with the structure below
-2. Run the 13-check self-review in `agent/skills/report-generation/SKILL.md`
+2. Run the consolidated pre-submission / report QA checklist (`agent/skills/report-generation/SKILL.md` "Post-Generation Self-Review" → `agent/references/submission-format.md`)
 3. In review-and-fix QA mode, run the QA checklist and fix report-local issues
 4. In publish mode, emit `report.generated`, mark included findings `reported`, update scope.json phase to `complete`
 5. `vigil assess agent handoff --from-json <path>` to capture summary, runtime issues, working artifacts (point at `report.md`), open questions, and role-specific extras (`qa_status`, `findings_in_report`)

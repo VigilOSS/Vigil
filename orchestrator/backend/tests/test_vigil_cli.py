@@ -90,7 +90,8 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     # Credentials are centralized in the backend store; no auth.json scaffold.
     assert not (created.path / "auth.json").exists()
     assert manifest["key"] == created.key
-    assert (created.path / "cases.db").exists()
+    # local cases.db no longer created; work items live in the backend
+    # ``assessment_work_items`` table — see tests/test_work_buffer_backend.py.
     assert (created.path / "start_codex.sh").exists()
     assert (created.path / "start_claude.sh").exists()
     assert "codex --full-auto" in (created.path / "start_codex.sh").read_text(encoding="utf-8")
@@ -280,7 +281,8 @@ def test_engagement_create_android_uses_artifact_only_scope(
     assert scope["current_phase"] == "ingest"
     assert manifest["target"] == "com.callpod.android_apps.keeper"
     assert (created.path / "source").is_dir()
-    assert (created.path / "cases.db").exists()
+    # local cases.db no longer created; work items live in the backend
+    # ``assessment_work_items`` table — see tests/test_work_buffer_backend.py.
     assert list_engagements(install_root)[0].target == "com.callpod.android_apps.keeper"
 
 
@@ -3438,8 +3440,9 @@ def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypa
 
     calls: list[str] = []
 
-    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_proxy", lambda *args, **kwargs: calls.append("mitmproxy"))
@@ -3461,8 +3464,9 @@ def test_up_starts_oob_when_only_client_sessions_exist(tmp_path: Path, monkeypat
 
     calls: list[str] = []
 
-    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
@@ -3488,7 +3492,7 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
 
     calls: list[str] = []
 
-    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: name == "vigil")
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
@@ -3530,7 +3534,7 @@ def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(up_module, "resolve_source_root", lambda *_args, **_kwargs: tmp_path)
     monkeypatch.setattr(up_module, "install_from_source", lambda *args, **kwargs: None)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: False)
-    monkeypatch.setattr(up_module, "_image_outdated", lambda *args, **kwargs: True)
+    monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: True)
     monkeypatch.setattr(up_module, "_start_or_restart_runtime", lambda *args, **kwargs: None)
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: None)
     monkeypatch.setattr(up_module, "_start_mitmproxy_if_needed", lambda *args, **kwargs: None)
@@ -3552,6 +3556,250 @@ def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: 
 
 
 # ---------------------------------------------------------------------------
+# Image freshness + proxy container/image drift
+# ---------------------------------------------------------------------------
+
+
+def _make_mitmproxy_inputs(install_root: Path) -> tuple[Path, Path]:
+    """Create the Dockerfile + addon that gate mitmproxy image freshness."""
+    dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    addon = install_root / "agent" / "scripts" / "proxy_addon.py"
+    addon.parent.mkdir(parents=True)
+    addon.write_text("# addon\n", encoding="utf-8")
+    return dockerfile, addon
+
+
+def test_mitmproxy_build_reports_current_when_image_newer_than_inputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import mitmproxy as mitmproxy_module
+    from vigil_cli.docker import DockerResult
+
+    install_root = tmp_path / "install"
+    dockerfile, addon = _make_mitmproxy_inputs(install_root)
+    # Inputs are OLD (2001); the image Created stamp is NEW (2030).
+    old = 1_000_000_000
+    os.utime(dockerfile, (old, old))
+    os.utime(addon, (old, old))
+
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:4] == ["docker", "image", "inspect", "-f"]:
+            return DockerResult(0, "2030-01-01T00:00:00Z\n", "")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
+
+    mitmproxy_module.build_image(install_root, runner=runner)
+
+    out = capsys.readouterr().out
+    assert "image current (up to date with source)" in out
+    assert not any(cmd[:2] == ["docker", "build"] for cmd in commands)
+
+
+def test_mitmproxy_build_rebuilds_when_inputs_newer_than_image(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import mitmproxy as mitmproxy_module
+    from vigil_cli.docker import DockerResult
+
+    install_root = tmp_path / "install"
+    _make_mitmproxy_inputs(install_root)  # written now -> newest mtime
+
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        # The tag EXISTS (image_exists True) but was Created back in 2001, so
+        # the freshly-written addon/Dockerfile are newer -> must rebuild. This
+        # is exactly the false-"current" the bare tag-exists check reported.
+        if argv[:4] == ["docker", "image", "inspect", "-f"]:
+            return DockerResult(0, "2001-01-01T00:00:00Z\n", "")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
+
+    mitmproxy_module.build_image(install_root, runner=runner)
+
+    out = capsys.readouterr().out
+    assert "image current" not in out
+    assert any(cmd[:3] == ["docker", "build", "-t"] for cmd in commands)
+    assert "image built" in out
+
+
+def test_mitmproxy_build_force_uses_no_cache_even_when_fresh(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import mitmproxy as mitmproxy_module
+    from vigil_cli.docker import DockerResult
+
+    install_root = tmp_path / "install"
+    dockerfile, addon = _make_mitmproxy_inputs(install_root)
+    old = 1_000_000_000
+    os.utime(dockerfile, (old, old))
+    os.utime(addon, (old, old))
+
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:4] == ["docker", "image", "inspect", "-f"]:
+            return DockerResult(0, "2030-01-01T00:00:00Z\n", "")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
+
+    mitmproxy_module.build_image(install_root, force=True, runner=runner)
+
+    build_command = next(cmd for cmd in commands if cmd[:2] == ["docker", "build"])
+    assert "--no-cache" in build_command
+    assert "image current" not in capsys.readouterr().out
+
+
+def test_proxy_image_drift_true_when_container_predates_image() -> None:
+    from vigil_cli import image_freshness
+    from vigil_cli import up as up_module
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "inspect", "-f"] and argv[3] == "{{.Image}}":
+            return DockerResult(0, "sha256:old-container-image\n", "")
+        if argv[:4] == ["docker", "image", "inspect", "-f"] and argv[4] == "{{.Id}}":
+            return DockerResult(0, "sha256:new-tag-image\n", "")
+        return DockerResult(0, "", "")
+
+    assert image_freshness.proxy_image_drift(runner=runner) is True
+    # up.py's thin wrapper single-sources the same verdict.
+    assert up_module._proxy_image_drift(runner=runner) is True
+
+
+def test_proxy_image_drift_false_when_ids_match() -> None:
+    from vigil_cli import image_freshness
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "inspect", "-f"] and argv[3] == "{{.Image}}":
+            return DockerResult(0, "sha256:same\n", "")
+        if argv[:4] == ["docker", "image", "inspect", "-f"] and argv[4] == "{{.Id}}":
+            return DockerResult(0, "sha256:same\n", "")
+        return DockerResult(0, "", "")
+
+    assert image_freshness.proxy_image_drift(runner=runner) is False
+
+
+def test_proxy_image_drift_false_when_container_absent() -> None:
+    from vigil_cli import image_freshness
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "inspect", "-f"] and argv[3] == "{{.Image}}":
+            return DockerResult(1, "", "No such object")
+        if argv[:4] == ["docker", "image", "inspect", "-f"] and argv[4] == "{{.Id}}":
+            return DockerResult(0, "sha256:new-tag-image\n", "")
+        return DockerResult(0, "", "")
+
+    assert image_freshness.proxy_image_drift(runner=runner) is False
+
+
+def test_up_warns_when_proxy_container_predates_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import up as up_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(up_module, "install_from_source", lambda *a, **k: None)
+    monkeypatch.setattr(up_module, "image_outdated", lambda *a, **k: False)
+    monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *a, **k: False)
+    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda **k: True)
+    monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
+    monkeypatch.setattr(up_module, "start_runtime", lambda *a, **k: calls.append("runtime"))
+    monkeypatch.setattr(up_module, "start_proxy", lambda *a, **k: calls.append("mitmproxy"))
+    monkeypatch.setattr(up_module, "start_orchestrator", lambda *a, **k: calls.append("orchestrator"))
+    monkeypatch.setattr(
+        up_module,
+        "oob_status",
+        lambda *a, **k: {"state": "partial", "server": True, "frpc": True, "clients": []},
+    )
+    monkeypatch.setattr(up_module, "start_oob", lambda *a, **k: calls.append("oob"))
+
+    up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *a, **k: None)
+
+    out = capsys.readouterr().out
+    assert "running old image; restart to pick up rebuilt image" in out
+    assert "Run `vigil mitmproxy start` to recreate the container on the current image." in out
+    # The proxy is already running, so `up` warns instead of recreating it.
+    assert "mitmproxy" not in calls
+
+
+def test_status_payload_reports_mitmproxy_image_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import status as status_module
+    from vigil_cli.docker import DockerResult
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil-proxy\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and argv[3] == "{{.Image}}":
+            return DockerResult(0, "sha256:old\n", "")
+        if argv[:4] == ["docker", "image", "inspect", "-f"] and argv[4] == "{{.Id}}":
+            return DockerResult(0, "sha256:new\n", "")
+        return DockerResult(0, "", "")
+
+    status = status_module.collect_status(install_root, runner=runner)
+    assert status["mitmproxy"]["image_drift"] is True
+
+    status_module.print_status(status)
+
+
+def test_status_print_shows_restart_needed_on_drift(capsys: pytest.CaptureFixture[str]) -> None:
+    from vigil_cli.status import print_status
+
+    print_status(_minimal_status(mitmproxy={"state": "running", "ca_volume": True, "image_drift": True}))
+    out = capsys.readouterr().out
+    mitm_line = next(line for line in out.splitlines() if line.startswith("mitmproxy\t"))
+    assert "restart-needed" in mitm_line
+
+
+def test_doctor_reports_mitmproxy_container_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import status as status_module
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil-proxy\n", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and argv[3] == "{{.Image}}":
+            return DockerResult(0, "sha256:old\n", "")
+        if argv[:4] == ["docker", "image", "inspect", "-f"] and argv[4] == "{{.Id}}":
+            return DockerResult(0, "sha256:new\n", "")
+        return DockerResult(0, "ok", "")
+
+    monkeypatch.setattr(status_module.shutil, "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(
+        status_module.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0, "ok", ""),
+    )
+    monkeypatch.setattr(status_module, "runtime_status", lambda **k: "stopped")
+
+    checks = status_module.collect_doctor_checks(tmp_path, runner=runner)
+    drift = next(c for c in checks if c.name == "mitmproxy-container-drift")
+    assert drift.status == "STALE"
+    assert "vigil mitmproxy start" in drift.detail
+
+
+# ---------------------------------------------------------------------------
 # Wave 3 W3-B mutation-helper coverage
 # ---------------------------------------------------------------------------
 
@@ -3568,47 +3816,75 @@ def _load_assess_main():
     return assess_main
 
 
-def _seed_dispatch_db(db_path: Path, rows: list[dict[str, object]]) -> None:
-    """Insert synthetic work_items rows for dispatch / list-clusters tests."""
-    scripts_root = repo_root / "agent" / "scripts"
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
-    for module_name in list(sys.modules):
-        if module_name == "assess" or module_name.startswith("assess."):
-            sys.modules.pop(module_name, None)
-    from assess.lib.db import db_init  # type: ignore[import-not-found]
+class _FakeWorkBufferClient:
+    """In-memory AssessmentClient stand-in for the backend work buffer.
 
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    db_path.touch()
-    db_init(str(db_path))
-    conn = sqlite3.connect(str(db_path))
-    try:
-        for row in rows:
-            conn.execute(
-                """INSERT INTO work_items
-                (queue_key, method, url, url_path, query_params, body_params,
-                 type, source, status, priority_score, cluster_key, terminal_reason)
-                VALUES (?, ?, ?, ?, '{}', '{}', ?, 'test', ?, ?, ?, ?)""",
-                (
-                    row["queue_key"],
-                    row.get("method", "GET"),
-                    row["url"],
-                    row.get("url_path", "/"),
-                    row.get("type", "api"),
-                    row.get("status", "pending"),
-                    row.get("priority_score", 0),
-                    row.get("cluster_key"),
-                    row.get("terminal_reason"),
-                ),
+    The per-engagement local ``cases.db`` ``work_items`` table was folded into
+    the orchestrator backend as ``assessment_work_items`` and is now reached over
+    HTTP (ADR 0013). These CLI tests therefore drive ``dispatch.run`` /
+    ``list_clusters.run`` against this fake instead of a real SQLite file. Reads
+    (``get`` / ``get_all_pages``) serve the seeded row dicts honoring the
+    ``?status=`` / ``?type=`` filters the commands use; writes (``post``) capture
+    the exact ``(endpoint, payload)`` on ``self.posts`` and return a plausible
+    ``{"affected": N}`` / ``{"claimed": [...]}`` ack. The former cases.db row-state
+    assertions are re-expressed against these captured POSTs — the durable row
+    mutation itself is covered server-side by tests/test_work_buffer_backend.py.
+    """
+
+    def __init__(self, rows=None, *, fetch_response=None):
+        # Normalize seeded rows: default status "pending" (matching the old
+        # SQLite column default) so defer/list-cluster status filters behave.
+        self.rows: list[dict] = []
+        for row in rows or []:
+            normalized = dict(row)
+            normalized.setdefault("status", "pending")
+            self.rows.append(normalized)
+        self.posts: list[tuple[str, dict]] = []
+        self.fetch_response = fetch_response
+
+    def _match_status(self, endpoint: str, row: dict) -> bool:
+        import re as _re
+
+        m = _re.search(r"status=([^&]+)", endpoint)
+        if not m:
+            return True
+        return str(row.get("status") or "pending") == m.group(1)
+
+    def get_all_pages(self, endpoint: str, *, page_size: int = 5000):
+        return [dict(r) for r in self.rows if self._match_status(endpoint, r)]
+
+    def get(self, endpoint: str):
+        return [dict(r) for r in self.rows if self._match_status(endpoint, r)]
+
+    def post(self, endpoint: str, payload: dict):
+        self.posts.append((endpoint, payload))
+        if endpoint == "work-items/fetch-by-priority" and self.fetch_response is not None:
+            return dict(self.fetch_response)
+        if endpoint == "work-items/defer":
+            # The backend defers only PENDING rows; mirror that so the
+            # zero-matched-rows path still exits non-zero.
+            ids = set(payload.get("ids") or [])
+            affected = sum(
+                1
+                for r in self.rows
+                if r.get("id") in ids and str(r.get("status") or "pending") == "pending"
             )
-            if "id" in row:
-                conn.execute(
-                    "UPDATE work_items SET id = ? WHERE queue_key = ?",
-                    (row["id"], row["queue_key"]),
-                )
-        conn.commit()
-    finally:
-        conn.close()
+            return {"affected": affected}
+        if endpoint in ("work-items/fetch", "work-items/fetch-by-priority"):
+            return {"claimed": [], "non_routable": [], "allowed_types": []}
+        # done / error / mark-manual / defer-cluster / reset-stale / retry-errors
+        # all just need a numeric ack the CLI echoes back.
+        return {"affected": len(payload.get("ids") or [])}
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
 
 def test_resolve_surface_requires_rationale(capsys: pytest.CaptureFixture[str]) -> None:
@@ -3994,7 +4270,7 @@ def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
 def _setup_transition_env(
     monkeypatch, module, tmp_path, *, scope, services=None, findings=None,
     dispatches=None, report_readiness=None, terminal_block=None,
-    decisions_by_kind=None,
+    decisions_by_kind=None, work_items=None,
 ):
     engagement = tmp_path / "agent" / "engagements" / "eng-test"
     engagement.mkdir(parents=True, exist_ok=True)
@@ -4005,6 +4281,13 @@ def _setup_transition_env(
     class _Client:
         def __init__(self, *_a, **_k) -> None:
             pass
+
+        def get_all_pages(self, endpoint: str, *, page_size: int = 5000):
+            # The work buffer now lives in the backend (assessment_work_items);
+            # the consumption advisory / work-buffer gates read it via
+            # get_all_pages("work-items..."). Serve the seeded rows (default [])
+            # — see tests/test_work_buffer_backend.py for the backend contract.
+            return list(work_items or [])
 
         def get(self, path: str):
             if path == "services":
@@ -4186,12 +4469,11 @@ def test_transition_verify_consumption_is_advisory_not_block(monkeypatch, tmp_pa
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "web", "current_phase": "consume-test"},
         findings=[{"slug": "f-1", "workflow_status": "active", "severity": "low"}],
+        # One genuinely un-consumed pending item (no terminal_reason) drives the
+        # consumption advisory. The work buffer is backend-owned now, so seed the
+        # fake client's work-items instead of a local cases.db table.
+        work_items=[{"id": 1, "status": "pending", "terminal_reason": None}],
     )
-    conn = sqlite3.connect(str(eng / "cases.db"))
-    conn.execute("CREATE TABLE work_items (id INTEGER PRIMARY KEY, status TEXT, terminal_reason TEXT)")
-    conn.execute("INSERT INTO work_items (status, terminal_reason) VALUES ('pending', NULL)")
-    conn.commit()
-    conn.close()
     module.run(_transition_args(eng, "verify"))
     err = capsys.readouterr().err
     assert "consumption_incomplete" in err
@@ -4661,6 +4943,11 @@ def test_check_phase_readiness_reports_partially_covered_surfaces(
             if path == "application-units/depth-ledger":
                 return {"skipped": True, "units": [], "summary": {}}
             raise AssertionError(f"unexpected endpoint {path}")
+
+        def get_all_pages(self, endpoint: str, *, page_size: int = 5000):
+            # coverage_checks._load_work_items_by_host reads the backend work
+            # buffer via get_all_pages("work-items"); empty scope means no rows.
+            return []
 
         def get_engagement(self, path: str, query: str = "") -> dict:
             return {"applicable": False, "engagement_type": "red",
@@ -6745,174 +7032,186 @@ def test_transition_phase_complete_marks_blue_scope_completed(
     assert updated["status"] == "completed"
 
 
-def _run_dispatch_action(db_path: Path, action: str, extra: list[str] | None = None, reason: str = "") -> None:
+def _run_dispatch_action(
+    monkeypatch,
+    rows: list[dict] | None,
+    action: str,
+    extra: list[str] | None = None,
+    reason: str = "",
+    *,
+    fetch_response: dict | None = None,
+) -> "_FakeWorkBufferClient":
+    """Drive ``dispatch.run`` (work-buffer verbs) against the backend fake."""
     module = _load_assess_module(
         "wave3_dispatch_module",
         "agent/scripts/assess/commands/dispatch/__init__.py",
     )
+    fake = _FakeWorkBufferClient(rows, fetch_response=fetch_response)
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir="/tmp/eng",
+        ),
+    )
     module.run(
         SimpleNamespace(
-            db_path=str(db_path),
             action=action,
             extra=list(extra or []),
             reason=reason,
+            reason_tag="",
             by="status",
+            engagement_dir=None,
         )
     )
+    return fake
 
 
 def _run_list_clusters_action(
-    db_path: Path,
+    monkeypatch,
+    rows: list[dict] | None,
     status: str = "pending",
     limit: int = 100,
     host: str = "",
-) -> None:
+) -> "_FakeWorkBufferClient":
     module = _load_assess_module(
         "wave3_list_clusters_module",
         "agent/scripts/assess/commands/list_clusters.py",
     )
+    fake = _FakeWorkBufferClient(rows)
+    monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir="/tmp/eng",
+        ),
+    )
     module.run(
         SimpleNamespace(
-            db_path=str(db_path),
+            engagement_dir=None,
             status=status,
             limit=limit,
             host=host,
         )
     )
+    return fake
 
 
-def test_dispatch_defer_items_accepts_multiple_positional_ids(tmp_path: Path) -> None:
-    """P1 #10: defer-items must affect every id, not just extra[0]."""
-    db = tmp_path / "cases.db"
-    _seed_dispatch_db(
-        db,
-        [
-            {"queue_key": "q:1", "url": "https://target.example/a", "id": 1},
-            {"queue_key": "q:2", "url": "https://target.example/b", "id": 2},
-            {"queue_key": "q:3", "url": "https://target.example/c", "id": 3},
-        ],
-    )
+def test_dispatch_defer_items_accepts_multiple_positional_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1 #10: defer-items must send every id to the backend, not just extra[0].
 
-    _run_dispatch_action(db, "defer-items", ["1", "2", "3"], reason="low signal")
+    The row-state mutation (pending -> skipped with terminal_reason) is now
+    backend-owned; see tests/test_work_buffer_backend.py. Here we protect the
+    CLI wiring: the exact ids + reason POSTed to work-items/defer.
+    """
+    rows = [
+        {"queue_key": "q:1", "url": "https://target.example/a", "id": 1},
+        {"queue_key": "q:2", "url": "https://target.example/b", "id": 2},
+        {"queue_key": "q:3", "url": "https://target.example/c", "id": 3},
+    ]
 
-    rows = sqlite3.connect(str(db)).execute(
-        "SELECT id, status, terminal_reason FROM work_items ORDER BY id"
-    ).fetchall()
-    assert [(r[0], r[1]) for r in rows] == [(1, "skipped"), (2, "skipped"), (3, "skipped")]
-    assert all(r[2] == "low signal" for r in rows)
+    fake = _run_dispatch_action(monkeypatch, rows, "defer-items", ["1", "2", "3"], reason="low signal")
+
+    assert fake.posts == [("work-items/defer", {"ids": [1, 2, 3], "reason": "low signal"})]
 
 
-def test_dispatch_defer_items_accepts_comma_separated(tmp_path: Path) -> None:
+def test_dispatch_defer_items_accepts_comma_separated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """P1 #10: comma form still works alongside the multi-positional form."""
-    db = tmp_path / "cases.db"
-    _seed_dispatch_db(
-        db,
-        [
-            {"queue_key": "q:1", "url": "https://target.example/a", "id": 10},
-            {"queue_key": "q:2", "url": "https://target.example/b", "id": 11},
-        ],
-    )
+    rows = [
+        {"queue_key": "q:1", "url": "https://target.example/a", "id": 10},
+        {"queue_key": "q:2", "url": "https://target.example/b", "id": 11},
+    ]
 
-    _run_dispatch_action(db, "defer-items", ["10,11"], reason="noise")
+    fake = _run_dispatch_action(monkeypatch, rows, "defer-items", ["10,11"], reason="noise")
 
-    rows = sqlite3.connect(str(db)).execute(
-        "SELECT status FROM work_items ORDER BY id"
-    ).fetchall()
-    assert [r[0] for r in rows] == ["skipped", "skipped"]
+    assert fake.posts == [("work-items/defer", {"ids": [10, 11], "reason": "noise"})]
 
 
 def test_dispatch_defer_items_with_no_ids_errors(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """P1 #10: empty / pure-comma id input must abort instead of silently no-op."""
-    db = tmp_path / "cases.db"
-    _seed_dispatch_db(db, [])
-
     with pytest.raises(SystemExit):
-        _run_dispatch_action(db, "defer-items", [], reason="x")
+        _run_dispatch_action(monkeypatch, [], "defer-items", [], reason="x")
     err = capsys.readouterr().err
     assert "Usage" in err or "id" in err.lower()
 
 
 def test_dispatch_defer_items_pure_comma_string_errors(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """P3 #15: a pure-comma id_list (e.g. ',') must abort instead of silently no-op."""
-    db = tmp_path / "cases.db"
-    _seed_dispatch_db(db, [])
-
     with pytest.raises(SystemExit):
-        _run_dispatch_action(db, "defer-items", [","], reason="x")
+        _run_dispatch_action(monkeypatch, [], "defer-items", [","], reason="x")
     err = capsys.readouterr().err
     assert "at least one numeric ID" in err
 
 
 def test_dispatch_defer_items_zero_rows_exits_nonzero(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """P2 #11: zero matched rows must surface an error so a typo isn't a silent success."""
-    db = tmp_path / "cases.db"
-    _seed_dispatch_db(
-        db,
-        [
-            {"queue_key": "q:1", "url": "https://target.example/a", "id": 1, "status": "done"},
-        ],
-    )
+    """P2 #11: zero matched rows must surface an error so a typo isn't a silent success.
+
+    The backend returns affected=0 when no PENDING row matches (here the only
+    row is already ``done``); the CLI must exit non-zero and explain.
+    """
+    rows = [{"queue_key": "q:1", "url": "https://target.example/a", "id": 1, "status": "done"}]
 
     with pytest.raises(SystemExit):
-        _run_dispatch_action(db, "defer-items", ["1"], reason="x")
+        _run_dispatch_action(monkeypatch, rows, "defer-items", ["1"], reason="x")
     err = capsys.readouterr().err
     assert "no pending items matched" in err
 
 
-def test_dispatch_done_marks_every_id(tmp_path: Path) -> None:
-    """P1 #10: done must update all ids, not just the first one in `extra`."""
-    db = tmp_path / "cases.db"
-    _seed_dispatch_db(
-        db,
-        [
-            {"queue_key": "q:1", "url": "https://target.example/a", "id": 1, "status": "processing"},
-            {"queue_key": "q:2", "url": "https://target.example/b", "id": 2, "status": "processing"},
-        ],
-    )
+def test_dispatch_done_marks_every_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P1 #10: done must send all ids to the backend, not just the first in `extra`."""
+    rows = [
+        {"queue_key": "q:1", "url": "https://target.example/a", "id": 1, "status": "processing"},
+        {"queue_key": "q:2", "url": "https://target.example/b", "id": 2, "status": "processing"},
+    ]
 
-    _run_dispatch_action(db, "done", ["1", "2"])
+    fake = _run_dispatch_action(monkeypatch, rows, "done", ["1", "2"])
 
-    rows = sqlite3.connect(str(db)).execute("SELECT status FROM work_items ORDER BY id").fetchall()
-    assert [r[0] for r in rows] == ["done", "done"]
+    assert fake.posts == [("work-items/done", {"ids": [1, 2]})]
 
 
 def test_dispatch_peek_invalid_limit_errors(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """P3 #12: a non-integer peek limit prints a clean usage line instead of a stacktrace."""
-    db = tmp_path / "cases.db"
-    _seed_dispatch_db(db, [])
     with pytest.raises(SystemExit):
-        _run_dispatch_action(db, "peek", ["api", "abc"])
+        _run_dispatch_action(monkeypatch, [], "peek", ["api", "abc"])
     err = capsys.readouterr().err
     assert "must be an integer" in err
 
 
 def test_dispatch_fetch_by_priority_warns_when_only_non_routable_pending(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """P2 #14: pending rows in non-routable types must surface a stderr WARN."""
-    db = tmp_path / "cases.db"
-    _seed_dispatch_db(
-        db,
-        [
-            {
-                "queue_key": "img:1",
-                "url": "https://target.example/logo.png",
-                "id": 1,
-                "type": "image",
-                "status": "pending",
-            },
-        ],
-    )
+    """P2 #14: pending rows in non-routable types must surface a stderr WARN.
 
-    _run_dispatch_action(db, "fetch-by-priority", ["10", "auto"])
+    The routing + claim run server-side; the CLI just renders the backend's
+    ``non_routable`` summary. Drive the fetch-by-priority response directly.
+    """
+    fetch_response = {
+        "claimed": [],
+        "non_routable": [{"type": "image", "count": 1}],
+        "allowed_types": ["api", "form", "json"],
+    }
+
+    _run_dispatch_action(
+        monkeypatch, [], "fetch-by-priority", ["10", "auto"], fetch_response=fetch_response
+    )
 
     captured = capsys.readouterr()
     assert "WARN fetch-by-priority" in captured.err
@@ -6920,10 +7219,9 @@ def test_dispatch_fetch_by_priority_warns_when_only_non_routable_pending(
 
 
 def test_list_clusters_host_filter_matches_full_population(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """P1 #25: --host considers ALL items per cluster, not just the first 5 samples."""
-    db = tmp_path / "cases.db"
     rows = []
     # Cluster A: 6 items on other-host.com, then 1 on target.example (sample window covers
     # only the first 5 by priority — the legacy implementation would miss target.example).
@@ -6959,9 +7257,8 @@ def test_list_clusters_host_filter_matches_full_population(
             "type": "api",
         }
     )
-    _seed_dispatch_db(db, rows)
 
-    _run_list_clusters_action(db, host="target.example")
+    _run_list_clusters_action(monkeypatch, rows, host="target.example")
     payload = json.loads(capsys.readouterr().out)
     cluster_keys = [c["cluster_key"] for c in payload["clusters"]]
     assert "alpha" in cluster_keys
@@ -6969,38 +7266,34 @@ def test_list_clusters_host_filter_matches_full_population(
 
 
 def test_list_clusters_host_filter_supports_wildcard(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Bonus #26: '*.example.com' fnmatches subdomains, exact 'example.com' does not."""
-    db = tmp_path / "cases.db"
-    _seed_dispatch_db(
-        db,
-        [
-            {
-                "queue_key": "a:1",
-                "url": "https://api.example.com/v1",
-                "id": 1,
-                "cluster_key": "alpha",
-                "priority_score": 10,
-            },
-            {
-                "queue_key": "a:2",
-                "url": "https://example.com/",
-                "id": 2,
-                "cluster_key": "beta",
-                "priority_score": 5,
-            },
-        ],
-    )
+    rows = [
+        {
+            "queue_key": "a:1",
+            "url": "https://api.example.com/v1",
+            "id": 1,
+            "cluster_key": "alpha",
+            "priority_score": 10,
+        },
+        {
+            "queue_key": "a:2",
+            "url": "https://example.com/",
+            "id": 2,
+            "cluster_key": "beta",
+            "priority_score": 5,
+        },
+    ]
 
-    _run_list_clusters_action(db, host="*.example.com")
+    _run_list_clusters_action(monkeypatch, rows, host="*.example.com")
     payload = json.loads(capsys.readouterr().out)
     cluster_keys = [c["cluster_key"] for c in payload["clusters"]]
     assert "alpha" in cluster_keys
     assert "beta" not in cluster_keys
 
     # Exact apex match excludes subdomain-only clusters.
-    _run_list_clusters_action(db, host="example.com")
+    _run_list_clusters_action(monkeypatch, rows, host="example.com")
     payload = json.loads(capsys.readouterr().out)
     cluster_keys = [c["cluster_key"] for c in payload["clusters"]]
     assert "beta" in cluster_keys
@@ -7516,13 +7809,25 @@ def _run_render_handoff(
     max_lines: int = 40,
     include_evidence: bool = False,
 ) -> None:
-    module.run(
+    """Run render-handoff through the operator surface.
+
+    ``dispatch.run`` no longer routes render-handoff; it is now
+    ``vigil assess agent render-handoff <agent-id>``, which delegates to
+    ``dispatch._render_handoff`` (the shared ``handoff_renderer`` blob emitter).
+    The ``module`` arg (the dispatch package) is only used by the stub, which
+    patches the shared ``handoff_renderer`` — the same module object this run
+    reaches via ``assess.commands.agent`` -> ``dispatch._render_handoff``.
+    """
+    agent_module = _load_assess_module(
+        "round9_agent_render_handoff_module",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    agent_module.run(
         SimpleNamespace(
-            db_path="render-handoff",
-            action=agent_id,
-            extra=[],
+            action="render-handoff",
+            extra=[agent_id],
+            agent_id=None,
             reason="",
-            by="status",
             max_lines=max_lines,
             include_evidence=include_evidence,
             engagement_dir=str(engagement_dir),
@@ -8097,8 +8402,42 @@ def test_agent_reconcile_stale_dry_run_groups_handoffs(
     assert rows["AG-GAP"]["category"] == "no_handoff"
 
 
+def _invoke_backend_lifecycle(module, action: str, args) -> None:
+    """Route an OLD dispatch backend-action name to the internal
+    ``assess.commands.dispatch.agent`` helper it now lives in.
+
+    Pre-refactor these verbs were routed by a ``db_path`` positional through
+    ``dispatch.run``. Routing now lives in ``assess.commands.agent.run`` (the
+    ``vigil assess agent <verb>`` operator surface), which delegates to exactly
+    these helpers. We call the helpers directly (rather than ``agent.run``) so
+    the CLI-wiring assertions here stay exact: ``agent start`` adds a Runtime
+    Identity banner + a native-wrapper WARN to the register path, and ``agent
+    done`` adds a handoff-closable precheck — operator affordances that would
+    perturb these stdout/stderr assertions without exercising anything new.
+    The internal helper names are unchanged (dispatch/agent.py ``_DBLESS_ACTIONS``).
+    """
+    agentmod = module.agent
+    extra = list(getattr(args, "extra", None) or [])
+    if action == "register":
+        agentmod._register_dispatch(args)
+    elif action == "update-status":
+        agentmod._update_dispatch_status(args, extra)
+    elif action == "abort-duplicate":
+        agentmod._abort_duplicate_dispatch(args, extra)
+    elif action == "list":
+        agentmod._list_dispatches(args)
+    elif action == "get":
+        agentmod._get_dispatch(args, extra)
+    elif action == "record-decision":
+        agentmod._record_decision(args)
+    elif action == "record-handoff":
+        agentmod._record_handoff(args)
+    else:
+        raise AssertionError(f"unmapped backend lifecycle action: {action!r}")
+
+
 def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
-    """Execute dispatch.run with a fake AssessmentClient injected."""
+    """Execute a backend agent-lifecycle verb with a fake AssessmentClient injected."""
     module = _load_dispatch_module()
     fake = _CapturingClient()
     monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
@@ -8157,7 +8496,7 @@ def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
         "hf_extras_json": None,
     }
     args_dict.update(flags)
-    module.run(SimpleNamespace(**args_dict))
+    _invoke_backend_lifecycle(module, action, SimpleNamespace(**args_dict))
     return fake
 
 
@@ -8210,16 +8549,10 @@ def _dispatch_args(action: str, *, db_path: str | None = None, extra=None, **fla
     return SimpleNamespace(**args_dict)
 
 
-def test_dispatch_backend_actions_reject_cases_db_prefix(capsys: pytest.CaptureFixture[str]) -> None:
-    module = _load_dispatch_module()
-
-    with pytest.raises(SystemExit) as exc_info:
-        module.run(_dispatch_args("record-handoff", db_path="cases.db"))
-
-    assert exc_info.value.code == 1
-    err = capsys.readouterr().err
-    assert "must not take a cases.db path" in err
-    assert "vigil assess agent handoff" in err
+# test_dispatch_backend_actions_reject_cases_db_prefix removed: subject no
+# longer exists. The CLI verbs no longer accept a cases.db path positional at
+# all (the work buffer moved to the backend assessment_work_items table); there
+# is nothing left to guard against. See tests/test_work_buffer_backend.py.
 
 
 def test_dispatch_record_handoff_from_json_rejects_agent_id_mismatch(
@@ -8238,8 +8571,10 @@ def test_dispatch_record_handoff_from_json_rejects_agent_id_mismatch(
         encoding="utf-8",
     )
 
+    # The agent_id-mismatch guard lives in _build_handoff_payload / _record_handoff
+    # and fires before any client call.
     with pytest.raises(SystemExit) as exc_info:
-        module.run(
+        module.agent._record_handoff(
             _dispatch_args(
                 "record-handoff",
                 from_json=str(payload_path),
@@ -8437,7 +8772,9 @@ def test_dispatch_register_overlap_check_is_opt_in(
         ),
     )
 
-    module.run(
+    _invoke_backend_lifecycle(
+        module,
+        "register",
         _dispatch_args(
             "register",
             agent_id="AG-NEW",
@@ -8446,7 +8783,7 @@ def test_dispatch_register_overlap_check_is_opt_in(
             finding_slugs="VA-001",
             dispatch_mode_arg="item-iterating",
             skills="idor-testing",
-        )
+        ),
     )
 
     err = capsys.readouterr().err
@@ -8480,7 +8817,9 @@ def test_dispatch_register_warns_on_structured_overlap(
         ),
     )
 
-    module.run(
+    _invoke_backend_lifecycle(
+        module,
+        "register",
         _dispatch_args(
             "register",
             agent_id="AG-NEW",
@@ -8490,7 +8829,7 @@ def test_dispatch_register_warns_on_structured_overlap(
             dispatch_mode_arg="item-iterating",
             skills="idor-testing",
             check_overlap=True,
-        )
+        ),
     )
 
     err = capsys.readouterr().err
@@ -8525,7 +8864,9 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
         ),
     )
 
-    module.run(
+    _invoke_backend_lifecycle(
+        module,
+        "register",
         _dispatch_args(
             "register",
             agent_id="AG-NEW",
@@ -8534,7 +8875,7 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
             dispatch_mode_arg="hypothesis-driven",
             task="Review account deletion flows",
             skills="idor-testing",
-        )
+        ),
     )
 
     err = capsys.readouterr().err
@@ -8571,13 +8912,15 @@ def test_dispatch_abort_duplicate_marks_row_and_records_decision(
         ),
     )
 
-    module.run(
+    _invoke_backend_lifecycle(
+        module,
+        "abort-duplicate",
         _dispatch_args(
             "abort-duplicate",
             extra=["AG-DUP"],
             replacement_agent_id="AG-KEEP",
             reason="same exploit review was registered twice",
-        )
+        ),
     )
 
     assert fake.patches[0][0] == "AG-DUP"
@@ -8665,7 +9008,7 @@ def test_dispatch_list_emits_jsonl(
             agent_root="/tmp",
         ),
     )
-    module.run(SimpleNamespace(
+    module.agent._list_dispatches(SimpleNamespace(
         db_path="list", action="", extra=[], reason="", by="status",
         max_lines=40, include_evidence=False, engagement_dir=None,
         agent_id=None, agent_role=None, task=None, scope_host=None,
@@ -8847,7 +9190,7 @@ def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
             "hf_recommended_next_agent": None,
             "hf_extras_json": None,
         }
-        module.run(SimpleNamespace(**args_dict))
+        module.agent._record_handoff(SimpleNamespace(**args_dict))
 
     _invoke(p1)
     _invoke(p2)
@@ -9255,6 +9598,174 @@ def test_validate_dispatch_skips_scope_check_when_engagement_dir_omitted(
     assert not any("scope" in e.lower() for e in errors), errors
 
 
+def test_validate_dispatch_flags_technique_cage_warn_only() -> None:
+    """C4a: a numbered step list that pre-names vuln classes reads as a technique
+    cage — the validator WARNs (pointing at `coverage --for-dispatch`) and NEVER
+    adds to errors. WARN-only is the whole contract of the lint."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": "idor-testing",
+        "task": (
+            "Test the login endpoint for the following:\n"
+            "1. Test for SQLi in the username parameter\n"
+            "2. Check for XSS in the redirect field\n"
+            "3. Verify the JWT signature is validated\n"
+            "4. Confirm CSRF tokens are enforced\n"
+        ),
+    }
+    errors, warnings = validate_specialist_dispatch_contract(payload)
+    assert errors == [], errors  # a cage is a depth smell, never an error
+    assert any("technique cage" in w for w in warnings), warnings
+    assert any("--for-dispatch" in w for w in warnings), warnings
+    assert not any("cage" in e.lower() for e in errors), errors
+
+
+def test_validate_dispatch_open_objective_task_has_no_cage_warning() -> None:
+    """C4a conservatism: an open-ended, hypothesis-framed prose task (no step
+    list, no imperative verb run) must NOT trip the technique-cage lint, so the
+    warning does not fire on legitimately-shaped dispatches."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": "idor-testing",
+        "task": (
+            "Hunt the tenant-isolation boundary on the orders workflow. We have "
+            "two member identities in different orgs; the interesting question is "
+            "whether one org's member can observe or mutate the other org's "
+            "records. Reason about where the boundary is enforced and where it "
+            "leaks, then follow the strongest signal you find."
+        ),
+    }
+    errors, warnings = validate_specialist_dispatch_contract(payload)
+    assert not any("technique cage" in w for w in warnings), warnings
+    assert errors == [], errors
+
+
+def test_detect_technique_cage_requires_two_signals() -> None:
+    """The pure lint helper is conservative: a single signal (a step list alone,
+    or a lone vuln-class mention in prose) is not enough — >=2 co-occurring
+    signals are required before it warns."""
+    from assess.lib.contracts import _detect_technique_cage
+
+    # A numbered list with NO vuln class and NO imperative-verb run — one signal.
+    step_only = (
+        "Cover the checkout flow in this order:\n"
+        "1. the cart page\n"
+        "2. the shipping page\n"
+        "3. the payment page\n"
+    )
+    assert _detect_technique_cage(step_only) == []
+
+    # A single vuln-class mention in open prose — one signal only.
+    class_only = "Consider whether an idor is reachable across the two org tenants."
+    assert _detect_technique_cage(class_only) == []
+
+    # Two co-occurring signals (step list + pre-named classes) — warns.
+    caged = (
+        "Run these probes:\n"
+        "1. Test the id param for sqli\n"
+        "2. Test the url param for ssrf\n"
+        "3. Test the next param for open-redirect\n"
+    )
+    caged_warnings = _detect_technique_cage(caged)
+    assert caged_warnings and "technique cage" in caged_warnings[0]
+    assert "--for-dispatch" in caged_warnings[0]
+
+
+def test_detect_technique_cage_ignores_benign_scope_list_but_catches_bug_menu() -> None:
+    """Regression (QC): a structured SCOPE list with one incidental class noun and
+    NO imperative verbs is not a cage and must not warn (avoids warning-fatigue);
+    a verb-less per-step BUG MENU (>=2 steps each pre-naming a class) IS a cage."""
+    from assess.lib.contracts import _detect_technique_cage
+
+    # Benign: numbered scope areas, one incidental class token, zero imperative
+    # verbs — a single class-naming step line is below the bug-menu threshold.
+    benign = (
+        "Review these areas in order:\n"
+        "1. the sqli-prone search endpoint\n"
+        "2. the account settings page\n"
+        "3. the admin dashboard\n"
+    )
+    assert _detect_technique_cage(benign) == []
+
+    # A cage without imperative verbs: each step pre-names a specific bug class.
+    bug_menu = (
+        "Cover these:\n"
+        "1. idor on /api/users/{id}\n"
+        "2. sqli on the login form\n"
+        "3. ssrf on the webhook url\n"
+    )
+    menu_warnings = _detect_technique_cage(bug_menu)
+    assert menu_warnings and "technique cage" in menu_warnings[0]
+
+
+def test_detect_technique_cage_needs_named_bug_not_bare_recipe() -> None:
+    """Regression (blind triage): a STRUCTURED imperative list that names no bug
+    to hunt is NOT a cage — an orientation checklist and a confirmed-finding PoC
+    both have >=3 steps + imperative verbs but pre-name no vuln class, so they
+    must stay quiet. A cage needs >=2 named bug classes on its recipe lines."""
+    from assess.lib.contracts import _detect_technique_cage
+
+    orientation = (
+        "Get your bearings first:\n"
+        "1. Enumerate the site routes\n"
+        "2. Confirm the login flow works\n"
+        "3. Verify the account page loads\n"
+    )
+    assert _detect_technique_cage(orientation) == []
+
+    poc = (
+        "Weaponize the confirmed finding:\n"
+        "1. Send a request to /latest/meta-data/\n"
+        "2. Confirm the metadata document is returned\n"
+        "3. Validate the returned creds against STS\n"
+    )
+    assert _detect_technique_cage(poc) == []
+
+    # Exactly two recipe lines pre-name a bug -> the >=2 threshold; warns.
+    two_named = (
+        "Run these:\n"
+        "1. Test sqli on the id param\n"
+        "2. Test xss on the name param\n"
+        "3. review the pricing page\n"
+    )
+    warned = _detect_technique_cage(two_named)
+    assert warned and "technique cage" in warned[0]
+
+
+def test_list_attempts_build_query_emits_route_param_names() -> None:
+    """Regression (blind triage): the `list-attempts` CLI must emit the EXACT
+    query-param names the GET /attempts route accepts (notably --surface ->
+    surface_id, --host -> target_host); a drift here silently returns unfiltered
+    results and no round-trip test would otherwise catch it."""
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlparse
+
+    from assess.commands.list_attempts import _build_query
+
+    args = SimpleNamespace(
+        finding="VA-1", surface="12", host="app.example.com",
+        attack_family="idor", result_status="no-signal", lens="tenant-boundary",
+        limit=25, offset=5,
+    )
+    query = _build_query(args)
+    assert query.startswith("attempts?")
+    params = parse_qs(urlparse("http://x/" + query).query)
+    assert params["surface_id"] == ["12"]
+    assert params["target_host"] == ["app.example.com"]
+    assert params["finding"] == ["VA-1"]
+    assert params["attack_family"] == ["idor"]
+    assert params["result_status"] == ["no-signal"]
+    assert params["lens"] == ["tenant-boundary"]
+    assert params["limit"] == ["25"]
+    assert params["offset"] == ["5"]
+    # The CLI-side dest names must NOT leak onto the wire.
+    assert "surface" not in params and "host" not in params
 
 
 def test_validate_dispatch_missing_mode_defaults_and_warns_not_errors() -> None:

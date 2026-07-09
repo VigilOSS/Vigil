@@ -152,6 +152,22 @@
       ],
       "default": null,
       "title": "Finding Id"
+    },
+    "work_item_ids": {
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "title": "Work Item Ids",
+      "type": "array",
+      "description": "Opt-in work-buffer item ids this probe satisfies; marked 'done' atomically with the probe insert so 'remaining work' counts decrement as probes land. Unknown ids are skipped, not an error."
+    },
+    "resolve_surface_id": {
+      "type": "integer",
+      "default": null,
+      "title": "Resolve Surface Id",
+      "minimum": 1,
+      "description": "OPT-IN: surface id to advance to 'partially-covered' as part of recording. Omit to leave surface state untouched (recording never auto-mutates it)."
     }
   },
   "required": [

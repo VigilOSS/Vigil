@@ -224,8 +224,7 @@ routinely surface staging hosts and adjacent services that passive sources miss.
 
 ```bash
 vigil assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
-  -tech-detect -title -tls-grab -status-code \
-  --extra-args "-server -content-length -follow-redirects" \
+  -tech-detect -title -tls-grab -status-code -web-server -cl -follow-redirects \
   -o /engagements/$ENGAGEMENT_KEY/scans/httpx_fingerprint.jsonl \
   --technique RECON --intent "httpx tech + tls-grab fingerprint" \
   --probe-kind fingerprint --phase recon --timeout 900

@@ -7,6 +7,7 @@ from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.finding_render import blocked_reason_summary
 
 
 def register(subparsers) -> None:
@@ -30,7 +31,13 @@ def register(subparsers) -> None:
     p.add_argument("--source-name")
     p.add_argument("--slug")
     p.add_argument("--root-cause", dest="root_cause_slug", help="Show the root finding and linked siblings")
-    p.add_argument("--search", help="Case-insensitive search over slug, title, summary, location, and source_name")
+    p.add_argument(
+        "--search",
+        "--q",
+        dest="search",
+        help="Case-insensitive search over slug, title, summary, location, and source_name "
+             "(--q is an alias for cross-verb consistency)",
+    )
     p.add_argument(
         "--holding",
         action="store_true",
@@ -45,6 +52,29 @@ def register(subparsers) -> None:
     p.add_argument("--all", action="store_true", help="Fetch all matching findings instead of applying the default limit")
     p.add_argument("--json", action="store_true", help="Print filtered findings as JSON instead of a table")
     p.set_defaults(func=run)
+
+
+def _finding_row(item: dict) -> str:
+    """Render one finding as a pipe-delimited list-findings row.
+
+    A blocked-for-provisioning finding (verification_disposition='blocked') gets
+    a trailing ``BLOCKED[(kind)]: <reason>`` cell so the operator reads WHY it is
+    held out of the report without opening the finding. The disposition cell
+    already shows ``.../blocked``; this adds the reason that used to live only in
+    the finding's ``details_json``.
+    """
+    row = (
+        f"{item.get('slug', '')} | "
+        f"{item.get('severity', '')} | "
+        f"{item.get('workflow_status', '')} | "
+        f"{item.get('verification_state', '')}/{item.get('verification_disposition', '')} | "
+        f"{item.get('root_cause_role', '')} | "
+        f"{item.get('title', '')}"
+    )
+    blocked = blocked_reason_summary(item)
+    if blocked:
+        row += f" | {blocked}"
+    return row
 
 
 def _matches_search(finding: dict, search: str) -> bool:
@@ -144,11 +174,4 @@ def run(args) -> None:
         return
 
     for item in filtered:
-        print(
-            f"{item.get('slug', '')} | "
-            f"{item.get('severity', '')} | "
-            f"{item.get('workflow_status', '')} | "
-            f"{item.get('verification_state', '')}/{item.get('verification_disposition', '')} | "
-            f"{item.get('root_cause_role', '')} | "
-            f"{item.get('title', '')}"
-        )
+        print(_finding_row(item))

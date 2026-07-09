@@ -24,6 +24,8 @@ from ._common import (
     _scalar_row,
 )
 from .dispatches import _serialize_decision
+from .work_buffer import _derive_work_item, mark_work_items_done
+from .app_units import _surface_host_path, _path_under_prefix
 
 
 
@@ -873,6 +875,7 @@ def _ingest_request_observation(
     banner: str,
     coverage_candidates: list[dict[str, Any]] | None,
     auto_generate_coverage: bool,
+    work_item: dict[str, Any] | None = None,
     deferred_service_refreshes: set[int] | None = None,
 ) -> dict[str, Any]:
     scheme, host, _, _ = _parse_url(url)
@@ -978,12 +981,23 @@ def _ingest_request_observation(
         if deferred_service_refreshes is not None and coverage_item["service_id"] is not None:
             deferred_service_refreshes.add(int(coverage_item["service_id"]))
         coverage_items.append(coverage_item)
+    derived_work_item = _derive_work_item(
+        connection,
+        engagement_id,
+        request_variant=request_variant,
+        service=service,
+        coverage_items=coverage_items,
+        auth_context=auth_context,
+        discovery_source=discovery_source,
+        work_item=work_item,
+    )
     return {
         "target": target,
         "service": service,
         "request_variant": request_variant,
         "request_observation": observation,
         "coverage_items": coverage_items,
+        "work_item": derived_work_item,
     }
 
 
@@ -1013,6 +1027,7 @@ def ingest_request_observation(
     banner: str,
     coverage_candidates: list[dict[str, Any]] | None,
     auto_generate_coverage: bool,
+    work_item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -1042,6 +1057,7 @@ def ingest_request_observation(
             banner=banner,
             coverage_candidates=coverage_candidates,
             auto_generate_coverage=auto_generate_coverage,
+            work_item=work_item,
         )
 
 
@@ -1177,10 +1193,12 @@ def record_probe_run(
     target_port: int | None = None,
     lens: str = "",
     finding_id: int | None = None,
+    work_item_ids: list[int] | None = None,
+    resolve_surface_id: int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
-        return _upsert_probe_run(
+        record = _upsert_probe_run(
             connection,
             engagement.id,
             request_variant_id=request_variant_id,
@@ -1204,27 +1222,246 @@ def record_probe_run(
             lens=lens,
             finding_id=finding_id,
         )
+        # A3: drain the work buffer in the SAME transaction as the probe insert.
+        # ``get_connection`` is re-entrant and commits only at the outermost
+        # depth, so the nested ``mark_work_items_done`` reuses this connection and
+        # its writes commit atomically with the probe. Unknown ids are silently
+        # skipped (mirrors POST /work-items/done), so a stale id never rolls back
+        # the probe write; the ``affected`` count surfaces a short drain.
+        if work_item_ids:
+            record["work_items_done"] = mark_work_items_done(engagement.id, work_item_ids)
+        # A3 (opt-in): advance a mapped surface only on an explicit id — recording
+        # never auto-mutates surface state. A single probe partially covers, so the
+        # surface goes to ``partially-covered`` with a synthesized followup. A bad
+        # surface id 404s and rolls the whole txn back; the probe upsert is
+        # idempotent on its probe_key, so a corrected re-run is safe.
+        if resolve_surface_id is not None:
+            record["surface_resolved"] = update_surface(
+                engagement.id,
+                resolve_surface_id,
+                status_value="partially-covered",
+                rationale=(notes.strip() or f"probe recorded: {attack_family} {result_status}"),
+                followup_condition=(
+                    f"partially covered by a {attack_family} probe ({result_status}); "
+                    "remaining vuln families for this surface still need coverage"
+                ),
+            )
+        return record
 
 def list_probe_runs(
     engagement_id: int,
     *,
+    attack_family: str = "",
+    target_host: str = "",
+    target_path: str = "",
+    auth_context: str = "",
+    result_status: str = "",
     limit: int = DEFAULT_PROBE_RUN_LIMIT,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     limit, offset = _bounded_probe_run_window(limit, offset)
+    # Optional exact-match filters (empty string = no filter). Column names are a
+    # fixed allowlist, never caller text, so the f-string interpolation is safe;
+    # every value is bound. Lets `fetch probe-runs?attack_family=sqli` return only
+    # that family instead of the full unfiltered set (the silent no-op it was).
+    clauses = ["engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    for column, value in (
+        ("attack_family", attack_family),
+        ("target_host", target_host),
+        ("target_path", target_path),
+        ("auth_context", auth_context),
+        ("result_status", result_status),
+    ):
+        if value:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    params.extend([limit, offset])
     with _common.get_connection() as connection:
         return _fetch_all(
             connection,
-            """
+            f"""
             SELECT *
             FROM assessment_probe_runs
-            WHERE engagement_id = ?
+            WHERE {" AND ".join(clauses)}
             ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
-            (engagement.id, limit, offset),
+            tuple(params),
         )
+
+
+_ATTEMPT_FIELDS: tuple[str, ...] = (
+    "id", "target_host", "target_path", "target_port", "auth_context",
+    "attack_family", "lens", "result_status", "observed_http_status",
+    "signal_type", "tool_name", "agent_name", "finding_id", "finding_slug",
+    "finding_title", "finding_severity", "created_at",
+)
+
+
+def _serialize_attempt(row: dict[str, Any]) -> dict[str, Any]:
+    """Project a probe-run⋈finding row onto the pinned ``/attempts`` shape.
+
+    ``finding_*`` fields are ``None`` for probes with no linked finding (the
+    LEFT JOIN yields nulls). ``request_variant_id`` is read for the surface
+    containment test but never emitted — the wire shape carries only the
+    finding-joined attempt fields the CLI groups by lens × result_status.
+    """
+    return {field: row.get(field) for field in _ATTEMPT_FIELDS}
+
+
+def _attempt_matches_surface(
+    row: dict[str, Any],
+    *,
+    linked_variant_ids: set[int],
+    surface_host: str,
+    surface_path: str,
+) -> bool:
+    """A probe belongs to ``surface`` when EITHER its ``request_variant_id`` is
+    FK-linked to the surface (``surface_request_variant_links``) OR its
+    ``target_host``/``target_path`` is contained by the surface descriptor.
+
+    The containment arm is load-bearing: most CLI-recorded probes carry a null
+    ``request_variant_id`` (raw/list-mode), so a link-table-only match would
+    silently under-count them. Reuses the same host-equality + prefix-containment
+    helpers the depth ledger uses for probe→unit mapping.
+    """
+    vid = row.get("request_variant_id")
+    if vid is not None and int(vid) in linked_variant_ids:
+        return True
+    if not surface_host:
+        return False
+    t_host = str(row.get("target_host") or "").strip().lower()
+    if not t_host or t_host != surface_host:
+        return False
+    t_path = str(row.get("target_path") or "/") or "/"
+    return _path_under_prefix(t_path, surface_path)
+
+
+def list_attempts(
+    engagement_id: int,
+    *,
+    finding: str = "",
+    surface_id: int | None = None,
+    target_host: str = "",
+    attack_family: str = "",
+    result_status: str = "",
+    lens: str = "",
+    limit: int = DEFAULT_PROBE_RUN_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Finding-joined, surface-aware read of recorded probe attempts (A4a).
+
+    A "what has actually been tried against this finding / surface / host, and did
+    it land" view so a specialist does not re-run an already-walled probe. Additive
+    to ``list_probe_runs`` (that raw read is unchanged): this LEFT JOINs
+    ``assessment_findings`` so each attempt carries the linked finding's
+    slug/title/severity (null when unlinked), and supports a ``finding`` SLUG filter
+    (resolved slug→id server-side) and a ``surface`` filter that matches BOTH
+    FK-linked and target-descriptor-contained probes.
+
+    Returns ``{"attempts": [...], "count": <len>}`` — a flat, ordered
+    (created_at DESC) list; grouping by lens × result_status is done CLI-side.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_probe_run_window(limit, offset)
+
+    with _common.get_connection() as connection:
+        finding_id_filter: int | None = None
+        if finding:
+            frow = connection.execute(
+                "SELECT id FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+                (engagement.id, finding),
+            ).fetchone()
+            if frow is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"finding slug '{finding}' not found",
+                )
+            finding_id_filter = int(frow["id"])
+
+        # Resolve the surface row ONCE: its linked variant ids + parsed host/path.
+        surface_active = surface_id is not None
+        linked_variant_ids: set[int] = set()
+        surface_host = ""
+        surface_path = "/"
+        if surface_active:
+            srow = connection.execute(
+                "SELECT target_descriptor FROM assessment_surfaces WHERE engagement_id = ? AND id = ?",
+                (engagement.id, surface_id),
+            ).fetchone()
+            if srow is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"surface id={surface_id} not found",
+                )
+            surface_host, surface_path = _surface_host_path(str(srow["target_descriptor"] or ""))
+            link_rows = connection.execute(
+                "SELECT request_variant_id FROM surface_request_variant_links "
+                "WHERE engagement_id = ? AND surface_id = ?",
+                (engagement.id, surface_id),
+            ).fetchall()
+            linked_variant_ids = {int(r["request_variant_id"]) for r in link_rows}
+
+        # SQL applies the exact-match column filters (fixed allowlist, every value
+        # bound). The surface filter cannot be a WHERE clause (path containment is
+        # segment-wise), so when it is active the window is sliced in Python after
+        # filtering (so ``count`` and the window stay consistent). When it is NOT
+        # active there is no post-fetch filter, so bound the window in SQL (like
+        # ``list_probe_runs``) instead of loading every matching probe row.
+        clauses = ["probe.engagement_id = ?"]
+        params: list[Any] = [engagement.id]
+        if finding_id_filter is not None:
+            clauses.append("probe.finding_id = ?")
+            params.append(finding_id_filter)
+        for column, value in (
+            ("probe.target_host", target_host),
+            ("probe.attack_family", attack_family),
+            ("probe.result_status", result_status),
+            ("probe.lens", lens),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+
+        sql = f"""
+            SELECT
+                probe.id, probe.target_host, probe.target_path, probe.target_port,
+                probe.auth_context, probe.attack_family, probe.lens, probe.result_status,
+                probe.observed_http_status, probe.signal_type, probe.tool_name,
+                probe.agent_name, probe.request_variant_id, probe.finding_id, probe.created_at,
+                finding.slug AS finding_slug,
+                finding.title AS finding_title,
+                finding.severity AS finding_severity
+            FROM assessment_probe_runs AS probe
+            LEFT JOIN assessment_findings AS finding
+                ON probe.finding_id = finding.id
+            WHERE {" AND ".join(clauses)}
+            ORDER BY probe.created_at DESC, probe.id DESC
+            """
+        fetch_params = list(params)
+        if not surface_active:
+            sql += "            LIMIT ? OFFSET ?\n            "
+            fetch_params.extend([limit, offset])
+        rows = _fetch_all(connection, sql, tuple(fetch_params))
+
+    if surface_active:
+        rows = [
+            row for row in rows
+            if _attempt_matches_surface(
+                row,
+                linked_variant_ids=linked_variant_ids,
+                surface_host=surface_host,
+                surface_path=surface_path,
+            )
+        ]
+        window = rows[offset:offset + limit]
+    else:
+        window = rows  # already bounded by SQL LIMIT/OFFSET above
+    attempts = [_serialize_attempt(row) for row in window]
+    return {"attempts": attempts, "count": len(attempts)}
+
 
 def record_surface(
     engagement_id: int,

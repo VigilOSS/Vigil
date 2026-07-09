@@ -10,8 +10,12 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
+import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -168,6 +172,16 @@ def clear_auth(
 def import_auth(
     engagement_dir: Path, source: str | None, identity: str = DEFAULT_IDENTITY
 ) -> None:
+    """Import identity material (cookies/headers/tokens) from a file or stdin.
+
+    The incoming JSON MAY also carry a ``material.liveness`` signature —
+    ``{"expect_status": 200, "authed_marker": "...", "dead_marker": "sessionExpired"}``
+    (every key optional) — which is persisted verbatim via the backend store's
+    extra-keys passthrough. It changes NO import behavior here, but it is what lets
+    ``vigil auth status --probe`` and ``vigil auth keepalive`` return a real
+    ``live``/``dead`` verdict (matched case-sensitively against the probe response's
+    status line + headers incl. ``Location`` + body) instead of ``unknown``.
+    """
     if source is None or source == "-":
         raw = os.read(0, 1_000_000).decode()
     else:
@@ -597,3 +611,411 @@ def _is_stale(value: str) -> bool:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed <= datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# vigil auth keepalive — keep long-lived (enterprise SSO / reverse-proxy) sessions live
+# ---------------------------------------------------------------------------
+#
+# Ported and generalized from the proven CMS reference keepalive. Each cycle it
+# re-resolves the freshest full-anchor capture PER distinct login (auto-follows
+# re-logins, skips captured logouts), fires ONE read-only authed GET per identity
+# through the kali-exec path to reset the enterprise IDLE clock, and tees a
+# LIVE/DEAD + userId verdict to a log. The live probe is the AUTHORITATIVE
+# liveness oracle — cookie presence/age is never trusted on its own.
+#
+# There are NO built-in anchor-cookie names. Vigil bakes in NO target-specific auth
+# knowledge — every engagement's session/cookies differ, so the operator MUST declare
+# the session-anchor cookie name(s) per engagement via ``--anchor-cookie`` (repeatable).
+# An anchor cookie's VALUE identifies a distinct login (so captures dedup to one per
+# login) and the server emits the literal value ``deleted`` on logout — the marker of a
+# captured logout to skip. (The full per-engagement liveness ADAPTER — anchors + probe
+# path + live/dead classification the LLM authors for the target — is roadmap item R5.)
+
+_HTTP_STATUS_RE = re.compile(r"HTTP/\d(?:\.\d)?\s+(\d{3})")
+# The userId lands inside the JSON-escaped ``stdout_preview`` of the kali-exec
+# envelope, so its quotes may be backslash-escaped (``\"userId\"``); tolerate both.
+_USER_ID_RE = re.compile(r'\\?"userId\\?"\s*:\s*\\?"([^"\\]*)')
+
+_KEEPALIVE_CAVEATS: tuple[str, ...] = (
+    "  keepalive resets the enterprise IDLE timeout only. Hard ceilings it CANNOT defeat:",
+    "    - the absolute / max-session lifetime (e.g. F5 APM ~80 min) still expires on schedule",
+    "    - a same-user browser re-login tears this session down (Set-Cookie: <anchor>=deleted)",
+    "    => for multi-hour / cross-account runs you STILL need a fresh browser login periodically.",
+)
+
+
+def _ka_ts() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _resolve_caps(
+    identities: dict[str, Any],
+    caps: int,
+    *,
+    anchor_cookies: tuple[str, ...],
+) -> list[str]:
+    """Freshest full-anchor capture per distinct login, newest-first, capped to ``caps``.
+
+    Ports the reference ``resolve_caps``: from the FULL identity map (cookie VALUES
+    included — the value-redacted ``auth list`` view cannot do this) keep only
+    captures that carry one of the OPERATOR-DECLARED ``anchor_cookies`` (this
+    engagement's session-anchor cookie name(s); Vigil assumes none), DROP any whose
+    anchor value is the literal ``deleted`` (a captured logout folded into the jar),
+    then dedup by the anchor identity — so re-logins are auto-followed and one login
+    is not probed N times — keeping the newest ``updated_at``. Pure, cheap PRE-FILTER
+    only: a clean-looking cap can still be DEAD server-side; the live probe is the
+    authoritative oracle.
+    """
+    anchor_set = set(anchor_cookies)
+    rows: list[tuple[str, str, tuple[tuple[str, str], ...]]] = []
+    for name, info in (identities or {}).items():
+        if not isinstance(info, dict):
+            continue
+        raw_cookies = info.get("cookies")
+        cookies = raw_cookies if isinstance(raw_cookies, dict) else {}
+        present = {
+            str(k): str(v)
+            for k, v in cookies.items()
+            if k in anchor_set and v not in (None, "")
+        }
+        if not present:
+            continue  # anchor-less junk row — no declared session-anchor cookie
+        if any(v.strip().lower() == "deleted" for v in present.values()):
+            continue  # captured logout -> skip
+        anchor_key = tuple(sorted(present.items()))
+        rows.append((str(info.get("updated_at") or ""), str(name), anchor_key))
+    # Newest ``updated_at`` first; name is a deterministic tie-break.
+    rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    resolved: list[str] = []
+    for _updated, name, anchor_key in rows:
+        if anchor_key in seen:
+            continue
+        seen.add(anchor_key)
+        resolved.append(name)
+    return resolved[: max(caps, 0)]
+
+
+def _parse_probe_blob(
+    raw: str,
+    *,
+    anchor_cookies: tuple[str, ...],
+) -> dict[str, Any]:
+    """Lenient regex parse of the raw ``vigil assess kali exec`` output blob.
+
+    HARD RULE — never ``json.loads`` this. ``emit_result`` prints a single JSON
+    envelope whose ``stdout_preview`` is a head+tail TRUNCATION of the curl ``-i``
+    response; a cut in the middle of that escaped string yields ``Unterminated
+    string``, so a ``json.loads`` here is a latent false-negative. Regex the raw
+    text instead. Returns ``{status, status_line, user_id, deleted}`` where
+    ``status`` is the int HTTP code (or ``None`` when unparseable) and ``deleted``
+    is True when the RESPONSE tore the session down (``<anchor>=deleted``
+    Set-Cookie for one of the operator-declared ``anchor_cookies``), which is a
+    server logout regardless of the status code.
+    """
+    raw = raw or ""
+    m = _HTTP_STATUS_RE.search(raw)
+    status_line = m.group(0) if m else "?"
+    status = int(m.group(1)) if m else None
+    muid = _USER_ID_RE.search(raw)
+    user_id = muid.group(1) if muid else "-"
+    deleted = any(f"{name}=deleted" in raw for name in anchor_cookies)
+    return {
+        "status": status,
+        "status_line": status_line,
+        "user_id": user_id,
+        "deleted": deleted,
+    }
+
+
+def _classify_probe(
+    parsed: dict[str, Any],
+    raw: str,
+    liveness_cfg: dict[str, Any] | None,
+) -> tuple[bool, str]:
+    """Decide LIVE vs DEAD for one probe from its parsed blob.
+
+    Precedence:
+      1. a RESPONSE-side teardown (``<anchor>=deleted`` Set-Cookie) is a hard DEAD
+         override — the server is killing the session no matter the status code;
+      2. else, when the identity declares a ``material.liveness`` signature, defer to
+         the shared ``_classify_liveness`` classifier (kept in lockstep with
+         ``assess.commands.auth_status``);
+      3. else the reference default: HTTP 200 with no ``sessionExpired`` marker.
+
+    Returns ``(is_live, reason)``.
+    """
+    if parsed.get("deleted"):
+        return False, "response set <anchor>=deleted (server logout teardown)"
+    status = parsed.get("status")
+    status_int = status if isinstance(status, int) else None
+    if isinstance(liveness_cfg, dict) and liveness_cfg:
+        verdict, reason = _classify_liveness(status_int, raw or "", liveness_cfg)
+        return verdict == "live", f"{verdict}: {reason}"
+    expired = "sessionExpired" in (raw or "")
+    if status_int == 200 and not expired:
+        return True, "HTTP 200, no sessionExpired marker"
+    return False, f"{parsed.get('status_line', '?')}, sessionExpired={expired}"
+
+
+def _vigil_assess_argv(
+    engagement_dir: Path, identity: str, probe_url: str
+) -> list[str]:
+    """Build the argv for ONE authed liveness GET routed through the kali-exec path.
+
+    Routing through ``vigil assess kali exec`` (correct egress + command-run audit +
+    identity injection) with an argv LIST — NEVER ``bash -c`` (a shell wrapper eats
+    the ``--identity`` flag and the session is not injected). Mirrors
+    ``assess.commands.auth_status._run_identity_probe``: a read-only ``curl -sS -i``
+    (status line + headers incl. ``Location``, no ``-L``) tagged ``--technique AUTH``
+    / ``--probe-kind fingerprint`` in the always-allowed ``recon`` phase. Prefers the
+    ``vigil`` binary on PATH; falls back to invoking ``agent/scripts/assess.py``
+    directly (what the ``vigil assess`` passthrough execs anyway) so PATH is not a
+    hard dependency.
+    """
+    vigil = shutil.which("vigil")
+    if vigil:
+        prefix = [vigil, "assess", "--engagement-dir", str(engagement_dir)]
+    else:
+        assess = _install_root(engagement_dir) / "agent" / "scripts" / "assess.py"
+        prefix = [str(assess), "--engagement-dir", str(engagement_dir)]
+    return [
+        *prefix,
+        "kali", "exec",
+        "--identity", identity,
+        "--technique", "AUTH",
+        "--intent", "session keepalive liveness probe",
+        "--probe-kind", "fingerprint",
+        "--phase", "recon",
+        "--timeout", "30",
+        "--",
+        "curl", "-sS", "-i", probe_url,
+    ]
+
+
+def _keepalive_probe(engagement_dir: Path, identity: str, probe_url: str) -> str:
+    """Run ONE authed liveness GET; return the raw combined stdout+stderr blob for
+    ``_parse_probe_blob``. Any spawn/timeout failure returns an error blob so the
+    cycle records DEAD and the loop never crashes."""
+    argv = _vigil_assess_argv(engagement_dir, identity, probe_url)
+    env = dict(os.environ)
+    env["ENGAGEMENT_DIR"] = str(engagement_dir)
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, env=env, timeout=90
+        )
+    except subprocess.TimeoutExpired:
+        return "__keepalive_probe_error__ kali exec timed out"
+    except OSError as exc:  # noqa: BLE001 — a probe must never crash the loop
+        return f"__keepalive_probe_error__ {exc}"
+    return (proc.stdout or "") + (proc.stderr or "")
+
+
+def _keepalive_cycle(
+    engagement_dir: Path,
+    explicit: list[str],
+    caps: int,
+    anchor_cookies: tuple[str, ...],
+    probe_url: str,
+    emit,
+    iteration: int,
+) -> None:
+    """One keepalive cycle: (re-)resolve caps, probe each, tee a verdict line.
+
+    ``anchor_cookies`` are the operator-declared session-anchor cookie name(s) for
+    this engagement — they drive both the freshest-per-anchor cap resolution and the
+    ``<anchor>=deleted`` server-logout detection in the parsed probe blob.
+    """
+    auth_map = read_auth(engagement_dir)
+    identities = auth_map.get("identities") if isinstance(auth_map, dict) else {}
+    identities = identities if isinstance(identities, dict) else {}
+    cap_names = (
+        list(explicit)
+        if explicit
+        else _resolve_caps(identities, caps, anchor_cookies=anchor_cookies)
+    )
+    if not cap_names:
+        emit(f"{_ka_ts()}  iter={iteration}  (no live-looking caps — log back in)")
+        return
+    for cap in cap_names:
+        material = identities.get(cap)
+        material = material if isinstance(material, dict) else {}
+        liveness_cfg = material.get("liveness")
+        raw = _keepalive_probe(engagement_dir, cap, probe_url)
+        parsed = _parse_probe_blob(raw, anchor_cookies=anchor_cookies)
+        live, reason = _classify_probe(
+            parsed, raw, liveness_cfg if isinstance(liveness_cfg, dict) else None
+        )
+        emit(
+            f"{_ka_ts()}  iter={iteration}  {cap}  "
+            f"{'LIVE' if live else 'DEAD'}  {parsed['status_line']}  "
+            f"userId={parsed['user_id']}  deleted={parsed['deleted']}  ({reason})"
+        )
+        time.sleep(1)  # <=2 req/s deconfliction pacing between caps
+
+
+def _redirect_daemon_stdio(log_file: Path) -> None:
+    """Point the daemon's stdin at /dev/null and stdout/stderr at the log, so the
+    keepalive loop's ``print`` tee lands in the log and any traceback is captured."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    with open(os.devnull, "rb", 0) as devnull:
+        os.dup2(devnull.fileno(), 0)
+    log_fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.dup2(log_fd, 1)
+        os.dup2(log_fd, 2)
+    finally:
+        os.close(log_fd)
+
+
+def _detach_into_background(engagement_dir: Path, log_file: Path) -> int | None:
+    """Double-fork into a detached daemon that outlives the launching shell.
+
+    Returns the daemon PID in the ORIGINAL parent (so the caller can print it plus a
+    ``kill <pid>`` line), or ``None`` in the fully-detached grandchild — which then
+    runs the keepalive loop with stdout/stderr redirected to ``log_file`` and its PID
+    written to ``<engagement>/pids/keepalive.pid``. A pipe hands the grandchild PID
+    back to the parent across the intermediate child.
+    """
+    if not hasattr(os, "fork"):
+        raise SystemExit("--detach requires a POSIX platform (os.fork unavailable)")
+    pids_dir = engagement_dir / "pids"
+    pids_dir.mkdir(parents=True, exist_ok=True)
+    pid_file = pids_dir / "keepalive.pid"
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    read_fd, write_fd = os.pipe()
+
+    pid1 = os.fork()
+    if pid1 > 0:
+        # Original parent: read the daemon PID off the pipe (blocks until every
+        # write end is closed → both child1 exit and grandchild write+close), then
+        # reap the fast-exiting intermediate child.
+        os.close(write_fd)
+        with os.fdopen(read_fd, "r") as reader:
+            data = reader.read().strip()
+        try:
+            os.waitpid(pid1, 0)
+        except OSError:
+            pass
+        return int(data) if data.isdigit() else None
+
+    # Intermediate child #1.
+    try:
+        os.close(read_fd)
+        os.setsid()
+        if os.fork() > 0:
+            os._exit(0)  # child1 exits; the grandchild is reparented to init
+        # Grandchild (the daemon).
+        pid = os.getpid()
+        try:
+            os.write(write_fd, str(pid).encode())
+        finally:
+            os.close(write_fd)
+        try:
+            pid_file.write_text(f"{pid}\n", encoding="utf-8")
+        except OSError:
+            pass
+        _redirect_daemon_stdio(log_file)
+        return None
+    except BaseException:
+        os._exit(1)
+
+
+def keepalive(
+    engagement_dir: Path,
+    *,
+    identities: list[str] | None = None,
+    anchor_cookies: list[str] | None = None,
+    interval: int = 285,
+    iters: int = 120,
+    caps: int = 4,
+    probe_url: str | None = None,
+    log_path: str | Path | None = None,
+    detach: bool = False,
+) -> None:
+    """Keep long-lived (enterprise SSO / reverse-proxy) sessions live across a long
+    engagement.
+
+    Every ``interval`` seconds, for ``iters`` cycles, fire ONE read-only authed GET
+    per identity to reset the idle clock and tee a LIVE/DEAD + userId verdict to a
+    log. ``anchor_cookies`` are REQUIRED: the operator-declared session-anchor cookie
+    name(s) for THIS engagement (Vigil bakes in none). They drive freshest-per-anchor
+    cap resolution and ``<anchor>=deleted`` server-logout detection. When
+    ``identities`` is empty each cycle auto-resolves the freshest ``caps``
+    full-anchor captures per distinct login (skipping captured logouts), so
+    re-logins are auto-followed; passing ``--identity`` overrides that. The live
+    probe is the authoritative liveness oracle. ``detach`` double-forks into a
+    background daemon (PID file under ``<engagement>/pids/``) that outlives the shell.
+    """
+    engagement_dir = Path(engagement_dir).expanduser()
+    probe_url = (probe_url or "").strip()
+    if not probe_url:
+        raise SystemExit(
+            "keepalive requires --probe-url <url> (an authed endpoint that returns "
+            "logged-in content; cookie presence alone is not proof of liveness)"
+        )
+    anchors = tuple(a.strip() for a in (anchor_cookies or []) if a and a.strip())
+    if not anchors:
+        raise SystemExit(
+            "keepalive requires at least one --anchor-cookie naming this engagement's "
+            "session-anchor cookie(s) (e.g. --anchor-cookie SESSIONID --anchor-cookie "
+            "AUTHTOKEN). Vigil bakes in no target-specific cookie names — every "
+            "engagement's session/cookies differ, so declare them per engagement."
+        )
+    explicit = [i.strip() for i in (identities or []) if i and i.strip()]
+    log_file = (
+        Path(log_path).expanduser()
+        if log_path
+        else engagement_dir / "tools" / "keepalive.log"
+    )
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Startup banner + hard-ceiling caveats to the launching terminal (always, even
+    # when detaching, so the operator sees the limits up front).
+    print(
+        f"keepalive: interval={interval}s iters={iters} caps={caps} "
+        f"identities={explicit or 'auto'} anchors={list(anchors)} "
+        f"probe_url={probe_url} log={log_file}",
+        flush=True,
+    )
+    for line in _KEEPALIVE_CAVEATS:
+        print(line, flush=True)
+
+    if detach:
+        pid = _detach_into_background(engagement_dir, log_file)
+        if pid is not None:
+            # Original parent: report and return; the daemon runs the loop.
+            print(f"keepalive detached: pid={pid}  log={log_file}", flush=True)
+            print(f"stop it with: kill {pid}", flush=True)
+            return
+        # Daemon (grandchild): stdout/stderr are already redirected to the log.
+
+    def emit(line: str) -> None:
+        # Tee: print → the operator's terminal (foreground) or the log via the
+        # daemon's dup2 (detached). A foreground run ALSO appends explicitly so the
+        # log persists; the daemon skips the append (its print already lands there).
+        print(line, flush=True)
+        if not detach:
+            with open(log_file, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+
+    emit(
+        f"{_ka_ts()}  KEEPALIVE START  interval={interval}s iters={iters} "
+        f"caps={caps} identities={explicit or 'auto'} anchors={list(anchors)} "
+        f"probe_url={probe_url}"
+    )
+    try:
+        for i in range(1, max(iters, 0) + 1):
+            _keepalive_cycle(
+                engagement_dir, explicit, caps, anchors, probe_url, emit, i
+            )
+            if i < iters:
+                time.sleep(interval)
+    except KeyboardInterrupt:
+        emit(f"{_ka_ts()}  KEEPALIVE INTERRUPTED (operator Ctrl-C)")
+    finally:
+        emit(f"{_ka_ts()}  KEEPALIVE EXITED (relaunch if still testing)")

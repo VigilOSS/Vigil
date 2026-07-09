@@ -267,10 +267,22 @@ def _string_set(value: Any) -> set[str]:
     return {str(item).strip() for item in items if str(item).strip()}
 
 
+def _dispatch_ids(args, extra: list[str]) -> list[str]:
+    """Collect one-or-more agent ids from the variadic ``extra`` positional,
+    falling back to ``--agent-id`` when no positional id was given. Batch:
+    every id in ``extra`` is processed with the same shared flags."""
+    ids = [str(x).strip() for x in (extra or []) if str(x).strip()]
+    if not ids:
+        fallback = (getattr(args, "agent_id", "") or "").strip()
+        if fallback:
+            ids = [fallback]
+    return ids
+
+
 def _update_dispatch_status(args, extra: list[str]) -> None:
-    agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
-    if not agent_id:
-        print("Usage: vigil assess agent done <agent-id> --status ...", file=sys.stderr)
+    ids = _dispatch_ids(args, extra)
+    if not ids:
+        print("Usage: vigil assess agent done <agent-id> [<agent-id> ...] --status ...", file=sys.stderr)
         sys.exit(1)
     patch: dict[str, Any] = {}
     if getattr(args, "dispatch_status", None):
@@ -289,11 +301,25 @@ def _update_dispatch_status(args, extra: list[str]) -> None:
         )
         sys.exit(1)
     client, _ = _client_for(args)
+    rows: list[dict[str, Any]] = []
+    failed = 0
     try:
-        row = client.update_dispatch(agent_id, patch)
+        for agent_id in ids:
+            try:
+                rows.append(client.update_dispatch(agent_id, patch))
+            except Exception as exc:  # noqa: BLE001 - one bad id must not drop the rest
+                failed += 1
+                print(f"agent done: {agent_id} failed: {exc}", file=sys.stderr)
     finally:
         client.close()
-    print(json.dumps(row, ensure_ascii=False))
+    if len(ids) == 1 and rows:
+        print(json.dumps(rows[0], ensure_ascii=False))
+    else:
+        for row in rows:
+            print(json.dumps(row, ensure_ascii=False))
+        print(f"[agent done] updated {len(rows)} dispatch(es); {failed} failed.", file=sys.stderr)
+    if failed:
+        sys.exit(1)
 
 
 def _abort_duplicate_dispatch(args, extra: list[str]) -> None:
@@ -369,19 +395,24 @@ def _list_dispatches(args) -> None:
 
 
 def _get_dispatch(args, extra: list[str]) -> None:
-    agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
-    if not agent_id:
-        print("Usage: vigil assess agent get <agent-id>", file=sys.stderr)
+    ids = _dispatch_ids(args, extra)
+    if not ids:
+        print("Usage: vigil assess agent get <agent-id> [<agent-id> ...]", file=sys.stderr)
         sys.exit(1)
     client, _ = _client_for(args)
+    missing = 0
     try:
-        row = client.get_dispatch(agent_id)
+        for agent_id in ids:
+            row = client.get_dispatch(agent_id)
+            if row is None:
+                missing += 1
+                print(f"agent get: agent_id '{agent_id}' not found", file=sys.stderr)
+                continue
+            print(json.dumps(row, ensure_ascii=False))
     finally:
         client.close()
-    if row is None:
-        print(f"agent get: agent_id '{agent_id}' not found", file=sys.stderr)
+    if missing:
         sys.exit(2)
-    print(json.dumps(row, ensure_ascii=False))
 
 
 def _record_decision(args) -> None:

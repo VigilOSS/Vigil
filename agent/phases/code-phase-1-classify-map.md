@@ -59,6 +59,12 @@ Use the helper contracts as the durable shape source before authoring or reviewi
    ranking. The on-disk queue artifact is a flat per-file JSON array -- no nested batch wrappers
    or glob patterns.
 
+**Sizing check (informs Phase 2 batch sizing):** Run `vigil assess code-size-summary`
+to get LOC buckets and large-file candidates across the indexed repo(s). Phase 2's
+adaptive batching (1 logical module or 1-3 tightly related files per hunter dispatch,
+shrunk further for large/parser-heavy/stateful files) is easier to plan up front when
+the operator already knows which files are outsized outliers before dispatch begins.
+
 On return:
 ```bash
 # Record classifications

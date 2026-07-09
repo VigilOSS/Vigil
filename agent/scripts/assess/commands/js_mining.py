@@ -67,13 +67,9 @@ def register(subparsers) -> None:
                    help="Enable trufflehog verification (off by default).")
     p.add_argument("--no-secrets", dest="no_secrets", action="store_true",
                    help="Skip the trufflehog secret scan (endpoint extraction still runs).")
-    p.add_argument("--db", dest="db_path", default="",
-                   help="cases.db path for endpoint ingest. Relative paths anchor to the engagement dir. "
-                        "When unset, DEFAULTS to the engagement's cases.db so extracted endpoints are "
-                        "never silently dropped — pass --no-ingest to opt out.")
     p.add_argument("--no-ingest", dest="no_ingest", action="store_true",
-                   help="Extract + scan but do NOT ingest endpoints into the work buffer "
-                        "(overrides the default-to-cases.db behavior).")
+                   help="Extract + scan but do NOT ingest endpoints into the backend "
+                        "work buffer (ingest is on by default).")
     p.add_argument("--stage-timeout", dest="stage_timeout", type=int, default=900,
                    help="Per-tool --timeout seconds (default 900).")
     p.set_defaults(func=run)
@@ -88,7 +84,6 @@ _ARG_DEFAULTS = {
     "cap_body_bytes": 2097152,
     "verify": False,
     "no_secrets": False,
-    "db_path": "",
     "no_ingest": False,
     "stage_timeout": 900,
 }
@@ -345,21 +340,9 @@ def run(args) -> None:
     # and scope filtering — see the resolved path instead of None (which would raise
     # in rate_caps_for_dir and silently no-op the default-on recon JS stage).
     args.engagement_dir = cfg.engagement_dir
-    # --db foot-gun guard: when unset, default the ingest target to the
-    # engagement's cases.db so a full mine never silently drops every extracted
-    # endpoint (written to disk but never reaching the work buffer). --no-ingest
-    # is the explicit opt-out.
-    if not args.db_path and not getattr(args, "no_ingest", False):
-        default_db = Path(cfg.engagement_dir) / "cases.db"
-        if default_db.is_file():
-            args.db_path = str(default_db)
-            print(f"js-mining: --db unset; defaulting endpoint ingest to {default_db}.",
-                  file=sys.stderr)
-        else:
-            _warn(
-                f"--db unset and no cases.db at {default_db}; extracted endpoints will be "
-                "written to disk but NOT ingested. Pass --db <path> to ingest."
-            )
+    # Extracted endpoints are ingested into the backend work buffer (the single
+    # store) unless --no-ingest is passed; ingest is on by default so a full mine
+    # never silently drops every extracted endpoint.
     work_host, _ = _paths(cfg, "")
     work_host.parent.mkdir(parents=True, exist_ok=True)
 
@@ -432,11 +415,20 @@ def run(args) -> None:
     # extractor emits raw endpoints resolved against the body's source URL.
     resolved: list[str] = []
     seen: set[str] = set()
+    malformed: list[str] = []
 
     def _accept(url: str) -> None:
         if not url:
             return
-        host = (urlparse(url).hostname or "").lower()
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except ValueError:
+            # jsluice/regex output is untrusted parser input: a malformed URL
+            # literal (e.g. an unbracketed IPv6-like authority) makes urlparse
+            # raise ``Invalid IPv6 URL``. Quarantine it instead of letting one
+            # bad literal abort the whole mining run and lose every good endpoint.
+            malformed.append(url)
+            return
         if args.target and host and not _host_matches_target(host, args.target):
             return
         # Drop endpoints on out-of-scope hosts (allow AND not deny). Only when an
@@ -465,15 +457,31 @@ def run(args) -> None:
         if not source_url:
             continue
         for ep in eps:
-            absolute = resolve_js_endpoint(ep, base_url=source_url)
+            try:
+                absolute = resolve_js_endpoint(ep, base_url=source_url)
+            except ValueError:
+                # resolve_js_endpoint urlparses the raw endpoint; a malformed
+                # one is quarantined, not fatal (same untrusted-input rationale).
+                malformed.append(ep)
+                continue
             if absolute:
                 _accept(absolute)
 
     endpoints_host, _ = _paths(cfg, "js_endpoints.txt")
     endpoints_host.write_text("\n".join(resolved) + "\n", encoding="utf-8")
 
+    # Quarantine sidecar: malformed URL literals that could not be parsed. Kept
+    # for a browser-semantic/salvage follow-up rather than silently dropped.
+    if malformed:
+        malformed_host, _ = _paths(cfg, "js_endpoints_malformed.txt")
+        malformed_host.write_text("\n".join(malformed) + "\n", encoding="utf-8")
+        _warn(
+            f"{len(malformed)} malformed URL(s) quarantined to {malformed_host} "
+            "(not fatal; good endpoints still mined)."
+        )
+
     ingested = 0
-    if args.db_path and resolved:
+    if not getattr(args, "no_ingest", False) and resolved:
         try:
             ingest_endpoints.run(_ingest_args(args, str(endpoints_host)))
             ingested = len(resolved)
@@ -512,7 +520,6 @@ def run(args) -> None:
 def _ingest_args(args, urls_file: str):
     from types import SimpleNamespace
     return SimpleNamespace(
-        db_path=args.db_path,
         source="js-extract",
         input_file=urls_file,
         egress_blocked_hosts=None,

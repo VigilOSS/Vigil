@@ -32,6 +32,16 @@ KNOWN_SKILLLESS_CLASSES: frozenset[str] = frozenset(
     {
         "ldap-injection",
         "path-authz",
+        # Added (vuln-taxonomy-audit 2026-07): real, WSTG-documented classes
+        # with no reliable gf-style URL/param signal (so no bucket) and no
+        # existing skill whose scope honestly covers them yet — allowlisted
+        # rather than forcing an unbacked skill mapping, mirroring
+        # `ldap-injection`/`path-authz` above. `ssi-injection` DOES have a
+        # bucket (`ssi`, extension-based) but still has no dedicated skill.
+        "xpath-injection",
+        "ssi-injection",
+        "clickjacking",
+        "csv-injection",
     }
 )
 

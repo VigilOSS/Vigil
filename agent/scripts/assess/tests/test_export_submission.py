@@ -4,15 +4,27 @@ Drives the real argparse parser (`export_submission.register`) and `run`, with a
 fake client that returns canned finding / finding-links / command-run payloads and
 records every GET and POST. Pins the behaviour the plan locks down:
 
+  * the output is the platform copy-paste layout — `**Title:**` / `**VRT:**` (or
+    `**Weakness:**`; `direct` drops both) / `**Severity:**` / `**CVSS:**` header
+    lines, a `---` separator, the stable `### ` sections (Summary / Steps to
+    Reproduce / Evidence / Attack Scenario / Impact / Remediation), then a second
+    `---` and the ONE "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section the
+    operator never pastes (present in BOTH draft and final);
   * draft always writes and inserts `[NEEDS: ...]` markers for missing proof;
   * final mode strict-gates on title / severity+CVSS / platform taxonomy /
     attacker-impact / >=1 proof, raising `AssessError` and writing nothing;
+  * `### Evidence` renders ONLY the authored `details.evidence` (`[NEEDS: evidence]`
+    in a draft when absent) — the raw structured proof (poc_* / evidence_ref) and
+    the linked command runs are NOT rendered into it; they, the finding metadata,
+    and any hygiene warnings are consolidated into the single OPERATOR DETAILS
+    section (mirrored by the context JSON `linked_command_runs` array). The old
+    separate "OPERATOR NOTES" and "COMMAND REFERENCE" blocks no longer exist;
   * `direct` drops the VRT/weakness taxonomy fields (and its gate);
   * the generated submission is registered as `kind="submission"` and NO payload
     ever carries `submission_status`;
-  * command evidence comes ONLY from explicit finding-links (no fuzzy search);
-  * internal ids (UUIDs / absolute engagement paths / cases.db) are scrubbed
-    from the output while the human-readable slug survives.
+  * linked command runs come ONLY from explicit finding-links (no fuzzy search);
+  * internal ids (UUIDs / absolute engagement paths / cases.db) are FLAGGED
+    non-destructively while the finding content survives verbatim.
 """
 from __future__ import annotations
 
@@ -167,7 +179,23 @@ def test_draft_writes_with_needs_markers(tmp_path, monkeypatch, capsys):
     assert "[NEEDS: CVSS vector]" in body
     assert "[NEEDS: VRT category]" in body
     assert "[NEEDS: attacker-impact statement]" in body
+    # Evidence renders its own draft marker; the proof marker lives under OPERATOR DETAILS.
+    assert "[NEEDS: evidence]" in body
     assert "[NEEDS: proof" in body
+    # Stable sections still render their headers even when empty, with markers.
+    assert "[NEEDS: summary]" in body
+    assert "[NEEDS: steps to reproduce]" in body
+    assert "[NEEDS: remediation]" in body
+    # Copy-paste layout: header field lines + separator + ### sections.
+    assert body.startswith("**Title:**")
+    assert "**CVSS:** [NEEDS: CVSS vector]" in body
+    assert "\n---\n" in body
+    assert "### Summary" in body and "### Evidence" in body
+    # The single OPERATOR DETAILS reference section is present below the second divider.
+    assert "## OPERATOR DETAILS — NOT FOR SUBMISSION" in body
+    # The retired separate blocks no longer exist.
+    assert "## OPERATOR NOTES" not in body
+    assert "## COMMAND REFERENCE" not in body
     # draft still registers the artifact.
     assert any(ep == "artifacts" for ep, _ in fake.posts)
 
@@ -192,11 +220,77 @@ def test_final_passes_with_complete_finding(tmp_path, monkeypatch, capsys):
 
     body = _submission_path(tmp_path).read_text()
     assert "[NEEDS:" not in body
-    assert "broken_access_control.idor" in body  # VRT rendered
+    # Copy-paste header field lines, then a separator, then the ### body sections.
+    assert body.startswith("**Title:** IDOR exposes other users' orders on /orders/{id}")
+    assert "**VRT:** broken_access_control.idor" in body  # VRT header line
+    assert "**Severity:** HIGH" in body
+    assert "**CVSS:** CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N (6.5)" in body
+    header, _, sections = body.partition("\n---\n")
+    assert "### Summary" not in header  # first separator really splits header from body
+    assert "### Steps to Reproduce" in sections and "### Impact" in sections
+    # Structured proof lives under OPERATOR DETAILS, NOT in the pasteable Evidence section.
     assert "**PoC Request:**" in body and "**PoC Response:**" in body
+    details = body[body.index("## OPERATOR DETAILS"):]
+    assert "**PoC Request:**" in details and "**PoC Response:**" in details
+    evidence = body[body.index("### Evidence"):body.index("### Impact")]
+    assert "PoC Request" not in evidence and "PoC Response" not in evidence
+    # The single OPERATOR DETAILS section is present; the retired blocks are gone.
+    assert "## OPERATOR DETAILS — NOT FOR SUBMISSION" in body
+    assert "## OPERATOR NOTES" not in body
+    assert "## COMMAND REFERENCE" not in body
     # context companion written alongside.
     ctx = json.loads((tmp_path / "submissions" / "VA-047" / "submission-context.json").read_text())
     assert ctx["mode"] == "final" and ctx["missing"] == [] and ctx["proof"]["has_proof"] is True
+    assert ctx["linked_command_runs"] == []
+
+
+def test_operator_details_surfaces_full_record(tmp_path, monkeypatch, capsys):
+    """Everything else on the record is surfaced below the paste line so the LLM
+    edits with the full picture — dedup/merge, root cause, chain, verification, notes."""
+    finding = _finding(details=_complete_details(
+        chain_required="true",
+        chain_rationale="Needs the VA-002 oracle to supply victim userIds.",
+        propagation_verdict="Write reaches the prod routing path; not gated to the caller's env.",
+        discovered_by="exploit-developer",
+    ))
+    finding["merged_into_slug"] = "EX-003"
+    finding["root_cause_key"] = "missing-flauthz:tame-writes"
+    finding["defect_family"] = "broken-function-level-authorization"
+    finding["verification_state"] = "verified"
+    finding["notes"] = "MECHANISM: no E00207 caller-authz on qtame writes. REACHABILITY: prod accepted."
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    details = body[body.index("## OPERATOR DETAILS"):]  # below the never-paste line
+    assert "Merged into: EX-003" in details
+    assert "missing-flauthz:tame-writes" in details
+    assert "broken-function-level-authorization" in details
+    assert "Chain rationale" in details and "VA-002 oracle" in details
+    assert "Propagation verdict" in details
+    assert "Verification state: verified" in details
+    assert "Discovered by: exploit-developer" in details
+    assert "Investigation notes" in details and "no E00207" in details
+    # notes never leak above the paste line
+    assert "no E00207" not in body[: body.index("## OPERATOR DETAILS")]
+
+
+def test_location_method_not_doubled(tmp_path, monkeypatch, capsys):
+    """canonical_location already carrying the method must not become 'POST POST …'."""
+    finding = _finding(details=_complete_details(request_method="POST"))
+    finding["canonical_location"] = "POST https://app.example.com/api/tame/qtameSubmit"
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    assert "POST POST" not in body
+    assert "Location: POST https://app.example.com/api/tame/qtameSubmit" in body
 
 
 # -- per-platform blockers (each blocks final, passes draft) ------------------
@@ -284,9 +378,13 @@ def test_direct_mode_drops_taxonomy_and_gate(tmp_path, monkeypatch, capsys):
     export_submission.run(args)
     capsys.readouterr()
     body = _submission_path(tmp_path).read_text()
+    # Neither the Bugcrowd VRT nor the HackerOne weakness taxonomy line appears.
     assert "VRT" not in body
     assert "Weakness" not in body
-    assert "Direct disclosure" in body
+    # Still the copy-paste layout: Title + Severity + CVSS header, then the body.
+    assert body.startswith("**Title:**")
+    assert "**Severity:**" in body and "**CVSS:**" in body
+    assert "### Summary" in body
 
 
 # -- artifact registration / submission_status invariant ----------------------
@@ -309,16 +407,18 @@ def test_artifact_registered_as_submission_without_submission_status(tmp_path, m
         assert "submission_status" not in any_payload
 
 
-# -- command evidence: explicit links only, no fuzzy search -------------------
+# -- linked command runs: REFERENCE, not force-rendered Evidence --------------
 
-def test_command_evidence_from_links_only(tmp_path, monkeypatch, capsys):
+def test_linked_runs_are_reference_not_evidence(tmp_path, monkeypatch, capsys):
+    # A distinctive command (orders/1002) so it never collides with the PoC's own
+    # request line (orders/1001) when we check which section it lands in.
     links = [
         {"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 5},
         {"finding_slug": "VA-047", "target_kind": "probe_run", "target_id": 9},  # ignored (wrong kind)
         {"finding_slug": "VA-999", "target_kind": "command_run", "target_id": 7},  # ignored (other finding)
     ]
     command_runs = {
-        5: {"id": 5, "command": "curl -s https://app.example.com/orders/1001", "intent": "reproduce IDOR", "return_code": 0},
+        5: {"id": 5, "command": "curl -sk https://app.example.com/orders/1002", "intent": "reproduce IDOR", "return_code": 0},
         7: {"id": 7, "command": "curl -s https://app.example.com/secret", "intent": "unrelated", "return_code": 0},
     }
     fake = _FakeClient(_finding(details=_complete_details()), links=links, command_runs=command_runs)
@@ -328,12 +428,100 @@ def test_command_evidence_from_links_only(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
-    assert "curl -s https://app.example.com/orders/1001" in body  # linked run embedded
     assert "app.example.com/secret" not in body  # other finding's run not pulled in
+
+    # The linked run appears ONLY under the single OPERATOR DETAILS section, never in Evidence.
+    assert "## OPERATOR DETAILS — NOT FOR SUBMISSION" in body
+    assert "**Linked command runs**" in body
+    ref_idx = body.index("## OPERATOR DETAILS")
+    assert "curl -sk https://app.example.com/orders/1002" in body[ref_idx:]
+    evidence = body[body.index("### Evidence"):body.index("### Impact")]
+    assert "curl -sk https://app.example.com/orders/1002" not in evidence
+    assert "orders/1002" not in evidence
+
+    # ...and as structured reference in the context JSON's linked_command_runs.
+    runs = _context(tmp_path)["linked_command_runs"]
+    assert [r["id"] for r in runs] == [5]
+    assert runs[0]["intent"] == "reproduce IDOR" and runs[0]["return_code"] == 0
+    assert "orders/1002" in runs[0]["command"]
+
     # Decision 4: NO fuzzy command search — only finding-links + the exact run by id.
     assert "finding-links" in fake.gets
     assert "command-runs/5" in fake.gets
     assert not any(g.startswith("command-runs?") for g in fake.gets)
+
+
+def test_operator_details_consolidates_all_reference(tmp_path, monkeypatch, capsys):
+    """One OPERATOR DETAILS section holds metadata + structured proof + linked runs.
+
+    Pins the consolidation: the three previously-separate mechanisms (raw poc_* in
+    Evidence, a COMMAND REFERENCE block, an OPERATOR NOTES block) are now one
+    section, and `### Evidence` carries only the authored prose.
+    """
+    links = [{"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 5}]
+    command_runs = {
+        5: {"id": 5, "command": "curl -sk https://app.example.com/orders/1002", "intent": "reproduce", "return_code": 0},
+    }
+    details = _complete_details(
+        evidence="Response carried member B's masked order (o***1002). <-- proof",
+        cwe_id="CWE-639",
+        owasp_category="A01:2021",
+        references=["https://cwe.mitre.org/data/definitions/639.html"],
+    )
+    fake = _FakeClient(_finding(details=details), links=links, command_runs=command_runs)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+
+    # Exactly one reference section, below a second `---`; the retired blocks are gone.
+    assert body.count("## OPERATOR DETAILS — NOT FOR SUBMISSION") == 1
+    assert "## OPERATOR NOTES" not in body
+    assert "## COMMAND REFERENCE" not in body
+    assert body.count("\n---\n") >= 2  # header separator + OPERATOR DETAILS separator
+
+    details_section = body[body.index("## OPERATOR DETAILS"):]
+    # Finding metadata weaves into OPERATOR DETAILS (kept out of the pasteable header).
+    assert "CWE-639" in details_section
+    assert "A01:2021" in details_section
+    assert "cwe.mitre.org/data/definitions/639.html" in details_section
+    assert "member" in details_section  # auth context
+    # Structured proof + linked runs are here too.
+    assert "**Structured proof**" in details_section
+    assert "**PoC Request:**" in details_section and "**PoC Response:**" in details_section
+    assert "**Linked command runs**" in details_section
+    assert "curl -sk https://app.example.com/orders/1002" in details_section
+
+    # `### Evidence` renders ONLY the authored prose — no raw proof, no linked command.
+    evidence = body[body.index("### Evidence"):body.index("### Impact")]
+    assert "Response carried member B's masked order (o***1002). <-- proof" in evidence
+    assert "PoC Request" not in evidence and "PoC Response" not in evidence
+    assert "curl -sk" not in evidence
+    assert "CWE-639" not in evidence
+
+
+def test_evidence_authored_from_details_evidence(tmp_path, monkeypatch, capsys):
+    """Evidence renders the finding's authored `details.evidence`, not a linked run."""
+    links = [{"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 5}]
+    command_runs = {
+        5: {"id": 5, "command": "curl -sk https://app.example.com/orders/1002", "intent": "reproduce", "return_code": 0},
+    }
+    details = _complete_details(evidence="Response body carried member B's masked order (o***1002).")
+    fake = _FakeClient(_finding(details=details), links=links, command_runs=command_runs)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    evidence = body[body.index("### Evidence"):body.index("### Impact")]
+    # Authored evidence prose lands in the Evidence section...
+    assert "Response body carried member B's masked order (o***1002)." in evidence
+    # ...while the linked command stays out of Evidence (it's reference below the divider).
+    assert "curl -sk" not in evidence
+    assert "curl -sk https://app.example.com/orders/1002" in body
 
 
 # -- internal-id hygiene (faithful body + non-destructive warnings) -----------
@@ -439,5 +627,6 @@ def test_json_summary_shape(tmp_path, monkeypatch, capsys):
     assert out["mode"] == "final"
     assert out["path"] == "submissions/VA-047/submission.md"
     assert out["missing"] == []
+    assert out["linked_command_runs"] == 0  # no linked runs on this finding
     assert out["artifact_registered"] is True
     assert out["hygiene_warnings"] == []  # clean finding: no internal-id leaks

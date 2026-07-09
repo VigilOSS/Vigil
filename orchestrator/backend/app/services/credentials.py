@@ -41,6 +41,12 @@ _SESSION_HINT_COOKIE_NAMES = frozenset(
 # to one row while a different subject appends.
 _JWT_ANCHOR_CLAIMS = ("sub", "uid", "user_id", "email")
 
+# Human-readable identity-label charset + length cap. A derived `cap-<label>` name
+# is used as a DB identity key and shown in `vigil auth list`, so it must be
+# lowercase and restricted to filesystem/label-safe characters.
+_LABEL_SAFE_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
+_LABEL_MAX_LEN = 40
+
 # Token dict keys (case-insensitive) whose value may hold a bearer credential —
 # mirrors proxy_addon.BEARER_TOKEN_PRIORITY so the derivation sees the same bearer
 # the addon would synthesize into an Authorization header.
@@ -72,12 +78,14 @@ def load_identities(
     sessions usable at that host (subdomain-aware); ``include_dead`` surfaces
     probe-proven-dead sessions that are hidden by default.
     """
+    active_material = db.get_active_credential(engagement_id)
+    active = (
+        str(active_material.get("identity_name") or DEFAULT_IDENTITY)
+        if active_material is not None
+        else DEFAULT_IDENTITY
+    )
     rows = db.list_credentials(engagement_id, host=host, include_dead=include_dead)
     identities = {row["identity_name"]: row for row in rows}
-    active = next(
-        (row["identity_name"] for row in rows if row.get("is_active")),
-        next(iter(identities), DEFAULT_IDENTITY),
-    )
     return {"identities": identities, "active_identity": active}
 
 
@@ -150,7 +158,19 @@ def derive_capture_identity(
     This is the churn fix + the multi-identity key (2026-07). The same login
     (same anchor) hashes to the same ``cap-<sha1>`` name so the existing UPSERT
     REFRESHES one row; a genuinely-distinct login (different anchor) yields a
-    different name so it APPENDS a new row. Anchor material, in order:
+    different name so it APPENDS a new row.
+
+    When the capture carries an identifiable PRINCIPAL — a decoded JWT
+    ``sub``/``uid``/``user_id``/``email`` claim — the name is a human-readable
+    ``cap-<sanitized-claim>`` (e.g. ``cap-acme-user``) instead of the opaque hash,
+    so ``vigil auth list``/``show`` can tell account A from account B for
+    IDOR/BOLA cross-account testing. The label derives from the DURABLE claim
+    (stable across a token refresh), NEVER from a rotating cookie value, so
+    refreshes of the same login still coalesce to one row; a short hash suffix is
+    appended only when sanitization is lossy, so two distinct principals whose
+    claims sanitize to the same label never wrongly share a row. A capture with
+    no identifiable principal (cookie-only, opaque bearer) keeps ``cap-<sha1>``.
+    Anchor material, in order:
 
     * **anchor cookies** — cookies whose NAME is in the generic session-hint set
       (:data:`_SESSION_HINT_COOKIE_NAMES`, case-insensitive). If none match, the
@@ -203,6 +223,15 @@ def derive_capture_identity(
 
     if not anchor_pairs:
         return None
+
+    # Prefer a human-readable name derived from a durable principal claim; this
+    # only ever COALESCES more (by principal) than the hash — it never splits a
+    # single login — so the append-in-place dedup the store relies on is
+    # preserved. No identifiable principal -> the opaque per-anchor fingerprint.
+    principal = _principal_identity(jwt_anchor)
+    if principal is not None:
+        return principal
+
     key_material = "\n".join(sorted(f"{name}={value}" for name, value in anchor_pairs))
     digest = hashlib.sha1(key_material.encode("utf-8")).hexdigest()[:10]
     return f"cap-{digest}"
@@ -225,6 +254,69 @@ def _bearer_anchor_term(
         claim_name, claim_value = claim
         return (f"jwt:{claim_name}", str(claim_value))
     return ("bearer", bearer)
+
+
+def _principal_identity(jwt_anchor: tuple[str, str] | None) -> str | None:
+    """Return a human-readable ``cap-<principal>`` identity name, or ``None``.
+
+    Only a DECODED JWT claim (``jwt:sub``/``uid``/``user_id``/``email``, produced
+    by :func:`_bearer_anchor_term`) is treated as an identifiable principal — a
+    raw opaque bearer or an opaque cookie session value is not human-readable, so
+    those fall through to the ``cap-<sha1>`` fingerprint. The label derives from
+    the durable claim value, so it is stable across a token refresh (same
+    principal -> same name -> the row REFRESHES in place). A short hash of the
+    claim (durable, never a rotating cookie) is appended only when sanitization
+    is lossy, so two distinct principals whose claims sanitize to the same label
+    still get distinct names (errs toward a distinct key, never a wrong merge).
+    """
+    if jwt_anchor is None:
+        return None
+    claim_name, claim_value = jwt_anchor
+    if not claim_name.startswith("jwt:"):
+        return None  # raw/opaque bearer — no human-identifiable principal
+    raw = str(claim_value)
+    label = _sanitize_label(raw)
+    if not label:
+        return None  # claim was all-unsafe/empty — fall back to the fingerprint
+    if _label_is_lossy(raw, label):
+        disamb = hashlib.sha1(
+            f"{claim_name}={raw}".encode("utf-8")
+        ).hexdigest()[:6]
+        return f"cap-{label}-{disamb}"
+    return f"cap-{label}"
+
+
+def _sanitize_label(value: str) -> str:
+    """Lowercase ``value`` and reduce it to a filesystem/label-safe token.
+
+    Any run of characters outside ``[a-z0-9._-]`` collapses to a single ``_``;
+    leading/trailing separators are stripped and the result is capped at
+    :data:`_LABEL_MAX_LEN`. Returns ``""`` when nothing safe survives.
+    """
+    out: list[str] = []
+    prev_sep = False
+    for ch in value.strip().lower():
+        if ch in _LABEL_SAFE_CHARS:
+            out.append(ch)
+            prev_sep = False
+        elif not prev_sep:
+            out.append("_")
+            prev_sep = True
+    return "".join(out).strip("._-")[:_LABEL_MAX_LEN].strip("._-")
+
+
+def _label_is_lossy(raw: str, label: str) -> bool:
+    """True when :func:`_sanitize_label` may have conflated distinct claims.
+
+    The label faithfully represents the claim only when the (stripped) claim was
+    already lowercase, label-safe, and short enough that nothing was replaced,
+    case-folded, stripped, or truncated. Otherwise two distinct principals could
+    collapse to the same label — including case-only-differing claims, since the
+    label is forced lowercase — so the caller appends a disambiguating hash of
+    the durable claim (err toward a distinct key, never a wrong merge).
+    """
+    stripped = raw.strip()
+    return label != stripped or len(stripped) > _LABEL_MAX_LEN
 
 
 def _extract_bearer(headers: dict[str, str], tokens: dict[str, str]) -> str | None:

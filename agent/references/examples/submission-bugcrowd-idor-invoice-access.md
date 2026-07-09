@@ -1,5 +1,6 @@
 ---
 description: "Example: Bugcrowd submission for cross-tenant IDOR on an invoice PDF endpoint"
+skill: report-generation
 category: Disclosure & Reporting Formats
 ---
 

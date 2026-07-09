@@ -106,6 +106,31 @@ voting. Do not resolve uncertainty by defaulting to kill.
 
 See skill file for the full disposition table and kill reason format with examples.
 
+## Severity & Report-Readiness Gate
+
+Modeled on `agent/agents/vulnerability-analyst.md` "Four Validation Gates" Gate 3 — the
+five-check protocol above establishes bug-**existence**; before recording `confirmed` or
+`downgraded` you still owe the severity-calibration half it does not cover:
+
+- Run `agent/references/finding-fp-and-severity-gate.md` checks **C5** (per-metric CVSS
+  discipline — each base metric justified against proven impact, not an inflated band),
+  **C6** (is the impact on a REAL object, proven by read-back or observable side effect, or an
+  orphan/unvalidated write), and **C7** (is this by-design/documented/precedented, or a genuine
+  boundary break).
+- Run the `agent/rules/hunting.md` §3 net-new-capability test: if the attacker already controls
+  the whole input the code processes (their own repo/PR/config/build artifact), a bug that only
+  reproduces what their own source already achieves by design carries zero incremental
+  capability — set severity as a ceiling before any escalation reasoning, however impressive the
+  sink.
+- **Author the result into the finding's `details`, not just assert it clears the bar:** the
+  report-ready `evidence` (exact taint path + guard-failure proof), `impact` (the one-sentence
+  attacker outcome), a justified `cvss_vector`/`cvss_score` recomputed against the C5 checks, and
+  `remediation`, via `vigil assess update-finding <slug> --inline '{"details": {...}}'` — so the
+  report phase formats the story rather than re-authoring it.
+
+Do this before the closing verbs run — `verify-finding`/`kill-finding` persist the disposition,
+but the report-ready `details` must already be on the finding when they fire.
+
 ## FP Persistence
 
 When a finding is killed, persist that decision durably through the finding verification
@@ -120,10 +145,14 @@ so the backend clears the prior verification state and the finding returns to ac
 
 ```bash
 # Persist confirm/downgrade/dispute decisions through the verification endpoint
-vigil assess verify-finding <slug> <verification-json>
+vigil assess verify-finding <slug> --disposition <verdict> --reason "<rationale>"
 
 # Persist kills with the dedicated helper (enforces kill_reason + kill_check fields)
 vigil assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+
+# Batch form: dispositioning several false positives that share one root rationale
+# (same payload/flags applied to every slug, resilient loop with a per-slug failure tally)
+vigil assess kill-finding <slug1> <slug2> <slug3> --reason "<shared kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 
 # Reopen a previously verified or false-positive finding when retest disproves the prior verdict
 vigil assess reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
@@ -139,7 +168,7 @@ vigil assess record-finding code-vuln-verifier <new-finding-json>
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess verify-finding <slug> <verification-json>` for each confirm/downgrade/dispute decision
+1. `vigil assess verify-finding <slug> --disposition <verdict> --reason "<rationale>"` for each confirm/downgrade/dispute decision
 2. `vigil assess kill-finding <slug> ...` for each kill decision
 3. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
 4. `vigil assess record-finding code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)

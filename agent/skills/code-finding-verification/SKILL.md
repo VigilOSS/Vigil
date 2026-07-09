@@ -253,7 +253,8 @@ for concrete examples of the boundary between High and Medium.
 Checks 1–5 establish the bug is **real** (existence); they do not judge whether a *real* bug's impact
 is **overclaimed** — a separate, cross-track axis. Before recording `confirmed` at the hunter's
 severity, run the shared gate (`agent/references/finding-fp-and-severity-gate.md`): **C5** (per-metric
-CVSS discipline), **C7** (by-design/documented/precedent), and the **`hunting.md §3` net-new test**
+CVSS discipline), **C6** (real-object proof, not an orphan/unvalidated write), **C7**
+(by-design/documented/precedent), and the **`hunting.md §3` net-new test**
 (a real injection that only reproduces what the attacker's own controlled repo/PR/template/build
 already achieves grants zero net-new capability). A finding can PASS all five existence checks and
 still DOWNGRADE/KILL there — cite the gate check, not a failed existence check. This calibration's
@@ -428,7 +429,7 @@ When you persist a false positive in structured finding state, include:
 - `details.kill_check` — integer 1-5 for the failed verification check
 - `details.kill_reason` — concise verifier rationale suitable for later query/reporting
 - Use `vigil assess kill-finding <slug> ...` when you already have the kill rationale in hand, because it enforces the required false-positive fields before the request leaves the CLI
-- Use `vigil assess verify-finding <slug> <verification-json>` for confirm/downgrade/dispute flows or when the verification payload already exists on disk, because the verification transition belongs in the audit ledger rather than a generic finding patch
+- Use `vigil assess verify-finding <slug> --disposition <verdict> --reason "<rationale>"` for confirm/downgrade/dispute flows, or `--payload-file <path>` when the verification payload already exists on disk, because the verification transition belongs in the audit ledger rather than a generic finding patch
 - Use `vigil assess reset-finding <slug> ...` when new evidence disproves an earlier verified or false-positive verdict, because reopening is its own lifecycle transition and should clear the prior verification state instead of patching fields by hand
 
 ## Output Format
@@ -479,4 +480,4 @@ When you persist structured verification state, include:
 - Full filesystem access — read source files directly for independent verification of taint paths and guards
 - **CWE pattern reference (REQUIRED)** — load the `agent/references/code-vuln-patterns/*.md` file matching each finding's CWE. Pattern knowledge is needed for guard completeness evaluation (Check 2: are ALL variant forms of this bug class guarded?) and exploitation feasibility assessment (Check 4: what does a real exploit look like for this pattern?)
 - Variant findings from Phase 3 — load variant context for variant-aware verification
-- **Shared impact & severity-calibration gate** — `agent/references/finding-fp-and-severity-gate.md`: the cross-track home for the impact/overclaim checks (C5 per-metric CVSS, C7 by-design/documented/precedent, and C1–C4 live data-exposure mechanics). This skill's five checks establish bug-EXISTENCE; run the gate's C5/C7 + the `hunting.md §3` net-new test to calibrate severity before `confirmed` — see "Severity Calibration" above. Shared with the live/web verifier, not web-only.
+- **Shared impact & severity-calibration gate** — `agent/references/finding-fp-and-severity-gate.md`: the cross-track home for the impact/overclaim checks (C5 per-metric CVSS, C6 real-object proof, C7 by-design/documented/precedent, and C1–C4 live data-exposure mechanics). This skill's five checks establish bug-EXISTENCE; run the gate's C5/C6/C7 + the `hunting.md §3` net-new test to calibrate severity before `confirmed` — see "Severity Calibration" above. Shared with the live/web verifier, not web-only.

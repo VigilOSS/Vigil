@@ -20,8 +20,8 @@ to the caller (export-findings strips and re-joins; the tree appends one).
 
 This module lives under ``agent/scripts/assess/lib`` so the assess command
 imports it directly; the ``src`` CLI package reaches it through the same
-``add_assess_import_path`` bridge it already uses for ``assess.lib.client`` and
-``assess.lib.db`` (see ``vigil_cli.paths``).
+``add_assess_import_path`` bridge it already uses for ``assess.lib.client``
+(see ``vigil_cli.paths``).
 """
 from __future__ import annotations
 
@@ -71,6 +71,37 @@ def detail_value(finding: dict, key: str, default: Any = "") -> Any:
     if value not in (None, "", []):
         return value
     return details_object(finding).get(key, default)
+
+
+def blocked_reason_summary(finding: dict) -> str:
+    """One-line ``BLOCKED: <reason>`` marker for a blocked finding, or "".
+
+    A finding is *blocked-for-provisioning* when its ``verification_disposition``
+    is ``blocked``: the attempt could not even start because a precondition is
+    missing (an account / line / device / credential / access), so the finding is
+    held OUT of the report until unblocked. Its ``verification_state`` is
+    ``verified`` and its ``workflow_status`` usually stays ``active`` — so a
+    compact finding line that shows only ``workflow_status/verification_state``
+    (resume-brief) renders it as a bare ``active/verified`` row with NO hint that
+    it is blocked or why. This marker restores that signal from the required
+    ``details.block_reason`` (guaranteed present by the verify/record invariant
+    that blocked findings MUST carry a block_reason).
+
+    Gated strictly on ``verification_disposition == 'blocked'`` — a ``block_reason``
+    may legitimately sit on a non-blocked finding (e.g. a pending_runtime_proof
+    hold), and labelling that "BLOCKED" would be wrong. Returns "" otherwise, so a
+    normal finding never grows a marker. The reason is read via ``detail_value``
+    so it resolves whether it is a top-level projected field (resume-brief) or
+    nested in ``details_json`` (list-findings' raw record).
+
+    (Surfacing ``details.unblock_requirements`` — the class of the missing
+    precondition and who it was requested from — is deferred; see roadmap.md.)
+    """
+    disposition = str(finding.get("verification_disposition") or "").strip().lower()
+    if disposition != "blocked":
+        return ""
+    reason = str(detail_value(finding, "block_reason", "") or "").strip()
+    return f"BLOCKED: {reason}" if reason else "BLOCKED"
 
 
 def string_list(values: object) -> list[str]:

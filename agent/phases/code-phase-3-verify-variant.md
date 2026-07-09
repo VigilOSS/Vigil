@@ -47,6 +47,11 @@ Provide:
 - CWE pattern references matching each finding's defect family
 - Build system configuration for compile-time flag evaluation (Makefiles, CMakeLists,
   configure scripts, feature flags)
+- Threat model: `tools/analysis-state/threat-model.json` (trust boundaries for reachability
+  tracing and severity grounding) — Agent B gets this below; the verifier needs it too
+- Instruction: run the FP & severity-downgrade gate (`agent/references/finding-fp-and-severity-gate.md`,
+  C1–C7) on each finding, then author the report-ready story into `details`, before recording
+  confirmed/downgraded
 
 The verifier's job is precise FP elimination. False positives are expected in any
 AI-assisted vulnerability pipeline, but so are wrongly killed real findings. A killed
@@ -115,14 +120,26 @@ If the verifier's clean-file spot-check discovers a missed vulnerability:
 
 ```bash
 # Record verification results (updates existing findings)
-vigil assess verify-finding <slug> <verification-json>
+vigil assess verify-finding <slug> --disposition <verdict> --reason "<rationale>"
 # Or use the dedicated false-positive helper when you already have the kill rationale
 vigil assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+# Batch-kill several FPs that share one root rationale (same payload/flags applied to every slug)
+vigil assess kill-finding <slug1> <slug2> <slug3> --reason "<shared kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 # Reopen a previously verified or false-positive finding when new evidence requires re-triage
 vigil assess reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
 # Record variant findings (new findings)
 vigil assess record-finding code-variant-hunter <variant-finding-json>
 ```
+
+**D4 killed-finding re-mint guard:** Agent A (killing FPs) and Agent B (minting variants) run in
+parallel on overlapping files, so Agent B may `record-finding` a candidate at a file the verifier
+just killed. The backend's D4 guard refuses a net-new record that shares `defect_family` (technique)
+and a normalized endpoint/canonical-location signal with a finding already killed as
+`false_positive` — this is expected here, not a bug. On a 409: re-check the kill first (was it
+rigorous, on the same code path as the new candidate?). If the kill was right and this is a
+genuinely distinct bug at that file:line (different variable, different guard failure, different
+sink), re-record with `--allow-remint` (alias `--force`). If the kill was wrong, `reset-finding
+<slug>` on the killed finding instead of forcing the re-mint.
 
 **Pre-report deduplication:**
 Before dispatching report-writer, check for duplicates across hunter and variant-hunter prefixes.
@@ -147,8 +164,11 @@ vigil assess merge-finding <source-slug> <target-slug> "<reason>"
 vigil assess transition-phase fuzz
 ```
 
-Exit: All findings verified. Variant scan complete. Transition to Phase 4 (Fuzz) if the
-codebase is C/C++ with memory-safety targets, otherwise skip directly to report.
+Exit: All findings verified. Variant scan complete. If the verifier killed >80% of the findings
+dispatched to it, review whether Phase 2 hunter dispatch context (CWE pattern references, threat
+model) needs tightening before the next batch — a high kill rate this far past hunt is a dispatch
+signal, not just an FP-elimination stat. Transition to Phase 4 (Fuzz) if the codebase is C/C++
+with memory-safety targets, otherwise skip directly to report.
 
 ---
 

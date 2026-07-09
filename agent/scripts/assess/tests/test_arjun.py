@@ -10,6 +10,18 @@ import pytest
 from assess.commands import arjun_select, arjun_sweep, kali_arjun
 from assess.lib import arjun_enrich
 
+from _fake_client import FakeAssessmentClient
+
+
+class _Cfg:
+    """Minimal stand-in for `assess.lib.config.Config` (arjun commands read
+    `.engagement_dir` / `.base_url` / `.engagement_key`)."""
+
+    def __init__(self, engagement_dir: str) -> None:
+        self.engagement_dir = engagement_dir
+        self.base_url = "http://backend.invalid"
+        self.engagement_key = "test-eng"
+
 
 # --------------------------------------------------------------------------
 # arjun_enrich — pure helpers (slot routing, sqli rule, signals, rationale,
@@ -220,24 +232,27 @@ def test_select_targets_param_poor_only():
     assert arjun_select.select_targets(rows, param_poor_only=True) == [("GET", "http://h/poor")]
 
 
-def test_arjun_select_run_writes_list_and_reports_budget_drops(tmp_path, capsys):
+def test_arjun_select_run_writes_list_and_reports_budget_drops(tmp_path, monkeypatch, capsys):
     # End-to-end run(): the gated list is written, the summary carries the per-gate
     # drop breakdown, and a budget-truncated host warns on stderr (not silent).
+    # The work buffer lives in the backend now; seed rows on the fake client and
+    # let run() read them via get_all_pages("work-items").
     from assess.commands import arjun_select as asel
-    from assess.lib.db import db_init, db_insert_work_item
 
-    db = tmp_path / "cases.db"
-    db.write_bytes(b"")
-    db_init(str(db))
+    fake = FakeAssessmentClient()
     for name in ("alpha", "beta", "gamma"):
-        db_insert_work_item(
-            str(db), queue_key=f"k:{name}", method="GET",
+        fake.add_row(
+            queue_key=f"k:{name}", method="GET",
             url=f"https://h.example/{name}", url_path=f"/{name}",
-            case_type="form", live_status="live",
+            type="form", status="pending", live_status="live",
+            query_params="{}", body_params="{}", path_params="{}",
         )
+    monkeypatch.setattr(asel, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
+    monkeypatch.setattr(asel, "AssessmentClient", lambda *a, **k: fake)
+
     out_file = tmp_path / "targets.txt"
     ns = argparse.Namespace(
-        db_path=str(db), out=str(out_file), include_unknown=True,
+        out=str(out_file), include_unknown=True,
         max_per_host=1, param_poor_only=False, engagement_dir=str(tmp_path),
     )
     asel.run(ns)
@@ -385,29 +400,31 @@ def test_select_targets_budget_is_per_origin_not_hostname():
     assert has_8443 == {True, False}, "budget must keep one URL from EACH port-origin"
 
 
-def test_arjun_select_run_writes_method_specific_sidecars(tmp_path, capsys):
+def test_arjun_select_run_writes_method_specific_sidecars(tmp_path, monkeypatch, capsys):
     # run() must emit per-method sidecar lists so `kali arjun -i <out>.POST -m POST`
     # scans the body surface separately from the GET query surface — a single flat
     # list scanned under one -m would miss the other verb's hidden params.
     from assess.commands import arjun_select as asel
-    from assess.lib.db import db_init, db_insert_work_item
 
-    db = tmp_path / "cases.db"
-    db.write_bytes(b"")
-    db_init(str(db))
-    db_insert_work_item(
-        str(db), queue_key="k:get", method="GET",
+    fake = FakeAssessmentClient()
+    fake.add_row(
+        queue_key="k:get", method="GET",
         url="https://h.example/api/search", url_path="/api/search",
-        case_type="api", live_status="live",
+        type="api", status="pending", live_status="live",
+        query_params="{}", body_params="{}", path_params="{}",
     )
-    db_insert_work_item(
-        str(db), queue_key="k:post", method="POST",
+    fake.add_row(
+        queue_key="k:post", method="POST",
         url="https://h.example/api/search", url_path="/api/search",
-        case_type="api", live_status="live",
+        type="api", status="pending", live_status="live",
+        query_params="{}", body_params="{}", path_params="{}",
     )
+    monkeypatch.setattr(asel, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
+    monkeypatch.setattr(asel, "AssessmentClient", lambda *a, **k: fake)
+
     out_file = tmp_path / "targets.txt"
     ns = argparse.Namespace(
-        db_path=str(db), out=str(out_file), include_unknown=False,
+        out=str(out_file), include_unknown=False,
         max_per_host=0, param_poor_only=False, engagement_dir=str(tmp_path),
     )
     asel.run(ns)
@@ -425,86 +442,15 @@ def test_arjun_select_run_writes_method_specific_sidecars(tmp_path, capsys):
     assert out_file.read_text().count("https://h.example/api/search") == 2
 
 
-def test_arjun_select_run_anchors_relative_db_to_engagement(tmp_path, capsys, monkeypatch):
-    # U4: a bare `cases.db` with --engagement-dir <eng> must resolve against the
-    # engagement root, not the (drifted) process cwd. The DB lives in <eng>; the
-    # cwd is elsewhere and has NO cases.db, so an unanchored is_file() check would
-    # fail (or read the wrong DB). Anchoring makes the drift-tolerant call work.
-    from assess.commands import arjun_select as asel
-    from assess.lib.db import db_init, db_insert_work_item
-
-    eng = tmp_path / "engagement"
-    eng.mkdir()
-    (eng / "scope.json").write_text("{}", encoding="utf-8")
-    db = eng / "cases.db"
-    db.write_bytes(b"")
-    db_init(str(db))
-    db_insert_work_item(
-        str(db), queue_key="k:a", method="GET",
-        url="https://h.example/a", url_path="/a", case_type="form", live_status="live",
-    )
-
-    # Drift the cwd away from the engagement; it has no cases.db.
-    other = tmp_path / "elsewhere"
-    other.mkdir()
-    monkeypatch.chdir(other)
-
-    out_file = eng / "scans" / "arjun.txt"
-    ns = argparse.Namespace(
-        db_path="cases.db", out=str(out_file), include_unknown=False,
-        max_per_host=0, param_poor_only=False, engagement_dir=str(eng),
-    )
-    asel.run(ns)  # must NOT exit(1) "database not found"
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["db_path"] == str(db)
-    assert summary["selected"] == 1
-
-
-def test_ingest_arjun_anchors_relative_db_to_engagement(tmp_path, capsys, monkeypatch):
-    # U4 (ingest side): a bare `cases.db` from a drifted cwd must anchor to the
-    # engagement before rows are mutated, so enrichment never writes to an
-    # unrelated cwd database.
-    from assess.commands import ingest_arjun
-    from assess.lib.db import db_init, db_insert_work_item, db_query
-
-    eng = tmp_path / "engagement"
-    eng.mkdir()
-    (eng / "scope.json").write_text("{}", encoding="utf-8")
-    db = eng / "cases.db"
-    db.write_bytes(b"")
-    db_init(str(db))
-    db_insert_work_item(
-        str(db), queue_key="seed:GET:/known", method="GET",
-        url="https://h.example/known", url_path="/known", case_type="unknown", source="seed",
-    )
-
-    arjun_json = {"https://h.example/known": {"params": ["debug"], "method": "GET"}}
-    jf = eng / "arjun.json"
-    jf.write_text(json.dumps(arjun_json), encoding="utf-8")
-
-    class _Cfg:
-        engagement_dir = str(eng)
-
-    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg())
-    monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
-
-    other = tmp_path / "elsewhere"
-    other.mkdir()
-    monkeypatch.chdir(other)
-
-    ns = argparse.Namespace(
-        db_path="cases.db", json_file=str(jf), source="arjun",
-        default_method="GET", engagement_dir=str(eng),
-    )
-    ingest_arjun.run(ns)  # must NOT exit(1) and must mutate the ENGAGEMENT db
-    out = json.loads(capsys.readouterr().out)
-    assert out["db_path"] == str(db)
-    assert out["enriched"] == 1
-
-    enriched = db_query(
-        str(db), "SELECT query_params FROM work_items WHERE url = ?", ("https://h.example/known",)
-    )
-    assert "debug" in json.loads(enriched[0]["query_params"])
+# NOTE: `test_arjun_select_run_anchors_relative_db_to_engagement` and
+# `test_ingest_arjun_anchors_relative_db_to_engagement` were removed. Both pinned
+# the anchoring of a relative `cases.db` positional to the engagement root. The
+# local `cases.db` work buffer was folded into the backend `assessment_work_items`
+# table, so neither command opens a db anymore (arjun-select and ingest-arjun read
+# the buffer over HTTP via AssessmentClient); there is no db path to anchor and no
+# `db_path` field in either summary. The engagement-relative resolution that
+# remains — the `--json-file` path — is still covered by
+# `test_ingest_arjun_anchors_relative_json_to_engagement` below.
 
 
 def test_ingest_arjun_anchors_relative_json_to_engagement(tmp_path, capsys, monkeypatch):
@@ -514,17 +460,17 @@ def test_ingest_arjun_anchors_relative_json_to_engagement(tmp_path, capsys, monk
     # missing-file branch and report a CLEAN no-op — silently dropping a real
     # `kali arjun` discovery. Anchoring makes the drift-tolerant call find it.
     from assess.commands import ingest_arjun
-    from assess.lib.db import db_init, db_insert_work_item, db_query
 
     eng = tmp_path / "engagement"
     eng.mkdir()
     (eng / "scope.json").write_text("{}", encoding="utf-8")
-    db = eng / "cases.db"
-    db.write_bytes(b"")
-    db_init(str(db))
-    db_insert_work_item(
-        str(db), queue_key="seed:GET:/known", method="GET",
-        url="https://h.example/known", url_path="/known", case_type="unknown", source="seed",
+
+    fake = FakeAssessmentClient()
+    fake.add_row(
+        queue_key="seed:GET:/known", method="GET",
+        url="https://h.example/known", url_path="/known", type="unknown",
+        source="seed", status="pending",
+        query_params="{}", body_params="{}", path_params="{}",
     )
 
     arjun_json = {"https://h.example/known": {"params": ["debug"], "method": "GET"}}
@@ -533,18 +479,16 @@ def test_ingest_arjun_anchors_relative_json_to_engagement(tmp_path, capsys, monk
     jf.parent.mkdir(parents=True, exist_ok=True)
     jf.write_text(json.dumps(arjun_json), encoding="utf-8")
 
-    class _Cfg:
-        engagement_dir = str(eng)
-
-    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg(str(eng)))
     monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
+    monkeypatch.setattr(ingest_arjun, "AssessmentClient", lambda *a, **k: fake)
 
     other = tmp_path / "elsewhere"
     other.mkdir()
     monkeypatch.chdir(other)
 
     ns = argparse.Namespace(
-        db_path="cases.db", json_file=rel, source="arjun",
+        json_file=rel, source="arjun",
         default_method="GET", engagement_dir=str(eng),
     )
     ingest_arjun.run(ns)  # must FIND the anchored artifact, not report the cwd no-op
@@ -553,9 +497,7 @@ def test_ingest_arjun_anchors_relative_json_to_engagement(tmp_path, capsys, monk
     assert out["records"] == 1
     assert out["enriched"] == 1
 
-    enriched = db_query(
-        str(db), "SELECT query_params FROM work_items WHERE url = ?", ("https://h.example/known",)
-    )
+    enriched = fake.row_for_url("https://h.example/known")
     assert "debug" in json.loads(enriched[0]["query_params"])
 
 
@@ -697,23 +639,22 @@ def test_ingest_arjun_missing_json_is_noop(tmp_path, capsys):
 
 
 def test_ingest_arjun_run_creates_new_and_enriches_existing(tmp_path, monkeypatch, capsys):
-    # End-to-end over a REAL schema: a discovered endpoint that is not yet in the
-    # buffer must actually LAND in it (the create path), and a matching one must be
-    # enriched — proving neither finding is silently dropped between JSON and DB.
+    # End-to-end: a discovered endpoint that is not yet in the buffer must
+    # actually LAND in it (the create path, via work-items/bulk), and a matching
+    # one must be enriched — proving neither finding is silently dropped between
+    # the JSON and the backend work buffer.
     from assess.commands import ingest_arjun
-    from assess.lib.db import db_init, db_insert_work_item, db_query
 
-    db = tmp_path / "cases.db"
-    db.write_bytes(b"")  # db_init requires the file to already exist
-    db_init(str(db))
-    db_insert_work_item(
-        str(db),
+    fake = FakeAssessmentClient()
+    fake.add_row(
         queue_key="seed:GET:/known",
         method="GET",
         url="https://h.example/known",
         url_path="/known",
-        case_type="unknown",
+        type="unknown",
         source="seed",
+        status="pending",
+        query_params="{}", body_params="{}", path_params="{}",
     )
 
     arjun_json = {
@@ -723,14 +664,12 @@ def test_ingest_arjun_run_creates_new_and_enriches_existing(tmp_path, monkeypatc
     jf = tmp_path / "arjun.json"
     jf.write_text(json.dumps(arjun_json), encoding="utf-8")
 
-    class _Cfg:
-        engagement_dir = str(tmp_path)
-
-    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
     monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
+    monkeypatch.setattr(ingest_arjun, "AssessmentClient", lambda *a, **k: fake)
 
     ns = argparse.Namespace(
-        db_path=str(db), json_file=str(jf), source="arjun",
+        json_file=str(jf), source="arjun",
         default_method="GET", engagement_dir=str(tmp_path),
     )
     ingest_arjun.run(ns)
@@ -739,18 +678,12 @@ def test_ingest_arjun_run_creates_new_and_enriches_existing(tmp_path, monkeypatc
     assert out["created"] == 1
     assert out["malformed_preserved"] == 0
 
-    created = db_query(
-        str(db),
-        "SELECT query_params, selected_by FROM work_items WHERE url = ?",
-        ("https://h.example/brand-new",),
-    )
+    created = fake.row_for_url("https://h.example/brand-new")
     assert len(created) == 1, "new arjun endpoint was silently dropped, not inserted"
     assert "id" in json.loads(created[0]["query_params"])
     assert created[0]["selected_by"] == "arjun"
 
-    enriched = db_query(
-        str(db), "SELECT query_params FROM work_items WHERE url = ?", ("https://h.example/known",)
-    )
+    enriched = fake.row_for_url("https://h.example/known")
     assert "debug" in json.loads(enriched[0]["query_params"])
 
 
@@ -759,11 +692,8 @@ def test_ingest_arjun_candidates_on_two_hosts_create_two_rows(tmp_path, monkeypa
     # work items. A host-blind candidate queue_key (`arjun:METHOD:url_path:sig`)
     # collapsed them into one via UNIQUE(queue_key); the key must carry the host.
     from assess.commands import ingest_arjun
-    from assess.lib.db import db_init, db_query
 
-    db = tmp_path / "cases.db"
-    db.write_bytes(b"")
-    db_init(str(db))
+    fake = FakeAssessmentClient()
 
     arjun_json = {
         "https://aps.example/u/apps": {"params": ["file"], "method": "POST"},
@@ -772,20 +702,17 @@ def test_ingest_arjun_candidates_on_two_hosts_create_two_rows(tmp_path, monkeypa
     jf = tmp_path / "arjun.json"
     jf.write_text(json.dumps(arjun_json), encoding="utf-8")
 
-    class _Cfg:
-        engagement_dir = str(tmp_path)
-
-    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
     monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
+    monkeypatch.setattr(ingest_arjun, "AssessmentClient", lambda *a, **k: fake)
 
     ns = argparse.Namespace(
-        db_path=str(db), json_file=str(jf), source="arjun",
+        json_file=str(jf), source="arjun",
         default_method="POST", engagement_dir=str(tmp_path),
     )
     ingest_arjun.run(ns)
 
-    rows = db_query(str(db), "SELECT url FROM work_items ORDER BY url", ())
-    urls = [r["url"] for r in rows]
+    urls = sorted(row["url"] for row in fake.rows)
     assert urls == ["https://aps.example/u/apps", "https://elmo.example/u/apps"], \
         "host-blind queue_key collapsed two distinct host surfaces into one row"
 
@@ -811,28 +738,20 @@ def test_run_writes_empty_json_artifact_when_arjun_finds_nothing(
 # ingest-arjun row matching + non-destructive enrichment (regression bugs found
 # on the live acme-agency.example run: host-blind matching + curated-priority downgrade)
 # --------------------------------------------------------------------------
-def _mem_db():
-    import sqlite3
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        "CREATE TABLE work_items (id INTEGER PRIMARY KEY, method TEXT, url TEXT, url_path TEXT, "
-        "type TEXT, query_params TEXT, body_params TEXT, path_params TEXT, priority_score INTEGER, "
-        "priority_reason TEXT, cluster_key TEXT, terminal_reason TEXT, signals TEXT, selected_by TEXT, "
-        "triage_rationale TEXT, params_key_sig TEXT, status TEXT)"
-    )
-    return conn
+# `_match_existing_row` now matches over the backend-fetched work-item ROW DICTS
+# (pre-sorted by id) instead of an SQLite connection — the work buffer moved to
+# the backend. These helpers/tests pass the same rows as a list of dicts.
 
 
 def test_match_existing_row_distinguishes_same_path_different_host():
     from assess.commands import ingest_arjun
 
-    conn = _mem_db()
-    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (1,'GET','https://aps.example/u/apps','/u/apps')")
-    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (2,'GET','https://elmo.example/u/apps','/u/apps')")
-    aps = ingest_arjun._match_existing_row(conn, method="GET", url_path="/u/apps", url="https://aps.example/u/apps")
-    elmo = ingest_arjun._match_existing_row(conn, method="GET", url_path="/u/apps", url="https://elmo.example/u/apps")
+    rows = [
+        {"id": 1, "method": "GET", "url": "https://aps.example/u/apps", "url_path": "/u/apps"},
+        {"id": 2, "method": "GET", "url": "https://elmo.example/u/apps", "url_path": "/u/apps"},
+    ]
+    aps = ingest_arjun._match_existing_row(rows, method="GET", url_path="/u/apps", url="https://aps.example/u/apps")
+    elmo = ingest_arjun._match_existing_row(rows, method="GET", url_path="/u/apps", url="https://elmo.example/u/apps")
     assert aps["id"] == 1
     assert elmo["id"] == 2
 
@@ -844,55 +763,53 @@ def test_match_existing_row_distinguishes_same_url_different_method():
     # row (id 1), writing the discovered body params onto the wrong surface.
     from assess.commands import ingest_arjun
 
-    conn = _mem_db()
-    # GET row gets the LOWER id so the old ORDER BY id LIMIT 1 picks it wrongly.
-    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (1,'GET','https://h.example/api/item','/api/item')")
-    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (2,'POST','https://h.example/api/item','/api/item')")
+    # GET row gets the LOWER id so a naive "first by id" match picks it wrongly.
+    rows = [
+        {"id": 1, "method": "GET", "url": "https://h.example/api/item", "url_path": "/api/item"},
+        {"id": 2, "method": "POST", "url": "https://h.example/api/item", "url_path": "/api/item"},
+    ]
     post = ingest_arjun._match_existing_row(
-        conn, method="POST", url_path="/api/item", url="https://h.example/api/item"
+        rows, method="POST", url_path="/api/item", url="https://h.example/api/item"
     )
     get = ingest_arjun._match_existing_row(
-        conn, method="GET", url_path="/api/item", url="https://h.example/api/item"
+        rows, method="GET", url_path="/api/item", url="https://h.example/api/item"
     )
     assert post["id"] == 2, "POST run must match the POST row, not the lower-id GET row"
     assert get["id"] == 1, "GET run must still match the GET row"
 
 
 def test_ingest_arjun_post_enriches_post_row_not_get_row(tmp_path, monkeypatch, capsys):
-    # End-to-end over the REAL schema: a url present as BOTH a GET and a POST work
-    # item, with the GET row at the LOWER id. A POST Arjun enrichment for that url
-    # must write the discovered body param onto the POST row and leave the GET
-    # row's params untouched — the old url-only match enriched the wrong (GET) row.
+    # End-to-end: a url present as BOTH a GET and a POST work item, with the GET
+    # row at the LOWER id. A POST Arjun enrichment for that url must write the
+    # discovered body param onto the POST row and leave the GET row's params
+    # untouched — the old url-only match enriched the wrong (GET) row.
     from assess.commands import ingest_arjun
-    from assess.lib.db import db_init, db_insert_work_item, db_query
 
-    db = tmp_path / "cases.db"
-    db.write_bytes(b"")
-    db_init(str(db))
-    # Insert the GET row first so it lands at the lower id.
-    db_insert_work_item(
-        str(db), queue_key="seed:GET:/api/item", method="GET",
+    fake = FakeAssessmentClient()
+    # Seed the GET row first so it lands at the lower id.
+    fake.add_row(
+        queue_key="seed:GET:/api/item", method="GET",
         url="https://h.example/api/item", url_path="/api/item",
-        case_type="unknown", source="seed",
+        type="unknown", source="seed", status="pending",
+        query_params="{}", body_params="{}", path_params="{}",
     )
-    db_insert_work_item(
-        str(db), queue_key="seed:POST:/api/item", method="POST",
+    fake.add_row(
+        queue_key="seed:POST:/api/item", method="POST",
         url="https://h.example/api/item", url_path="/api/item",
-        case_type="unknown", source="seed",
+        type="unknown", source="seed", status="pending",
+        query_params="{}", body_params="{}", path_params="{}",
     )
 
     arjun_json = {"https://h.example/api/item": {"params": ["payload"], "method": "POST"}}
     jf = tmp_path / "arjun.json"
     jf.write_text(json.dumps(arjun_json), encoding="utf-8")
 
-    class _Cfg:
-        engagement_dir = str(tmp_path)
-
-    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(ingest_arjun, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
     monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
+    monkeypatch.setattr(ingest_arjun, "AssessmentClient", lambda *a, **k: fake)
 
     ns = argparse.Namespace(
-        db_path=str(db), json_file=str(jf), source="arjun",
+        json_file=str(jf), source="arjun",
         default_method="POST", engagement_dir=str(tmp_path),
     )
     ingest_arjun.run(ns)
@@ -900,16 +817,8 @@ def test_ingest_arjun_post_enriches_post_row_not_get_row(tmp_path, monkeypatch, 
     assert out["enriched"] == 1
     assert out["created"] == 0
 
-    post_row = db_query(
-        str(db),
-        "SELECT body_params, query_params FROM work_items WHERE method = 'POST' AND url = ?",
-        ("https://h.example/api/item",),
-    )[0]
-    get_row = db_query(
-        str(db),
-        "SELECT body_params, query_params FROM work_items WHERE method = 'GET' AND url = ?",
-        ("https://h.example/api/item",),
-    )[0]
+    post_row = next(r for r in fake.rows if r["method"] == "POST" and r["url"] == "https://h.example/api/item")
+    get_row = next(r for r in fake.rows if r["method"] == "GET" and r["url"] == "https://h.example/api/item")
     # The POST row (correct surface) received the discovered body param...
     assert "payload" in json.loads(post_row["body_params"])
     # ...and the GET row (wrong surface) was left untouched.
@@ -920,41 +829,45 @@ def test_ingest_arjun_post_enriches_post_row_not_get_row(tmp_path, monkeypatch, 
 def test_match_existing_row_does_not_match_substring_or_subdomain_host():
     from assess.commands import ingest_arjun
 
-    conn = _mem_db()
     # Rows on a subdomain and on a substring-containing host, sharing the path.
-    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (1,'GET','https://app.cms.example/apps','/apps')")
-    conn.execute("INSERT INTO work_items (id, method, url, url_path) VALUES (2,'GET','https://evilcms.example/apps','/apps')")
+    rows = [
+        {"id": 1, "method": "GET", "url": "https://app.cms.example/apps", "url_path": "/apps"},
+        {"id": 2, "method": "GET", "url": "https://evilcms.example/apps", "url_path": "/apps"},
+    ]
     # An endpoint on the APEX host must match NEITHER (different origins) — the old
     # `LIKE '%cms.example%'` fallback would have wrongly matched both.
     apex = ingest_arjun._match_existing_row(
-        conn, method="GET", url_path="/apps", url="https://cms.example/apps"
+        rows, method="GET", url_path="/apps", url="https://cms.example/apps"
     )
     assert apex is None
     # The exact subdomain endpoint still matches its own row.
     sub = ingest_arjun._match_existing_row(
-        conn, method="GET", url_path="/apps", url="https://app.cms.example/apps"
+        rows, method="GET", url_path="/apps", url="https://app.cms.example/apps"
     )
     assert sub["id"] == 1
 
 
 def test_enrich_existing_never_downgrades_curated_priority():
+    # `_enrich_existing(row, record)` now RETURNS `(summary, bulk_item)` — the
+    # work-items/bulk upsert payload — instead of mutating a db connection. The
+    # enrichment must not downgrade a curated row's priority/cluster/provenance.
     from assess.commands import ingest_arjun
 
-    conn = _mem_db()
-    conn.execute(
-        "INSERT INTO work_items (id, method, url, url_path, type, query_params, body_params, path_params, "
-        "priority_score, cluster_key, priority_reason, selected_by, signals, status) "
-        "VALUES (1,'GET','https://h/apps','/apps','unknown','{}','{}','{}',95,'curated:high','curated','curated-src','[\"curated-sig\"]','pending')"
-    )
-    row = dict(conn.execute("SELECT * FROM work_items WHERE id=1").fetchone())
+    row = {
+        "id": 1, "queue_key": "seed:GET:/apps", "method": "GET",
+        "url": "https://h/apps", "url_path": "/apps", "type": "unknown",
+        "query_params": "{}", "body_params": "{}", "path_params": "{}",
+        "priority_score": 95, "cluster_key": "curated:high",
+        "priority_reason": "curated", "selected_by": "curated-src",
+        "signals": '["curated-sig"]', "status": "pending",
+    }
     record = {"endpoint": "https://h/apps", "method": "GET", "params": ["automation"], "header_params": []}
-    ingest_arjun._enrich_existing(conn, row, record)
-    after = dict(conn.execute("SELECT * FROM work_items WHERE id=1").fetchone())
-    assert after["priority_score"] == 95            # not downgraded to gf:api (20)
-    assert after["cluster_key"] == "curated:high"   # curated cluster preserved
-    assert after["selected_by"] == "curated-src"    # provenance preserved
-    assert "automation" in after["query_params"]    # discovered param still added
-    sigs = json.loads(after["signals"])
+    _summary, item = ingest_arjun._enrich_existing(row, record)
+    assert item["priority_score"] == 95            # not downgraded to gf:api (20)
+    assert item["cluster_key"] == "curated:high"   # curated cluster preserved
+    assert item["selected_by"] == "curated-src"    # provenance preserved
+    assert "automation" in item["query_params"]    # discovered param still added
+    sigs = json.loads(item["signals"])
     assert "curated-sig" in sigs and "arjun:automation" in sigs  # signals merged, not replaced
 
 
@@ -963,23 +876,23 @@ def test_enrich_existing_preserves_malformed_param_column():
     # (never overwrite/destroy it) while still capturing the discovery in signals.
     from assess.commands import ingest_arjun
 
-    conn = _mem_db()
-    conn.execute(
-        "INSERT INTO work_items (id, method, url, url_path, type, query_params, body_params, path_params, "
-        "priority_score, cluster_key, priority_reason, selected_by, signals, params_key_sig, status) "
-        "VALUES (1,'GET','https://h/x','/x','unknown','THIS-IS-NOT-JSON','{}','{}',50,'c','r','seed','[\"s\"]','sig0','pending')"
-    )
-    row = dict(conn.execute("SELECT * FROM work_items WHERE id=1").fetchone())
+    row = {
+        "id": 1, "queue_key": "seed:GET:/x", "method": "GET",
+        "url": "https://h/x", "url_path": "/x", "type": "unknown",
+        "query_params": "THIS-IS-NOT-JSON", "body_params": "{}", "path_params": "{}",
+        "priority_score": 50, "cluster_key": "c", "priority_reason": "r",
+        "selected_by": "seed", "signals": '["s"]', "params_key_sig": "sig0",
+        "status": "pending",
+    }
     record = {"endpoint": "https://h/x", "method": "GET", "params": ["foo"], "header_params": []}
-    res = ingest_arjun._enrich_existing(conn, row, record)
-    after = dict(conn.execute("SELECT * FROM work_items WHERE id=1").fetchone())
-    assert after["query_params"] == "THIS-IS-NOT-JSON"      # corrupt column NOT destroyed
-    assert after["params_key_sig"] == "sig0"                # signature not recomputed from garbage
-    sigs = json.loads(after["signals"])
+    summary, item = ingest_arjun._enrich_existing(row, record)
+    assert item["query_params"] == "THIS-IS-NOT-JSON"      # corrupt column NOT destroyed
+    assert item["params_key_sig"] == "sig0"                # signature not recomputed from garbage
+    sigs = json.loads(item["signals"])
     assert "arjun:foo" in sigs                              # discovery NOT lost
     assert "arjun-param-field-malformed-preserved" in sigs  # and loudly flagged
     assert "s" in sigs                                      # original signal preserved
-    assert res["malformed_param_field"] is True
+    assert summary["malformed_param_field"] is True
 
 
 def test_merge_signal_lists_dedups_and_preserves():

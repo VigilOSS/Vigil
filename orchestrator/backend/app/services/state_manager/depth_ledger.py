@@ -301,25 +301,26 @@ def _extract_host_tokens(value: str) -> set[str]:
     return out
 
 
-def _unit_ledger(
+def _unit_scope(
     unit: dict[str, Any],
     *,
     variant_by_id: dict[int, dict[str, Any]],
     status_by_variant: dict[int, list[int]],
     parsed_surfaces: list[tuple[str, str, str]],
-    cred_hosts: set[str],
-    coverage_items: list[dict[str, Any]],
-    probes: list[dict[str, Any]],
-    dispatches: list[dict[str, Any]],
-    findings: list[dict[str, Any]],
-    active_deferrals: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    unit_id = int(unit["id"])
+    """Assemble the per-unit derived scope both ``_unit_ledger`` and the
+    by-family grid builder need: the unit's identity (host/port_class/prefix),
+    its mapped request variants (+ ids), their paths/methods/observed statuses,
+    and the surface types under it.
+
+    Pure and side-effect-free — factored out of ``_unit_ledger`` so the by-family
+    grid (``by_family_coverage``) computes ``_expected_families`` over the SAME
+    inputs without duplicating the variant/surface assembly. ``_unit_ledger``'s
+    behavior (and therefore ``depth_ledger()``'s output) is unchanged.
+    """
     host = str(unit["host"]).lower()
     port_class = str(unit["port_class"])
     prefix = str(unit["path_prefix"])
-    risk_score = int(unit.get("risk_score") or 0)
-    depth_tier = str(unit.get("depth_tier") or "thin")
 
     unit_variants: list[dict[str, Any]] = []
     for v in variant_by_id.values():
@@ -341,14 +342,41 @@ def _unit_ledger(
         if s_host == host and _path_under_prefix(s_path, prefix):
             unit_surface_types.add(s_type)
 
-    unit_variant_ids = {int(v["id"]) for v in unit_variants}
+    return {
+        "unit_id": int(unit["id"]),
+        "host": host,
+        "port_class": port_class,
+        "prefix": prefix,
+        "unit_variants": unit_variants,
+        "paths": paths,
+        "methods": methods,
+        "statuses": statuses,
+        "unit_surface_types": unit_surface_types,
+        "unit_variant_ids": {int(v["id"]) for v in unit_variants},
+    }
 
+
+def _covered_families_for_unit(
+    unit_probes: list[dict[str, Any]],
+    unit_coverage: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compute the COVERED-family evidence for a unit from its already-bucketed
+    probes + coverage_items (§5.3 Covered definition).
+
+    Returns the covering-probe families, the per-family covering identity sets
+    (for the access-control cross-identity test), the disclosure-concrete flag,
+    the covering coverage_item families, and their union ``covered_families``.
+
+    Pure extraction of the inline block ``_unit_ledger`` used to carry; both
+    ``_unit_ledger`` and ``by_family_coverage`` now share it. NEVER counts a
+    self-attested-without-evidence signal: only whitelisted covering probe
+    ``result_status`` values and notes-bearing covered/not-applicable
+    coverage_items contribute (S5/S7). ``depth_ledger()`` output is unchanged.
+    """
     covering_probe_families: set[str] = set()
     covering_identities_by_family: dict[str, set[str]] = {}
     disclosure_concrete = False
-    for p in probes:
-        if not _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix):
-            continue
+    for p in unit_probes:
         rs = str(p.get("result_status") or "").strip().lower()
         if rs not in PROBE_RESULT_STATUSES_COVERING:
             continue
@@ -365,9 +393,7 @@ def _unit_ledger(
             disclosure_concrete = True
 
     covering_cov_families: set[str] = set()
-    for ci in coverage_items:
-        if not _coverage_maps_to_unit(ci, unit_id, unit_variant_ids):
-            continue
+    for ci in unit_coverage:
         status_val = str(ci.get("status") or "").strip().lower()
         if status_val not in ("covered", "not_applicable", "not-applicable"):
             continue
@@ -379,7 +405,77 @@ def _unit_ledger(
         if fam and fam not in _GENERIC_FAMILIES:
             covering_cov_families.add(fam)
 
-    covered_families = covering_probe_families | covering_cov_families
+    return {
+        "covering_probe_families": covering_probe_families,
+        "covering_identities_by_family": covering_identities_by_family,
+        "disclosure_concrete": disclosure_concrete,
+        "covering_cov_families": covering_cov_families,
+        "covered_families": covering_probe_families | covering_cov_families,
+    }
+
+
+def _unit_ledger(
+    unit: dict[str, Any],
+    *,
+    variant_by_id: dict[int, dict[str, Any]],
+    status_by_variant: dict[int, list[int]],
+    parsed_surfaces: list[tuple[str, str, str]],
+    cred_hosts: set[str],
+    coverage_items: list[dict[str, Any]],
+    probes: list[dict[str, Any]],
+    dispatches: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    active_deferrals: list[dict[str, Any]],
+) -> dict[str, Any]:
+    scope = _unit_scope(
+        unit,
+        variant_by_id=variant_by_id,
+        status_by_variant=status_by_variant,
+        parsed_surfaces=parsed_surfaces,
+    )
+    unit_id = scope["unit_id"]
+    host = scope["host"]
+    port_class = scope["port_class"]
+    prefix = scope["prefix"]
+    risk_score = int(unit.get("risk_score") or 0)
+    depth_tier = str(unit.get("depth_tier") or "thin")
+    unit_variants = scope["unit_variants"]
+    paths = scope["paths"]
+    methods = scope["methods"]
+    statuses = scope["statuses"]
+    unit_surface_types = scope["unit_surface_types"]
+    unit_variant_ids = scope["unit_variant_ids"]
+
+    # Bucket each cross-cutting list to THIS unit ONCE. The covering scan, the
+    # touched fallback, the signal-class scan, and the dispatch work-evidence
+    # check each previously re-ran the same `_probe_maps_to_unit` /
+    # `_coverage_maps_to_unit` / `_finding_maps_to_unit` predicate over the FULL
+    # lists (and the dispatch check re-scanned every probe per dispatch), making
+    # the ledger O(units x dispatches x probes) and timing out at ~900 probes.
+    # Membership is IDENTICAL — only the recomputation is removed.
+    unit_probes = [
+        p for p in probes
+        if _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix)
+    ]
+    unit_coverage = [
+        ci for ci in coverage_items if _coverage_maps_to_unit(ci, unit_id, unit_variant_ids)
+    ]
+    unit_findings = [f for f in findings if _finding_maps_to_unit(f, host, prefix)]
+    unit_has_covering_probe = any(
+        str(p.get("result_status") or "").strip().lower() in PROBE_RESULT_STATUSES_COVERING
+        for p in unit_probes
+    )
+    # Dispatch work-evidence (S7) asks only "does this UNIT have a covering probe
+    # OR a finding" — it is dispatch-INDEPENDENT, so it is a per-unit constant, not
+    # a per-dispatch probe rescan.
+    unit_has_work_evidence = unit_has_covering_probe or bool(unit_findings)
+
+    covered = _covered_families_for_unit(unit_probes, unit_coverage)
+    covering_probe_families = covered["covering_probe_families"]
+    covering_identities_by_family = covered["covering_identities_by_family"]
+    disclosure_concrete = covered["disclosure_concrete"]
+    covering_cov_families = covered["covering_cov_families"]
+    covered_families = covered["covered_families"]
 
     ac_identities = covering_identities_by_family.get(ACCESS_CONTROL_FAMILY, set())
     cross_identity_satisfied = len(ac_identities) >= 2
@@ -452,43 +548,25 @@ def _unit_ledger(
     dedicated = _dedicated_dispatch_satisfied(
         block_families=block_families,
         host=host,
-        port_class=port_class,
         prefix=prefix,
-        unit_id=unit_id,
-        unit_variant_ids=unit_variant_ids,
         dispatches=dispatches,
-        probes=probes,
-        findings=findings,
+        unit_has_work_evidence=unit_has_work_evidence,
     )
 
     depth_satisfied = (not missing_block) and dedicated
 
-    touched = bool(covering_probe_families) or bool(covering_cov_families)
-    if not touched:
-        for f in findings:
-            if _finding_maps_to_unit(f, host, prefix):
-                touched = True
-                break
-    if not touched:
-        for p in probes:
-            rs = str(p.get("result_status") or "").strip().lower()
-            if rs in PROBE_RESULT_STATUSES_COVERING and _probe_maps_to_unit(
-                p, unit_id, unit_variant_ids, host, port_class, prefix
-            ):
-                touched = True
-                break
-    if not touched:
-        for d in dispatches:
-            if str(d.get("status") or "").strip().lower() != "completed":
-                continue
-            if not _dispatch_contains_unit(d, host, prefix):
-                continue
-            if _dispatch_has_work_evidence(
-                d, unit_id, unit_variant_ids, host, port_class, prefix,
-                probes, findings,
-            ):
-                touched = True
-                break
+    # A unit is "touched" if there is ANY work evidence under it: a covering
+    # probe/coverage family, a covering probe whose family didn't resolve, or a
+    # finding. A completed dispatch adds nothing here — its work-evidence test is
+    # the SAME probe/finding-under-unit check already captured by
+    # `unit_has_covering_probe` / `unit_findings` — so the redundant
+    # O(dispatches x probes) dispatch scan is gone.
+    touched = (
+        bool(covering_probe_families)
+        or bool(covering_cov_families)
+        or unit_has_covering_probe
+        or bool(unit_findings)
+    )
 
     decisive_surface = bool(unit_surface_types & _DECISIVE_SURFACE_TYPES)
 
@@ -509,9 +587,7 @@ def _unit_ledger(
     # covering probe / coverage_item, so the operator can drain coverage per CLASS
     # rather than per family. Reuses the same unit-mapped probes/coverage_items.
     signal_classes_expected: set[str] = set()
-    for ci in coverage_items:
-        if not _coverage_maps_to_unit(ci, unit_id, unit_variant_ids):
-            continue
+    for ci in unit_coverage:
         cls = vuln_taxonomy.normalize_class(str(ci.get("attack_family") or ""))
         if not cls or not vuln_taxonomy.is_valid_class(cls):
             continue
@@ -521,17 +597,13 @@ def _unit_ledger(
 
     signal_classes_covered: set[str] = set()
     if signal_classes_expected:
-        for p in probes:
-            if not _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix):
-                continue
+        for p in unit_probes:
             if str(p.get("result_status") or "").strip().lower() not in PROBE_RESULT_STATUSES_COVERING:
                 continue
             signal_classes_covered.add(
                 vuln_taxonomy.normalize_class(str(p.get("attack_family") or ""))
             )
-        for ci in coverage_items:
-            if not _coverage_maps_to_unit(ci, unit_id, unit_variant_ids):
-                continue
+        for ci in unit_coverage:
             if str(ci.get("status") or "").strip().lower() not in (
                 "covered", "not_applicable", "not-applicable"
             ):
@@ -652,7 +724,7 @@ def _expected_families(
     ):
         expected["file"] = "upload/download/file param or path"
 
-    expected["disclosure"] = "deep_required unit (always expected)"
+    expected["disclosure"] = "every application unit (always expected)"
 
     has_form = any(
         "form" in str(v.get("content_type_family") or "").lower() for v in unit_variants
@@ -795,13 +867,9 @@ def _dedicated_dispatch_satisfied(
     *,
     block_families: set[str],
     host: str,
-    port_class: str,
     prefix: str,
-    unit_id: int,
-    unit_variant_ids: set[int],
     dispatches: list[dict[str, Any]],
-    probes: list[dict[str, Any]],
-    findings: list[dict[str, Any]],
+    unit_has_work_evidence: bool,
 ) -> bool:
     """≥1 completed dispatch with WORK EVIDENCE that, between qualifying
     dispatches, covers every block-level Expected class for the unit (S7).
@@ -809,62 +877,38 @@ def _dedicated_dispatch_satisfied(
     A dispatch QUALIFIES when:
       * ``status='completed'`` AND
       * (scope_host, scope_path_prefix) contains the unit AND
-      * it has corroborating durable output under the unit (≥1 covering probe
-        OR a recorded finding under the unit) — ``status='completed'`` ALONE,
-        or accompanied only by a self-attested handoff, does NOT satisfy.
+      * ``unit_has_work_evidence`` — the unit has corroborating durable output
+        (≥1 covering probe OR a recorded finding under it). ``status='completed'``
+        ALONE, or accompanied only by a self-attested handoff, does NOT satisfy:
+        the handoff ``summary``/``coverage_gaps`` are agent self-attestation and
+        the doctrine forbids counting a self-attested-without-evidence signal
+        (else one completed dispatch with a broad ``scope_path_prefix`` + a bare
+        handoff would satisfy every unit on the host). Legitimate work the harness
+        missed is recovered via the recorded depth-deferral / ``--force --reason``
+        valve, not by trusting free text.
+
+    Work evidence is a per-UNIT property (does the unit have a covering probe or a
+    finding), NOT per-dispatch — so the caller computes it ONCE and passes it in,
+    rather than re-scanning every probe per dispatch (the old O(dispatches x
+    probes) hot path). With no work evidence, no dispatch can qualify.
+
     The union of qualifying dispatches' resolved classes must cover every
     block-level family. When there are NO block-level families (degenerate), a
     deep_required unit still owes ≥1 qualifying dispatch.
     """
     covered_block: set[str] = set()
     any_qualifying = False
-    for d in dispatches:
-        if str(d.get("status") or "").strip().lower() != "completed":
-            continue
-        if not _dispatch_contains_unit(d, host, prefix):
-            continue
-        if not _dispatch_has_work_evidence(
-            d, unit_id, unit_variant_ids, host, port_class, prefix,
-            probes, findings,
-        ):
-            continue
-        any_qualifying = True
-        covered_block |= _dispatch_classes(d) & block_families
+    if unit_has_work_evidence:
+        for d in dispatches:
+            if str(d.get("status") or "").strip().lower() != "completed":
+                continue
+            if not _dispatch_contains_unit(d, host, prefix):
+                continue
+            any_qualifying = True
+            covered_block |= _dispatch_classes(d) & block_families
     if not block_families:
         return any_qualifying
     return block_families.issubset(covered_block)
-
-
-def _dispatch_has_work_evidence(
-    dispatch: dict[str, Any],
-    unit_id: int,
-    unit_variant_ids: set[int],
-    host: str,
-    port_class: str,
-    prefix: str,
-    probes: list[dict[str, Any]],
-    findings: list[dict[str, Any]],
-) -> bool:
-    """Corroborating durable output under the unit (S7): ≥1 covering probe_run
-    under the unit OR a recorded finding under the unit.
-
-    A dispatch handoff is NOT accepted here. The handoff ``summary`` (and the
-    free-form ``coverage_gaps``) are agent-authored self-attestation, and the
-    doctrine forbids counting a self-attested-without-evidence signal: otherwise
-    one completed dispatch with a broad ``scope_path_prefix`` and a bare handoff
-    would mark every unit on the host ``touched`` and downgrade the terminal
-    block from blocking to warning. Only real probe/finding artifacts satisfy;
-    legitimate work the harness missed is recovered via the recorded
-    depth-deferral / ``--force --reason`` valve, not by trusting free text."""
-    for p in probes:
-        if str(p.get("result_status") or "").strip().lower() not in PROBE_RESULT_STATUSES_COVERING:
-            continue
-        if _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix):
-            return True
-    for f in findings:
-        if _finding_maps_to_unit(f, host, prefix):
-            return True
-    return False
 
 
 def _finding_maps_to_unit(
@@ -1052,4 +1096,231 @@ def _warn_detail(unit_ledger: dict[str, Any], *, reason: str) -> dict[str, Any]:
     }
 
 
-__all__ = ["depth_ledger", "terminal_depth_block"]
+def by_family_coverage(connection, engagement_id: int) -> dict[str, Any]:
+    """Engagement-wide (application-unit × vuln-family) coverage grid (A1).
+
+    Unlike ``depth_ledger()`` — which scores only ``deep_required`` units for the
+    depth gate — this projection walks EVERY application unit and, for each,
+    reports one cell per vuln FAMILY in ``union(expected, probed)`` so an operator
+    can SEE never-probed gaps vs probed-and-walled vs finding-linked BEFORE a phase
+    exit. It is read-only/advisory (never mutates, never blocks).
+
+    Each cell's ``status`` reuses the SAME covered/expected/deferred classification
+    ``_unit_ledger`` applies (covering-probe evidence; disclosure needs a concrete
+    tool; access-control needs ≥2 identities; a family with an active
+    ``depth_deferral`` counts as deferred), so the grid never disagrees with the
+    depth ledger on a shared cell. Per-family probe/finding stats are read off the
+    SAME one-pass unit bucketing (``_probe_maps_to_unit``) the ledger uses — no
+    O(units × probes) rescan per family.
+
+    Shape::
+
+        {"units": [{application_unit_id, host, port_class, path_prefix,
+                    deep_required, families: [{family, expected_reason, status,
+                    probe_count, covering_probe_count, has_finding, finding_id},
+                    ...]}, ...],
+         "totals": {units, cells, covered, missing_block, missing_warn,
+                    deferred, with_finding}}
+    """
+    zero_totals = {
+        "units": 0, "cells": 0, "covered": 0, "missing_block": 0,
+        "missing_warn": 0, "deferred": 0, "with_finding": 0,
+    }
+    if vuln_taxonomy is None:
+        return {"units": [], "totals": dict(zero_totals)}
+
+    units = _fetch_all(
+        connection,
+        "SELECT * FROM assessment_application_units WHERE engagement_id = ? "
+        "ORDER BY host, port_class, path_prefix",
+        (engagement_id,),
+    )
+    variants = _fetch_all(
+        connection,
+        "SELECT id, scheme, host, port, method, normalized_path, auth_context, "
+        "content_type_family, query_schema_json, body_schema_json, path_schema_json, "
+        "header_schema_json FROM assessment_request_variants WHERE engagement_id = ?",
+        (engagement_id,),
+    )
+    observations = _fetch_all(
+        connection,
+        "SELECT request_variant_id, response_status FROM assessment_request_observations "
+        "WHERE engagement_id = ?",
+        (engagement_id,),
+    )
+    surfaces = _fetch_all(
+        connection,
+        "SELECT surface_type, target_descriptor FROM assessment_surfaces WHERE engagement_id = ?",
+        (engagement_id,),
+    )
+    coverage_items = _fetch_all(
+        connection,
+        "SELECT id, application_unit_id, request_variant_id, attack_family, status, notes "
+        "FROM assessment_coverage_items WHERE engagement_id = ?",
+        (engagement_id,),
+    )
+    probes = _fetch_all(
+        connection,
+        "SELECT id, application_unit_id, request_variant_id, attack_family, result_status, "
+        "tool_name, target_host, target_path, target_port, auth_context, finding_id "
+        "FROM assessment_probe_runs WHERE engagement_id = ?",
+        (engagement_id,),
+    )
+    creds = _fetch_all(
+        connection,
+        "SELECT credential_key, principal, provenance_json "
+        "FROM assessment_credentials WHERE engagement_id = ?",
+        (engagement_id,),
+    ) if _table_exists(connection, "assessment_credentials") else []
+
+    variant_by_id = {int(v["id"]): v for v in variants}
+    status_by_variant: dict[int, list[int]] = {}
+    for obs in observations:
+        vid = obs.get("request_variant_id")
+        st = obs.get("response_status")
+        if vid is not None and st is not None:
+            status_by_variant.setdefault(int(vid), []).append(int(st))
+
+    parsed_surfaces: list[tuple[str, str, str]] = []
+    for s in surfaces:
+        s_host, s_path = _surface_host_path(str(s.get("target_descriptor") or ""))
+        if s_host:
+            parsed_surfaces.append((s_host, s_path, str(s.get("surface_type") or "")))
+
+    cred_hosts: set[str] = set()
+    for c in creds:
+        for raw in (c.get("credential_key"), c.get("principal"), c.get("provenance_json")):
+            for tok in _extract_host_tokens(str(raw or "")):
+                cred_hosts.add(tok)
+
+    active_deferrals = _active_depth_deferrals(engagement_id)
+
+    totals = dict(zero_totals)
+    totals["units"] = len(units)
+    result_units: list[dict[str, Any]] = []
+
+    for unit in units:
+        scope = _unit_scope(
+            unit,
+            variant_by_id=variant_by_id,
+            status_by_variant=status_by_variant,
+            parsed_surfaces=parsed_surfaces,
+        )
+        unit_id = scope["unit_id"]
+        host = scope["host"]
+        port_class = scope["port_class"]
+        prefix = scope["prefix"]
+        unit_variant_ids = scope["unit_variant_ids"]
+
+        expected = _expected_families(
+            unit_variants=scope["unit_variants"],
+            paths=scope["paths"],
+            methods=scope["methods"],
+            statuses=scope["statuses"],
+            unit_surface_types=scope["unit_surface_types"],
+            host=host,
+            cred_hosts=cred_hosts,
+        )
+
+        # ONE bucketing pass per unit (identical predicate to the depth ledger).
+        unit_probes = [
+            p for p in probes
+            if _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix)
+        ]
+        unit_coverage = [
+            ci for ci in coverage_items if _coverage_maps_to_unit(ci, unit_id, unit_variant_ids)
+        ]
+        covered = _covered_families_for_unit(unit_probes, unit_coverage)
+
+        deferred_families: set[str] = set()
+        for row in active_deferrals:
+            payload = row.get("payload") or {}
+            if not _deferral_applies_to_unit(payload, host, prefix):
+                continue
+            for cls in payload.get("vuln_classes") or []:
+                fam = vuln_taxonomy.family_of(vuln_taxonomy.normalize_class(str(cls)))
+                if fam:
+                    deferred_families.add(fam)
+
+        # Per-family probe stats off the SAME bucketed probes — never a per-family
+        # rescan. ``finding_id`` is the MIN non-null linkage in the family bucket
+        # (probes carry it; per-input coverage cells do not) — ``min`` rather than
+        # "first row seen" so the reported id is DETERMINISTIC regardless of the
+        # unordered ``SELECT`` scan order. ``has_finding`` stays "any probe in the
+        # bucket carries a finding".
+        probe_stats: dict[str, dict[str, Any]] = {}
+        observed_families: set[str] = set()
+        for p in unit_probes:
+            fam = vuln_taxonomy.family_of(
+                vuln_taxonomy.normalize_class(str(p.get("attack_family") or ""))
+            )
+            if not fam:
+                continue
+            observed_families.add(fam)
+            st = probe_stats.setdefault(
+                fam, {"probe_count": 0, "covering_probe_count": 0, "finding_id": None}
+            )
+            st["probe_count"] += 1
+            if str(p.get("result_status") or "").strip().lower() in PROBE_RESULT_STATUSES_COVERING:
+                st["covering_probe_count"] += 1
+            fid = p.get("finding_id")
+            if fid is not None:
+                fid = int(fid)
+                if st["finding_id"] is None or fid < st["finding_id"]:
+                    st["finding_id"] = fid
+
+        ac_identities = covered["covering_identities_by_family"].get(ACCESS_CONTROL_FAMILY, set())
+
+        families_out: list[dict[str, Any]] = []
+        for fam in sorted(expected.keys() | observed_families):
+            block_level = _FAMILY_BLOCK_LEVEL.get(fam, BLOCK_WARN)
+            if fam == "disclosure":
+                is_covered = covered["disclosure_concrete"]
+            elif fam == ACCESS_CONTROL_FAMILY:
+                is_covered = len(ac_identities) >= 2
+            else:
+                is_covered = fam in covered["covered_families"]
+
+            if is_covered:
+                status_label = "covered"
+            elif fam in deferred_families:
+                status_label = "deferred"
+            elif block_level == BLOCK_HIGH:
+                status_label = "missing_block"
+            else:
+                status_label = "missing_warn"
+
+            stats = probe_stats.get(fam)
+            probe_count = int(stats["probe_count"]) if stats else 0
+            covering_probe_count = int(stats["covering_probe_count"]) if stats else 0
+            finding_id = stats["finding_id"] if stats else None
+            has_finding = finding_id is not None
+
+            families_out.append({
+                "family": fam,
+                "expected_reason": expected.get(fam),
+                "status": status_label,
+                "probe_count": probe_count,
+                "covering_probe_count": covering_probe_count,
+                "has_finding": has_finding,
+                "finding_id": finding_id,
+            })
+
+            totals["cells"] += 1
+            totals[status_label] += 1
+            if has_finding:
+                totals["with_finding"] += 1
+
+        result_units.append({
+            "application_unit_id": unit_id,
+            "host": host,
+            "port_class": port_class,
+            "path_prefix": prefix,
+            "deep_required": bool(int(unit.get("deep_required") or 0)),
+            "families": families_out,
+        })
+
+    return {"units": result_units, "totals": totals}
+
+
+__all__ = ["depth_ledger", "terminal_depth_block", "by_family_coverage"]

@@ -8,8 +8,9 @@ category: Disclosure & Reporting Formats
 
 HackerOne-specific scaffold for `vigil assess export-submission <slug> --platform hackerone`.
 Shared rules (voice, section budgets, PII redaction, PoC authoring, de-harnessing, the
-pre-submission checklist) live in `agent/references/bugbounty-submission-format.md` — this file
-only adds what HackerOne needs in place of Bugcrowd's VRT: a CWE weakness, and how HackerOne
+pre-submission checklist, and the finding-is-source-of-truth flow — author each section, write it
+back to the finding, re-render) live in `agent/references/submission-format.md` — this
+file only adds what HackerOne needs in place of Bugcrowd's VRT: a CWE weakness, and how HackerOne
 derives its severity bucket.
 
 ## Strict-gate fields
@@ -36,9 +37,9 @@ row above empty.
 
 **Weakness:** CWE-[nnn]: [name]
 
-**Severity:** [Critical/High/Medium/Low] — CVSS:3.1/[vector] ([score])
+**Severity:** [Critical/High/Medium/Low]
 
-[PoC block — see bugbounty-submission-format.md "PoC block". Omit for inline-only reproductions.]
+**CVSS:** CVSS:3.1/[vector] ([score])
 
 ---
 
@@ -49,7 +50,9 @@ row above empty.
 [Numbered. One action per step. No narrative between steps.]
 
 ### Evidence
-[Request/response or PoC output, truncated to the proof lines, annotated.]
+[AUTHORED from the OPERATOR DETAILS section's structured proof + linked runs + a targeted
+`list-command-runs` search, PII-masked, truncated to the proof lines, annotated with <-- proof
+markers. Stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
 
 ### Attack Scenario
 [2-3 sentences. Concrete adversary class + action + outcome.]
@@ -64,10 +67,17 @@ row above empty.
 ## HackerOne-specific notes
 
 - **Weakness replaces VRT.** Pick the single most specific CWE the fault maps to (`CWE-89`, not
-  `CWE-20`). If two CWEs are plausible, use the one the PoC actually exercises.
+  `CWE-20`). If two CWEs are plausible, use the one the PoC actually exercises. Offline, grep
+  `agent/references/reporting/hackerone-weaknesses.tsv` for the candidate CWE.
 - **Severity is CVSS-derived, not a separate scale.** HackerOne computes the Critical/High/
   Medium/Low bucket directly from the submitted CVSS:3.1 vector through its own calculator — don't
-  hand-pick a severity that disagrees with the vector; fix the vector instead.
+  hand-pick a severity that disagrees with the vector; fix the vector instead. See
+  `agent/references/reporting/hackerone-weaknesses.md` for the CVSS→band table and the guardrail
+  that weakness and severity are decoupled — never carry a Bugcrowd P-rating into this field.
+- **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
+  it as `submissions/<slug>/poc.<ext>` and attach it in the HackerOne form — see
+  `submission-format.md` "PoC block". `export-submission` emits no PoC line into the body; a
+  hand-inserted one is wiped on the next `--overwrite`.
 - Some HackerOne programs add an "Asset" field mapped to their published scope (e.g.,
   `api.example.com` vs `www.example.com`). Name the exact in-scope asset in Steps to Reproduce —
   this template doesn't carry a separate field for it because it isn't part of the strict gate.

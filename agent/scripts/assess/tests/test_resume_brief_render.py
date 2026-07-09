@@ -69,6 +69,24 @@ def test_per_input_coverage_no_wall_code_omits_parens():
     assert "no-signal(" not in out  # None wall -> no parenthesized code
 
 
+def test_per_input_coverage_marks_covered_when_latest_status_is_noncovering():
+    per_input = {
+        "cells": [{
+            "target_host": "h", "target_path": "/p", "attack_family": "idor",
+            "input_slot": "path:id", "auth_context": "member", "count": 2,
+            "covering": True, "latest_status": "blocked",
+            "observed_http_status": 403, "lens": "tenant-boundary",
+            "evidence_ref": "traffic/probes/idor-a.txt",
+        }],
+        "cells_count": 1,
+    }
+    lines: list = []
+    resume_brief._render_per_input_coverage(lines, per_input)
+    out = "\n".join(lines)
+    assert "covered; latest=blocked(403) x2" in out
+    assert "— tenant-boundary" in out
+
+
 def test_per_input_coverage_truncation_hint():
     cells = [
         {
@@ -109,6 +127,67 @@ def test_attempts_no_longer_renders_noncovering_probe_list():
     out = "\n".join(lines)
     assert "## Attempts" in out
     assert "non-covering probe runs" not in out
+
+
+def test_finding_line_appends_blocked_reason_for_provisioning_block():
+    # resume-brief _finding_summary shape: a disposition='blocked' finding is
+    # active/verified, so the base line says nothing about being blocked. The
+    # marker restores WHY it stalled (the block_reason).
+    row = {
+        "slug": "VA-047", "severity": "high",
+        "workflow_status": "active", "verification_state": "verified",
+        "verification_disposition": "blocked",
+        "block_reason": "Needs finance-admin account and this WONT be given",
+        "title": "IDOR on /orders",
+    }
+    line = resume_brief._finding_line(row)
+    assert line.startswith("VA-047 high active/verified IDOR on /orders")
+    assert "BLOCKED: Needs finance-admin account and this WONT be given" in line
+
+
+def test_finding_line_no_marker_for_non_blocked_finding_with_block_reason():
+    # A block_reason on a pending/none finding must NOT render as BLOCKED — the
+    # marker is gated on the disposition, not the field's presence.
+    row = {
+        "slug": "VA-048", "severity": "medium",
+        "workflow_status": "active", "verification_state": "verified",
+        "verification_disposition": "pending_runtime_proof",
+        "block_reason": "held pending CMS sandbox",
+        "title": "held vector",
+    }
+    line = resume_brief._finding_line(row)
+    assert "BLOCKED" not in line
+
+
+def test_finding_line_no_marker_for_normal_finding():
+    row = {
+        "slug": "VA-001", "severity": "low",
+        "workflow_status": "active", "verification_state": "verified",
+        "verification_disposition": "confirmed",
+        "block_reason": "",
+        "title": "Reflected XSS",
+    }
+    line = resume_brief._finding_line(row)
+    assert line == "VA-001 low active/verified Reflected XSS"
+    assert "BLOCKED" not in line
+
+
+def test_render_markdown_surfaces_blocked_reason_in_findings_bucket():
+    # End-to-end through the markdown renderer: a blocked finding in the verified
+    # bucket carries its reason so the operator never has to open the finding.
+    brief = {
+        "findings": {
+            "verified": [{
+                "slug": "VA-047", "severity": "high",
+                "workflow_status": "active", "verification_state": "verified",
+                "verification_disposition": "blocked",
+                "block_reason": "Needs finance-admin account and this WONT be given",
+                "title": "IDOR on /orders",
+            }],
+        },
+    }
+    out = resume_brief._render_markdown(brief)
+    assert "BLOCKED: Needs finance-admin account and this WONT be given" in out
 
 
 def test_render_markdown_orders_per_input_after_attempts():

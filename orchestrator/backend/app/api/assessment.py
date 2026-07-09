@@ -26,7 +26,13 @@ from ..services.state_manager.coverage import (
     MAX_PROBE_RUN_LIST_LIMIT,
     MAX_REQUEST_LIST_LIMIT,
     SurfaceStatus,
+    list_attempts,
 )
+# by_family_coverage lives in the depth_ledger submodule (it reuses the ledger's
+# per-unit scope/expected/covered helpers); the package re-exports the
+# ``depth_ledger`` FUNCTION under that name, shadowing the submodule attribute, so
+# it is imported directly from the submodule rather than via ``state_manager``.
+from ..services.state_manager.depth_ledger import by_family_coverage
 from ..services.state_manager.http_flows import (
     DEFAULT_HTTP_FLOW_LIMIT,
     MAX_HTTP_FLOW_LIST_LIMIT,
@@ -61,6 +67,50 @@ _ALLOWED_PHASES: frozenset[str] = frozenset(
 )
 
 
+class WorkItemInput(BaseModel):
+    """Optional per-observation work-buffer derivation block. Permissive (every
+    field defaulted, extra keys ignored) so a well-formed observation can NEVER
+    422 — the same silent-loss-avoidance invariant as HttpFlowIngestRequest.
+    When present, the backend derives one ``assessment_work_items`` row in the
+    same transaction as the observation/variant/coverage-item; when absent
+    (``None``), no buffered row is created. Classification fields
+    (type/priority/cluster/…) are producer-computed facts — the backend stores
+    them, it never re-runs the classifier."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    case_type: str = Field(default="unknown", max_length=64)
+    queue_key: str = Field(default="", max_length=512)
+    source: str = Field(default="", max_length=128)
+    status: str = Field(default="pending", max_length=32)
+    url: str = ""
+    url_path: str = ""
+    query_params: Any = ""
+    body_params: Any = ""
+    path_params: Any = ""
+    cookie_params: Any = ""
+    headers: Any = ""
+    body: str | None = None
+    content_type: str = Field(default="", max_length=256)
+    content_length: int = 0
+    request_body_truncated: bool = False
+    response_status: int = 0
+    response_headers: Any = ""
+    response_size: int = 0
+    response_snippet: str | None = None
+    response_truncated: bool = False
+    params_key_sig: str = Field(default="", max_length=256)
+    priority_score: int = 0
+    priority_reason: str = ""
+    cluster_key: str = ""
+    terminal_reason: str = ""
+    classifier_version: str = ""
+    signals: str = ""
+    selected_by: str = ""
+    triage_rationale: str = ""
+    live_status: str = ""
+
+
 class RequestObservationIngestRequest(BaseModel):
     url: str = Field(min_length=1, max_length=4096)
     method: str = Field(default="GET", min_length=1, max_length=16)
@@ -85,6 +135,9 @@ class RequestObservationIngestRequest(BaseModel):
     banner: str = Field(default="", max_length=4096)
     coverage_candidates: list[dict[str, Any]] = Field(default_factory=list)
     auto_generate_coverage: bool = True
+    # Optional producer-supplied work-buffer derivation block. When present the
+    # backend derives one work item in the same ingest transaction (ADR 0013).
+    work_item: WorkItemInput | None = None
 
 
 class RequestObservationBulkIngestRequest(BaseModel):
@@ -92,6 +145,113 @@ class RequestObservationBulkIngestRequest(BaseModel):
         min_length=1,
         max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS,
     )
+
+
+class WorkItemBulkInput(BaseModel):
+    """Direct work-buffer write for rows with no request-variant (out-of-scope /
+    egress skips, arjun/dns/gau-only producers, ``requeue``, the cases.db
+    migration tool). Permissive/defaulted so a well-formed producer never 422s.
+    ``queue_key`` + ``url`` are the minimum for a row to be stored."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    queue_key: str = Field(default="", max_length=512)
+    request_variant_id: int | None = None
+    service_id: int | None = None
+    coverage_item_id: int | None = None
+    auth_context: str = Field(default="anonymous", max_length=128)
+    method: str = Field(default="GET", max_length=16)
+    url: str = ""
+    url_path: str = ""
+    host: str = Field(default="", max_length=512)
+    query_params: Any = "{}"
+    body_params: Any = "{}"
+    path_params: Any = "{}"
+    cookie_params: Any = "{}"
+    headers: Any = ""
+    body: str | None = None
+    content_type: str = Field(default="", max_length=256)
+    content_length: int = 0
+    request_body_truncated: bool = False
+    response_status: int = 0
+    response_headers: Any = ""
+    response_size: int = 0
+    response_snippet: str | None = None
+    response_truncated: bool = False
+    type: str = Field(default="unknown", max_length=64)
+    source: str = Field(default="", max_length=128)
+    status: str = Field(default="pending", max_length=32)
+    params_key_sig: str = Field(default="", max_length=256)
+    priority_score: int = 0
+    priority_reason: str | None = None
+    cluster_key: str | None = None
+    terminal_reason: str | None = None
+    classifier_version: str | None = None
+    signals: str | None = None
+    selected_by: str | None = None
+    triage_rationale: str | None = None
+    live_status: str | None = None
+
+
+class WorkItemBulkIngestRequest(BaseModel):
+    items: list[WorkItemBulkInput] = Field(
+        min_length=1,
+        max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS,
+    )
+
+
+class WorkItemFetchRequest(BaseModel):
+    type: str = Field(default="", max_length=64)
+    limit: int = Field(default=1, ge=1, le=1000)
+    agent: str = Field(default="", max_length=128)
+
+
+class WorkItemPriorityFetchRequest(BaseModel):
+    limit: int = Field(default=1, ge=1, le=1000)
+    agent: str = Field(default="auto", max_length=128)
+
+
+class WorkItemIdsRequest(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
+class WorkItemDeferItemsRequest(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+    reason: str = Field(default="", max_length=1024)
+
+
+class WorkItemDeferClusterRequest(BaseModel):
+    cluster_key: str = Field(default="", max_length=512)
+    reason: str = Field(default="", max_length=1024)
+
+
+class WorkItemUpdate(BaseModel):
+    """One by-id field update for the classify-work maintenance path. Only the
+    fields present are written (extra keys ignored); ``id`` is required."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    type: str | None = None
+    status: str | None = None
+    queue_key: str | None = None
+    priority_score: int | None = None
+    priority_reason: str | None = None
+    cluster_key: str | None = None
+    terminal_reason: str | None = None
+    classifier_version: str | None = None
+
+
+class WorkItemUpdateRequest(BaseModel):
+    updates: list[WorkItemUpdate] = Field(min_length=1, max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS)
+
+
+class WorkItemResetStaleRequest(BaseModel):
+    minutes: int = Field(default=30, ge=0, le=100000)
+
+
+class WorkItemRetryErrorsRequest(BaseModel):
+    max_retries: int = Field(default=3, ge=0, le=1000)
 
 
 class HttpFlowIngestRequest(BaseModel):
@@ -189,6 +349,16 @@ class ProbeRunRecordRequest(BaseModel):
     # Optional attempt→finding linkage. Validated to belong to the engagement
     # (404 otherwise) and COALESCE-backfilled on a re-run of the same probe.
     finding_id: int | None = None
+    # A3: opt-in work-buffer drain. ids of assessment_work_items rows this probe
+    # satisfies — marked ``done`` in the SAME transaction as the probe insert so
+    # "remaining work" bucket counts and recorded probes can never disagree.
+    # Unknown ids are silently skipped (mirrors POST /work-items/done); an empty
+    # list leaves the buffer untouched.
+    work_item_ids: list[int] = Field(default_factory=list)
+    # A3: opt-in surface advance. When set, the surface is advanced to
+    # ``partially-covered`` via the resolve-surface path. Recording never
+    # auto-mutates surface state — this only fires on an explicit id.
+    resolve_surface_id: int | None = None
 
 
 class CoverageItemRecordRequest(BaseModel):
@@ -657,6 +827,11 @@ class FindingRecordRequest(BaseModel):
     service_id: int | None = None
     surface_id: int | None = None
     links: list[FindingLinkRequest] = Field(default_factory=list)
+    # D4 (kill re-mint override): control flag, NOT a stored column. When true it
+    # skips the killed-finding re-mint guard so an intentional distinct re-mint of
+    # a finding that only coincidentally shares an endpoint + technique with a prior
+    # false_positive still lands. Plumbed from `record-finding --allow-remint/--force`.
+    allow_remint: bool = Field(default=False)
 
     @model_validator(mode="after")
     def _root_cause_links_use_helper(self) -> "FindingRecordRequest":
@@ -874,6 +1049,22 @@ def get_per_host_coverage(engagement_key: str) -> dict[str, Any]:
     return payload
 
 
+@router.get("/coverage-readiness/by-family")
+def get_by_family_coverage(engagement_key: str) -> dict[str, Any]:
+    """A1 — engagement-wide (application-unit × vuln-family) coverage grid.
+
+    Complements ``/coverage-readiness/by-host`` (per-host recon outcomes) with a
+    per-unit, per-family view: every application unit (INCLUDING non-deep_required
+    ones) and, for each, one cell per vuln family in ``union(expected, probed)``
+    tagged covered / missing_block / missing_warn / deferred with its probe and
+    finding-linkage stats. Read-only/advisory — operators use it to SEE
+    never-probed gaps vs probed-and-walled vs finding-linked before a phase exit.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    with state_manager.get_connection() as connection:
+        return by_family_coverage(connection, engagement.id)
+
+
 @router.get("/report-readiness")
 def get_report_readiness(engagement_key: str) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
@@ -1016,11 +1207,60 @@ def get_coverage_items(
 @router.get("/probe-runs")
 def get_probe_runs(
     engagement_key: str,
+    attack_family: str = "",
+    target_host: str = "",
+    target_path: str = "",
+    auth_context: str = "",
+    result_status: str = "",
     limit: int = Query(default=DEFAULT_PROBE_RUN_LIMIT, ge=1, le=MAX_PROBE_RUN_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_probe_runs(engagement.id, limit=limit, offset=offset)
+    return state_manager.list_probe_runs(
+        engagement.id,
+        attack_family=attack_family,
+        target_host=target_host,
+        target_path=target_path,
+        auth_context=auth_context,
+        result_status=result_status,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/attempts")
+def get_attempts(
+    engagement_key: str,
+    finding: str = "",
+    surface_id: int | None = None,
+    target_host: str = "",
+    attack_family: str = "",
+    result_status: str = "",
+    lens: str = "",
+    limit: int = Query(default=DEFAULT_PROBE_RUN_LIMIT, ge=1, le=MAX_PROBE_RUN_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """A4a — finding-joined, surface-aware read of recorded probe attempts.
+
+    A "what has actually been tried against this finding/surface/host, and did it
+    land" view so a specialist does not re-run an already-walled probe. Additive to
+    ``GET /probe-runs`` (unchanged): each attempt carries the linked finding's
+    slug/title/severity (null when unlinked). ``finding`` is a finding SLUG
+    (resolved server-side); ``surface_id`` matches BOTH FK-linked probes and probes
+    whose target host/path is contained by the surface descriptor.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    return list_attempts(
+        engagement.id,
+        finding=finding,
+        surface_id=surface_id,
+        target_host=target_host,
+        attack_family=attack_family,
+        result_status=result_status,
+        lens=lens,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/command-runs")
@@ -1092,6 +1332,9 @@ def get_resume_brief(
     agent_id: str = "",
     max_age_hours: float | None = Query(default=None, gt=0, le=24 * 30),
     since: str = "",
+    per_input_limit: int = Query(
+        default=assessment_memory._PER_INPUT_ROW_LIMIT, ge=0, le=100000
+    ),
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return assessment_memory.build_resume_brief(
@@ -1101,6 +1344,7 @@ def get_resume_brief(
         agent_id=agent_id,
         max_age_hours=max_age_hours,
         since=since,
+        per_input_limit=per_input_limit,
     )
 
 
@@ -1492,6 +1736,146 @@ async def create_request_observations_bulk(
         {"engagement_id": engagement.id, "count": result["count"]},
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Work buffer (assessment_work_items) — the transient triage/dispatch queue.
+# Folds the former per-engagement cases.db work_items into the backend ledger
+# (ADR 0013). Reads are plain GET; the mutation/claim verbs are POST and offload
+# the sync SQLite work to the threadpool like the other write handlers.
+# ---------------------------------------------------------------------------
+@router.get("/work-items")
+def get_work_items(
+    engagement_key: str,
+    type: str = "",
+    status: str = "",
+    limit: int = Query(default=5000, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    if type:
+        return state_manager.peek_work_items(engagement.id, type_val=type, limit=limit)
+    return state_manager.list_work_items(engagement.id, status=(status or None), limit=limit, offset=offset)
+
+
+@router.get("/work-items/stats")
+def get_work_item_stats(engagement_key: str, by: str = "status") -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.work_buffer_stats(engagement.id, by=by)
+
+
+@router.post("/work-items/bulk", status_code=status.HTTP_201_CREATED)
+async def create_work_items_bulk(engagement_key: str, request: WorkItemBulkIngestRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_work_items_bulk,
+            engagement.id,
+            [item.model_dump() for item in request.items],
+        )
+    )
+
+
+@router.post("/work-items/fetch")
+async def fetch_work_items_endpoint(engagement_key: str, request: WorkItemFetchRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.fetch_work_items,
+            engagement.id,
+            type_val=request.type,
+            limit=request.limit,
+            agent=request.agent,
+        )
+    )
+
+
+@router.post("/work-items/fetch-by-priority")
+async def fetch_work_items_by_priority_endpoint(
+    engagement_key: str, request: WorkItemPriorityFetchRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.fetch_work_items_by_priority,
+            engagement.id,
+            limit=request.limit,
+            agent=request.agent,
+        )
+    )
+
+
+@router.post("/work-items/done")
+async def work_items_done(engagement_key: str, request: WorkItemIdsRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(state_manager.mark_work_items_done, engagement.id, request.ids)
+    )
+
+
+@router.post("/work-items/error")
+async def work_items_error(engagement_key: str, request: WorkItemIdsRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(state_manager.mark_work_items_error, engagement.id, request.ids)
+    )
+
+
+@router.post("/work-items/defer")
+async def work_items_defer(engagement_key: str, request: WorkItemDeferItemsRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(state_manager.defer_work_items, engagement.id, ids=request.ids, reason=request.reason)
+    )
+
+
+@router.post("/work-items/defer-cluster")
+async def work_items_defer_cluster(engagement_key: str, request: WorkItemDeferClusterRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.defer_work_item_cluster,
+            engagement.id,
+            cluster_key=request.cluster_key,
+            reason=request.reason,
+        )
+    )
+
+
+@router.post("/work-items/mark-manual")
+async def work_items_mark_manual(engagement_key: str, request: WorkItemIdsRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(state_manager.mark_work_items_manual, engagement.id, request.ids)
+    )
+
+
+@router.post("/work-items/update")
+async def work_items_update(engagement_key: str, request: WorkItemUpdateRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.apply_work_item_updates,
+            engagement.id,
+            [u.model_dump(exclude_unset=True) for u in request.updates],
+        )
+    )
+
+
+@router.post("/work-items/reset-stale")
+async def work_items_reset_stale(engagement_key: str, request: WorkItemResetStaleRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(state_manager.reset_stale_work_items, engagement.id, minutes=request.minutes)
+    )
+
+
+@router.post("/work-items/retry-errors")
+async def work_items_retry_errors(engagement_key: str, request: WorkItemRetryErrorsRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(state_manager.retry_error_work_items, engagement.id, max_retries=request.max_retries)
+    )
 
 
 def _register_http_flow_artifacts(engagement_id: int, request: HttpFlowIngestRequest) -> None:
@@ -2156,6 +2540,7 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
             service_id=request.service_id,
             surface_id=request.surface_id,
             links=[item.model_dump() for item in request.links],
+            allow_remint=request.allow_remint,
         )
     )
     await anyio.to_thread.run_sync(

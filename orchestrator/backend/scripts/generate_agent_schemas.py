@@ -458,6 +458,16 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     "target_port": {
                         "description": "TCP port probed. Omit when port is implied by the scheme (80/443).",
                     },
+                    "work_item_ids": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1},
+                        "description": "Opt-in work-buffer item ids this probe satisfies; marked 'done' atomically with the probe insert so 'remaining work' counts decrement as probes land. Unknown ids are skipped, not an error.",
+                    },
+                    "resolve_surface_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "OPT-IN: surface id to advance to 'partially-covered' as part of recording. Omit to leave surface state untouched (recording never auto-mutates it).",
+                    },
                 }
             },
         ),

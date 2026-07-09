@@ -1,5 +1,6 @@
 ---
 description: "Example: direct vendor submission for SQL injection auth bypass on a customer portal login form"
+skill: report-generation
 category: Disclosure & Reporting Formats
 ---
 

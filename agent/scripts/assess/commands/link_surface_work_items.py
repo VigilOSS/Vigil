@@ -1,7 +1,7 @@
 """vigil assess link-surface-work-items — link backend surfaces to the request
 variants behind local work_items.
 
-Selects work_items from the local ``cases.db`` (by cluster or explicit
+Selects work items from the backend work buffer (by cluster or explicit
 queue_key) and, for each, links the durable backend ``request_variant_id`` to
 one or more surfaces. A work_item that was never successfully posted to the
 backend has a NULL ``request_variant_id`` (the backend has no record of it) and
@@ -13,7 +13,6 @@ import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
-from assess.lib.db import db_query
 from assess.lib.surface_links import create_surface_request_variant_link
 
 
@@ -22,7 +21,6 @@ def register(subparsers) -> None:
         "link-surface-work-items",
         help="Link backend surfaces to the request variants behind local work_items",
     )
-    p.add_argument("db_path", help="Path to cases.db")
     p.add_argument(
         "--cluster",
         action="append",
@@ -67,8 +65,6 @@ def _parse_surface_ids(raw_values: list[str]) -> list[int]:
 
 
 def run(args) -> None:
-    db_path = args.db_path
-
     surface_ids = _parse_surface_ids(args.surface_id)
     if not surface_ids:
         print("ERROR: at least one --surface-id is required", file=sys.stderr)
@@ -77,28 +73,10 @@ def run(args) -> None:
         print("ERROR: select work_items with --cluster and/or --queue-key", file=sys.stderr)
         sys.exit(1)
 
-    conditions: list[str] = []
-    params: list[str] = []
-    if args.cluster:
-        placeholders = ", ".join("?" for _ in args.cluster)
-        conditions.append(f"cluster_key IN ({placeholders})")
-        params.extend(args.cluster)
-    if args.queue_key:
-        placeholders = ", ".join("?" for _ in args.queue_key)
-        conditions.append(f"queue_key IN ({placeholders})")
-        params.extend(args.queue_key)
-
-    rows = db_query(
-        db_path,
-        "SELECT queue_key, url, request_variant_id FROM work_items "
-        f"WHERE {' OR '.join(conditions)} "
-        "ORDER BY id",
-        tuple(params),
-    )
-
-    if not rows:
-        print("link-surface-work-items: no matching work_items found", file=sys.stderr)
-        return
+    # Select the target rows by cluster_key / queue_key in Python, mirroring the
+    # former SQL `WHERE cluster_key IN (...) OR queue_key IN (...)`.
+    cluster_filter = set(args.cluster)
+    queue_key_filter = set(args.queue_key)
 
     cfg = load_config(args.engagement_dir)
     created = 0
@@ -107,6 +85,18 @@ def run(args) -> None:
     linked_variants: set[int] = set()
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        # Read the whole buffer (all statuses; get_all_pages preserves the
+        # backend's ORDER BY id) and filter to the requested selectors.
+        rows = [
+            row for row in client.get_all_pages("work-items")
+            if row.get("cluster_key") in cluster_filter
+            or row.get("queue_key") in queue_key_filter
+        ]
+
+        if not rows:
+            print("link-surface-work-items: no matching work_items found", file=sys.stderr)
+            return
+
         for row in rows:
             request_variant_id = row.get("request_variant_id")
             if not request_variant_id:

@@ -120,6 +120,45 @@ def test_catalog_lists_every_registered_contract_command(capsys):
     assert catalog_names == registry_names
 
 
+# Registered argparse subcommands that previously had NO CommandContract entry,
+# so `list-commands` never surfaced them and `contract <verb>` returned
+# "Unknown contract" (regression B-Q1b). Each must now resolve through BOTH the
+# list-commands catalog and the contract registry.
+_PREVIOUSLY_UNLISTED_CODE_VERBS = (
+    "code-coverage",
+    "code-ingest",
+    "code-index-sync",
+    "code-size-summary",
+)
+
+
+@pytest.mark.parametrize("name", _PREVIOUSLY_UNLISTED_CODE_VERBS)
+def test_previously_unlisted_code_verb_is_discoverable(name, capsys):
+    rows = _run_json(capsys, ["list-commands", "--json"])
+    names = {row["name"] for row in rows}
+    assert name in names, f"{name!r} is missing from the list-commands catalog"
+
+
+@pytest.mark.parametrize("name", _PREVIOUSLY_UNLISTED_CODE_VERBS)
+def test_previously_unlisted_code_verb_resolves_as_contract(name):
+    # `vigil assess contract <verb>` must no longer return "Unknown contract".
+    contract = contracts.get_contract(name)
+    assert contract is not None, f"contract lookup for {name!r} returned None"
+    assert contract.name == name
+
+
+def test_code_coverage_contract_documents_gate_flags():
+    # code-coverage runs every code Core-Loop iteration; its contract must
+    # document the --cwe-matrix and --require-gate-pass flags it accepts.
+    contract = contracts.get_contract("code-coverage")
+    assert contract is not None
+    blob = " ".join(contract.preferred_invocations)
+    blob += " " + " ".join(contract.notes)
+    blob += " " + " ".join(default for _, default in contract.helper_defaults)
+    assert "--cwe-matrix" in blob
+    assert "--require-gate-pass" in blob
+
+
 # The discovery / navigation / core-query commands a specialist reaches for.
 # These are phase-agnostic utilities but MUST stay discoverable via
 # `list-commands` (the catalog is the commands analogue of list-skills /

@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 
 from assess.commands import link_surface_work_items
-from assess.lib.db import db_init, db_insert_work_item
+from _fake_client import FakeAssessmentClient
 
 
 class _Cfg:
@@ -29,28 +29,48 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
-    """Context-managed fake (the command uses `with AssessmentClient(...)`)."""
+def _seed_work_item(
+    fake: FakeAssessmentClient,
+    *,
+    queue_key: str,
+    url: str,
+    url_path: str,
+    case_type: str = "api_route",
+    cluster_key: str | None = None,
+    request_variant_id: int | None = None,
+) -> dict:
+    """Seed one folded-in work-item row on the fake backend buffer.
 
-    def __init__(self) -> None:
-        self.links: list[dict] = []
-        self.fail_surface_ids: set[int] = set()
+    ``db_insert_work_item(case_type=...)`` mapped to the row's ``type`` column,
+    so we pass ``type=`` here. A ``request_variant_id=None`` seed stays None —
+    the null-variant skip path the command must honour.
+    """
+    return fake.add_row(
+        queue_key=queue_key,
+        method="GET",
+        url=url,
+        url_path=url_path,
+        type=case_type,
+        cluster_key=cluster_key,
+        request_variant_id=request_variant_id,
+    )
 
-    def post(self, endpoint: str, payload: dict) -> dict:
-        assert endpoint == "surface-request-variant-links"
-        if payload.get("surface_id") in self.fail_surface_ids:
+
+def _inject_link_failures(fake: FakeAssessmentClient, fail_surface_ids: set[int]) -> None:
+    """Make the fake's surface-link POST raise for the given surface_ids, then
+    delegate to the original ``post`` — modelling a backend that rejects one
+    link while accepting the rest."""
+    original_post = fake.post
+
+    def post(endpoint: str, payload: dict) -> dict:
+        if (
+            endpoint == "surface-request-variant-links"
+            and payload.get("surface_id") in fail_surface_ids
+        ):
             raise RuntimeError(f"backend rejected surface_id={payload.get('surface_id')}")
-        self.links.append(payload)
-        return {"id": len(self.links), **payload}
+        return original_post(endpoint, payload)
 
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
+    fake.post = post  # type: ignore[method-assign]
 
 
 def _ns(
@@ -74,46 +94,33 @@ def _ns(
     )
 
 
-def _seed_db(tmp_path) -> str:
-    db = tmp_path / "cases.db"
-    db.write_bytes(b"")
-    db_init(str(db))
-    return str(db)
-
-
-def _setup_client(monkeypatch, tmp_path, fake_client: _FakeClient) -> None:
+def _setup_client(monkeypatch, tmp_path, fake_client: FakeAssessmentClient) -> None:
     monkeypatch.setattr(link_surface_work_items, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
     monkeypatch.setattr(link_surface_work_items, "AssessmentClient", lambda *a, **k: fake_client)
 
 
 def test_link_by_cluster_creates_one_link_per_request_variant(tmp_path, monkeypatch, capsys):
-    db = _seed_db(tmp_path)
-    db_insert_work_item(
-        db,
+    fake_client = FakeAssessmentClient()
+    _seed_work_item(
+        fake_client,
         queue_key="variant:101:api_route",
-        method="GET",
         url="https://example.com/a",
         url_path="/a",
-        case_type="api_route",
         cluster_key="gf:cluster",
         request_variant_id=101,
     )
-    db_insert_work_item(
-        db,
+    _seed_work_item(
+        fake_client,
         queue_key="variant:102:api_route",
-        method="GET",
         url="https://example.com/b",
         url_path="/b",
-        case_type="api_route",
         cluster_key="gf:cluster",
         request_variant_id=102,
     )
-
-    fake_client = _FakeClient()
     _setup_client(monkeypatch, tmp_path, fake_client)
 
     link_surface_work_items.run(
-        _ns(db, str(tmp_path), cluster=["gf:cluster"], surface_id=["5"])
+        _ns(str(tmp_path / "cases.db"), str(tmp_path), cluster=["gf:cluster"], surface_id=["5"])
     )
     out = capsys.readouterr().out
 
@@ -125,31 +132,30 @@ def test_link_by_cluster_creates_one_link_per_request_variant(tmp_path, monkeypa
 
 
 def test_link_by_queue_key_selects_exact_row(tmp_path, monkeypatch, capsys):
-    db = _seed_db(tmp_path)
-    db_insert_work_item(
-        db,
+    fake_client = FakeAssessmentClient()
+    _seed_work_item(
+        fake_client,
         queue_key="variant:200:api_route",
-        method="GET",
         url="https://example.com/c",
         url_path="/c",
-        case_type="api_route",
         request_variant_id=200,
     )
-    db_insert_work_item(
-        db,
+    _seed_work_item(
+        fake_client,
         queue_key="variant:201:api_route",
-        method="GET",
         url="https://example.com/d",
         url_path="/d",
-        case_type="api_route",
         request_variant_id=201,
     )
-
-    fake_client = _FakeClient()
     _setup_client(monkeypatch, tmp_path, fake_client)
 
     link_surface_work_items.run(
-        _ns(db, str(tmp_path), queue_key=["variant:200:api_route"], surface_id=["9"])
+        _ns(
+            str(tmp_path / "cases.db"),
+            str(tmp_path),
+            queue_key=["variant:200:api_route"],
+            surface_id=["9"],
+        )
     )
     capsys.readouterr()
 
@@ -159,23 +165,19 @@ def test_link_by_queue_key_selects_exact_row(tmp_path, monkeypatch, capsys):
 
 
 def test_skips_work_item_with_null_request_variant_id(tmp_path, monkeypatch, capsys):
-    db = _seed_db(tmp_path)
-    db_insert_work_item(
-        db,
+    fake_client = FakeAssessmentClient()
+    _seed_work_item(
+        fake_client,
         queue_key="skipped:none:api_route",
-        method="GET",
         url="https://example.com/never-posted",
         url_path="/never-posted",
-        case_type="api_route",
         cluster_key="gf:never-posted",
         request_variant_id=None,
     )
-
-    fake_client = _FakeClient()
     _setup_client(monkeypatch, tmp_path, fake_client)
 
     link_surface_work_items.run(
-        _ns(db, str(tmp_path), cluster=["gf:never-posted"], surface_id=["5"])
+        _ns(str(tmp_path / "cases.db"), str(tmp_path), cluster=["gf:never-posted"], surface_id=["5"])
     )
     out, err = capsys.readouterr()
 
@@ -186,33 +188,28 @@ def test_skips_work_item_with_null_request_variant_id(tmp_path, monkeypatch, cap
 
 
 def test_dedup_when_multiple_work_items_share_request_variant_id(tmp_path, monkeypatch, capsys):
-    db = _seed_db(tmp_path)
-    db_insert_work_item(
-        db,
+    fake_client = FakeAssessmentClient()
+    _seed_work_item(
+        fake_client,
         queue_key="variant:300:api_route",
-        method="GET",
         url="https://example.com/e",
         url_path="/e",
-        case_type="api_route",
         cluster_key="gf:dup",
         request_variant_id=300,
     )
-    db_insert_work_item(
-        db,
+    _seed_work_item(
+        fake_client,
         queue_key="variant:300:event_feed",
-        method="GET",
         url="https://example.com/e?x=1",
         url_path="/e",
         case_type="event_feed",
         cluster_key="gf:dup",
         request_variant_id=300,
     )
-
-    fake_client = _FakeClient()
     _setup_client(monkeypatch, tmp_path, fake_client)
 
     link_surface_work_items.run(
-        _ns(db, str(tmp_path), cluster=["gf:dup"], surface_id=["1", "2"])
+        _ns(str(tmp_path / "cases.db"), str(tmp_path), cluster=["gf:dup"], surface_id=["1", "2"])
     )
     out = capsys.readouterr().out
 
@@ -225,24 +222,20 @@ def test_dedup_when_multiple_work_items_share_request_variant_id(tmp_path, monke
 
 
 def test_failed_link_does_not_abort_remaining_links(tmp_path, monkeypatch, capsys):
-    db = _seed_db(tmp_path)
-    db_insert_work_item(
-        db,
+    fake_client = FakeAssessmentClient()
+    _seed_work_item(
+        fake_client,
         queue_key="variant:400:api_route",
-        method="GET",
         url="https://example.com/f",
         url_path="/f",
-        case_type="api_route",
         cluster_key="gf:flaky",
         request_variant_id=400,
     )
-
-    fake_client = _FakeClient()
-    fake_client.fail_surface_ids = {1}
+    _inject_link_failures(fake_client, {1})
     _setup_client(monkeypatch, tmp_path, fake_client)
 
     link_surface_work_items.run(
-        _ns(db, str(tmp_path), cluster=["gf:flaky"], surface_id=["1", "2"])
+        _ns(str(tmp_path / "cases.db"), str(tmp_path), cluster=["gf:flaky"], surface_id=["1", "2"])
     )
     out, err = capsys.readouterr()
 
@@ -255,12 +248,13 @@ def test_failed_link_does_not_abort_remaining_links(tmp_path, monkeypatch, capsy
 
 
 def test_requires_at_least_one_surface_id(tmp_path, monkeypatch, capsys):
-    db = _seed_db(tmp_path)
-    fake_client = _FakeClient()
+    fake_client = FakeAssessmentClient()
     _setup_client(monkeypatch, tmp_path, fake_client)
 
     try:
-        link_surface_work_items.run(_ns(db, str(tmp_path), cluster=["gf:x"], surface_id=[]))
+        link_surface_work_items.run(
+            _ns(str(tmp_path / "cases.db"), str(tmp_path), cluster=["gf:x"], surface_id=[])
+        )
         assert False, "expected SystemExit"
     except SystemExit as exc:
         assert exc.code == 1
@@ -269,12 +263,11 @@ def test_requires_at_least_one_surface_id(tmp_path, monkeypatch, capsys):
 
 
 def test_requires_cluster_or_queue_key(tmp_path, monkeypatch, capsys):
-    db = _seed_db(tmp_path)
-    fake_client = _FakeClient()
+    fake_client = FakeAssessmentClient()
     _setup_client(monkeypatch, tmp_path, fake_client)
 
     try:
-        link_surface_work_items.run(_ns(db, str(tmp_path), surface_id=["1"]))
+        link_surface_work_items.run(_ns(str(tmp_path / "cases.db"), str(tmp_path), surface_id=["1"]))
         assert False, "expected SystemExit"
     except SystemExit as exc:
         assert exc.code == 1

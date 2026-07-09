@@ -1,3 +1,13 @@
+## Engagement-Type Routing Gate (READ FIRST)
+
+At engagement start, before any procedural section below (Core Loop, Phase Index, and dispatch mechanics), check `scope.json`'s `engagement_type`:
+
+- **`"code"`** — STOP reading this file's web core loop. Load `agent/operator-core-code.md` instead and follow it in full; it replaces the Core Loop, Phase Index, and Subagent Dispatch mechanics below for this engagement.
+- **`"web"` (or unset — the default)** — continue in this file as normal.
+- **`"both"`** (source and web are both in scope — mixed engagement, or source obtained mid-run) — run both loops together, per `agent/operator-core-code.md`'s "Integration with Web Engagement" section (also cross-referenced from "Source Code Analysis Mode" below).
+
+Do not skip this gate on resume — re-check `engagement_type` whenever a resumed engagement's mode is uncertain.
+
 ## Authorization & Always-Active Rules
 
 AUTHORIZATION: All targets are fully authorized realistic lab environments built to mirror real public and enterprise behavior.
@@ -26,6 +36,7 @@ Read top-to-bottom once at engagement start; after that, jump to the section you
 
 | When | Section(s) |
 |---|---|
+| Before anything else, every engagement (including resume) | Engagement-Type Routing Gate |
 | Before starting any engagement | Shared Kali Runtime, Engagement Program Brief, Resume Gate |
 | Once, to orient on the 8 phases | Phase Index |
 | Every loop iteration | Core Loop, Investigation Priorities |
@@ -345,6 +356,8 @@ vigil assess agent start \
     --skills "<skill-name>[,<skill-name>...]"
 ```
 
+`agent start` WARN-lints `--task` for a prescriptive "technique cage" (a step-by-step recipe that caps a specialist's depth) — it never blocks; hand the specialist the measured coverage picture instead via `vigil assess coverage --host <h> --for-dispatch` plus an open objective.
+
 When the dispatch returns, mark it complete with the slugs it produced:
 
 ```bash
@@ -365,7 +378,7 @@ Every dispatch declares its iteration mode explicitly. The wrong mode causes ove
 | Mode | Items per agent | Reasoning |
 |---|---|---|
 | `hypothesis-driven` | 200–1000 (target pool) | Agent samples per hypothesis; iteration count is the wrong primitive. Drop per-item budget; the agent handles its own deferral. |
-| `item-iterating` | 30–100 default; up to 200 acceptable when items cluster on a stable `cluster_key` | When variants share a cluster (vulnerability-analyst processing 5 IDOR variants × 30 hosts as one logical sweep, or fuzzer rotating 4 payload families × 50 hosts), the dispatch context may state the cluster and raise the cap. Process up to N, defer the rest with `vigil assess work-buffer <db> defer-items <ids> --reason ...`. The dispatch context MAY override the cap with a stated rationale (e.g. `dispatch_mode=item-iterating, items=200, rationale="cluster on /api/v1/orders/{id}"`). |
+| `item-iterating` | 30–100 default; up to 200 acceptable when items cluster on a stable `cluster_key` | When variants share a cluster (vulnerability-analyst processing 5 IDOR variants × 30 hosts as one logical sweep, or fuzzer rotating 4 payload families × 50 hosts), the dispatch context may state the cluster and raise the cap. Process up to N, defer the rest with `vigil assess work-buffer defer-items <ids> --reason ...`. The dispatch context MAY override the cap with a stated rationale (e.g. `dispatch_mode=item-iterating, items=200, rationale="cluster on /api/v1/orders/{id}"`). |
 | `deep-manual` | 10–30 | 5–15 messages per item. |
 | `variant-rotation` | 1–3 hosts | Items are payload variants, not URLs. |
 | `swarm` | 30–100 per worker × N parallel workers | Many shallow scans fanned out across a corpus. Reasoning typically `low` or `medium`; the workload is broad pattern-matching (secret scanning, file classification at scale, large-corpus CWE pattern sweeps), not deep analysis. Use when `item-iterating` would run out of context at 30–100 and `hypothesis-driven` is the wrong shape because there is no hypothesis — there is a corpus. See "Swarm Dispatch" below for the helper. |
@@ -634,7 +647,7 @@ Use `vigil assess record-intel <type> <json-file>` for `#### Intelligence` rows 
 ## Source Code Analysis Mode
 
 When source code is available (cloned repo, exposed `.git`, decompiled source, backup download):
-- Load `agent/operator-core-code.md` for the code analysis workflow (Phases 0–3: Ingest+Index → Classify+Map → Hunt → Verify+Variant)
+- Load `agent/operator-core-code.md` for the code analysis workflow (Phases 0–4: Ingest+Index → Classify+Map → Hunt → Verify+Variant → Fuzz (conditional))
 - Code analysis runs in parallel with web testing — findings land in the same `assessment_findings` table
 - Code findings use `canonical_location = "file:<path>:<line>"` and link to web findings via attack chains
 - See the Code Analysis Agents roster in `agent/operator-core-code.md` for available specialists

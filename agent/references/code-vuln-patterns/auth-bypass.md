@@ -71,6 +71,64 @@ Token is validated but incompletely:
 - API key checked for existence but not scoped — any valid key accesses any resource
 - OAuth token validated but `sub` claim not matched to the requested resource's owner
 
+### Trusted Proxy Header Injection
+The auth/redirect/rate-limit decision reads a header that looks like infrastructure metadata
+but is, at the network edge, an ordinary client-controlled input unless a fronting proxy
+strips or overwrites it first. Whitebox detection: grep for the header name, find where its
+value feeds a security decision, then verify — from the deployment config, not from reading
+the handler in isolation — that the value cannot originate from the client (i.e. the request
+actually always transits a trusted proxy hop that sets/overwrites it before the app sees it).
+If no such proxy config guarantees that, the header is attacker-controlled.
+
+- **`X-Forwarded-Host` / `Host` into a password-reset link, redirect target, or cache key**
+  — read without an allowlist, the value becomes the origin used to build a link the victim
+  will click, or the key used to serve/cache a response.
+  ```python
+  # Flask: password reset link built from the Host header, no allowlist
+  def send_reset_link(user):
+      host = request.headers.get("X-Forwarded-Host", request.host)
+      reset_url = f"https://{host}/reset?token={make_token(user)}"
+      send_email(user.email, reset_url)
+      # Attacker sets X-Forwarded-Host: evil.example -> victim's valid token is
+      # emailed inside a link pointing at the attacker's host.
+  ```
+  Grep for `X-Forwarded-Host`, `request.host`, `HTTP_HOST`, `Host` reads feeding URL
+  construction, redirect targets, or cache-key derivation. A fix allowlists known hostnames
+  or uses a server-side configured canonical host instead of the header.
+
+- **`X-Original-URL` / `X-Rewrite-URL` consumed by a reverse-proxy rewrite the auth
+  route-matcher never sees** — the app-facing framework routes on the rewritten path while
+  the auth middleware (or a WAF/route-matcher upstream) evaluated the original request path,
+  so a request that looks safe to the matcher is rewritten to a sensitive route internally.
+  ```nginx
+  # nginx passes X-Original-URL through to the app; some frameworks (e.g. older
+  # Symfony/Zend setups with front-controller rewriting) trust it for internal routing.
+  # Auth middleware inspects request.path (the original URL: /public/x);
+  # the framework's router dispatches on X-Original-URL (/admin/delete) instead.
+  ```
+  Grep for `X-Original-URL`, `X-Rewrite-URL` reads in routing/dispatch code; verify the
+  same path value is what the auth layer evaluated.
+
+- **`X-Forwarded-For` / `X-Real-IP` trusted for an IP-allowlist or rate-limit decision
+  without a trusted-proxy-hop check** — the app treats the header as the client's real IP,
+  but any client can set it directly unless a specific, verified proxy hop is guaranteed to
+  overwrite or append to it before the app reads it.
+  ```javascript
+  // Express: IP allowlist keyed off a client-settable header
+  function isInternalIp(req) {
+      const ip = req.headers['x-forwarded-for']?.split(',')[0].trim();
+      return INTERNAL_CIDRS.some(cidr => inCidr(ip, cidr));
+      // BUG: no `trust proxy` config verified, and no check that this request
+      // actually traversed the trusted load balancer — client sets
+      // X-Forwarded-For: 10.0.0.1 directly and passes the allowlist.
+  }
+  ```
+  Grep for `X-Forwarded-For`, `X-Real-IP`, `req.ip`, `remote_addr` reads feeding
+  `allowlist`/`internal`/`rate_limit`/`geofence` decisions; confirm the framework's trusted-proxy
+  setting (e.g. Express `trust proxy`, Django `SECURE_PROXY_SSL_HEADER`/custom middleware) is
+  configured to only honor the header from a known, immediate upstream hop — not from the
+  public internet.
+
 ## C/C++ Specific
 
 **Dangerous patterns**:

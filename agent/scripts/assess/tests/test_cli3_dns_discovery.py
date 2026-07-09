@@ -360,3 +360,21 @@ def test_resolution_failures_surfaced_even_when_nothing_resolved(tmp_path, monke
     failures = eng_dir / "scans" / "dns-discovery" / "resolution_failures.txt"
     assert failures.read_text(encoding="utf-8") == "net.example.com\noff.example.com\n"
     assert "no hosts resolved" in err.getvalue()
+
+
+def test_brute_engagement_dir_canonicalized_when_flag_is_none(monkeypatch, tmp_path):
+    """Regression: ``dns-discovery --brute`` / ``recon --brute`` with no explicit
+    ``--engagement-dir`` left ``args.engagement_dir=None``, which crashed the
+    puredns brute lock (``network_heavy_lock(None)`` -> ``Path(None)`` TypeError)
+    and silently skipped host-route required-header injection. ``run()`` must
+    canonicalize it to the resolved cfg dir before any stage consumes it."""
+    eng_dir = tmp_path / "eng"
+    monkeypatch.setattr(dd, "load_config", lambda _flag: _cfg(eng_dir))
+    # Empty apexes -> a clean early ``sys.exit(2)`` right AFTER canonicalization,
+    # so the assertion exercises the fix without driving the whole brute pipeline.
+    args = _run_args(None, brute=True, apexes=[])
+    assert args.engagement_dir is None
+    with pytest.raises(SystemExit) as exc:
+        dd.run(args)
+    assert exc.value.code == 2
+    assert args.engagement_dir == str(eng_dir)  # canonicalized in place

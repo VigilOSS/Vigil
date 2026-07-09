@@ -233,16 +233,21 @@ def _agent_id_extra(args) -> list[str]:
 
 
 def _done(args) -> None:
-    if not getattr(args, "agent_id", None):
-        if args.extra:
-            args.agent_id = args.extra[0]
-        else:
-            print("agent done: agent id required as positional arg or --agent-id", file=sys.stderr)
-            sys.exit(1)
+    # Batch: `agent done a b c` closes all three with the same shared flags. Collect
+    # every positional id (falling back to --agent-id) and hand the full list to the
+    # dispatch handler, which iterates with a per-id failure tally.
+    ids = [str(x).strip() for x in (getattr(args, "extra", None) or []) if str(x).strip()]
+    if not ids and getattr(args, "agent_id", None):
+        ids = [str(args.agent_id).strip()]
+    if not ids:
+        print("agent done: agent id required as positional arg or --agent-id", file=sys.stderr)
+        sys.exit(1)
     if not getattr(args, "dispatch_status", None):
         args.dispatch_status = "completed"
-    _warn_if_handoff_is_closable(args)
-    dispatch._update_dispatch_status(args, [])  # noqa: SLF001
+    for agent_id in ids:
+        args.agent_id = agent_id
+        _warn_if_handoff_is_closable(args)
+    dispatch._update_dispatch_status(args, ids)  # noqa: SLF001
 
 
 def _warn_if_handoff_is_closable(args) -> None:
@@ -267,6 +272,20 @@ def _warn_if_handoff_is_closable(args) -> None:
         except Exception:  # noqa: BLE001
             pass
     if not handoff:
+        # C4c: closing straight to a terminal status with NO handoff at all is
+        # silent state-loss — resume-brief's `terminal_no_handoff` list and
+        # `agent reconcile-stale` can only report this after the fact; there
+        # is no summary, no coverage_gaps, no next_steps. WARN only (never
+        # block) so a crash-recovery force-close stays possible.
+        if str(getattr(args, "dispatch_status", "") or "") in {"failed", "aborted"}:
+            print(
+                f"WARN agent done: no handoff found for {args.agent_id} closing as "
+                f"{args.dispatch_status!r}; this is silent state-loss — resume-brief and "
+                "`agent reconcile-stale` will only ever see a bare terminal_no_handoff row, "
+                "not why the dispatch died. Consider `vigil assess agent handoff ...` first, "
+                "or note the cause via `agent decision` before closing.",
+                file=sys.stderr,
+            )
         return
     status_value = str(handoff.get("handoff_status") or "")
     if status_value in {"ready", "blocked"}:
@@ -284,10 +303,44 @@ def _utcnow_iso() -> str:
 
 
 def _close(args) -> None:
-    agent_id = getattr(args, "agent_id", None) or (args.extra[0] if args.extra else "")
-    if not agent_id:
+    # Batch: `agent close a b c` closes each ready/blocked handoff. A single id keeps
+    # the detailed non-closable guidance below; multiple ids run a resilient loop
+    # where a non-closable/checkpointed dispatch is reported and skipped, not fatal.
+    ids = [str(x).strip() for x in (getattr(args, "extra", None) or []) if str(x).strip()]
+    if not ids and getattr(args, "agent_id", None):
+        ids = [str(args.agent_id).strip()]
+    if not ids:
         print("agent close: agent id required as positional arg or --agent-id", file=sys.stderr)
         sys.exit(1)
+    if len(ids) == 1:
+        _close_one(args, ids[0])
+        return
+    client, _ = dispatch._client_for(args)  # noqa: SLF001
+    closed = 0
+    failed = 0
+    reason = getattr(args, "reason", "") or "agent close"
+    try:
+        for agent_id in ids:
+            try:
+                result = _close_via_client(client, agent_id, reason=reason)
+            except _ReconcileSkipped as exc:
+                failed += 1
+                print(f"agent close: {agent_id} skipped: {exc}", file=sys.stderr)
+                continue
+            except Exception as exc:  # noqa: BLE001 - one bad id must not drop the rest
+                failed += 1
+                print(f"agent close: {agent_id} failed: {exc}", file=sys.stderr)
+                continue
+            closed += 1
+            print(json.dumps({"dispatch": result["dispatch"], "decision": result["decision"]}, ensure_ascii=False))
+    finally:
+        client.close()
+    print(f"[agent close] closed {closed} dispatch(es); {failed} failed/skipped.", file=sys.stderr)
+    if failed:
+        sys.exit(1)
+
+
+def _close_one(args, agent_id: str) -> None:
     client, _ = dispatch._client_for(args)  # noqa: SLF001
     try:
         handoff = client.get_handoff(agent_id)
@@ -430,6 +483,38 @@ def _reconcile_stale(args) -> None:
                     else "handoff is checkpointed; specialist must mark ready|blocked before close"
                 )
             rows_out.append(item)
+        # C4c: terminal (failed/aborted) dispatches with no handoff row at all
+        # are silent state-loss — mirrors assessment_memory._recent_dispatch_
+        # picture's `terminal_no_handoff` list so `reconcile-stale` is a
+        # complete picture on its own. Unlike the in-progress rows above,
+        # these have no ready/blocked handoff to consume, so they can never
+        # be "closed" here — this is read-only reporting, dry_run or not.
+        for terminal_status in ("failed", "aborted"):
+            for row in client.list_dispatches(status=terminal_status, limit=1000):
+                # Defensive re-check: don't trust every client/backend combo to
+                # have filtered server-side by `status`.
+                if str(row.get("status") or "") != terminal_status:
+                    continue
+                agent_id = row.get("agent_id")
+                if handoffs.get(agent_id):
+                    continue
+                rows_out.append(
+                    {
+                        "agent_id": agent_id,
+                        "agent_role": row.get("agent_role"),
+                        "age_hours": None,
+                        "threshold_hours": None,
+                        "category": "terminal_no_handoff",
+                        "handoff_status": "none",
+                        "dispatch_status": terminal_status,
+                        "closed": False,
+                        "closed_status": None,
+                        "skip_reason": (
+                            "terminal dispatch has no handoff; not closable via reconcile "
+                            "(informational only — silent state-loss, see resume-brief)"
+                        ),
+                    }
+                )
     finally:
         client.close()
     print(json.dumps(rows_out, indent=2, ensure_ascii=False))

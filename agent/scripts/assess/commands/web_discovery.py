@@ -113,8 +113,10 @@ def register(subparsers) -> None:
         "--db",
         dest="db_path",
         default="",
-        help="cases.db path. When set, the crawled URLs are ingested into the work "
-             "buffer (gf-bucketed) via ingest-endpoints. Relative paths anchor to the engagement dir.",
+        help="Enable ingesting the crawled URLs into the backend work buffer "
+             "(gf-bucketed) via ingest-endpoints. Pass any non-empty value to enable. "
+             "The work buffer is backend-owned now, so a path value here is only a "
+             "toggle — it is not used as a filesystem path (ADR 0013).",
     )
     p.add_argument("--stage-timeout", dest="stage_timeout", type=int, default=1800, help="Per-tool --timeout seconds (default 1800)")
     # Fix 2 (Issue 2) — seat the httpx liveness verdicts as prioritized work

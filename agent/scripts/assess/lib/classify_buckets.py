@@ -1,8 +1,8 @@
 """Shared gf-style bucket classification used by both ingestion and re-runs.
 
 This module is the single source of truth for the priority/cluster assignments
-that `db_insert_work_item()` writes inline at insert time and that
-`vigil assess classify-work` re-applies idempotently. Keeping the logic in one
+that the ingest producers compute inline (into the work_item block the backend
+derives) and that `vigil assess classify-work` re-applies idempotently. Keeping the logic in one
 place ensures the two paths cannot drift — operators forgetting to run
 `classify-work` after an ingest used to leave the work buffer unscored, which
 broke priority-mode dispatch silently.
@@ -129,6 +129,18 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # `redirect`): these name a URL the SERVER fetches (SSRF), as opposed to
         # the `redirect` family which names a URL the BROWSER follows. Both
         # `snake_case` and `concatenated` (camelCase-lowercased) forms are listed.
+        # Deepened (vuln-taxonomy-audit 2026-07): image/avatar-fetch compound
+        # family. "SSRF via avatar/profile-picture URL" (the server
+        # downloads a user-supplied image URL server-side to resize/host it) is
+        # one of the most frequently reported bug-bounty SSRF variants and was
+        # entirely absent from the curated `_url` families below — the bare
+        # `image`/`photo`/`avatar` keys exist only in `img_traversal` (local
+        # path traversal) and `upload_fields` (multipart upload), neither of
+        # which carries the server-fetch-a-remote-URL semantics. Both
+        # `snake_case` and concatenated forms, mirroring the existing
+        # `webhook_url`/`webhookurl` idiom; none collide with any other
+        # bucket's key set (`avatar`/`image`/`photo` bare are used elsewhere,
+        # but the `_url` compound forms here are novel).
         40,
         frozenset({
             "url", "uri", "host", "port", "feed", "window",
@@ -136,6 +148,10 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             "remote_url", "remoteurl", "webhook_url", "webhookurl",
             "feed_url", "feedurl", "dest_uri", "desturi",
             "target_uri", "targeturi", "request_uri", "requesturi",
+            "image_url", "imageurl", "avatar_url", "avatarurl",
+            "photo_url", "photourl", "picture_url", "pictureurl",
+            "logo_url", "logourl", "thumbnail_url", "thumbnailurl",
+            "icon_url", "iconurl",
         }),
         ("/proxy/", "/fetch/"),
     ),
@@ -168,12 +184,24 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # `column`,`field`,`from`,`row`,`sleep`,`fetch`. `where`/`select` also
         # overlap the `nosqli` bucket via `$`-operators; both firing is fine (the
         # reason chain is multi-bucket).
+        # Deepened (vuln-taxonomy-audit 2026-07): ORM sort/group compound
+        # family. "SQLi via sort/orderBy parameter" (an ORM building
+        # `ORDER BY <param>` or `GROUP BY <param>` directly from a request
+        # value, unparameterizable because column names cannot be bound) is a
+        # recurring bug-bounty pattern and a direct extension of the same
+        # rationale already used for the bare `where`/`select`/`sleep`/`fetch`
+        # additions above ("a param literally named after a SQL clause/function
+        # is a genuine injection signal" — see `sqli.md`). `order`/`sort` bare
+        # keys already exist; the compound `_by` forms and `having` do not, and
+        # none collide with any other bucket.
         40,
         frozenset({
             "id", "uid", "pid", "sid", "tid", "order", "sort", "filter",
             "q", "search", "query", "category",
             "where", "select", "table", "column", "field", "from", "row",
             "sleep", "fetch",
+            "order_by", "orderby", "sort_by", "sortby",
+            "group_by", "groupby", "having",
         }),
         (),
     ),
@@ -256,6 +284,27 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             ".axd", ".ashx", ".asmx", ".svc", "/_vti_bin/", "/trace.axd",
             "/elmah.axd",
         ),
+    ),
+    (
+        "xxe",
+        # NEW (vuln-taxonomy-audit 2026-07) → class `xxe` (already canonical;
+        # `xxe-testing` skill already exists — this bucket was the classifier's
+        # one confirmed gap: the class had a skill but no gf-style signal).
+        # XML/SOAP surfaces that accept attacker-controlled XML are the classic
+        # XXE entry point (external entity / DTD abuse, blind OOB exfil, SSRF via
+        # entity expansion). Weight 40 (tied with ssrf/sqli/lfi/auth/deserialization/
+        # dotnet_handler) reflects real severity; declared AFTER `dotnet_handler`
+        # so a future shared fragment would keep that bucket's existing tie-break
+        # win. Every key/fragment below is DELIBERATELY NOVEL (verified against
+        # no other bucket) so this addition cannot recluster any existing row:
+        # `.svc`/`.asmx` (also classic SOAP endpoints) already belong to
+        # `dotnet_handler` and `/xmlrpc.php` already belongs to `wordpress` — both
+        # are real adjacent XXE surfaces, cross-referenced in
+        # `agent/references/gf-patterns/xxe.md` rather than re-declared here, so
+        # this bucket cannot change either bucket's pinned `cluster_key`.
+        40,
+        frozenset({"xml", "soap", "wsdl", "rss"}),
+        ("/soap", ".wsdl"),
     ),
     (
         "img_traversal",
@@ -461,6 +510,27 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         ("/_search", "/aggregate", "/_msearch"),
     ),
     (
+        "prototype-pollution",
+        # NEW (vuln-taxonomy-audit 2026-07) → class `prototype-pollution`
+        # (already canonical; the `prototype-pollution` skill already exists).
+        # PortSwigger's server-side prototype-pollution research (Gareth Heyes,
+        # portswigger.net/research/server-side-prototype-pollution) shows the
+        # gadget is triggered by literal `__proto__`/`constructor`/`prototype`
+        # keys reaching an object-merge sink; a captured request whose JSON body
+        # already carries one of these keys (often as a compound bracket path
+        # like `constructor[prototype][x]`, decomposed by `expand_compound_key`)
+        # is a strong, low-FP signal — these are not normal application
+        # parameter names. Param-only (no path fragment carries the signal),
+        # mirroring `ssti`/`cors`/`sqli`. Weight 35 (nosqli/idor tier): real
+        # severity (server-side PP can reach RCE via gadget chains) but keyed on
+        # rare literal names rather than a proven interpreter sink. All three
+        # keys are DELIBERATELY NOVEL (verified against every other bucket) so
+        # this addition cannot recluster any existing row.
+        35,
+        frozenset({"__proto__", "constructor", "prototype"}),
+        (),
+    ),
+    (
         "upload_fields",
         # NEW (review-and-merge): parameter-level signal for upload surfaces
         # that may not match the `trust_surface` path heuristic (e.g.,
@@ -616,6 +686,36 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         (),
     ),
     (
+        "mass-assignment",
+        # NEW (vuln-taxonomy-audit 2026-07) → class `mass-assignment` (already
+        # canonical; `bff-parameter-override`/`mass-assignment` skills already
+        # exist). OWASP API Security Top 10:2023 folds mass assignment into
+        # API3:2023 "Broken Object Property Level Authorization" — a top-3 API
+        # risk. Autobinding frameworks (Rails/Spring MVC/ASP.NET MVC/Node ORMs)
+        # bind body keys straight onto a model, so a captured request whose body
+        # already carries a privilege-shaped key (`isAdmin`, `role`, `verified`,
+        # `access_level`, ...) is real over-posting signal — the canonical
+        # example is the 2012 GitHub mass-assignment breach via a public-key
+        # upload endpoint. Param-only (body-shape issue, no distinctive path).
+        # Weight 30 (privileged_action/servicenow tier — bfla-adjacent
+        # authorization risk); declared AFTER `privileged_action` so a shared
+        # weight never disturbs its existing wins. Every key below is
+        # DELIBERATELY NOVEL (verified against every other bucket, including
+        # oauth-oidc's `scope` and privileged_action's own verb set) so this
+        # addition cannot recluster any existing row.
+        30,
+        frozenset({
+            "role", "roles", "admin", "isadmin", "is_admin",
+            "permissions", "permission",
+            "verified", "is_verified", "isverified",
+            "approved", "is_approved", "isapproved",
+            "access_level", "accesslevel", "privilege", "privileges",
+            "account_type", "accounttype", "user_type", "usertype",
+            "user_role", "userrole", "is_active", "isactive",
+        }),
+        (),
+    ),
+    (
         "devops_console",
         # NEW (classify-context-and-surface 2026-06, Part 3 §A.7) → class
         # `debug-exposure`. Ops dashboards / metrics & registry planes that are
@@ -636,6 +736,27 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             "/kibana", "/_cat/", "/solr/", "/druid", "/debug/pprof",
             "/v2/_catalog", "/api/v4/projects",
         ),
+    ),
+    (
+        "ssi",
+        # NEW (vuln-taxonomy-audit 2026-07) → NEW class `ssi-injection` (OWASP
+        # WSTG 4.7.8 "Testing for SSI Injection"; www-community "Server-Side
+        # Includes (SSI) Injection"). SSI directives (`<!--#exec cmd="..."-->`)
+        # can reach OS command execution when a server parses these extensions
+        # and echoes unsanitized input. Extension-only detection mirrors
+        # `dotnet_handler`'s `.axd`/`.asmx` idiom: a hit on one of these rare,
+        # largely-legacy extensions is a low-FP signal even without a param key.
+        # No skill exists yet for this rare/legacy class — allowlisted
+        # skill-less in `test_vuln_taxonomy.KNOWN_SKILLLESS_CLASSES`, mirroring
+        # `ldap-injection`/`path-authz`. Weight 30 (below `dotnet_handler`'s 40 —
+        # SSI is rarer/lower-triage-priority in 2026 stacks than ASP.NET
+        # handlers, but still real when present). All three extensions are
+        # DELIBERATELY NOVEL (verified against `interestingext`'s extension list
+        # and every other bucket) so this addition cannot recluster any
+        # existing row.
+        30,
+        frozenset(),
+        (".shtml", ".shtm", ".stm"),
     ),
     (
         "redirect",
@@ -1091,9 +1212,9 @@ BUCKET_SKILLS: dict[str, tuple[str, ...]] = vuln_taxonomy.derive_bucket_skills()
 # across the codebase. Every consumer that needs the same set imports
 # `INERT_TYPES` from this module:
 #
-# - `agent/scripts/assess/lib/db.py:db_insert_work_item()` reads it to stamp
-#   `status='skipped'` at insert time so inert rows never enter the dispatch
-#   queue.
+# - the ingest producers (`ingest_endpoints`/`ingest_candidates`/`ingest_spec`,
+#   the proxy addon) read it to set `status='skipped'` in the work_item block
+#   they POST, so inert rows never enter the dispatch queue.
 # - `agent/scripts/assess/lib/classify_buckets.py:classify_row()` (this file)
 #   reads it to stamp `terminal_reason='inert_type'` so `fetch-by-priority`
 #   excludes them with one predicate.
@@ -1133,7 +1254,7 @@ _INERT_TYPES = INERT_TYPES
 # (`_IDOR_WEIGHT`, `_PRIVILEGED_ACTION_WEIGHT`, `_INTERESTINGEXT_WEIGHT`,
 # `_AUTH_KEY_SET`, `_SSO_PATH_FRAGMENTS`) are covered transitively — they cannot
 # change without `_BUCKETS` itself changing — so they are not re-listed.
-# `db_insert_work_item()` stamps it inline at ingest and
+# the ingest producers stamp it inline at ingest and
 # `classify-work` re-stamps it on every re-classification, so a later
 # `classify-work --reclassify-stale` can tell rows scored under an OLD taxonomy
 # from rows already at the current one — restamping only the stale
@@ -1923,12 +2044,11 @@ def classify_from_fields(
     live_status: str | None = None,
     demote_dead_archive: bool = False,
 ) -> dict[str, Any]:
-    """Adapter for ingest paths that don't have a sqlite Row yet.
+    """Adapter for ingest paths that classify from raw fields (no row yet).
 
-    `db_insert_work_item()` calls this immediately after the INSERT so it can
-    write `priority_score` / `priority_reason` / `cluster_key` /
-    `terminal_reason` in the same connection without round-tripping through
-    a SELECT. Returns the same shape as `classify_row()`.
+    The ingest producers call this while building the work_item block they POST
+    so the backend-derived row carries `priority_score` / `priority_reason` /
+    `cluster_key` / `terminal_reason`. Returns the same shape as `classify_row()`.
 
     `url`/`source`/`live_status` are the optional boost-only context inputs
     (Fix 1). They default to None so the legacy 5-keyword call convention (and

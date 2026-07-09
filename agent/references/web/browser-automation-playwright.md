@@ -53,9 +53,10 @@ proxy trips the edge.
 ### Mode A — through-proxy (auto-capture into the engagement)
 
 Route the headed browser through `vigil mitmproxy` so the proxy addon
-auto-detects the login and POSTs the captured credentials to the backend store /
-records traffic to `cases.db`. This is the clean path *when the edge tolerates
-the proxy* — you get engagement-pipeline capture for free.
+auto-detects the login and POSTs the captured credentials to the backend store,
+and posts request observations that the backend derives into the work buffer
+(`assessment_work_items`, ADR 0013) server-side. This is the clean path *when
+the edge tolerates the proxy* — you get engagement-pipeline capture for free.
 
 ```bash
 vigil mitmproxy start

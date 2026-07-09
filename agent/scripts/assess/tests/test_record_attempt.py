@@ -273,3 +273,34 @@ def test_record_attempt_missing_required_flag_shows_pointer(tmp_path, monkeypatc
         )
     err = capsys.readouterr().err
     assert "See: vigil assess contract record-attempt" in err
+
+
+# -- A3 work-buffer drain / surface resolve plumbing ---------------------------
+
+def test_record_attempt_work_item_ids_and_resolve_surface_plumb_through(tmp_path, monkeypatch, capsys):
+    """--work-item-ids and --resolve-surface thread into the probe-runs payload so
+    the backend can drain the buffer + advance the surface in the same txn (A3)."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        _attempt_argv() + ["--work-item-ids", "3", "4", "--resolve-surface", "9"],
+        str(tmp_path),
+    )
+    record_attempt.run(args)
+    capsys.readouterr()
+    payload = fake.posts[0][1]
+    assert payload["work_item_ids"] == [3, 4]
+    assert payload["resolve_surface_id"] == 9
+
+
+def test_record_attempt_omits_drain_fields_when_absent(tmp_path, monkeypatch, capsys):
+    """The default payload is unchanged when the opt-in A3 flags are not passed —
+    recording never auto-drains the buffer or mutates surface state."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(_attempt_argv(), str(tmp_path))
+    record_attempt.run(args)
+    capsys.readouterr()
+    payload = fake.posts[0][1]
+    assert "work_item_ids" not in payload
+    assert "resolve_surface_id" not in payload

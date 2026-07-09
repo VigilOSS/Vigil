@@ -13,30 +13,32 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
 from assess.lib import coverage_checks as cc
-from assess.lib import db as db_module
 from assess.commands import coverage as coverage_cmd
 from assess.lib.config import Config
+from _fake_client import FakeAssessmentClient, host_of
 
 
 # --------------------------------------------------------------------------- #
-# cases.db helpers
+# work-item seeding helpers
+#
+# The former per-engagement ``cases.db`` ``work_items`` table was folded into
+# the orchestrator backend; ``load_route_stats_by_host`` now reads the buffer
+# through ``client.get_all_pages("work-items")``. These helpers seed that same
+# durable state on the backend-less ``FakeAssessmentClient`` instead of a local
+# sqlite db.
 # --------------------------------------------------------------------------- #
 
 
-def _make_cases_db(tmp_path: Path) -> Path:
-    db_path = tmp_path / "cases.db"
-    db_path.touch()
-    db_module.db_init(str(db_path))
-    return db_path
+def _make_fake() -> FakeAssessmentClient:
+    return FakeAssessmentClient()
 
 
 def _insert_work_item(
-    db_path: Path,
+    fake,
     *,
     queue_key: str,
     url: str,
@@ -46,18 +48,21 @@ def _insert_work_item(
     response_status: int | None = 200,
     live_status: str | None = None,
 ) -> None:
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            """INSERT INTO work_items
-            (queue_key, method, url, url_path, query_params, body_params,
-             type, source, status, response_status, live_status)
-            VALUES (?, 'GET', ?, ?, '{}', '{}', ?, 'test', ?, ?, ?)""",
-            (queue_key, url, url_path, case_type, status, response_status, live_status),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    # ``add_row`` auto-derives the row's ``host`` column from ``url`` — the same
+    # column ``load_route_stats_by_host`` groups on — so no host is passed here.
+    fake.add_row(
+        queue_key=queue_key,
+        method="GET",
+        url=url,
+        url_path=url_path,
+        type=case_type,
+        source="test",
+        status=status,
+        response_status=response_status,
+        live_status=live_status,
+        query_params="{}",
+        body_params="{}",
+    )
 
 
 def _cfg(eng_dir: Path) -> Config:
@@ -128,60 +133,62 @@ def _host_row(host: str, *, waf: bool = False) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def test_route_stats_counts_distinct_live_paths(tmp_path):
-    db = _make_cases_db(tmp_path)
+def test_route_stats_counts_distinct_live_paths():
+    fake = _make_fake()
     base = "https://a.example.com"
     for i in range(3):
         _insert_work_item(
-            db, queue_key=f"k{i}", url=f"{base}/p{i}", url_path=f"/p{i}",
+            fake, queue_key=f"k{i}", url=f"{base}/p{i}", url_path=f"/p{i}",
             response_status=200,
         )
     # Duplicate path (different query) — distinct by url_path, counts once.
     _insert_work_item(
-        db, queue_key="kdup", url=f"{base}/p0?x=1", url_path="/p0", response_status=200,
+        fake, queue_key="kdup", url=f"{base}/p0?x=1", url_path="/p0", response_status=200,
     )
     # A dead path: counts toward total but NOT live.
     _insert_work_item(
-        db, queue_key="kdead", url=f"{base}/dead", url_path="/dead",
+        fake, queue_key="kdead", url=f"{base}/dead", url_path="/dead",
         response_status=0, live_status="blackholed@5m",
     )
     # host_root crawl seed — excluded from routes entirely.
     _insert_work_item(
-        db, queue_key="kroot", url=base, url_path="/", case_type="host_root",
+        fake, queue_key="kroot", url=base, url_path="/", case_type="host_root",
         response_status=200,
     )
 
-    stats = cc.load_route_stats_by_host(db)
+    stats = cc.load_route_stats_by_host(fake)
     assert "a.example.com" in stats
     row = stats["a.example.com"]
     assert row["live_routes"] == 3
     assert row["total_routes"] == 4  # 3 live + 1 dead, host_root excluded
 
 
-def test_route_stats_live_status_stamp_counts_as_live(tmp_path):
-    db = _make_cases_db(tmp_path)
+def test_route_stats_live_status_stamp_counts_as_live():
+    fake = _make_fake()
     _insert_work_item(
-        db, queue_key="k1", url="https://b.example.com/x", url_path="/x",
+        fake, queue_key="k1", url="https://b.example.com/x", url_path="/x",
         response_status=0, live_status="live@9m",
     )
-    stats = cc.load_route_stats_by_host(db)
+    stats = cc.load_route_stats_by_host(fake)
     assert stats["b.example.com"]["live_routes"] == 1
 
 
-def test_route_stats_detects_api_auth_graphql(tmp_path):
-    db = _make_cases_db(tmp_path)
+def test_route_stats_detects_api_auth_graphql():
+    fake = _make_fake()
     host = "https://api.example.com"
-    _insert_work_item(db, queue_key="kapi", url=f"{host}/api/v1/users", url_path="/api/v1/users")
-    _insert_work_item(db, queue_key="kauth", url=f"{host}/login", url_path="/login")
-    _insert_work_item(db, queue_key="kgql", url=f"{host}/graphql", url_path="/graphql")
-    stats = cc.load_route_stats_by_host(db)["api.example.com"]
+    _insert_work_item(fake, queue_key="kapi", url=f"{host}/api/v1/users", url_path="/api/v1/users")
+    _insert_work_item(fake, queue_key="kauth", url=f"{host}/login", url_path="/login")
+    _insert_work_item(fake, queue_key="kgql", url=f"{host}/graphql", url_path="/graphql")
+    stats = cc.load_route_stats_by_host(fake)["api.example.com"]
     assert stats["api_like"] is True
     assert stats["auth_like"] is True
     assert stats["graphql_like"] is True
 
 
-def test_route_stats_missing_db_is_empty():
-    assert cc.load_route_stats_by_host(Path("/no/such/cases.db")) == {}
+def test_route_stats_empty_buffer_is_empty():
+    # The former "missing cases.db → {}" concept is gone now that the buffer
+    # lives behind the backend; an EMPTY work-item buffer yields an empty map.
+    assert cc.load_route_stats_by_host(_make_fake()) == {}
 
 
 # --------------------------------------------------------------------------- #
@@ -378,12 +385,31 @@ class FakeClient:
         self._per_host_payload = per_host_payload
         self._dispatches = dispatches or []
         self.calls: list[str] = []
+        # Folded-in work-item buffer the command reads via
+        # ``load_route_stats_by_host`` → ``get_all_pages("work-items")``.
+        self._rows: list[dict] = []
+        self._next_id = 0
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         return False
+
+    def add_row(self, **fields) -> dict:
+        row = dict(fields)
+        self._next_id += 1
+        row.setdefault("id", self._next_id)
+        if "host" not in row and row.get("url"):
+            row["host"] = host_of(row["url"])
+        self._rows.append(row)
+        return row
+
+    def get_all_pages(self, endpoint: str, **kwargs):
+        path = endpoint.partition("?")[0].strip("/")
+        if path == "work-items":
+            return list(self._rows)
+        return []
 
     def get(self, endpoint: str):
         self.calls.append(endpoint)
@@ -405,15 +431,13 @@ def test_command_json_output_flags_uncovered_gap(tmp_path, monkeypatch):
     eng_dir = tmp_path / "eng"
     eng_dir.mkdir()
     _write_scope(eng_dir, ["target.example", "*.target.example"])
-    db = eng_dir / "cases.db"
-    db.touch()
-    db_module.db_init(str(db))
-    base = "https://app.target.example"
-    for i in range(7):
-        _insert_work_item(db, queue_key=f"k{i}", url=f"{base}/p{i}", url_path=f"/p{i}")
 
     payload = _per_host_payload(hosts=[_host_row("app.target.example")])
     fake = FakeClient(per_host_payload=payload)
+    base = "https://app.target.example"
+    for i in range(7):
+        _insert_work_item(fake, queue_key=f"k{i}", url=f"{base}/p{i}", url_path=f"/p{i}")
+
     monkeypatch.setattr(coverage_cmd, "load_config", lambda _flag: _cfg(eng_dir))
     monkeypatch.setattr(coverage_cmd, "AssessmentClient", lambda *a, **k: fake)
 
@@ -432,15 +456,13 @@ def test_command_text_output_surfaces_uncovered_block(tmp_path, monkeypatch):
     eng_dir = tmp_path / "eng"
     eng_dir.mkdir()
     _write_scope(eng_dir, ["target.example", "*.target.example"])
-    db = eng_dir / "cases.db"
-    db.touch()
-    db_module.db_init(str(db))
-    base = "https://app.target.example"
-    for i in range(7):
-        _insert_work_item(db, queue_key=f"k{i}", url=f"{base}/p{i}", url_path=f"/p{i}")
 
     payload = _per_host_payload(hosts=[_host_row("app.target.example")])
     fake = FakeClient(per_host_payload=payload)
+    base = "https://app.target.example"
+    for i in range(7):
+        _insert_work_item(fake, queue_key=f"k{i}", url=f"{base}/p{i}", url_path=f"/p{i}")
+
     monkeypatch.setattr(coverage_cmd, "load_config", lambda _flag: _cfg(eng_dir))
     monkeypatch.setattr(coverage_cmd, "AssessmentClient", lambda *a, **k: fake)
 

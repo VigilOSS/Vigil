@@ -244,7 +244,7 @@ Plain Katana output feeds `ingest-endpoints`:
 
 ```bash
 cat /engagements/$ENGAGEMENT_KEY/scans/katana_target.txt |
-  vigil assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" katana
+  vigil assess ingest-endpoints katana
 ```
 
 If the crawl produced JSONL with richer metadata and a triage step promoted
@@ -252,7 +252,7 @@ records into candidate JSONL, use `ingest-candidates` so priority and rationale
 survive:
 
 ```bash
-vigil assess ingest-candidates "$ENGAGEMENT_DIR/cases.db" \
+vigil assess ingest-candidates \
   surface-collector-curated \
   /engagements/$ENGAGEMENT_KEY/scans/surface-collector/candidate_records.jsonl
 ```

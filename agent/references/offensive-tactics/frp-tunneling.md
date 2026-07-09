@@ -100,6 +100,23 @@ Use centralized logs from the host:
 vigil logs oob --lines 80
 ```
 
+## Retention cleanup
+
+Per-client OOB artifacts under `/data/oob/clients/` (logs, metadata, and tmux
+session files) accumulate as agents come and go. Prune the stopped ones:
+
+```bash
+vigil oob clean --dry-run    # preview only — list what would go, delete nothing
+vigil oob clean              # remove non-running clients whose artifacts are all idle > 5 days
+vigil oob clean --days 14    # widen the retention window to the last two weeks
+```
+
+`vigil oob clean` deletes the log, metadata, and session files only for clients
+that are **not currently running** and whose every artifact is older than
+`--days` days (default 5). Running clients — and any client touched inside the
+window — are never removed. Add `--json` for a machine-readable summary of what
+was cleaned.
+
 ## Agent OOB Readiness Check
 
 Before sending blind payloads, agents verify OOB state directly:

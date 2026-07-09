@@ -8,9 +8,21 @@ Both modes share the same backend, findings table, and CLI tools.
 - Mid-engagement when source code is obtained (exposed `.git`, source maps, backup download) —
   code analysis phases run in parallel with ongoing web testing
 
+**Creating a new code engagement:** `vigil engagement create --type code <name> --repo <path>`.
+
 **Expected state on entry:** engagement directory exists with `scope.json`, `source/` directory,
 and orchestrator backend reachable. The operator reads `scope.json` to determine the current phase
 and resumes from there.
+
+**Engagement Program Brief — `ENGAGEMENT.md`.** `ENGAGEMENT.md` (see
+`agent/operator-core.md`, "Engagement Program Brief") is **LIVE-TESTING ROE**: mandatory
+request headers, rate caps, no-fire endpoints, deconfliction contacts, and exfiltration
+limits. For a pure static source review it is advisory only — reading and analyzing
+files under `source/` does not touch the wire, so none of those constraints bind. It
+re-applies in full the instant the code track does anything live: a Phase-4 fuzz
+campaign that exercises a running target, or web testing running alongside the code
+track (see "Integration with Web Engagement" below). Re-check `ENGAGEMENT.md` before
+any such live probe, even mid-run.
 
 ---
 
@@ -19,11 +31,28 @@ Complete authorization is already established. Aggressive vulnerability analysis
 
 Primary methodology reference:
 - `agent/references/runtime-guides/engagement-methodology.md`
+- `agent/references/runtime-guides/vuln-taxonomy.md` — canonical cross-track vuln-class
+  vocabulary (web, code, and blue tracks share the same 63 classes); use it to name
+  `applicable_vuln_classes` consistently instead of ad hoc per-dispatch labels.
 
 Always-active rules:
 - `agent/rules/resume.md`
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
+
+`agent/rules/hunting.md` is loaded always-active, but two of its sections are
+web-runtime-only and do NOT apply to pure static source review:
+- **"A URL can be a whole application"** — the app-unit depth gate assumes a live
+  host with path-prefixed applications; the backend returns `skipped: true` for
+  non-web `engagement_type` (code engagements included), so there is no app-unit
+  ledger to satisfy. The code-track analog of "measured depth" is the Phase-2B CWE
+  effort-threshold gate (`vigil assess code-coverage --require-gate-pass`) — it
+  plays the same structural-depth role the app-unit ledger plays for web.
+- **"Attack headers are ordinary injected inputs"** — describes live HTTP header
+  probing (`record-probe --input-slot header:...`), which has no analog against
+  static source. The code-track equivalent is a static header-trust review — does
+  the code trust `X-Forwarded-*`/`X-Original-URL`/etc. without validation — covered
+  in `agent/references/code-vuln-patterns/auth-bypass.md`, not by probing.
 
 `agent/rules/reporting.md` is specialist/Report-phase-loaded, not an operator
 always-active rule: do not load `reporting.md` CONTENT into operator context
@@ -52,7 +81,7 @@ Read top-to-bottom once at code-engagement start; after that, jump to the sectio
 | Every specialist dispatch | Dispatch Context Template, Runtime Identity Block, Pre-Dispatch Checklist |
 | After each phase transition | Coverage Communication |
 | When code analysis runs alongside web testing | Integration with Web Engagement |
-| Always | Operator Boundary -- Orchestration, Not Authorship; macOS/zsh Compatibility |
+| Always | Operator Boundary -- Orchestration, Not Authorship; macOS/zsh Compatibility; Handoff Reference |
 
 ## Resume Gate -- Code Analysis Mode
 
@@ -67,6 +96,17 @@ runtime/fuzz command history live in different backend projections.
 
 After code analysis engagement initialization completes, repeat until all critical/high files
 analyzed or user signals stop:
+
+**Re-anchor on method mid-run.** Periodically re-read the always-active rules
+(`agent/rules/hunting.md`, `agent/rules/adversarial-mindset.md`, `agent/rules/resume.md`) and
+the current phase doc (Phase Index above) — not just at engagement start. This is the "method
+re-anchor" the Phase Index and every `agent/phases/code-phase-N-*.md` doc point back to when
+they say to re-read on a method re-anchor. On long, high-volume runs the method drifts to the
+bottom of context and the loop degrades into shallow file-ticking; a periodic re-read
+re-establishes the constrained-attacker persona, the dispatch contract, and the phase-exit
+gates. This is a cue, not a gate: trigger a re-anchor when the cadence slips — a code-specific
+drift signal is repeated `needs-context` returns on the same file, or hunter dispatches
+returning clean with declining effort scores across successive batches.
 
 1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). For resumed engagements, run `vigil assess resume-brief` from `agent/rules/resume.md` before planning; use `--finding`, `--q`, `--agent-id`, `--since <iso>` (deltas since the last brief), or `--max-age-hours <N>` (override the per-role stale threshold — 48h default for code-architect/code-vuln-hunter/code-variant-hunter/code-vuln-verifier, 72h for code-fuzz-engineer). Check code coverage stats via `vigil assess code-coverage`. Check CWE effort matrix via `vigil assess code-coverage --cwe-matrix` when in Phase 2B. Backend state is canonical; use `--require-gate-pass` only for the final Phase 3 gate.
 2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive precise FP elimination on all findings — kills require counter-evidence as rigorous as the original finding. Coverage gaps drive decisions.
@@ -370,3 +410,22 @@ methodology and produces unreliable verdicts.
 - Make file edits through the active coding environment's patch/edit tool. Avoid shell
   redirection (`cat >`, `echo >`) for manual file creation or modification because it
   bypasses reviewable patch diffs and is easy to quote incorrectly in zsh.
+
+## Handoff Reference
+
+See `agent/references/handoff-protocols.md` for the shared agent-to-agent handoff
+mechanics -- Closing Sequence (`vigil assess agent handoff --from-json`), the handoff
+schema, `vigil assess agent render-handoff`, and the Skill Passing Protocol. Those
+mechanics apply identically to code-track specialists even though that doc's per-phase
+"Returns" sections are written for the web track.
+
+Each agent's Handoffs section specifies **which skill to bring** when passing work
+downstream. Summary (code track): `code-architect` -> `code-vuln-hunter` (bring the
+vulnerability-analysis skill matching the flagged signal), `code-vuln-hunter` ->
+`code-vuln-verifier` (bring code-finding-verification skill) + `code-variant-hunter`
+(bring code-variant-analysis skill, parallel), operator-mediated transition into
+Phase 4 (Fuzz) when a CWE class is fuzz-suited -- `code-fuzz-engineer` does its own
+target selection in Phase 4A rather than receiving a direct handoff from the hunter
+(bring code-fuzz-campaign skill, C/C++ only), `code-vuln-verifier`/`code-variant-hunter`
+-> `report-writer` (bring report-generation skill; per-finding
+`export-submission --platform direct` closeout).

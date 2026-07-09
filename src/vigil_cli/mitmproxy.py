@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import docker
+from . import image_freshness
 from .paths import container_host_url, resolve_orchestrator_base_url
 
 _PORT_WAIT_ATTEMPTS = 30
@@ -40,8 +41,16 @@ def build_image(
     dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
     if not dockerfile.is_file():
         raise SystemExit(f"mitmproxy Dockerfile missing: {dockerfile}")
-    if not force and docker.image_exists(image, runner=runner):
-        print(f"mitmproxy\timage current\t{image}")
+    # Only report "current" when the tag exists AND is newer than its build
+    # inputs. A bare tag-exists check (the old behaviour) reported "current"
+    # even after proxy_addon.py / the Dockerfile changed, so a rebuilt addon
+    # never landed until someone passed --force.
+    if (
+        not force
+        and docker.image_exists(image, runner=runner)
+        and not image_freshness.image_outdated(image, _mitmproxy_inputs(install_root), runner=runner)
+    ):
+        print(f"mitmproxy\timage current (up to date with source)\t{image}")
         return
     print(f"mitmproxy\tbuilding\timage={image}")
     argv = [
@@ -56,6 +65,18 @@ def build_image(
     ]
     docker.require_success(runner(argv), argv)
     print(f"mitmproxy\timage built\t{image}")
+
+
+def _mitmproxy_inputs(install_root: Path) -> list[Path]:
+    """Build inputs whose mtime determines image freshness.
+
+    Mirrors ``up.py:_mitmproxy_image_inputs`` — the Dockerfile plus the addon
+    source baked into the image.
+    """
+    return [
+        install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile",
+        install_root / "agent" / "scripts" / "proxy_addon.py",
+    ]
 
 
 def start_proxy(

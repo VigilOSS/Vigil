@@ -322,7 +322,7 @@ def _check_preconditions(
         elif track == "blue":
             blockers.extend(_check_blue_preconditions(target_phase, client, engagement_dir))
         else:
-            blockers.extend(_check_web_preconditions(target_phase, engagement_dir, client))
+            blockers.extend(_check_web_preconditions(target_phase, client))
 
     return blockers
 
@@ -335,35 +335,28 @@ def _precondition_check_failed(check_name: str, exc: Exception) -> dict[str, str
     }
 
 
-def _consumption_advisory(engagement_dir: str) -> dict[str, str] | None:
+def _consumption_advisory(client: AssessmentClient) -> dict[str, str] | None:
     """Advisory (never a block) when the consume-test buffer still has genuinely
     un-consumed work at verify time (S2).
 
     Counts only ``pending`` rows with NO ``terminal_reason`` — i.e. items that
     were neither tested nor explicitly deferred/inert — to match the consume
-    gate's honest semantics. Returns None when cases.db is absent or the buffer
-    is essentially worked down.
+    gate's honest semantics. Reads the backend work buffer; returns None when the
+    buffer is essentially worked down. A backend fetch failure surfaces (the
+    client raises) rather than silently reporting "worked down".
     """
-    db_path = os.path.join(engagement_dir, "cases.db")
-    if not os.path.isfile(db_path):
-        return None
-    try:
-        import sqlite3
-        conn = sqlite3.connect(db_path)
-        pending = conn.execute(
-            "SELECT COUNT(*) FROM work_items "
-            "WHERE status = 'pending' AND (terminal_reason IS NULL OR terminal_reason = '')"
-        ).fetchone()[0]
-        conn.close()
-    except Exception:
-        return None
+    pending = sum(
+        1
+        for row in client.get_all_pages("work-items?status=pending")
+        if isinstance(row, dict) and str(row.get("terminal_reason") or "") == ""
+    )
     if pending <= 0:
         return None
     return {
         "kind": "consumption_incomplete",
         "severity": "advisory",
         "detail": (
-            f"{pending} un-consumed work item(s) still pending in cases.db — "
+            f"{pending} un-consumed work item(s) still pending in the work buffer — "
             "verify is being entered over an unfinished consume-test buffer. "
             "Not blocking; finish consumption (or defer those items with a "
             "reason) so verification reflects real testing."
@@ -373,7 +366,6 @@ def _consumption_advisory(engagement_dir: str) -> dict[str, str] | None:
 
 def _check_web_preconditions(
     target_phase: str,
-    engagement_dir: str,
     client: AssessmentClient,
 ) -> list[dict[str, str]]:
     blockers: list[dict[str, str]] = []
@@ -390,27 +382,15 @@ def _check_web_preconditions(
             blockers.append(_precondition_check_failed("collect services", exc))
 
     elif target_phase == "consume-test":
-        db_path = os.path.join(engagement_dir, "cases.db")
-        if not os.path.isfile(db_path):
-            blockers.append({
-                "kind": "no_work_buffer",
-                "detail": "cases.db not found — collection may not have run",
-            })
-        else:
-            try:
-                import sqlite3
-                conn = sqlite3.connect(db_path)
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM work_items WHERE status = 'pending'"
-                ).fetchone()[0]
-                conn.close()
-                if count == 0:
-                    blockers.append({
-                        "kind": "empty_work_buffer",
-                        "detail": "No pending work items in cases.db — nothing to consume",
-                    })
-            except Exception as exc:
-                blockers.append(_precondition_check_failed("consume-test work buffer", exc))
+        try:
+            count = len(client.get_all_pages("work-items?status=pending"))
+            if count == 0:
+                blockers.append({
+                    "kind": "empty_work_buffer",
+                    "detail": "No pending work items in the work buffer — nothing to consume",
+                })
+        except Exception as exc:
+            blockers.append(_precondition_check_failed("consume-test work buffer", exc))
 
     elif target_phase == "verify":
         try:
@@ -424,7 +404,7 @@ def _check_web_preconditions(
                     })
         except Exception as exc:
             blockers.append(_precondition_check_failed("verify findings", exc))
-        consumption = _consumption_advisory(engagement_dir)
+        consumption = _consumption_advisory(client)
         if consumption is not None:
             blockers.append(consumption)
 
@@ -913,6 +893,17 @@ def _check_code_preconditions(
         except Exception as exc:
             blockers.append(_precondition_check_failed("complete code findings", exc))
         blockers.extend(_code_coverage_blockers(client))
+        # The blind-triage gate is track-agnostic: every Medium-or-above active
+        # finding must carry a recorded Accept* blind_triage_verdict before the
+        # terminal edge (code-phase-4-fuzz.md makes the blind Pass-2 review
+        # mandatory for code findings too). ``_blind_triage_blockers`` filters
+        # findings + dispatches verdicts generically, so it applies unchanged.
+        # ``_chain_construction_blockers`` and ``_depth_backstop_blockers`` are
+        # intentionally NOT applied to the code track: chain-construction keys
+        # on the web-only exploit-developer A->B chain role, and depth-backstop
+        # is the web app-unit ledger (the backend returns skipped=true for code
+        # engagements), so neither is meaningful here.
+        blockers.extend(_blind_triage_blockers(client))
 
     return blockers
 

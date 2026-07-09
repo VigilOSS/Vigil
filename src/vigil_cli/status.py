@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import docker
 from .backup import latest_backup
+from .image_freshness import proxy_image_drift
 from .config import get_config_value
 from .engagements import list_engagements
 from .oob import DEFAULT_OOB_DOMAIN, oob_status
@@ -211,6 +212,9 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
     ]
     runtime_state = runtime_status(runner=runner)
     mitm_running = docker.container_running("vigil-proxy", runner=runner)
+    # Drift is only meaningful for a running container; skip the two docker
+    # inspects otherwise to keep `vigil status` cheap.
+    mitm_image_drift = mitm_running and proxy_image_drift(runner=runner)
     backup = latest_backup(install_root)
     oob_token_configured = bool(os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token"))
     oob_domain = (
@@ -236,6 +240,7 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
         "mitmproxy": {
             "state": "running" if mitm_running else "stopped",
             "image_exists": docker.image_exists("vigil-proxy:latest", runner=runner),
+            "image_drift": bool(mitm_image_drift),
             "ca_volume": docker.volume_exists("mitmproxy-ca", runner=runner),
         },
         # deep=False keeps `vigil status` cheap (no per-client log reads / DNS probe);
@@ -289,7 +294,9 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
                 f"cpu.max={live.get('cpu_max', '?')} pids.max={live.get('pids_max', '?')}"
             )
         print(f"runtime-tier\t{configured_str}{live_str}")
-    print(f"mitmproxy\t{mitmproxy['state']}\tca_volume={mitmproxy['ca_volume']}")  # type: ignore[index]
+    mitm_dict = mitmproxy if isinstance(mitmproxy, dict) else {}
+    drift_note = "\trestart-needed" if mitm_dict.get("image_drift") else ""
+    print(f"mitmproxy\t{mitm_dict.get('state', '-')}\tca_volume={mitm_dict.get('ca_volume')}{drift_note}")
     print(
         f"oob\t{oob.get('state', '-')}\tclients={len(oob.get('clients') or [])}"
         f"\tdomain={oob.get('domain') or '-'}"
@@ -355,6 +362,14 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         checks.append(Check("docker-daemon", "OK" if docker.daemon_available(runner=runner) else "FAIL"))
         checks.append(Check("runtime-image", "OK" if docker.image_exists("vigil:latest", runner=runner) else "MISSING"))
         checks.append(Check("mitmproxy-image", "OK" if docker.image_exists("vigil-proxy:latest", runner=runner) else "MISSING"))
+        # Drift only exists for a running container; a stopped/absent proxy is
+        # OK because the next `vigil mitmproxy start` picks up the current image.
+        mitm_drift = docker.container_running("vigil-proxy", runner=runner) and proxy_image_drift(runner=runner)
+        checks.append(
+            Check("mitmproxy-container-drift", "STALE", "container older than image; run `vigil mitmproxy start`")
+            if mitm_drift
+            else Check("mitmproxy-container-drift", "OK")
+        )
         if runtime_status(runner=runner) == "running":
             checks.append(Check("runtime-mounts", "OK" if runtime_mounts_ok(install_root, runner=runner) else "FAIL"))
             for tool in ("dtach", "tmux", "frpc", "interactsh-server", "interactsh-client"):

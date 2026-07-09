@@ -4,11 +4,11 @@ import getpass
 import select
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config as config_module
 from . import docker
+from .image_freshness import image_outdated, proxy_image_drift
 from .install import InstallOptions, install_from_source
 from .mitmproxy import MitmproxyOptions, start_proxy
 from .oob import OobOptions, oob_options as _oob_options, oob_status, start_oob
@@ -48,7 +48,7 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
     runtime_built = False
     if options.no_build:
         print("runtime image\tbuild skipped")
-    elif _image_outdated("vigil:latest", _runtime_image_inputs(install_root), runner=runner):
+    elif image_outdated("vigil:latest", _runtime_image_inputs(install_root), runner=runner):
         print("runtime image\tbuilding")
         build_runtime(install_root, runner=runner)
         runtime_built = True
@@ -59,7 +59,7 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
 
     if options.no_build:
         print("mitmproxy image\tbuild skipped")
-    elif _image_outdated("vigil-proxy:latest", _mitmproxy_image_inputs(install_root), runner=runner):
+    elif image_outdated("vigil-proxy:latest", _mitmproxy_image_inputs(install_root), runner=runner):
         print("mitmproxy image\tbuilding")
         _build_mitmproxy_image(install_root, runner=runner)
     else:
@@ -125,7 +125,11 @@ def _confirm_runtime_restart(options: UpOptions) -> bool:
 
 def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner: docker.Runner) -> None:
     if docker.container_running("vigil-proxy", runner=runner):
-        print("mitmproxy\talready running")
+        if _proxy_image_drift(runner=runner):
+            print("mitmproxy\trunning old image; restart to pick up rebuilt image")
+            print("Run `vigil mitmproxy start` to recreate the container on the current image.")
+        else:
+            print("mitmproxy\talready running")
         return
     engagements_root = install_root / "agent" / "engagements"
     engagements_root.mkdir(parents=True, exist_ok=True)
@@ -182,64 +186,19 @@ def _mitmproxy_image_inputs(install_root: Path) -> list[Path]:
     ]
 
 
-def _image_outdated(image: str, inputs: list[Path], *, runner: docker.Runner) -> bool:
-    created = _image_created_at(image, runner=runner)
-    if created is None:
-        return True
-    latest_input = _latest_mtime(inputs)
-    return latest_input is not None and latest_input > created.timestamp()
-
-
-def _image_created_at(image: str, *, runner: docker.Runner) -> datetime | None:
-    result = runner(["docker", "image", "inspect", "-f", "{{.Created}}", image])
-    if result.returncode != 0:
-        return None
-    value = result.stdout.strip()
-    if not value:
-        return None
-    try:
-        return _parse_docker_timestamp(value).astimezone(timezone.utc)
-    except ValueError:
-        return None
-
-
-def _parse_docker_timestamp(value: str) -> datetime:
-    normalized = value
-    if normalized.endswith("Z"):
-        normalized = normalized[:-1] + "+00:00"
-    if "." in normalized:
-        prefix, suffix = normalized.split(".", 1)
-        tz_index = len(suffix)
-        for marker in ("+", "-"):
-            index = suffix.find(marker)
-            if index != -1:
-                tz_index = index
-                break
-        fraction = suffix[:tz_index]
-        timezone_part = suffix[tz_index:]
-        normalized = f"{prefix}.{fraction[:6].ljust(6, '0')}{timezone_part}"
-    parsed = datetime.fromisoformat(normalized)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _latest_mtime(paths: list[Path]) -> float | None:
-    latest: float | None = None
-    for path in paths:
-        if path.is_file():
-            latest = max(latest or 0, path.stat().st_mtime)
-        elif path.is_dir():
-            for child in path.rglob("*"):
-                if child.is_file():
-                    latest = max(latest or 0, child.stat().st_mtime)
-    return latest
-
-
 def _runtime_image_drift(options: RuntimeOptions, *, runner: docker.Runner) -> bool:
     container_id = docker.container_image_id(options.container_name, runner=runner)
     configured_id = docker.image_id(options.image, runner=runner)
     return bool(container_id and configured_id and container_id != configured_id)
+
+
+def _proxy_image_drift(*, runner: docker.Runner) -> bool:
+    """True when the running proxy container predates the current proxy image.
+
+    Mirrors ``_runtime_image_drift`` for the mitmproxy container. Single-sourced
+    in ``image_freshness`` so ``vigil status`` reports the same verdict.
+    """
+    return proxy_image_drift(runner=runner)
 
 
 def _build_mitmproxy_image(install_root: Path, *, runner: docker.Runner = docker.run_command_streaming) -> None:

@@ -191,6 +191,124 @@ class SpecialistDispatchContract:
     extras: dict[str, Any] = field(default_factory=dict)
 
 
+# C4a — technique-cage dispatch lint. A "technique cage" is a prescriptive,
+# step-by-step script in a --task that caps a specialist's depth to a fixed
+# recipe — the doctrine's opposite of an open-objective dispatch (see
+# operator-core.md "Standing dispatch constraint": a less-constrained specialist
+# consistently out-finds a caged one). The lint is deliberately CONSERVATIVE: it
+# WARNs (never errors) and only when >=2 of three co-occurring signals are
+# present, so it does not warning-fatigue on legitimately structured tasks.
+_CAGE_IMPERATIVE_VERBS: tuple[str, ...] = (
+    "test", "check", "verify", "try", "confirm", "validate", "attempt",
+    "send", "run", "fuzz", "enumerate", "probe", "inject", "exploit",
+    "brute", "bruteforce", "scan", "hit", "replay",
+)
+
+# A step-list line: leading `1.` / `2)` numbering, or a `-` / `*` / `•` bullet.
+_CAGE_STEP_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
+
+# An imperative-verb line: an optional leading number/bullet, then one of the
+# test-verbs at a word boundary.
+_CAGE_VERB_RE = re.compile(
+    r"^\s*(?:\d+[.)]\s*|[-*•]\s*)?(?:"
+    + "|".join(_CAGE_IMPERATIVE_VERBS)
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_technique_cage(task: str) -> list[str]:
+    """Warn (never error) when a ``--task`` reads as a prescriptive technique cage.
+
+    Conservative by design — it must not warning-fatigue on legitimately
+    structured tasks. It detects three signals:
+
+      (i)   a numbered/bulleted STEP LIST — >=3 lines matching ``^\\s*\\d+[.)]``
+            or ``^\\s*[-*•]``;
+      (ii)  a run of IMPERATIVE test-verbs — >=3 lines starting (after any
+            leading number/bullet) with test/check/verify/try/confirm/validate/
+            attempt/send/run/fuzz/enumerate/...;
+      (iii) pre-named VULN-CLASS tokens from the canonical taxonomy
+            (``vuln_taxonomy.all_classes()`` — imported the way ``probe_args.py``
+            does, never a hardcoded parallel list).
+
+    It warns ONLY when a STRUCTURED recipe (>=3 step-list lines (i) or >=3
+    imperative-verb lines (ii)) also PRE-COMMITS to >=2 named bug classes (iii)
+    ON its recipe lines — the cage is "hunt these specific bugs, this way". A
+    structured imperative list that names NO bug to hunt (an orientation
+    checklist, or a confirmed-finding PoC / reproduction) is NOT a cage; neither
+    is a scope list with a single incidental class noun. Both must stay quiet.
+
+    Returns zero or more short WARN strings, each pointing at the alternative:
+    ``vigil assess coverage --host <h> --for-dispatch``. WARN-ONLY — the caller
+    must NEVER fold these into ``errors``.
+    """
+    text = str(task or "")
+    if not text.strip():
+        return []
+    lines = text.splitlines()
+
+    step_lines = sum(1 for ln in lines if _CAGE_STEP_RE.match(ln))
+    verb_lines = sum(1 for ln in lines if _CAGE_VERB_RE.match(ln))
+
+    from assess.lib.vuln_taxonomy import all_classes
+
+    classes = tuple(all_classes())
+
+    def _names_a_class(fragment: str) -> bool:
+        low = fragment.lower()
+        return any(
+            re.search(r"(?<![a-z0-9])" + re.escape(cls) + r"(?![a-z0-9])", low)
+            for cls in classes
+        )
+
+    lowered = text.lower()
+    named_classes = sorted(
+        cls
+        for cls in classes
+        if re.search(r"(?<![a-z0-9])" + re.escape(cls) + r"(?![a-z0-9])", lowered)
+    )
+    # Recipe lines (a step OR imperative-verb line) that THEMSELVES pre-name a
+    # specific bug class. A cage pre-commits the specialist to >=2 named bug
+    # classes inside a structured list. A structured imperative list that names
+    # no bug to hunt (an orientation checklist, a confirmed-finding PoC), or a
+    # scope list with one incidental class noun, is NOT a cage.
+    cage_lines = sum(
+        1 for ln in lines
+        if (_CAGE_STEP_RE.match(ln) or _CAGE_VERB_RE.match(ln)) and _names_a_class(ln)
+    )
+
+    signals: list[str] = []
+    if step_lines >= 3:
+        signals.append(f"a {step_lines}-item numbered/bulleted step list")
+    if verb_lines >= 3:
+        signals.append(f"{verb_lines} imperative test-verb lines")
+    if named_classes:
+        shown = ", ".join(named_classes[:4])
+        more = "" if len(named_classes) <= 4 else ", ..."
+        signals.append(f"pre-named vuln class(es): {shown}{more}")
+
+    # Warn only on a STRUCTURED recipe (>=3 step lines or >=3 imperative-verb
+    # lines) that also pre-commits to >=2 named bug classes ON its recipe lines.
+    # The named-bug requirement is what separates a cage ("hunt these specific
+    # bugs") from a legitimate imperative checklist / confirmed-finding PoC that
+    # prescribes actions but names no bug to hunt.
+    has_structure = step_lines >= 3 or verb_lines >= 3
+    if not (has_structure and cage_lines >= 2):
+        return []
+
+    return [
+        "task reads as a prescriptive technique cage ("
+        + "; ".join(signals)
+        + "). A step-by-step recipe caps a specialist's depth and costs real "
+        "severity — dispatch the surface + hard ROE + an OPEN objective and let "
+        "the specialist form its own hypotheses. To hand it the MEASURED "
+        "coverage picture (covered classes + OPEN gaps) instead of a script, "
+        "run `vigil assess coverage --host <h> --for-dispatch` and paste the "
+        "COVERAGE block into the dispatch."
+    ]
+
+
 def validate_specialist_dispatch_contract(
     payload: Any,
     *,
@@ -342,6 +460,10 @@ def validate_specialist_dispatch_contract(
                                 "(e.g. cert-chain pivot), reframe as recon/osint, or add "
                                 "the host to scope.json first."
                             )
+
+    # C4a: WARN-only technique-cage lint over the free-text task. NEVER appended
+    # to `errors` — a prescriptive task is a depth smell, not an invalid dispatch.
+    warnings.extend(_detect_technique_cage(str(payload.get("task") or "")))
 
     return errors, warnings
 
@@ -530,6 +652,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Do not put `link_kind=root_cause` in the `links` array. Record the finding first, then `vigil assess link-finding` after verification — root/sibling grouping is an explicit lifecycle action.",
             "evidence_ref must point at an existing engagement file (auto-registered and linked on record). URL refs, prose refs, and path-shaped refs with no file are REJECTED — they cannot satisfy report-readiness artifact indexing. Put external URLs in details.references; pass --allow-unindexed-evidence only for a theoretical/code-inferred finding with no file.",
             "Dedup keys on (defect_family + root_cause_key + auth_context + canonical_location). A net-new record whose tuple collides with an EXISTING reported/active finding under a different slug is REFUSED, not silently merged. For a genuinely-distinct sibling on the same root cause, give it its OWN root_cause_key/defect_family and attach it with link-finding; pass --update <slug> ONLY to intentionally modify that exact existing finding.",
+            "Kill re-mint guard (D4): a net-new record that shares the same defect_family (technique) AND a normalized endpoint/canonical-location signal with a finding previously KILLED as false_positive is REFUSED — this catches a source-line vs runtime rediscovery that would otherwise resurrect a disproven finding at a different canonical_location. If the earlier kill was wrong, reopen it with `reset-finding <slug>`; if this is a genuinely NEW finding that only coincides on endpoint + technique, re-record with --allow-remint (a.k.a. --force).",
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
@@ -641,6 +764,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         schema_name="backend RootCauseLinkRequest / FindingLinkRequest",
         preferred_invocations=(
             "vigil assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_finding",
+            "vigil assess link-finding <sib1> <sib2> <sib3> --root-cause <root-slug>",
             "vigil assess link-finding <sibling-slug> --root-cause <root-slug> --effect eliminates_attack_path --note 'Root removes this exploit chain; residual XXE remains.'",
             "vigil assess link-finding <sibling-slug> --clear-root-cause",
             "vigil assess link-finding <blocked-slug> --link-kind unblocked_by --target-kind finding --target-ref <unblocking-slug>",
@@ -659,6 +783,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("link_kind", "related (generic mode)"),
         ),
         notes=(
+            "Batch: list several sibling slugs positionally to attach them all to one --root-cause (or apply the same --intel / generic / --clear-root-cause op to each) in a resilient loop with a per-slug failure tally.",
             "Root-cause mode (--root-cause): use after findings are verified enough to consolidate. Records intentional grouping without touching root_cause_key, so dedup and human grouping stay separate.",
             "Use --effect eliminates_attack_path when fixing the root removes only the demonstrated chain and the sibling still needs standalone remediation; use eliminates_finding when the root fix retires the sibling entirely.",
             "Generic mode (--link-kind + --target-kind + --target-id/--target-ref): records an arbitrary typed link (POST /findings/{slug}/links). link_kind=root_cause is refused here — use --root-cause.",
@@ -776,11 +901,13 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         author_supplied_fields=(
             "--result-status (attempted|blocked|no-signal|error — non-covering only)",
-            "--attack-family (a vuln_taxonomy class)",
+            "--attack-family (a vuln_taxonomy CLASS token — not a family heading; see agent/references/runtime-guides/vuln-taxonomy.md)",
             "--input-slot (REQUIRED — 'slot:name' or a bare coarse slot; 'unknown'/empty rejected)",
             "--auth-context (REQUIRED — explicit identity; no silent anonymous)",
             "--target-host (REQUIRED — a non-covering lead is target-anchored by host/path)",
             "--lens / --target-path / --target-port as applicable",
+            "--work-item-ids <id...> (optional — mark those work-buffer rows done atomically with the probe insert; unknown ids skipped)",
+            "--resolve-surface <id> (optional, OPT-IN — advance that surface to partially-covered; omit and surface state is untouched)",
         ),
         helper_defaults=(
             ("tool_name", "manual"),
@@ -792,6 +919,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Name the specific input as `--input-slot slot:name` (e.g. `header:X-Forwarded-Host`, `query:uid`) so 'which input was probed' stays queryable; a bare slot is fine for whole-slot probes.",
             "--finding <slug> backfills the attempt→finding link (finding_id); it is COALESCE-backfilled on a re-run of the same probe, so a later record-attempt can attach the link an earlier one omitted.",
             "An out-of-vocab --attack-family WARNs but is stored verbatim (the backend persists TEXT for forward-compatibility).",
+            "A3: --work-item-ids <id...> drains those work-buffer rows (marks them `done`) in the SAME transaction as the probe insert, so `vigil assess work-buffer stats` bucket counts actually decrement as probes land; unknown ids are skipped, not an error. --resolve-surface <id> is OPT-IN: it advances that surface to `partially-covered` via the resolve-surface path — recording never auto-mutates surface state, so omit it to leave the surface untouched.",
+            "Verdict → verb+status (there is NO `refuted` status — a runtime-refuted hypothesis is `no-signal`): confirmed vuln → `record-probe --result-status tested|signal`; the probe fired but proved nothing → `record-attempt --result-status attempted`; a WAF/auth/egress wall stopped it → `record-attempt --result-status blocked`; hypothesis disproven / nothing distinguishing the response → `record-attempt --result-status no-signal`; the probe itself errored (tool/network failure) → `record-attempt --result-status error`. Vocabulary source: coverage.py:PROBE_RESULT_STATUSES.",
         ),
         common_mistakes=(
             ("--result-status tested", "covering verdicts go to `record-probe` (evidence required), not record-attempt; use attempted/blocked/no-signal/error here"),
@@ -809,12 +938,14 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         author_supplied_fields=(
             "--result-status (tested|signal — covering only)",
-            "--attack-family (a vuln_taxonomy class)",
+            "--attack-family (a vuln_taxonomy CLASS token — not a family heading; see agent/references/runtime-guides/vuln-taxonomy.md)",
             "--evidence-ref (REQUIRED — a covering verdict without evidence is not coverage)",
             "--input-slot (REQUIRED — 'slot:name' or a bare coarse slot; 'unknown'/empty rejected)",
             "--auth-context (REQUIRED — explicit identity; no silent anonymous)",
             "--target-host (REQUIRED unless a --request-variant-id/--service-id anchor is passed) / --target-path as applicable",
             "--request-variant-id / --service-id / --coverage-item-id from the fetched work-item (links the probe to the exact request/coverage item)",
+            "--work-item-ids <id...> (optional — mark those work-buffer rows done atomically with the probe insert; unknown ids skipped)",
+            "--resolve-surface <id> (optional, OPT-IN — advance that surface to partially-covered; omit and surface state is untouched)",
         ),
         helper_defaults=(
             ("tool_name", "manual"),
@@ -825,6 +956,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`--evidence-ref` is mandatory: a covering probe with no evidence is exactly the self-attested signal the doctrine forbids, and the depth ledger only counts covering probes with a real result.",
             "Name the specific input as `--input-slot slot:name` (e.g. `header:X-Forwarded-Host`, `query:uid`) so per-input coverage stays queryable in the resume brief; a bare slot is fine for whole-slot probes.",
             "Replaces the old raw `post probe-runs <json>` for the covering path (that raw form is now redirected here).",
+            "A3: --work-item-ids <id...> drains those work-buffer rows (marks them `done`) in the SAME transaction as the probe insert, so `vigil assess work-buffer stats` bucket counts actually decrement as probes land; unknown ids are skipped, not an error. --resolve-surface <id> is OPT-IN: it advances that surface to `partially-covered` via the resolve-surface path — recording never auto-mutates surface state, so omit it to leave the surface untouched.",
+            "Verdict → verb+status (there is NO `refuted` status — a runtime-refuted hypothesis is `no-signal`): confirmed vuln → `record-probe --result-status tested|signal`; the probe fired but proved nothing → `record-attempt --result-status attempted`; a WAF/auth/egress wall stopped it → `record-attempt --result-status blocked`; hypothesis disproven / nothing distinguishing the response → `record-attempt --result-status no-signal`; the probe itself errored (tool/network failure) → `record-attempt --result-status error`. Vocabulary source: coverage.py:PROBE_RESULT_STATUSES.",
         ),
         common_mistakes=(
             ("--result-status blocked", "non-covering outcomes go to `record-attempt`; record-probe is for tested/signal only"),
@@ -939,9 +1072,12 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Apply a verification transition to an existing finding through the audit ledger.",
         schema_name="backend FindingVerifyRequest",
         preferred_invocations=(
-            "vigil assess verify-finding <slug> <verification-json>",
+            'vigil assess verify-finding <slug> --disposition confirmed --reason "..."',
             'vigil assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity low',
             'vigil assess verify-finding <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check 2',
+            "vigil assess verify-finding <slug> --inline '{\"disposition\":\"confirmed\",\"reason_text\":\"...\"}'",
+            "vigil assess verify-finding <slug> --payload-file verify.json",
+            'vigil assess verify-finding VA-001 VA-002 VA-003 --disposition confirmed --reason "batch: all reproduced"',
         ),
         author_supplied_fields=(
             "disposition",
@@ -950,6 +1086,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Use for confirmed, downgraded, and disputed verification outcomes.",
             "For false_positive, either pass details.kill_reason/details.kill_check here, or use kill-finding for the shorter flow.",
+            "The JSON payload is passed via --inline '<json>' or --payload-file <path>; the trailing positional payload arg was REMOVED, so a JSON blob passed positionally is rejected with a pointer to the flags.",
+            "Batch: list several slugs positionally to apply the SAME disposition/payload/flags to each (resilient loop with a per-slug failure tally).",
         ),
         common_mistakes=(
             ("rationale", "use reason_text"),
@@ -975,6 +1113,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         schema_name="backend FindingVerifyRequest (false_positive)",
         preferred_invocations=(
             'vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-5>',
+            "vigil assess kill-finding <slug> --payload-file kill.json",
+            'vigil assess kill-finding VA-004 VA-005 --reason "..." --kill-reason "..." --kill-check 2',
         ),
         author_supplied_fields=(
             "reason_text",
@@ -983,6 +1123,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Use when you have the kill rationale and do not need a custom JSON payload file.",
+            "A custom JSON payload goes via --inline '<json>' or --payload-file <path>; the trailing positional payload arg was REMOVED (a JSON blob passed positionally is rejected).",
+            "Batch: list several slugs positionally to kill them all with the SAME payload/flags (resilient loop with a per-slug failure tally).",
         ),
         common_mistakes=(
             ("rationale", "use reason_text"),
@@ -1005,16 +1147,19 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Patch non-verification finding fields on an existing slug.",
         schema_name="backend FindingPatchRequest",
         preferred_invocations=(
-            "vigil assess update-finding <slug> <patch-json-file>",
+            "vigil assess update-finding <slug> --payload-file patch.json",
             'vigil assess update-finding <slug> --status reported --reason "Published in report"',
             'vigil assess update-finding <slug> --inline \'{"workflow_status":"draft","reason_text":"Needs more evidence"}\'',
             'vigil assess update-finding <slug> --details-inline \'{"chain_required":true,"chain_rationale":"...","required_followup":["..."]}\'',
             'vigil assess update-finding <slug> --details-inline \'{"cvss_score":9.1}\' --details-replace',
+            'vigil assess update-finding VA-006 VA-007 --status reported --reason "batch: published"',
         ),
         author_supplied_fields=(
             "at least one patch field",
         ),
         notes=(
+            "The patch payload goes via --inline '<json>' or --payload-file <path>; the trailing positional payload arg was REMOVED (a JSON blob passed positionally is rejected).",
+            "Batch: list several slugs positionally to apply the SAME patch payload/flags to each (resilient loop with a per-slug failure tally).",
             "Use for workflow and metadata updates that are NOT verification lifecycle transitions.",
             "Reopening a verified or false-positive finding for re-triage belongs in reset-finding.",
             "Verification disposition changes, disputed reviews, and false_positive kills belong in verify-finding or kill-finding.",
@@ -1073,6 +1218,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         preferred_invocations=(
             'vigil assess reset-finding <slug> --reason "..." --status draft',
             'vigil assess reset-finding <slug> --reason "Retest disproved the kill" --status active',
+            'vigil assess reset-finding VA-008 VA-009 --reason "batch: retest disproved both" --status draft',
         ),
         author_supplied_fields=(
             "reason_text",
@@ -1081,6 +1227,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Use when new evidence means a verified or false-positive finding should return to the active workflow.",
             "Reopening a false-positive finding resets verification_state to unreviewed and verification_disposition to none server-side.",
+            "Batch: list several slugs positionally to reset them all with the SAME --status/--reason (resilient loop with a per-slug failure tally).",
         ),
         common_mistakes=(
             ("verification_state", "reopening is a reset-finding transition, not a manual verification_state patch"),
@@ -1105,6 +1252,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             'vigil assess resolve-surface <id> --status not_applicable --rationale "..."',
             'vigil assess resolve-surface <id> --status deferred --rationale "..."',
             'vigil assess resolve-surface <id> --status partially-covered --rationale "..." --followup-condition "..."',
+            'vigil assess resolve-surface 42 99 17 --status covered --rationale "batch: same triage verdict"',
         ),
         author_supplied_fields=(
             "status",
@@ -1115,6 +1263,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Resolve a discovered surface after triage instead of falling back to direct SQL.",
             "Rationale is appended to existing rationale, so the audit trail accumulates context across resolutions.",
             "--followup-condition is REQUIRED when --status=partially-covered: the one-line condition the follow-up coverage pass must satisfy.",
+            "Batch: list several surface ids positionally to resolve them all with the SAME --status/--rationale (resilient loop with a per-id failure tally).",
         ),
         common_mistakes=(
             ("status=discovered", "discovered is the seed state; resolve to covered, not_applicable, deferred, or partially-covered"),
@@ -1146,6 +1295,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             'vigil assess resolve-coverage-item <id> --status covered --rationale "idor tested across two identities; user_b got 403"',
             'vigil assess resolve-coverage-item <id> --status not_applicable --rationale "no id-bearing param; static render"',
             'vigil assess resolve-coverage-item <id> --status deferred --rationale "low-signal; revisit after auth is issued"',
+            'vigil assess resolve-coverage-item 77 88 99 --status covered --rationale "batch: same class verdict"',
         ),
         author_supplied_fields=(
             "status (pending|queued|deferred|covered|not_applicable|blocked)",
@@ -1153,6 +1303,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Coverage items are seeded `pending` at ingest — one per implied vuln-class on a surface (the gf-bucket bridge). Resolve each implied class, not just the cluster winner: a surface's `covered` on one class does NOT cover its sibling classes.",
+            "Batch: list several coverage-item ids positionally to resolve them all with the SAME --status/--rationale (resilient loop with a per-id failure tally).",
             "--rationale is required for EVERY status (audit trail); the backend additionally rejects an empty rationale for `covered` / `not_applicable`. A resolved-positive verdict must state what was tested and why; a deferral must state why.",
             "Rationale is appended to the item's existing notes, so the audit trail accumulates across resolutions.",
             "Replaces the old raw `patch coverage-items/<id> <json>` (that raw form is now redirected here).",
@@ -1230,6 +1381,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess code-dispatch list-triggers [status]",
             "vigil assess code-dispatch resolve-triggers <triggers-json-file> <resolution-status> <note>",
             "vigil assess code-dispatch requeue-triggers <triggers-json-file>",
+            "vigil assess code-dispatch retry-error <id1,id2,...> [reason]",
         ),
         author_supplied_fields=(
             "queue item id(s)",
@@ -1242,6 +1394,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`resolve-triggers` records accepted terminal trigger gaps — use it when the target implementation is outside the supplied source snapshot, a source equivalent was analyzed, or the trigger family is genuinely not applicable.",
             "Do not inflate CWE effort numbers to satisfy the gate. Use `disposition=not_applicable` on the coverage entry, or `resolve-triggers` for cross-file gaps that cannot be queued.",
             "`list-triggers` defaults to pending triggers, so operators can inspect blockers before resolving or requeueing.",
+            "`retry-error` recovers queue items stuck at status='error' back to 'pending' so they re-enter the fetch rotation — `reset-stale` only recovers abandoned 'processing' rows on a time window and never touches 'error' rows.",
         ),
         common_mistakes=(
             ("cwe_coverage object wrapper", "`done` requires a bare JSON array, not {'cwe_coverage': [...]}"),
@@ -1256,6 +1409,41 @@ _CONTRACTS: dict[str, CommandContract] = {
             {
                 "command": "vigil assess code-dispatch done 42 clean cwe/42.json 'reviewed parser'",
             },
+            {
+                "command": "vigil assess code-dispatch retry-error 42 'transient parser crash, retrying'",
+            },
+        ),
+    ),
+    "code-ingest": CommandContract(
+        name="code-ingest",
+        goals=("code-analysis",),
+        phase=("code-ingest",),
+        summary="Walk a source repository, fingerprint analyzable files, and register them with the code-analysis backend.",
+        schema_name="backend code/repos + code/files ingest (no JSON author-file)",
+        preferred_invocations=(
+            "vigil assess code-ingest <repo-path>",
+            "vigil assess code-ingest <repo-path> --name <repo-name> --repo-key <repo-key>",
+            "vigil assess code-ingest <repo-path> --include-path '**/ResetPassword.min.js'",
+        ),
+        author_supplied_fields=(
+            "repo_path (positional, required)",
+            "--name / --repo-key when the derived defaults need overriding",
+        ),
+        helper_defaults=(
+            ("--name", "repository directory basename"),
+            ("--repo-key", "stable name+realpath hash"),
+            ("--language", "unset (does NOT auto-tag unknown files)"),
+            ("--default-language-for-unknown", "unset (unknown-extension files stay language-less)"),
+            ("--max-included-skipped-bytes", "2000000"),
+            ("--skipped-manifest", "tools/analysis-state/skipped-artifacts/<repo-key>.json"),
+        ),
+        notes=(
+            "First code step: run before code-index / code-index-sync. It creates the backend repo row (returning a repo_id, also written into scope.json source_repos) and bulk-registers analyzable files with language, LOC, hash, header snippet, and git churn/security-history metadata.",
+            "Generated/binary/minified files and skip-dirs (node_modules, vendor, dist, ...) are excluded and accounted in the skipped-artifacts manifest. --include-minified, --include-skipped, and --include-path <glob> (repeatable) opt specific artifacts back in, capped by --max-included-skipped-bytes.",
+            "--language sets only the repo's primary language; use --default-language-for-unknown to stamp a language on unrecognized-extension files (use sparingly — a wrong stamp pollutes coverage math and structural indexing).",
+        ),
+        common_mistakes=(
+            ("--language to tag unknown files", "--language sets the repo primary language only; use --default-language-for-unknown to stamp unrecognized-extension files"),
         ),
     ),
     "code-index": CommandContract(
@@ -1289,6 +1477,37 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("running outside engagement context", "pass --engagement-dir or --output-dir explicitly"),
             ("sync cannot find manifest", "use the default tools/analysis-state output or pass the same explicit output path consistently"),
             ("legacy manifest with multiple repos", "pass --repo-id or rebuild the index so repo_key metadata is available"),
+        ),
+    ),
+    "code-index-sync": CommandContract(
+        name="code-index-sync",
+        goals=("code-analysis",),
+        phase=("code-ingest",),
+        summary="Push structural-index metadata (function/entry-point/sink/export counts) from the analysis-state manifest to the backend.",
+        schema_name="code/files bulk-structural-metadata (reads structural-index manifest + per-file index JSON)",
+        preferred_invocations=(
+            "vigil assess code-index-sync",
+            "vigil assess code-index-sync --repo-key <repo-key>",
+            "vigil assess code-index-sync --repo-id <repo-id>",
+        ),
+        author_supplied_fields=(
+            "--repo-key or --repo-id only to restrict sync to one repo",
+            "--manifest / --index-dir only for non-default analysis-state locations",
+        ),
+        helper_defaults=(
+            ("--manifest", "<engagement_dir>/tools/analysis-state/structural-index-manifest.json"),
+            ("--index-dir", "<manifest-dir>/structural-index/"),
+            ("--repo-id", "unset (sync every repo in the manifest)"),
+            ("--repo-key", "unset (sync every repo in the manifest)"),
+        ),
+        notes=(
+            "Run after code-index has built the structural index into the default analysis-state tree; this consumes that manifest, so both must share the same output directory (the code-index default).",
+            "The aggregate manifest is keyed by repo_key, so multiple source repos sync from one engagement tree. Use --repo-key (or --repo-id) to re-sync just one repo.",
+            "A legacy single-repo manifest with no repo identity requires --repo-id when the engagement has more than one backend repo; otherwise rebuild the index with current code-index so repo_key metadata is recorded.",
+        ),
+        common_mistakes=(
+            ("manifest not found", "run code-index first, or point --manifest at the same output dir code-index wrote"),
+            ("--repo-id against an aggregate manifest with no matching identity", "pass --repo-key, or rebuild the index so repo_key/repo_path metadata matches the backend repo"),
         ),
     ),
     "code-classify": CommandContract(
@@ -1438,6 +1657,60 @@ _CONTRACTS: dict[str, CommandContract] = {
                 ],
                 "cross_file_triggers": [],
             },
+        ),
+    ),
+    "code-coverage": CommandContract(
+        name="code-coverage",
+        goals=("code-analysis",),
+        phase=("code-hunt", "code-verify"),
+        summary="Display code-analysis coverage, per-file CWE effort, and the coverage-gate verdict.",
+        schema_name="backend code/coverage projection (read-only)",
+        preferred_invocations=(
+            "vigil assess code-coverage",
+            "vigil assess code-coverage --cwe-matrix",
+            "vigil assess code-coverage --require-gate-pass",
+            "vigil assess code-coverage --repo-id <repo-id> --cwe-matrix --require-gate-pass",
+        ),
+        author_supplied_fields=(
+            "--repo-id to scope one repo",
+            "--cwe-matrix / --require-gate-pass flags as needed",
+        ),
+        helper_defaults=(
+            ("--repo-id", "unset (aggregate across all repos)"),
+            ("--cwe-matrix", "off (summary view; on shows the per-file CWE effort matrix)"),
+            ("--require-gate-pass", "off (informational; on exits non-zero unless the gate passes)"),
+        ),
+        notes=(
+            "The code Core-Loop coverage check — read it each iteration to see which files and vuln classes are under-tested before dispatching more hunt work.",
+            "--cwe-matrix renders the per-file CWE effort table with a structural-verification cross-check (functions_analyzed vs the structural index) and flags critical/high files below their effort threshold.",
+            "--require-gate-pass makes the command a gate: it exits non-zero when the backend coverage gate has not passed (or, under --cwe-matrix, when a critical file has an effort gap), so it can front a phase transition.",
+        ),
+    ),
+    "code-size-summary": CommandContract(
+        name="code-size-summary",
+        goals=("code-analysis",),
+        phase=("code-ingest", "code-classify"),
+        summary="Summarize backend-indexed code_files: counts, LOC buckets, ownership splits, and large-file candidates.",
+        schema_name="backend code/files projection (read-only aggregate)",
+        preferred_invocations=(
+            "vigil assess code-size-summary",
+            "vigil assess code-size-summary --repo-id <repo-id>",
+            "vigil assess code-size-summary --large-threshold 1500 --top 30",
+            "vigil assess code-size-summary --json",
+        ),
+        author_supplied_fields=(
+            "--repo-id to scope one repo",
+            "--large-threshold / --top / --json as needed",
+        ),
+        helper_defaults=(
+            ("--repo-id", "unset (aggregate across all repos)"),
+            ("--large-threshold", "1000 (minimum LOC for critical/high large-file candidates)"),
+            ("--top", "20 (maximum large candidates printed)"),
+            ("--json", "off (text summary; on emits the structured summary object)"),
+        ),
+        notes=(
+            "Sizing view for the ingest/classify pass: shows LOC buckets, language and analysis-status splits, and app-owned vs generated vs vendor ownership so classification effort lands on app-owned surface, not vendored/generated bulk.",
+            "large_candidates lists only critical/high-classified files at or above --large-threshold LOC — the oversized attack surface worth splitting into focused hunt dispatches.",
         ),
     ),
     # --- Discovery / navigation / read-query utilities (phase-agnostic) ---
@@ -1609,19 +1882,24 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "coverage": CommandContract(
         name="coverage",
-        summary="Per-host coverage ledger: route count, real_app, dedicated lane, finding verdict, and computed coverage-state (read-only).",
-        schema_name="backend per-host coverage projection",
+        summary="Coverage ledger (read-only). Default: per-host route/real_app/verdict state. --by-family: per application-unit × attack-family GAP grid. --for-dispatch --host <h>: a paste-ready COVERAGE block for a dispatch prompt.",
+        schema_name="backend per-host coverage projection (+ coverage-readiness/by-family for --by-family/--for-dispatch)",
         preferred_invocations=(
             "vigil assess coverage",
             "vigil assess coverage --route-threshold 6",
+            "vigil assess coverage --by-family",
+            "vigil assess coverage --for-dispatch --host app.example.com --path-prefix /api",
             "vigil assess coverage --json",
         ),
         author_supplied_fields=(),
         helper_defaults=(
-            ("--route-threshold", "6 (distinct LIVE url_path count at/above which a host counts as a real_app on routes alone)"),
+            ("--route-threshold", "6 (distinct LIVE url_path count at/above which a host counts as a real_app on routes alone; default per-host view only)"),
         ),
         notes=(
             "Read-only orientation for where coverage stands per host. `--json` is the machine form for dispatch planning.",
+            "--by-family renders the per application-unit × attack-family grid from `coverage-readiness/by-family`: GAP cells (missing_block/missing_warn or zero covering probes) are marked, covered cells show the verdict + covering/total probe counts, and finding-linked cells are flagged (e.g. finding#45). --json passes the raw by-family payload through.",
+            "--for-dispatch --host <h> [--path-prefix <p>] reuses the SAME by-family grid (no extra backend call), filters CLIENT-SIDE to that application-unit, and emits a paste-ready COVERAGE: block listing covered vs OPEN-gap families — hand it to a specialist alongside an open objective instead of a prescriptive technique cage (which `agent start` now WARN-lints).",
+            "Scoping vocabulary: --host / --path-prefix here select application-UNITS (grid rows). This is distinct from --surface on `list-attempts`, which is a surface-ID; keep the two straight.",
         ),
     ),
     "list-findings": CommandContract(
@@ -1669,6 +1947,33 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Read-only audit search. `--q` is a fuzzy keyword search over command/tool/previews/metadata/finding-aliases; `--sort {relevance|recent|distant}` (distant surfaces coverage-gap candidates); filters include --agent-name / --phase / --tool-name / --tool-bin / --target-host / --technique / --route.",
             "Drill into a single row with `vigil assess get-command-run <id>`.",
+        ),
+    ),
+    "list-attempts": CommandContract(
+        name="list-attempts",
+        phase=("consume-test", "exploit"),
+        summary=(
+            "List the recorded probe-attempt ledger (the READ side of "
+            "record-probe/record-attempt), grouped by lens × result_status with "
+            "per-row finding linkage."
+        ),
+        schema_name="GET /assessment/attempts",
+        preferred_invocations=(
+            "vigil assess list-attempts --host app.example.com",
+            "vigil assess list-attempts --attack-family idor --result-status no-signal",
+            "vigil assess list-attempts --finding VA-047",
+            "vigil assess list-attempts --lens tenant-boundary --json",
+        ),
+        author_supplied_fields=(),
+        notes=(
+            "Read-only query mirror of the probe-recording verbs: record-probe writes covering probes (tested|signal), record-attempt writes non-covering attempts (attempted|blocked|no-signal|error), and this lists both back.",
+            "Rows are grouped by the free-text --lens the probe ran under × its result_status, so 'which mindset produced which verdict' reads at a glance; each row carries finding_slug + finding_severity when the probe is linked to a finding.",
+            "Filters: --finding <slug> / --surface <id> / --host / --attack-family / --result-status / --lens, plus --limit / --offset. --surface is a surface-ID, NOT a host — host filtering is --host, and the application-unit coverage view is `vigil assess coverage --host`.",
+            "Use it before dispatching more probing to dedup against what a lens/family has already tried on a host (the query-side companion to `coverage --by-family`, which shows the class-level GAPs).",
+        ),
+        common_mistakes=(
+            ("--surface <host>", "--surface is a surface-ID; pass a host to --host (or use `vigil assess coverage --host` for the app-unit coverage grid)"),
+            ("expecting a bare list", "the response is {\"attempts\": [...], \"count\": N}; --json emits it verbatim"),
         ),
     ),
     "get-command-run": CommandContract(
@@ -2078,6 +2383,19 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "stderr); pass your own `-exclude-tags` to override it verbatim. The result's `resolved_argv` "
         "shows the exact command that ran after injection.",
         "Long sweeps run synchronously with a generous --timeout. `vigil assess kali job start` is operator-only — specialists never background (see kali-exec skill).",
+    ),
+    "httpx": (
+        "Alt-port liveness (I-6): pass -ports/-p <comma-list> (e.g. 80,443,8080,8443) whenever "
+        "scope may include non-default ports — httpx probes only 80/443 by default, so an "
+        "alt-port-only host reads as dead and is never seeded/crawled without this.",
+        "Prefer typed flags over --extra-args: -web-server (Server header; there is NO -server "
+        "flag on this wrapper, only -web-server), -content-length/-cl (flag), -path <path> "
+        "(probe an appended path), -store-response/-sr + -store-response-dir/-srd (save response "
+        "bodies to disk).",
+        "--extra-args common passthrough (not yet typed): -mr/-match-regex (regex match), "
+        "-body/-d (request body), -method/-x (HTTP method, default GET), and -json field-selection "
+        "flags (e.g. -irr/-include-response). Confirm exact spelling with `vigil assess kali "
+        "tool-help httpx` before guessing — see references/tools/recon/httpx.md.",
     ),
     "katana": (
         "Deep + scope-safe + disk-bounded by DEFAULT: `-d 5`, `-fs fqdn` (crawl only the exact seeded "
@@ -2668,6 +2986,7 @@ def _dispatch_root_contract() -> CommandContract:
             "`agent done` patches lifecycle directly, `agent handoff` writes a repeatable checkpoint, `agent close` consumes a ready/blocked handoff into closure, and `agent render-handoff` assembles the blob the next dispatch prompt pastes verbatim.",
             "`agent start` defaults a missing --dispatch-mode from the role (warn, not block) and accepts a newly-coined mode (advisory warn). "
             "Pass --allow-no-skills to proceed for an ad-hoc role with no --skills (warn, not error), and --check-overlap to opt into the advisory in-progress-overlap scan.",
+            "`agent start` also lints --task for a prescriptive 'technique cage' — a step-by-step recipe that caps a specialist's depth (>=2 of: a numbered/bulleted step list, a run of imperative test-verbs, a pre-named vuln class). This is WARN-only and NEVER blocks the dispatch; the fix is to hand the specialist the measured coverage picture instead of a script via `vigil assess coverage --host <h> --for-dispatch` (paste the COVERAGE block) plus an open objective.",
             f"Verbs with their own contract entries: {', '.join(AGENT_VERBS)}.",
         ),
         common_mistakes=(
@@ -2696,30 +3015,29 @@ def _dispatch_root_contract() -> CommandContract:
 def _work_buffer_contract() -> CommandContract:
     return CommandContract(
         name="work-buffer",
-        summary="Operate on the local cases.db work-buffer queue.",
-        schema_name="local cases.db work_items schema",
+        summary="Operate on the backend assessment_work_items work-buffer queue.",
+        schema_name="backend assessment_work_items schema",
         preferred_invocations=(
-            "vigil assess work-buffer <cases.db> stats --by status|source|cluster|host",
-            "vigil assess work-buffer <cases.db> peek <type> [limit]",
-            "vigil assess work-buffer <cases.db> fetch <type> <limit> <agent-name>",
-            "vigil assess work-buffer <cases.db> fetch-by-priority <limit> auto",
-            "vigil assess work-buffer <cases.db> done <id1,id2,...>",
-            "vigil assess work-buffer <cases.db> defer-cluster <cluster_key> --reason \"...\"",
+            "vigil assess work-buffer stats --by status|source|cluster|host",
+            "vigil assess work-buffer peek <type> [limit]",
+            "vigil assess work-buffer fetch <type> <limit> <agent-name>",
+            "vigil assess work-buffer fetch-by-priority <limit> auto",
+            "vigil assess work-buffer done <id1,id2,...>",
+            "vigil assess work-buffer defer-cluster <cluster_key> --reason \"...\"",
         ),
         author_supplied_fields=(
-            "<cases.db>",
             "<action>",
             "action-specific item ids, type, limit, agent name, or reason",
         ),
         notes=(
-            "Work-buffer rows are local batching state, NOT backend agent lifecycle rows. "
-            "Use `vigil assess agent …` for backend dispatch rows, handoffs, and decisions.",
+            "Work-buffer rows are backend batching state (assessment_work_items), NOT backend agent "
+            "lifecycle rows. Use `vigil assess agent …` for backend dispatch rows, handoffs, and decisions.",
             "Mark items done only after the specialist has written durable backend state "
             "(findings, surfaces, probe runs, or coverage) for the work.",
         ),
         common_mistakes=(
             ("using agent handoff syntax here", "`work-buffer` never records handoffs; use `vigil assess agent handoff`"),
-            ("reading cases.db directly", "use the helper so migrations, status transitions, and terminal_reason semantics stay consistent"),
+            ("calling the backend work-items API directly", "use the CLI verb so classification, status transitions, and terminal_reason semantics stay consistent"),
         ),
     )
 
@@ -2835,9 +3153,10 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "vigil assess agent done <agent-id> --status completed --finding-slugs <slug1,slug2>",
                 "vigil assess agent done <agent-id> --status failed",
                 "vigil assess agent done <agent-id> --status aborted",
+                "vigil assess agent done AG-1 AG-2 AG-3 --status completed",
             ),
             author_supplied_fields=(
-                "<agent-id>",
+                "<agent-id> (one or more; batch applies the same flags to each)",
                 "--status (in-progress|completed|failed|aborted|blocked)",
             ),
             helper_defaults=(
@@ -2866,13 +3185,15 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             preferred_invocations=(
                 "vigil assess agent close <agent-id>",
                 "vigil assess agent close <agent-id> --reason \"ready handoff reviewed\"",
+                "vigil assess agent close AG-1 AG-2 AG-3",
             ),
             author_supplied_fields=(
-                "<agent-id>",
+                "<agent-id> (one or more; batch closes each ready/blocked handoff)",
                 "--reason",
             ),
             notes=(
                 "Use after a specialist checkpoint marks handoff_status=ready or blocked. Checkpointed handoffs stay open.",
+                "Batch: list several agent-ids to close each in a resilient loop; a non-closable/checkpointed dispatch is reported and skipped, not fatal.",
                 "Records a dispatch_closed_from_handoff decision row so automated/stale closure stays auditable.",
             ),
         )

@@ -48,6 +48,14 @@ def _finding_summary(row: Any) -> dict[str, Any]:
         "evidence_ref": row["evidence_ref"] or "",
         "chain_required": bool(details.get("chain_required")),
         "chain_rationale": str(details.get("chain_rationale") or "")[:500],
+        # Blocked-for-provisioning marker: a disposition='blocked' finding is held
+        # OUT of the report and otherwise renders in the brief as a bare
+        # active/verified line, so surface WHY it stalled via the required
+        # block_reason. Empty for non-blocked findings; bounded so the brief stays
+        # compact. Rendered by resume_brief._finding_line via the shared
+        # finding_render.blocked_reason_summary helper. (Surfacing
+        # unblock_requirements is deferred — see roadmap.md.)
+        "block_reason": str(details.get("block_reason") or "")[:300],
         "updated_at": row["updated_at"],
     }
 
@@ -150,6 +158,17 @@ def _stale_threshold_for(role: str | None, *, override: float | None) -> float:
     return _STALE_THRESHOLD_BY_ROLE.get(str(role or ""), _DEFAULT_STALE_THRESHOLD_HOURS)
 
 
+# C4c: a dispatch that lands on a terminal status (failed/aborted) with no
+# handoff row at all is silent state-loss — there is no artifact explaining
+# why it died, and (pre-fix) it was structurally invisible to this picture
+# because the in-progress-only gate below excluded it before the handoff-gap
+# check ever ran. `_TERMINAL_NO_HANDOFF_STATUSES` is the scope for the new
+# `terminal_no_handoff` list; keep it in sync with the `agent.py`
+# `_reconcile_stale` mirror (which reports the same rows read-only, since a
+# handoff-less terminal dispatch has no ready/blocked handoff to close).
+_TERMINAL_NO_HANDOFF_STATUSES = frozenset({"failed", "aborted"})
+
+
 def _recent_dispatch_picture(
     engagement_id: int,
     *,
@@ -160,14 +179,35 @@ def _recent_dispatch_picture(
     now = dt.datetime.now(dt.timezone.utc)
     stale: list[dict[str, Any]] = []
     gaps: list[dict[str, Any]] = []
+    terminal_no_handoff: list[dict[str, Any]] = []
     for row in dispatches:
-        if row.get("status") != "in-progress":
-            continue
         agent_id = row.get("agent_id")
         agent_role = row.get("agent_role")
+        status_value = str(row.get("status") or "")
         handoff = handoffs.get(agent_id)
+        # A handoff-less dispatch is surfaced by exactly ONE list, keyed on status
+        # so nothing is double-reported and normal rows aren't flagged:
+        #   * terminal (failed/aborted) -> `terminal_no_handoff` — silent
+        #     state-loss, the load-bearing case that used to be invisible to the
+        #     brief (the in-progress-only gate below excluded it before the
+        #     handoff check ran);
+        #   * in-progress -> `handoff_gaps` — running but not yet checkpointed.
+        # A `completed` dispatch with no handoff is normal (not every completed
+        # dispatch owes one), so neither list flags it.
         if not handoff:
-            gaps.append({"agent_id": agent_id, "agent_role": agent_role, "reason": "no_handoff"})
+            if status_value in _TERMINAL_NO_HANDOFF_STATUSES:
+                terminal_no_handoff.append(
+                    {
+                        "agent_id": agent_id,
+                        "agent_role": agent_role,
+                        "status": status_value,
+                        "completed_at": row.get("completed_at"),
+                    }
+                )
+            elif status_value == "in-progress":
+                gaps.append({"agent_id": agent_id, "agent_role": agent_role, "reason": "no_handoff"})
+        if status_value != "in-progress":
+            continue
         started = _parse_iso(row.get("dispatched_at"))
         age_hours = ((now - started).total_seconds() / 3600.0) if started else None
         threshold = _stale_threshold_for(agent_role, override=max_age_hours)
@@ -192,6 +232,7 @@ def _recent_dispatch_picture(
         "latest_handoffs": list(handoffs.values())[:10],
         "stale_in_progress_dispatches": stale,
         "handoff_gaps": gaps[:10],
+        "terminal_no_handoff": terminal_no_handoff[:10],
         "stale_threshold_hours": reported_threshold,
         "stale_threshold_role_overrides": dict(_STALE_THRESHOLD_BY_ROLE) if max_age_hours is None else {},
     }
@@ -330,26 +371,30 @@ def _surfaces_section(connection, engagement_id: int) -> dict[str, Any]:
 
 
 def _work_buffer_section(connection, engagement_id: int) -> dict[str, Any]:
-    """Pending coverage-item rollup ("work buffer") keyed by gf-bucket (gap #2).
+    """Pending work-buffer rollup keyed by gf-bucket cluster (gap #2).
 
-    The gf-bucket → coverage bridge records one ``assessment_coverage_items``
-    row per matched bucket, storing the canonical attack-class that the bucket
-    maps to (``GF_BUCKET_TO_CLASS[bucket]``) in ``attack_family`` — so grouping
-    by ``attack_family`` rolls up the pending work by bucket-derived class. A
-    coverage item is pending until it is ``covered`` / ``not_applicable``.
-    Counts are an absolute snapshot, NOT since-filtered. ``by_bucket`` is
-    ordered by descending count.
+    Reads the real dispatch queue (``assessment_work_items``) — the transient
+    triage buffer folded into the backend ledger (ADR 0013) — rather than a
+    coverage-item proxy. A row is pending work until it is claimed / done /
+    skipped / deferred; rows carrying a ``terminal_reason`` are excluded. Keyed
+    by ``cluster_key`` (the gf-bucket identity, e.g. ``gf:trust_surface``),
+    falling back to ``type:<type>`` when unclustered. Counts are an absolute
+    snapshot, NOT since-filtered. ``by_bucket`` is ordered by descending count.
     """
     rows = connection.execute(
-        "SELECT attack_family, status FROM assessment_coverage_items WHERE engagement_id = ?",
+        "SELECT cluster_key, type, status, terminal_reason "
+        "FROM assessment_work_items WHERE engagement_id = ?",
         (engagement_id,),
     ).fetchall()
     by_bucket: Counter = Counter()
     for row in rows:
         status_value = str(row["status"] or "pending").strip().lower()
-        if status_value in _RETIRED_COVERAGE_STATUSES:
+        if status_value != "pending":
             continue
-        by_bucket[str(row["attack_family"] or "unknown")] += 1
+        if row["terminal_reason"]:
+            continue
+        key = row["cluster_key"] or f"type:{row['type'] or 'unknown'}"
+        by_bucket[str(key)] += 1
     return {
         "pending_total": sum(by_bucket.values()),
         "by_bucket": dict(by_bucket.most_common()),
@@ -461,7 +506,7 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
 
 
 def _per_input_coverage_section(
-    connection, engagement_id: int, *, since: str
+    connection, engagement_id: int, *, since: str, row_limit: int = _PER_INPUT_ROW_LIMIT
 ) -> dict[str, Any]:
     """Per-input coverage grid (WS2) — the generated, queryable answer to "which
     input was tested for which class, as which identity, and did it hit a wall".
@@ -559,7 +604,11 @@ def _per_input_coverage_section(
         if not cell["evidence_ref"] and covering and probe["evidence_ref"]:
             cell["evidence_ref"] = probe["evidence_ref"]
 
-    cell_list = list(cells.values())[:_PER_INPUT_ROW_LIMIT]
+    all_cells = list(cells.values())
+    # ``row_limit <= 0`` returns every cell (the resume-brief ``--all-cells``
+    # escape valve for the ~790-cell case); a positive limit caps the sample. The
+    # absolute total below still reports true breadth regardless of the cap.
+    cell_list = all_cells if row_limit <= 0 else all_cells[:row_limit]
 
     # Absolute distinct-cell total (NOT since-filtered), like the other counts —
     # so a capped/filtered grid still signals the true number of probed inputs.
@@ -585,6 +634,7 @@ def build_resume_brief(
     agent_id: str = "",
     max_age_hours: float | None = None,
     since: str = "",
+    per_input_limit: int = _PER_INPUT_ROW_LIMIT,
 ) -> dict[str, Any]:
     if since and _parse_iso(since) is None:
         # Silent fallback would hide the bug — the operator types
@@ -636,7 +686,7 @@ def build_resume_brief(
         work_buffer_section = _work_buffer_section(connection, engagement_id)
         attempts_section = _attempts_section(connection, engagement_id, since=since)
         per_input_coverage_section = _per_input_coverage_section(
-            connection, engagement_id, since=since
+            connection, engagement_id, since=since, row_limit=per_input_limit
         )
 
     command_matches_all = (

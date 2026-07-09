@@ -203,7 +203,10 @@ def add_passthrough_args_flag(parser) -> None:
     parser.add_argument(
         "--extra-args",
         default="",
-        help="Raw additional CLI args appended to the underlying tool. shlex-split. Use sparingly; prefer typed flags.",
+        help=(
+            "Raw additional CLI args appended to the underlying tool. shlex-split. Use sparingly; "
+            "prefer typed flags. Example: --extra-args '-mr admin'"
+        ),
     )
 
 

@@ -304,6 +304,7 @@ approval IDs.
 | Command-run ID | `<command-run-id>` |
 
 #### Exact command
+
 ```text
 <COPY VERBATIM from `assessment_command_runs.command`. Examples:
   Revoke-AzureADUserAllRefreshToken -ObjectId <user-objectid>

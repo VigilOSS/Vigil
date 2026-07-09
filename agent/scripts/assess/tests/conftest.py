@@ -22,6 +22,12 @@ _SCRIPTS_ROOT = Path(__file__).resolve().parents[2]  # agent/scripts
 if str(_SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_ROOT))
 
+# The tests directory is on sys.path (pytest prepend import mode; no __init__.py
+# here), so the shared, backend-less fake for AssessmentClient imports as a
+# top-level module. Re-exported here so `from conftest import FakeAssessmentClient`
+# also resolves and so the module is always loaded for the suite.
+from _fake_client import FakeAssessmentClient  # noqa: E402,F401
+
 
 @pytest.fixture(autouse=True)
 def _isolate_vigil_config(tmp_path, monkeypatch):

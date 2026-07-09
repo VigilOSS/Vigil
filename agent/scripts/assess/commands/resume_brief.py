@@ -6,6 +6,9 @@ from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.finding_render import blocked_reason_summary
+
+_COVERING_STATUSES = {"tested", "signal"}
 
 
 def register(subparsers) -> None:
@@ -36,6 +39,23 @@ def register(subparsers) -> None:
             "72h for code-fuzz-engineer."
         ),
     )
+    p.add_argument(
+        "--per-input-limit",
+        dest="per_input_limit",
+        type=int,
+        default=None,
+        help=(
+            "Cap on Per-Input Coverage cells returned (default 20). The grid also "
+            "reports the true total (cells_count), so a capped sample still signals "
+            "breadth. Use a larger N, or --all-cells, when you need every cell."
+        ),
+    )
+    p.add_argument(
+        "--all-cells",
+        dest="all_cells",
+        action="store_true",
+        help="Return every Per-Input Coverage cell (no cap). Equivalent to --per-input-limit 0.",
+    )
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(func=run)
 
@@ -55,6 +75,10 @@ def run(args) -> None:
     since = getattr(args, "since", "")
     if since:
         params.append(("since", since))
+    if getattr(args, "all_cells", False):
+        params.append(("per_input_limit", "0"))
+    elif getattr(args, "per_input_limit", None) is not None:
+        params.append(("per_input_limit", str(int(args.per_input_limit))))
     endpoint = "resume-brief"
     if params:
         endpoint += "?" + urlencode(params, quote_via=quote)
@@ -123,8 +147,18 @@ def _render_markdown(brief: dict) -> str:
         lines.append(f"- stale: {row.get('agent_id')} role={row.get('agent_role')} age_h={row.get('age_hours')} handoff={row.get('handoff_status')}")
     for row in dispatches.get("handoff_gaps") or []:
         lines.append(f"- gap: {row.get('agent_id')} role={row.get('agent_role')} reason={row.get('reason')}")
-    if not (dispatches.get("stale_in_progress_dispatches") or dispatches.get("handoff_gaps")):
-        lines.append("- no stale in-progress dispatches or handoff gaps in the brief window")
+    for row in dispatches.get("terminal_no_handoff") or []:
+        lines.append(
+            f"- terminal-no-handoff: {row.get('agent_id')} role={row.get('agent_role')} "
+            f"status={row.get('status')} completed_at={row.get('completed_at')} "
+            "(silent state-loss — no handoff was ever written)"
+        )
+    if not (
+        dispatches.get("stale_in_progress_dispatches")
+        or dispatches.get("handoff_gaps")
+        or dispatches.get("terminal_no_handoff")
+    ):
+        lines.append("- no stale in-progress dispatches, handoff gaps, or terminal handoff-less dispatches in the brief window")
     selected = dispatches.get("selected_dispatch")
     if selected:
         lines.extend(["", "## Selected Dispatch"])
@@ -352,6 +386,8 @@ def _render_per_input_coverage(lines: list, per_input: dict) -> None:
             status = cell.get("latest_status") or "-"
             wall = cell.get("observed_http_status")
             verdict = f"{status}({wall})" if wall is not None else status
+            if cell.get("covering") and status not in _COVERING_STATUSES:
+                verdict = f"covered; latest={verdict}"
             count = cell.get("count") or 1
             line = f"  - {family} {slot} [{auth}] {verdict} x{count}"
             lens = _trim(cell.get("lens") or "", 40)
@@ -387,11 +423,19 @@ def _select_findings(rows: list) -> list:
 
 
 def _finding_line(row: dict) -> str:
-    return (
+    line = (
         f"{row.get('slug')} {row.get('severity')} "
         f"{row.get('workflow_status')}/{row.get('verification_state')} "
         f"{_trim(row.get('title') or '', 100)}"
     )
+    # A blocked-for-provisioning finding (verification_disposition='blocked')
+    # shows only workflow_status/verification_state above — usually active/verified
+    # — so nothing here says it is blocked or why. Append the reason so a resume
+    # reads it without opening the finding. No-op for non-blocked findings.
+    blocked = blocked_reason_summary(row)
+    if blocked:
+        line += f" — {_trim(blocked, 160)}"
+    return line
 
 
 def _trim(value: str, limit: int) -> str:

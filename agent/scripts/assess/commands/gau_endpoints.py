@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
-import sqlite3
 import sys
 from pathlib import Path
 from shlex import quote
@@ -29,7 +28,6 @@ from assess.lib.gau_pipeline import (
     decide_cache_reuse,
     emit_pipeline_summary,
     gau_cache_key,
-    resolve_db_path,
     resolve_pipeline_paths,
     run_uro_dedup,
     utcnow_iso,
@@ -94,7 +92,6 @@ def _build_gau_argv(*, target: str, output_path: str, args: argparse.Namespace) 
 
 def _run_ingest_endpoints(
     *,
-    db_path: Path,
     source: str,
     input_file: Path,
     engagement_dir: Path,
@@ -102,7 +99,7 @@ def _run_ingest_endpoints(
     """Invoke `ingest-endpoints` in-process via the same CLI entrypoint.
 
     Calling `cli.main(argv)` directly avoids a subprocess boundary while
-    still routing through the same argparse + audit + DB write code path
+    still routing through the same argparse + audit + backend-ingest code path
     `vigil assess ingest-endpoints` uses on the host. SystemExit raised by
     the inner command propagates as a non-zero exit, which we translate
     into AssessError so the wrapper can surface it cleanly.
@@ -112,7 +109,6 @@ def _run_ingest_endpoints(
         "--engagement-dir",
         str(engagement_dir),
         "ingest-endpoints",
-        str(db_path),
         source,
         "--file",
         str(input_file),
@@ -128,48 +124,38 @@ def _run_ingest_endpoints(
     return {"returncode": 0}
 
 
-def _summarize_work_buffer(db_path: Path, source: str) -> dict:
-    """Read post-ingest counts directly from cases.db.
+def _summarize_work_buffer(cfg, source: str) -> dict:
+    """Read post-ingest counts for `source` from the backend work buffer.
 
-    Reading SQL avoids a backend round-trip and gives a deterministic
-    snapshot the wrapper can return as part of its summary. We scope to
-    the source we just wrote so concurrent ingests on other sources do
-    not skew the numbers.
+    Scoped to the source we just wrote so concurrent ingests on other sources
+    do not skew the numbers. Best-effort: a backend hiccup degrades to zeros
+    rather than failing the whole gau run.
     """
-    if not db_path.is_file():
-        return {"work_items_total": 0, "work_items_pending": 0, "top_clusters": []}
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
-    conn.row_factory = sqlite3.Row
+    from collections import Counter
+
+    from assess.lib.client import AssessmentClient
+
     try:
-        total = conn.execute(
-            "SELECT COUNT(*) FROM work_items WHERE source = ?", (source,)
-        ).fetchone()[0]
-        pending = conn.execute(
-            "SELECT COUNT(*) FROM work_items WHERE source = ? AND status = 'pending'",
-            (source,),
-        ).fetchone()[0]
-        skipped = conn.execute(
-            "SELECT COUNT(*) FROM work_items WHERE source = ? AND status = 'skipped'",
-            (source,),
-        ).fetchone()[0]
-        clusters = conn.execute(
-            """
-            SELECT cluster_key, COUNT(*) AS n
-            FROM work_items
-            WHERE source = ? AND status = 'pending' AND cluster_key IS NOT NULL
-            GROUP BY cluster_key
-            ORDER BY n DESC
-            LIMIT 10
-            """,
-            (source,),
-        ).fetchall()
-    finally:
-        conn.close()
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+            rows = [
+                r for r in client.get_all_pages("work-items")
+                if (r.get("source") or "") == source
+            ]
+    except Exception:  # noqa: BLE001 - summary is best-effort
+        return {"work_items_total": 0, "work_items_pending": 0, "work_items_skipped": 0, "top_clusters": []}
+
+    pending = sum(1 for r in rows if r.get("status") == "pending")
+    skipped = sum(1 for r in rows if r.get("status") == "skipped")
+    clusters: Counter = Counter(
+        r.get("cluster_key")
+        for r in rows
+        if r.get("status") == "pending" and r.get("cluster_key")
+    )
     return {
-        "work_items_total": int(total),
-        "work_items_pending": int(pending),
-        "work_items_skipped": int(skipped),
-        "top_clusters": [{"cluster_key": r["cluster_key"], "count": int(r["n"])} for r in clusters],
+        "work_items_total": len(rows),
+        "work_items_pending": pending,
+        "work_items_skipped": skipped,
+        "top_clusters": [{"cluster_key": k, "count": int(n)} for k, n in clusters.most_common(10)],
     }
 
 
@@ -180,7 +166,6 @@ def run(args: argparse.Namespace) -> None:
         providers=args.providers,
     )
     paths = resolve_pipeline_paths(cfg, target=args.target, cache_key=current_cache_key)
-    db_path = resolve_db_path(cfg, getattr(args, "db_override", None))
 
     decision = decide_cache_reuse(
         paths,
@@ -270,18 +255,8 @@ def run(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
 
-    # Ensure cases.db exists before we try to write into it. New temp DBs
-    # passed via --db must be initialized; existing engagement DBs are
-    # already migrated.
-    if not db_path.is_file():
-        from assess.lib.db import db_init
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        db_path.touch()
-        db_init(str(db_path))
-
     try:
         _run_ingest_endpoints(
-            db_path=db_path,
             source=args.source,
             input_file=ingest_input,
             engagement_dir=Path(cfg.engagement_dir),
@@ -290,7 +265,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"gau-endpoints: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    work_summary = _summarize_work_buffer(db_path, args.source)
+    work_summary = _summarize_work_buffer(cfg, args.source)
 
     emit_pipeline_summary(
         {
@@ -307,7 +282,6 @@ def run(args: argparse.Namespace) -> None:
             "deduped_count": deduped_count,
             "ingest_input_path": str(ingest_input),
             "ingest_source": args.source,
-            "db_path": str(db_path),
             **work_summary,
         }
     )

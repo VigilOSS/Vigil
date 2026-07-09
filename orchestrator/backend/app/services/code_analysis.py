@@ -1858,6 +1858,57 @@ def reset_stale_queue_items(
         return {"reset": cursor.rowcount}
 
 
+def retry_error_queue_items(
+    engagement_id: int,
+    item_ids: list[int],
+    reason: str = "",
+) -> dict[str, Any]:
+    """C5.1: recover queue items stuck at status='error' back to 'pending'.
+
+    `reset_stale_queue_items` only recovers abandoned 'processing' rows on a
+    time window; an 'error' row has no recovery path at all today — a stuck
+    error item is a permanently un-analyzed source file (silent coverage
+    loss). Id-scoped like `error_queue_items` (not time-windowed): every id
+    must currently be 'error' via `_require_queue_status`, so a caller cannot
+    silently no-op on the wrong status. `reason` is appended to the existing
+    `analysis_notes` as an audit breadcrumb rather than overwriting prior
+    notes from the failed run.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    if not item_ids:
+        return {"retried": 0, "total": 0, "item_ids": []}
+    # Dedupe (preserving order) so `retry-error 5,5` does not fail its own
+    # rowcount==len(item_ids) check — `id IN (5,5)` updates one row while len is 2.
+    item_ids = list(dict.fromkeys(item_ids))
+    reason_text = (reason or "").strip()
+    note_suffix = f"\n[retried: {reason_text}]" if reason_text else "\n[retried]"
+    placeholders = ",".join("?" for _ in item_ids)
+    with get_connection() as connection:
+        queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
+        _require_queue_status(queue_rows, expected_status="error", action="retry")
+        cursor = connection.execute(
+            f"""
+            UPDATE code_analysis_queue
+            SET status = 'pending',
+                assigned_agent = '',
+                consumed_at = NULL,
+                analysis_notes = analysis_notes || ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND status = 'error' AND id IN ({placeholders})
+            """,
+            (note_suffix, engagement.id, *item_ids),
+        )
+        if cursor.rowcount != len(item_ids):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="queue items changed state before retry; refetch and retry",
+            )
+        for row in queue_rows.values():
+            _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
+            _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
+        return {"retried": cursor.rowcount, "total": len(item_ids), "item_ids": sorted(item_ids)}
+
+
 # =========================================================================
 # Analysis Results
 # =========================================================================

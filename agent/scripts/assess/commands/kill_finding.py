@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
@@ -18,9 +19,19 @@ def register(subparsers) -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=render_contract_epilog("kill-finding"),
     )
-    p.add_argument("finding_slug", help="Canonical finding slug")
-    p.add_argument("payload", nargs="?", help="Path to a JSON verification payload or inline JSON object")
+    p.add_argument(
+        "finding_slug",
+        nargs="+",
+        help="One or more canonical finding slugs. Batch: every listed slug is killed with the "
+             "SAME payload/flags (resilient loop with a per-slug failure tally).",
+    )
     p.add_argument("--inline", dest="inline_payload", help="Raw JSON verification payload")
+    p.add_argument(
+        "--payload-file",
+        dest="payload_file",
+        help="Path to a JSON verification payload file (replaces the removed trailing positional "
+             "payload arg; use --inline for raw JSON).",
+    )
     p.add_argument("--reason", dest="reason_text", help="Why the finding is a false positive")
     p.add_argument("--reason-code", default="")
     p.add_argument("--kill-reason", help="Stored as details.kill_reason")
@@ -34,13 +45,39 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
+def _looks_like_payload(token: str) -> bool:
+    """True when a positional token looks like a JSON payload rather than a slug."""
+    t = (token or "").strip()
+    return bool(t) and (t.startswith(("{", "[")) or t.endswith(".json") or Path(t).is_file())
+
+
 def run(args) -> None:
-    raw_payload = args.inline_payload if args.inline_payload is not None else args.payload
+    slugs = args.finding_slug if isinstance(args.finding_slug, list) else [args.finding_slug]
+    # The trailing positional payload arg was removed (it collided with a variadic
+    # slug list). Catch a legacy JSON blob passed positionally.
+    for token in slugs:
+        if _looks_like_payload(str(token)):
+            print(
+                f"'{str(token).strip()}' looks like a JSON payload, not a finding slug. The "
+                f"positional payload arg was removed — pass the JSON via --inline '<json>' or "
+                f"--payload-file <path>, and list only finding slugs positionally.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    inline_payload = getattr(args, "inline_payload", None)
+    payload_file = getattr(args, "payload_file", None)
+    if inline_payload is not None:
+        raw_payload, raw_inline = inline_payload, True
+    elif payload_file:
+        raw_payload, raw_inline = payload_file, False
+    else:
+        raw_payload, raw_inline = None, False
     if raw_payload is not None:
         try:
             payload, _ = parse_json_argument(
                 raw_payload,
-                inline=args.inline_payload is not None,
+                inline=raw_inline,
                 description="false-positive verification payload",
             )
         except ValueError as exc:
@@ -99,7 +136,24 @@ def run(args) -> None:
         sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
+    results: list = []
+    failed = 0
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.post(f"findings/{args.finding_slug}/verify", payload)
+        for slug in slugs:
+            try:
+                results.append(client.post(f"findings/{slug}/verify", payload))
+            except Exception as exc:  # noqa: BLE001 - one bad slug must not drop the rest
+                failed += 1
+                print(f"kill-finding: {slug} failed: {exc}", file=sys.stderr)
 
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if len(slugs) == 1 and results:
+        print(json.dumps(results[0], indent=2, ensure_ascii=False))
+    else:
+        for result in results:
+            print(json.dumps(result, ensure_ascii=False))
+        print(
+            f"[kill-finding] killed {len(results)} finding(s); {failed} failed.",
+            file=sys.stderr,
+        )
+    if failed:
+        sys.exit(1)
