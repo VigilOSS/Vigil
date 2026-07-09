@@ -100,3 +100,26 @@ def test_probe_coverage_verbs_have_contracts() -> None:
 
     for name in ("record-probe", "resolve-coverage-item"):
         assert contracts.get_contract(name) is not None, f"missing CommandContract for {name}"
+
+
+def test_cli_registers_list_attempts() -> None:
+    """A4a: `list-attempts` (read side of the probe-recording verbs) must be
+    BOTH imported and wired into the register loop in cli.py."""
+    imported = _cli_imported_commands()
+    registered = _cli_registered_commands()
+    assert "list_attempts" in imported, (
+        "list_attempts not imported in cli.py 'from assess.commands import ...' block"
+    )
+    assert "list_attempts" in registered, (
+        "list_attempts imported but missing from the cli.py 'for mod in (...)' register loop"
+    )
+
+
+def test_list_attempts_has_contract() -> None:
+    """The anti-drift rule: a registered command must carry a CommandContract so
+    `vigil assess contract list-attempts` stays accurate."""
+    from assess.lib import contracts
+
+    assert contracts.get_contract("list-attempts") is not None, (
+        "missing CommandContract for list-attempts"
+    )

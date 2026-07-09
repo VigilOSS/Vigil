@@ -1932,6 +1932,187 @@ def render_coverage_ledger_text(ledger: dict[str, Any]) -> list[str]:
     return lines
 
 
+# ---------------------------------------------------------------------------
+# A1 — the by-family coverage grid (per application-unit × attack-family)
+# ---------------------------------------------------------------------------
+# The by-family grid is the finer-grained sibling of the per-host ledger: it
+# projects, per deep-required application-unit, one cell PER expected attack-
+# family — so a unit that is "covered" at the host level but has an untouched
+# SQLi class is visibly a gap. The backend owns the projection
+# (``coverage-readiness/by-family``); these renderers are CLI-side glue over the
+# pinned payload shape:
+#
+#   {"units": [{"application_unit_id", "host", "port_class", "path_prefix",
+#               "deep_required", "families": [{"family", "expected_reason",
+#               "status", "probe_count", "covering_probe_count", "has_finding",
+#               "finding_id"}]}],
+#    "totals": {"units", "cells", "covered", "missing_block", "missing_warn",
+#               "deferred", "with_finding"}}
+#
+# ``status`` ∈ covered | missing_block | missing_warn | deferred.
+
+_FAMILY_LEDGER_STATUS_LABEL: dict[str, str] = {
+    "covered": "COVERED",
+    "missing_block": "MISSING-BLOCK",
+    "missing_warn": "missing-warn",
+    "deferred": "deferred",
+}
+
+
+def _family_cell_is_gap(fam: dict[str, Any]) -> bool:
+    """A family cell is a coverage GAP when its status is a missing_* verdict, or
+    (for any unrecognized status) when no covering probe has landed on it yet
+    (``covering_probe_count == 0``). A ``covered`` cell is never a gap, and a
+    ``deferred`` cell is a deliberate decision (like a per-host deferral), so it
+    is not surfaced as an unaddressed gap either."""
+    status = str(fam.get("status") or "")
+    if status in ("covered", "deferred"):
+        return False
+    if status in ("missing_block", "missing_warn"):
+        return True
+    return int(fam.get("covering_probe_count") or 0) == 0
+
+
+def _family_finding_flag(fam: dict[str, Any]) -> str:
+    """Return a ``finding#<id>`` (or bare ``finding``) flag for a linked cell, else ``""``."""
+    if not fam.get("has_finding"):
+        return ""
+    finding_id = fam.get("finding_id")
+    return f"finding#{finding_id}" if finding_id is not None else "finding"
+
+
+def render_family_ledger_text(payload: dict[str, Any]) -> list[str]:
+    """Render the by-family coverage grid as text lines.
+
+    One block per application-unit (header carries host / port_class /
+    path_prefix / deep-required), then one line per expected family cell. A GAP
+    cell (missing_block / missing_warn, or no covering probe) is marked ``GAP``;
+    a covered cell shows its verdict plus ``covering/total covering`` probe
+    counts; a finding-linked cell is flagged ``finding#<id>`` so the three read
+    distinctly at a glance. The leading ``totals:`` line summarizes the grid.
+    """
+    if not isinstance(payload, dict):
+        return ["coverage by-family: unexpected response from backend"]
+
+    units = [u for u in (payload.get("units") or []) if isinstance(u, dict)]
+    totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+
+    lines: list[str] = [
+        "coverage by-family (per application-unit × attack-family — a GAP cell "
+        "has no covering probe; a covered cell shows its verdict + probe counts):"
+    ]
+    lines.append(
+        "  totals: "
+        f"{totals.get('units', 0)} unit(s) | "
+        f"{totals.get('cells', 0)} cell(s) | "
+        f"{totals.get('covered', 0)} covered | "
+        f"{totals.get('missing_block', 0)} missing-block | "
+        f"{totals.get('missing_warn', 0)} missing-warn | "
+        f"{totals.get('deferred', 0)} deferred | "
+        f"{totals.get('with_finding', 0)} with finding"
+    )
+    if not units:
+        lines.append("  (no application-units with a deep-coverage expectation yet)")
+        return lines
+
+    for unit in units:
+        host = str(unit.get("host") or "")
+        port_class = str(unit.get("port_class") or "")
+        path_prefix = str(unit.get("path_prefix") or "")
+        deep = "deep-required" if unit.get("deep_required") else "shallow-ok"
+        unit_id = unit.get("application_unit_id")
+        header = f"  - unit#{unit_id} {host}"
+        if port_class:
+            header += f" [{port_class}]"
+        if path_prefix:
+            header += f" {path_prefix}"
+        header += f"  ({deep})"
+        lines.append(header)
+
+        families = [f for f in (unit.get("families") or []) if isinstance(f, dict)]
+        if not families:
+            lines.append("      (no expected families for this unit)")
+            continue
+        for fam in families:
+            family = str(fam.get("family") or "")
+            status = str(fam.get("status") or "")
+            label = _FAMILY_LEDGER_STATUS_LABEL.get(status, status or "?")
+            probe_count = int(fam.get("probe_count") or 0)
+            covering = int(fam.get("covering_probe_count") or 0)
+            marker = "GAP " if _family_cell_is_gap(fam) else "    "
+            reason = str(fam.get("expected_reason") or "")
+            reason_str = f" ({reason})" if reason else ""
+            finding_flag = _family_finding_flag(fam)
+            finding_str = f"  {finding_flag}" if finding_flag else ""
+            lines.append(
+                f"      {marker}{family}{reason_str}: {label} "
+                f"[{covering}/{probe_count} covering]{finding_str}"
+            )
+    return lines
+
+
+def render_dispatch_coverage_block(
+    payload: dict[str, Any],
+    *,
+    host: str,
+    path_prefix: str | None = None,
+) -> list[str]:
+    """Render a paste-ready ``COVERAGE:`` block for a specialist dispatch prompt.
+
+    Filters the by-family grid CLIENT-SIDE to ``host`` (and ``path_prefix`` when
+    given) and lists, per application-unit, which attack-families are already
+    covered and which remain OPEN gaps — so a dispatch can hand the specialist
+    the measured coverage picture plus an OPEN objective instead of a
+    prescriptive technique cage. Reuses the by-family payload; adds no backend
+    call. NOTE: ``host``/``path_prefix`` scope by application-unit here — this is
+    deliberately NOT the surface-id sense of ``--surface`` on ``list-attempts``.
+    """
+    host_l = (host or "").strip().lower()
+    prefix = (path_prefix or "").strip()
+    units = [
+        u
+        for u in (payload.get("units") or [])
+        if isinstance(u, dict) and str(u.get("host") or "").strip().lower() == host_l
+    ]
+    if prefix:
+        units = [u for u in units if str(u.get("path_prefix") or "") == prefix]
+
+    scope = f"{host_l}{prefix}"
+    lines: list[str] = [
+        f"COVERAGE: {scope} (coverage-driven dispatch context — hunt the OPEN "
+        "gaps below and form your own hypotheses; this is a map, not a script):"
+    ]
+    if not units:
+        lines.append(
+            f"  (no recorded coverage expectation for {scope} yet — treat the "
+            "whole surface as open and enumerate first)"
+        )
+        return lines
+
+    for unit in units:
+        pp = str(unit.get("path_prefix") or "")
+        deep = "deep-required" if unit.get("deep_required") else "shallow-ok"
+        covered_fams: list[str] = []
+        open_fams: list[str] = []
+        for fam in unit.get("families") or []:
+            if not isinstance(fam, dict):
+                continue
+            name = str(fam.get("family") or "")
+            if _family_cell_is_gap(fam):
+                open_fams.append(name)
+            else:
+                flag = _family_finding_flag(fam)
+                covered_fams.append(f"{name}({flag})" if flag else name)
+        lines.append(f"  unit {host_l}{pp} [{deep}]")
+        lines.append(
+            f"    covered: {', '.join(covered_fams) if covered_fams else '(none)'}"
+        )
+        lines.append(
+            f"    OPEN gaps: {', '.join(open_fams) if open_fams else '(none)'}"
+        )
+    return lines
+
+
 # Re-exports the consolidated CLI command and tests expect from this module.
 __all__ = [
     "BUCKET_SKILLS",
@@ -1954,6 +2135,8 @@ __all__ = [
     "compute_coverage_state",
     "dispatched_hosts_from_rows",
     "render_coverage_ledger_text",
+    "render_family_ledger_text",
+    "render_dispatch_coverage_block",
     "COVERAGE_STATE_COVERED",
     "COVERAGE_STATE_UNCOVERED",
     "COVERAGE_STATE_NEEDS_BROWSER_REPROBE",

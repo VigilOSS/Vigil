@@ -191,6 +191,96 @@ class SpecialistDispatchContract:
     extras: dict[str, Any] = field(default_factory=dict)
 
 
+# C4a — technique-cage dispatch lint. A "technique cage" is a prescriptive,
+# step-by-step script in a --task that caps a specialist's depth to a fixed
+# recipe — the doctrine's opposite of an open-objective dispatch (see
+# operator-core.md "Standing dispatch constraint": a less-constrained specialist
+# consistently out-finds a caged one). The lint is deliberately CONSERVATIVE: it
+# WARNs (never errors) and only when >=2 of three co-occurring signals are
+# present, so it does not warning-fatigue on legitimately structured tasks.
+_CAGE_IMPERATIVE_VERBS: tuple[str, ...] = (
+    "test", "check", "verify", "try", "confirm", "validate", "attempt",
+    "send", "run", "fuzz", "enumerate", "probe", "inject", "exploit",
+    "brute", "bruteforce", "scan", "hit", "replay",
+)
+
+# A step-list line: leading `1.` / `2)` numbering, or a `-` / `*` / `•` bullet.
+_CAGE_STEP_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
+
+# An imperative-verb line: an optional leading number/bullet, then one of the
+# test-verbs at a word boundary.
+_CAGE_VERB_RE = re.compile(
+    r"^\s*(?:\d+[.)]\s*|[-*•]\s*)?(?:"
+    + "|".join(_CAGE_IMPERATIVE_VERBS)
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_technique_cage(task: str) -> list[str]:
+    """Warn (never error) when a ``--task`` reads as a prescriptive technique cage.
+
+    Requires >=2 of three co-occurring signals before it warns (conservative by
+    design — this must not warning-fatigue on legitimately structured tasks):
+
+      (i)   a numbered/bulleted STEP LIST — >=3 lines matching ``^\\s*\\d+[.)]``
+            or ``^\\s*[-*•]``;
+      (ii)  a run of IMPERATIVE test-verbs — >=3 lines starting (after any
+            leading number/bullet) with test/check/verify/try/confirm/validate/
+            attempt/send/run/fuzz/enumerate/...;
+      (iii) at least one pre-named VULN-CLASS token from the canonical taxonomy
+            (``vuln_taxonomy.all_classes()`` — imported the way ``probe_args.py``
+            does, never a hardcoded parallel list), i.e. the task pre-commits to
+            which bug to look for.
+
+    Returns zero or more short WARN strings, each pointing at the alternative:
+    ``vigil assess coverage --host <h> --for-dispatch``. WARN-ONLY — the caller
+    must NEVER fold these into ``errors``.
+    """
+    text = str(task or "")
+    if not text.strip():
+        return []
+    lines = text.splitlines()
+
+    step_lines = sum(1 for ln in lines if _CAGE_STEP_RE.match(ln))
+    verb_lines = sum(1 for ln in lines if _CAGE_VERB_RE.match(ln))
+
+    from assess.lib.vuln_taxonomy import all_classes
+
+    lowered = text.lower()
+    named_classes = sorted(
+        cls
+        for cls in all_classes()
+        if re.search(
+            r"(?<![a-z0-9])" + re.escape(cls) + r"(?![a-z0-9])", lowered
+        )
+    )
+
+    signals: list[str] = []
+    if step_lines >= 3:
+        signals.append(f"a {step_lines}-item numbered/bulleted step list")
+    if verb_lines >= 3:
+        signals.append(f"{verb_lines} imperative test-verb lines")
+    if named_classes:
+        shown = ", ".join(named_classes[:4])
+        more = "" if len(named_classes) <= 4 else ", ..."
+        signals.append(f"pre-named vuln class(es): {shown}{more}")
+
+    if len(signals) < 2:
+        return []
+
+    return [
+        "task reads as a prescriptive technique cage ("
+        + "; ".join(signals)
+        + "). A step-by-step recipe caps a specialist's depth and costs real "
+        "severity — dispatch the surface + hard ROE + an OPEN objective and let "
+        "the specialist form its own hypotheses. To hand it the MEASURED "
+        "coverage picture (covered classes + OPEN gaps) instead of a script, "
+        "run `vigil assess coverage --host <h> --for-dispatch` and paste the "
+        "COVERAGE block into the dispatch."
+    ]
+
+
 def validate_specialist_dispatch_contract(
     payload: Any,
     *,
@@ -342,6 +432,10 @@ def validate_specialist_dispatch_contract(
                                 "(e.g. cert-chain pivot), reframe as recon/osint, or add "
                                 "the host to scope.json first."
                             )
+
+    # C4a: WARN-only technique-cage lint over the free-text task. NEVER appended
+    # to `errors` — a prescriptive task is a depth smell, not an invalid dispatch.
+    warnings.extend(_detect_technique_cage(str(payload.get("task") or "")))
 
     return errors, warnings
 
@@ -1760,19 +1854,24 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "coverage": CommandContract(
         name="coverage",
-        summary="Per-host coverage ledger: route count, real_app, dedicated lane, finding verdict, and computed coverage-state (read-only).",
-        schema_name="backend per-host coverage projection",
+        summary="Coverage ledger (read-only). Default: per-host route/real_app/verdict state. --by-family: per application-unit × attack-family GAP grid. --for-dispatch --host <h>: a paste-ready COVERAGE block for a dispatch prompt.",
+        schema_name="backend per-host coverage projection (+ coverage-readiness/by-family for --by-family/--for-dispatch)",
         preferred_invocations=(
             "vigil assess coverage",
             "vigil assess coverage --route-threshold 6",
+            "vigil assess coverage --by-family",
+            "vigil assess coverage --for-dispatch --host app.example.com --path-prefix /api",
             "vigil assess coverage --json",
         ),
         author_supplied_fields=(),
         helper_defaults=(
-            ("--route-threshold", "6 (distinct LIVE url_path count at/above which a host counts as a real_app on routes alone)"),
+            ("--route-threshold", "6 (distinct LIVE url_path count at/above which a host counts as a real_app on routes alone; default per-host view only)"),
         ),
         notes=(
             "Read-only orientation for where coverage stands per host. `--json` is the machine form for dispatch planning.",
+            "--by-family renders the per application-unit × attack-family grid from `coverage-readiness/by-family`: GAP cells (missing_block/missing_warn or zero covering probes) are marked, covered cells show the verdict + covering/total probe counts, and finding-linked cells are flagged (e.g. finding#45). --json passes the raw by-family payload through.",
+            "--for-dispatch --host <h> [--path-prefix <p>] reuses the SAME by-family grid (no extra backend call), filters CLIENT-SIDE to that application-unit, and emits a paste-ready COVERAGE: block listing covered vs OPEN-gap families — hand it to a specialist alongside an open objective instead of a prescriptive technique cage (which `agent start` now WARN-lints).",
+            "Scoping vocabulary: --host / --path-prefix here select application-UNITS (grid rows). This is distinct from --surface on `list-attempts`, which is a surface-ID; keep the two straight.",
         ),
     ),
     "list-findings": CommandContract(
@@ -1820,6 +1919,33 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Read-only audit search. `--q` is a fuzzy keyword search over command/tool/previews/metadata/finding-aliases; `--sort {relevance|recent|distant}` (distant surfaces coverage-gap candidates); filters include --agent-name / --phase / --tool-name / --tool-bin / --target-host / --technique / --route.",
             "Drill into a single row with `vigil assess get-command-run <id>`.",
+        ),
+    ),
+    "list-attempts": CommandContract(
+        name="list-attempts",
+        phase=("consume-test", "exploit"),
+        summary=(
+            "List the recorded probe-attempt ledger (the READ side of "
+            "record-probe/record-attempt), grouped by lens × result_status with "
+            "per-row finding linkage."
+        ),
+        schema_name="GET /assessment/attempts",
+        preferred_invocations=(
+            "vigil assess list-attempts --host app.example.com",
+            "vigil assess list-attempts --attack-family idor --result-status no-signal",
+            "vigil assess list-attempts --finding VA-047",
+            "vigil assess list-attempts --lens tenant-boundary --json",
+        ),
+        author_supplied_fields=(),
+        notes=(
+            "Read-only query mirror of the probe-recording verbs: record-probe writes covering probes (tested|signal), record-attempt writes non-covering attempts (attempted|blocked|no-signal|error), and this lists both back.",
+            "Rows are grouped by the free-text --lens the probe ran under × its result_status, so 'which mindset produced which verdict' reads at a glance; each row carries finding_slug + finding_severity when the probe is linked to a finding.",
+            "Filters: --finding <slug> / --surface <id> / --host / --attack-family / --result-status / --lens, plus --limit / --offset. --surface is a surface-ID, NOT a host — host filtering is --host, and the application-unit coverage view is `vigil assess coverage --host`.",
+            "Use it before dispatching more probing to dedup against what a lens/family has already tried on a host (the query-side companion to `coverage --by-family`, which shows the class-level GAPs).",
+        ),
+        common_mistakes=(
+            ("--surface <host>", "--surface is a surface-ID; pass a host to --host (or use `vigil assess coverage --host` for the app-unit coverage grid)"),
+            ("expecting a bare list", "the response is {\"attempts\": [...], \"count\": N}; --json emits it verbatim"),
         ),
     ),
     "get-command-run": CommandContract(
@@ -2832,6 +2958,7 @@ def _dispatch_root_contract() -> CommandContract:
             "`agent done` patches lifecycle directly, `agent handoff` writes a repeatable checkpoint, `agent close` consumes a ready/blocked handoff into closure, and `agent render-handoff` assembles the blob the next dispatch prompt pastes verbatim.",
             "`agent start` defaults a missing --dispatch-mode from the role (warn, not block) and accepts a newly-coined mode (advisory warn). "
             "Pass --allow-no-skills to proceed for an ad-hoc role with no --skills (warn, not error), and --check-overlap to opt into the advisory in-progress-overlap scan.",
+            "`agent start` also lints --task for a prescriptive 'technique cage' — a step-by-step recipe that caps a specialist's depth (>=2 of: a numbered/bulleted step list, a run of imperative test-verbs, a pre-named vuln class). This is WARN-only and NEVER blocks the dispatch; the fix is to hand the specialist the measured coverage picture instead of a script via `vigil assess coverage --host <h> --for-dispatch` (paste the COVERAGE block) plus an open objective.",
             f"Verbs with their own contract entries: {', '.join(AGENT_VERBS)}.",
         ),
         common_mistakes=(

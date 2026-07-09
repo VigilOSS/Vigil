@@ -26,7 +26,13 @@ from ..services.state_manager.coverage import (
     MAX_PROBE_RUN_LIST_LIMIT,
     MAX_REQUEST_LIST_LIMIT,
     SurfaceStatus,
+    list_attempts,
 )
+# by_family_coverage lives in the depth_ledger submodule (it reuses the ledger's
+# per-unit scope/expected/covered helpers); the package re-exports the
+# ``depth_ledger`` FUNCTION under that name, shadowing the submodule attribute, so
+# it is imported directly from the submodule rather than via ``state_manager``.
+from ..services.state_manager.depth_ledger import by_family_coverage
 from ..services.state_manager.http_flows import (
     DEFAULT_HTTP_FLOW_LIMIT,
     MAX_HTTP_FLOW_LIST_LIMIT,
@@ -1043,6 +1049,22 @@ def get_per_host_coverage(engagement_key: str) -> dict[str, Any]:
     return payload
 
 
+@router.get("/coverage-readiness/by-family")
+def get_by_family_coverage(engagement_key: str) -> dict[str, Any]:
+    """A1 — engagement-wide (application-unit × vuln-family) coverage grid.
+
+    Complements ``/coverage-readiness/by-host`` (per-host recon outcomes) with a
+    per-unit, per-family view: every application unit (INCLUDING non-deep_required
+    ones) and, for each, one cell per vuln family in ``union(expected, probed)``
+    tagged covered / missing_block / missing_warn / deferred with its probe and
+    finding-linkage stats. Read-only/advisory — operators use it to SEE
+    never-probed gaps vs probed-and-walled vs finding-linked before a phase exit.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    with state_manager.get_connection() as connection:
+        return by_family_coverage(connection, engagement.id)
+
+
 @router.get("/report-readiness")
 def get_report_readiness(engagement_key: str) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
@@ -1201,6 +1223,41 @@ def get_probe_runs(
         target_path=target_path,
         auth_context=auth_context,
         result_status=result_status,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/attempts")
+def get_attempts(
+    engagement_key: str,
+    finding: str = "",
+    surface_id: int | None = None,
+    target_host: str = "",
+    attack_family: str = "",
+    result_status: str = "",
+    lens: str = "",
+    limit: int = Query(default=DEFAULT_PROBE_RUN_LIMIT, ge=1, le=MAX_PROBE_RUN_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """A4a — finding-joined, surface-aware read of recorded probe attempts.
+
+    A "what has actually been tried against this finding/surface/host, and did it
+    land" view so a specialist does not re-run an already-walled probe. Additive to
+    ``GET /probe-runs`` (unchanged): each attempt carries the linked finding's
+    slug/title/severity (null when unlinked). ``finding`` is a finding SLUG
+    (resolved server-side); ``surface_id`` matches BOTH FK-linked probes and probes
+    whose target host/path is contained by the surface descriptor.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    return list_attempts(
+        engagement.id,
+        finding=finding,
+        surface_id=surface_id,
+        target_host=target_host,
+        attack_family=attack_family,
+        result_status=result_status,
+        lens=lens,
         limit=limit,
         offset=offset,
     )

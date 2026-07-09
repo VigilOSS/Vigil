@@ -356,6 +356,8 @@ vigil assess agent start \
     --skills "<skill-name>[,<skill-name>...]"
 ```
 
+`agent start` WARN-lints `--task` for a prescriptive "technique cage" (a step-by-step recipe that caps a specialist's depth) — it never blocks; hand the specialist the measured coverage picture instead via `vigil assess coverage --host <h> --for-dispatch` plus an open objective.
+
 When the dispatch returns, mark it complete with the slugs it produced:
 
 ```bash

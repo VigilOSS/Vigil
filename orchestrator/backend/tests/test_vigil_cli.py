@@ -9598,6 +9598,83 @@ def test_validate_dispatch_skips_scope_check_when_engagement_dir_omitted(
     assert not any("scope" in e.lower() for e in errors), errors
 
 
+def test_validate_dispatch_flags_technique_cage_warn_only() -> None:
+    """C4a: a numbered step list that pre-names vuln classes reads as a technique
+    cage — the validator WARNs (pointing at `coverage --for-dispatch`) and NEVER
+    adds to errors. WARN-only is the whole contract of the lint."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": "idor-testing",
+        "task": (
+            "Test the login endpoint for the following:\n"
+            "1. Test for SQLi in the username parameter\n"
+            "2. Check for XSS in the redirect field\n"
+            "3. Verify the JWT signature is validated\n"
+            "4. Confirm CSRF tokens are enforced\n"
+        ),
+    }
+    errors, warnings = validate_specialist_dispatch_contract(payload)
+    assert errors == [], errors  # a cage is a depth smell, never an error
+    assert any("technique cage" in w for w in warnings), warnings
+    assert any("--for-dispatch" in w for w in warnings), warnings
+    assert not any("cage" in e.lower() for e in errors), errors
+
+
+def test_validate_dispatch_open_objective_task_has_no_cage_warning() -> None:
+    """C4a conservatism: an open-ended, hypothesis-framed prose task (no step
+    list, no imperative verb run) must NOT trip the technique-cage lint, so the
+    warning does not fire on legitimately-shaped dispatches."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": "idor-testing",
+        "task": (
+            "Hunt the tenant-isolation boundary on the orders workflow. We have "
+            "two member identities in different orgs; the interesting question is "
+            "whether one org's member can observe or mutate the other org's "
+            "records. Reason about where the boundary is enforced and where it "
+            "leaks, then follow the strongest signal you find."
+        ),
+    }
+    errors, warnings = validate_specialist_dispatch_contract(payload)
+    assert not any("technique cage" in w for w in warnings), warnings
+    assert errors == [], errors
+
+
+def test_detect_technique_cage_requires_two_signals() -> None:
+    """The pure lint helper is conservative: a single signal (a step list alone,
+    or a lone vuln-class mention in prose) is not enough — >=2 co-occurring
+    signals are required before it warns."""
+    from assess.lib.contracts import _detect_technique_cage
+
+    # A numbered list with NO vuln class and NO imperative-verb run — one signal.
+    step_only = (
+        "Cover the checkout flow in this order:\n"
+        "1. the cart page\n"
+        "2. the shipping page\n"
+        "3. the payment page\n"
+    )
+    assert _detect_technique_cage(step_only) == []
+
+    # A single vuln-class mention in open prose — one signal only.
+    class_only = "Consider whether an idor is reachable across the two org tenants."
+    assert _detect_technique_cage(class_only) == []
+
+    # Two co-occurring signals (step list + pre-named classes) — warns.
+    caged = (
+        "Run these probes:\n"
+        "1. Test the id param for sqli\n"
+        "2. Test the url param for ssrf\n"
+        "3. Test the next param for open-redirect\n"
+    )
+    caged_warnings = _detect_technique_cage(caged)
+    assert caged_warnings and "technique cage" in caged_warnings[0]
+    assert "--for-dispatch" in caged_warnings[0]
 
 
 def test_validate_dispatch_missing_mode_defaults_and_warns_not_errors() -> None:
