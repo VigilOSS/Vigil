@@ -101,7 +101,6 @@ def _create(tmp_path, monkeypatch, etype, **extra):
 
     for name in (
         "_snapshot_orchestrator_database",
-        "_init_cases_db",
         "_write_prompt_wrappers",
         "_write_codex_config",
         "_write_claude_config",

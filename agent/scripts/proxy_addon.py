@@ -36,6 +36,7 @@ from assess.lib.classify_buckets import (
 )
 from assess.lib.params import header_schema_from_headers
 from assess.lib.scope import required_headers as _scope_required_headers
+from assess.lib import no_fire as _no_fire
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -196,6 +197,8 @@ class EngagementEntry:
     # Program-mandated attribution headers (e.g. BugCrowd ``X-Bug-Bounty``) the
     # ``request`` hook injects onto this engagement's outbound in-scope requests.
     required_headers: dict = field(default_factory=dict)
+    off_limits_paths: tuple[str, ...] = ()
+    no_fire_policy_invalid: bool = False
 
 
 def _normalize_scope_entry(raw: str) -> str:
@@ -537,6 +540,8 @@ class CaseCollector:
                     existing.updated_at = entry.updated_at
                     existing.capture_policy = entry.capture_policy
                     existing.required_headers = entry.required_headers
+                    existing.off_limits_paths = entry.off_limits_paths
+                    existing.no_fire_policy_invalid = entry.no_fire_policy_invalid
                     new_registry[entry.key] = existing
                 else:
                     new_registry[entry.key] = entry
@@ -623,6 +628,7 @@ class CaseCollector:
             # up — without this the marker would silently never inject in the
             # common case where the backend registry fetch succeeds.
             required_headers = self._required_headers_from_root(root)
+            off_limits_paths, no_fire_policy_invalid = self._no_fire_from_root(root)
             entries.append(
                 EngagementEntry(
                     key=key,
@@ -633,6 +639,8 @@ class CaseCollector:
                     updated_at=updated_at,
                     capture_policy=capture_policy,
                     required_headers=required_headers,
+                    off_limits_paths=off_limits_paths,
+                    no_fire_policy_invalid=no_fire_policy_invalid,
                 )
             )
         return entries
@@ -684,6 +692,16 @@ class CaseCollector:
             # scope_data is already parsed here; reuse it rather than re-reading
             # scope.json from disk like the backend path must.
             required_headers = _scope_required_headers(scope_data)
+            try:
+                off_limits_paths = _no_fire.patterns(scope_data)
+                no_fire_policy_invalid = False
+            except _no_fire.NoFirePolicyError as exc:
+                ctx.log.error(
+                    f"proxy_addon: invalid no-fire policy in {scope_path}: {exc}; "
+                    "blocking every matched request"
+                )
+                off_limits_paths = ()
+                no_fire_policy_invalid = True
             entries.append(
                 EngagementEntry(
                     key=engagement_dir.name,
@@ -694,6 +712,8 @@ class CaseCollector:
                     updated_at=updated_at,
                     capture_policy=capture_policy,
                     required_headers=required_headers,
+                    off_limits_paths=off_limits_paths,
+                    no_fire_policy_invalid=no_fire_policy_invalid,
                 )
             )
         return entries
@@ -730,6 +750,25 @@ class CaseCollector:
         if not isinstance(data, dict):
             return {}
         return _scope_required_headers(data)
+
+    @staticmethod
+    def _no_fire_from_root(engagement_dir: Path) -> tuple[tuple[str, ...], bool]:
+        scope_path = engagement_dir / "scope.json"
+        try:
+            with scope_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return (), True
+        if not isinstance(data, dict):
+            return (), True
+        try:
+            return _no_fire.patterns(data), False
+        except _no_fire.NoFirePolicyError as exc:
+            ctx.log.error(
+                f"proxy_addon: invalid no-fire policy in {scope_path}: {exc}; "
+                "blocking every matched request"
+            )
+            return (), True
 
     @staticmethod
     def _scope_patterns_from_dict(scope_data: dict) -> list[str]:
@@ -783,6 +822,8 @@ class CaseCollector:
                     "scope_priority": entry.scope_priority,
                     "updated_at": entry.updated_at,
                     "required_headers": dict(entry.required_headers),
+                    "off_limits_paths": list(entry.off_limits_paths),
+                    "no_fire_policy_invalid": entry.no_fire_policy_invalid,
                 }
                 for entry in self.registry.values()
             ),
@@ -1404,6 +1445,15 @@ class CaseCollector:
         with self._registry_lock:
             return any(entry.required_headers for entry in self.registry.values())
 
+    def _any_request_policy(self) -> bool:
+        with self._registry_lock:
+            return any(
+                entry.required_headers
+                or entry.off_limits_paths
+                or entry.no_fire_policy_invalid
+                for entry in self.registry.values()
+            )
+
     def request(self, flow: http.HTTPFlow):
         """Inject a matched engagement's scope.json ``required_headers`` onto its
         outbound in-scope requests (ROE researcher-attribution markers, e.g.
@@ -1423,8 +1473,9 @@ class CaseCollector:
         hosts and header-less engagements untouched."""
         if self.engagements_root is None:
             return
-        # Fast path: nothing to inject unless some engagement mandates a header.
-        if not self._any_required_headers():
+        # Fast path: nothing to inject or block unless some engagement carries
+        # outbound request policy.
+        if not self._any_request_policy():
             return
         req = flow.request
         hostname = (urlparse(req.pretty_url).hostname or "").lower()
@@ -1435,7 +1486,33 @@ class CaseCollector:
         # to tighten the out-of-scope CIDR carve-out.
         resolved_ip = self._resolved_server_ip(flow)
         entry = self._match_engagement(hostname, resolved_ip=resolved_ip)
-        if entry is None or not entry.required_headers:
+        if entry is None:
+            return
+        blocked_pattern = None
+        if not entry.no_fire_policy_invalid:
+            try:
+                blocked_pattern = _no_fire.match_url(
+                    {"off_limits_paths": list(entry.off_limits_paths)}, req.pretty_url
+                )
+            except _no_fire.NoFirePolicyError:
+                blocked_pattern = "ambiguous-encoded-url-fail-closed"
+        if entry.no_fire_policy_invalid or blocked_pattern:
+            body = json.dumps(
+                {
+                    "blocked": True,
+                    "policy": "off_limits_paths",
+                    "pattern": blocked_pattern or "invalid-policy-fail-closed",
+                    "engagement": entry.key,
+                }
+            ).encode("utf-8")
+            flow.response = http.Response.make(
+                451,
+                body,
+                {
+                    "Content-Type": "application/json",
+                    "X-Vigil-No-Fire": "blocked",
+                },
+            )
             return
         for name, value in entry.required_headers.items():
             # mitmproxy Headers membership is case-insensitive — never overwrite

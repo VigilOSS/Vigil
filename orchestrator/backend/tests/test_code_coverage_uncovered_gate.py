@@ -42,11 +42,13 @@ def _prepare(client, isolate_settings, key):
     return repo, parser
 
 
-def _complete(client, key, queue_item_id, cwe_coverage, disposition="clean"):
+def _complete(client, key, queue_item, cwe_coverage, disposition="clean"):
     return client.post(
         f"/engagements/{key}/assessment/code/analysis-queue/done",
         json={
-            "item_ids": [queue_item_id],
+            "item_ids": [queue_item["id"]],
+            "agent_name": queue_item["assigned_agent"],
+            "lease_token": queue_item["lease_token"],
             "disposition": disposition,
             "notes": "",
             "cwe_coverage": cwe_coverage,
@@ -105,7 +107,7 @@ def test_uncovered_high_risk_file_flagged_when_closed_with_zero_function_analysi
     queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
     # High effort (>= 70) so the effort gate is silent, isolating the structural
     # sub-gate; functions_analyzed defaults to 0 in _network_input_coverage.
-    done = _complete(client, key, queue_item["id"], _network_input_coverage(default_effort=80))
+    done = _complete(client, key, queue_item, _network_input_coverage(default_effort=80))
     assert done.status_code == 200, done.text
 
     gate = _gate(client, key, repo["id"])
@@ -126,7 +128,7 @@ def test_total_functions_zero_is_not_flagged(client, isolate_settings):
     parser = next(f for f in files if f["file_path"] == "src/parser.py")
     _classify_file(client, key, int(parser["id"]), "critical", 100)
     queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
-    done = _complete(client, key, queue_item["id"], _network_input_coverage(default_effort=80))
+    done = _complete(client, key, queue_item, _network_input_coverage(default_effort=80))
     assert done.status_code == 200, done.text
     gate = _gate(client, key, repo["id"])
     assert _uncovered_paths(gate) == set()
@@ -148,7 +150,7 @@ def test_claimed_functions_analyzed_clears_uncovered(client, isolate_settings):
             "open-redirect", "path-traversal", "algorithmic-dos",
         )},
     )
-    done = _complete(client, key, queue_item["id"], coverage)
+    done = _complete(client, key, queue_item, coverage)
     assert done.status_code == 200, done.text
     assert _uncovered_paths(_gate(client, key, repo["id"])) == set()
 
@@ -168,6 +170,7 @@ def test_analysis_result_function_row_clears_uncovered(client, isolate_settings)
             "queue_item_id": queue_item["id"],
             "file_id": parser["id"],
             "agent_name": "code-vuln-hunter",
+            "lease_token": queue_item["lease_token"],
             "function_name": "parse_message",
             "hypothesis": "bounded",
             "evidence": "reviewed sinks",
@@ -177,7 +180,7 @@ def test_analysis_result_function_row_clears_uncovered(client, isolate_settings)
         },
     )
     assert result.status_code == 201, result.text
-    done = _complete(client, key, queue_item["id"], _network_input_coverage(default_effort=80))
+    done = _complete(client, key, queue_item, _network_input_coverage(default_effort=80))
     assert done.status_code == 200, done.text
     assert _uncovered_paths(_gate(client, key, repo["id"])) == set()
 
@@ -198,7 +201,7 @@ def test_accepted_gap_clears_uncovered(client, isolate_settings):
             "open-redirect", "path-traversal", "algorithmic-dos",
         )},
     )
-    done = _complete(client, key, queue_item["id"], coverage)
+    done = _complete(client, key, queue_item, coverage)
     assert done.status_code == 200, done.text
     assert _uncovered_paths(_gate(client, key, repo["id"])) == set()
 
@@ -213,7 +216,7 @@ def test_linked_finding_clears_uncovered(client, isolate_settings):
     repo, parser = _prepare(client, isolate_settings, key)
     _create_file_finding(client, key, "VA-047", "file:src/parser.py:12")
     queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
-    done = _complete(client, key, queue_item["id"], _network_input_coverage(default_effort=80))
+    done = _complete(client, key, queue_item, _network_input_coverage(default_effort=80))
     assert done.status_code == 200, done.text
     assert _uncovered_paths(_gate(client, key, repo["id"])) == set()
 
@@ -235,7 +238,7 @@ def test_low_effort_with_functions_analyzed_is_warn_not_uncovered(client, isolat
             "open-redirect", "path-traversal", "algorithmic-dos",
         )},
     )
-    done = _complete(client, key, queue_item["id"], coverage)
+    done = _complete(client, key, queue_item, coverage)
     assert done.status_code == 200, done.text
     gate = _gate(client, key, repo["id"])
     assert gate["effort_warnings"], "low effort should still raise an effort WARN"

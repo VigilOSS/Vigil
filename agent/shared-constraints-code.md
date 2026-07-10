@@ -308,9 +308,12 @@ finding, and `update-finding` for non-verification metadata or workflow updates.
 For code findings, put code-specific proof fields under finding `details`: `cwe_id`, `impact`,
 `evidence`, `taint_path`, `guards_evaluated`, `remediation`, `slot_type`,
 `steps_to_reproduce`, `cvss_vector`, and `cvss_score` are all covered by the
-`record-finding` contract examples. For analysis rows, include the fetched `queue_item_id`;
+`record-finding` contract examples. For analysis rows, include the fetched `queue_item_id`,
+`agent_name`, and `lease_token`;
 the backend derives `file_id` from that queue item and rejects mismatches when `file_id` is
-supplied as an optional consistency check.
+supplied as an optional consistency check. Renew long-running claims with
+`vigil assess code-dispatch heartbeat <item-id> <agent-name> <lease-token>`; results and closeouts
+using a reclaimed lease are rejected.
 
 **Report-readiness mandate:** `check-phase-readiness --phase report` blocks the final report if any
 verified finding is missing `cvss_score`, `cvss_vector`, `steps_to_reproduce`,
@@ -332,7 +335,7 @@ Before your dispatch returns, run in this order:
 
 1. `vigil assess record-finding <agent-name> <finding-json>` for each confirmed finding.
 2. `vigil assess code-record-analysis <analysis-json>` for each queue item disposition, with
-   `queue_item_id` from the fetched dispatch item.
+   `queue_item_id`, `agent_name`, and `lease_token` from the fetched dispatch item.
 3. `vigil assess agent handoff --from-json <path>` — use the exact
    `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the
    operator placed at the top of your dispatch prompt. The handoff row is keyed on
@@ -348,7 +351,9 @@ Before your dispatch returns, run in this order:
 
 CWE coverage claims are cross-referenced against analysis-result rows at queue completion.
 
-1. Record analysis results BEFORE `code-dispatch done`. Result rows must exist when
+1. Record analysis results BEFORE
+   `code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <coverage-json> [notes]`.
+   Result rows must exist when
    the backend validates coverage claims.
 2. `functions_analyzed` in each coverage entry must be backed by result rows: at least
    30% of claimed functions must have a distinct `function_name` in analysis results for

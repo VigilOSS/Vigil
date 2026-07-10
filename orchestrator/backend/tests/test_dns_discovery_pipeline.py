@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 # --------------------------------------------------------------------------- #
 # Module loading (mirror test_discovery_pipelines.py so the import path matches).
@@ -144,6 +146,13 @@ def test_wordlist_head_under_cap_is_identity(monkeypatch, tmp_path):
     assert dns._capped_wordlist(args, _cfg(tmp_path), "host") == str(wl)
 
 
+def test_host_route_missing_wordlist_fails_before_tool_execution(tmp_path):
+    dns = _load("dns_ut_missing_host_wordlist", "agent/scripts/assess/commands/dns_discovery.py")
+
+    with pytest.raises(dns.AssessError, match="host wordlist does not exist"):
+        dns._wordlist_for_route(_cfg(tmp_path), str(tmp_path / "missing.txt"), "host")
+
+
 # --------------------------------------------------------------------------- #
 # CR-20 — productive-parent re-brute selection.
 # --------------------------------------------------------------------------- #
@@ -173,6 +182,50 @@ def test_select_parent_targets_empty_without_brute(monkeypatch, tmp_path):
     # --no-parent-recursion also yields empty.
     args2 = _base_dns_args(tmp_path, brute=True, no_parent_recursion=True)
     assert dns._select_parent_targets(args2, resolved, bruted_apexes=set()) == []
+
+
+def test_productive_parent_recursion_is_fenced_to_authored_apex_and_scope(
+    monkeypatch, tmp_path
+):
+    dns = _load("dns_ut_parent_fence", "agent/scripts/assess/commands/dns_discovery.py")
+    resolved = {
+        *(f"h{i}.origin.api.example.com" for i in range(5)),
+        *(f"h{i}.origin.vendor.test" for i in range(5)),
+    }
+    args = _base_dns_args(
+        tmp_path,
+        brute=True,
+        parent_min_children=5,
+        no_parent_recursion=False,
+    )
+
+    parents = dns._select_parent_targets(
+        args,
+        resolved,
+        bruted_apexes={"example.com"},
+        allowed_apexes=["example.com"],
+        scope_doc={"hosts": ["*.example.com"]},
+    )
+
+    assert parents == ["origin.api.example.com"]
+
+
+def test_parent_recursion_global_bypass_overrides_apex_and_scope_fence(
+    monkeypatch, tmp_path
+):
+    dns = _load("dns_ut_parent_bypass", "agent/scripts/assess/commands/dns_discovery.py")
+    resolved = {*(f"h{i}.origin.vendor.test" for i in range(5))}
+    args = _base_dns_args(tmp_path, brute=True, parent_min_children=5)
+
+    parents = dns._select_parent_targets(
+        args,
+        resolved,
+        bruted_apexes=set(),
+        allowed_apexes=["example.com"],
+        scope_doc={"hosts": ["example.com"], "scope_enforcement": "bypass"},
+    )
+
+    assert parents == ["origin.vendor.test"]
 
 
 # --------------------------------------------------------------------------- #
@@ -337,8 +390,11 @@ def test_convergence_stops_after_two_zero_net_new(monkeypatch, tmp_path):
     monkeypatch.setattr(dns, "_discover_once", fake_once)
     # Always offer a productive parent so the loop would keep going if not for the
     # zero-net-new stop rule (proves CR-6 convergence, not just "ran out of work").
-    monkeypatch.setattr(dns, "_select_parent_targets",
-                        lambda args, resolved, bruted: ["origin.example.com"])
+    monkeypatch.setattr(
+        dns,
+        "_select_parent_targets",
+        lambda args, resolved, bruted, **_scope: ["origin.example.com"],
+    )
 
     args = _base_dns_args(tmp_path, brute=True, max_passes=10, no_converge=False)
     dns.run(args)   # returns normally on success (only sys.exit on zero resolved)

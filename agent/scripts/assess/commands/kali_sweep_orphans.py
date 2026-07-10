@@ -30,20 +30,25 @@ from assess.lib.client import AssessError, AssessmentClient, default_runtime_con
 from assess.lib.config import load_config
 from assess.lib.kali_jobs import _job_pid_file as _job_pid_file_in_container
 from assess.lib.kali_jobs import _read_exit_marker as _read_job_exit_marker
+from assess.lib.kali_jobs import finalize_parent_command_run
 from assess.lib.kali_runtime_exec import _cat_container_pid_file, _container_pid_file
+from assess.lib.host_processes import reap_registered_processes
+from assess.lib.rate_leases import release_target_rate_lease
 
 _DEFAULT_MAX_AGE_SECONDS = 3600
 
 # What `run()` reconciles. ``command-runs`` (default) preserves the original
 # behavior byte-for-byte; ``jobs`` reconciles stuck assessment_jobs rows (the
-# dtach-supervised async-job lifecycle); ``all`` does both.
-_VALID_SCOPES = ("command-runs", "jobs", "all")
+# dtach-supervised async-job lifecycle); ``host-processes`` reaps precisely
+# registered host children; ``all`` reconciles all three resource classes.
+_VALID_SCOPES = ("command-runs", "jobs", "host-processes", "all")
 
 # Statuses that are still in-flight (worth probing for liveness). Anything else
 # is terminal and the row should be skipped silently — its outcome is already
 # recorded, so finalizing it again would be a no-op at best and a destructive
 # overwrite at worst (e.g., flipping a recorded ``completed`` to ``lost``).
 _RUNNING_STATUSES = frozenset({"running", "queued"})
+_JOB_RECONCILABLE_STATUSES = frozenset({"running", "queued", "stop_failed"})
 
 # stdout_path is recorded as ``<engagement-dir>/scans/kali/<run_uuid>.out``.
 # We accept any prefix so tests and engagements with custom mount points still
@@ -64,7 +69,8 @@ def register(subparsers) -> None:
         help=(
             "Reconcile rows stuck in status=running/queued past a threshold age "
             "by probing the in-container PID. Default scope is command-runs; "
-            "--scope jobs|all also reconciles assessment_jobs (async dtach jobs)."
+            "--scope jobs|host-processes|all also reconciles async jobs and "
+            "precisely registered host processes."
         ),
     )
     p.add_argument(
@@ -101,8 +107,8 @@ def register(subparsers) -> None:
         choices=list(_VALID_SCOPES),
         default="command-runs",
         help=(
-            "What to reconcile: command-runs (default, stuck audit rows), jobs "
-            "(stuck async dtach-job rows), or all (both)."
+            "What to reconcile: command-runs (default), jobs (async dtach rows), "
+            "host-processes (owned host PIDs), or all."
         ),
     )
     p.set_defaults(func=run)
@@ -139,6 +145,13 @@ def _row_age_seconds(row: dict, now: _dt.datetime) -> float | None:
     if started_at is None:
         return None
     return (now - started_at).total_seconds()
+
+
+def _job_age_seconds(row: dict, now: _dt.datetime) -> float | None:
+    """Age queued jobs from creation; running jobs from their actual start."""
+    timestamp = row.get("started_at") or row.get("created_at")
+    parsed = _parse_started_at(timestamp)
+    return None if parsed is None else (now - parsed).total_seconds()
 
 
 def _run_uuid_from_stdout_path(stdout_path: str | None) -> str | None:
@@ -348,13 +361,22 @@ def _list_running_jobs(client: AssessmentClient) -> list[dict]:
 
     Unlike command-runs, the backend filters jobs server-side
     (``list_jobs`` honours ``?status=``), so we ask per pre-terminal status.
-    Jobs are few per engagement; a single 1000-row page per status suffices.
+    Fetch every page so a long-lived engagement cannot hide stale rows beyond
+    the backend's 1000-row request cap.
     """
     rows: list[dict] = []
-    for state in ("running", "queued"):
-        page = client.get(f"jobs?status={state}&limit=1000")
-        if isinstance(page, list):
+    for state in sorted(_JOB_RECONCILABLE_STATUSES):
+        offset = 0
+        while True:
+            page = client.get(
+                f"jobs?status={state}&limit=1000&offset={offset}"
+            )
+            if not isinstance(page, list):
+                break
             rows.extend(page)
+            if len(page) < 1000:
+                break
+            offset += len(page)
     return rows
 
 
@@ -370,6 +392,19 @@ def _finalize_job(
     if exit_code is not None:
         payload["exit_code"] = int(exit_code)
     return client.patch(f"jobs/{int(job_id)}", payload, accept_409=True)
+
+
+def _release_swept_job_rate_lease(client: AssessmentClient, row: dict) -> None:
+    metadata = row.get("audit_metadata")
+    if not isinstance(metadata, dict):
+        return
+    token = str(metadata.get("rate_lease_token") or "")
+    if not token:
+        return
+    try:
+        release_target_rate_lease(token, client=client)
+    except AssessError:
+        return
 
 
 def _sweep_jobs(
@@ -394,15 +429,13 @@ def _sweep_jobs(
         row_id = row.get("id")
         if row_id is None:
             continue
-        # queued rows never spawned a process, so they carry no started_at and
-        # _row_age_seconds returns None -> skipped (correct: nothing to reap).
-        age_seconds = _row_age_seconds(row, now)
+        age_seconds = _job_age_seconds(row, now)
         if age_seconds is None or age_seconds < max_age:
             continue
         summary["checked"] += 1
 
         existing_status = str(row.get("status") or "").strip().lower()
-        if existing_status not in _RUNNING_STATUSES:
+        if existing_status not in _JOB_RECONCILABLE_STATUSES:
             summary["skipped"] += 1
             if args.dry_run:
                 print(
@@ -432,6 +465,14 @@ def _sweep_jobs(
                     now_iso=now_iso,
                     exit_code=rc,
                 )
+                finalize_parent_command_run(
+                    client,
+                    row,
+                    status_value=final_status,
+                    return_code=rc,
+                    ended_at_iso=now_iso,
+                )
+                _release_swept_job_rate_lease(client, row)
             except AssessError as exc:
                 summary["skipped"] += 1
                 print(
@@ -487,6 +528,14 @@ def _sweep_jobs(
             continue
         try:
             _finalize_job(client, job_id=int(row_id), status_value="lost", now_iso=now_iso)
+            finalize_parent_command_run(
+                client,
+                row,
+                status_value="lost",
+                return_code=None,
+                ended_at_iso=now_iso,
+            )
+            _release_swept_job_rate_lease(client, row)
         except AssessError as exc:
             summary["skipped"] += 1
             print(
@@ -515,13 +564,21 @@ def run(args) -> None:
 
     cr_summary: dict | None = None
     job_summary: dict | None = None
-    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        now = _dt.datetime.now(_dt.timezone.utc)
-        now_iso = _utcnow_iso()
-        if scope in ("command-runs", "all"):
-            cr_summary = _sweep_command_runs(client, args, now, now_iso, max_age)
-        if scope in ("jobs", "all"):
-            job_summary = _sweep_jobs(client, args, now, now_iso, max_age)
+    host_summary: dict | None = None
+    if scope in ("command-runs", "jobs", "all"):
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+            now = _dt.datetime.now(_dt.timezone.utc)
+            now_iso = _utcnow_iso()
+            if scope in ("command-runs", "all"):
+                cr_summary = _sweep_command_runs(client, args, now, now_iso, max_age)
+            if scope in ("jobs", "all"):
+                job_summary = _sweep_jobs(client, args, now, now_iso, max_age)
+    if scope in ("host-processes", "all"):
+        host_summary = reap_registered_processes(
+            cfg.engagement_dir,
+            max_age_seconds=max_age,
+            dry_run=bool(args.dry_run),
+        )
 
     dry = bool(args.dry_run)
     if scope == "command-runs":
@@ -529,12 +586,20 @@ def run(args) -> None:
         print(json.dumps({"summary": cr_summary, "dry_run": dry}, ensure_ascii=False))
     elif scope == "jobs":
         print(json.dumps({"summary": job_summary, "dry_run": dry, "scope": "jobs"}, ensure_ascii=False))
+    elif scope == "host-processes":
+        print(
+            json.dumps(
+                {"summary": host_summary, "dry_run": dry, "scope": "host-processes"},
+                ensure_ascii=False,
+            )
+        )
     else:
         print(
             json.dumps(
                 {
                     "summary": cr_summary,
                     "jobs_summary": job_summary,
+                    "host_processes_summary": host_summary,
                     "dry_run": dry,
                     "scope": "all",
                 },

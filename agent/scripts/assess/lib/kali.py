@@ -28,6 +28,7 @@ without touching the rest of the suite.
 from __future__ import annotations
 
 import os
+import re
 import resource
 import signal
 import subprocess
@@ -37,10 +38,12 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
+from . import scope as scope_lib
 from . import vuln_taxonomy
 from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
 from .identity import host_cookie_hosts, host_cookies_for, resolve_identity
+from .rate_leases import aggregate_rate_reservation, target_rate_lease
 
 # Re-exports — keep this block ordered by source module so the public surface
 # is grep-friendly. Tests patch a number of these via the legacy
@@ -439,6 +442,115 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
     return True
 
 
+def _nuclei_stages_disable_callbacks(cmd: list[str], *, depth: int = 0) -> bool:
+    if depth > 16:
+        return False
+    effective = scope_lib._unwrap_launcher_argv(cmd)
+    executable = Path(str(effective[0])).name.lower() if effective else ""
+    if executable == "nuclei":
+        flags = {
+            str(token).split("=", 1)[0].lstrip("-") for token in effective[1:]
+        }
+        return bool({"ni", "no-interactsh"} & flags)
+    if executable not in scope_lib._SHELL_BINARIES:
+        return "nuclei" not in scope_lib.execution_tools(effective)
+    found = False
+    for index, option in enumerate(effective[:-1]):
+        if not (option.startswith("-") and option.endswith("c")):
+            continue
+        segments, ambiguous = scope_lib._shell_command_segments(effective[index + 1])
+        if ambiguous:
+            return False
+        for segment in segments:
+            if "nuclei" not in scope_lib.execution_tools(segment):
+                continue
+            found = True
+            if not _nuclei_stages_disable_callbacks(segment, depth=depth + 1):
+                return False
+    return found
+
+
+def _apply_nuclei_oob_safety(cmd: list[str], *, explicit_oob: bool = False) -> None:
+    """Disable nuclei callbacks for raw sync/job commands before audit or spawn."""
+    tools = scope_lib.execution_tools(cmd)
+    if "nuclei" not in tools:
+        return
+    if explicit_oob:
+        return
+    joined = " ".join(str(token) for token in cmd)
+    override_pattern = re.compile(
+        r"(?<!\S)--?(?:interactsh-url|interactsh-server|iserver)(?==|\s|$)"
+    )
+    if override_pattern.search(joined):
+        raise scope_lib.ScopePolicyError(
+            "raw nuclei interactsh configuration is not allowed; use the typed "
+            "nuclei wrapper with --oob-mode none|public|vigil"
+        )
+    effective = scope_lib._unwrap_launcher_argv(cmd)
+    executable = Path(str(effective[0])).name.lower() if effective else ""
+    if executable == "nuclei":
+        normalized_flags = {
+            str(token).split("=", 1)[0].lstrip("-") for token in effective[1:]
+        }
+        if not {"ni", "no-interactsh"} & normalized_flags:
+            cmd.append("-ni")
+        return
+    if not _nuclei_stages_disable_callbacks(cmd):
+        raise scope_lib.ScopePolicyError(
+            "raw shell-wrapped nuclei must disable callbacks with -ni; use the typed "
+            "nuclei wrapper for public or Vigil OOB"
+        )
+
+
+def prepare_execution_command(
+    cmd: list[str],
+    *,
+    tool_name: str,
+    engagement_dir: Path,
+    identity: str | None = None,
+    nuclei_oob_explicit: bool = False,
+) -> tuple[str, str]:
+    """Apply shared identity, attribution, and OOB preparation for sync/jobs.
+
+    Returns ``(auth_context, attribution_gap)``. The caller owns how a gap is
+    surfaced, but must refuse before audit/spawn when the second value is set.
+    """
+    _apply_nuclei_oob_safety(cmd, explicit_oob=nuclei_oob_explicit)
+    auth_context = "anonymous"
+    if identity is not None:
+        identity_name, material = resolve_identity(engagement_dir, identity)
+        if not material:
+            print(
+                f"warning: --identity '{identity}' not found in the credential store "
+                "or temporarily unavailable; auth material was NOT applied.",
+                file=sys.stderr,
+            )
+        elif _apply_identity_material(cmd, tool_name, material):
+            auth_context = identity_name or auth_context
+        else:
+            print(
+                f"warning: --identity '{identity}': auth material was NOT applied "
+                f"to tool '{tool_name}'. Leaving auth_context anonymous.",
+                file=sys.stderr,
+            )
+
+    required = _required_headers(engagement_dir)
+    if required:
+        status = _apply_required_headers(cmd, tool_name, required)
+        if status == "warned":
+            print(
+                "warning: program-required attribution headers could not be "
+                f"injected into tool '{tool_name}'.",
+                file=sys.stderr,
+            )
+        gap = required_header_attribution_gap(
+            cmd, tool_name, required, _in_scope_allow_entries(engagement_dir)
+        )
+        if gap:
+            return auth_context, gap
+    return auth_context, ""
+
+
 # Program-mandated attribution-header classifier + injector
 # (``_REQUIRED_HEADER_INJECTABLE`` / ``_REQUIRED_HEADER_SKIP`` /
 # ``_apply_required_headers`` / ``_existing_header_names``) now live in
@@ -446,6 +558,89 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
 # (``kali_exec``) and the audited host path (the recon host-dispatch wrappers in
 # commands/web_discovery.py / dns_discovery.py) apply the SAME rules. The names
 # are re-exported from this module for back-compat with existing importers.
+
+
+def _audit_execution_policy_refusal(
+    *,
+    cfg: Config,
+    eng_key: str,
+    eng_dir: Path,
+    cmd: list[str],
+    tool_name: str,
+    technique: str,
+    intent: str,
+    probe_kind: str,
+    phase: str,
+    destructive: bool,
+    agent_name: str,
+    timeout: int,
+    run_uuid: str,
+    stdout_path: Path,
+    stderr_path: Path,
+    started_at_iso: str,
+    scope_version: str,
+    auth_context: str,
+    reason: str,
+) -> None:
+    """Best-effort durable evidence for a policy-denied, never-started run."""
+    try:
+        scope_doc = scope_lib.load_scope(str(eng_dir))
+        enforcement = scope_lib.scope_enforcement(scope_doc)
+    except (OSError, ValueError, SystemExit):
+        enforcement = "enforce"
+    policy = {
+        "scope_enforcement": enforcement,
+        "scope_bypassed": False,
+        "checked_targets": [],
+        "policy_refusal": reason,
+    }
+    client = AssessmentClient(cfg.base_url, eng_key)
+    try:
+        row = _post_pre_exec_row(
+            client,
+            cmd=cmd,
+            technique=technique,
+            intent=intent,
+            probe_kind=probe_kind,
+            phase=phase,
+            destructive=destructive,
+            agent_name=agent_name,
+            engagement_dir=eng_dir,
+            container_name="",
+            timeout=timeout,
+            force=False,
+            started_at_iso=started_at_iso,
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+            working_dir=f"/engagements/{eng_key}",
+            scope_version=scope_version,
+            auth_context=auth_context,
+            tool_name=tool_name,
+            run_uuid=run_uuid,
+            execution_policy=policy,
+        )
+        run_id = row.get("id")
+        if run_id is not None:
+            _patch_finalize(
+                client,
+                run_id=int(run_id),
+                status="failed",
+                return_code=None,
+                ended_at_iso=_utcnow_iso(),
+                duration_ms=0,
+                stdout_preview="",
+                stderr_preview=reason,
+                timed_out=False,
+                partial_results=False,
+                peak_rss_bytes=None,
+                cpu_user_seconds=None,
+                cpu_system_seconds=None,
+            )
+    except Exception as exc:  # noqa: BLE001 - refusal still blocks if audit is unavailable
+        print(f"warning: could not audit execution-policy refusal: {exc}", file=sys.stderr)
+        _write_failed_audit_marker(eng_dir, run_uuid=run_uuid, error=str(exc))
+    finally:
+        client.close()
 
 
 def kali_exec(
@@ -465,6 +660,9 @@ def kali_exec(
     config: Config | None = None,
     tool_name: str | None = None,
     identity: str | None = None,
+    rate_override_reason: str = "",
+    destinations: tuple[scope_lib.ExecutionDestination, ...] = (),
+    nuclei_oob_explicit: bool = False,
 ) -> KaliResult:
     """Run `cmd` inside the runtime container with full audit recording.
 
@@ -482,7 +680,14 @@ def kali_exec(
     # SystemExit with "Cannot resolve engagement directory."
     cfg = config or load_config(str(engagement_dir) if engagement_dir else None)
     eng_dir = _resolve_engagement_dir(engagement_dir, cfg)
-    eng_key = engagement_key or eng_dir.name or cfg.engagement_key
+    if engagement_key is not None:
+        eng_key = str(engagement_key).strip()
+        if not eng_key:
+            raise AssessError("engagement key is empty")
+    else:
+        eng_key = str(cfg.engagement_key or eng_dir.name).strip()
+        if not eng_key:
+            raise AssessError("engagement key is empty")
     resolved_agent = _resolve_agent_name(agent_name)
     technique = normalize_technique(technique)
     probe_kind = normalize_probe_kind(probe_kind)
@@ -506,22 +711,7 @@ def kali_exec(
     started_at_iso = _utcnow_iso()
     started_monotonic = time.monotonic()
     scope_version = _scope_version(eng_dir)
-    # A plain kali exec does not apply credential material. Keep its audit label
-    # anonymous unless the caller explicitly asks for an identity and that
-    # identity is actually injected into the command below. This avoids a
-    # credentials backend read on every recon probe and prevents unauthenticated
-    # commands from being counted as active-identity coverage.
     auth_context = "anonymous"
-    _identity_name: str | None = None
-    _identity_material: dict = {}
-    if identity is not None:
-        _identity_name, _identity_material = resolve_identity(eng_dir, identity)
-        if not _identity_material:
-            print(
-                f"warning: --identity '{identity}' not found in the credential "
-                "store or temporarily unavailable; no auth material to apply.",
-                file=sys.stderr,
-            )
 
     if os.environ.get(_KALI_NOOP_ENV):
         # Test-only short-circuit. Returns a synthetic result so argparse
@@ -541,83 +731,72 @@ def kali_exec(
             resolved_argv=list(cmd),
         )
 
+    derived_tool_name = tool_name or _derive_tool_name(cmd)
+    try:
+        auth_context, attribution_gap = prepare_execution_command(
+            cmd,
+            tool_name=derived_tool_name,
+            engagement_dir=eng_dir,
+            identity=identity,
+            nuclei_oob_explicit=nuclei_oob_explicit,
+        )
+        execution_policy = scope_lib.enforce_execution_policy(
+            cmd,
+            tool_name=derived_tool_name,
+            engagement_dir=eng_dir,
+            engagement_key=eng_key,
+            destinations=destinations,
+        )
+    except scope_lib.ScopePolicyError as exc:
+        _audit_execution_policy_refusal(
+            cfg=cfg,
+            eng_key=eng_key,
+            eng_dir=eng_dir,
+            cmd=cmd,
+            tool_name=derived_tool_name,
+            technique=technique,
+            intent=intent,
+            probe_kind=probe_kind,
+            phase=phase,
+            destructive=destructive,
+            agent_name=resolved_agent,
+            timeout=timeout,
+            run_uuid=run_uuid,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            started_at_iso=started_at_iso,
+            scope_version=scope_version,
+            auth_context=auth_context,
+            reason=str(exc),
+        )
+        raise AssessError(str(exc)) from exc
+
     _check_container_running(container_name)
 
-    derived_tool_name = tool_name or _derive_tool_name(cmd)
-    if identity is not None:
-        if _apply_identity_material(cmd, derived_tool_name, _identity_material):
-            auth_context = _identity_name or auth_context
-        else:
-            print(
-                f"warning: --identity '{identity}': auth material was NOT applied "
-                f"(tool '{derived_tool_name}' takes no injectable -H header, or no "
-                "material). Leaving auth_context derived so this run is NOT counted "
-                "as a cross-identity probe — inject the identity's auth into the "
-                "command manually if this tool needs it.",
-                file=sys.stderr,
-            )
-
-    # Program-mandated attribution headers (e.g. BugCrowd's ``X-Bug-Bounty:
-    # <handle>``) must ride every in-scope HTTP probe. Inject here — after the
-    # identity block (so an identity-set header isn't duplicated) and before the
-    # IP-pin/exec — so the injected ``-H`` args land in the recorded audit argv.
-    # For a ``sh -c``/``bash -c`` wrapper the header is BEST-EFFORT injected into
-    # the curl/wget sub-commands inside the script TEXT (W5); a plain argv append
-    # would land on the shell, not the inner tool. This Layer-1 injection only
-    # WARNs when no safe -H injection is possible (an unknown tool, or a script we
-    # could not rewrite) — it does not itself block. The Layer-2 backstop just
-    # below is the hard stop: per ADR 0010, an un-attributed request that REACHES
-    # an in-scope host on a required-headers engagement is a ban-risk, so it is
-    # REFUSED rather than sent. Local / non-target commands stay unaffected.
-    _req_headers = _required_headers(eng_dir)
-    if _req_headers:
-        status = _apply_required_headers(cmd, derived_tool_name, _req_headers)
-        if status == "warned":
-            names = ", ".join(_req_headers)
-            print(
-                f"warning: program requires header(s) {names} but tool "
-                f"'{derived_tool_name}' has no known -H injection — this run will "
-                "NOT carry the required header; inject it manually if this tool "
-                "reaches the in-scope target.",
-                file=sys.stderr,
-            )
-
-        # Layer-2 fail-closed attribution backstop (ADR 0010). After every
-        # transparent mutation (identity, Layer-1 required-header injection) the
-        # assembled command is inspected one last time: when it REACHES an
-        # in-scope host WITHOUT carrying the marker, REFUSE the run rather than
-        # send un-attributed traffic to a program-governed host (a ban-risk on
-        # federal/managed programs). This catches the gaps Layer 1 leaves — a
-        # `bash -c "curl <in-scope>"` whose script couldn't be injected, an
-        # unknown tool, or wafw00f. Local/non-target commands and passive skip-set
-        # tools are unaffected (the gate is fail-OPEN for everything else).
-        gap = required_header_attribution_gap(
-            cmd, derived_tool_name, _req_headers, _in_scope_allow_entries(eng_dir)
+    if attribution_gap:
+        refusal = (
+            f"RUNTIME ERROR: refusing to run — {attribution_gap}. Program-required "
+            "attribution headers must ride every in-scope HTTP request "
+            "(missing attribution is a ban-risk on federal/managed programs). "
+            "Add the marker the tool's own way (curl/httpx -H, whatweb "
+            "--header, nikto -Add-header, arjun --headers) or call curl "
+            "directly instead of wrapping it in bash -c, then re-run."
         )
-        if gap:
-            refusal = (
-                f"RUNTIME ERROR: refusing to run — {gap}. Program-required "
-                "attribution headers must ride every in-scope HTTP request "
-                "(missing attribution is a ban-risk on federal/managed programs). "
-                "Add the marker the tool's own way (curl/httpx -H, whatweb "
-                "--header, nikto -Add-header, arjun --headers) or call curl "
-                "directly instead of wrapping it in bash -c, then re-run."
-            )
-            print(refusal, file=sys.stderr)
-            return KaliResult(
-                run_id=None,
-                status="refused",
-                return_code=None,
-                stdout_path=str(stdout_path),
-                stderr_path=str(stderr_path),
-                duration_ms=int((time.monotonic() - started_monotonic) * 1000),
-                peak_rss_bytes=None,
-                stdout_preview="",
-                stderr_preview=refusal,
-                timed_out=False,
-                partial_results=False,
-                resolved_argv=list(cmd),
-            )
+        print(refusal, file=sys.stderr)
+        return KaliResult(
+            run_id=None,
+            status="refused",
+            return_code=None,
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+            duration_ms=int((time.monotonic() - started_monotonic) * 1000),
+            peak_rss_bytes=None,
+            stdout_preview="",
+            stderr_preview=refusal,
+            timed_out=False,
+            partial_results=False,
+            resolved_argv=list(cmd),
+        )
 
     # CR-36 — host-resolve + --resolve IP-pin. On macOS Docker Desktop the
     # container resolver flaps (I-013), so a container HTTP probe can return
@@ -657,6 +836,8 @@ def kali_exec(
     run_id: int | None = None
     superseded_by_id: int | None = None
     audit_failed = False
+    rate_lease_cm = None
+    rate_lease_entered = False
     try:
         try:
             row = _post_pre_exec_row(
@@ -680,6 +861,7 @@ def kali_exec(
                 auth_context=auth_context,
                 tool_name=derived_tool_name,
                 run_uuid=run_uuid,
+                execution_policy=execution_policy,
             )
             run_id = int(row.get("id")) if row.get("id") is not None else None
             superseded_by_id = row.get("superseded_by_id")
@@ -703,6 +885,43 @@ def kali_exec(
             )
             _write_failed_audit_marker(eng_dir, run_uuid=run_uuid, error=str(exc))
             audit_failed = True
+
+        reservation = aggregate_rate_reservation(
+            str(eng_dir), cmd, derived_tool_name, execution_policy
+        )
+        if reservation is not None:
+            rate_lease_cm = target_rate_lease(
+                config=cfg,
+                owner=f"kali:{resolved_agent}:{run_uuid}",
+                effective_rate_rps=reservation,
+                ttl_seconds=max(int(timeout) + 60, 60),
+                override_reason=rate_override_reason,
+                command_run_id=run_id,
+            )
+            try:
+                rate_lease_cm.__enter__()
+                rate_lease_entered = True
+            except Exception as exc:
+                if run_id is not None and not audit_failed:
+                    try:
+                        _patch_finalize(
+                            client,
+                            run_id=run_id,
+                            status="failed",
+                            return_code=None,
+                            ended_at_iso=_utcnow_iso(),
+                            duration_ms=0,
+                            stdout_preview="",
+                            stderr_preview=f"aggregate rate lease refused: {exc}",
+                            timed_out=False,
+                            partial_results=False,
+                            peak_rss_bytes=None,
+                            cpu_user_seconds=None,
+                            cpu_system_seconds=None,
+                        )
+                    except Exception:
+                        pass
+                raise AssessError(f"aggregate rate lease refused: {exc}") from exc
 
         # One docker-exec attempt + full telemetry snapshot. Factored into a
         # nested closure so the CR-36 false-negative guard can run it a SECOND
@@ -1107,6 +1326,8 @@ def kali_exec(
             resolved_argv=list(cmd),
         )
     finally:
+        if rate_lease_cm is not None and rate_lease_entered:
+            rate_lease_cm.__exit__(None, None, None)
         client.close()
 
 
@@ -1183,6 +1404,7 @@ __all__ = [
     "PROBE_KIND_ENUM",
     "TECHNIQUE_ENUM",
     "_emit_probe_run",
+    "target_rate_lease",
     # Public surface
     "kali_exec",
 ]

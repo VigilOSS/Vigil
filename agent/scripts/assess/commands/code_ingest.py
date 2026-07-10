@@ -195,6 +195,11 @@ def register(subparsers) -> None:
         default=None,
         help="Optional path for skipped-artifacts manifest (default: tools/analysis-state/skipped-artifacts/<repo-key>.json).",
     )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compare the scanned manifest with the active backend generation without staging or committing it.",
+    )
     p.set_defaults(func=run)
 
 
@@ -660,13 +665,16 @@ def run(args) -> None:
             files.append(file_record)
 
     if not files:
-        _write_skipped_manifest(args, cfg=cfg, repo_key=repo_key, repo_name=repo_name, repo_path=repo_path, records=skipped_records)
-        print("No analyzable files found.", file=sys.stderr)
-        sys.exit(1)
+        print(
+            "No analyzable files found; committing a complete empty manifest.",
+            file=sys.stderr,
+        )
 
     # POST to backend
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        # Create the repo record
+        # Stage a complete generation. The backend only promotes it after every
+        # batch arrives, so a crash or transport failure cannot expose a
+        # half-refreshed source tree.
         repo_payload = {
             'repo_key': repo_key,
             'name': repo_name,
@@ -677,10 +685,17 @@ def run(args) -> None:
             'total_loc': total_loc,
             'git_churn': {'churn_scores': dict(sorted(churn_scores.items(), key=lambda x: -x[1])[:30])} if churn_scores else {},
         }
-        repo_resp = client.post('code/repos', repo_payload)
-        repo_id = repo_resp.get('id') or repo_resp.get('repo_id')
-        if not repo_id:
-            print("Backend did not return a repo ID", file=sys.stderr)
+        if getattr(args, "dry_run", False):
+            preview = client.post(
+                'code/repos/refresh/preview', {'repo_key': repo_key, 'files': files}
+            )
+            print(json.dumps(preview, indent=2, ensure_ascii=False))
+            return
+        refresh = client.post('code/repos/refresh/start', repo_payload)
+        repo_id = refresh.get('repo_id')
+        refresh_token = refresh.get('refresh_token')
+        if not repo_id or not refresh_token:
+            print("Backend did not return a repo refresh claim", file=sys.stderr)
             sys.exit(1)
 
         # Bulk-create files in batches
@@ -689,11 +704,15 @@ def run(args) -> None:
         for i in range(0, len(files), batch_size):
             batch = files[i:i + batch_size]
             files_payload = {
-                'repo_id': repo_id,
+                'refresh_token': refresh_token,
                 'files': batch,
             }
-            resp = client.post('code/files', files_payload)
-            created_count += resp.get('inserted', len(batch))
+            resp = client.post(f'code/repos/{repo_id}/refresh/files', files_payload)
+            created_count += resp.get('staged', len(batch))
+        client.post(
+            f'code/repos/{repo_id}/refresh/commit',
+            {'refresh_token': refresh_token, 'manifest_complete': True},
+        )
 
 
     skipped_manifest = _write_skipped_manifest(

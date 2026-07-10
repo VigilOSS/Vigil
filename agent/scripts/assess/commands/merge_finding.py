@@ -12,6 +12,8 @@ def register(subparsers) -> None:
     p.add_argument("source_slug", help="Source finding slug (will be merged away)")
     p.add_argument("target_slug", help="Target finding slug (will absorb source)")
     p.add_argument("reason", help="Reason for the merge")
+    p.add_argument("--expected-source-row-version", type=int)
+    p.add_argument("--expected-target-row-version", type=int)
     p.set_defaults(func=run)
 
 
@@ -22,7 +24,10 @@ def run(args) -> None:
         "target_slug": args.target_slug,
         "reason": args.reason,
         "source_name": "operator",
+        "expected_source_row_version": getattr(args, "expected_source_row_version", None),
+        "expected_target_row_version": getattr(args, "expected_target_row_version", None),
     }
+    payload = {key: value for key, value in payload.items() if value is not None}
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         client.post("findings/merge", payload)

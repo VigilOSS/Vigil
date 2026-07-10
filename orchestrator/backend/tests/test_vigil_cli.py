@@ -784,6 +784,35 @@ def test_engagement_create_persists_header_and_rate_limit(
     assert scope["rate_limit"] == 5.0
 
 
+def test_engagement_create_persists_aggregate_rate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "https://app.example.com",
+            "--hosts",
+            "app.example.com",
+            "--no-prompt",
+            "--aggregate-rate-limit",
+            "12.5",
+        ]
+    )
+
+    created_path = _created_path_from_stdout(capsys.readouterr().out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["rate_limit_aggregate_rps"] == 12.5
+
+
 def test_engagement_create_omits_rate_limit_when_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2196,12 +2225,18 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
     _copy_agent_fixture(repo_root / "agent", install_root)
     captured: dict[str, object] = {}
 
-    def fake_execv(path: str, argv: list[str]) -> None:
+    def fake_execvpe(path: str, argv: list[str], env: dict[str, str]) -> None:
         captured["path"] = path
         captured["argv"] = argv
+        captured["env"] = env
         raise SystemExit(0)
 
-    monkeypatch.setattr(main_module.os, "execv", fake_execv)
+    monkeypatch.setattr(
+        main_module,
+        "_oob_options",
+        lambda root: SimpleNamespace(oob_domain="configured.oob.test"),
+    )
+    monkeypatch.setattr(main_module.os, "execvpe", fake_execvpe)
 
     with pytest.raises(SystemExit) as excinfo:
         main_module.main(["--root", str(install_root), "assess", "--help"])
@@ -2209,6 +2244,7 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
     assert excinfo.value.code == 0
     assert captured["path"] == str(install_root / "agent" / "scripts" / "assess.py")
     assert captured["argv"] == [str(install_root / "agent" / "scripts" / "assess.py"), "--help"]
+    assert captured["env"]["VIGIL_OOB_DOMAIN"] == "configured.oob.test"
 
 
 def test_aith_mcp_subcommand_prints_deprecation_and_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
@@ -6267,14 +6303,20 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
         "agent/scripts/assess/commands/host_exec.py",
     )
     posts: list[tuple[str, dict]] = []
+    events: list[str] = []
 
     class _Client:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, endpoint: str, payload: dict) -> dict:
+            events.append("audit")
             posts.append((endpoint, payload))
             return {"id": 42}
+
+        def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            events.append("finalize")
+            return {"id": 42, **payload}
 
         def close(self) -> None:
             return None
@@ -6297,10 +6339,11 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
         ),
     )
     monkeypatch.setattr(
-        module.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="ok\n", stderr=""),
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (events.append("process") or (0, "ok\n", "", False)),
     )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
@@ -6324,6 +6367,11 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
     assert exc_info.value.code == 0
     assert posts[0][0] == "command-runs/host-exec"
     assert posts[0][1]["agent_name"] == "investigator"
+    assert posts[0][1]["status"] == "running"
+    assert posts[0][1]["stdout"] == ""
+    assert posts[0][1]["stdout_path"].endswith(".out")
+    assert posts[0][1]["stderr_path"].endswith(".err")
+    assert events == ["audit", "process", "finalize"]
 
 
 def test_host_exec_destructive_gate_allows_format_flags_but_blocks_format_command() -> None:
@@ -6342,6 +6390,432 @@ def test_host_exec_destructive_gate_allows_format_flags_but_blocks_format_comman
     assert module._contains_destructive_token([r"C:\Windows\System32\format.com", "E:"]) == "format"
     assert module._contains_destructive_token(["formatter", "raw"]) is None
     assert module._contains_destructive_token(["rm", "-rf", "/tmp/example"]) == "rm -r"
+
+
+def test_host_exec_registers_process_before_communicate_and_unregisters_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_process_registry",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    events: list[str] = []
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def communicate(self, timeout: int):
+            events.append("communicate")
+            return "ok\n", ""
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(
+        module.host_processes,
+        "register_process",
+        lambda *a, **k: events.append("register"),
+    )
+    monkeypatch.setattr(
+        module.host_processes,
+        "unregister_process",
+        lambda *a, **k: events.append("unregister"),
+    )
+    monkeypatch.setattr(
+        module.host_processes,
+        "registered_group_alive",
+        lambda *a, **k: False,
+    )
+
+    result = module._run_host_process(
+        ["echo", "ok"],
+        cwd=str(tmp_path),
+        timeout_seconds=30,
+        engagement_dir=str(tmp_path),
+        run_uuid="run-1",
+    )
+
+    assert result == (0, "ok\n", "", False)
+    assert events == ["register", "communicate", "unregister"]
+
+
+def test_host_exec_keeps_registry_for_background_child_after_leader_exits(
+    tmp_path: Path,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_residual_group",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    child_pid_path = tmp_path / "child.pid"
+    run_uuid = "run-residual-group"
+    child_pid = 0
+    try:
+        result = module._run_host_process(
+            [
+                "/bin/sh",
+                "-c",
+                'sleep 30 </dev/null >/dev/null 2>&1 & echo "$!" > "$1"',
+                "sh",
+                str(child_pid_path),
+            ],
+            cwd=str(tmp_path),
+            timeout_seconds=10,
+            engagement_dir=str(tmp_path),
+            run_uuid=run_uuid,
+        )
+        child_pid = int(child_pid_path.read_text(encoding="ascii"))
+
+        assert result[0] == 0
+        registry = (
+            tmp_path / ".runtime" / "host-processes" / f"{run_uuid}.json"
+        )
+        assert registry.is_file()
+        summary = module.host_processes.reap_registered_processes(
+            tmp_path, max_age_seconds=0
+        )
+        assert summary["reaped"] == 1
+        assert not registry.exists()
+    finally:
+        if child_pid:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_host_exec_spills_stdout_and_stderr_from_process_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_spill",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    stdout_path = tmp_path / "run.out"
+    stderr_path = tmp_path / "run.err"
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def communicate(self, timeout: int):
+            return None, None
+
+    def fake_popen(*_args, stdout, stderr, **_kwargs):
+        stdout.write(b"first stdout line\n")
+        stdout.flush()
+        stderr.write(b"first stderr line\n")
+        stderr.flush()
+        return _Proc()
+
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(module.host_processes, "register_process", lambda *a, **k: None)
+    monkeypatch.setattr(module.host_processes, "unregister_process", lambda *a, **k: None)
+
+    result = module._run_host_process(
+        ["example"],
+        cwd=str(tmp_path),
+        timeout_seconds=30,
+        engagement_dir=str(tmp_path),
+        run_uuid="run-spill",
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
+
+    assert result == (0, "first stdout line\n", "first stderr line\n", False)
+    assert stdout_path.read_text() == "first stdout line\n"
+    assert stderr_path.read_text() == "first stderr line\n"
+
+
+def test_host_exec_large_output_returns_bounded_head_tail_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_bounded_preview",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    stdout_path = tmp_path / "large.out"
+    stderr_path = tmp_path / "large.err"
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def communicate(self, timeout: int):
+            return None, None
+
+    def fake_popen(*_args, stdout, stderr, **_kwargs):
+        stdout.write(b"HEAD\n" + b"x" * (2 * 1024 * 1024) + b"\nTAIL\n")
+        stderr.write(b"ERRHEAD\n" + b"y" * (2 * 1024 * 1024) + b"\nERRTAIL\n")
+        return _Proc()
+
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(module.host_processes, "register_process", lambda *a, **k: None)
+    monkeypatch.setattr(module.host_processes, "unregister_process", lambda *a, **k: None)
+
+    _, stdout_preview, stderr_preview, _ = module._run_host_process(
+        ["example"],
+        cwd=str(tmp_path),
+        timeout_seconds=30,
+        engagement_dir=str(tmp_path),
+        run_uuid="run-large",
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
+
+    assert len(stdout_preview.encode()) <= module._OUTPUT_PREVIEW_BYTES
+    assert len(stderr_preview.encode()) <= module._OUTPUT_PREVIEW_BYTES
+    assert stdout_preview.startswith("HEAD\n")
+    assert stdout_preview.endswith("\nTAIL\n")
+    assert "omitted; full output:" in stdout_preview
+    assert stderr_preview.startswith("ERRHEAD\n")
+    assert stderr_preview.endswith("\nERRTAIL\n")
+    assert stdout_path.stat().st_size > 2 * 1024 * 1024
+    assert stderr_path.stat().st_size > 2 * 1024 * 1024
+
+
+def test_host_exec_fast_exit_before_registry_is_treated_as_already_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_fast_exit_registry",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    events: list[str] = []
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def communicate(self, timeout: int):
+            events.append(f"communicate:{timeout}")
+            return "done\n", ""
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(
+        module.host_processes,
+        "register_process",
+        lambda *a, **k: (_ for _ in ()).throw(module.AssessError("process already exited")),
+    )
+    monkeypatch.setattr(
+        module.host_processes,
+        "unregister_process",
+        lambda *a, **k: events.append("unregister"),
+    )
+
+    assert module._run_host_process(
+        ["true"],
+        cwd=str(tmp_path),
+        timeout_seconds=30,
+        engagement_dir=str(tmp_path),
+        run_uuid="run-fast",
+    ) == (0, "done\n", "", False)
+    assert events == ["communicate:1"]
+
+
+def test_host_exec_registry_failure_terminates_process_group_with_bounded_kill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_registry_failure",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    signals: list[int] = []
+
+    class _Proc:
+        pid = 4321
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout: int):
+            raise module.subprocess.TimeoutExpired("cmd", timeout)
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(
+        module.host_processes,
+        "register_process",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("registry unavailable")),
+    )
+    monkeypatch.setattr(module.os, "getpgid", lambda _pid: 4321)
+    monkeypatch.setattr(module.os, "killpg", lambda _pgid, sig: signals.append(sig))
+
+    with pytest.raises(RuntimeError, match="registry unavailable"):
+        module._run_host_process(
+            ["sleep", "60"],
+            cwd=str(tmp_path),
+            timeout_seconds=30,
+            engagement_dir=str(tmp_path),
+            run_uuid="run-registry-fail",
+        )
+
+    assert signals == [module.signal.SIGTERM, module.signal.SIGKILL]
+
+
+def test_host_exec_process_failure_finalizes_pre_exec_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_process_failure_audit",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    patches: list[tuple[str, dict]] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {"id": 42}
+
+        def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            patches.append((endpoint, payload))
+            return payload
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("registry unavailable")),
+    )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="audit process setup failure",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert exc_info.value.code == 1
+    assert patches[0][0] == "command-runs/42"
+    assert patches[0][1]["status"] == "failed"
+    assert "registry unavailable" in patches[0][1]["stderr_preview"]
+
+
+def test_host_exec_acquires_aggregate_rate_lease_after_pre_exec_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_rate_lease",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    events: list[str] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            events.append("audit")
+            return {"id": 42}
+
+        def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            events.append("finalize")
+            return payload
+
+        def close(self) -> None:
+            pass
+
+    class _Lease:
+        def __enter__(self):
+            events.append("lease-acquire")
+            return {"lease_token": "lease-1"}
+
+        def __exit__(self, *_exc):
+            events.append("lease-release")
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "aggregate_rate_reservation",
+        lambda *_args, **_kwargs: 7.0,
+    )
+    monkeypatch.setattr(
+        module,
+        "target_rate_lease",
+        lambda **_kwargs: _Lease(),
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (events.append("process") or (0, "", "", False)),
+    )
+    (tmp_path / "scope.json").write_text(
+        json.dumps({"hosts": ["target.example"], "aggregate_rate_limit_rps": 10}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["curl", "https://target.example/health"],
+                tool="curl",
+                intent="host liveness",
+                technique="RECON",
+                phase="recon",
+                target_host="target.example",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+                rate_override_reason="",
+            )
+        )
+
+    assert exc_info.value.code == 0
+    assert events == [
+        "audit",
+        "lease-acquire",
+        "process",
+        "lease-release",
+        "finalize",
+    ]
 
 
 def test_host_exec_require_audit_fails_when_audit_record_fails(
@@ -6379,10 +6853,11 @@ def test_host_exec_require_audit_fails_when_audit_record_fails(
         ),
     )
     monkeypatch.setattr(
-        module.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="ok\n", stderr=""),
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: pytest.fail("WRITE must not execute without its required pre-audit"),
     )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(

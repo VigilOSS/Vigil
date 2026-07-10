@@ -517,7 +517,7 @@ class ArtifactRegisterRequest(BaseModel):
 class JobCreate(BaseModel):
     """Request body for POST /jobs — opens an assessment_jobs row.
 
-    parent_command_run_id links the synchronous audit row that initiated the
+    parent_command_run_id links the pre-exec command audit owned by the async
     dtach worker. status defaults to queued; the CLI bumps it to running
     immediately after dtach attaches.
     """
@@ -563,6 +563,29 @@ class JobRecord(BaseModel):
     audit_metadata: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class RateLeaseCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    owner: str = Field(min_length=1, max_length=256)
+    effective_rate_rps: float = Field(gt=0)
+    ttl_seconds: int = Field(default=300, ge=1, le=86_400)
+    override_reason: str = Field(default="", max_length=2048)
+    command_run_id: int | None = Field(default=None, ge=1)
+
+
+class RateLeaseUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ttl_seconds: int | None = Field(default=None, ge=1, le=86_400)
+    release: bool = False
+
+    @model_validator(mode="after")
+    def _one_action(self) -> "RateLeaseUpdate":
+        if self.release == (self.ttl_seconds is not None):
+            raise ValueError("provide exactly one of release=true or ttl_seconds")
+        return self
 
 
 class SurfaceRecordRequest(BaseModel):
@@ -771,6 +794,8 @@ class MergeFindingsRequest(BaseModel):
     target_slug: str = Field(min_length=1, max_length=256)
     reason: str = Field(min_length=1, max_length=4096)
     source_name: str = Field(default="operator", min_length=1, max_length=128)
+    expected_source_row_version: int | None = Field(default=None, ge=1)
+    expected_target_row_version: int | None = Field(default=None, ge=1)
 
 
 def _reject_invalid_submission_status(value: str | None) -> None:
@@ -879,6 +904,7 @@ class FindingPatchRequest(BaseModel):
     reason_code: str = Field(default="", max_length=128)
     reason_text: str = Field(default="", max_length=4096)
     artifact_ref: str = Field(default="", max_length=1024)
+    expected_row_version: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _validate_submission_status(self) -> "FindingPatchRequest":
@@ -2243,6 +2269,46 @@ async def patch_job(
     return record
 
 
+@router.post("/rate-leases", status_code=status.HTTP_201_CREATED)
+def create_rate_lease(
+    engagement_key: str,
+    request: RateLeaseCreate,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.acquire_rate_lease(
+        engagement.id,
+        owner=request.owner,
+        effective_rate_rps=request.effective_rate_rps,
+        ttl_seconds=request.ttl_seconds,
+        override_reason=request.override_reason,
+        command_run_id=request.command_run_id,
+    )
+
+
+@router.get("/rate-leases")
+def get_rate_leases(
+    engagement_key: str,
+    active_only: bool = Query(default=False),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_rate_leases(engagement.id, active_only=active_only)
+
+
+@router.patch("/rate-leases/{lease_token}")
+def patch_rate_lease(
+    engagement_key: str,
+    lease_token: str,
+    request: RateLeaseUpdate,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.update_rate_lease(
+        engagement.id,
+        lease_token=lease_token,
+        ttl_seconds=request.ttl_seconds,
+        release=request.release,
+    )
+
+
 @router.post("/oob-probes", status_code=status.HTTP_201_CREATED)
 async def create_oob_probe(engagement_key: str, request: OobProbeRecordRequest) -> dict[str, Any]:
     """Record an OAST probe (called by ``vigil oob mint``).
@@ -2494,6 +2560,8 @@ async def merge_findings_endpoint(engagement_key: str, request: MergeFindingsReq
             target_slug=request.target_slug,
             reason=request.reason,
             source_name=request.source_name,
+            expected_source_row_version=request.expected_source_row_version,
+            expected_target_row_version=request.expected_target_row_version,
         )
     )
     await anyio.to_thread.run_sync(
@@ -2590,6 +2658,7 @@ async def patch_finding(
             transition_reason_code=request.reason_code,
             transition_reason_text=request.reason_text,
             transition_artifact_ref=request.artifact_ref,
+            expected_row_version=request.expected_row_version,
         )
     )
     await anyio.to_thread.run_sync(

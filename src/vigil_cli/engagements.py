@@ -166,6 +166,19 @@ def resolve_rate_limit(value: float | str | None) -> float | None:
     return rate
 
 
+def resolve_aggregate_rate_limit(value: float | str | None) -> float | None:
+    """Normalize the engagement-wide concurrent target-rate ceiling."""
+    if value is None:
+        return None
+    try:
+        rate = float(str(value).strip())
+    except ValueError as exc:
+        raise SystemExit("--aggregate-rate-limit must be a positive number") from exc
+    if rate <= 0:
+        raise SystemExit("--aggregate-rate-limit must be greater than 0 req/s")
+    return rate
+
+
 @dataclass(frozen=True, slots=True)
 class CreateEngagementOptions:
     install_root: Path
@@ -192,6 +205,8 @@ class CreateEngagementOptions:
     # gate). Written into scope.json's ``rate_limit`` only when set, for
     # HTTP-target engagements.
     rate_limit: float | None = None
+    # Concurrent target-facing runs acquire backend leases against this ceiling.
+    rate_limit_aggregate_rps: float | None = None
     # Blue-only fields (ignored unless engagement_type == "blue"):
     customer: str | None = None
     platforms: list[str] = field(default_factory=list)
@@ -460,9 +475,17 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
         # byte-identical and recon stages fall through to their tool defaults.
         if options.rate_limit is not None:
             scope["rate_limit"] = options.rate_limit
-    elif options.required_headers or options.out_of_scope or options.rate_limit is not None:
+        if options.rate_limit_aggregate_rps is not None:
+            scope["rate_limit_aggregate_rps"] = options.rate_limit_aggregate_rps
+    elif (
+        options.required_headers
+        or options.out_of_scope
+        or options.rate_limit is not None
+        or options.rate_limit_aggregate_rps is not None
+    ):
         raise SystemExit(
-            "--program/--header, --out-of-scope, and --rate-limit apply only to "
+            "--program/--header, --out-of-scope, --rate-limit, and "
+            "--aggregate-rate-limit apply only to "
             f"HTTP-target engagements (web/both/android), not '{options.engagement_type}'."
         )
 

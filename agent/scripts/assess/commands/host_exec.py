@@ -12,15 +12,20 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
+from typing import Any
 
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
+from assess.lib import scope as scope_lib
+from assess.lib import host_processes
+from assess.lib.rate_leases import aggregate_rate_reservation, target_rate_lease
 
 
 # Conservative destructive-token list. Operators must pass --allow-destructive
@@ -38,6 +43,9 @@ _DESTRUCTIVE_COMMANDS: tuple[str, ...] = ("format",)
 _AUDIT_SOURCE_CHOICES = ("header", "stdin", "argv")
 _DEFAULT_TIMEOUT_SECONDS = 600
 _INTENT_MAX_LEN = 200
+_PROCESS_TERM_GRACE_SECONDS = 5
+_PROCESS_KILL_GRACE_SECONDS = 2
+_OUTPUT_PREVIEW_BYTES = 64 * 1024
 
 
 def register(subparsers) -> None:
@@ -137,6 +145,11 @@ def register(subparsers) -> None:
         help="Exit non-zero if the backend audit row cannot be recorded; use for blue WRITE actions.",
     )
     p.add_argument(
+        "--rate-override-reason",
+        default="",
+        help="Reason for an authorized aggregate target-rate override.",
+    )
+    p.add_argument(
         "--finding",
         dest="finding",
         default="",
@@ -215,6 +228,7 @@ def _merge_from_json(args: argparse.Namespace, doc: dict) -> None:
         "audit_source": "audit_source",
         "allow_destructive": "allow_destructive",
         "require_audit": "require_audit",
+        "rate_override_reason": "rate_override_reason",
         "finding": "finding",
         "finding_id": "finding",
     }
@@ -252,17 +266,26 @@ def _validate_required(args: argparse.Namespace) -> None:
         sys.exit(2)
 
 
-def _build_notes(scope_host: str) -> str:
+def _build_notes(
+    scope_host: str,
+    execution_policy: dict | None = None,
+    *,
+    policy_refusal: str = "",
+) -> str:
     """Encode CLI-only fields (currently scope_host) as a small JSON blob in
     notes so they remain auditable even though the SQL schema has no dedicated
     column. Empty string when nothing to record so we don't pollute the column.
     """
-    payload: dict[str, str] = {}
+    payload: dict[str, Any] = {}
     if (scope_host or "").strip():
         payload["scope_host"] = scope_host.strip()
+    if execution_policy:
+        payload.update(execution_policy)
+    if policy_refusal:
+        payload["policy_refusal"] = policy_refusal
     if not payload:
         return ""
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    return scope_lib.execution_policy_notes(payload)
 
 
 def _resolve_finding_id(client: AssessmentClient, ref: str) -> int:
@@ -296,6 +319,169 @@ def _resolve_agent_name(args: argparse.Namespace) -> str:
     return "operator"
 
 
+def _bounded_text(value: Any, limit: int = _OUTPUT_PREVIEW_BYTES) -> str:
+    if value is None:
+        return ""
+    raw = value if isinstance(value, bytes) else str(value).encode("utf-8", errors="replace")
+    if len(raw) <= limit:
+        return _clip_utf8(raw.decode("utf-8", errors="replace"), limit)
+    marker = f"\n... {len(raw) - limit} or more bytes omitted ...\n"
+    return _bounded_head_tail(
+        raw[:limit], raw[-limit:], marker=marker, limit=limit
+    )
+
+
+def _clip_utf8(value: str, limit: int, *, from_end: bool = False) -> str:
+    """Clip text to an encoded-byte budget without returning partial UTF-8."""
+    if limit <= 0:
+        return ""
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) <= limit:
+        return value
+    window = encoded[-limit:] if from_end else encoded[:limit]
+    return window.decode("utf-8", errors="ignore")
+
+
+def _bounded_head_tail(head: bytes, tail: bytes, *, marker: str, limit: int) -> str:
+    marker = _clip_utf8(marker, limit)
+    available = max(limit - len(marker.encode("utf-8")), 0)
+    head_budget = available // 2
+    tail_budget = available - head_budget
+    head_text = _clip_utf8(
+        head.decode("utf-8", errors="replace"), head_budget
+    )
+    tail_text = _clip_utf8(
+        tail.decode("utf-8", errors="replace"), tail_budget, from_end=True
+    )
+    return head_text + marker + tail_text
+
+
+def _bounded_file_preview(path: Path, limit: int = _OUTPUT_PREVIEW_BYTES) -> str:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size <= limit:
+                return _clip_utf8(
+                    fh.read(limit).decode("utf-8", errors="replace"), limit
+                )
+            head = fh.read(limit)
+            fh.seek(max(size - limit, 0))
+            tail = fh.read(limit)
+    except OSError:
+        return ""
+    marker = f"\n... output omitted; full output: {path} ...\n"
+    return _bounded_head_tail(
+        head, tail, marker=marker, limit=limit
+    )
+
+
+def _run_host_process(
+    argv: list[str],
+    *,
+    cwd: str,
+    timeout_seconds: int,
+    engagement_dir: str,
+    run_uuid: str,
+    stdout_path: Path | None = None,
+    stderr_path: Path | None = None,
+) -> tuple[int, str, str, bool]:
+    """Run one host process with line-one spill and precise group ownership."""
+    output_dir = Path(engagement_dir) / "scans" / "host-exec"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = stdout_path or output_dir / f"{run_uuid}.out"
+    stderr_path = stderr_path or output_dir / f"{run_uuid}.err"
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+        try:
+            process = subprocess.Popen(  # noqa: S603 - operator-supplied argv is the contract
+                argv,
+                cwd=cwd,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            return 127, "", f"host-exec: command not found: {exc}\n", False
+
+        registered = False
+        return_code = int(process.returncode) if process.returncode is not None else 1
+        timed_out = False
+        communicated = False
+        captured_stdout = ""
+        captured_stderr = ""
+        try:
+            host_processes.register_process(
+                engagement_dir, run_uuid=run_uuid, pid=process.pid
+            )
+            registered = True
+        except Exception:
+            # A very short-lived command may exit between Popen and the identity
+            # lookup. It cannot become an orphan, so collect its completed result.
+            if process.poll() is not None:
+                captured_stdout, captured_stderr = process.communicate(timeout=1)
+                communicated = True
+                return_code = int(process.returncode)
+            else:
+                _terminate_process_group(process)
+                raise
+
+        try:
+            if not communicated:
+                captured_stdout, captured_stderr = process.communicate(
+                    timeout=timeout_seconds
+                )
+            return_code = int(process.returncode)
+        except subprocess.TimeoutExpired:
+            _terminate_process_group(process)
+            return_code = 124
+            timed_out = True
+        finally:
+            if registered and process.returncode is not None:
+                group_alive = host_processes.registered_group_alive(
+                    engagement_dir, run_uuid=run_uuid
+                )
+                if group_alive is False:
+                    host_processes.unregister_process(
+                        engagement_dir, run_uuid=run_uuid
+                    )
+
+    stdout_text = _bounded_file_preview(stdout_path)
+    stderr_text = _bounded_file_preview(stderr_path)
+    if not stdout_text and captured_stdout:
+        stdout_text = _bounded_text(captured_stdout)
+    if not stderr_text and captured_stderr:
+        stderr_text = _bounded_text(captured_stderr)
+    return return_code, stdout_text, stderr_text, timed_out
+
+
+def _terminate_process_group(process: subprocess.Popen) -> tuple[str, str]:
+    """Boundedly terminate and reap the whole process group created by Popen."""
+    try:
+        process_group = os.getpgid(process.pid)
+    except ProcessLookupError:
+        try:
+            return process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            return "", ""
+
+    for sig, grace in (
+        (signal.SIGTERM, _PROCESS_TERM_GRACE_SECONDS),
+        (signal.SIGKILL, _PROCESS_KILL_GRACE_SECONDS),
+    ):
+        try:
+            os.killpg(process_group, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout_text, stderr_text = process.communicate(timeout=grace)
+            return stdout_text or "", stderr_text or ""
+        except subprocess.TimeoutExpired:
+            continue
+    return "", ""
+
+
 def run(args) -> None:
     if args.from_json:
         _merge_from_json(args, _load_from_json(args.from_json))
@@ -319,144 +505,225 @@ def run(args) -> None:
     timeout_seconds = int(args.timeout or _DEFAULT_TIMEOUT_SECONDS)
 
     run_uuid = uuid.uuid4().hex
+    output_dir = Path(cfg.engagement_dir) / "scans" / "host-exec"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = output_dir / f"{run_uuid}.out"
+    stderr_path = output_dir / f"{run_uuid}.err"
     started_at = _utcnow_iso()
     started_monotonic = time.monotonic()
 
-    stdout_text = ""
-    stderr_text = ""
-    return_code: int = -1
-    timed_out = False
-
     try:
-        completed = subprocess.run(  # noqa: S603 — host-exec deliberately invokes operator-supplied argv
+        execution_policy = scope_lib.enforce_execution_policy(
             argv,
-            cwd=cwd,
-            timeout=timeout_seconds,
-            capture_output=True,
-            text=True,
+            tool_name=args.tool.strip(),
+            engagement_dir=cfg.engagement_dir,
+            engagement_key=cfg.engagement_key,
+            explicit_targets=tuple(
+                target
+                for target in (
+                    (args.target_host or "").strip(),
+                    (args.scope_host or "").strip(),
+                )
+                if scope_lib.host_from_token(target)
+            ),
+            require_declared_tool=True,
         )
-        stdout_text = completed.stdout or ""
-        stderr_text = completed.stderr or ""
-        return_code = int(completed.returncode)
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        # TimeoutExpired exposes partial stdout/stderr as bytes when text=True
-        # has not yet decoded; coerce defensively.
-        stdout_text = (
-            exc.stdout.decode("utf-8", errors="replace")
-            if isinstance(exc.stdout, (bytes, bytearray))
-            else (exc.stdout or "")
-        )
-        stderr_text = (
-            exc.stderr.decode("utf-8", errors="replace")
-            if isinstance(exc.stderr, (bytes, bytearray))
-            else (exc.stderr or "")
-        )
-        return_code = 124  # conventional timeout exit code
-    except FileNotFoundError as exc:
-        stderr_text = f"host-exec: command not found: {exc}\n"
-        return_code = 127
-
-    completed_at = _utcnow_iso()
-    duration_ms = int((time.monotonic() - started_monotonic) * 1000)
-    success = (return_code == 0) and not timed_out
+    except scope_lib.ScopePolicyError as exc:
+        reason = str(exc)
+        refusal_payload = {
+            "command": " ".join(argv),
+            "argv": argv,
+            "tool_name": args.tool.strip(),
+            "route": "host_exec",
+            "agent_name": _resolve_agent_name(args),
+            "phase": args.phase.strip(),
+            "return_code": None,
+            "timed_out": False,
+            "success": False,
+            "started_at": started_at,
+            "completed_at": _utcnow_iso(),
+            "duration_ms": 0,
+            "stdout": "",
+            "stderr": reason,
+            "notes": _build_notes(args.scope_host, policy_refusal=reason),
+            "technique": args.technique.strip(),
+            "intent": args.intent.strip()[:_INTENT_MAX_LEN],
+            "destructive": bool(args.allow_destructive),
+            "target_host": (args.target_host or "").strip(),
+            "audit_source": args.audit_source,
+            "working_dir": cwd,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "timeout_seconds_requested": timeout_seconds,
+            "run_uuid": run_uuid,
+            "status": "failed",
+        }
+        try:
+            with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+                client.post("command-runs/host-exec", refusal_payload)
+        except Exception as audit_exc:  # noqa: BLE001 - target traffic remains blocked
+            print(f"[host-exec] WARN: policy refusal audit failed -- {audit_exc}", file=sys.stderr)
+        print(f"host-exec: refusing to run — {reason}", file=sys.stderr)
+        sys.exit(3)
 
     command_str = " ".join(argv)
     command_hash = _sha256_str(command_str)
-    stdout_sha256 = _sha256_str(stdout_text)
-    stderr_sha256 = _sha256_str(stderr_text)
+    notes = _build_notes(args.scope_host, execution_policy)
 
-    # Stream the wrapped command's output to the operator's fds first so the
-    # audit POST cannot delay or swallow it.
-    if stdout_text:
-        sys.stdout.write(stdout_text)
-        sys.stdout.flush()
-    if stderr_text:
-        sys.stderr.write(stderr_text)
-        sys.stderr.flush()
-
-    payload: dict = {
+    pre_payload: dict = {
         "command": command_str,
         "argv": argv,
         "tool_name": args.tool.strip(),
-        # Server forces route='host_exec' regardless; sending it here keeps
-        # the audit trail consistent if the server-side guard is ever bypassed.
         "route": "host_exec",
         "agent_name": _resolve_agent_name(args),
         "phase": args.phase.strip(),
-        "return_code": return_code,
-        "timed_out": timed_out,
-        "success": success,
+        "return_code": None,
+        "timed_out": False,
+        "success": None,
         "started_at": started_at,
-        "completed_at": completed_at,
-        "duration_ms": duration_ms,
-        "stdout": stdout_text,
-        "stderr": stderr_text,
+        "completed_at": "",
+        "duration_ms": 0,
+        "stdout": "",
+        "stderr": "",
         "command_hash": command_hash,
-        "stdout_sha256": stdout_sha256,
-        "stderr_sha256": stderr_sha256,
-        "notes": _build_notes(args.scope_host),
+        "stdout_sha256": "",
+        "stderr_sha256": "",
+        "notes": notes,
         "technique": args.technique.strip(),
         "intent": args.intent.strip()[:_INTENT_MAX_LEN],
         "destructive": bool(args.allow_destructive),
         "target_host": (args.target_host or "").strip(),
         "audit_source": args.audit_source,
         "working_dir": cwd,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
         "timeout_seconds_requested": timeout_seconds,
         "run_uuid": run_uuid,
-        "status": "timed_out" if timed_out else ("completed" if success else "failed"),
+        "status": "running",
     }
 
     record_run_id: int | str = ""
     audit_record_failed = False
-    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        # Optional finding linkage. Resolve the slug/id to the finding's numeric
-        # id here so a bad ref does not 404 the WHOLE audit row (the command
-        # already ran) — on failure we WARN and record the run unlinked, honoring
-        # host-exec's non-fatal audit doctrine.
-        finding_ref = str(getattr(args, "finding", "") or "").strip()
-        if finding_ref:
-            try:
-                payload["finding_id"] = _resolve_finding_id(client, finding_ref)
-            except Exception as exc:  # noqa: BLE001 — link is best-effort, never blocks audit
-                print(
-                    f"[host-exec] WARN: could not link finding {finding_ref!r}: {exc}; "
-                    "recording the run unlinked.",
-                    file=sys.stderr,
-                )
-        endpoint = "command-runs/host-exec"
-        response = None
+    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    finding_ref = str(getattr(args, "finding", "") or "").strip()
+    if finding_ref:
         try:
-            response = client.post(endpoint, payload)
-        except Exception as exc:  # noqa: BLE001 — must never eat the exit code
-            # A best-effort finding link must NEVER sink the audit row (the command
-            # already ran). A bad numeric --finding skips the client-side slug lookup
-            # above and only 404s server-side (same for a valid-but-wrong-engagement
-            # id); if the POST failed with a finding_id attached, drop the link and
-            # retry once unlinked before declaring the audit failed.
-            if "finding_id" in payload:
-                bad_id = payload.pop("finding_id")
+            pre_payload["finding_id"] = _resolve_finding_id(client, finding_ref)
+        except Exception as exc:  # noqa: BLE001 - linkage is best-effort
+            print(
+                f"[host-exec] WARN: could not link finding {finding_ref!r}: {exc}; "
+                "recording the run unlinked.",
+                file=sys.stderr,
+            )
+    try:
+        try:
+            response = client.post("command-runs/host-exec", pre_payload)
+        except Exception as exc:  # noqa: BLE001 - honor require-audit below
+            if "finding_id" in pre_payload:
+                bad_id = pre_payload.pop("finding_id")
                 print(
                     f"[host-exec] WARN: could not link finding id={bad_id}: {exc}; "
                     "recording the run unlinked.",
                     file=sys.stderr,
                 )
                 try:
-                    response = client.post(endpoint, payload)
-                except Exception as exc2:  # noqa: BLE001 — must never eat the exit code
+                    response = client.post("command-runs/host-exec", pre_payload)
+                except Exception as retry_exc:  # noqa: BLE001
+                    response = None
                     audit_record_failed = True
-                    print(
-                        f"[host-exec] WARN: audit record failed -- {exc2}",
-                        file=sys.stderr,
-                    )
+                    print(f"[host-exec] WARN: pre-exec audit failed -- {retry_exc}", file=sys.stderr)
             else:
+                response = None
                 audit_record_failed = True
-                print(
-                    f"[host-exec] WARN: audit record failed -- {exc}",
-                    file=sys.stderr,
-                )
+                print(f"[host-exec] WARN: pre-exec audit failed -- {exc}", file=sys.stderr)
         if isinstance(response, dict):
             record_run_id = response.get("run_id") or response.get("id") or ""
+
+        if getattr(args, "require_audit", False) and not record_run_id:
+            print(
+                "[host-exec] required pre-exec audit record was not created; refusing execution",
+                file=sys.stderr,
+            )
+            sys.exit(4)
+
+        stdout_text = ""
+        stderr_text = ""
+        return_code: int = -1
+        timed_out = False
+
+        try:
+            reservation = aggregate_rate_reservation(
+                cfg.engagement_dir,
+                argv,
+                args.tool.strip(),
+                execution_policy,
+            )
+            if reservation is None:
+                return_code, stdout_text, stderr_text, timed_out = _run_host_process(
+                    argv,
+                    cwd=cwd,
+                    timeout_seconds=timeout_seconds,
+                    engagement_dir=cfg.engagement_dir,
+                    run_uuid=run_uuid,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                )
+            else:
+                numeric_run_id = int(record_run_id) if str(record_run_id).isdigit() else None
+                with target_rate_lease(
+                    config=cfg,
+                    owner=f"host-exec:{run_uuid}",
+                    effective_rate_rps=reservation,
+                    ttl_seconds=max(timeout_seconds + 60, 60),
+                    override_reason=str(
+                        getattr(args, "rate_override_reason", "") or ""
+                    ).strip(),
+                    command_run_id=numeric_run_id,
+                ):
+                    return_code, stdout_text, stderr_text, timed_out = _run_host_process(
+                        argv,
+                        cwd=cwd,
+                        timeout_seconds=timeout_seconds,
+                        engagement_dir=cfg.engagement_dir,
+                        run_uuid=run_uuid,
+                        stdout_path=stdout_path,
+                        stderr_path=stderr_path,
+                    )
+        except Exception as exc:  # noqa: BLE001 - finalize the running audit row
+            return_code = 1
+            stderr_text = f"host-exec: process setup failed: {exc}\n"
+
+        completed_at = _utcnow_iso()
+        duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+        success = (return_code == 0) and not timed_out
+
+        # Stream the wrapped command's output only after the process exits; the
+        # pre-exec audit already exists at this point.
+        if stdout_text:
+            sys.stdout.write(stdout_text)
+            sys.stdout.flush()
+        if stderr_text:
+            sys.stderr.write(stderr_text)
+            sys.stderr.flush()
+
+        finalize_payload: dict = {
+            "return_code": return_code,
+            "timed_out": timed_out,
+            "ended_at": completed_at,
+            "duration_ms": duration_ms,
+            "stdout_preview": stdout_text,
+            "stderr_preview": stderr_text,
+            "status": "timed_out" if timed_out else ("completed" if success else "failed"),
+            "partial_results": bool(stdout_text or stderr_text) and not success,
+        }
+        if record_run_id:
+            try:
+                client.patch(f"command-runs/{record_run_id}", finalize_payload)
+            except Exception as exc:  # noqa: BLE001
+                audit_record_failed = True
+                print(f"[host-exec] WARN: audit finalize failed -- {exc}", file=sys.stderr)
+    finally:
+        client.close()
 
     audit_line = (
         f"[host-exec] recorded run_uuid={run_uuid} "

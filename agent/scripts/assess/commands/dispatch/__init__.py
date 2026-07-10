@@ -76,6 +76,7 @@ __all__ = [
     "_get_dispatch",
     "_abort_duplicate_dispatch",
     "_update_dispatch_status",
+    "_register_dispatch",
     "_client_for",
     "_build_register_payload",
     "_warn_on_overlapping_dispatch",

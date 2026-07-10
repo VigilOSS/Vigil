@@ -168,3 +168,69 @@ def test_host_admitted_absent_out_of_scope_matches_legacy_behavior():
 def test_out_of_scope_non_list_raises_system_exit():
     with pytest.raises(SystemExit):
         scope.out_of_scope_entries({"out_of_scope": "mobile.acme.example"})
+
+
+def test_scope_enforcement_defaults_to_enforce_and_only_explicit_bypass_disables_it():
+    assert scope.scope_enforcement({}) == "enforce"
+    assert scope.scope_enforcement({"scope_enforcement": "enforce"}) == "enforce"
+    assert scope.scope_enforcement({"scope_enforcement": "bypass"}) == "bypass"
+    # Typos and unknown values must never become an implicit bypass.
+    assert scope.scope_enforcement({"scope_enforcement": "disabled"}) == "enforce"
+
+
+def test_target_admission_enforces_allow_and_deny_lists_by_default():
+    scope_doc = {
+        "hosts": ["*.example.test"],
+        "out_of_scope": ["admin.example.test"],
+    }
+
+    admitted = scope.target_admission(scope_doc, "https://api.example.test/v1")
+    carved_out = scope.target_admission(scope_doc, "admin.example.test")
+    unrelated = scope.target_admission(scope_doc, "other.test")
+
+    assert admitted["admitted"] is True
+    assert admitted["scope_enforcement"] == "enforce"
+    assert admitted["bypassed"] is False
+    assert carved_out["admitted"] is False
+    assert "out-of-scope" in carved_out["reason"]
+    assert unrelated["admitted"] is False
+
+
+def test_target_admission_global_bypass_allows_every_parseable_target_and_marks_verdict():
+    scope_doc = {
+        "hosts": ["example.test"],
+        "out_of_scope": ["blocked.test"],
+        "scope_enforcement": "bypass",
+    }
+
+    verdict = scope.target_admission(scope_doc, "https://blocked.test/path")
+
+    assert verdict["admitted"] is True
+    assert verdict["scope_enforcement"] == "bypass"
+    assert verdict["bypassed"] is True
+    assert "global scope bypass" in verdict["reason"]
+
+
+def test_denied_tools_are_normalized_deduplicated_and_invalid_shapes_fail_closed():
+    assert scope.denied_tools({"denied_tools": [" Nuclei ", "nuclei", "SQLMAP", 7]}) == {
+        "nuclei",
+        "sqlmap",
+    }
+    with pytest.raises(SystemExit, match="denied_tools.*list"):
+        scope.denied_tools({"denied_tools": "nuclei"})
+
+
+def test_denied_tools_reads_canonical_nested_tool_policy():
+    assert scope.denied_tools(
+        {"tool_policy": {"denied_tools": [" Nuclei ", "SQLMAP"]}}
+    ) == {"nuclei", "sqlmap"}
+
+    with pytest.raises(SystemExit, match="tool_policy.*object"):
+        scope.denied_tools({"tool_policy": ["nuclei"]})
+
+
+def test_aggregate_rate_limit_parses_positive_number_and_rejects_invalid_values():
+    assert scope.aggregate_rate_limit({"rate_limit_aggregate_rps": 12.5}) == 12.5
+    assert scope.aggregate_rate_limit({}) is None
+    assert scope.aggregate_rate_limit({"rate_limit_aggregate_rps": 0}) is None
+    assert scope.aggregate_rate_limit({"rate_limit_aggregate_rps": "fast"}) is None

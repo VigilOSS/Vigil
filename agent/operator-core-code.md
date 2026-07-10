@@ -327,7 +327,9 @@ vigil assess code-coverage --cwe-matrix      # CWE effort state when Phase 2B or
 
 Resume from the current phase. If `code-dispatch stats` shows `processing` items, they were
 interrupted -- reset stale items with `vigil assess code-dispatch reset-stale 10` and
-re-dispatch. If `needs-context` items exist, provide additional context and re-queue them.
+re-dispatch. Active specialists heartbeat their fetched `agent_name` + `lease_token`; every result
+and closeout reuses that ownership pair. If `needs-context` items exist, provide the requested
+context and return them to pending with `code-dispatch retry-needs-context <ids> <reason>`.
 
 Phase-specific resume actions:
 - **Phase 1 (classify-map)**: Check if call graph, attack hypotheses, and file analysis queue

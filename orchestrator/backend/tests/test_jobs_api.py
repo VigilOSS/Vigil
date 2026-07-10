@@ -10,6 +10,8 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
+import pytest
+
 ENGAGEMENT_KEY = "2026-04-17-130000-jobs"
 
 
@@ -230,8 +232,36 @@ def test_patch_job_rejects_terminal_status_overwrite(client, isolate_settings):
     assert current["status"] == "completed"
 
 
-def test_patch_job_terminal_update_uses_preterminal_compare_and_swap(
-    client, isolate_settings, monkeypatch
+def test_patch_job_allows_stop_failed_reconciliation(client, isolate_settings):
+    """stop_failed means process ownership needs attention, not that it ended."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
+        json={"status": "running"},
+    ).json()
+    stopped = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
+        json={"status": "stop_failed"},
+    )
+    assert stopped.status_code == 200, stopped.text
+
+    reconciled = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
+        json={
+            "status": "completed",
+            "ended_at": "2026-04-17T13:30:00Z",
+            "exit_code": 0,
+        },
+    )
+
+    assert reconciled.status_code == 200, reconciled.text
+    assert reconciled.json()["status"] == "completed"
+    assert reconciled.json()["exit_code"] == 0
+
+
+@pytest.mark.parametrize("target_status", ["killed", "stop_failed"])
+def test_patch_job_status_update_uses_preterminal_compare_and_swap(
+    client, isolate_settings, monkeypatch, target_status
 ):
     """A stale pre-terminal read must not allow a later terminal write to
     overwrite the terminal row that already won."""
@@ -286,7 +316,7 @@ def test_patch_job_terminal_update_uses_preterminal_compare_and_swap(
 
     response = client.patch(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
-        json={"status": "killed", "exit_code": -9},
+        json={"status": target_status, "exit_code": -9},
     )
 
     assert response.status_code == 409, response.text

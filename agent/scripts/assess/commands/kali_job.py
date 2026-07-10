@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+import uuid
 
 from pathlib import Path
 
@@ -25,10 +26,17 @@ from assess.lib.kali import (
     TECHNIQUE_ENUM,
     ScopedErrorParser,
     _INTENT_MAX_LEN,
+    _audit_execution_policy_refusal,
     _resolve_agent_name,
+    _scope_version,
+    _utcnow_iso,
+    prepare_execution_command,
 )
 from assess.lib.kali_audit import _enum_reject_message
 from assess.lib.kali_jobs import job_list, job_status, job_stop, job_tail, reap_jobs, start_job
+from assess.lib.rate_leases import aggregate_rate_reservation
+from assess.lib.kali_tool_naming import _derive_tool_name
+from assess.lib import scope as scope_lib
 
 
 _DEFAULT_JOB_TIMEOUT_SECONDS = 24 * 60 * 60  # 24h hard cap parity with `kali exec` budgets
@@ -83,13 +91,28 @@ def register(subparsers) -> None:
         ),
     )
     start.add_argument("--destructive", action="store_true")
+    start.add_argument(
+        "--rate-override-reason",
+        dest="rate_override_reason",
+        default="",
+        help="Recorded justification when this job exceeds the engagement aggregate rate ceiling.",
+    )
     start.add_argument("--agent-name", dest="agent_name", required=False, default=None)
+    start.add_argument(
+        "--identity",
+        default=None,
+        help="Named engagement identity whose material is injected before the job starts.",
+    )
     start.add_argument("--container-name", dest="container_name", default=default_runtime_container())
     start.add_argument(
         "--parent-command-run-id",
         dest="parent_command_run_id",
         type=int,
         default=None,
+        help=(
+            "Deprecated and rejected: async jobs now create and own their "
+            "parent command-run audit automatically."
+        ),
     )
     start.add_argument(
         "command",
@@ -170,6 +193,58 @@ def _run_start(args) -> None:
     elif timeout_value <= 0:
         raise AssessError("--timeout must be > 0")
     resolved_agent = _resolve_agent_name(args.agent_name)
+    cfg = _load_job_config(args)
+    explicit_dir = getattr(args, "engagement_dir", None)
+    engagement_dir = Path(explicit_dir).expanduser().resolve() if explicit_dir else Path(cfg.engagement_dir).resolve()
+    command = list(args.command)
+    derived_tool_name = _derive_tool_name(command)
+    if getattr(args, "parent_command_run_id", None) is not None:
+        raise AssessError(
+            "--parent-command-run-id is system-owned for async jobs and cannot be supplied"
+        )
+    try:
+        auth_context, attribution_gap = prepare_execution_command(
+            command,
+            tool_name=derived_tool_name,
+            engagement_dir=engagement_dir,
+            identity=getattr(args, "identity", None),
+        )
+        if attribution_gap:
+            raise scope_lib.ScopePolicyError(attribution_gap)
+        execution_policy = scope_lib.enforce_execution_policy(
+            command,
+            tool_name=derived_tool_name,
+            engagement_dir=engagement_dir,
+            engagement_key=cfg.engagement_key,
+            explicit_targets=([args.target_host] if args.target_host else []),
+        )
+    except scope_lib.ScopePolicyError as exc:
+        run_uuid = uuid.uuid4().hex
+        output_dir = engagement_dir / "scans" / "kali" / "jobs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _audit_execution_policy_refusal(
+            cfg=cfg,
+            eng_key=cfg.engagement_key,
+            eng_dir=engagement_dir,
+            cmd=command,
+            tool_name=derived_tool_name,
+            technique=technique,
+            intent=intent,
+            probe_kind=args.probe_kind,
+            phase=args.phase,
+            destructive=bool(args.destructive),
+            agent_name=resolved_agent,
+            timeout=int(timeout_value),
+            run_uuid=run_uuid,
+            stdout_path=output_dir / f"{run_uuid}.out",
+            stderr_path=output_dir / f"{run_uuid}.err",
+            started_at_iso=_utcnow_iso(),
+            scope_version=_scope_version(engagement_dir),
+            auth_context=locals().get("auth_context", "anonymous"),
+            reason=str(exc),
+        )
+        raise AssessError(str(exc)) from exc
+
     audit_meta = {
         "technique": args.technique,
         "intent": intent,
@@ -179,15 +254,27 @@ def _run_start(args) -> None:
         "agent_name": resolved_agent or None,
         "target_host": args.target_host,
         "timeout_seconds_requested": int(timeout_value),
+        "scope_version": _scope_version(engagement_dir),
+        "auth_context": auth_context,
+        **execution_policy,
     }
-    cfg = _load_job_config(args)
-    explicit_dir = getattr(args, "engagement_dir", None)
-    engagement_dir = Path(explicit_dir).expanduser().resolve() if explicit_dir else None
+    reservation = aggregate_rate_reservation(
+        str(engagement_dir),
+        command,
+        derived_tool_name,
+        execution_policy,
+    )
+    if reservation is not None:
+        audit_meta["effective_rate_rps"] = reservation
+        audit_meta["rate_override_reason"] = str(
+            getattr(args, "rate_override_reason", "") or ""
+        ).strip()
     record = start_job(
-        list(args.command),
+        command,
         audit_meta=audit_meta,
         container_name=args.container_name,
-        parent_command_run_id=args.parent_command_run_id,
+        execution_policy=execution_policy,
+        tool_name=derived_tool_name,
         engagement_dir=engagement_dir,
         config=cfg,
     )

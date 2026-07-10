@@ -29,6 +29,9 @@ def _load_proxy_addon_module():
     mitmproxy = ModuleType("mitmproxy")
     http = ModuleType("mitmproxy.http")
     http.HTTPFlow = object  # type: ignore[attr-defined]
+    http.Response = SimpleNamespace(  # type: ignore[attr-defined]
+        make=lambda status, body, headers: _FakeHttpResponse(status, headers, body)
+    )
     mitmproxy.http = http  # type: ignore[attr-defined]
     mitmproxy.ctx = SimpleNamespace(
         log=SimpleNamespace(
@@ -38,8 +41,8 @@ def _load_proxy_addon_module():
         ),
         options=SimpleNamespace(engagements_root="", registry_poll_seconds=30),
     )
-    sys.modules.setdefault("mitmproxy", mitmproxy)
-    sys.modules.setdefault("mitmproxy.http", http)
+    sys.modules["mitmproxy"] = mitmproxy
+    sys.modules["mitmproxy.http"] = http
 
     module_path = Path(__file__).resolve().parents[3] / "agent" / "scripts" / "proxy_addon.py"
     spec = importlib.util.spec_from_file_location("test_proxy_addon_module_routing", module_path)
@@ -58,6 +61,7 @@ def _seed_engagement(
     scope_priority: int = 0,
     out_of_scope: list[str] | None = None,
     required_headers: dict[str, str] | None = None,
+    off_limits_paths: list[str] | None = None,
 ) -> Path:
     engagement_dir = engagements_root / key
     engagement_dir.mkdir(parents=True, exist_ok=True)
@@ -68,6 +72,8 @@ def _seed_engagement(
         scope["out_of_scope"] = out_of_scope
     if required_headers is not None:
         scope["required_headers"] = required_headers
+    if off_limits_paths is not None:
+        scope["off_limits_paths"] = off_limits_paths
     (engagement_dir / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
     return engagement_dir
 
@@ -511,6 +517,80 @@ def test_request_hook_noop_when_engagement_has_no_required_headers(tmp_path: Pat
     assert collector._any_required_headers() is False  # fast path short-circuits
     req = _run_request_hook(collector, "https://app.example.com/x")
     assert dict(req.headers) == {}
+
+
+def test_request_hook_synthesizes_block_for_no_fire_url_without_upstream_send(
+    tmp_path: Path,
+) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root,
+        "eng-a",
+        hosts=["app.example.com"],
+        off_limits_paths=["/api/send-email"],
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    flow = _FakeFlow(
+        _FakeRequest(url="https://app.example.com/api/send-email?to=real-user"),
+        None,
+    )
+
+    collector.request(flow)
+
+    assert flow.response is not None
+    assert flow.response.status_code == 451
+    assert flow.response.headers.get("X-Vigil-No-Fire") == "blocked"
+    assert b"off_limits_paths" in flow.response.get_content()
+
+
+def test_request_hook_no_fire_is_host_scoped_for_absolute_patterns(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root,
+        "eng-a",
+        hosts=["*.example.com"],
+        off_limits_paths=["https://api.example.com/reset/*"],
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    flow = _FakeFlow(_FakeRequest(url="https://www.example.com/reset/alice"), None)
+
+    collector.request(flow)
+
+    assert flow.response is None
+
+
+def test_request_hook_excessive_encoding_fails_closed_with_synthetic_response(
+    tmp_path: Path,
+) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root,
+        "eng-a",
+        hosts=["app.example.com"],
+        off_limits_paths=["/admin/delete"],
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    flow = _FakeFlow(
+        _FakeRequest(url="https://app.example.com/admin%2525252Fdelete"),
+        None,
+    )
+
+    collector.request(flow)
+
+    assert flow.response.status_code == 451
+    assert flow.response.headers.get("X-Vigil-No-Fire") == "blocked"
 
 
 def test_filesystem_registry_parses_required_headers(tmp_path: Path) -> None:

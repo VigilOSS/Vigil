@@ -438,6 +438,7 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "assessment_command_runs",
     "assessment_artifacts",
     "assessment_jobs",
+    "assessment_rate_leases",
     "code_repos",
     "code_modules",
     "code_files",
@@ -1128,6 +1129,7 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 submission_status TEXT NOT NULL DEFAULT 'none',
                 merged_into_finding_id INTEGER,
                 last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                row_version INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, slug),
@@ -1913,7 +1915,7 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
 def _create_jobs_table(connection: sqlite3.Connection) -> None:
     # assessment_jobs tracks long-running dtach-supervised workers spawned
     # by `vigil assess kali job start`. parent_command_run_id links the
-    # synchronous audit row that initiated the job; SET NULL on cascade
+    # pre-exec command audit owned by that async job; SET NULL on cascade
     # so cleaning up an orphaned command-run does not destroy the job
     # record we still need for forensics.
     connection.execute(
@@ -1942,6 +1944,37 @@ def _create_jobs_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_jobs_command_run "
         "ON assessment_jobs(parent_command_run_id)"
+    )
+
+
+def _create_rate_leases_table(connection: sqlite3.Connection) -> None:
+    """Durable engagement-wide target-rate reservations.
+
+    Tool-local throttles remain the execution mechanism. This table is the
+    concurrency truth that prevents several individually polite agents from
+    exceeding an engagement's aggregate ceiling together.
+    """
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_rate_leases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            lease_token TEXT NOT NULL UNIQUE,
+            owner TEXT NOT NULL,
+            effective_rate_rps REAL NOT NULL,
+            aggregate_limit_rps REAL,
+            override_reason TEXT,
+            command_run_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
+            expires_at TEXT NOT NULL,
+            released_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_rate_leases_active "
+        "ON assessment_rate_leases(engagement_id, released_at, expires_at)"
     )
 
 
@@ -2102,6 +2135,9 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 threat_model_json TEXT NOT NULL DEFAULT '{}',
                 git_churn_json TEXT NOT NULL DEFAULT '{}',
                 lsp_config_json TEXT NOT NULL DEFAULT '{}',
+                active_generation INTEGER NOT NULL DEFAULT 0,
+                pending_refresh_token TEXT NOT NULL DEFAULT '',
+                pending_refresh_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, repo_key),
@@ -2171,6 +2207,8 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 priority INTEGER NOT NULL DEFAULT 50,
                 status TEXT NOT NULL DEFAULT 'pending',
                 assigned_agent TEXT NOT NULL DEFAULT '',
+                lease_token TEXT NOT NULL DEFAULT '',
+                last_heartbeat_at TEXT,
                 disposition TEXT NOT NULL DEFAULT '',
                 analysis_notes TEXT NOT NULL DEFAULT '',
                 skip_reason TEXT NOT NULL DEFAULT '',
@@ -2209,12 +2247,31 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 audit_metadata_json TEXT NOT NULL DEFAULT '{}',
                 cwe_coverage_json TEXT NOT NULL DEFAULT '[]',
                 cross_file_triggers_json TEXT NOT NULL DEFAULT '[]',
+                lease_token TEXT NOT NULL DEFAULT '',
+                result_fingerprint TEXT NOT NULL DEFAULT '',
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
                 FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
             )
             """
+    )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_ingest_staging (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                refresh_token TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(repo_id, refresh_token, file_path),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE
+            )
+        """
     )
     connection.execute(
         """
@@ -2279,6 +2336,7 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "submission_status": "TEXT NOT NULL DEFAULT 'none'",
         "merged_into_finding_id": "INTEGER",
         "last_seen_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "row_version": "INTEGER NOT NULL DEFAULT 1",
         "evidence_artifact_id": "INTEGER REFERENCES assessment_artifacts(id) ON DELETE SET NULL",
     }
     for column_name, definition in finding_column_defaults.items():
@@ -2334,8 +2392,20 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
 
     # Migrate code_repos: add lsp_config_json if missing
     repo_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_repos)").fetchall()}
-    if repo_columns and "lsp_config_json" not in repo_columns:
-        connection.execute("ALTER TABLE code_repos ADD COLUMN lsp_config_json TEXT NOT NULL DEFAULT '{}'")
+    legacy_repos_need_generation_backfill = bool(repo_columns) and "active_generation" not in repo_columns
+    for col_name, col_def in {
+        "lsp_config_json": "TEXT NOT NULL DEFAULT '{}'",
+        "active_generation": "INTEGER NOT NULL DEFAULT 0",
+        "pending_refresh_token": "TEXT NOT NULL DEFAULT ''",
+        "pending_refresh_json": "TEXT NOT NULL DEFAULT '{}'",
+    }.items():
+        if repo_columns and col_name not in repo_columns:
+            connection.execute(f"ALTER TABLE code_repos ADD COLUMN {col_name} {col_def}")
+    if legacy_repos_need_generation_backfill:
+        # Repositories created before refresh generations existed are already
+        # authoritative snapshots. Generation zero is reserved for an
+        # uncommitted first refresh, so preserve legacy visibility as gen 1.
+        connection.execute("UPDATE code_repos SET active_generation = 1")
 
     result_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_analysis_results)").fetchall()}
     if result_columns and "audit_metadata_json" not in result_columns:
@@ -2354,6 +2424,8 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         # silent deferral. Operators tag skips with a structured reason
         # (test-fixture, generated-code, minified, out-of-scope-language).
         "skip_reason": "TEXT NOT NULL DEFAULT ''",
+        "lease_token": "TEXT NOT NULL DEFAULT ''",
+        "last_heartbeat_at": "TEXT",
     }
     for col_name, col_def in queue_new_columns.items():
         if queue_columns and col_name not in queue_columns:
@@ -2364,6 +2436,18 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cwe_coverage_json TEXT NOT NULL DEFAULT '[]'")
     if result_columns and "cross_file_triggers_json" not in result_columns:
         connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cross_file_triggers_json TEXT NOT NULL DEFAULT '[]'")
+    for col_name, col_def in {
+        "lease_token": "TEXT NOT NULL DEFAULT ''",
+        "result_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "superseded_at": "TEXT",
+    }.items():
+        if result_columns and col_name not in result_columns:
+            connection.execute(f"ALTER TABLE code_analysis_results ADD COLUMN {col_name} {col_def}")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_code_analysis_results_idempotent "
+        "ON code_analysis_results(queue_item_id, lease_token, result_fingerprint) "
+        "WHERE queue_item_id IS NOT NULL AND lease_token != '' AND result_fingerprint != ''"
+    )
 
     # Migrate code_files: add structural metadata columns from tree-sitter index
     file_columns = _table_columns(connection, "code_files")
@@ -3217,6 +3301,7 @@ def init_db() -> None:
         _create_artifacts_table_and_fts(connection)
         _create_http_flow_tables(connection)
         _create_jobs_table(connection)
+        _create_rate_leases_table(connection)
         _create_code_analysis_tables(connection)
         _apply_additive_migrations(connection)
         _create_intel_tables(connection)

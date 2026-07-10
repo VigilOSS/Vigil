@@ -148,6 +148,15 @@ def add_required_kali_flags(parser) -> None:
         ),
     )
     parser.add_argument(
+        "--rate-override-reason",
+        dest="rate_override_reason",
+        default="",
+        help=(
+            "Recorded justification for exceeding scope.rate_limit_aggregate_rps. "
+            "Without it, aggregate-cap conflicts are refused before execution."
+        ),
+    )
+    parser.add_argument(
         "--agent-name",
         dest="kali_agent_name",
         default=None,
@@ -278,6 +287,7 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "force": bool(getattr(args, "force", False)),
         "container_name": getattr(args, "container_name", None),
         "identity": getattr(args, "identity", None),
+        "rate_override_reason": getattr(args, "rate_override_reason", "") or "",
     }
     if explicit_dir:
         kwargs["engagement_dir"] = Path(explicit_dir).expanduser().resolve()

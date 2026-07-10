@@ -95,7 +95,7 @@ def run(args) -> None:
         sys.exit(0)
 
     # Validate required fields
-    required = {"queue_item_id", "disposition"}
+    required = {"queue_item_id", "agent_name", "lease_token", "disposition"}
     for i, result in enumerate(results):
         if not isinstance(result, dict):
             print(f"Item {i} is not a JSON object", file=sys.stderr)
