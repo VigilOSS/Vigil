@@ -520,6 +520,8 @@ KALI_VERBS: tuple[str, ...] = KALI_TARGET_VERBS + KALI_MAINT_VERBS
 
 _KALI_COMMON_NOTES: tuple[str, ...] = (
     "Every target-facing kali verb requires --technique, --intent, --probe-kind, --phase, and --timeout. The CLI rejects a call missing any of these before it reaches the backend.",
+    "Target inputs and target-list files are admitted through scope.json before execution. Passive sources and reachability controls require explicit typed destinations. `scope_enforcement: bypass` overrides target allow/deny admission only; tool policy, audit, rate governance, and no-fire policy remain enforced.",
+    "When scope.json defines `rate_limit_aggregate_rps` (set at creation with `--aggregate-rate-limit`), target-facing runs reserve capacity after their pre-exec audit and before process launch, including commands whose target is supplied through a typed dynamic shell input. Use --rate-override-reason only for an authorized, durable exception.",
     "--technique must be one of TECHNIQUE_ENUM: use HEALTH for runtime/tool inventory, META for operator-side metadata, LOG-READ for artifact reads, OTHER only when no specific class fits.",
     "--agent-name resolves from the flag, then $AGENT_NAME, $VIGIL_AGENT_NAME, then `operator`. Specialists must export AGENT_NAME in their wrapper or pass --agent-name <role>.",
     "--phase is REQUIRED — pass the phase the dispatch was authorized for, NOT scope.json.current_phase. Allowed (from kali_audit.ALLOWED_PHASES; the two half-phase tags recon-pivot and exploit-recon are the trailing entries): "
@@ -1021,6 +1023,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "First resume primitive — use instead of manually chaining findings, handoffs, command-runs, and local notes.",
+            "Before reading the brief, the helper performs a bounded one-hour orphan sweep across command runs, async jobs, and precisely-owned host processes so stale runtime state is not presented as active work.",
             "Output is bounded; use get-command-run and artifact get for drill-down.",
             "Carries aggregate Surfaces (status×type + top uncovered) and Work Buffer (pending coverage by gf-bucket) rollups plus coverage/read-first intel notes — drill into per-item coverage-items / request-variants / work-buffer only when a rollup flags a bucket.",
             "Carries an Attempts do-today ledger (recorded blocked techniques and roe_blocked findings) — read it BEFORE re-dispatching a surface so a walled-off technique is not silently re-attempted.",
@@ -1150,6 +1153,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess update-finding <slug> --payload-file patch.json",
             'vigil assess update-finding <slug> --status reported --reason "Published in report"',
             'vigil assess update-finding <slug> --inline \'{"workflow_status":"draft","reason_text":"Needs more evidence"}\'',
+            'vigil assess update-finding <slug> --expected-row-version <version> --summary "..."',
             'vigil assess update-finding <slug> --details-inline \'{"chain_required":true,"chain_rationale":"...","required_followup":["..."]}\'',
             'vigil assess update-finding <slug> --details-inline \'{"cvss_score":9.1}\' --details-replace',
             'vigil assess update-finding VA-006 VA-007 --status reported --reason "batch: published"',
@@ -1377,14 +1381,17 @@ _CONTRACTS: dict[str, CommandContract] = {
         schema_name="backend code-analysis queue / trigger request models",
         preferred_invocations=(
             "vigil assess code-dispatch fetch <limit> <agent-name>",
-            "vigil assess code-dispatch done <item-id> <disposition> <cwe-coverage-json-file> [notes]",
+            "vigil assess code-dispatch heartbeat <item-id> <agent-name> <lease-token>",
+            "vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <cwe-coverage-json-file> [notes]",
             "vigil assess code-dispatch list-triggers [status]",
             "vigil assess code-dispatch resolve-triggers <triggers-json-file> <resolution-status> <note>",
             "vigil assess code-dispatch requeue-triggers <triggers-json-file>",
             "vigil assess code-dispatch retry-error <id1,id2,...> [reason]",
+            "vigil assess code-dispatch retry-needs-context <id1,id2,...> <reason>",
         ),
         author_supplied_fields=(
             "queue item id(s)",
+            "the fetched agent_name + lease_token for heartbeat, results, and closeouts",
             "bare JSON array for cwe_coverage when completing a queue item",
             "trigger_id/id or file_path/target_file_path when resolving triggers",
             "resolution_status: external_context_unavailable, source_equivalent_analyzed, or not_applicable",
@@ -1395,6 +1402,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Do not inflate CWE effort numbers to satisfy the gate. Use `disposition=not_applicable` on the coverage entry, or `resolve-triggers` for cross-file gaps that cannot be queued.",
             "`list-triggers` defaults to pending triggers, so operators can inspect blockers before resolving or requeueing.",
             "`retry-error` recovers queue items stuck at status='error' back to 'pending' so they re-enter the fetch rotation — `reset-stale` only recovers abandoned 'processing' rows on a time window and never touches 'error' rows.",
+            "`retry-needs-context` returns reviewed context gaps to pending and supersedes their old needs-context result projection.",
         ),
         common_mistakes=(
             ("cwe_coverage object wrapper", "`done` requires a bare JSON array, not {'cwe_coverage': [...]}"),
@@ -1407,7 +1415,7 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "command": "vigil assess code-dispatch resolve-triggers missing.json external_context_unavailable 'storage DLL source not provided'",
             },
             {
-                "command": "vigil assess code-dispatch done 42 clean cwe/42.json 'reviewed parser'",
+                "command": "vigil assess code-dispatch done 42 code-vuln-hunter <lease-token> clean cwe/42.json 'reviewed parser'",
             },
             {
                 "command": "vigil assess code-dispatch retry-error 42 'transient parser crash, retrying'",
@@ -1421,6 +1429,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Walk a source repository, fingerprint analyzable files, and register them with the code-analysis backend.",
         schema_name="backend code/repos + code/files ingest (no JSON author-file)",
         preferred_invocations=(
+            "vigil assess code-ingest <repo-path> --dry-run",
             "vigil assess code-ingest <repo-path>",
             "vigil assess code-ingest <repo-path> --name <repo-name> --repo-key <repo-key>",
             "vigil assess code-ingest <repo-path> --include-path '**/ResetPassword.min.js'",
@@ -1438,7 +1447,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("--skipped-manifest", "tools/analysis-state/skipped-artifacts/<repo-key>.json"),
         ),
         notes=(
-            "First code step: run before code-index / code-index-sync. It creates the backend repo row (returning a repo_id, also written into scope.json source_repos) and bulk-registers analyzable files with language, LOC, hash, header snippet, and git churn/security-history metadata.",
+            "First code step: run before code-index / code-index-sync. It stages a complete source manifest and atomically promotes it, returning a repo_id that is also written into scope.json source_repos. Interrupted batches never replace the active tree; changed files invalidate their old analysis and removed files leave coverage in the same commit.",
+            "Use --dry-run to report added, changed, renamed, and removed paths against the active backend generation without staging or committing.",
             "Generated/binary/minified files and skip-dirs (node_modules, vendor, dist, ...) are excluded and accounted in the skipped-artifacts manifest. --include-minified, --include-skipped, and --include-path <glob> (repeatable) opt specific artifacts back in, capped by --max-included-skipped-bytes.",
             "--language sets only the repo's primary language; use --default-language-for-unknown to stamp a language on unrecognized-extension files (use sparingly — a wrong stamp pollutes coverage math and structural indexing).",
         ),
@@ -1617,6 +1627,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         author_supplied_fields=(
             "queue_item_id",
             "agent_name",
+            "lease_token",
             "function_name",
             "hypothesis",
             "evidence",
@@ -1634,7 +1645,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("cross_file_triggers", "[]"),
         ),
         notes=(
-            "Record analysis results only for queue items fetched by code-dispatch. queue_item_id is required so stale or copied file_id values cannot attach work to the wrong file.",
+            "Record analysis results only for queue items fetched by code-dispatch. queue_item_id, agent_name, and lease_token are required; reclaimed leases reject stale writes.",
             "When file_id is supplied, the backend treats it as a consistency check and rejects it if it differs from the queue item's file.",
             "For a confirmed finding, run record-finding first, then put that slug in finding_slug.",
         ),
@@ -1647,6 +1658,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             {
                 "queue_item_id": 42,
                 "agent_name": "code-vuln-hunter",
+                "lease_token": "<fetched-lease-token>",
                 "function_name": "parse_message",
                 "hypothesis": "Attacker-controlled bytes reach length-sensitive copy code",
                 "evidence": "parse_message() bounds checks len before memcpy; no bypass found",
@@ -2382,6 +2394,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Politeness `-exclude-tags dos,fuzz,intrusive,brute-force` is injected by default (announced on "
         "stderr); pass your own `-exclude-tags` to override it verbatim. The result's `resolved_argv` "
         "shows the exact command that ran after injection.",
+        "Blind callbacks are disabled by default (`--oob-mode none` injects `-ni`). `public` is an explicit data-egress choice; `vigil` uses the OOB domain resolved and exported by the top-level `vigil assess` launcher.",
         "Long sweeps run synchronously with a generous --timeout. `vigil assess kali job start` is operator-only — specialists never background (see kali-exec skill).",
     ),
     "httpx": (
@@ -2489,6 +2502,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     ),
     "job": (
         "Long-running probes go through `vigil assess kali job start ...`. The dtach session is parented by tini so it survives the calling shell.",
+        "Job start uses the same pre-execution preparation as synchronous Kali execution: `--identity` material, required attribution headers, nuclei OOB safety, target scope, denied tools, and rate policy are applied before audit/spawn.",
         "Subcommands: start | status | tail | stop | list.",
     ),
     "sweep-orphans": (
@@ -2511,7 +2525,7 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     ),
     "nuclei": (
         {
-            "command": "vigil assess kali nuclei -l hosts.txt -t http/cves/,http/misconfiguration/,http/exposures/ -severity high,critical -mhe 50 -random-agent -rate-limit 50 -c 25 -bs 25 -jsonl -o scans/nuclei.jsonl --technique RECON --intent 'reactive sweep on Phase-1 URL delta (WAF-resilient)' --probe-kind fingerprint --phase recon --timeout 1800",
+            "command": "vigil assess kali nuclei -l hosts.txt -t http/cves/,http/misconfiguration/,http/exposures/ -severity high,critical -mhe 50 -random-agent -rate-limit 50 -c 25 -bs 25 -jsonl -o scans/nuclei.jsonl --oob-mode none --technique RECON --intent 'reactive sweep on Phase-1 URL delta (WAF-resilient)' --probe-kind fingerprint --phase recon --timeout 1800",
         },
     ),
     "katana": (
@@ -2599,7 +2613,7 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     ),
     "job": (
         {
-            "command": "vigil assess kali job start --technique CVE-VALIDATION --intent 'long nuclei sweep' --probe-kind fingerprint --phase recon --timeout 21600 -- nuclei -l targets.txt -t http/cves/",
+            "command": "vigil assess kali job start --technique CVE-VALIDATION --intent 'long nuclei sweep' --probe-kind fingerprint --phase recon --timeout 21600 -- nuclei -l targets.txt -t http/cves/ -ni",
         },
         {
             "command": "vigil assess kali job status 42",

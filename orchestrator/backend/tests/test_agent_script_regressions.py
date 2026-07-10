@@ -118,6 +118,108 @@ def test_get_command_run_accepts_json_flag(monkeypatch, tmp_path: Path, capsys) 
     assert json.loads(capsys.readouterr().out) == {"id": 123, "stdout_preview": "ok"}
 
 
+def test_get_command_run_live_reads_current_on_disk_tails(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_script_module(
+        "test_get_command_run_live_module",
+        "agent/scripts/assess/commands/get_command_run.py",
+    )
+    output_dir = tmp_path / "scans" / "kali"
+    output_dir.mkdir(parents=True)
+    stdout = output_dir / "run.out"
+    stderr = output_dir / "run.err"
+    stdout.write_text("still running\nlatest stdout\n", encoding="utf-8")
+    stderr.write_text("latest stderr\n", encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, *args):
+            pass
+
+        def get(self, endpoint: str):
+            return {
+                "id": 123,
+                "status": "running",
+                "stdout_path": str(stdout),
+                "stderr_path": str(stderr),
+                "stdout_preview": "old preview",
+            }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    module.register(sub)
+    args = parser.parse_args(["get-command-run", "123", "--live"])
+    args.engagement_dir = tmp_path
+
+    args.func(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["live_output"]["stdout"] == "still running\nlatest stdout\n"
+    assert payload["live_output"]["stderr"] == "latest stderr\n"
+
+
+def test_get_command_run_live_refuses_paths_outside_engagement(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_script_module(
+        "test_get_command_run_live_refusal_module",
+        "agent/scripts/assess/commands/get_command_run.py",
+    )
+    outside = tmp_path.parent / "outside-secret.txt"
+    outside.write_text("must not leak", encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, *args):
+            pass
+
+        def get(self, endpoint: str):
+            return {"id": 123, "stdout_path": str(outside), "stderr_path": None}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    module.register(sub)
+    args = parser.parse_args(["get-command-run", "123", "--live"])
+    args.engagement_dir = tmp_path
+
+    args.func(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["live_output"]["stdout"] == "[refused: path outside engagement]"
+    assert "must not leak" not in json.dumps(payload)
+
+
 def test_fetch_auto_pages_bounded_assessment_lists(capsys) -> None:
     module = _load_script_module(
         "test_fetch_module_auto_pages",
@@ -922,10 +1024,12 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
 
         def post(self, endpoint: str, payload: dict[str, object]):
             calls.append((endpoint, payload))
-            if endpoint == "code/repos":
-                return {"id": 41}
-            if endpoint == "code/files":
-                return {"inserted": len(payload["files"])}
+            if endpoint == "code/repos/refresh/start":
+                return {"repo_id": 41, "refresh_token": "refresh-41"}
+            if endpoint == "code/repos/41/refresh/files":
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/41/refresh/commit":
+                return {"inserted": 1, "changed": 0, "renamed": 0, "deleted": 0}
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -948,8 +1052,8 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
         )
     )
 
-    repo_call = next(payload for endpoint, payload in calls if endpoint == "code/repos")
-    files_call = next(payload for endpoint, payload in calls if endpoint == "code/files")
+    repo_call = next(payload for endpoint, payload in calls if endpoint == "code/repos/refresh/start")
+    files_call = next(payload for endpoint, payload in calls if endpoint == "code/repos/41/refresh/files")
 
     assert "repo_key" in repo_call
     assert "repo_path" in repo_call
@@ -994,10 +1098,12 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
 
         def post(self, endpoint: str, payload: dict[str, object]):
             calls.append((endpoint, payload))
-            if endpoint == "code/repos":
-                return {"id": 41}
-            if endpoint == "code/files":
-                return {"inserted": len(payload["files"])}
+            if endpoint == "code/repos/refresh/start":
+                return {"repo_id": 41, "refresh_token": "refresh-41"}
+            if endpoint == "code/repos/41/refresh/files":
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/41/refresh/commit":
+                return {"inserted": 1, "changed": 0, "renamed": 0, "deleted": 0}
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1025,7 +1131,7 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
         )
     )
 
-    files_call = next(payload for endpoint, payload in calls if endpoint == "code/files")
+    files_call = next(payload for endpoint, payload in calls if endpoint == "code/repos/41/refresh/files")
     assert [row["file_path"] for row in files_call["files"]] == ["app.js"]
     manifest_path = engagement_dir / "tools" / "analysis-state" / "skipped-artifacts" / "demo.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1066,10 +1172,12 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
 
         def post(self, endpoint: str, payload: dict[str, object]):
             calls.append((endpoint, payload))
-            if endpoint == "code/repos":
-                return {"id": 42}
-            if endpoint == "code/files":
-                return {"inserted": len(payload["files"])}
+            if endpoint == "code/repos/refresh/start":
+                return {"repo_id": 42, "refresh_token": "refresh-42"}
+            if endpoint == "code/repos/42/refresh/files":
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/42/refresh/commit":
+                return {"inserted": 2, "changed": 0, "renamed": 0, "deleted": 0}
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1097,7 +1205,7 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
         )
     )
 
-    files_call = next(payload for endpoint, payload in calls if endpoint == "code/files")
+    files_call = next(payload for endpoint, payload in calls if endpoint == "code/repos/42/refresh/files")
     paths = {row["file_path"] for row in files_call["files"]}
     assert paths == {"app.js", "build/ResetPassword.min.js"}
 

@@ -12,6 +12,140 @@ from __future__ import annotations
 from assess.commands import resume_brief
 
 
+def test_resume_hydration_reconciles_all_orphans_before_backend_read(
+    monkeypatch, tmp_path, capsys
+):
+    events: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        resume_brief,
+        "load_config",
+        lambda _d: type(
+            "Cfg",
+            (),
+            {
+                "base_url": "http://backend",
+                "engagement_key": "eng",
+                "engagement_dir": str(tmp_path),
+            },
+        )(),
+    )
+
+    def fake_sweep(ns):
+        events.append(("sweep", ns))
+        print("internal sweep output")
+
+    class FakeClient:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, endpoint):
+            events.append(("get", endpoint))
+            return {"engagement": {"key": "eng"}}
+
+    monkeypatch.setattr(resume_brief.kali_sweep_orphans, "run", fake_sweep)
+    monkeypatch.setattr(resume_brief, "AssessmentClient", FakeClient)
+
+    resume_brief.run(
+        type(
+            "Args",
+            (),
+            {
+                "engagement_dir": str(tmp_path),
+                "q": "",
+                "finding": "",
+                "agent_id": "",
+                "since": "",
+                "max_age_hours": None,
+                "per_input_limit": None,
+                "all_cells": False,
+                "as_json": True,
+            },
+        )()
+    )
+
+    assert [name for name, _ in events] == ["sweep", "get"]
+    sweep_args = events[0][1]
+    assert sweep_args.scope == "all"
+    assert sweep_args.max_age_seconds == 3600
+    assert sweep_args.dry_run is False
+    assert sweep_args.engagement_dir == str(tmp_path)
+    assert "internal sweep output" not in capsys.readouterr().out
+
+
+def test_resume_hydration_surfaces_bounded_orphan_attention_summary(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(
+        resume_brief,
+        "load_config",
+        lambda _d: type(
+            "Cfg",
+            (),
+            {
+                "base_url": "http://backend",
+                "engagement_key": "eng",
+                "engagement_dir": str(tmp_path),
+            },
+        )(),
+    )
+
+    def fake_sweep(_ns):
+        print("still-running id=1 lots of internal detail")
+        print(
+            '{"summary":{"still_running":2,"skipped":1},'
+            '"jobs_summary":{"still_running":3,"skipped":0},'
+            '"host_processes_summary":{"unverifiable":4,"failed":1},'
+            '"scope":"all"}'
+        )
+
+    class FakeClient:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, _endpoint):
+            return {"engagement": {"key": "eng"}}
+
+    monkeypatch.setattr(resume_brief.kali_sweep_orphans, "run", fake_sweep)
+    monkeypatch.setattr(resume_brief, "AssessmentClient", FakeClient)
+
+    resume_brief.run(
+        type(
+            "Args",
+            (),
+            {
+                "engagement_dir": str(tmp_path),
+                "q": "",
+                "finding": "",
+                "agent_id": "",
+                "since": "",
+                "max_age_hours": None,
+                "per_input_limit": None,
+                "all_cells": False,
+                "as_json": True,
+            },
+        )()
+    )
+
+    captured = capsys.readouterr()
+    assert "lots of internal detail" not in captured.out
+    assert "orphan reconciliation needs attention" in captured.err
+    assert "command_runs:still_running=2,skipped=1" in captured.err
+    assert "jobs:still_running=3" in captured.err
+    assert "host_processes:unverifiable=4,failed=1" in captured.err
+
+
 def test_per_input_coverage_empty_is_noop():
     lines: list = []
     resume_brief._render_per_input_coverage(lines, {})

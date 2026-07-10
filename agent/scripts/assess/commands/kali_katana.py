@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from assess.lib import no_fire
 from assess.lib import scope as scope_lib
 from assess.lib.client import AssessError
 from assess.lib.config import load_config
@@ -121,6 +122,19 @@ def _resolve_rate_cap(args):
     return rate_cap
 
 
+def _scope_no_fire_regex(args) -> str:
+    try:
+        cfg = load_config(getattr(args, "engagement_dir", None))
+        return no_fire.crawl_exclusion_regex(scope_lib.load_scope(cfg.engagement_dir))
+    except SystemExit:
+        # Parser/unit callers can build the typed argv without engagement
+        # context. The shared execution boundary still resolves and enforces
+        # policy before a real process starts.
+        return ""
+    except no_fire.NoFirePolicyError as exc:
+        raise AssessError(str(exc)) from exc
+
+
 def run(args) -> None:
     if not args.target_url and not args.target_list:
         print("katana: pass -u <url> or -list <file>", file=sys.stderr)
@@ -158,8 +172,11 @@ def run(args) -> None:
         cmd.extend(["-fs", str(args.field_scope)])
     if args.known_files:
         cmd.extend(["-kf", str(args.known_files)])
-    if args.crawl_out_scope:
-        cmd.extend(["-cos", str(args.crawl_out_scope)])
+    authored_exclusion = str(args.crawl_out_scope or "").strip()
+    policy_exclusion = _scope_no_fire_regex(args)
+    exclusions = [value for value in (authored_exclusion, policy_exclusion) if value]
+    if exclusions:
+        cmd.extend(["-cos", "(?:" + ")|(?:".join(exclusions) + ")"])
     for header in args.headers or []:
         cmd.extend(["-H", header])
 

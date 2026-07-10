@@ -34,8 +34,10 @@ def _cfg(tmp_path):
 
 def _wire(monkeypatch, mod, tmp_path, probe_lines: str):
     monkeypatch.setattr(mod, "load_config", lambda flag: _cfg(tmp_path))
+    recorded = {}
 
     def fake_exec(cmd, **kwargs):
+        recorded["exec_kwargs"] = kwargs
         # The probe script redirects to `> '<container path>'`; translate to host.
         script = cmd[2]
         target = script.rsplit("> ", 1)[1].strip().strip("'\"")
@@ -45,8 +47,6 @@ def _wire(monkeypatch, mod, tmp_path, probe_lines: str):
         return SimpleNamespace(return_code=0)
 
     monkeypatch.setattr(mod, "kali_exec", fake_exec)
-
-    recorded = {}
 
     class _Client:
         def __init__(self, *a, **k): pass
@@ -91,6 +91,11 @@ def test_cluster_blackholed_records_decision(monkeypatch, tmp_path, capsys):
     assert recorded["decision"]["payload"]["blocked_pct"] == 100
     assert sorted(recorded["decision"]["payload"]["blackholed_hosts"]) == ["a.example.com", "b.example.com"]
     assert (tmp_path / "blocked.txt").read_text().split() == ["a.example.com", "b.example.com"]
+    assert [(item.value, item.role) for item in recorded["exec_kwargs"]["destinations"]] == [
+        ("example.com", "control"),
+        ("a.example.com", "target"),
+        ("b.example.com", "target"),
+    ]
 
 
 def test_control_failure_records_nothing(monkeypatch, tmp_path, capsys):

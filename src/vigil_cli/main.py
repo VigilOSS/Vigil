@@ -35,6 +35,7 @@ from .engagements import (
     resolve_engagement_path,
     resolve_out_of_scope,
     resolve_rate_limit,
+    resolve_aggregate_rate_limit,
     resolve_required_headers,
     set_active_engagement,
     set_engagement_header,
@@ -340,6 +341,15 @@ def main(argv: list[str] | None = None) -> None:
              "no-op (the ceiling only clamps DOWN). Unset = today's behavior (per-tool "
              "defaults, agent discretion, no hard gate). web/both/android only. "
              "e.g. --rate-limit 5",
+    )
+    create_p.add_argument(
+        "--aggregate-rate-limit",
+        dest="aggregate_rate_limit",
+        type=float,
+        default=None,
+        metavar="REQ_PER_SEC",
+        help="Engagement-wide ceiling across concurrent target-facing commands. "
+             "Excess requires each command to record --rate-override-reason.",
     )
     create_p.add_argument(
         "--no-prompt",
@@ -1003,7 +1013,11 @@ def main(argv: list[str] | None = None) -> None:
         _oob(args, install_root)
     elif args.command == "assess":
         assess = install_root / "agent" / "scripts" / "assess.py"
-        os.execv(str(assess), [str(assess), *args.assess_args])
+        os.execvpe(
+            str(assess),
+            [str(assess), *args.assess_args],
+            _assess_exec_environment(install_root),
+        )
 
 
 def _top_level_command_index(raw_argv: list[str]) -> int | None:
@@ -1047,7 +1061,18 @@ def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
     if not assess.exists():
         source_root = resolve_source_root(source_value, install_root=install_root)
         assess = source_root / "agent" / "scripts" / "assess.py"
-    os.execv(str(assess), [str(assess), *raw_argv[idx + 1 :]])
+    os.execvpe(
+        str(assess),
+        [str(assess), *raw_argv[idx + 1 :]],
+        _assess_exec_environment(install_root),
+    )
+
+
+def _assess_exec_environment(install_root: Path) -> dict[str, str]:
+    """Export CLI-owned runtime configuration across the assess exec boundary."""
+    env = dict(os.environ)
+    env["VIGIL_OOB_DOMAIN"] = _oob_options(install_root).oob_domain.strip().rstrip(".")
+    return env
 
 
 def _config(args: argparse.Namespace) -> None:
@@ -1330,6 +1355,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
     required_headers = resolve_required_headers(args.program, args.researcher, args.header)
     out_of_scope = resolve_out_of_scope(args.out_of_scope)
     rate_limit = resolve_rate_limit(args.rate_limit)
+    aggregate_rate_limit = resolve_aggregate_rate_limit(args.aggregate_rate_limit)
 
     # Dry runs skip the summary + confirmation: nothing will be created either
     # way, and the dry-run path prints its own plan summary.
@@ -1345,6 +1371,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             required_headers=required_headers,
             out_of_scope=out_of_scope,
             rate_limit=rate_limit,
+            aggregate_rate_limit=aggregate_rate_limit,
         )
         if not _confirm("Create engagement? [Y/n]"):
             raise SystemExit("aborted: engagement not created")
@@ -1363,6 +1390,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         required_headers=required_headers,
         out_of_scope=out_of_scope,
         rate_limit=rate_limit,
+        rate_limit_aggregate_rps=aggregate_rate_limit,
     )
 
     if args.dry_run:
@@ -1512,6 +1540,7 @@ def _print_create_summary(
     required_headers: dict[str, str] | None = None,
     out_of_scope: list[str] | None = None,
     rate_limit: float | None = None,
+    aggregate_rate_limit: float | None = None,
 ) -> None:
     print("[vigil] engagement summary:", file=sys.stderr)
     print(f"[vigil]   type:      {engagement_type}", file=sys.stderr)
@@ -1536,6 +1565,11 @@ def _print_create_summary(
         print(
             f"[vigil]   rate-limit: {rate_limit:g} req/s "
             "(global per-invocation; bounds per-host as a side effect)",
+            file=sys.stderr,
+        )
+    if aggregate_rate_limit is not None:
+        print(
+            f"[vigil]   aggregate-rate-limit: {aggregate_rate_limit:g} req/s",
             file=sys.stderr,
         )
 

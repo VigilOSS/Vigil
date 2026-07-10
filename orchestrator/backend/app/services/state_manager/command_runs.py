@@ -1017,11 +1017,11 @@ def update_job(
             )
         where = "WHERE engagement_id = ? AND id = ?"
         where_values: list[Any] = [engagement.id, int(job_id)]
-        guard_terminal_update = (
-            status_value in _JOB_TERMINAL_STATUSES
+        guard_pre_terminal_update = (
+            status_value is not None
             and existing_status in _JOB_PRE_TERMINAL_STATUSES
         )
-        if guard_terminal_update:
+        if guard_pre_terminal_update:
             pre_terminal_statuses = tuple(sorted(str(s) for s in _JOB_PRE_TERMINAL_STATUSES))
             placeholders = ", ".join("?" for _ in pre_terminal_statuses)
             where += f" AND status IN ({placeholders})"

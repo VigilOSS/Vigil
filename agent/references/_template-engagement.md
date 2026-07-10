@@ -134,6 +134,11 @@ the program may revoke scope on violation.
 [FILL: additional no-fire paths]
 ```
 
+Mirror the finalized list into `scope.json` as `off_limits_paths` (a JSON array
+of `/path`, globbed `/path/*`, or absolute URL patterns). That machine-owned
+field is what direct/list execution admission, Katana crawl exclusions, and the
+shared proxy enforce; this prose section remains the human-readable ROE.
+
 If a test path you want to probe is adjacent to one of the above (e.g., testing
 `/api/send-notification` vs. `/api/send-email`), raise a `scope_decision` before proceeding
 so the operator can confirm the boundary.

@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from assess.commands import web_discovery
 
 
@@ -23,7 +25,9 @@ def _cfg(tmp_path: Path) -> SimpleNamespace:
 
 
 def _scope(tmp_path: Path, **fields) -> None:
-    payload = {"engagement_type": "web", "hosts": ["example.com"]}
+    # These cases actively probe subdomains; wildcard scope is the explicit
+    # authorization. A bare ``example.com`` entry grants only that exact host.
+    payload = {"engagement_type": "web", "hosts": ["*.example.com"]}
     payload.update(fields)
     (tmp_path / "scope.json").write_text(json.dumps(payload), encoding="utf-8")
 
@@ -239,3 +243,171 @@ def test_katana_records_unit_backward_compatible(tmp_path):
     assert by_url["https://h/a"]["content_type"] == "image/png"
     # sorted by url
     assert [r["url"] for r in out] == ["https://h/a", "https://h/b", "https://h/c"]
+
+
+def test_failed_katana_cannot_replace_or_ingest_prior_canonical(monkeypatch, tmp_path):
+    _scope(tmp_path)
+    hosts_file = _hosts_file(tmp_path, ["live.example.com"])
+    out_dir = tmp_path / "scans" / "web-discovery"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    canonical = out_dir / "katana.jsonl"
+    canonical.write_text(
+        '{"endpoint":"https://stale.example.com/old"}\n', encoding="utf-8"
+    )
+    canonical_seeds = out_dir / "live_urls.txt"
+    canonical_seeds.write_text("https://stale.example.com\n", encoding="utf-8")
+    ingested: list[Path] = []
+    monkeypatch.setattr(web_discovery, "load_config", lambda d: _cfg(tmp_path))
+    monkeypatch.setattr(web_discovery, "AssessmentClient", lambda *a, **k: _Client())
+    monkeypatch.setattr(
+        web_discovery,
+        "ingest_httpx_results",
+        lambda *a, **k: {"upserted": 0, "by_class": {}},
+    )
+    monkeypatch.setattr(
+        web_discovery.ingest_endpoints,
+        "run",
+        lambda ns: ingested.append(Path(ns.input_file)),
+    )
+
+    def fake_kali(cmd, **kwargs):
+        out = cmd[cmd.index("-o") + 1]
+        path = tmp_path / out.removeprefix("/engagements/eng/")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if kwargs.get("tool_name") == "httpx":
+            path.write_text(
+                '{"url":"https://live.example.com","input":"live.example.com"}\n',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(return_code=0)
+        path.write_text(
+            '{"endpoint":"https://fresh.example.com/new"}\n', encoding="utf-8"
+        )
+        return SimpleNamespace(return_code=9)
+
+    monkeypatch.setattr(web_discovery, "kali_exec", fake_kali)
+
+    with pytest.raises(SystemExit) as exc:
+        web_discovery.run(
+            _args(
+                tmp_path,
+                hosts_file,
+                runtime="container",
+                no_crawl=False,
+                db_path="cases.db",
+                seat_liveness=False,
+            )
+        )
+
+    assert exc.value.code == 9
+    assert "stale.example.com" in canonical.read_text(encoding="utf-8")
+    assert canonical_seeds.read_text(encoding="utf-8") == "https://stale.example.com\n"
+    assert ingested == []
+
+
+def test_successful_katana_uses_and_promotes_run_owned_seed_file(monkeypatch, tmp_path):
+    _scope(tmp_path)
+    hosts_file = _hosts_file(tmp_path, ["live.example.com"])
+    captured, ingested = [], []
+    _install_seams(
+        monkeypatch,
+        tmp_path,
+        captured=captured,
+        ingested=ingested,
+        httpx_rows={
+            "80,443": [
+                '{"url":"https://live.example.com","input":"live.example.com"}'
+            ]
+        },
+        katana_rows=['{"endpoint":"https://live.example.com/api"}'],
+    )
+
+    web_discovery.run(
+        _args(
+            tmp_path,
+            hosts_file,
+            runtime="container",
+            no_crawl=False,
+            run_uuid="run-katana-1",
+        )
+    )
+
+    katana = next(cmd for cmd in captured if cmd[0] == "katana")
+    seeds = katana[katana.index("-list") + 1]
+    assert seeds.endswith("/runs/run-katana-1/live_urls.txt")
+    assert (
+        tmp_path / "scans" / "web-discovery" / "live_urls.txt"
+    ).read_text(encoding="utf-8") == "https://live.example.com\n"
+
+
+def test_crawl_health_reports_yield_assets_and_fast_empty_warning(tmp_path):
+    katana = tmp_path / "katana.jsonl"
+    katana.write_text(
+        '{"endpoint":"https://a.example.com/"}\n'
+        '{"endpoint":"https://a.example.com/app.js"}\n'
+        '{"endpoint":"https://b.example.com/api"}\n',
+        encoding="utf-8",
+    )
+
+    health = web_discovery._crawl_health(
+        ["https://a.example.com", "https://b.example.com"],
+        katana,
+        elapsed_seconds=20,
+        budget_seconds=100,
+        run_uuid="run-1",
+    )
+
+    assert health["seed_count"] == 2
+    assert health["unique_url_count"] == 3
+    assert health["per_host_yield"] == {"a.example.com": 2, "b.example.com": 1}
+    assert health["asset_count"] == 1
+    assert health["asset_ratio"] == pytest.approx(1 / 3)
+    assert health["elapsed_budget_ratio"] == pytest.approx(0.2)
+
+    empty = web_discovery._crawl_health(
+        ["https://spa.example.com"],
+        tmp_path / "missing.jsonl",
+        elapsed_seconds=1,
+        budget_seconds=100,
+        run_uuid="run-2",
+    )
+    assert "fast-empty" in empty["warnings"]
+    assert "possible-spa-undercoverage" in empty["warnings"]
+
+
+def test_skipped_crawl_cannot_reuse_or_ingest_prior_katana(monkeypatch, tmp_path):
+    _scope(tmp_path)
+    hosts_file = _hosts_file(tmp_path, ["live.example.com"])
+    out_dir = tmp_path / "scans" / "web-discovery"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    canonical = out_dir / "katana.jsonl"
+    canonical.write_text(
+        '{"endpoint":"https://stale.example.com/old"}\n', encoding="utf-8"
+    )
+    captured, ingested = [], []
+    _install_seams(
+        monkeypatch,
+        tmp_path,
+        captured=captured,
+        ingested=ingested,
+        httpx_rows={
+            "80,443": [
+                '{"url":"https://live.example.com","input":"live.example.com"}'
+            ]
+        },
+        katana_rows=[],
+    )
+
+    web_discovery.run(
+        _args(
+            tmp_path,
+            hosts_file,
+            runtime="container",
+            no_crawl=True,
+            db_path="cases.db",
+            seat_liveness=False,
+        )
+    )
+
+    assert canonical.read_text(encoding="utf-8") == ""
+    assert ingested == []

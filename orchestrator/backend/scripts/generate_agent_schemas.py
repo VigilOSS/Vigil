@@ -740,6 +740,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     {
                         "queue_item_id": 42,
                         "agent_name": "code-vuln-hunter",
+                        "lease_token": "lease-7f6c0d12",
                         "function_name": "parseurl",
                         "hypothesis": "Attacker-controlled URL scheme length passed to memcpy without bounds check",
                         "evidence": "In parseurl() at line 342, schemelen is derived from user-supplied URL without validation. memcpy(buf, scheme, schemelen) copies attacker-controlled bytes into fixed-size heap buffer.",

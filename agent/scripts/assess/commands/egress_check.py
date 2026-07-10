@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from assess.lib import reachability
+from assess.lib import scope as scope_lib
 from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.kali import kali_exec
@@ -118,6 +119,10 @@ def run(args) -> None:
         technique="RECON", intent="egress reputation check (control + in-scope sample)",
         probe_kind="baseline", phase="recon", timeout=int(args.stage_timeout),
         engagement_dir=args.engagement_dir, tool_name="curl",
+        destinations=tuple(
+            [scope_lib.ExecutionDestination(host, "control") for host in controls]
+            + [scope_lib.ExecutionDestination(host, "target") for host in sample]
+        ),
     )
 
     verdicts: dict[str, str] = {}

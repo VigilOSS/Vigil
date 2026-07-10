@@ -18,11 +18,17 @@
       "description": "Optional consistency check. When supplied, it must match the file_id on queue_item_id; the backend records the queue-derived file_id."
     },
     "agent_name": {
-      "default": "",
       "maxLength": 128,
+      "minLength": 1,
       "title": "Agent Name",
       "type": "string",
       "description": "Name of the agent that produced this result."
+    },
+    "lease_token": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Lease Token",
+      "type": "string"
     },
     "function_name": {
       "default": "",
@@ -191,6 +197,8 @@
   },
   "required": [
     "queue_item_id",
+    "agent_name",
+    "lease_token",
     "disposition"
   ],
   "title": "Code Analysis Result",
@@ -201,6 +209,7 @@
     {
       "queue_item_id": 42,
       "agent_name": "code-vuln-hunter",
+      "lease_token": "lease-7f6c0d12",
       "function_name": "parseurl",
       "hypothesis": "Attacker-controlled URL scheme length passed to memcpy without bounds check",
       "evidence": "In parseurl() at line 342, schemelen is derived from user-supplied URL without validation. memcpy(buf, scheme, schemelen) copies attacker-controlled bytes into fixed-size heap buffer.",

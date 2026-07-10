@@ -381,12 +381,15 @@ def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
             self.engagement_key = engagement_key
 
         def post(self, endpoint: str, payload: dict):
-            if endpoint == "code/repos":
+            if endpoint == "code/repos/refresh/start":
                 captured["repo_payload"] = payload
-                return {"id": 7}
-            if endpoint == "code/files":
+                return {"repo_id": 7, "refresh_token": "refresh-7"}
+            if endpoint == "code/repos/7/refresh/files":
                 captured["files_payload"] = payload
-                return {"inserted": len(payload["files"])}
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/7/refresh/commit":
+                assert payload == {"refresh_token": "refresh-7", "manifest_complete": True}
+                return {"inserted": 1, "changed": 0, "deleted": 0, "renamed": 0}
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -414,8 +417,93 @@ def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
     assert repo_payload["analyzable_files"] == 1
 
     files_payload = captured["files_payload"]
-    assert files_payload["repo_id"] == 7
+    assert files_payload["refresh_token"] == "refresh-7"
     assert [entry["file_path"] for entry in files_payload["files"]] == ["app.py"]
+
+
+def test_code_ingest_dry_run_reports_refresh_delta_without_staging(monkeypatch, tmp_path, capsys):
+    module = _load_code_ingest_module()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "app.py").write_text("print('changed')\n", encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test", engagement_key="eng", engagement_dir=str(tmp_path / "engagement")
+        ),
+    )
+    monkeypatch.setattr(module, "_setup_ctags", lambda repo_path: {"available": False})
+    posted: list[str] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+        def post(self, endpoint, payload):
+            posted.append(endpoint)
+            assert endpoint == "code/repos/refresh/preview"
+            return {"added": ["app.py"], "changed": [], "renamed": [], "removed": ["old.py"]}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(
+        SimpleNamespace(
+            repo_path=str(repo_path), name="demo", language=None, repo_key=None,
+            engagement_dir=tmp_path / "engagement", dry_run=True,
+        )
+    )
+    assert posted == ["code/repos/refresh/preview"]
+    output = capsys.readouterr().out
+    assert '"added"' in output
+    assert '"removed"' in output
+
+
+def test_code_ingest_commits_complete_empty_manifest(monkeypatch, tmp_path):
+    module = _load_code_ingest_module()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test", engagement_key="eng", engagement_dir=str(tmp_path / "engagement")
+        ),
+    )
+    monkeypatch.setattr(module, "_setup_ctags", lambda repo_path: {"available": False})
+    posted: list[tuple[str, dict]] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+        def post(self, endpoint, payload):
+            posted.append((endpoint, payload))
+            if endpoint == "code/repos/refresh/start":
+                assert payload["total_files"] == 0
+                assert payload["analyzable_files"] == 0
+                return {"repo_id": 7, "refresh_token": "refresh-7"}
+            if endpoint == "code/repos/7/refresh/commit":
+                assert payload == {"refresh_token": "refresh-7", "manifest_complete": True}
+                return {"inserted": 0, "changed": 0, "deleted": 2, "renamed": 0}
+            raise AssertionError(f"Unexpected endpoint: {endpoint}")
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(
+        SimpleNamespace(
+            repo_path=str(repo_path), name="demo", language=None, repo_key=None,
+            engagement_dir=tmp_path / "engagement", dry_run=False,
+        )
+    )
+    assert [endpoint for endpoint, _ in posted] == [
+        "code/repos/refresh/start",
+        "code/repos/7/refresh/commit",
+    ]
 
 
 def test_code_index_walk_repo_skips_named_pipes(tmp_path):
@@ -597,10 +685,12 @@ def test_code_ingest_limits_security_scan_for_large_histories(monkeypatch, capsy
             self.engagement_key = engagement_key
 
         def post(self, endpoint: str, payload: dict):
-            if endpoint == "code/repos":
-                return {"id": 7}
-            if endpoint == "code/files":
-                return {"inserted": len(payload["files"])}
+            if endpoint == "code/repos/refresh/start":
+                return {"repo_id": 7, "refresh_token": "refresh-7"}
+            if endpoint == "code/repos/7/refresh/files":
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/7/refresh/commit":
+                return {"inserted": 1, "changed": 0, "deleted": 0, "renamed": 0}
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1271,7 +1361,7 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
     module.run(
         SimpleNamespace(
             action="done",
-            extra=["42", "clean", str(coverage_path), "Reviewed"],
+            extra=["42", "code-vuln-hunter", "lease-42", "clean", str(coverage_path), "Reviewed"],
             engagement_dir=tmp_path,
         )
     )
@@ -1279,6 +1369,8 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
     assert captured["endpoint"] == "code/analysis-queue/done"
     assert captured["payload"] == {
         "item_ids": [42],
+        "agent_name": "code-vuln-hunter",
+        "lease_token": "lease-42",
         "disposition": "clean",
         "notes": "Reviewed",
         "cwe_coverage": [{"family": "web-app-injection", "effort": 85}],
@@ -1288,7 +1380,7 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
         module.run(
             SimpleNamespace(
                 action="done",
-                extra=["42,43", "clean", str(coverage_path)],
+                extra=["42,43", "code-vuln-hunter", "lease-42", "clean", str(coverage_path)],
                 engagement_dir=tmp_path,
             )
         )
@@ -1388,6 +1480,8 @@ def test_code_record_analysis_rejects_bad_nested_payloads_before_post(tmp_path, 
             [
                 {
                     "queue_item_id": 101,
+                    "agent_name": "code-vuln-hunter",
+                    "lease_token": "lease-101",
                     "file_id": 1,
                     "disposition": "clean",
                     "cwe_coverage": {"cwe_coverage": [{"family": "ssrf", "effort": 80}]},
@@ -1411,9 +1505,11 @@ def test_code_record_analysis_validates_whole_batch_before_any_post(monkeypatch,
     analysis_path.write_text(
         json.dumps(
             [
-                {"queue_item_id": 201, "file_id": 1, "disposition": "clean"},
+                {"queue_item_id": 201, "file_id": 1, "agent_name": "hunter", "lease_token": "lease-201", "disposition": "clean"},
                 {
                     "queue_item_id": 202,
+                    "agent_name": "hunter",
+                    "lease_token": "lease-202",
                     "file_id": 2,
                     "disposition": "clean",
                     "cross_file_triggers": [{"file_path": "src/missing.py", "vuln_class": "ssrf"}],
@@ -2020,7 +2116,7 @@ def test_code_dispatch_done_supports_dry_run(monkeypatch, tmp_path, capsys):
         SimpleNamespace(
             engagement_dir=tmp_path,
             action="done",
-            extra=["42", "clean", str(coverage_path), "--dry-run"],
+            extra=["42", "code-vuln-hunter", "lease-42", "clean", str(coverage_path), "--dry-run"],
         )
     )
 
@@ -2049,7 +2145,7 @@ def test_code_dispatch_done_rejects_invalid_disposition(monkeypatch, tmp_path, c
             SimpleNamespace(
                 engagement_dir=tmp_path,
                 action="done",
-                extra=["42", "done", str(coverage_path)],
+                extra=["42", "code-vuln-hunter", "lease-42", "done", str(coverage_path)],
             )
         )
 

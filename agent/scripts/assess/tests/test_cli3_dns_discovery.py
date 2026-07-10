@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -92,6 +94,175 @@ def test_nonempty_result_writes_union(tmp_path, monkeypatch):
 
     resolved = eng_dir / "scans" / "dns-discovery" / "resolved_hosts.txt"
     assert resolved.read_text(encoding="utf-8") == "a.example.com\nb.example.com\n"
+
+
+def test_dns_generation_owns_and_promotes_every_artifact(tmp_path, monkeypatch):
+    eng_dir = tmp_path / "eng"
+    canonical = eng_dir / "scans" / "dns-discovery"
+    canonical.mkdir(parents=True)
+    (canonical / "subs_ct.txt").write_text("stale.example.com\n", encoding="utf-8")
+
+    monkeypatch.setattr(dd, "load_config", lambda _flag: _cfg(eng_dir))
+
+    def discover_once(_args, cfg, _targets, _resolved, _pass_no):
+        assert cfg.dns_run_uuid == "generation-one"
+        for name, content in {
+            "apexes.txt": "example.com\n",
+            "subs_passive.txt": "api.example.com\n",
+            "subs_merged.txt": "api.example.com\n",
+            "wildcard_parents.txt": "example.com\n",
+        }.items():
+            path, container_path = dd._paths(cfg, name)
+            assert "/runs/generation-one/" in container_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        return {"api.example.com"}, []
+
+    monkeypatch.setattr(dd, "_discover_once", discover_once)
+    dd.run(_run_args(str(eng_dir), no_converge=True, run_uuid="generation-one"))
+
+    for name in ("apexes.txt", "subs_passive.txt", "subs_merged.txt", "wildcard_parents.txt"):
+        assert (canonical / name).read_text(encoding="utf-8")
+    assert (canonical / "resolved_hosts.txt").read_text(encoding="utf-8") == "api.example.com\n"
+    # An artifact from the prior accepted generation cannot survive when the
+    # new accepted generation did not produce it.
+    assert (canonical / "subs_ct.txt").read_text(encoding="utf-8") == ""
+    manifest = json.loads((canonical / "generation.json").read_text(encoding="utf-8"))
+    assert manifest["run_uuid"] == "generation-one"
+    assert manifest["state"] == "accepted"
+    assert "resolved_hosts.txt" in manifest["artifacts"]
+
+
+def test_failed_dns_generation_preserves_last_accepted_canonical_files(tmp_path, monkeypatch):
+    eng_dir = tmp_path / "eng"
+    canonical = eng_dir / "scans" / "dns-discovery"
+    canonical.mkdir(parents=True)
+    accepted = canonical / "subs_passive.txt"
+    accepted.write_text("accepted.example.com\n", encoding="utf-8")
+
+    monkeypatch.setattr(dd, "load_config", lambda _flag: _cfg(eng_dir))
+
+    def fail_after_writing(_args, cfg, _targets, _resolved, _pass_no):
+        path, _ = dd._paths(cfg, "subs_passive.txt")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("partial.example.com\n", encoding="utf-8")
+        raise RuntimeError("stage failed")
+
+    monkeypatch.setattr(dd, "_discover_once", fail_after_writing)
+    with pytest.raises(RuntimeError, match="stage failed"):
+        dd.run(_run_args(str(eng_dir), run_uuid="failed-generation"))
+
+    assert accepted.read_text(encoding="utf-8") == "accepted.example.com\n"
+    assert not (canonical / "generation.json").exists()
+
+
+def test_dns_promotion_replace_failure_rolls_back_entire_canonical_generation(
+    tmp_path, monkeypatch
+):
+    eng_dir = tmp_path / "eng"
+    canonical = eng_dir / "scans" / "dns-discovery"
+    run_dir = canonical / "runs" / "new-run"
+    run_dir.mkdir(parents=True)
+    for name in ("a.txt", "b.txt"):
+        (canonical / name).write_text(f"old-{name}\n", encoding="utf-8")
+        (run_dir / name).write_text(f"new-{name}\n", encoding="utf-8")
+    old_manifest = {"run_uuid": "old-run", "state": "accepted"}
+    (canonical / "generation.json").write_text(
+        json.dumps(old_manifest), encoding="utf-8"
+    )
+    cfg = _cfg(eng_dir)
+    cfg.dns_run_uuid = "new-run"
+
+    original_replace = Path.replace
+    replacements = 0
+
+    def fail_second_artifact(source: Path, destination: Path):
+        nonlocal replacements
+        destination = Path(destination)
+        if destination.parent == canonical and destination.name in {"a.txt", "b.txt"}:
+            replacements += 1
+            if replacements == 2:
+                raise OSError("injected canonical replace failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_second_artifact)
+    with pytest.raises(OSError, match="injected canonical replace failure"):
+        dd._promote_generation(
+            cfg, state="accepted", resolved_count=1, failure_count=0
+        )
+
+    assert (canonical / "a.txt").read_text(encoding="utf-8") == "old-a.txt\n"
+    assert (canonical / "b.txt").read_text(encoding="utf-8") == "old-b.txt\n"
+    assert json.loads((canonical / "generation.json").read_text()) == old_manifest
+
+
+def test_concurrent_dns_promotions_publish_one_coherent_generation(
+    tmp_path, monkeypatch
+):
+    eng_dir = tmp_path / "eng"
+    canonical = eng_dir / "scans" / "dns-discovery"
+    canonical.mkdir(parents=True)
+    for name in ("a.txt", "b.txt"):
+        (canonical / name).write_text(f"old-{name}\n", encoding="utf-8")
+    (canonical / "generation.json").write_text(
+        json.dumps({"run_uuid": "old-run", "state": "accepted"}), encoding="utf-8"
+    )
+
+    configs = {}
+    for run_uuid in ("race-a", "race-b"):
+        run_dir = canonical / "runs" / run_uuid
+        run_dir.mkdir(parents=True)
+        for name in ("a.txt", "b.txt"):
+            (run_dir / name).write_text(f"{run_uuid}-{name}\n", encoding="utf-8")
+        cfg = _cfg(eng_dir)
+        cfg.dns_run_uuid = run_uuid
+        configs[run_uuid] = cfg
+
+    original_replace = Path.replace
+    race_a_replaced_first = threading.Event()
+    race_b_committed_manifest = threading.Event()
+
+    def interleave_without_serialization(source: Path, destination: Path):
+        destination = Path(destination)
+        source_name = source.name
+        if source_name.endswith("-race-a") and destination.name == "a.txt":
+            result = original_replace(source, destination)
+            race_a_replaced_first.set()
+            race_b_committed_manifest.wait(timeout=0.5)
+            return result
+        if source_name.endswith("-race-b") and destination.name == "generation.json":
+            result = original_replace(source, destination)
+            race_b_committed_manifest.set()
+            return result
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", interleave_without_serialization)
+    errors: list[BaseException] = []
+
+    def promote(run_uuid: str) -> None:
+        try:
+            dd._promote_generation(
+                configs[run_uuid],
+                state="accepted",
+                resolved_count=1,
+                failure_count=0,
+            )
+        except BaseException as exc:  # pragma: no cover - assertion reports it
+            errors.append(exc)
+
+    first = threading.Thread(target=promote, args=("race-a",))
+    first.start()
+    assert race_a_replaced_first.wait(timeout=2)
+    second = threading.Thread(target=promote, args=("race-b",))
+    second.start()
+    first.join(timeout=3)
+    second.join(timeout=3)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    accepted = json.loads((canonical / "generation.json").read_text())["run_uuid"]
+    assert (canonical / "a.txt").read_text() == f"{accepted}-a.txt\n"
+    assert (canonical / "b.txt").read_text() == f"{accepted}-b.txt\n"
 
 
 # --------------------------------------------------------------------------- #

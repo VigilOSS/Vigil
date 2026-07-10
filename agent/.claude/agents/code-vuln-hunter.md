@@ -60,8 +60,9 @@ Before producing any output, confirm:
 - [ ] **CWE-specific pattern reference loaded** -- the correct `code-vuln-patterns/*.md` file
       matching the slot types is present. WITHOUT IT, PATTERN-LEVEL DEPTH IS LOST.
 - [ ] **File batch provided**: file paths, priorities, batch theme, slot types, classification tier
-- [ ] **Queue item IDs provided**: each final `code-record-analysis` row will use the fetched
-      `queue_item_id` as the file identity source
+- [ ] **Queue leases provided**: each final result and closeout will use the fetched
+      `queue_item_id`, `agent_name`, and `lease_token`; heartbeat long-running work before the
+      stale threshold
 - [ ] **Structural index loaded (if available at `tools/analysis-state/structural-index/`)** -- provides
       function map as completeness anchor, plus entry points, sinks, exports, and import targets as advisory navigation metadata
 - [ ] **Threat model summary available** -- trust boundaries, entry points, high-value targets, and trusted inputs (sources NOT to treat as attacker-controlled)
@@ -584,7 +585,8 @@ vigil assess record-finding code-vuln-hunter <finding-json>
 vigil assess code-record-analysis <analysis-json>
 ```
 
-Every `analysis-json` payload must include the fetched `queue_item_id` and `audit_metadata`:
+Every `analysis-json` payload must include the fetched `queue_item_id`, `agent_name`,
+`lease_token`, and `audit_metadata`:
 - `cross_ref_usage`: actual ctags/grep/Read lookups performed during analysis
 - `pattern_refs`: the `agent/references/code-vuln-patterns/*.md` files consulted for that verdict
 
@@ -600,7 +602,7 @@ Pass `--allow-remint` only when the candidate is a genuinely distinct bug at tha
 Before your dispatch returns, run in this order:
 
 1. `vigil assess record-finding code-vuln-hunter <finding-json>` per finding
-2. `vigil assess code-record-analysis <analysis-json>` per queue item (carries dispositions, CWE coverage, cross-file triggers, and the fetched `queue_item_id`)
+2. `vigil assess code-record-analysis <analysis-json>` per queue item (carries dispositions, CWE coverage, cross-file triggers, and the fetched queue lease)
 3. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
 4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 

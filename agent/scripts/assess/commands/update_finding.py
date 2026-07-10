@@ -57,6 +57,11 @@ def register(subparsers) -> None:
     p.add_argument("--reason-code", default="")
     p.add_argument("--reason", dest="reason_text", default="")
     p.add_argument("--artifact-ref", default="")
+    p.add_argument(
+        "--expected-row-version",
+        type=int,
+        help="Reject the patch if the finding changed since this row_version was read.",
+    )
     p.add_argument("--details-inline", help="Inline JSON object for details")
     p.add_argument("--provenance-inline", help="Inline JSON object for provenance")
     p.add_argument(
@@ -177,6 +182,7 @@ def run(args) -> None:
             "reason_code": args.reason_code,
             "reason_text": args.reason_text,
             "artifact_ref": args.artifact_ref,
+            "expected_row_version": getattr(args, "expected_row_version", None),
         }
         payload = {key: value for key, value in payload.items() if value is not None}
         if not any(value not in ("", None) for value in payload.values()):

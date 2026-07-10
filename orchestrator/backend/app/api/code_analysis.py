@@ -57,9 +57,19 @@ class CodeFileRecord(BaseModel):
     has_past_cve_fix: bool = False
 
 
-class CodeFilesBulkCreateRequest(BaseModel):
-    repo_id: int
+class CodeRepoRefreshFilesRequest(BaseModel):
+    refresh_token: str = Field(min_length=1, max_length=128)
+    files: list[CodeFileRecord] = Field(min_length=1)
+
+
+class CodeRepoRefreshPreviewRequest(BaseModel):
+    repo_key: str = Field(min_length=1, max_length=256)
     files: list[CodeFileRecord]
+
+
+class CodeRepoRefreshCommitRequest(BaseModel):
+    refresh_token: str = Field(min_length=1, max_length=128)
+    manifest_complete: Literal[True]
 
 
 class CodeFileClassification(BaseModel):
@@ -115,6 +125,8 @@ class QueueFetchRequest(BaseModel):
 class QueueCompleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     item_ids: list[int] = Field(min_length=1, max_length=1)
+    agent_name: str = Field(min_length=1, max_length=128)
+    lease_token: str = Field(min_length=1, max_length=128)
     disposition: str = Field(min_length=1, max_length=64)
     notes: str = Field(default="", max_length=20000)
     cwe_coverage: list[dict[str, Any]] = Field(default_factory=list)
@@ -124,12 +136,16 @@ class QueueCompleteRequest(BaseModel):
 
 
 class QueueErrorRequest(BaseModel):
-    item_ids: list[int]
+    item_ids: list[int] = Field(min_length=1, max_length=1)
+    agent_name: str = Field(min_length=1, max_length=128)
+    lease_token: str = Field(min_length=1, max_length=128)
     notes: str = Field(default="", max_length=20000)
 
 
 class QueueNeedsContextRequest(BaseModel):
-    item_ids: list[int]
+    item_ids: list[int] = Field(min_length=1, max_length=1)
+    agent_name: str = Field(min_length=1, max_length=128)
+    lease_token: str = Field(min_length=1, max_length=128)
     expansion_request: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -144,10 +160,22 @@ class QueueRetryErrorRequest(BaseModel):
     reason: str = Field(default="", max_length=2000)
 
 
+class QueueRetryNeedsContextRequest(BaseModel):
+    item_ids: list[int] = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class QueueHeartbeatRequest(BaseModel):
+    item_id: int
+    agent_name: str = Field(min_length=1, max_length=128)
+    lease_token: str = Field(min_length=1, max_length=128)
+
+
 class AnalysisResultRecord(BaseModel):
     queue_item_id: int
     file_id: int | None = None
-    agent_name: str = Field(default="", max_length=128)
+    agent_name: str = Field(min_length=1, max_length=128)
+    lease_token: str = Field(min_length=1, max_length=128)
     function_name: str = Field(default="", max_length=512)
     hypothesis: str = Field(default="", max_length=20000)
     evidence: str = Field(default="", max_length=20000)
@@ -270,13 +298,63 @@ def _audit_code_mutation(
 # Repository endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/repos", status_code=status.HTTP_201_CREATED)
-async def create_repo(engagement_key: str, request: CodeRepoCreateRequest) -> dict[str, Any]:
+@router.post("/repos/refresh/start", status_code=status.HTTP_201_CREATED)
+async def start_repo_refresh(engagement_key: str, request: CodeRepoCreateRequest) -> dict[str, Any]:
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     record = await anyio.to_thread.run_sync(
-        functools.partial(code_analysis.create_code_repo, engagement.id, **request.model_dump())
+        functools.partial(code_analysis.start_code_repo_refresh, engagement.id, request.model_dump())
     )
-    await _broadcast(engagement.key, "repo", record)
+    await _broadcast(engagement.key, "repo_refresh_started", record)
+    return record
+
+
+@router.post("/repos/refresh/preview")
+async def preview_repo_refresh(
+    engagement_key: str, request: CodeRepoRefreshPreviewRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.preview_code_repo_refresh,
+            engagement.id,
+            repo_key=request.repo_key,
+            files=[item.model_dump() for item in request.files],
+        )
+    )
+
+
+@router.post("/repos/{repo_id}/refresh/files")
+async def stage_repo_refresh_files(
+    engagement_key: str, repo_id: int, request: CodeRepoRefreshFilesRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.stage_code_repo_refresh_files,
+            engagement.id,
+            repo_id,
+            refresh_token=request.refresh_token,
+            files=[item.model_dump() for item in request.files],
+        )
+    )
+    return record
+
+
+@router.post("/repos/{repo_id}/refresh/commit")
+async def commit_repo_refresh(
+    engagement_key: str, repo_id: int, request: CodeRepoRefreshCommitRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.commit_code_repo_refresh,
+            engagement.id,
+            repo_id,
+            refresh_token=request.refresh_token,
+            manifest_complete=request.manifest_complete,
+        )
+    )
+    await _broadcast(engagement.key, "repo_refresh_committed", record)
     return record
 
 
@@ -305,21 +383,6 @@ async def update_repo(engagement_key: str, repo_id: int, request: dict[str, Any]
 # ---------------------------------------------------------------------------
 # File endpoints
 # ---------------------------------------------------------------------------
-
-@router.post("/files", status_code=status.HTTP_201_CREATED)
-async def bulk_create_files(engagement_key: str, request: CodeFilesBulkCreateRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.bulk_create_code_files,
-            engagement.id,
-            repo_id=request.repo_id,
-            files=[f.model_dump() for f in request.files],
-        )
-    )
-    await _broadcast(engagement.key, "files", record)
-    return record
-
 
 @router.get("/files")
 def list_files(
@@ -467,6 +530,8 @@ async def complete_queue_items(engagement_key: str, request: QueueCompleteReques
             code_analysis.complete_queue_items,
             engagement.id,
             item_ids=request.item_ids,
+            agent_name=request.agent_name,
+            lease_token=request.lease_token,
             disposition=request.disposition,
             notes=request.notes,
             cwe_coverage=request.cwe_coverage,
@@ -479,8 +544,13 @@ async def complete_queue_items(engagement_key: str, request: QueueCompleteReques
             engagement.id,
             title="code-dispatch done",
             action=f"item_ids={request.item_ids} disposition={request.disposition}",
+            actor_name=request.agent_name,
             result=request.notes,
-            metadata={"item_ids": request.item_ids, "disposition": request.disposition},
+            metadata={
+                "item_ids": request.item_ids,
+                "disposition": request.disposition,
+                "lease_token": request.lease_token,
+            },
         )
     )
     await _broadcast(engagement.key, "queue_done", record)
@@ -495,6 +565,8 @@ async def error_queue_items(engagement_key: str, request: QueueErrorRequest) -> 
             code_analysis.error_queue_items,
             engagement.id,
             item_ids=request.item_ids,
+            agent_name=request.agent_name,
+            lease_token=request.lease_token,
             notes=request.notes,
         )
     )
@@ -510,6 +582,8 @@ async def needs_context_queue_items(engagement_key: str, request: QueueNeedsCont
             code_analysis.needs_context_queue_items,
             engagement.id,
             item_ids=request.item_ids,
+            agent_name=request.agent_name,
+            lease_token=request.lease_token,
             expansion_request=request.expansion_request,
         )
     )
@@ -528,6 +602,22 @@ async def reset_stale_queue_items(engagement_key: str, request: QueueResetStaleR
         )
     )
     await _broadcast(engagement.key, "queue_reset_stale", record)
+    return record
+
+
+@router.post("/analysis-queue/heartbeat")
+async def heartbeat_queue_item(engagement_key: str, request: QueueHeartbeatRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.heartbeat_queue_item,
+            engagement.id,
+            item_id=request.item_id,
+            agent_name=request.agent_name,
+            lease_token=request.lease_token,
+        )
+    )
+    await _broadcast(engagement.key, "queue_heartbeat", record)
     return record
 
 
@@ -553,6 +643,32 @@ async def retry_error_queue_items(engagement_key: str, request: QueueRetryErrorR
         )
     )
     await _broadcast(engagement.key, "queue_retry_error", record)
+    return record
+
+
+@router.post("/analysis-queue/retry-needs-context")
+async def retry_needs_context_queue_items(
+    engagement_key: str, request: QueueRetryNeedsContextRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.retry_needs_context_queue_items,
+            engagement.id,
+            item_ids=request.item_ids,
+            reason=request.reason,
+        )
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_code_mutation,
+            engagement.id,
+            title="code-dispatch retry-needs-context",
+            action=f"item_ids={request.item_ids} reason={request.reason}",
+            metadata={"item_ids": request.item_ids, "reason": request.reason},
+        )
+    )
+    await _broadcast(engagement.key, "queue_retry_needs_context", record)
     return record
 
 
@@ -654,12 +770,14 @@ def list_analysis_results(
     engagement_key: str,
     file_id: int | None = Query(default=None),
     disposition: str | None = Query(default=None),
+    include_superseded: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return code_analysis.list_analysis_results(
         engagement.id,
         file_id=file_id,
         disposition=disposition,
+        include_superseded=include_superseded,
     )
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -234,7 +236,7 @@ def _analysis_result_row(connection, result_id: int) -> Any:
     ).fetchone()
 
 
-def _get_repo_row(connection, engagement_id: int, repo_id: int) -> dict[str, Any]:
+def _get_repo_row_raw(connection, engagement_id: int, repo_id: int) -> dict[str, Any]:
     row = connection.execute(
         "SELECT * FROM code_repos WHERE engagement_id = ? AND id = ?",
         (engagement_id, repo_id),
@@ -244,12 +246,23 @@ def _get_repo_row(connection, engagement_id: int, repo_id: int) -> dict[str, Any
     return dict(row)
 
 
+def _get_published_repo_row(connection, engagement_id: int, repo_id: int) -> dict[str, Any]:
+    row = _get_repo_row_raw(connection, engagement_id, repo_id)
+    if int(row.get("active_generation", 0)) == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
+    return row
+
+
 def _get_repo_rows(connection, engagement_id: int, repo_ids: set[int]) -> dict[int, dict[str, Any]]:
     if not repo_ids:
         return {}
     placeholders = ",".join("?" for _ in repo_ids)
     rows = connection.execute(
-        f"SELECT * FROM code_repos WHERE engagement_id = ? AND id IN ({placeholders})",
+        f"""
+        SELECT * FROM code_repos
+        WHERE engagement_id = ? AND active_generation > 0
+          AND id IN ({placeholders})
+        """,
         (engagement_id, *sorted(repo_ids)),
     ).fetchall()
     found = {int(row["id"]): dict(row) for row in rows}
@@ -263,7 +276,15 @@ def _get_file_rows(connection, engagement_id: int, file_ids: set[int]) -> dict[i
         return {}
     placeholders = ",".join("?" for _ in file_ids)
     rows = connection.execute(
-        f"SELECT * FROM code_files WHERE engagement_id = ? AND id IN ({placeholders})",
+        f"""
+        SELECT files.*
+        FROM code_files AS files
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+        WHERE files.engagement_id = ? AND files.id IN ({placeholders})
+        """,
         (engagement_id, *sorted(file_ids)),
     ).fetchall()
     found = {int(row["id"]): dict(row) for row in rows}
@@ -277,7 +298,18 @@ def _get_queue_rows(connection, engagement_id: int, item_ids: set[int]) -> dict[
         return {}
     placeholders = ",".join("?" for _ in item_ids)
     rows = connection.execute(
-        f"SELECT * FROM code_analysis_queue WHERE engagement_id = ? AND id IN ({placeholders})",
+        f"""
+        SELECT queue.*
+        FROM code_analysis_queue AS queue
+        JOIN code_files AS files
+          ON files.id = queue.file_id
+         AND files.engagement_id = queue.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+        WHERE queue.engagement_id = ? AND queue.id IN ({placeholders})
+        """,
         (engagement_id, *sorted(item_ids)),
     ).fetchall()
     found = {int(row["id"]): dict(row) for row in rows}
@@ -309,6 +341,22 @@ def _require_queue_status(
     )
 
 
+def _require_queue_lease(
+    queue_rows: dict[int, dict[str, Any]], *, agent_name: str, lease_token: str, action: str
+) -> None:
+    invalid = [
+        item_id
+        for item_id, row in queue_rows.items()
+        if str(row.get("assigned_agent", "")) != agent_name
+        or str(row.get("lease_token", "")) != lease_token
+    ]
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot {action}: queue lease is no longer owned by {agent_name}",
+        )
+
+
 def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> None:
     queue_rows = connection.execute(
         """
@@ -329,7 +377,7 @@ def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> 
         """
         SELECT disposition, COUNT(*) AS total
         FROM code_analysis_results
-        WHERE engagement_id = ? AND file_id = ?
+        WHERE engagement_id = ? AND file_id = ? AND superseded_at IS NULL
         GROUP BY disposition
         """,
         (engagement_id, file_id),
@@ -529,61 +577,465 @@ def _sync_trigger_status_for_file(connection, engagement_id: int, file_id: int) 
 # Repository Management
 # =========================================================================
 
-def create_code_repo(
-    engagement_id: int,
-    *,
-    repo_key: str,
-    name: str,
-    language: str,
-    repo_path: str,
-    total_files: int,
-    analyzable_files: int,
-    total_loc: int,
-    commit_hash: str,
-    branch: str,
-    git_churn: dict | None = None,
+def start_code_repo_refresh(engagement_id: int, repo: dict[str, Any]) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    refresh_token = str(uuid.uuid4())
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT * FROM code_repos WHERE engagement_id = ? AND repo_key = ?",
+            (engagement.id, repo["repo_key"]),
+        ).fetchone()
+        if row is None:
+            cursor = connection.execute(
+                """
+                INSERT INTO code_repos (
+                    engagement_id, repo_key, name, language, repo_path,
+                    commit_hash, branch, pending_refresh_token, pending_refresh_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    engagement.id, repo["repo_key"], repo["name"], repo.get("language", ""),
+                    repo["repo_path"], repo.get("commit_hash", ""), repo.get("branch", ""),
+                    refresh_token, _json_text(repo),
+                ),
+            )
+            repo_id = int(cursor.lastrowid)
+        else:
+            repo_id = int(row["id"])
+            old_token = str(row["pending_refresh_token"] or "")
+            if old_token:
+                connection.execute(
+                    "DELETE FROM code_ingest_staging WHERE repo_id = ? AND refresh_token = ?",
+                    (repo_id, old_token),
+                )
+            connection.execute(
+                """
+                UPDATE code_repos
+                SET pending_refresh_token = ?, pending_refresh_json = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND id = ?
+                """,
+                (refresh_token, _json_text(repo), engagement.id, repo_id),
+            )
+    return {"repo_id": repo_id, "refresh_token": refresh_token}
+
+
+def _normalized_file_manifest_record(record: Any) -> dict[str, Any]:
+    record = dict(record)
+    return {
+        "file_hash": str(record.get("file_hash", "") or ""),
+        "language": str(record.get("language", "") or ""),
+        "loc": int(record.get("loc", 0) or 0),
+        "header_snippet": str(record.get("header_snippet", "") or ""),
+        "git_churn_score": int(record.get("git_churn_score", 0) or 0),
+        "has_past_cve_fix": bool(record.get("has_past_cve_fix")),
+    }
+
+
+def preview_code_repo_refresh(
+    engagement_id: int, *, repo_key: str, files: list[dict[str, Any]]
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    incoming = {str(row["file_path"]): row for row in files}
+    with get_connection() as connection:
+        repo = connection.execute(
+            "SELECT id FROM code_repos WHERE engagement_id = ? AND repo_key = ?",
+            (engagement.id, repo_key),
+        ).fetchone()
+        if repo is None:
+            return {"added": sorted(incoming), "changed": [], "renamed": [], "removed": [], "unchanged": []}
+        rows = connection.execute(
+            """
+            SELECT file_path, file_hash, language, loc, header_snippet,
+                   git_churn_score, has_past_cve_fix
+            FROM code_files WHERE engagement_id = ? AND repo_id = ?
+            """,
+            (engagement.id, int(repo["id"])),
+        ).fetchall()
+    existing = {str(row["file_path"]): _normalized_file_manifest_record(row) for row in rows}
+    normalized_incoming = {
+        path: _normalized_file_manifest_record(record) for path, record in incoming.items()
+    }
+    changed = sorted(
+        path for path in set(existing) & set(incoming)
+        if existing[path] != normalized_incoming[path]
+    )
+    unchanged = sorted((set(existing) & set(incoming)) - set(changed))
+    removed = set(existing) - set(incoming)
+    added = set(incoming) - set(existing)
+    removed_by_hash: dict[str, list[str]] = {}
+    added_by_hash: dict[str, list[str]] = {}
+    for path in removed:
+        removed_by_hash.setdefault(str(existing[path]["file_hash"]), []).append(path)
+    for path in added:
+        added_by_hash.setdefault(str(normalized_incoming[path]["file_hash"]), []).append(path)
+    renamed: list[dict[str, str]] = []
+    for file_hash, old_paths in removed_by_hash.items():
+        new_paths = added_by_hash.get(file_hash, [])
+        if file_hash and len(old_paths) == 1 and len(new_paths) == 1:
+            renamed.append({"from": old_paths[0], "to": new_paths[0], "file_hash": file_hash})
+            removed.discard(old_paths[0])
+            added.discard(new_paths[0])
+    return {
+        "added": sorted(added), "changed": changed,
+        "renamed": sorted(renamed, key=lambda row: (row["from"], row["to"])),
+        "removed": sorted(removed), "unchanged": unchanged,
+    }
+
+
+def stage_code_repo_refresh_files(
+    engagement_id: int, repo_id: int, *, refresh_token: str, files: list[dict[str, Any]]
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        repo = _get_repo_row_raw(connection, engagement.id, repo_id)
+        if str(repo.get("pending_refresh_token", "")) != refresh_token:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="repo refresh token is stale")
+        for file_record in files:
+            connection.execute(
+                """
+                INSERT INTO code_ingest_staging (
+                    engagement_id, repo_id, refresh_token, file_path, file_json
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(repo_id, refresh_token, file_path)
+                DO UPDATE SET file_json = excluded.file_json
+                """,
+                (engagement.id, repo_id, refresh_token, file_record["file_path"], _json_text(file_record)),
+            )
+    return {"staged": len(files)}
+
+
+def _invalidate_file_analysis(connection, engagement_id: int, file_id: int) -> None:
+    """Discard every conclusion whose validity depends on file content or path."""
+    connection.execute(
+        "DELETE FROM code_analysis_triggers WHERE engagement_id = ? AND source_file_id = ?",
+        (engagement_id, file_id),
+    )
+    connection.execute(
+        """
+        UPDATE code_analysis_triggers
+        SET status = 'pending', resolved_queue_item_id = NULL,
+            resolution_note = '', updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ? AND target_file_id = ?
+        """,
+        (engagement_id, file_id),
+    )
+    connection.execute(
+        "DELETE FROM code_analysis_results WHERE engagement_id = ? AND file_id = ?",
+        (engagement_id, file_id),
+    )
+    connection.execute(
+        "DELETE FROM code_analysis_queue WHERE engagement_id = ? AND file_id = ?",
+        (engagement_id, file_id),
+    )
+    connection.execute(
+        """
+        UPDATE code_files
+        SET classification = 'unclassified', role = '', slot_types_json = '[]',
+            analysis_priority = 0, analysis_status = 'pending', analysis_depth = 'none',
+            skip_reason = '', variant_check_status = 'pending', module_id = NULL,
+            notes = '', total_functions = 0, total_entry_points = 0,
+            total_sinks = 0, total_exports = 0
+        WHERE engagement_id = ? AND id = ?
+        """,
+        (engagement_id, file_id),
+    )
+
+
+_METADATA_REFRESH_REVIEW_THEME = "metadata-refresh-review"
+
+
+def _reopen_file_metadata_review(
+    connection,
+    engagement_id: int,
+    file_row: dict[str, Any],
+    *,
+    invalidate_architecture: bool,
+) -> None:
+    """Retire stale conclusions while preserving them as non-covering history."""
+    file_id = int(file_row["id"])
+    prior_priority = int(file_row.get("analysis_priority", 0) or 0)
+    if prior_priority <= 0:
+        row = connection.execute(
+            "SELECT MAX(priority) AS priority FROM code_analysis_queue WHERE engagement_id = ? AND file_id = ?",
+            (engagement_id, file_id),
+        ).fetchone()
+        prior_priority = int(row["priority"] or 50) if row is not None else 50
+    review_priority = max(0, min(100, prior_priority))
+    superseded_at = _now_iso()
+    connection.execute(
+        """
+        UPDATE code_analysis_results
+        SET superseded_at = ?
+        WHERE engagement_id = ? AND file_id = ? AND superseded_at IS NULL
+        """,
+        (superseded_at, engagement_id, file_id),
+    )
+    connection.execute(
+        "DELETE FROM code_analysis_triggers WHERE engagement_id = ? AND source_file_id = ?",
+        (engagement_id, file_id),
+    )
+    connection.execute(
+        """
+        UPDATE code_analysis_triggers
+        SET resolved_queue_item_id = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ?
+          AND (
+              target_file_id = ?
+              OR (
+                  target_file_id IS NULL
+                  AND target_file_path = ?
+                  AND source_file_id IN (
+                      SELECT id FROM code_files
+                      WHERE engagement_id = ? AND repo_id = ?
+                  )
+              )
+          )
+        """,
+        (
+            engagement_id,
+            file_id,
+            str(file_row["file_path"]),
+            engagement_id,
+            int(file_row["repo_id"]),
+        ),
+    )
+    connection.execute(
+        """
+        UPDATE code_analysis_queue
+        SET status = 'done', disposition = 'superseded',
+            cwe_coverage_json = '[]', cross_file_triggers_json = '[]',
+            guidance_hypotheses_json = '[]', completed_at = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ? AND file_id = ?
+        """,
+        (superseded_at, engagement_id, file_id),
+    )
+    architecture_fields = (
+        "role = '', slot_types_json = '[]', module_id = NULL," if invalidate_architecture else ""
+    )
+    connection.execute(
+        f"""
+        UPDATE code_files
+        SET classification = 'unclassified', {architecture_fields}
+            analysis_priority = 0, analysis_status = 'pending',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ? AND id = ?
+        """,
+        (engagement_id, file_id),
+    )
+    connection.execute(
+        """
+        INSERT INTO code_analysis_queue (
+            engagement_id, file_id, priority, status, batch_theme,
+            slot_types_json, guidance_hypotheses_json
+        ) VALUES (?, ?, ?, 'pending', ?, '[]', '[]')
+        """,
+        (engagement_id, file_id, review_priority, _METADATA_REFRESH_REVIEW_THEME),
+    )
+    _sync_trigger_status_for_file(connection, engagement_id, file_id)
+
+
+def commit_code_repo_refresh(
+    engagement_id: int, repo_id: int, *, refresh_token: str, manifest_complete: bool
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    inserted = changed = renamed = deleted = unchanged = 0
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        repo = _get_repo_row_raw(connection, engagement.id, repo_id)
+        if str(repo.get("pending_refresh_token", "")) != refresh_token:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="repo refresh token is stale")
+        staged_rows = connection.execute(
+            """
+            SELECT file_path, file_json FROM code_ingest_staging
+            WHERE engagement_id = ? AND repo_id = ? AND refresh_token = ?
+            ORDER BY file_path
+            """,
+            (engagement.id, repo_id, refresh_token),
+        ).fetchall()
+        if not manifest_complete:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="repo refresh manifest is incomplete")
+        staged = {str(row["file_path"]): _json_decode(row["file_json"], {}) for row in staged_rows}
+        existing_rows = connection.execute(
+            "SELECT * FROM code_files WHERE engagement_id = ? AND repo_id = ?",
+            (engagement.id, repo_id),
+        ).fetchall()
+        existing = {str(row["file_path"]): dict(row) for row in existing_rows}
+
+        missing_paths = set(existing) - set(staged)
+        new_paths = set(staged) - set(existing)
+        missing_by_hash: dict[str, list[str]] = {}
+        new_by_hash: dict[str, list[str]] = {}
+        for path in missing_paths:
+            missing_by_hash.setdefault(str(existing[path].get("file_hash", "")), []).append(path)
+        for path in new_paths:
+            new_by_hash.setdefault(str(staged[path].get("file_hash", "")), []).append(path)
+        renamed_old: set[str] = set()
+        renamed_new: set[str] = set()
+        for file_hash, old_paths in missing_by_hash.items():
+            new_matches = new_by_hash.get(file_hash, [])
+            if not file_hash or len(old_paths) != 1 or len(new_matches) != 1:
+                continue
+            old_path, new_path = old_paths[0], new_matches[0]
+            record = staged[new_path]
+            file_id = int(existing[old_path]["id"])
+            _invalidate_file_analysis(connection, engagement.id, file_id)
+            connection.execute(
+                """
+                UPDATE code_files SET file_path = ?, language = ?, loc = ?, file_hash = ?,
+                    header_snippet = ?, git_churn_score = ?, has_past_cve_fix = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND id = ?
+                """,
+                (
+                    new_path, record.get("language", ""), record.get("loc", 0), file_hash,
+                    record.get("header_snippet", ""), record.get("git_churn_score", 0),
+                    1 if record.get("has_past_cve_fix") else 0, engagement.id, file_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE code_analysis_triggers
+                SET target_file_path = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND target_file_id = ?
+                """,
+                (new_path, engagement.id, file_id),
+            )
+            renamed_old.add(old_path)
+            renamed_new.add(new_path)
+            renamed += 1
+
+        for path, record in staged.items():
+            if path in renamed_new:
+                continue
+            current = existing.get(path)
+            if current is None:
+                connection.execute(
+                    """
+                    INSERT INTO code_files (
+                        engagement_id, repo_id, file_path, language, loc, file_hash,
+                        header_snippet, git_churn_score, has_past_cve_fix
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        engagement.id, repo_id, path, record.get("language", ""), record.get("loc", 0),
+                        record.get("file_hash", ""), record.get("header_snippet", ""),
+                        record.get("git_churn_score", 0), 1 if record.get("has_past_cve_fix") else 0,
+                    ),
+                )
+                inserted += 1
+                continue
+            content_changed = str(current.get("file_hash", "")) != str(record.get("file_hash", ""))
+            language_changed = str(current.get("language", "")) != str(record.get("language", ""))
+            loc_changed = int(current.get("loc", 0) or 0) != int(record.get("loc", 0) or 0)
+            header_changed = str(current.get("header_snippet", "")) != str(record.get("header_snippet", ""))
+            risk_metadata_changed = (
+                int(current.get("git_churn_score", 0) or 0)
+                != int(record.get("git_churn_score", 0) or 0)
+                or bool(current.get("has_past_cve_fix"))
+                != bool(record.get("has_past_cve_fix"))
+            )
+            if content_changed or language_changed or loc_changed:
+                _invalidate_file_analysis(connection, engagement.id, int(current["id"]))
+                connection.execute(
+                    """
+                    UPDATE code_files SET language = ?, loc = ?, file_hash = ?, header_snippet = ?,
+                        git_churn_score = ?, has_past_cve_fix = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND id = ?
+                    """,
+                    (
+                        record.get("language", ""), record.get("loc", 0), record.get("file_hash", ""),
+                        record.get("header_snippet", ""), record.get("git_churn_score", 0),
+                        1 if record.get("has_past_cve_fix") else 0, engagement.id, current["id"],
+                    ),
+                )
+                changed += 1
+            elif header_changed or risk_metadata_changed:
+                _reopen_file_metadata_review(
+                    connection,
+                    engagement.id,
+                    current,
+                    invalidate_architecture=header_changed,
+                )
+                connection.execute(
+                    """
+                    UPDATE code_files SET language = ?, loc = ?, header_snippet = ?,
+                        git_churn_score = ?, has_past_cve_fix = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND id = ?
+                    """,
+                    (
+                        record.get("language", ""), record.get("loc", 0), record.get("header_snippet", ""),
+                        record.get("git_churn_score", 0), 1 if record.get("has_past_cve_fix") else 0,
+                        engagement.id, current["id"],
+                    ),
+                )
+                changed += 1
+            else:
+                connection.execute(
+                    """
+                    UPDATE code_files SET language = ?, loc = ?, header_snippet = ?,
+                        git_churn_score = ?, has_past_cve_fix = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND id = ?
+                    """,
+                    (
+                        record.get("language", ""), record.get("loc", 0), record.get("header_snippet", ""),
+                        record.get("git_churn_score", 0), 1 if record.get("has_past_cve_fix") else 0,
+                        engagement.id, current["id"],
+                    ),
+                )
+                unchanged += 1
+
+        for path in missing_paths - renamed_old:
+            connection.execute("DELETE FROM code_files WHERE id = ?", (existing[path]["id"],))
+            deleted += 1
+
+        metadata = _json_decode(repo.get("pending_refresh_json"), {})
         connection.execute(
             """
-            INSERT INTO code_repos (
-                engagement_id, repo_key, name, language, repo_path,
-                total_files, analyzable_files, total_loc,
-                commit_hash, branch, git_churn_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(engagement_id, repo_key) DO UPDATE SET
-                name = excluded.name,
-                language = excluded.language,
-                repo_path = excluded.repo_path,
-                total_files = excluded.total_files,
-                analyzable_files = excluded.analyzable_files,
-                total_loc = excluded.total_loc,
-                commit_hash = excluded.commit_hash,
-                branch = excluded.branch,
-                git_churn_json = excluded.git_churn_json,
-                updated_at = CURRENT_TIMESTAMP
+            UPDATE code_repos SET name = ?, language = ?, repo_path = ?, total_files = ?,
+                analyzable_files = ?, total_loc = ?, commit_hash = ?, branch = ?,
+                git_churn_json = ?, active_generation = active_generation + 1,
+                pending_refresh_token = '', pending_refresh_json = '{}',
+                analysis_status = 'ingested', updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ? AND pending_refresh_token = ?
             """,
             (
-                engagement.id, repo_key, name, language, repo_path,
-                total_files, analyzable_files, total_loc,
-                commit_hash, branch, _json_text(git_churn),
+                metadata.get("name", repo["name"]), metadata.get("language", ""),
+                metadata.get("repo_path", repo["repo_path"]), metadata.get("total_files", len(staged)),
+                metadata.get("analyzable_files", len(staged)), metadata.get("total_loc", 0),
+                metadata.get("commit_hash", ""), metadata.get("branch", ""),
+                _json_text(metadata.get("git_churn")), engagement.id, repo_id, refresh_token,
             ),
         )
-        row = connection.execute(
-            "SELECT * FROM code_repos WHERE engagement_id = ? AND repo_key = ?",
-            (engagement.id, repo_key),
-        ).fetchone()
-        assert row is not None
-        return _hydrate_code_repo(row)
+        connection.execute(
+            "DELETE FROM code_ingest_staging WHERE repo_id = ? AND refresh_token = ?",
+            (repo_id, refresh_token),
+        )
+        for module_row in connection.execute(
+            "SELECT id FROM code_modules WHERE engagement_id = ? AND repo_id = ?", (engagement.id, repo_id)
+        ).fetchall():
+            _sync_module_rollup(connection, engagement.id, int(module_row["id"]))
+    return {
+        "repo_id": repo_id, "inserted": inserted, "changed": changed, "renamed": renamed,
+        "deleted": deleted, "unchanged": unchanged,
+    }
 
 
 def list_code_repos(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         rows = connection.execute(
-            "SELECT * FROM code_repos WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC",
+            """
+            SELECT * FROM code_repos
+            WHERE engagement_id = ?
+              AND active_generation > 0
+            ORDER BY updated_at DESC, id DESC
+            """,
             (engagement.id,),
         ).fetchall()
         return [_hydrate_code_repo(row) for row in rows]
@@ -592,12 +1044,7 @@ def list_code_repos(engagement_id: int) -> list[dict[str, Any]]:
 def get_code_repo(engagement_id: int, repo_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        row = connection.execute(
-            "SELECT * FROM code_repos WHERE engagement_id = ? AND id = ?",
-            (engagement.id, repo_id),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
+        row = _get_published_repo_row(connection, engagement.id, repo_id)
     return _hydrate_code_repo(row)
 
 
@@ -637,6 +1084,7 @@ def update_code_repo(
     params.extend([engagement.id, repo_id])
 
     with get_connection() as connection:
+        _get_published_repo_row(connection, engagement.id, repo_id)
         connection.execute(
             f"UPDATE code_repos SET {', '.join(set_clauses)} WHERE engagement_id = ? AND id = ?",
             tuple(params),
@@ -654,43 +1102,6 @@ def update_code_repo(
 # File Management
 # =========================================================================
 
-def bulk_create_code_files(
-    engagement_id: int,
-    repo_id: int,
-    files: list[dict[str, Any]],
-) -> dict[str, Any]:
-    engagement = _engagement_or_404(engagement_id)
-    inserted = 0
-    skipped = 0
-    with get_connection() as connection:
-        _get_repo_row(connection, engagement.id, repo_id)
-        for f in files:
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO code_files (
-                    engagement_id, repo_id, file_path, language, loc,
-                    file_hash, header_snippet, git_churn_score, has_past_cve_fix
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    engagement.id,
-                    repo_id,
-                    f["file_path"],
-                    f.get("language", ""),
-                    f.get("loc", 0),
-                    f.get("file_hash", ""),
-                    f.get("header_snippet", ""),
-                    f.get("git_churn_score", 0),
-                    1 if f.get("has_past_cve_fix") else 0,
-                ),
-            )
-            if cursor.rowcount > 0:
-                inserted += 1
-            else:
-                skipped += 1
-    return {"inserted": inserted, "skipped": skipped, "total": len(files)}
-
 
 def list_code_files(
     engagement_id: int,
@@ -704,25 +1115,32 @@ def list_code_files(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    clauses = ["engagement_id = ?"]
+    clauses = ["files.engagement_id = ?", "repos.active_generation > 0"]
     params: list[Any] = [engagement.id]
     if repo_id is not None:
-        clauses.append("repo_id = ?")
+        clauses.append("files.repo_id = ?")
         params.append(repo_id)
     if module_id is not None:
-        clauses.append("module_id = ?")
+        clauses.append("files.module_id = ?")
         params.append(module_id)
     if classification is not None:
-        clauses.append("classification = ?")
+        clauses.append("files.classification = ?")
         params.append(classification)
     if analysis_status is not None:
-        clauses.append("analysis_status = ?")
+        clauses.append("files.analysis_status = ?")
         params.append(analysis_status)
     if search is not None:
-        clauses.append("file_path LIKE ? ESCAPE '\\'")
+        clauses.append("files.file_path LIKE ? ESCAPE '\\'")
         escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params.append(f"%{escaped}%")
-    query = f"SELECT * FROM code_files WHERE {' AND '.join(clauses)} ORDER BY analysis_priority DESC, id ASC"
+    query = f"""
+        SELECT files.*
+        FROM code_files AS files
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY files.analysis_priority DESC, files.id ASC
+    """
     if limit is not None:
         query += f" LIMIT {int(limit)}"
         if offset > 0:
@@ -734,12 +1152,7 @@ def list_code_files(
 def get_code_file(engagement_id: int, file_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        row = connection.execute(
-            "SELECT * FROM code_files WHERE engagement_id = ? AND id = ?",
-            (engagement.id, file_id),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
+        row = _get_file_rows(connection, engagement.id, {file_id})[file_id]
     return _hydrate_code_file(row)
 
 
@@ -825,6 +1238,11 @@ def bulk_classify_code_files(
     engagement = _engagement_or_404(engagement_id)
     updated = 0
     with get_connection() as connection:
+        _get_file_rows(
+            connection,
+            engagement.id,
+            {int(classification["file_id"]) for classification in classifications},
+        )
         affected_module_ids: set[int] = set()
         for idx, c in enumerate(classifications):
             classification = str(c.get("classification", "")).strip()
@@ -928,12 +1346,7 @@ def update_code_file(
     json_object_fields: set[str] = set()
 
     with get_connection() as connection:
-        file_row = connection.execute(
-            "SELECT * FROM code_files WHERE engagement_id = ? AND id = ?",
-            (engagement.id, file_id),
-        ).fetchone()
-        if file_row is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code file not found")
+        file_row = _get_file_rows(connection, engagement.id, {file_id})[file_id]
 
         normalized_kwargs = dict(kwargs)
         if "module_id" in normalized_kwargs:
@@ -1045,6 +1458,12 @@ def bulk_update_structural_metadata(
     structural_fields = {"total_functions", "total_entry_points", "total_sinks", "total_exports"}
 
     with get_connection() as connection:
+        file_ids = {
+            int(item["file_id"])
+            for item in updates
+            if item.get("file_id") is not None
+        }
+        _get_file_rows(connection, engagement.id, file_ids)
         for item in updates:
             _reject_unknown_fields(item, structural_fields | {"file_id"}, entity_name="bulk structural metadata update")
             file_id = item.get("file_id")
@@ -1095,7 +1514,7 @@ def bulk_create_code_modules(
     engagement = _engagement_or_404(engagement_id)
     created: list[int] = []
     with get_connection() as connection:
-        _get_repo_row(connection, engagement.id, repo_id)
+        _get_published_repo_row(connection, engagement.id, repo_id)
         repo_files = connection.execute(
             """
             SELECT id, file_path
@@ -1203,13 +1622,24 @@ def list_code_modules(
     repo_id: int | None = None,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    if repo_id is not None:
-        query = "SELECT * FROM code_modules WHERE engagement_id = ? AND repo_id = ? ORDER BY id ASC"
-        params: tuple[Any, ...] = (engagement.id, repo_id)
-    else:
-        query = "SELECT * FROM code_modules WHERE engagement_id = ? ORDER BY id ASC"
-        params = (engagement.id,)
     with get_connection() as connection:
+        if repo_id is not None:
+            _get_published_repo_row(connection, engagement.id, repo_id)
+            repo_clause = " AND modules.repo_id = ?"
+            params: tuple[Any, ...] = (engagement.id, repo_id)
+        else:
+            repo_clause = ""
+            params = (engagement.id,)
+        query = f"""
+            SELECT modules.*
+            FROM code_modules AS modules
+            JOIN code_repos AS repos
+              ON repos.id = modules.repo_id
+             AND repos.engagement_id = modules.engagement_id
+             AND repos.active_generation > 0
+            WHERE modules.engagement_id = ?{repo_clause}
+            ORDER BY modules.id ASC
+        """
         module_rows = connection.execute(query, params).fetchall()
         for row in module_rows:
             _sync_module_rollup(connection, engagement.id, int(row["id"]))
@@ -1274,7 +1704,19 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         rows = connection.execute(
-            "SELECT status, COUNT(*) AS total FROM code_analysis_queue WHERE engagement_id = ? GROUP BY status",
+            """
+            SELECT queue.status, COUNT(*) AS total
+            FROM code_analysis_queue AS queue
+            JOIN code_files AS files
+              ON files.id = queue.file_id
+             AND files.engagement_id = queue.engagement_id
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+             AND repos.active_generation > 0
+            WHERE queue.engagement_id = ?
+            GROUP BY queue.status
+            """,
             (engagement.id,),
         ).fetchall()
     counts: dict[str, int] = {}
@@ -1303,35 +1745,50 @@ def fetch_queue_items(
     engagement = _engagement_or_404(engagement_id)
     now = _now_iso()
     with get_connection() as connection:
-        # Atomic claim: UPDATE with subquery SELECT in one statement
-        connection.execute(
+        connection.execute("BEGIN IMMEDIATE")
+        selected = connection.execute(
             """
-            UPDATE code_analysis_queue
-            SET status = 'processing',
-                assigned_agent = ?,
-                consumed_at = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id IN (
-                SELECT id FROM code_analysis_queue
-                WHERE engagement_id = ? AND status = 'pending'
-                ORDER BY priority DESC, id ASC
-                LIMIT ?
-            )
+            SELECT queue.id
+            FROM code_analysis_queue AS queue
+            JOIN code_files AS files
+              ON files.id = queue.file_id
+             AND files.engagement_id = queue.engagement_id
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+             AND repos.active_generation > 0
+            WHERE queue.engagement_id = ? AND queue.status = 'pending'
+            ORDER BY queue.priority DESC, queue.id ASC
+            LIMIT ?
             """,
-            (agent_name, now, engagement.id, limit),
-        )
-        # Fetch the rows we just claimed
+            (engagement.id, limit),
+        ).fetchall()
+        claimed_ids: list[int] = []
+        for selected_row in selected:
+            item_id = int(selected_row["id"])
+            lease_token = str(uuid.uuid4())
+            cursor = connection.execute(
+                """
+                UPDATE code_analysis_queue
+                SET status = 'processing', assigned_agent = ?, lease_token = ?,
+                    consumed_at = ?, last_heartbeat_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND id = ? AND status = 'pending'
+                """,
+                (agent_name, lease_token, now, now, engagement.id, item_id),
+            )
+            if cursor.rowcount == 1:
+                claimed_ids.append(item_id)
+        if not claimed_ids:
+            return []
+        placeholders = ",".join("?" for _ in claimed_ids)
         rows = connection.execute(
-            """
+            f"""
             SELECT * FROM code_analysis_queue
-            WHERE engagement_id = ? AND assigned_agent = ? AND status = 'processing'
-              AND consumed_at = ?
+            WHERE engagement_id = ? AND id IN ({placeholders})
             ORDER BY priority DESC, id ASC
             """,
-            (engagement.id, agent_name, now),
+            (engagement.id, *claimed_ids),
         ).fetchall()
-        if not rows:
-            return []
 
         file_rows = _get_file_rows(connection, engagement.id, {int(row["file_id"]) for row in rows})
         repo_rows = _get_repo_rows(connection, engagement.id, {int(file_rows[int(row["file_id"])]["repo_id"]) for row in rows})
@@ -1438,6 +1895,7 @@ def _compute_coverage_integrity(
         """
         SELECT COUNT(*) FROM code_analysis_results
         WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
+          AND superseded_at IS NULL
         """,
         (engagement_id, queue_item_id, file_id),
     ).fetchone()[0] or 0
@@ -1446,7 +1904,7 @@ def _compute_coverage_integrity(
         """
         SELECT COUNT(DISTINCT function_name) FROM code_analysis_results
         WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
-          AND function_name != ''
+          AND function_name != '' AND superseded_at IS NULL
         """,
         (engagement_id, queue_item_id, file_id),
     ).fetchone()[0] or 0
@@ -1665,6 +2123,8 @@ _VALID_ANALYSIS_RESULT_DISPOSITIONS = frozenset({"finding", "suspicious", "clean
 def complete_queue_items(
     engagement_id: int,
     item_ids: list[int],
+    agent_name: str,
+    lease_token: str,
     disposition: str,
     notes: str = "",
     cwe_coverage: list[dict[str, Any]] | None = None,
@@ -1709,6 +2169,7 @@ def complete_queue_items(
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         _require_queue_status(queue_rows, expected_status="processing", action="complete")
+        _require_queue_lease(queue_rows, agent_name=agent_name, lease_token=lease_token, action="complete")
         queue_row = next(iter(queue_rows.values()))
         file_row = _get_file_rows(connection, engagement.id, {int(queue_row["file_id"])})[
             int(queue_row["file_id"])
@@ -1729,9 +2190,11 @@ def complete_queue_items(
                 cwe_coverage_json = ?,
                 completed_at = ?,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE engagement_id = ? AND status = 'processing' AND id IN ({placeholders})
+            WHERE engagement_id = ? AND status = 'processing'
+              AND assigned_agent = ? AND lease_token = ? AND id IN ({placeholders})
             """,
-            (next_status, disposition, notes, skip_reason, cwe_coverage_text, now, engagement.id, *item_ids),
+            (next_status, disposition, notes, skip_reason, cwe_coverage_text, now, engagement.id,
+             agent_name, lease_token, *item_ids),
         )
         if cursor.rowcount != len(item_ids):
             raise HTTPException(
@@ -1760,6 +2223,8 @@ def complete_queue_items(
 def error_queue_items(
     engagement_id: int,
     item_ids: list[int],
+    agent_name: str,
+    lease_token: str,
     notes: str = "",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
@@ -1769,15 +2234,17 @@ def error_queue_items(
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         _require_queue_status(queue_rows, expected_status="processing", action="mark as error")
+        _require_queue_lease(queue_rows, agent_name=agent_name, lease_token=lease_token, action="mark as error")
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
             SET status = 'error',
                 analysis_notes = ?,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE engagement_id = ? AND status = 'processing' AND id IN ({placeholders})
+            WHERE engagement_id = ? AND status = 'processing'
+              AND assigned_agent = ? AND lease_token = ? AND id IN ({placeholders})
             """,
-            (notes, engagement.id, *item_ids),
+            (notes, engagement.id, agent_name, lease_token, *item_ids),
         )
         if cursor.rowcount != len(item_ids):
             raise HTTPException(
@@ -1793,6 +2260,8 @@ def error_queue_items(
 def needs_context_queue_items(
     engagement_id: int,
     item_ids: list[int],
+    agent_name: str,
+    lease_token: str,
     expansion_request: dict[str, Any],
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
@@ -1802,15 +2271,19 @@ def needs_context_queue_items(
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         _require_queue_status(queue_rows, expected_status="processing", action="mark as needs_context")
+        _require_queue_lease(
+            queue_rows, agent_name=agent_name, lease_token=lease_token, action="mark as needs_context"
+        )
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
             SET status = 'needs_context',
                 expansion_request_json = ?,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE engagement_id = ? AND status = 'processing' AND id IN ({placeholders})
+            WHERE engagement_id = ? AND status = 'processing'
+              AND assigned_agent = ? AND lease_token = ? AND id IN ({placeholders})
             """,
-            (_json_text(expansion_request), engagement.id, *item_ids),
+            (_json_text(expansion_request), engagement.id, agent_name, lease_token, *item_ids),
         )
         if cursor.rowcount != len(item_ids):
             raise HTTPException(
@@ -1829,33 +2302,87 @@ def reset_stale_queue_items(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
+        # Serialize stale selection with heartbeat writers. The per-row CAS
+        # below is defense in depth for connections whose transaction mode is
+        # changed by an embedding caller.
+        connection.execute("BEGIN IMMEDIATE")
         stale_rows = connection.execute(
             """
-            SELECT id, file_id
+            SELECT id, file_id, lease_token,
+                   COALESCE(last_heartbeat_at, consumed_at, '') AS lease_activity_at
             FROM code_analysis_queue
             WHERE engagement_id = ?
               AND status = 'processing'
-              AND (consumed_at IS NULL OR datetime(consumed_at) < datetime('now', ? || ' minutes'))
+              AND file_id IN (
+                  SELECT files.id
+                  FROM code_files AS files
+                  JOIN code_repos AS repos
+                    ON repos.id = files.repo_id
+                   AND repos.engagement_id = files.engagement_id
+                   AND repos.active_generation > 0
+                  WHERE files.engagement_id = ?
+              )
+              AND (COALESCE(last_heartbeat_at, consumed_at) IS NULL
+                   OR datetime(COALESCE(last_heartbeat_at, consumed_at)) < datetime('now', ? || ' minutes'))
             """,
-            (engagement.id, f"-{minutes}"),
+            (engagement.id, engagement.id, f"-{minutes}"),
         ).fetchall()
+        reset_count = 0
+        for row in stale_rows:
+            cursor = connection.execute(
+                """
+                UPDATE code_analysis_queue
+                SET status = 'pending', assigned_agent = '', lease_token = '',
+                    consumed_at = NULL, last_heartbeat_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND id = ? AND status = 'processing'
+                  AND lease_token = ?
+                  AND COALESCE(last_heartbeat_at, consumed_at, '') = ?
+                """,
+                (
+                    engagement.id,
+                    int(row["id"]),
+                    str(row["lease_token"] or ""),
+                    str(row["lease_activity_at"] or ""),
+                ),
+            )
+            if cursor.rowcount != 1:
+                continue
+            reset_count += 1
+            connection.execute(
+                """
+                UPDATE code_analysis_results SET superseded_at = ?
+                WHERE queue_item_id = ? AND lease_token = ? AND superseded_at IS NULL
+                """,
+                (_now_iso(), int(row["id"]), str(row["lease_token"] or "")),
+            )
+            _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
+            _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
+        return {"reset": reset_count}
+
+
+def heartbeat_queue_item(
+    engagement_id: int, *, item_id: int, agent_name: str, lease_token: str
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    now = _now_iso()
+    with get_connection() as connection:
+        _get_queue_rows(connection, engagement.id, {item_id})
         cursor = connection.execute(
             """
             UPDATE code_analysis_queue
-            SET status = 'pending',
-                assigned_agent = '',
-                consumed_at = NULL,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE engagement_id = ?
-              AND status = 'processing'
-              AND (consumed_at IS NULL OR datetime(consumed_at) < datetime('now', ? || ' minutes'))
+            SET last_heartbeat_at = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ? AND status = 'processing'
+              AND assigned_agent = ? AND lease_token = ?
             """,
-            (engagement.id, f"-{minutes}"),
+            (now, engagement.id, item_id, agent_name, lease_token),
         )
-        for row in stale_rows:
-            _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
-            _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
-        return {"reset": cursor.rowcount}
+        if cursor.rowcount != 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot heartbeat: queue lease is no longer owned by this agent",
+            )
+    return {"item_id": item_id, "last_heartbeat_at": now}
 
 
 def retry_error_queue_items(
@@ -1886,12 +2413,22 @@ def retry_error_queue_items(
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         _require_queue_status(queue_rows, expected_status="error", action="retry")
+        for row in queue_rows.values():
+            connection.execute(
+                """
+                UPDATE code_analysis_results SET superseded_at = ?
+                WHERE queue_item_id = ? AND lease_token = ? AND superseded_at IS NULL
+                """,
+                (_now_iso(), int(row["id"]), str(row.get("lease_token", ""))),
+            )
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
             SET status = 'pending',
                 assigned_agent = '',
+                lease_token = '',
                 consumed_at = NULL,
+                last_heartbeat_at = NULL,
                 analysis_notes = analysis_notes || ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ? AND status = 'error' AND id IN ({placeholders})
@@ -1907,6 +2444,45 @@ def retry_error_queue_items(
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
         return {"retried": cursor.rowcount, "total": len(item_ids), "item_ids": sorted(item_ids)}
+
+
+def retry_needs_context_queue_items(
+    engagement_id: int, item_ids: list[int], reason: str
+) -> dict[str, Any]:
+    engagement = _engagement_or_404(engagement_id)
+    item_ids = list(dict.fromkeys(item_ids))
+    placeholders = ",".join("?" for _ in item_ids)
+    note_suffix = f"\n[context supplied: {reason.strip()}]"
+    with get_connection() as connection:
+        queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
+        _require_queue_status(queue_rows, expected_status="needs_context", action="retry")
+        cursor = connection.execute(
+            f"""
+            UPDATE code_analysis_queue
+            SET status = 'pending', assigned_agent = '', lease_token = '',
+                consumed_at = NULL, last_heartbeat_at = NULL,
+                analysis_notes = analysis_notes || ?, updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND status = 'needs_context' AND id IN ({placeholders})
+            """,
+            (note_suffix, engagement.id, *item_ids),
+        )
+        if cursor.rowcount != len(item_ids):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="queue items changed state before needs-context retry; refetch and retry",
+            )
+        connection.execute(
+            f"""
+            UPDATE code_analysis_results SET superseded_at = ?
+            WHERE engagement_id = ? AND superseded_at IS NULL
+              AND queue_item_id IN ({placeholders})
+            """,
+            (_now_iso(), engagement.id, *item_ids),
+        )
+        for row in queue_rows.values():
+            _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
+            _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
+    return {"retried": len(item_ids), "total": len(item_ids), "item_ids": sorted(item_ids)}
 
 
 # =========================================================================
@@ -1946,25 +2522,57 @@ def create_analysis_result(
             )
         file_row = _get_file_rows(connection, engagement.id, {queue_file_id})[queue_file_id]
         normalized_cross_file_triggers = _normalize_cross_file_triggers(result.get("cross_file_triggers"))
+        agent_name = str(result.get("agent_name", ""))
+        lease_token = str(result.get("lease_token", ""))
 
         _require_queue_status(
             {int(queue_item_id): queue_row},
             expected_status="processing",
             action="record analysis results for",
         )
+        _require_queue_lease(
+            {int(queue_item_id): queue_row},
+            agent_name=agent_name,
+            lease_token=lease_token,
+            action="record analysis results",
+        )
+        fingerprint_payload = {
+            key: value
+            for key, value in result.items()
+            if key not in {"audit_metadata"}
+        }
+        fingerprint_payload["file_id"] = int(file_row["id"])
+        fingerprint_payload["cross_file_triggers"] = normalized_cross_file_triggers
+        result_fingerprint = hashlib.sha256(
+            _json_text(fingerprint_payload).encode("utf-8")
+        ).hexdigest()
         cursor = connection.execute(
             """
             UPDATE code_analysis_queue
             SET updated_at = updated_at
             WHERE engagement_id = ? AND id = ? AND file_id = ? AND status = 'processing'
+              AND assigned_agent = ? AND lease_token = ?
             """,
-            (engagement.id, int(queue_item_id), int(file_row["id"])),
+            (engagement.id, int(queue_item_id), int(file_row["id"]), agent_name, lease_token),
         )
         if cursor.rowcount != 1:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="queue item changed state before recording analysis result; refetch and retry",
             )
+
+        existing_result = connection.execute(
+            """
+            SELECT id FROM code_analysis_results
+            WHERE engagement_id = ? AND queue_item_id = ? AND lease_token = ?
+              AND result_fingerprint = ?
+            """,
+            (engagement.id, int(queue_item_id), lease_token, result_fingerprint),
+        ).fetchone()
+        if existing_result is not None:
+            row = _analysis_result_row(connection, int(existing_result["id"]))
+            assert row is not None
+            return _hydrate_code_analysis_result(row)
 
         cursor = connection.execute(
             """
@@ -1973,15 +2581,16 @@ def create_analysis_result(
                 agent_name, function_name, hypothesis, evidence,
                 disposition, confidence, finding_slug, cwe_id,
                 slot_type, notes, audit_metadata_json,
-                cwe_coverage_json, cross_file_triggers_json
+                cwe_coverage_json, cross_file_triggers_json,
+                lease_token, result_fingerprint
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
                 queue_item_id,
                 int(file_row["id"]),
-                result.get("agent_name", ""),
+                agent_name,
                 result.get("function_name", ""),
                 result.get("hypothesis", ""),
                 result.get("evidence", ""),
@@ -1994,6 +2603,8 @@ def create_analysis_result(
                 _json_text(result.get("audit_metadata")),
                 _json_list_text(result.get("cwe_coverage")),
                 _json_list_text(normalized_cross_file_triggers),
+                lease_token,
+                result_fingerprint,
             ),
         )
         row = _analysis_result_row(connection, int(cursor.lastrowid))
@@ -2014,6 +2625,7 @@ def list_analysis_results(
     *,
     file_id: int | None = None,
     disposition: str | None = None,
+    include_superseded: bool = False,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     clauses = ["engagement_id = ?"]
@@ -2024,6 +2636,8 @@ def list_analysis_results(
     if disposition is not None:
         clauses.append("disposition = ?")
         params.append(disposition)
+    if not include_superseded:
+        clauses.append("superseded_at IS NULL")
     query = f"""
         SELECT
             results.*,
@@ -2035,8 +2649,13 @@ def list_analysis_results(
         LEFT JOIN assessment_findings AS findings
           ON findings.engagement_id = results.engagement_id
          AND findings.slug = results.finding_slug
-        LEFT JOIN code_files AS files
+        JOIN code_files AS files
           ON files.id = results.file_id
+         AND files.engagement_id = results.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
         WHERE {' AND '.join(f'results.{clause}' for clause in clauses)}
         ORDER BY results.id DESC
     """
@@ -2055,7 +2674,7 @@ def record_threat_model(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        _get_repo_row(connection, engagement.id, repo_id)
+        _get_published_repo_row(connection, engagement.id, repo_id)
         connection.execute(
             """
             UPDATE code_repos
@@ -2079,12 +2698,7 @@ def get_threat_model(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
-        row = connection.execute(
-            "SELECT threat_model_json FROM code_repos WHERE engagement_id = ? AND id = ?",
-            (engagement.id, repo_id),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
+        row = _get_published_repo_row(connection, engagement.id, repo_id)
     raw = row["threat_model_json"]
     if isinstance(raw, str) and raw:
         try:
@@ -2105,7 +2719,7 @@ def code_coverage_summary(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
 
-    repo_clause = ""
+    repo_clause = " AND repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0)"
     repo_params: tuple[Any, ...] = ()
     if repo_id is not None:
         repo_clause = " AND repo_id = ?"
@@ -2113,9 +2727,25 @@ def code_coverage_summary(
 
     with get_connection() as connection:
         if repo_id is not None:
-            _get_repo_row(connection, engagement.id, repo_id)
+            _get_published_repo_row(connection, engagement.id, repo_id)
 
-        repo_scoped_finding_clause = ""
+        repo_scoped_finding_clause = """
+          AND EXISTS (
+              SELECT 1
+              FROM code_files cf
+              JOIN code_repos published_repo
+                ON published_repo.id = cf.repo_id
+               AND published_repo.engagement_id = cf.engagement_id
+               AND published_repo.active_generation > 0
+              WHERE cf.engagement_id = f.engagement_id
+                AND substr(f.canonical_location, 1, 5) = 'file:'
+                AND substr(f.canonical_location, 6, length(cf.file_path)) = cf.file_path
+                AND (
+                    length(f.canonical_location) = 5 + length(cf.file_path)
+                    OR substr(f.canonical_location, 6 + length(cf.file_path), 1) = ':'
+                )
+          )
+        """
         repo_scoped_finding_params: tuple[Any, ...] = (engagement.id,)
         if repo_id is not None:
             repo_scoped_finding_clause = """
@@ -2136,6 +2766,9 @@ def code_coverage_summary(
                         WHERE other_cf.engagement_id = cf.engagement_id
                           AND other_cf.file_path = cf.file_path
                           AND other_cf.id != cf.id
+                          AND other_cf.repo_id IN (
+                              SELECT id FROM code_repos WHERE active_generation > 0
+                          )
                     )
               )
             """
@@ -2258,7 +2891,18 @@ def code_coverage_summary(
         unresolved_needs_context = _scalar_row(
             connection,
             (
-                "SELECT COUNT(*) FROM code_analysis_queue WHERE engagement_id = ? AND status = 'needs_context'"
+                """
+                SELECT COUNT(*) FROM code_analysis_queue
+                WHERE engagement_id = ? AND status = 'needs_context'
+                  AND file_id IN (
+                      SELECT files.id FROM code_files AS files
+                      JOIN code_repos AS repos
+                        ON repos.id = files.repo_id
+                       AND repos.engagement_id = files.engagement_id
+                       AND repos.active_generation > 0
+                      WHERE files.engagement_id = ?
+                  )
+                """
                 if repo_id is None
                 else """
                 SELECT COUNT(*)
@@ -2269,29 +2913,56 @@ def code_coverage_summary(
                   )
                 """
             ),
-            (engagement.id,) if repo_id is None else (engagement.id, engagement.id, repo_id),
+            (engagement.id, engagement.id)
+            if repo_id is None
+            else (engagement.id, engagement.id, repo_id),
         )
         direct_needs_context = _scalar_row(
             connection,
             (
-                "SELECT COUNT(*) FROM code_analysis_results WHERE engagement_id = ? AND disposition = 'needs_context'"
+                """
+                SELECT COUNT(*) FROM code_analysis_results
+                WHERE engagement_id = ? AND disposition = 'needs_context'
+                  AND superseded_at IS NULL
+                  AND file_id IN (
+                      SELECT files.id FROM code_files AS files
+                      JOIN code_repos AS repos
+                        ON repos.id = files.repo_id
+                       AND repos.engagement_id = files.engagement_id
+                       AND repos.active_generation > 0
+                      WHERE files.engagement_id = ?
+                  )
+                """
                 if repo_id is None
                 else """
                 SELECT COUNT(*)
                 FROM code_analysis_results
-                WHERE engagement_id = ? AND disposition = 'needs_context'
+                WHERE engagement_id = ? AND disposition = 'needs_context' AND superseded_at IS NULL
                   AND file_id IN (
                       SELECT id FROM code_files WHERE engagement_id = ? AND repo_id = ?
                   )
                 """
             ),
-            (engagement.id,) if repo_id is None else (engagement.id, engagement.id, repo_id),
+            (engagement.id, engagement.id)
+            if repo_id is None
+            else (engagement.id, engagement.id, repo_id),
         )
         unresolved_needs_context += direct_needs_context
         unresolved_active_queue = _scalar_row(
             connection,
             (
-                "SELECT COUNT(*) FROM code_analysis_queue WHERE engagement_id = ? AND status IN ('pending', 'processing')"
+                """
+                SELECT COUNT(*) FROM code_analysis_queue
+                WHERE engagement_id = ? AND status IN ('pending', 'processing')
+                  AND file_id IN (
+                      SELECT files.id FROM code_files AS files
+                      JOIN code_repos AS repos
+                        ON repos.id = files.repo_id
+                       AND repos.engagement_id = files.engagement_id
+                       AND repos.active_generation > 0
+                      WHERE files.engagement_id = ?
+                  )
+                """
                 if repo_id is None
                 else """
                 SELECT COUNT(*)
@@ -2302,15 +2973,24 @@ def code_coverage_summary(
                   )
                 """
             ),
-            (engagement.id,) if repo_id is None else (engagement.id, engagement.id, repo_id),
+            (engagement.id, engagement.id)
+            if repo_id is None
+            else (engagement.id, engagement.id, repo_id),
         )
         trigger_rows = connection.execute(
             (
                 """
-                SELECT status, COUNT(*) AS total
-                FROM code_analysis_triggers
-                WHERE engagement_id = ?
-                GROUP BY status
+                SELECT t.status, COUNT(*) AS total
+                FROM code_analysis_triggers AS t
+                JOIN code_files AS sf
+                  ON sf.id = t.source_file_id
+                 AND sf.engagement_id = t.engagement_id
+                JOIN code_repos AS repos
+                  ON repos.id = sf.repo_id
+                 AND repos.engagement_id = sf.engagement_id
+                 AND repos.active_generation > 0
+                WHERE t.engagement_id = ?
+                GROUP BY t.status
                 """
                 if repo_id is None
                 else """
@@ -2319,6 +2999,10 @@ def code_coverage_summary(
                 JOIN code_files sf
                   ON sf.id = t.source_file_id
                  AND sf.engagement_id = t.engagement_id
+                JOIN code_repos repos
+                  ON repos.id = sf.repo_id
+                 AND repos.engagement_id = sf.engagement_id
+                 AND repos.active_generation > 0
                 WHERE t.engagement_id = ? AND sf.repo_id = ?
                 GROUP BY t.status
                 """
@@ -2419,6 +3103,7 @@ def code_coverage_summary(
                 SELECT file_id, cwe_coverage_json
                 FROM code_analysis_results
                 WHERE engagement_id = ? AND file_id IN ({placeholders})
+                  AND superseded_at IS NULL
                 """,
                 (engagement.id, *file_meta.keys()),
             ).fetchall()
@@ -2505,6 +3190,7 @@ def code_coverage_summary(
                        COUNT(DISTINCT CASE WHEN function_name != '' THEN function_name END) AS distinct_functions
                 FROM code_analysis_results
                 WHERE engagement_id = ? AND file_id IN ({placeholders})
+                  AND superseded_at IS NULL
                 GROUP BY file_id
                 """,
                 (engagement.id, *file_id_list),
@@ -2768,7 +3454,15 @@ def requeue_triggered_files(
             if raw_file_id is not None:
                 validated_file_id = _coerce_int(raw_file_id, field_name="file_id")
                 row = connection.execute(
-                    "SELECT id, file_path FROM code_files WHERE engagement_id = ? AND id = ?",
+                    """
+                    SELECT files.id, files.file_path
+                    FROM code_files AS files
+                    JOIN code_repos AS repos
+                      ON repos.id = files.repo_id
+                     AND repos.engagement_id = files.engagement_id
+                     AND repos.active_generation > 0
+                    WHERE files.engagement_id = ? AND files.id = ?
+                    """,
                     (engagement.id, validated_file_id),
                 ).fetchone()
                 if row is None:
@@ -2779,9 +3473,26 @@ def requeue_triggered_files(
             elif raw_file_path:
                 rows = connection.execute(
                     (
-                        "SELECT id, file_path FROM code_files WHERE engagement_id = ? AND file_path = ?"
+                        """
+                        SELECT files.id, files.file_path
+                        FROM code_files AS files
+                        JOIN code_repos AS repos
+                          ON repos.id = files.repo_id
+                         AND repos.engagement_id = files.engagement_id
+                         AND repos.active_generation > 0
+                        WHERE files.engagement_id = ? AND files.file_path = ?
+                        """
                         if validated_repo_id is None
-                        else "SELECT id, file_path FROM code_files WHERE engagement_id = ? AND repo_id = ? AND file_path = ?"
+                        else """
+                        SELECT files.id, files.file_path
+                        FROM code_files AS files
+                        JOIN code_repos AS repos
+                          ON repos.id = files.repo_id
+                         AND repos.engagement_id = files.engagement_id
+                         AND repos.active_generation > 0
+                        WHERE files.engagement_id = ? AND files.repo_id = ?
+                          AND files.file_path = ?
+                        """
                     ),
                     (engagement.id, raw_file_path)
                     if validated_repo_id is None
@@ -2933,7 +3644,7 @@ def list_code_triggers(
 
     with get_connection() as connection:
         if repo_id is not None:
-            _get_repo_row(connection, engagement.id, int(repo_id))
+            _get_published_repo_row(connection, engagement.id, int(repo_id))
         rows = connection.execute(
             f"""
             SELECT
@@ -2941,9 +3652,13 @@ def list_code_triggers(
                 sf.file_path AS source_file_path,
                 tf.file_path AS resolved_target_file_path
             FROM code_analysis_triggers AS t
-            LEFT JOIN code_files AS sf
+            JOIN code_files AS sf
               ON sf.id = t.source_file_id
              AND sf.engagement_id = t.engagement_id
+            JOIN code_repos AS repos
+              ON repos.id = sf.repo_id
+             AND repos.engagement_id = sf.engagement_id
+             AND repos.active_generation > 0
             LEFT JOIN code_files AS tf
               ON tf.id = t.target_file_id
              AND tf.engagement_id = t.engagement_id
@@ -3001,6 +3716,15 @@ def resolve_code_triggers(
                         resolution_note = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE engagement_id = ? AND id = ? AND status = ?
+                      AND source_file_id IN (
+                          SELECT files.id
+                          FROM code_files AS files
+                          JOIN code_repos AS repos
+                            ON repos.id = files.repo_id
+                           AND repos.engagement_id = files.engagement_id
+                           AND repos.active_generation > 0
+                          WHERE files.engagement_id = ?
+                      )
                     """,
                     (
                         normalized_status,
@@ -3008,6 +3732,7 @@ def resolve_code_triggers(
                         engagement.id,
                         validated_id,
                         _TRIGGER_STATUS_PENDING,
+                        engagement.id,
                     ),
                 )
                 if cursor.rowcount == 0:
@@ -3027,8 +3752,19 @@ def resolve_code_triggers(
                 "engagement_id = ?",
                 "target_file_path = ?",
                 "status = ?",
+                "source_file_id IN ("
+                "SELECT files.id FROM code_files AS files "
+                "JOIN code_repos AS repos ON repos.id = files.repo_id "
+                "AND repos.engagement_id = files.engagement_id "
+                "AND repos.active_generation > 0 "
+                "WHERE files.engagement_id = ?)",
             ]
-            params: list[Any] = [engagement.id, file_path, _TRIGGER_STATUS_PENDING]
+            params: list[Any] = [
+                engagement.id,
+                file_path,
+                _TRIGGER_STATUS_PENDING,
+                engagement.id,
+            ]
             if vuln_class:
                 clauses.append("vuln_class = ?")
                 params.append(vuln_class)
@@ -3079,7 +3815,9 @@ def code_coverage_cwe_detail(
     records, plus applicable_families computed from file slot_types."""
     engagement = _engagement_or_404(engagement_id)
 
-    repo_clause = ""
+    repo_clause = """
+      AND f.repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0)
+    """
     repo_params: tuple[Any, ...] = ()
     if repo_id is not None:
         repo_clause = " AND f.repo_id = ?"
@@ -3087,7 +3825,7 @@ def code_coverage_cwe_detail(
 
     with get_connection() as connection:
         if repo_id is not None:
-            _get_repo_row(connection, engagement.id, repo_id)
+            _get_published_repo_row(connection, engagement.id, repo_id)
         # Fetch critical/high files with their slot_types
         file_rows = connection.execute(
             f"""
@@ -3124,6 +3862,7 @@ def code_coverage_cwe_detail(
                 SELECT file_id, cwe_coverage_json
                 FROM code_analysis_results
                 WHERE engagement_id = ? AND file_id IN ({placeholders})
+                  AND superseded_at IS NULL
                 """,
                 (engagement.id, *file_ids),
             ).fetchall()
