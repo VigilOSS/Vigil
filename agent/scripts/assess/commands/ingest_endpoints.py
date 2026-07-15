@@ -229,6 +229,8 @@ def run(args) -> None:
     egress_blocked_count = 0
     egress_warned_hosts: set[str] = set()
 
+    # The shared gate is inactive when scope is absent/empty or the engagement
+    # explicitly enables the global bypass.
     scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
     out_of_scope_count = 0
     out_of_scope_warned_hosts: set[str] = set()

@@ -46,8 +46,9 @@ EVIDENCE IS AUTHORED, NOT SYNTHESIZED. The ``### Evidence`` section renders ONLY
 the finding's authored ``details.evidence`` prose (``[NEEDS: evidence]`` in a draft
 when absent; empty in final, since ``details.evidence`` is authored prose, not a
 strict-gate field). The raw structured proof and the linked command runs are
-deliberately NOT rendered into Evidence: a real submission carries hand-annotated,
-PII-masked proof, so the tool surfaces them ONCE, as reference under the single
+deliberately NOT rendered into Evidence: a real submission carries hand-annotated
+proof (genuine third-party PII partial-masked, self-owned/synthetic data in full),
+so the tool surfaces them ONCE, as reference under the single
 OPERATOR DETAILS section (mirrored by the ``linked_command_runs`` array in the
 context JSON), for the report-writer to author Evidence FROM. Linked runs are
 sourced ONLY from explicit ``finding-links`` (``target_kind="command_run"``) —
@@ -70,29 +71,34 @@ them deliberately before an EXTERNAL submission.
 from __future__ import annotations
 
 import json
-import os
-import re
 import sys
 from pathlib import Path
 
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 # ``_fence_for`` and ``header_lines`` are the same PoC-formatting primitives the
-# shared finding renderer uses (finding_render.py ~:205/:225); reusing them keeps
-# submission PoC blocks byte-identical to export-findings rather than reimplementing.
-from assess.lib.finding_render import _fence_for, detail_value, details_object, header_lines, string_list
+# shared finding renderer uses (finding_render.py); reusing them keeps submission
+# PoC blocks byte-identical to export-findings rather than reimplementing. The
+# hygiene gate (``collect_internal_ids`` / ``hygiene_warnings`` / ``pasteable_body``)
+# and the structured-proof / path helpers (``poc_lines`` / ``engagement_relative``)
+# now live there too so ``export_reply`` shares one source of truth (aliased to the
+# prior private names to keep this module's call sites unchanged).
+from assess.lib.finding_render import (
+    _fence_for,
+    collect_internal_ids as _internal_ids,
+    detail_value,
+    details_object,
+    engagement_relative as _engagement_relative,
+    header_lines,
+    hygiene_warnings as _hygiene_warnings,
+    poc_lines as _poc_lines,
+    string_list,
+    strip_step_enumerator,
+)
+from assess.lib.scope import rate_caps_for_dir
 
 _PLATFORMS = ("bugcrowd", "hackerone", "direct")
 _PLATFORM_LABEL = {"bugcrowd": "Bugcrowd", "hackerone": "HackerOne", "direct": "Direct disclosure"}
-
-# UUID shape — used only to confirm a collected internal id is genuinely a UUID
-# before we FLAG (never rewrite) its presence. A target-application UUID in PoC
-# proof (e.g. an IDOR/BOLA on a UUID-keyed resource) is never touched.
-_UUID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
-# Detects a reference to the internal cases.db work database (presence only).
-_CASES_DB_RE = re.compile(r"cases\.db")
 
 
 def register(subparsers) -> None:
@@ -271,42 +277,6 @@ def _linked_command_runs(client, slug: str) -> list[dict]:
         if isinstance(row, dict) and _nonempty(row.get("command")):
             runs.append(row)
     return runs
-
-
-def _poc_lines(finding: dict) -> list[str]:
-    """Render poc_code / poc_request / poc_response, reusing finding_render's fencing."""
-    lines: list[str] = []
-    poc_code = _nonempty(detail_value(finding, "poc_code", ""))
-    if poc_code:
-        fence = _fence_for(poc_code)
-        lines += ["**PoC Code:**", f"{fence}\n{poc_code}\n{fence}", ""]
-
-    poc_request = detail_value(finding, "poc_request")
-    if isinstance(poc_request, dict) and poc_request:
-        req_headers = header_lines(poc_request.get("headers"))
-        req_body = str(poc_request.get("body") or "")
-        request_line = f"{poc_request.get('method', '')} {poc_request.get('url', '')}".strip()
-        fence = _fence_for(request_line, "\n".join(req_headers), req_body)
-        block = [f"{fence}\n{request_line}"]
-        block += req_headers
-        if poc_request.get("body"):
-            block.append(f"\n{poc_request['body']}")
-        block.append(fence)
-        lines += ["**PoC Request:**", "\n".join(block), ""]
-
-    poc_response = detail_value(finding, "poc_response")
-    if isinstance(poc_response, dict) and poc_response:
-        resp_headers = header_lines(poc_response.get("headers"))
-        resp_body = str(poc_response.get("body_excerpt") or "")
-        status_line = f"HTTP {poc_response.get('status', '')}".strip()
-        fence = _fence_for(status_line, "\n".join(resp_headers), resp_body)
-        block = [f"{fence}\n{status_line}"]
-        block += resp_headers
-        if poc_response.get("body_excerpt"):
-            block.append(f"\n{poc_response['body_excerpt']}")
-        block.append(fence)
-        lines += ["**PoC Response:**", "\n".join(block), ""]
-    return lines
 
 
 def _section(title: str, body: list[str]) -> list[str]:
@@ -492,6 +462,80 @@ def _operator_details_block(
     return lines
 
 
+def _asset_location(finding: dict) -> str:
+    """The finding's affected location, method-prefixed (deduping a baked-in verb).
+
+    Mirrors ``_metadata_reference_lines`` so the A2 operational-header ``Asset``
+    line renders the same location string the OPERATOR DETAILS ``Location`` line
+    does, and never produces "POST POST https://…" when ``canonical_location``
+    already carries the verb.
+    """
+    location = _nonempty(finding.get("canonical_location"))
+    if not location:
+        return ""
+    method = _nonempty(details_object(finding).get("request_method"))
+    if method and not location.upper().startswith(method.upper()):
+        location = f"{method} {location}"
+    return location
+
+
+def _poc_ref(finding: dict) -> str:
+    """A pointer to the finding's PoC for the A2 ``POC`` line.
+
+    Prefers a staged evidence file (``evidence_ref``); falls back to the captured
+    request line, then a marker that inline ``poc_code`` exists. Returns "" when
+    the finding carries no proof pointer at all (the line is then omitted).
+    """
+    ref = _nonempty(detail_value(finding, "evidence_ref", ""))
+    if ref:
+        return ref
+    poc_request = detail_value(finding, "poc_request")
+    if isinstance(poc_request, dict) and poc_request:
+        request_line = f"{poc_request.get('method', '')} {poc_request.get('url', '')}".strip()
+        if request_line:
+            return request_line
+    if _nonempty(detail_value(finding, "poc_code", "")):
+        return "inline PoC code (see Evidence / OPERATOR DETAILS)"
+    return ""
+
+
+def _operational_header_lines(finding: dict, required_headers: dict[str, str]) -> list[str]:
+    """The A2 operational overlay — Asset / POC / Run / Pass if / Deconfliction.
+
+    Emitted in the copy-paste header block FROM finding fields so a re-render or
+    ``--overwrite`` reconstructs the operator's operational overlay instead of
+    wiping it. Every line is omitted when its backing field is empty, so a finding
+    with none of these produces nothing (the prior header shape is unchanged).
+
+    Sources: Asset ← ``canonical_location`` (method-prefixed); POC ← the proof
+    pointer (``evidence_ref`` / request line / inline poc_code); Run ←
+    ``details.run``; Pass if ← ``details.pass_if``; Deconfliction ← the
+    engagement's program-attribution ``required_headers`` (scope.json), so the
+    triager/blue-team can attribute the traffic.
+    """
+    lines: list[str] = []
+    asset = _asset_location(finding)
+    if asset:
+        lines.append(f"**Asset:** {asset}")
+    poc = _poc_ref(finding)
+    if poc:
+        lines.append(f"**POC:** {poc}")
+    run = _nonempty(detail_value(finding, "run", ""))
+    if run:
+        lines.append(f"**Run:** {run}")
+    pass_if = _nonempty(detail_value(finding, "pass_if", ""))
+    if pass_if:
+        lines.append(f"**Pass if:** {pass_if}")
+    deconfliction = "; ".join(
+        f"{name}: {value}" for name, value in required_headers.items()
+    )
+    if deconfliction:
+        lines.append(f"**Deconfliction:** {deconfliction}")
+    if lines:
+        lines.append("")
+    return lines
+
+
 def _render_markdown(
     finding: dict,
     resolved: dict,
@@ -499,6 +543,7 @@ def _render_markdown(
     linked_runs: list[dict],
     draft: bool,
     hygiene_warnings: list[str],
+    required_headers: dict[str, str],
 ) -> str:
     # --- header field lines (the platform copy-paste layout) ----------------
     # The slug is NOT emitted in the body (submission-format.md "No internal
@@ -519,6 +564,12 @@ def _render_markdown(
         cvss = f"{cvss} ({resolved['cvss_score']})"
     lines += [f"**CVSS:** {cvss}", ""]
 
+    # --- A2 operational overlay (rendered FROM finding fields) --------------
+    # Placed in the copy-paste header, above the first ``---``, so it survives
+    # ``--overwrite``. Omitted entirely when the finding carries none of its
+    # backing fields.
+    lines += _operational_header_lines(finding, required_headers)
+
     lines += ["---", ""]
 
     # --- stable body sections (### headers) ---------------------------------
@@ -526,7 +577,9 @@ def _render_markdown(
     lines += _section("Summary", [summary or "[NEEDS: summary]"])
 
     steps = string_list(detail_value(finding, "steps_to_reproduce", []))
-    step_body = [f"{i}. {step}" for i, step in enumerate(steps, 1)] or ["[NEEDS: steps to reproduce]"]
+    step_body = [f"{i}. {strip_step_enumerator(step)}" for i, step in enumerate(steps, 1)] or [
+        "[NEEDS: steps to reproduce]"
+    ]
     lines += _section("Steps to Reproduce", step_body)
 
     lines += _section("Evidence", _evidence_body(finding, draft))
@@ -546,74 +599,6 @@ def _render_markdown(
 
     text = "\n".join(lines).rstrip()
     return text + "\n"
-
-
-def _internal_ids(finding: dict, linked_runs: list[dict]) -> list[str]:
-    """UUID-shaped internal identifiers to FLAG (never rewrite) in the output.
-
-    Only ids the backend assigns to its own records — this finding, its
-    engagement, and the agents/rows behind the linked command runs. Never the
-    target-application identifiers, so PoC proof is never mistaken for internal
-    state. Integer ids (e.g. a command-run row's ``id``) collected here are
-    harmless: ``_hygiene_warnings`` flags a value only when it is a full UUID.
-    """
-    ids: list[str] = []
-    for key in ("id", "engagement_id", "merged_into_finding_id"):
-        ids.append(_nonempty(finding.get(key)))
-    for row in linked_runs:
-        for key in ("producer_agent_id", "agent_id", "engagement_id", "finding_id"):
-            ids.append(_nonempty(row.get(key)))
-    seen: set[str] = set()
-    unique: list[str] = []
-    for value in ids:
-        if value and value not in seen:
-            seen.add(value)
-            unique.append(value)
-    return unique
-
-
-def _hygiene_warnings(text: str, slug: str, internal_ids: list[str], engagement_dir: str) -> list[str]:
-    """Non-destructively FLAG internal identifiers that leaked into the output.
-
-    Returns advisory strings; it NEVER mutates ``text``. The finding's content
-    reaches the report-writer verbatim — a target-app UUID, filename, or path must
-    survive — and these warnings let the report-writer (and the blind-triage gate)
-    decide what to strip before an EXTERNAL submission. Draft submissions are
-    internal working artifacts, so leaving the identifiers in place is correct;
-    only the outward-facing copy the operator pastes must be clean.
-    """
-    warnings: list[str] = []
-    slug = _nonempty(slug)
-    if slug and slug in text:
-        warnings.append(
-            f"finding slug '{slug}' appears in the body (heading) — remove before external submission"
-        )
-    eng = _nonempty(engagement_dir).rstrip("/")
-    if eng and eng in text:
-        warnings.append(
-            f"absolute engagement path '{eng}' appears — make paths relative before external submission"
-        )
-    for value in internal_ids:
-        if value and _UUID_RE.fullmatch(value) and value in text:
-            warnings.append(
-                f"internal identifier '{value}' appears — remove before external submission"
-            )
-    if _CASES_DB_RE.search(text):
-        warnings.append(
-            "reference to the internal cases.db work database appears — remove before external submission"
-        )
-    return warnings
-
-
-def _engagement_relative(path: Path, engagement_dir: str) -> str | None:
-    """Engagement-relative form of ``path``, or None if it lies outside the tree."""
-    try:
-        rel = os.path.relpath(str(path), str(engagement_dir))
-    except ValueError:
-        return None
-    if rel.startswith(".."):
-        return None
-    return rel
 
 
 def _build_context(
@@ -661,6 +646,11 @@ def run(args) -> None:
 
     cfg = load_config(args.engagement_dir)
     engagement_dir = cfg.engagement_dir
+    # A2 Deconfliction source: the engagement's program-attribution headers from
+    # scope.json. Read defensively (``rate_caps_for_dir`` degrades a missing
+    # scope.json to ``{}`` without raising), so a submission renders whether or not
+    # the engagement configured attribution headers.
+    _, required_headers = rate_caps_for_dir(engagement_dir)
 
     if args.output_dir:
         out_dir = Path(args.output_dir)
@@ -708,9 +698,15 @@ def run(args) -> None:
         # warning strings themselves quote the leaked value (a UUID, a `cases.db`
         # literal), so scanning a render that already contains them would flag the
         # advisory text as if it were a fresh leak.
-        scan_markdown = _render_markdown(finding, resolved, platform, linked_runs, draft, [])
-        hygiene_warnings = _hygiene_warnings(scan_markdown, slug, internal_ids, engagement_dir)
-        markdown = _render_markdown(finding, resolved, platform, linked_runs, draft, hygiene_warnings)
+        scan_markdown = _render_markdown(
+            finding, resolved, platform, linked_runs, draft, [], required_headers
+        )
+        hygiene_warnings = _hygiene_warnings(
+            scan_markdown, slug, internal_ids, engagement_dir, resolved["title"]
+        )
+        markdown = _render_markdown(
+            finding, resolved, platform, linked_runs, draft, hygiene_warnings, required_headers
+        )
         context = _build_context(
             slug, platform, draft, resolved, linked_runs, submission_rel or str(submission_md), hygiene_warnings
         )

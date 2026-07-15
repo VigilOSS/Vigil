@@ -142,12 +142,27 @@ def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner
 
 
 def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
-    status = oob_status(runner=runner, deep=False)  # only needs server/frpc liveness
+    options = _oob_options(install_root)
+    status = oob_status(
+        oob_domain=options.oob_domain,
+        tenant_prefix=options.tenant_prefix,
+        dns_remote_port=options.dns_remote_port,
+        reverse_remote_port=options.reverse_remote_port,
+        runner=runner,
+        deep=False,
+    )  # only needs server/frpc liveness
     if status.get("server") or status.get("frpc"):
+        route_matches = status.get("route_matches")
+        if route_matches is False or (
+            route_matches is None and options.tenant_prefix != "legacy"
+        ):
+            raise SystemExit(
+                "OOB sessions are already active for another tenant, or their tenant route cannot be verified. "
+                "Run `vigil oob restart` intentionally before switching tenant routes."
+            )
         print("oob\talready active; existing FRP/interactsh sessions left untouched")
         return
 
-    options = _oob_options(install_root)
     if not options.frp_token:
         token = _prompt_frp_token()
         if token:
@@ -158,6 +173,10 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
                 frp_port=options.frp_port,
                 frp_token=token,
                 oob_domain=options.oob_domain,
+                tenant_prefix=options.tenant_prefix,
+                dns_remote_port=options.dns_remote_port,
+                reverse_remote_port=options.reverse_remote_port,
+                tenant_route=options.tenant_route,
             )
         else:
             print("oob\tskipped; missing FRP token")

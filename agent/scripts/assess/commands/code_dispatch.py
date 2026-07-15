@@ -43,9 +43,14 @@ def run(args) -> None:
         _stats(cfg)
     elif action == "fetch":
         if len(extra) < 2:
-            print("Usage: code-dispatch fetch <limit> <agent-name>", file=sys.stderr)
+            print(
+                "Usage: code-dispatch fetch <limit> <agent-name> "
+                "[--repo-id ID] [--classification TIER] [--batch-theme THEME] "
+                "[--ids-file PATH]",
+                file=sys.stderr,
+            )
             sys.exit(1)
-        _fetch(cfg, int(extra[0]), extra[1])
+        _fetch(cfg, int(extra[0]), extra[1], _parse_fetch_filters(extra[2:]))
     elif action == "done":
         if len(extra) < 5:
             print(
@@ -178,19 +183,78 @@ def _stats(cfg) -> None:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _fetch(cfg, limit: int, agent_name: str) -> None:
+def _ids_from_file(path_value: str) -> list[int]:
+    path = Path(path_value)
+    if not path.is_file():
+        print(f"Queue ids file not found: {path_value}", file=sys.stderr)
+        raise SystemExit(1)
+    text = path.read_text(encoding="utf-8").strip()
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError:
+        raw = [token for token in text.replace(",", " ").split() if token]
+    if isinstance(raw, dict):
+        raw = raw.get("item_ids", raw.get("ids"))
+    if not isinstance(raw, list) or not raw:
+        print("Queue ids file must contain a non-empty JSON array or id list", file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        return sorted({int(value) for value in raw})
+    except (TypeError, ValueError):
+        print("Queue ids file contains a non-integer id", file=sys.stderr)
+        raise SystemExit(1) from None
+
+
+def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
+    filters: dict[str, object] = {}
+    index = 0
+    options = {
+        "--repo-id": "repo_id",
+        "--classification": "classification",
+        "--batch-theme": "batch_theme",
+        "--ids-file": "ids_file",
+    }
+    while index < len(tokens):
+        option = tokens[index]
+        field = options.get(option)
+        if field is None or index + 1 >= len(tokens):
+            print(f"Unknown or incomplete code-dispatch fetch option: {option}", file=sys.stderr)
+            raise SystemExit(1)
+        value = tokens[index + 1]
+        if field == "repo_id":
+            try:
+                filters[field] = int(value)
+            except ValueError:
+                print("--repo-id must be an integer", file=sys.stderr)
+                raise SystemExit(1) from None
+        elif field == "ids_file":
+            filters["item_ids"] = _ids_from_file(value)
+        else:
+            filters[field] = value
+        index += 2
+    return filters
+
+
+def _fetch(cfg, limit: int, agent_name: str, filters: dict[str, object] | None = None) -> None:
+    payload: dict[str, object] = {
+        'limit': limit,
+        'agent_name': agent_name,
+        **(filters or {}),
+    }
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.post('code/analysis-queue/fetch', {
-            'limit': limit,
-            'agent_name': agent_name,
-        })
+        result = client.post('code/analysis-queue/fetch', payload)
 
     snapshot = write_json_snapshot(
         cfg.engagement_dir,
         category="code-queue-fetch",
         label=agent_name,
         payload=result,
-        metadata={"command": "code-dispatch fetch", "agent_name": agent_name, "limit": limit},
+        metadata={
+            "command": "code-dispatch fetch",
+            "agent_name": agent_name,
+            "limit": limit,
+            "filters": filters or {},
+        },
     )
     print(f"Saved audit snapshot: {snapshot.name}", file=sys.stderr)
     print(json.dumps(result, indent=2, ensure_ascii=False))

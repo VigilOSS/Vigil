@@ -75,7 +75,9 @@ def test_liveness_unknown_leaves_state_untouched(client, isolate_settings):
     assert mat["liveness_verdict"] == "unknown"
     # unknown never marks a session dead and never invents a live verdict.
     assert mat["state"] == "available"
-    assert mat["last_probed_at"] is None
+    # Typed liveness records when the unknown observation occurred even though
+    # it deliberately leaves the credential lifecycle state unchanged.
+    assert mat["last_probed_at"]
 
 
 def test_liveness_404_for_unknown_identity(client, isolate_settings):

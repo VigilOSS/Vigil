@@ -217,8 +217,11 @@ def _install_status(monkeypatch, tmp_path, *, verdict, material=None):
         calls["active_used"] = True
         return dict(resolved_material)
 
-    def fake_probe(_dir, identity, url, *, liveness_cfg, timeout=15):
+    def fake_probe(
+        _dir, identity, url, *, liveness_cfg, scope_key="", timeout=15
+    ):
         calls["probed_identity"] = identity
+        calls["probed_scope"] = scope_key
         return {"liveness": verdict, "reason": "stubbed", "http_status": 200, "error": None}
 
     def fake_persist(_dir, identity, v, probed_at):
@@ -299,3 +302,76 @@ def test_probe_missing_identity_reports_and_does_not_persist(tmp_path, monkeypat
     assert "persisted" not in calls
     assert out["liveness"] == "unknown"
     assert "ghost" in out["liveness_probe"]["error"]
+
+
+def test_scoped_alias_probes_and_persists_resolved_identity(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        auth_status, "load_config", lambda *a, **k: _StatusCfg(str(tmp_path))
+    )
+    monkeypatch.setattr(auth_status, "_last_auth_probe", lambda *_a, **_k: None)
+    monkeypatch.setattr(auth_status, "AssessmentClient", lambda *a, **k: None)
+    calls: dict[str, object] = {}
+
+    def resolve(_dir, requested, *, scope_key=""):
+        calls["resolved"] = (requested, scope_key)
+        return "cap-billing-42", {
+            "identity_name": "cap-billing-42",
+            "auth_context": "member",
+            "state": "available",
+            "use_for_requests": True,
+            "headers": {"Authorization": "Bearer scoped"},
+            "liveness": {"authed_marker": "Sign out"},
+        }
+
+    def probe(_dir, identity, url, *, liveness_cfg, scope_key="", timeout=15):
+        calls["probed"] = (identity, scope_key, url)
+        return {
+            "liveness": "live",
+            "reason": "stubbed",
+            "http_status": 200,
+            "error": None,
+        }
+
+    def persist(_dir, identity, verdict, probed_at, **kwargs):
+        calls["persisted"] = (identity, verdict, kwargs)
+        return {"identity_name": identity, "liveness_verdict": verdict}
+
+    monkeypatch.setattr(auth_status, "resolve_identity", resolve)
+    monkeypatch.setattr(auth_status, "_run_identity_probe", probe)
+    monkeypatch.setattr(auth_status, "persist_liveness", persist)
+
+    args = _parse_status(
+        [
+            "auth-status",
+            "--json",
+            "--probe",
+            "--identity",
+            "member",
+            "--scope",
+            "billing",
+            "--probe-url",
+            "https://app.example.com/account",
+        ],
+        str(tmp_path),
+    )
+    args.func(args)
+    out = json.loads(capsys.readouterr().out)
+
+    assert calls["resolved"] == ("member", "billing")
+    assert calls["probed"] == (
+        "cap-billing-42",
+        "billing",
+        "https://app.example.com/account",
+    )
+    assert calls["persisted"] == (
+        "cap-billing-42",
+        "live",
+        {
+            "scope_key": "billing",
+            "source": "auth-status",
+            "reason": "stubbed",
+        },
+    )
+    assert out["liveness_probe"]["persisted"] is True

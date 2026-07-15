@@ -52,11 +52,11 @@ Line 2: Overage — API calls (Q2)  — $2,150.00
 
 ### Attack Scenario
 
-Any paying customer on the platform enumerates the invoice ID space sequentially from their own known IDs. Each hit returns another tenant's invoice PDF with company name, billing contact, and full line-item pricing. A competitor or disgruntled customer scripts the loop once and pulls every other tenant's contract pricing in one pass.
+A competitor or disgruntled customer, working from an ordinary paid account with no elevated role, enumerates the invoice ID space sequentially from their own known IDs. Each request for an ID outside their own range returns another tenant's invoice PDF with company name, billing contact, and full line-item pricing.
 
 ### Impact
 
-Any authenticated tenant reads billing data, contact details, and negotiated pricing for every other tenant on the platform. The ID space is sequential and unsalted, so the exposure isn't limited to adjacent accounts — it covers the full customer base in one enumerable range.
+Every tenant's billing data — contact details and negotiated line-item pricing — is readable across the platform. The ID space is sequential and unsalted, so exposure isn't limited to adjacent accounts: it covers the full customer base in one enumerable range.
 
 ### Remediation
 

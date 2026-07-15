@@ -75,7 +75,17 @@ vigil assess code-dispatch stats
 
 # Fetch batch for analysis -- returns file-based items grouped by batch_theme
 vigil assess code-dispatch fetch 10 code-vuln-hunter
+
+# Narrow a lane atomically by repo/class/theme or explicit queue ids
+vigil assess code-dispatch fetch 10 code-vuln-hunter --repo-id <repo-id> --classification high --batch-theme <theme>
+vigil assess code-dispatch fetch 10 code-vuln-hunter --ids-file <queue-ids-json>
 ```
+
+Pass lane filters to `fetch` instead of claiming broadly and filtering the response. Repository,
+classification, theme, and explicit-id predicates run inside the serialized claim query, leaving
+unrelated pending work available. Preserve each returned `agent_name`, `lease_token`, and
+`repo_generation`; results, heartbeats, and closeout reuse the agent and lease while the backend
+carries the claimed ingest generation.
 
 The fetch size is a queue convenience, not a required prompt batch size. Split fetched items into
 smaller hunter dispatches whenever code volume, framework noise, or support metadata would make
@@ -179,7 +189,7 @@ vigil assess contract code-record-analysis
 vigil assess code-record-analysis <analysis-json>
 
 # Preview the exact completion payload before committing queue history when unsure
-vigil assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
+vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
 
 # cwe-coverage-json must be a file path, not inline JSON. Create it before the done call:
 cat > /tmp/cwe_<item-id>.json <<'JSON'
@@ -196,7 +206,7 @@ cat > /tmp/cwe_<item-id>.json <<'JSON'
 JSON
 
 # Mark one file done with structured cwe_coverage after the payload is correct
-vigil assess code-dispatch done <item-id> <clean|finding|suspicious> /tmp/cwe_<item-id>.json ["notes"]
+vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious> /tmp/cwe_<item-id>.json ["notes"]
 
 # Record any findings
 vigil assess record-finding code-vuln-hunter <finding-json>
@@ -214,6 +224,10 @@ history is only useful if every completion records a valid disposition and a com
 bare JSON array that becomes `cwe_coverage`; do not wrap it in an object containing a
 `cwe_coverage` field. Include one entry for every `applicable_vuln_classes` value from the
 queue item, using explicit zero-effort gap entries for omitted/unexamined families.
+Record the analysis result before closeout. `finding` and `suspicious` require a current result
+under the active lease with inline `evidence` or an engagement-owned `evidence_ref`; `clean`
+requires non-empty family coverage and review notes. Per-file detail derives current result rows,
+evidenced rows, and distinct-function effort, so a submitted effort number is not proof of work.
 
 **Handling needs-context returns:** When items return as `needs-context`:
 1. Review the request -- what function, file, or dependency is missing and why.
@@ -309,10 +323,10 @@ directed vulnerability classes, and aims to raise effort scores to the target th
 **On return from CWE-directed re-dispatch:**
 ```bash
 # Preview first when the updated effort matrix is large or hand-edited
-vigil assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
+vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
 
 # Mark done with updated cwe_coverage (backend uses max-effort merge)
-vigil assess code-dispatch done <item-id> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
+vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
 
 # Record any new findings
 vigil assess record-finding code-vuln-hunter <finding-json>

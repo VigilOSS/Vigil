@@ -1,23 +1,23 @@
 ---
-description: Headless chromium (selenium) render of one URL inside the runtime — the trustworthy-signal recovery for a curl/httpx run the WAF-challenge detector flagged (status=waf_challenge). Returns origin HTTP status + final rendered DOM + a screenshot.
+description: Audited Playwright/system-Chromium browser workflows with scoped attribution, typed steps, and bounded application evidence.
 skill: web-recon
 ---
 
 # kali browser
 
-**Purpose:** Drive a real headless Chromium (selenium) inside the runtime container to
-render one URL, execute its JavaScript, and return the **origin HTTP status + the final
-rendered DOM + a screenshot**. This is the recovery path when a plain HTTP probe
+**Purpose:** Drive Playwright against system Chromium inside the runtime container to
+render a target, execute bounded typed workflows, and return the **origin HTTP status,
+final rendered DOM, screenshot, console/network metadata, route candidates, and step
+results**. It remains the recovery path when a plain HTTP probe
 (`curl`/`httpx`/`nuclei`/...) comes back with a **WAF / bot-challenge interstitial** rather
 than the real origin response.
 
 For live engagement targets, run it via `vigil assess kali browser` (typed verb,
 audit-flag-aware — it reaches the target, so it is recorded like every other kali probe).
 
-**Where it lives:** the verb runs `python3 -c <selenium-driver>` as the **system** python3
-inside `runtime-full`, driving the apt-installed `chromium` + `chromium-driver`. The
-`selenium` package is installed into the system interpreter (see
-`agent/docker/runtime-full/Dockerfile`).
+**Where it lives:** the verb runs a JSON execution plan through Playwright 1.61.0 using
+the apt-installed system Chromium in `runtime-full`. Selenium and chromedriver are not
+part of this path.
 
 ## When to reach for it (WAF-challenge recovery)
 
@@ -39,12 +39,25 @@ the rendered DOM + the captured origin status reflect the **real** application.
 - `--wait-selector '<css>'` — explicit-wait for a specific element before capture (bounded by `--page-timeout`); omit to fall back to `--settle`.
 - `--page-timeout <s>` — per-page load + explicit-wait timeout in seconds (default `30`).
 - `--settle <s>` — extra settle wait after load when no `--wait-selector` is given (default `2`).
+- `--attribution-scope all|document-origin` — `all` preserves the historical global
+  header behavior; `document-origin` applies program attribution to admitted document
+  navigations and their same-origin requests, preventing cross-origin CORS preflight failures.
+- `--steps-file <json>` — up to 50 typed `navigate`, `click`, `fill`, `wait`, `eval`, or
+  `assert` steps. Unknown actions/fields, non-HTTP navigation, and excessive timeouts fail
+  before the browser starts.
+- `--storage-state <path>` — explicit engagement-relative Playwright storage-state JSON.
+  Pair it with `--identity <name>`; Vigil resolves that identity and refuses missing, dead, stale,
+  or request-disabled material before replaying the state. Credential records never inject storage
+  state implicitly, and symlinks cannot escape the engagement root.
+- `--har-out <path>` — optional metadata-only HAR.
+- `--capture-bodies --body-dir <path> --max-body-bytes <n>` — opt-in bounded capture of
+  document/XHR/fetch response bodies.
 
-The driver is reliability-hardened: `--no-sandbox`, `--disable-dev-shm-usage`, explicit
-waits, a bounded page-load timeout, and a best-effort JSON result (DOM/screenshot still
-captured) rather than a crash when one capture step fails. It prints one JSON object on
-stdout: `http_status`, `final_url`, `title`, `dom_length`, the `screenshot`/`dom_path`
-paths, plus any per-step `*_warning`.
+Required attribution routing is installed before the first navigation and fails closed.
+Every declared navigation goes through host-side target admission; click-driven/dynamic
+navigations remain guarded by the runtime scope/no-fire router. The global
+`scope_enforcement: bypass` setting is honored. Failed steps write owned screenshot/DOM
+artifacts and return non-zero rather than being mistaken for completed coverage.
 
 ## Invocation
 
@@ -57,12 +70,26 @@ vigil assess kali browser https://app.target.example/login \
 # Wait for a specific element (SPA) before capturing, with a custom screenshot path.
 vigil assess kali browser https://app.target.example/dashboard \
   --wait-selector '#root' --page-timeout 45 \
+  --attribution-scope document-origin \
+  --identity member \
+  --storage-state tools/auth/dashboard-state.json \
   --screenshot scans/browser/dashboard.png \
   --technique RECON --intent "render SPA dashboard after JS settles" \
   --probe-kind baseline --phase consume-test --timeout 180
 ```
 
-Read-only navigation — leave `--destructive` off unless the URL itself is state-changing.
+Example steps file:
+
+```json
+[
+  {"action": "fill", "selector": "#search", "value": "invoice"},
+  {"action": "click", "selector": "button[type=submit]"},
+  {"action": "wait", "selector": "#results", "timeout_ms": 10000},
+  {"action": "assert", "selector": "#results", "contains": "invoice"}
+]
+```
+
+Set `--destructive` whenever the URL or any workflow step can change target state.
 
 ## Cross-reference
 

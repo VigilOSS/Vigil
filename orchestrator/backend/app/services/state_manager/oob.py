@@ -21,6 +21,17 @@ from . import _common
 
 _OOB_PROBE_STATUSES = {"pending", "fired", "confirmed", "expired", "ignored"}
 
+
+def _required_client_binding(client_name: str, client_payload_host: str) -> tuple[str, str]:
+    name = str(client_name or "").strip()
+    payload_host = str(client_payload_host or "").strip().rstrip(".").lower()
+    if not name or not payload_host:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="oob correlation requires client_name and client_payload_host",
+        )
+    return name, payload_host
+
 def record_oob_probe(
     engagement_id: int,
     *,
@@ -31,6 +42,8 @@ def record_oob_probe(
     probe_kind: str = "",
     request_hash: str = "",
     oob_domain: str = "",
+    client_name: str,
+    client_payload_host: str,
     notes: str = "",
     status_value: str = "pending",
 ) -> dict[str, Any]:
@@ -54,6 +67,9 @@ def record_oob_probe(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"invalid oob probe status '{status_value}'; allowed: {sorted(_OOB_PROBE_STATUSES)}",
         )
+    client_name, client_payload_host = _required_client_binding(
+        client_name, client_payload_host
+    )
     with _common.get_connection() as connection:
         existing = connection.execute(
             "SELECT * FROM assessment_oob_probes WHERE engagement_id = ? AND nonce = ?",
@@ -77,9 +93,10 @@ def record_oob_probe(
             """
             INSERT INTO assessment_oob_probes (
                 engagement_id, nonce, target_url, param, technique,
-                probe_kind, request_hash, oob_domain, notes, status
+                probe_kind, request_hash, oob_domain, client_name,
+                client_payload_host, notes, status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -90,6 +107,8 @@ def record_oob_probe(
                 probe_kind,
                 request_hash,
                 oob_domain,
+                client_name,
+                client_payload_host,
                 notes,
                 status_value,
             ),
@@ -174,6 +193,8 @@ def correlate_oob_interaction(
     query_type: str = "",
     raw_request: str = "",
     observed_at: str = "",
+    client_name: str,
+    client_payload_host: str,
 ) -> dict[str, Any]:
     """Record a single observed callback against the probe owning ``nonce``.
 
@@ -188,6 +209,9 @@ def correlate_oob_interaction(
     """
     engagement = _engagement_or_404(engagement_id)
     nonce = str(nonce or "").strip()
+    client_name, client_payload_host = _required_client_binding(
+        client_name, client_payload_host
+    )
     with _common.get_connection() as connection:
         # Serialize concurrent same-nonce polls: take the write lock up front so the
         # SELECT-check / INSERT-interaction / pending->fired UPDATE run atomically.
@@ -202,6 +226,26 @@ def correlate_oob_interaction(
         if probe_row is None:
             return {"matched": False, "probe": None, "interaction": None, "duplicate": False}
         probe = dict(probe_row)
+        if not probe.get("client_name") or not probe.get("client_payload_host"):
+            return {
+                "matched": False,
+                "duplicate": False,
+                "probe": None,
+                "interaction": None,
+                "reason": "unbound_probe",
+            }
+        if (
+            str(probe.get("client_name") or "") != str(client_name or "")
+            or str(probe.get("client_payload_host") or "")
+            != str(client_payload_host or "")
+        ):
+            return {
+                "matched": False,
+                "duplicate": False,
+                "probe": None,
+                "interaction": None,
+                "reason": "client_binding_mismatch",
+            }
         interaction_hash = hashlib.sha256(
             json.dumps(
                 [

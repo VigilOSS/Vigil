@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import platform
+import os
 import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import docker
+from . import config as config_module
 from .client_rosters import repair_engagement_client_rosters
+from .oob import DEFAULT_OOB_DOMAIN
+from .oob_tenants import initialize_tenant_route
 from .runtime import build_runtime
 
 
@@ -167,6 +171,16 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
         _ensure_install_dirs(install_root)
 
     repair_engagement_client_rosters(install_root)
+    initialize_tenant_route(
+        install_root,
+        is_upgrade=is_upgrade,
+        tenant_name=config_module.get_config_value("oob.tenant") or install_root.name,
+        base_domain=(
+            os.environ.get("VIGIL_OOB_DOMAIN")
+            or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN)
+            or DEFAULT_OOB_DOMAIN
+        ),
+    )
 
     image_built = False
     if options.verify_docker_image:

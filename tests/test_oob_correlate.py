@@ -283,7 +283,7 @@ def test_parse_ignores_empty_host_line():
 # ── read_client_log reuses the client-log source via the docker runner ─────
 
 
-def test_read_client_log_tails_the_client_log_file():
+def test_read_client_log_reverse_scans_bounded_interaction_records():
     from vigil_cli.docker import DockerResult
 
     seen = {}
@@ -294,10 +294,51 @@ def test_read_client_log_tails_the_client_log_file():
 
     text = oob.read_client_log("agent-1", runner=runner, lines=500)
     assert "Received DNS interaction" in text
-    # Confirms it reads the SAME path `oob client logs` reads.
+    # Read the SAME file as `oob client logs`, but count parser candidates
+    # rather than raw verbose lines (one callback expands to ~37 lines).
     joined = " ".join(seen["argv"])
     assert "/data/oob/clients/agent-1.log" in joined
-    assert "tail -n 500" in joined
+    assert "tac" in joined
+    assert "grep" in joined
+    assert "-m 500" in joined
+    assert "Received" in joined
+    assert '"protocol"' in joined
+
+
+def test_read_client_log_rejects_unbounded_interaction_windows():
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv, **_):
+        return DockerResult(0, "", "")
+
+    with pytest.raises(ValueError, match="between 1 and 10000"):
+        oob.read_client_log("agent-1", runner=runner, lines=0)
+    with pytest.raises(ValueError, match="between 1 and 10000"):
+        oob.read_client_log("agent-1", runner=runner, lines=10001)
+
+
+def test_interaction_candidate_window_survives_verbose_dns_burst():
+    nonce = "probe-http-survives"
+    host = f"{nonce}.researcher.example"
+    http = f"[{host}] Received HTTP interaction from 198.51.100.4 at 2026-07-16 23:07:38"
+    lines = [http]
+    for index in range(78):
+        dns = (
+            f"[{host}] Received DNS interaction (A) from 203.0.113.{index % 250 + 1} "
+            "at 2026-07-16 23:07:39"
+        )
+        lines.extend([dns, *[f"verbose detail {index}-{detail}" for detail in range(36)]])
+
+    raw_tail = "\n".join(lines[-2000:])
+    assert "Received HTTP interaction" not in raw_tail
+
+    candidates = [
+        line
+        for line in lines
+        if " Received " in line and " interaction" in line
+    ][-2000:]
+    protocols = {item.protocol for item in oob.parse_interactsh_log("\n".join(candidates))}
+    assert protocols == {"dns", "http"}
 
 
 def test_read_client_log_sanitizes_name():
@@ -316,6 +357,34 @@ def test_read_client_log_sanitizes_name():
     label = joined.split("clients/")[1].split(".log")[0]
     assert label == "foo-..-bar"
     assert "/" not in label
+
+
+def test_oob_runtime_preflight_includes_interaction_window_tools():
+    from vigil_cli.docker import DockerResult
+
+    commands = []
+
+    def runner(argv, **_):
+        commands.append(argv[-1])
+        return DockerResult(0, "", "")
+
+    oob._require_runtime_tools("vigil", runner=runner)
+    joined = "\n".join(commands)
+    assert "command -v grep" in joined
+    assert "command -v tac" in joined
+
+
+def test_oob_poll_record_limit_is_positive_and_bounded():
+    import argparse
+
+    from vigil_cli import main as main_module
+
+    assert main_module._oob_poll_record_limit("1") == 1
+    assert main_module._oob_poll_record_limit("10000") == 10000
+    with pytest.raises(argparse.ArgumentTypeError, match="between 1 and 10000"):
+        main_module._oob_poll_record_limit("0")
+    with pytest.raises(argparse.ArgumentTypeError, match="between 1 and 10000"):
+        main_module._oob_poll_record_limit("10001")
 
 
 # ── client_payload_host scans the WHOLE log (busy-client registration fix) ──
@@ -445,6 +514,8 @@ def test_oob_mint_cli_binds_nonce_under_running_client(monkeypatch, tmp_path, ca
     assert payload["nonce"] == nonce
     assert payload["technique"] == "ssrf"
     assert payload["oob_domain"] == "researcher.example"
+    assert payload["client_name"] == "agent-1"
+    assert payload["client_payload_host"] == payload_host
 
 
 def test_oob_mint_cli_honors_explicit_client(monkeypatch, tmp_path, capsys):
@@ -556,10 +627,21 @@ def test_oob_poll_cli_correlates_matched_and_unmatched(monkeypatch, tmp_path, ca
     class _PollClient(_FakeAssessmentClient):
         def get(self, endpoint):
             assert endpoint == "oob-probes"
-            return [{"nonce": "knownnonce01", "technique": "ssrf", "target_url": "https://shop.test/"}]
+            return [{
+                "nonce": "knownnonce01",
+                "technique": "ssrf",
+                "target_url": "https://shop.test/",
+                "client_name": "agent-1",
+                "client_payload_host": "researcher.example",
+            }]
 
     poll_client = _PollClient()
     monkeypatch.setattr(main_module, "_build_assessment_client", lambda ir, ek: poll_client)
+    monkeypatch.setattr(
+        main_module,
+        "poll_client_payload_host",
+        lambda *_, **__: "researcher.example",
+    )
 
     import argparse
 
@@ -578,6 +660,55 @@ def test_oob_poll_cli_correlates_matched_and_unmatched(monkeypatch, tmp_path, ca
     assert len(correlate_posts) == 1
     assert correlate_posts[0][1]["nonce"] == "knownnonce01"
     assert correlate_posts[0][1]["protocol"] == "dns"
+
+
+def test_oob_poll_cli_does_not_post_probe_owned_by_another_client(
+    monkeypatch, tmp_path, capsys
+):
+    from vigil_cli import main as main_module
+    from vigil_cli.docker import DockerResult
+
+    key = "2026-05-30-120000-poll"
+    _seed_engagement_dir(tmp_path, key)
+    log = (
+        "[knownnonce01.client-b] Received DNS interaction (A) "
+        "from 203.0.113.9 at 2026-05-30 12:00:00\n"
+    )
+    monkeypatch.setattr(
+        main_module,
+        "docker_run_command",
+        lambda argv, **_: DockerResult(0, log, ""),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "poll_client_payload_host",
+        lambda *_, **__: "researcher.example",
+    )
+
+    class _PollClient(_FakeAssessmentClient):
+        def get(self, endpoint):
+            assert endpoint == "oob-probes"
+            return [{
+                "nonce": "knownnonce01",
+                "client_name": "agent-a",
+                "client_payload_host": "researcher.example",
+            }]
+
+    poll_client = _PollClient()
+    monkeypatch.setattr(main_module, "_build_assessment_client", lambda *_: poll_client)
+    import argparse
+
+    args = argparse.Namespace(
+        engagement=key,
+        select=False,
+        client="agent-b",
+        lines=2000,
+        json=False,
+    )
+    main_module._oob_poll(args, tmp_path, main_module._oob_options(tmp_path))
+
+    assert "matched\t0\tunmatched\t1" in capsys.readouterr().out
+    assert [post for post in poll_client.posts if post[0] == "oob-probes/interactions"] == []
 
 
 # ── OOB health observability: status must surface the masked-failure class ──
@@ -640,6 +771,15 @@ def _status_runner(scenario):
             return DockerResult(0, scenario["logs"].get(name, ""), "")
         if cmd.startswith("dig"):
             return DockerResult(0, scenario.get("dig", ""), "")
+        if cmd.startswith("curl"):
+            return DockerResult(
+                0,
+                scenario.get(
+                    "http",
+                    "HTTP/1.1 200 OK\nServer: researcher.example\n",
+                ),
+                "",
+            )
         return DockerResult(0, "", "")
 
     return runner
@@ -680,6 +820,33 @@ def test_oob_status_ok_when_registered_and_resolving(monkeypatch):
     assert payload["domain_resolves"] is True
     assert payload["client_health"][0]["registered"] is True
     assert payload["issues"] == []
+
+
+def test_oob_status_degrades_when_dns_resolves_but_edge_http_redirects(monkeypatch):
+    monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
+    scenario = {
+        "server": True,
+        "frpc": True,
+        "running": ["ssrf-a"],
+        "configured": ["ssrf-a"],
+        "logs": {
+            "ssrf-a": (
+                "[INF] researcher.example\n"
+            )
+        },
+        "dig": "3.129.117.120\n",
+        "http": "HTTP/1.1 308 Permanent Redirect\nServer: Caddy\n",
+    }
+
+    payload = oob.oob_status(
+        oob_domain="researcher.example",
+        runner=_status_runner(scenario),
+    )
+
+    assert payload["domain_resolves"] is True
+    assert payload["edge_route_healthy"] is False
+    assert payload["health"] == "degraded"
+    assert any("HTTP edge route" in issue for issue in payload["issues"])
 
 
 def test_oob_status_shallow_skips_probes_and_does_not_false_degrade(monkeypatch):

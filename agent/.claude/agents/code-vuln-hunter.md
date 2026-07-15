@@ -61,8 +61,8 @@ Before producing any output, confirm:
       matching the slot types is present. WITHOUT IT, PATTERN-LEVEL DEPTH IS LOST.
 - [ ] **File batch provided**: file paths, priorities, batch theme, slot types, classification tier
 - [ ] **Queue leases provided**: each final result and closeout will use the fetched
-      `queue_item_id`, `agent_name`, and `lease_token`; heartbeat long-running work before the
-      stale threshold
+      `queue_item_id`, `agent_name`, and `lease_token`; follow the heartbeat cadence in
+      `shared-constraints-code.md` §10 for long-running work
 - [ ] **Structural index loaded (if available at `tools/analysis-state/structural-index/`)** -- provides
       function map as completeness anchor, plus entry points, sinks, exports, and import targets as advisory navigation metadata
 - [ ] **Threat model summary available** -- trust boundaries, entry points, high-value targets, and trusted inputs (sources NOT to treat as attacker-controlled)

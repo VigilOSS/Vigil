@@ -1,33 +1,4 @@
-"""vigil assess kali browser — headless chromium render of one URL via selenium.
-
-The trustworthy-signal recovery for a curl/httpx run that the WAF-challenge
-detector flagged (``KaliResult.status='waf_challenge'``): drive a real headless
-Chromium inside the runtime container, let it execute the page's JS (which clears
-most JS bot-challenges), and return the ORIGIN HTTP status + the final rendered
-DOM + a screenshot path. The run is audited like every other kali verb (pre-exec
-command-runs POST + finalize PATCH) because it reaches the target.
-
-Implementation: the command builds a ``python3 -c <driver> <url> <screenshot>
-<dom> <page_timeout> <settle> <wait_selector> <required_headers_json> <eval_js>``
-argv and hands it to ``kali_exec`` (so audit, output spilling, and the timeout
-kill-cascade are all reused verbatim). The driver itself is a self-contained
-selenium script
-that runs inside the container. Reliability is LOAD-BEARING — an unreliable browser
-plus the over-eager detector would strand real surfaces in reprobe limbo — so the
-driver uses ``--no-sandbox``, explicit waits, a bounded page-load timeout, and
-degrades to a best-effort JSON result (DOM/screenshot still captured) rather than
-crashing when one capture step fails.
-
-Program-mandated attribution headers (e.g. BugCrowd's ``X-Bug-Bounty: <handle>``)
-must ride EVERY in-scope HTTP request, including this WAF-recovery navigation.
-``kali_exec``'s central ``-H`` injector can't reach a Selenium-driven Chrome (a
-``tool_name='browser'`` argv has no ``-H`` flag — the injector just WARNs and sets
-nothing), so the verb resolves the engagement's ``required_headers`` itself and
-threads them (JSON-encoded) into the driver, which sets them on the chromium
-session via the Chrome DevTools Protocol (``Network.setExtraHTTPHeaders``) BEFORE
-``driver.get()`` — so the rendered navigation carries the same attribution header
-the curl/httpx probes inject.
-"""
+"""Audited Playwright/Chromium browser workflow for target application evidence."""
 from __future__ import annotations
 
 import json
@@ -35,8 +6,10 @@ import re
 import sys
 import uuid
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
+from assess.lib import scope as scope_lib
 from assess.lib.client import AssessError
 from assess.lib.config import resolve_engagement_dir
 from assess.lib.kali import (
@@ -44,350 +17,425 @@ from assess.lib.kali import (
     emit_result,
     kali_args_to_kwargs,
     kali_exec,
+    prepare_browser_identity_material,
 )
 from assess.lib.kali_output import _required_headers
 
 
-# Self-contained selenium driver run as ``python3 -c <this> <argv...>`` INSIDE
-# the runtime container. Positional argv (after the ``-c`` body):
-#   1 url  2 screenshot_path  3 dom_path  4 page_timeout  5 settle  6 wait_selector
-#   7 required_headers_json (JSON object of attribution+operator headers; "{}" when none)
-#   8 eval_js (optional operator JS evaluated in the page after settle; "" = skip)
-# Paths are engagement-relative; the container working dir is the engagement
-# root, so they land in the bind-mounted engagement tree on the host. The driver
-# prints ONE JSON object to stdout (origin http_status, final_url, title,
-# dom_length, screenshot/dom paths, a bounded ``console`` array of browser-console
-# / JS-error entries, an optional ``eval_result``, plus any per-step *_warning)
-# and exits 0 on a successful render, non-zero only when the browser could not be
-# launched at all.
+_MAX_STEPS = 50
+_MAX_STEP_TIMEOUT_MS = 120_000
+_ACTIONS = frozenset({"navigate", "click", "fill", "wait", "eval", "assert"})
+_STEP_KEYS = {
+    "navigate": frozenset({"action", "url", "wait_until", "timeout_ms"}),
+    "click": frozenset({"action", "selector", "timeout_ms"}),
+    "fill": frozenset({"action", "selector", "value", "timeout_ms"}),
+    "wait": frozenset({"action", "selector", "timeout_ms"}),
+    "eval": frozenset({"action", "script"}),
+    "assert": frozenset({"action", "selector", "contains", "equals", "visible", "timeout_ms"}),
+}
+
+
+# Runs under the runtime image's system Python. The complete execution plan is one
+# JSON argv value, avoiding shell interpolation and keeping every target URL
+# available to the host-side admission gate before Chromium starts.
 _BROWSER_DRIVER = r'''
-import json, os, sys, time
+import hashlib, json, os, re, sys, time
+from urllib.parse import urlsplit
 
-def _emit(obj, code):
-    sys.stdout.write(json.dumps(obj))
-    sys.stdout.write("\n")
+MAX_NETWORK_EVENTS = 500
+MAX_CONSOLE_EVENTS = 200
+MAX_ROUTE_CANDIDATES = 500
+
+def emit(value, code=0):
+    sys.stdout.write(json.dumps(value, ensure_ascii=True, separators=(",", ":")) + "\n")
     sys.stdout.flush()
-    sys.exit(code)
+    raise SystemExit(code)
 
-url = sys.argv[1] if len(sys.argv) > 1 else ""
-screenshot_path = sys.argv[2] if len(sys.argv) > 2 else "scans/browser/render.png"
-dom_path = sys.argv[3] if len(sys.argv) > 3 else "scans/browser/render.html"
-page_timeout = float(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else 30.0
-settle = float(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else 2.0
-wait_selector = sys.argv[6] if len(sys.argv) > 6 else ""
+def origin(raw):
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.hostname:
+        return ""
+    port = parsed.port
+    default = (parsed.scheme == "https" and port == 443) or (parsed.scheme == "http" and port == 80)
+    return "%s://%s%s" % (parsed.scheme.lower(), parsed.hostname.lower(), "" if not port or default else ":%d" % port)
 
-# Program-mandated attribution headers (e.g. ``X-Bug-Bounty: <handle>``) passed
-# JSON-encoded by the host CLI. They are set on the chromium session via CDP
-# before navigation so this WAF-recovery render carries the same attribution
-# header the curl/httpx probes inject. A missing/blank/malformed value degrades
-# to no extra headers (never crashes the render).
-extra_headers = {}
-raw_headers = sys.argv[7] if len(sys.argv) > 7 else ""
-if raw_headers:
-    try:
-        _parsed = json.loads(raw_headers)
-        if isinstance(_parsed, dict):
-            extra_headers = {
-                str(k): str(v) for k, v in _parsed.items() if str(k).strip()
-            }
-    except Exception:
-        extra_headers = {}
-
-# Optional operator JS evaluated in the rendered page AFTER settle (argv[8]).
-# LLM-friendly DOM/execution introspection e.g. "document.title" or a stored-XSS
-# execution sentinel like "window.__xss_fired". Blank = skip.
-eval_js = sys.argv[8] if len(sys.argv) > 8 else ""
-
-if not url:
-    _emit({"error": "no url supplied to browser driver"}, 2)
-
-try:
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-except Exception as exc:
-    _emit({"error": "selenium import failed: %r" % (exc,)}, 3)
-
-for d in (os.path.dirname(screenshot_path), os.path.dirname(dom_path)):
-    if d:
-        try:
-            os.makedirs(d, exist_ok=True)
-        except Exception:
-            pass
-
-opts = Options()
-opts.add_argument("--headless=new")
-opts.add_argument("--no-sandbox")
-opts.add_argument("--disable-dev-shm-usage")
-opts.add_argument("--disable-gpu")
-opts.add_argument("--window-size=1366,900")
-opts.add_argument("--ignore-certificate-errors")
-opts.add_argument("--disable-blink-features=AutomationControlled")
-opts.set_capability(
-    "goog:loggingPrefs", {"performance": "ALL", "browser": "ALL"}
-)
-for binloc in ("/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"):
-    if os.path.exists(binloc):
-        opts.binary_location = binloc
-        break
-
-service = None
-for drvpath in ("/usr/bin/chromedriver", "/usr/lib/chromium/chromedriver",
-                "/usr/lib/chromium-browser/chromedriver", "/usr/local/bin/chromedriver"):
-    if os.path.exists(drvpath):
-        service = Service(executable_path=drvpath)
-        break
-
-try:
-    driver = webdriver.Chrome(options=opts, service=service) if service \
-        else webdriver.Chrome(options=opts)
-except Exception as exc:
-    _emit({"error": "chrome launch failed: %r" % (exc,)}, 4)
-
-result = {"url": url, "screenshot": screenshot_path, "dom_path": dom_path}
-try:
-    try:
-        driver.set_page_load_timeout(page_timeout)
-    except Exception:
-        pass
-    # Set the program attribution header(s) on the chromium session over CDP
-    # BEFORE navigating, so the main-document request (and every sub-request)
-    # carries them — matching the -H the curl/httpx probes inject. Enable the
-    # Network domain first (required for setExtraHTTPHeaders to take effect).
-    if extra_headers:
-        try:
-            driver.execute_cdp_cmd("Network.enable", {})
-            driver.execute_cdp_cmd(
-                "Network.setExtraHTTPHeaders", {"headers": extra_headers}
-            )
-        except Exception as exc:
-            result["header_warning"] = (
-                "could not set required attribution header(s) %r: %r"
-                % (sorted(extra_headers), exc)
-            )
-    try:
-        driver.get(url)
-    except Exception as exc:
-        result["nav_warning"] = "%r" % (exc,)
-    if wait_selector:
-        try:
-            WebDriverWait(driver, page_timeout).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, wait_selector))
-            )
-        except Exception as exc:
-            result["wait_warning"] = "selector %r not present: %r" % (wait_selector, exc)
-    else:
-        try:
-            time.sleep(settle)
-        except Exception:
-            pass
-    # Origin HTTP status of the main document from the CDP performance log.
-    status = None
-    try:
-        for entry in driver.get_log("performance"):
+def host_allowed(host, entries):
+    host = (host or "").lower().rstrip(".")
+    for entry in entries:
+        kind = entry.get("entry_kind")
+        value = str(entry.get("host") or "").lower().rstrip(".")
+        if kind == "wildcard" and (host == value or host.endswith("." + value)):
+            return True
+        if kind in ("bare_host", "url") and host == value:
+            return True
+        if kind == "cidr":
             try:
-                msg = json.loads(entry["message"])["message"]
-            except Exception:
-                continue
-            if msg.get("method") != "Network.responseReceived":
-                continue
-            params = msg.get("params", {})
-            if params.get("type") != "Document":
-                continue
-            resp = params.get("response", {})
-            rstatus = resp.get("status")
-            ru = resp.get("url", "")
-            if status is None:
-                status = rstatus
-            if ru and (ru == url or ru.rstrip("/") == url.rstrip("/")):
-                status = rstatus
+                import ipaddress
+                if ipaddress.ip_address(host) in ipaddress.ip_network(value, strict=False):
+                    return True
+            except ValueError:
+                pass
+    return False
+
+def blocked_request(raw, cfg):
+    parsed = urlsplit(raw)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if cfg.get("scope_enforcement") != "bypass":
+        if not host_allowed(host, cfg.get("scope_entries") or []):
+            return "out-of-scope navigation host"
+        if host_allowed(host, cfg.get("out_of_scope_entries") or []):
+            return "explicitly out-of-scope navigation host"
+    no_fire_regex = cfg.get("no_fire_regex") or ""
+    if no_fire_regex and re.search(no_fire_regex, raw, re.IGNORECASE):
+        return "off-limits navigation path"
+    return ""
+
+raw = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    cfg = json.loads(raw)
+except Exception as exc:
+    emit({"error": "invalid browser execution plan: %r" % (exc,)}, 2)
+if not isinstance(cfg, dict) or not cfg.get("url"):
+    emit({"error": "browser execution plan requires url"}, 2)
+
+try:
+    from playwright.sync_api import sync_playwright
+except Exception as exc:
+    emit({"error": "playwright import failed: %r" % (exc,)}, 3)
+
+for key in ("screenshot", "dom_path", "har_out", "body_dir"):
+    value = str(cfg.get(key) or "")
+    directory = value if key == "body_dir" else os.path.dirname(value)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+result = {
+    "url": cfg["url"], "screenshot": cfg.get("screenshot"),
+    "dom_path": cfg.get("dom_path"), "network": [], "console": [],
+    "route_candidates": [], "omitted_attribution_origins": [], "steps": [],
+}
+network = result["network"]
+console = result["console"]
+candidate_keys = set()
+omitted = set()
+required_headers = dict(cfg.get("required_headers") or {})
+operator_headers = dict(cfg.get("operator_headers") or {})
+identity_headers = dict(cfg.get("identity_headers") or {})
+document_origins = set(cfg.get("document_origins") or [])
+identity_hosts = set(cfg.get("identity_hosts") or [])
+
+def add_candidate(request):
+    if len(result["route_candidates"]) >= MAX_ROUTE_CANDIDATES:
+        return
+    parsed = urlsplit(request.url)
+    key = (request.method, parsed.scheme, parsed.netloc, parsed.path)
+    if key in candidate_keys:
+        return
+    candidate_keys.add(key)
+    result["route_candidates"].append({
+        "method": request.method, "origin": origin(request.url),
+        "path": parsed.path or "/", "resource_type": request.resource_type,
+    })
+
+def on_request(request):
+    if len(network) < MAX_NETWORK_EVENTS:
+        network.append({
+            "event": "request", "method": request.method, "url": request.url,
+            "resource_type": request.resource_type,
+            "header_names": sorted(str(k).lower() for k in request.headers),
+        })
+    add_candidate(request)
+
+def on_response(response):
+    if len(network) < MAX_NETWORK_EVENTS:
+        network.append({
+            "event": "response", "url": response.url, "status": response.status,
+            "header_names": sorted(str(k).lower() for k in response.headers),
+        })
+    if not cfg.get("capture_bodies") or response.request.resource_type not in ("document", "xhr", "fetch"):
+        return
+    try:
+        body = response.body()
+        cap = int(cfg.get("max_body_bytes") or 262144)
+        body = body[:cap]
+        digest = hashlib.sha256((response.url + "\0").encode() + body).hexdigest()[:20]
+        path = os.path.join(cfg["body_dir"], digest + ".body")
+        with open(path, "wb") as fh:
+            fh.write(body)
+        result.setdefault("bodies", []).append({"url": response.url, "path": path, "bytes": len(body)})
+    except Exception as exc:
+        result.setdefault("body_warnings", []).append({"url": response.url, "error": repr(exc)})
+
+def route_request(route, request):
+    reason = blocked_request(request.url, cfg)
+    if reason:
+        result.setdefault("blocked_requests", []).append({"url": request.url, "reason": reason})
+        route.abort("blockedbyclient")
+        return
+    headers = dict(request.headers)
+    headers.update(operator_headers)
+    request_origin = origin(request.url)
+    request_host = (urlsplit(request.url).hostname or "").lower().rstrip(".")
+    is_document_navigation = request.is_navigation_request()
+    # Bearer/custom identity headers are target credentials, not ambient browser
+    # headers. Keep them on the resolved identity target host; cookies use
+    # Chromium's native domain/path scoping through context.add_cookies().
+    if request_host in identity_hosts:
+        headers.update(identity_headers)
+    should_attribute = cfg.get("attribution_scope") == "all" or (
+        cfg.get("attribution_scope") == "document-origin"
+        and (request_origin in document_origins or is_document_navigation)
+    )
+    if should_attribute:
+        headers.update(required_headers)
+        if is_document_navigation and request_origin:
+            document_origins.add(request_origin)
+    elif required_headers and request_origin:
+        omitted.add(request_origin)
+    route.continue_(headers=headers)
+
+def capture_failure(page, label):
+    stem = str(cfg.get("failure_stem") or "scans/browser/failure")
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", label)[:40]
+    png, html = stem + "-" + safe + ".png", stem + "-" + safe + ".html"
+    try:
+        page.screenshot(path=png, full_page=True)
+    except Exception:
+        png = ""
+    try:
+        with open(html, "w", encoding="utf-8") as fh:
+            fh.write(page.content())
+    except Exception:
+        html = ""
+    return {"screenshot": png, "dom_path": html}
+
+with sync_playwright() as playwright:
+    executable = next((p for p in ("/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome") if os.path.exists(p)), None)
+    try:
+        browser = playwright.chromium.launch(
+            executable_path=executable, headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors"],
+        )
+    except Exception as exc:
+        emit({"error": "chromium launch failed: %r" % (exc,)}, 4)
+    context_options = {"ignore_https_errors": True, "viewport": {"width": 1366, "height": 900}}
+    if cfg.get("har_out"):
+        context_options.update({"record_har_path": cfg["har_out"], "record_har_mode": "minimal", "record_har_content": "omit"})
+    if cfg.get("storage_state"):
+        context_options["storage_state"] = cfg["storage_state"]
+    context = browser.new_context(**context_options)
+    cookies = cfg.get("cookies") or []
+    if cookies:
+        context.add_cookies(cookies)
+    try:
+        context.route("**/*", route_request)
+    except Exception as exc:
+        browser.close()
+        emit({"error": "required attribution routing failed before navigation: %r" % (exc,)}, 5)
+    page = context.new_page()
+    page.on("request", on_request)
+    page.on("response", on_response)
+    page.on("console", lambda msg: console.append({"type": msg.type, "text": msg.text}) if len(console) < MAX_CONSOLE_EVENTS else None)
+    page.on("pageerror", lambda exc: console.append({"type": "pageerror", "text": str(exc)}) if len(console) < MAX_CONSOLE_EVENTS else None)
+    failed = False
+    try:
+        response = page.goto(cfg["url"], wait_until="domcontentloaded", timeout=int(float(cfg.get("page_timeout") or 30) * 1000))
+        result["http_status"] = response.status if response else None
+        if cfg.get("wait_selector"):
+            page.locator(cfg["wait_selector"]).wait_for(state="attached", timeout=int(float(cfg.get("page_timeout") or 30) * 1000))
+        else:
+            page.wait_for_timeout(int(float(cfg.get("settle") or 0) * 1000))
+        if cfg.get("eval_js"):
+            result["eval_result"] = page.evaluate(cfg["eval_js"])
+        for index, step in enumerate(cfg.get("steps") or []):
+            action = step["action"]
+            timeout = int(step.get("timeout_ms") or min(int(float(cfg.get("page_timeout") or 30) * 1000), 120000))
+            record = {"index": index, "action": action, "status": "completed"}
+            try:
+                if action == "navigate":
+                    resp = page.goto(step["url"], wait_until=step.get("wait_until", "domcontentloaded"), timeout=timeout)
+                    record["http_status"] = resp.status if resp else None
+                elif action == "click":
+                    page.locator(step["selector"]).click(timeout=timeout)
+                elif action == "fill":
+                    page.locator(step["selector"]).fill(step["value"], timeout=timeout)
+                elif action == "wait":
+                    if step.get("selector"):
+                        page.locator(step["selector"]).wait_for(state="attached", timeout=timeout)
+                    else:
+                        page.wait_for_timeout(timeout)
+                elif action == "eval":
+                    record["result"] = page.evaluate(step["script"])
+                elif action == "assert":
+                    locator = page.locator(step["selector"])
+                    locator.wait_for(state="hidden" if step.get("visible") is False else "visible", timeout=timeout)
+                    if "contains" in step or "equals" in step:
+                        text = locator.inner_text(timeout=timeout)
+                        if "contains" in step and step["contains"] not in text:
+                            raise AssertionError("expected selector text to contain %r" % step["contains"])
+                        if "equals" in step and step["equals"] != text:
+                            raise AssertionError("expected selector text %r, got %r" % (step["equals"], text))
+                result["steps"].append(record)
+            except Exception as exc:
+                record.update({"status": "failed", "error": repr(exc), "artifacts": capture_failure(page, "step-%d-%s" % (index, action))})
+                result["steps"].append(record)
+                failed = True
                 break
-    except Exception as exc:
-        result["status_warning"] = "%r" % (exc,)
-    result["http_status"] = status
-    try:
-        result["final_url"] = driver.current_url
-    except Exception:
-        result["final_url"] = url
-    try:
-        result["title"] = driver.title
-    except Exception:
-        result["title"] = ""
-    # Operator JS eval (optional) — run AFTER settle so page/app JS has executed.
-    # Forgiving: try as a bare expression (auto-``return``) first, then as a full
-    # statement body. Coerce a non-JSON-serializable return (e.g. a WebElement) to
-    # its repr so it can never crash the final emit.
-    if eval_js:
-        try:
-            try:
-                _val = driver.execute_script("return (" + eval_js + ")")
-            except Exception:
-                _val = driver.execute_script(eval_js)
-            try:
-                json.dumps(_val)
-                result["eval_result"] = _val
-            except (TypeError, ValueError):
-                result["eval_result"] = repr(_val)
-        except Exception as exc:
-            result["eval_warning"] = "%r" % (exc,)
-    # Browser console + JS errors (uncaught exceptions, CSP violations, and any
-    # console.* the page or a stored-XSS sentinel emitted). Captured after eval so
-    # eval's own console output is included; bounded to the last 200 entries so a
-    # noisy page cannot blow up the emitted JSON.
-    try:
-        _entries = driver.get_log("browser") or []
-        result["console"] = [
-            {"level": e.get("level"), "message": e.get("message"),
-             "timestamp": e.get("timestamp")}
-            for e in _entries[-200:]
-        ]
-    except Exception as exc:
-        result["console_warning"] = "%r" % (exc,)
-    dom = ""
-    try:
-        dom = driver.page_source or ""
-    except Exception as exc:
-        result["dom_warning"] = "%r" % (exc,)
-    result["dom_length"] = len(dom)
-    try:
-        with open(dom_path, "w", encoding="utf-8") as fh:
+        result["final_url"] = page.url
+        result["title"] = page.title()
+        dom = page.content()
+        result["dom_length"] = len(dom)
+        with open(cfg["dom_path"], "w", encoding="utf-8") as fh:
             fh.write(dom)
-    except Exception as exc:
-        result["dom_write_warning"] = "%r" % (exc,)
-    try:
-        driver.save_screenshot(screenshot_path)
+        page.screenshot(path=cfg["screenshot"], full_page=True)
         result["screenshot_ok"] = True
     except Exception as exc:
-        result["screenshot_ok"] = False
-        result["screenshot_warning"] = "%r" % (exc,)
-finally:
-    try:
-        driver.quit()
-    except Exception:
-        pass
-
-_emit(result, 0)
+        result["error"] = repr(exc)
+        result["failure_artifacts"] = capture_failure(page, "navigation")
+        failed = True
+    finally:
+        result["omitted_attribution_origins"] = sorted(omitted)
+        context.close()
+        browser.close()
+    emit(result, 6 if failed else 0)
 '''
 
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "browser",
-        help="Render a URL with headless chromium (selenium) in the runtime and "
-        "return origin status + final DOM + screenshot. Recovery for WAF-flagged runs.",
+        help="Run an audited, bounded Playwright/Chromium browser workflow.",
     )
     add_required_kali_flags(p)
-    p.add_argument("url", nargs="?", default="", help="Target URL to render (positional).")
+    p.add_argument("url", nargs="?", default="", help="Initial HTTP(S) URL.")
+    p.add_argument("--screenshot", default="", help="Engagement-relative screenshot path.")
+    p.add_argument("--dom-out", dest="dom_out", default="", help="Engagement-relative DOM path.")
+    p.add_argument("--wait-selector", default="", help="CSS selector to await before capture.")
+    p.add_argument("--page-timeout", type=float, default=30.0)
+    p.add_argument("--settle", type=float, default=2.0)
+    p.add_argument("--eval", dest="eval_js", default="", help="Evaluate JavaScript after initial load.")
+    p.add_argument("--header", dest="extra_headers", action="append", default=[], metavar="NAME:VALUE")
     p.add_argument(
-        "--screenshot",
-        dest="screenshot",
+        "--attribution-scope", choices=("all", "document-origin"), default="all",
+        help="Apply required attribution to all requests or only document origins.",
+    )
+    p.add_argument("--steps-file", default="", help="JSON array of typed browser steps (max 50).")
+    p.add_argument(
+        "--storage-state",
         default="",
-        help="Engagement-relative screenshot output path "
-        "(default scans/browser/<host>-<id>.png).",
+        help="Explicit engagement-relative Playwright storage-state JSON artifact.",
     )
-    p.add_argument(
-        "--dom-out",
-        dest="dom_out",
-        default="",
-        help="Engagement-relative rendered-DOM output path "
-        "(default scans/browser/<host>-<id>.html).",
-    )
-    p.add_argument(
-        "--wait-selector",
-        dest="wait_selector",
-        default="",
-        help="CSS selector to wait for (explicit wait) before capture. "
-        "Omit to fall back to --settle.",
-    )
-    p.add_argument(
-        "--page-timeout",
-        dest="page_timeout",
-        type=float,
-        default=30.0,
-        help="Per-page load + explicit-wait timeout in seconds (default 30).",
-    )
-    p.add_argument(
-        "--settle",
-        dest="settle",
-        type=float,
-        default=2.0,
-        help="Extra settle wait after load when no --wait-selector is given "
-        "(seconds, default 2).",
-    )
-    p.add_argument(
-        "--eval",
-        dest="eval_js",
-        default="",
-        help="Optional JS to evaluate in the rendered page AFTER settle and "
-        "return in the result as ``eval_result`` (e.g. \"document.title\" or a "
-        "stored-XSS execution sentinel like \"window.__xss_fired\"). A bare "
-        "expression is auto-returned; a full statement body may use ``return``.",
-    )
-    p.add_argument(
-        "--header",
-        dest="extra_headers",
-        action="append",
-        default=[],
-        metavar="NAME:VALUE",
-        help="Extra request header to set on the render via CDP (repeatable, "
-        "e.g. --header 'X-Debug: 1'). Program attribution headers are always "
-        "applied and CANNOT be overridden or stripped by this flag.",
-    )
+    p.add_argument("--har-out", default="", help="Optional engagement-relative metadata-only HAR path.")
+    p.add_argument("--capture-bodies", action="store_true", help="Capture bounded document/XHR/fetch bodies.")
+    p.add_argument("--body-dir", default="", help="Engagement-relative body artifact directory.")
+    p.add_argument("--max-body-bytes", type=int, default=262_144, help="Maximum bytes stored per body.")
     p.set_defaults(func=run)
 
 
 def _safe_slug(url: str) -> str:
-    """Filesystem-safe stem derived from the URL host (fallback 'target')."""
     try:
         host = urlsplit(url if "://" in url else "http://" + url).hostname or ""
     except ValueError:
         host = ""
-    host = host or "target"
-    return re.sub(r"[^A-Za-z0-9._-]", "_", host)
+    return re.sub(r"[^A-Za-z0-9._-]", "_", host or "target")
 
 
 def _parse_header_args(values: list[str]) -> dict[str, str]:
-    """Parse repeatable ``--header NAME:VALUE`` flags into a name→value dict.
-
-    Splits on the FIRST colon and trims surrounding whitespace (so both
-    ``X-Debug: 1`` and ``X-Debug:1`` parse). A flag with no colon or an empty
-    name is skipped rather than raising — a malformed flag degrades to "no extra
-    header" instead of failing the render.
-    """
     out: dict[str, str] = {}
     for raw in values or []:
         if not raw or ":" not in raw:
             continue
         name, value = raw.split(":", 1)
-        name = name.strip()
-        if not name:
-            continue
-        out[name] = value.strip()
+        if name.strip():
+            out[name.strip()] = value.strip()
     return out
 
 
+def _http_url(value: Any, *, field: str) -> str:
+    text = str(value or "").strip()
+    try:
+        parsed = urlsplit(text)
+    except ValueError as exc:
+        raise AssessError(f"browser {field} is not a valid URL") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise AssessError(f"browser {field} must be an absolute HTTP(S) URL")
+    return text
+
+
+def _artifact_path(value: str, *, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    path = Path(text)
+    if path.is_absolute() or ".." in path.parts:
+        raise AssessError(f"browser {field} must be engagement-relative without '..'")
+    return path.as_posix()
+
+
+def _load_steps(path: Path) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AssessError(f"browser cannot read steps file {path}: {exc}") from exc
+    if not isinstance(payload, list):
+        raise AssessError("browser steps file must contain a JSON array")
+    if len(payload) > _MAX_STEPS:
+        raise AssessError(f"browser steps file exceeds the {_MAX_STEPS}-step cap")
+    validated: list[dict[str, Any]] = []
+    for index, raw in enumerate(payload):
+        if not isinstance(raw, dict):
+            raise AssessError(f"browser step {index} must be an object")
+        action = str(raw.get("action") or "").strip().lower()
+        if action not in _ACTIONS:
+            raise AssessError(f"browser step {index} has unsupported action {action!r}")
+        extras = set(raw) - _STEP_KEYS[action]
+        if extras:
+            raise AssessError(f"browser step {index} has unsupported fields: {', '.join(sorted(extras))}")
+        step = dict(raw)
+        step["action"] = action
+        if action == "navigate":
+            step["url"] = _http_url(step.get("url"), field=f"step {index} url")
+            if step.get("wait_until", "domcontentloaded") not in {"commit", "domcontentloaded", "load", "networkidle"}:
+                raise AssessError(f"browser step {index} has invalid wait_until")
+        if action in {"click", "fill", "assert"} and not str(step.get("selector") or "").strip():
+            raise AssessError(f"browser step {index} requires selector")
+        if action == "fill" and "value" not in step:
+            raise AssessError(f"browser step {index} requires value")
+        if action == "eval" and not str(step.get("script") or "").strip():
+            raise AssessError(f"browser step {index} requires script")
+        if action == "assert" and not any(key in step for key in ("contains", "equals", "visible")):
+            raise AssessError(f"browser step {index} requires an assertion")
+        timeout = step.get("timeout_ms")
+        if timeout is not None and (not isinstance(timeout, int) or not 0 < timeout <= _MAX_STEP_TIMEOUT_MS):
+            raise AssessError(f"browser step {index} timeout_ms must be 1..{_MAX_STEP_TIMEOUT_MS}")
+        validated.append(step)
+    return validated
+
+
+def _load_storage_state(value: str, engagement_dir: Path | None) -> dict[str, Any] | None:
+    relative = _artifact_path(value, field="storage-state")
+    if not relative:
+        return None
+    if engagement_dir is None:
+        raise AssessError("browser --storage-state requires a resolvable engagement directory")
+    root = engagement_dir.resolve()
+    path = (root / relative).resolve()
+    if path != root and root not in path.parents:
+        raise AssessError("browser storage-state artifact must remain inside the engagement")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AssessError(f"browser cannot read storage-state artifact {relative}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise AssessError("browser storage-state artifact must contain a JSON object")
+    if not isinstance(payload.get("cookies", []), list) or not isinstance(
+        payload.get("origins", []), list
+    ):
+        raise AssessError("browser storage-state cookies and origins must be JSON arrays")
+    return payload
+
+
 def _resolve_required_headers(args) -> dict[str, str]:
-    """Program-mandated attribution headers (e.g. ``{"X-Bug-Bounty": "<handle>"}``)
-    for this engagement, or ``{}`` when none are configured / the engagement dir
-    cannot be resolved.
-
-    ``kali_exec`` injects ``required_headers`` only into ``-H``-capable CLI tools;
-    for the browser verb (``tool_name='browser'``) it just WARNs and sets nothing,
-    so the Selenium-driven Chrome would otherwise omit the attribution header every
-    curl/httpx probe carries — an in-scope request that violates program
-    attribution rules and may observe a different response. We resolve the headers
-    here and the driver sets them on the chromium session via CDP before
-    navigation.
-
-    Resolution honours the same precedence as every other verb (``--engagement-dir``
-    > ``$ENGAGEMENT_DIR`` > cwd ``scope.json``); ``_required_headers`` then applies
-    the SAME string→string filtering as the kali_exec / host-route injectors (only
-    ``str`` name → ``str`` value pairs survive). An unresolvable engagement degrades
-    quietly to ``{}`` rather than failing the render.
-    """
     try:
         eng_dir = resolve_engagement_dir(getattr(args, "engagement_dir", None))
     except SystemExit:
@@ -395,62 +443,114 @@ def _resolve_required_headers(args) -> dict[str, str]:
     return _required_headers(Path(eng_dir))
 
 
-def run(args) -> None:
-    url = (args.url or "").strip()
-    if not url:
-        print("browser: pass a <url> to render", file=sys.stderr)
-        raise AssessError("missing <url>")
-
-    token = uuid.uuid4().hex[:8]
-    stem = f"scans/browser/{_safe_slug(url)}-{token}"
-    screenshot = (args.screenshot or "").strip() or f"{stem}.png"
-    dom_out = (getattr(args, "dom_out", "") or "").strip() or f"{stem}.html"
-    wait_selector = getattr(args, "wait_selector", "") or ""
-    page_timeout = float(getattr(args, "page_timeout", 30.0))
-    settle = float(getattr(args, "settle", 2.0))
-
-    print(
-        f"browser: rendering {url} -> screenshot={screenshot} dom={dom_out}",
-        file=sys.stderr,
+def _scope_config(args) -> tuple[dict[str, Any], Path | None]:
+    try:
+        eng_dir = Path(resolve_engagement_dir(getattr(args, "engagement_dir", None)))
+        scope = scope_lib.load_scope(str(eng_dir))
+    except (SystemExit, OSError, ValueError, json.JSONDecodeError):
+        return ({"scope_entries": [], "out_of_scope_entries": [], "no_fire_regex": "", "scope_enforcement": "enforce"}, None)
+    return (
+        {
+            "scope_entries": scope_lib.scope_entries(scope),
+            "out_of_scope_entries": scope_lib.out_of_scope_entries(scope),
+            "no_fire_regex": scope_lib.no_fire.crawl_exclusion_regex(scope),
+            "scope_enforcement": scope_lib.scope_enforcement(scope),
+        },
+        eng_dir,
     )
 
-    # Program attribution headers (e.g. X-Bug-Bounty) — set on the chromium
-    # session via CDP inside the driver, since kali_exec's -H injector can't
-    # reach a Selenium navigation. Merged with any operator --header values;
-    # required headers WIN the merge so attribution can never be stripped or
-    # overridden. JSON-encoded so they thread safely through argv ("{}" when none).
-    req_headers = _resolve_required_headers(args)
+
+def _origin(url: str) -> str:
+    parsed = urlsplit(url)
+    port = parsed.port
+    default = (parsed.scheme == "https" and port == 443) or (parsed.scheme == "http" and port == 80)
+    return f"{parsed.scheme.lower()}://{parsed.hostname.lower()}{'' if not port or default else f':{port}'}"
+
+
+def run(args) -> None:
+    url = _http_url(getattr(args, "url", ""), field="url")
+    token = uuid.uuid4().hex[:8]
+    stem = f"scans/browser/{_safe_slug(url)}-{token}"
+    screenshot = _artifact_path(getattr(args, "screenshot", "") or f"{stem}.png", field="screenshot")
+    dom_out = _artifact_path(getattr(args, "dom_out", "") or f"{stem}.html", field="dom-out")
+    har_out = _artifact_path(getattr(args, "har_out", ""), field="har-out")
+    body_dir = _artifact_path(getattr(args, "body_dir", "") or f"{stem}-bodies", field="body-dir")
+    max_body_bytes = int(getattr(args, "max_body_bytes", 262_144))
+    if not 1 <= max_body_bytes <= 10_485_760:
+        raise AssessError("browser --max-body-bytes must be between 1 and 10485760")
+    steps_path = str(getattr(args, "steps_file", "") or "").strip()
+    steps = _load_steps(Path(steps_path).expanduser()) if steps_path else []
+    navigation_urls = [url] + [str(step["url"]) for step in steps if step["action"] == "navigate"]
+    destinations = tuple(scope_lib.ExecutionDestination(value, "target") for value in navigation_urls)
+
+    required_headers = _resolve_required_headers(args)
     operator_headers = _parse_header_args(getattr(args, "extra_headers", []) or [])
-    merged_headers = {**operator_headers, **req_headers}
-    headers_json = json.dumps(merged_headers, sort_keys=True)
-    if req_headers:
-        print(
-            "browser: applying program attribution header(s) "
-            f"{', '.join(sorted(req_headers))} to the chromium session via CDP.",
-            file=sys.stderr,
+    # Required program attribution always wins an explicit operator collision.
+    required_header_names = {name.lower() for name in required_headers}
+    operator_headers = {
+        name: value
+        for name, value in operator_headers.items()
+        if name.lower() not in required_header_names
+    }
+
+    scope_config, eng_dir = _scope_config(args)
+    storage_state = _load_storage_state(
+        str(getattr(args, "storage_state", "") or ""), eng_dir
+    )
+    identity_headers: dict[str, str] = {}
+    cookies: list[dict[str, Any]] = []
+    prepared_auth_context = "anonymous"
+    identity = getattr(args, "identity", None)
+    if storage_state is not None and not identity:
+        raise AssessError("browser --storage-state requires --identity")
+    if identity is not None and eng_dir is None:
+        raise AssessError("browser --identity requires engagement context")
+    if identity is not None:
+        prepared_auth_context, prepared = prepare_browser_identity_material(
+            eng_dir,
+            identity,
+            url,
+            scope_key=str(getattr(args, "identity_scope", "") or ""),
+            external_state_applied=storage_state is not None,
         )
-    if operator_headers:
-        print(
-            "browser: applying operator --header(s) "
-            f"{', '.join(sorted(operator_headers))} via CDP.",
-            file=sys.stderr,
-        )
+        identity_headers = dict(prepared.get("headers") or {})
+        cookies = list(prepared.get("cookies") or [])
+        if prepared_auth_context == "anonymous":
+            raise AssessError(
+                f"browser requested identity '{identity}' could not be applied; "
+                "refusing to run anonymously"
+            )
 
-    eval_js = (getattr(args, "eval_js", "") or "").strip()
-
-    cmd: list[str] = [
-        "python3",
-        "-c",
-        _BROWSER_DRIVER,
-        url,
-        screenshot,
-        dom_out,
-        str(page_timeout),
-        str(settle),
-        wait_selector,
-        headers_json,
-        eval_js,
-    ]
-
-    result = kali_exec(cmd, tool_name="browser", **kali_args_to_kwargs(args))
+    config = {
+        "url": url,
+        "screenshot": screenshot,
+        "dom_path": dom_out,
+        "failure_stem": f"{stem}-failure",
+        "page_timeout": float(getattr(args, "page_timeout", 30.0)),
+        "settle": float(getattr(args, "settle", 2.0)),
+        "wait_selector": str(getattr(args, "wait_selector", "") or ""),
+        "eval_js": str(getattr(args, "eval_js", "") or "").strip(),
+        "attribution_scope": str(getattr(args, "attribution_scope", "all")),
+        "required_headers": required_headers,
+        "operator_headers": operator_headers,
+        "identity_headers": identity_headers,
+        "identity_hosts": [(urlsplit(url).hostname or "").lower().rstrip(".")],
+        "cookies": cookies,
+        "storage_state": storage_state,
+        "document_origins": [_origin(url)],
+        "steps": steps,
+        "har_out": har_out,
+        "capture_bodies": bool(getattr(args, "capture_bodies", False)),
+        "body_dir": body_dir,
+        "max_body_bytes": max_body_bytes,
+        **scope_config,
+    }
+    print(f"browser: Playwright workflow {url} -> screenshot={screenshot} dom={dom_out}", file=sys.stderr)
+    cmd = ["python3", "-c", _BROWSER_DRIVER, json.dumps(config, sort_keys=True, separators=(",", ":"))]
+    kwargs = kali_args_to_kwargs(args)
+    # The browser prepares identity inside its execution plan. Shared CLI-tool
+    # injection cannot reach Chromium and would only duplicate/warn.
+    kwargs["identity"] = None
+    kwargs["prepared_auth_context"] = prepared_auth_context
+    result = kali_exec(cmd, tool_name="browser", destinations=destinations, **kwargs)
     emit_result(result)

@@ -544,7 +544,15 @@ def test_hygiene_flags_leaks_without_mutating_body(tmp_path, monkeypatch, capsys
             "return_code": 0,
         }
     }
-    fake = _FakeClient(_finding(details=_complete_details(), evidence_ref=abs_evidence), links=links, command_runs=command_runs)
+    # The slug / engagement-path / internal-UUID hygiene checks scan only the
+    # PASTEABLE body (above the second `---`), so exercise a real leak by authoring
+    # them INTO the copy-paste Evidence section — where flagging is genuinely
+    # correct. cases.db stays only in the linked command run (below the divider) to
+    # prove that one check still scans the whole document.
+    details = _complete_details(
+        evidence=f"Reproduced; artifact saved to {abs_evidence} under internal agent {_UUID}.",
+    )
+    fake = _FakeClient(_finding(details=details, evidence_ref=abs_evidence), links=links, command_runs=command_runs)
     _install(monkeypatch, tmp_path, fake)
     args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
     export_submission.run(args)
@@ -585,6 +593,101 @@ def test_target_uuid_in_poc_reaches_output_verbatim(tmp_path, monkeypatch, capsy
     assert _TARGET_UUID in body
     # A target-app UUID is not an internal id, so it is never flagged.
     assert all(_TARGET_UUID not in w for w in _context(tmp_path)["hygiene_warnings"])
+
+
+def test_slug_in_operator_details_only_does_not_warn(tmp_path, monkeypatch, capsys):
+    """A slug that appears ONLY in the never-paste OPERATOR DETAILS reference (here,
+    the investigation notes) is not a leak — the operator never pastes it — so the
+    slug hygiene check (pasteable body only) must stay silent."""
+    finding = _finding(details=_complete_details())
+    finding["notes"] = "Tracked as VA-047 in the work queue; see the linked run for repro."
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    # The slug is present below the second divider (in the notes reference)...
+    details = body[body.index("## OPERATOR DETAILS"):]
+    assert "VA-047" in details
+    # ...but never in the pasteable body, and NO slug warning fires.
+    assert "VA-047" not in body[: body.index("## OPERATOR DETAILS")]
+    warnings = _context(tmp_path)["hygiene_warnings"]
+    assert not any("finding slug" in w for w in warnings)
+
+
+def test_slug_in_pasteable_body_still_warns(tmp_path, monkeypatch, capsys):
+    """A slug that leaks into the copy-paste body (here, the summary) is a real leak
+    and must still be flagged."""
+    finding = _finding(details=_complete_details())
+    finding["summary"] = "Finding VA-047: an authenticated member can read another member's order."
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    assert "VA-047" in body[: body.index("## OPERATOR DETAILS")]  # leaked above the paste line
+    warnings = _context(tmp_path)["hygiene_warnings"]
+    assert any("finding slug" in w and "VA-047" in w for w in warnings)
+
+
+# -- steps: no double-numbering of pre-numbered items -------------------------
+
+def test_pre_numbered_steps_are_not_double_numbered(tmp_path, monkeypatch, capsys):
+    """An authored step that already starts with '1. ' / '2) ' must not render as
+    '1. 1. …' — the leading enumerator is stripped before the renderer prepends its
+    own counter."""
+    details = _complete_details(
+        steps_to_reproduce=[
+            "1. Log in as member A",
+            "2) GET /orders/1001 (member B's order)",
+            "Observe member B's data in the response",  # unnumbered: left as-is
+        ]
+    )
+    fake = _FakeClient(_finding(details=details))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    steps = body[body.index("### Steps to Reproduce"):body.index("### Evidence")]
+    # No doubled counters.
+    assert "1. 1." not in steps
+    assert "2. 2)" not in steps
+    # The author's own enumerator is gone; the renderer's counter is authoritative.
+    assert "1. Log in as member A" in steps
+    assert "2. GET /orders/1001 (member B's order)" in steps
+    assert "3. Observe member B's data in the response" in steps
+
+
+# -- title word-count hygiene warning (advisory, not a hard gate) -------------
+
+@pytest.mark.parametrize(
+    "title, expect_warn",
+    [
+        # 15 words -> warns.
+        ("This finding demonstrates a very long run on submission title that clearly exceeds the limit", True),
+        # 10 words -> no warning.
+        ("Short concise title that stays under the required word limit", False),
+    ],
+)
+def test_title_word_count_warns_but_does_not_gate(tmp_path, monkeypatch, capsys, title, expect_warn):
+    finding = _finding(details=_complete_details())
+    finding["title"] = title
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    # A complete finding: final mode must still WRITE (the title warning never gates).
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    assert _submission_path(tmp_path).exists()  # never blocked by the title warning
+    warnings = _context(tmp_path)["hygiene_warnings"]
+    assert any("max 12" in w for w in warnings) is expect_warn
 
 
 # -- overwrite guard ----------------------------------------------------------
@@ -630,3 +733,92 @@ def test_json_summary_shape(tmp_path, monkeypatch, capsys):
     assert out["linked_command_runs"] == 0  # no linked runs on this finding
     assert out["artifact_registered"] is True
     assert out["hygiene_warnings"] == []  # clean finding: no internal-id leaks
+
+
+# -- A2: operational-header overlay (rendered FROM finding fields) ------------
+
+def _write_scope(engagement_dir, required_headers):
+    """Minimal scope.json so rate_caps_for_dir surfaces the Deconfliction header."""
+    (engagement_dir / "scope.json").write_text(
+        json.dumps({"hosts": ["app.example.com"], "required_headers": required_headers}),
+        encoding="utf-8",
+    )
+
+
+def test_a2_operational_header_renders_from_fields(tmp_path, monkeypatch, capsys):
+    """The Asset/POC/Run/Pass if/Deconfliction overlay is emitted in the copy-paste
+    header (above the first `---`), each line sourced from a finding field so a
+    re-render reproduces it — not hand-applied text a re-render would wipe."""
+    _write_scope(tmp_path, {"X-Bug-Bounty": "vigiloss"})
+    finding = _finding(
+        evidence_ref="scans/va-003-poc.sh",
+        details=_complete_details(
+            run="bash scans/va-003-poc.sh",
+            pass_if="HTTP 200 returns another member's order record",
+        ),
+    )
+    finding["canonical_location"] = "https://app.example.com/api/orders/1001"
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    header, sep, _sections = body.partition("\n---\n")
+    assert sep == "\n---\n"
+    # All five operational lines render, and all sit in the pasteable header block.
+    assert "**Asset:** https://app.example.com/api/orders/1001" in header
+    assert "**POC:** scans/va-003-poc.sh" in header
+    assert "**Run:** bash scans/va-003-poc.sh" in header
+    assert "**Pass if:** HTTP 200 returns another member's order record" in header
+    assert "**Deconfliction:** X-Bug-Bounty: vigiloss" in header
+    # Still the platform copy-paste layout — the overlay sits after CVSS, not before Title.
+    assert body.startswith("**Title:**")
+
+
+def test_a2_operational_header_survives_overwrite(tmp_path, monkeypatch, capsys):
+    """The overlay is rebuilt from fields on `--overwrite`, so re-rendering never
+    wipes it (the A2 defect being fixed)."""
+    _write_scope(tmp_path, {"X-Bug-Bounty": "vigiloss"})
+    finding = _finding(
+        evidence_ref="scans/va-003-poc.sh",
+        details=_complete_details(run="bash scans/va-003-poc.sh", pass_if="HTTP 200 leak"),
+    )
+    finding["canonical_location"] = "https://app.example.com/api/orders/1001"
+    _install(monkeypatch, tmp_path, _FakeClient(finding))
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    _install(monkeypatch, tmp_path, _FakeClient(finding))
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd", "--overwrite"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    header = _submission_path(tmp_path).read_text().partition("\n---\n")[0]
+    for line in (
+        "**Asset:** https://app.example.com/api/orders/1001",
+        "**POC:** scans/va-003-poc.sh",
+        "**Run:** bash scans/va-003-poc.sh",
+        "**Pass if:** HTTP 200 leak",
+        "**Deconfliction:** X-Bug-Bounty: vigiloss",
+    ):
+        assert line in header
+
+
+def test_a2_operational_lines_omitted_without_backing_data(tmp_path, monkeypatch, capsys):
+    """No scope.json (no attribution header) and no run/pass_if → those lines are
+    omitted entirely; the Asset line (from canonical_location) still renders."""
+    finding = _finding(details=_complete_details())  # no run/pass_if, no scope.json written
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["export-submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    header = _submission_path(tmp_path).read_text().partition("\n---\n")[0]
+    assert "**Run:**" not in header
+    assert "**Pass if:**" not in header
+    assert "**Deconfliction:**" not in header
+    assert "**Asset:** /orders/1001" in header  # canonical_location is present

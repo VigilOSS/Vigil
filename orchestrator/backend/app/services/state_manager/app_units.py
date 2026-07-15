@@ -1006,6 +1006,10 @@ def _recompute_unit_links(
         "UPDATE assessment_probe_runs SET application_unit_id = NULL WHERE engagement_id = ?",
         (engagement_id,),
     )
+    connection.execute(
+        "UPDATE assessment_work_items SET application_unit_id = NULL WHERE engagement_id = ?",
+        (engagement_id,),
+    )
 
     cov = _fetch_all(
         connection,
@@ -1021,6 +1025,32 @@ def _recompute_unit_links(
             connection.execute(
                 "UPDATE assessment_coverage_items SET application_unit_id = ? WHERE id = ?",
                 (unit_id_by_key[key], row["id"]),
+            )
+
+    work_items = _fetch_all(
+        connection,
+        "SELECT id, request_variant_id, coverage_item_id FROM assessment_work_items "
+        "WHERE engagement_id = ?",
+        (engagement_id,),
+    )
+    coverage_unit_by_id = {
+        int(row["id"]): row.get("application_unit_id")
+        for row in _fetch_all(
+            connection,
+            "SELECT id, application_unit_id FROM assessment_coverage_items WHERE engagement_id = ?",
+            (engagement_id,),
+        )
+    }
+    for row in work_items:
+        unit_id = coverage_unit_by_id.get(int(row["coverage_item_id"])) if row.get("coverage_item_id") else None
+        if unit_id is None and row.get("request_variant_id") is not None:
+            key = prefix_for_variant.get(int(row["request_variant_id"]))
+            if key:
+                unit_id = unit_id_by_key.get(key)
+        if unit_id is not None:
+            connection.execute(
+                "UPDATE assessment_work_items SET application_unit_id = ? WHERE id = ?",
+                (unit_id, row["id"]),
             )
 
     probes = _fetch_all(

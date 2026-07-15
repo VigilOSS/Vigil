@@ -8,6 +8,7 @@ injection, ``auth-status``) reads the same store through the backend.
 from __future__ import annotations
 
 import http.client
+import importlib.util
 import json
 import os
 import re
@@ -17,13 +18,59 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, Callable
+from urllib.parse import urlencode, urlparse
 
-from .paths import resolve_orchestrator_base_url
+from .paths import resolve_install_root, resolve_orchestrator_base_url
 
 DEFAULT_IDENTITY = "default"
+
+
+@lru_cache(maxsize=1)
+def _load_liveness_classifier() -> Callable[
+    [int | None, str | None, dict[str, Any] | None], tuple[str, str]
+]:
+    """Load the assess-owned classifier from imports or the installed agent tree."""
+    try:
+        from assess.lib.auth_liveness import classify_liveness  # type: ignore[import-not-found]
+    except ModuleNotFoundError as import_error:
+        candidates = (
+            resolve_install_root() / "agent" / "scripts" / "assess" / "lib" / "auth_liveness.py",
+            Path(__file__).resolve().parents[2]
+            / "agent"
+            / "scripts"
+            / "assess"
+            / "lib"
+            / "auth_liveness.py",
+        )
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            spec = importlib.util.spec_from_file_location(
+                "_vigil_shared_auth_liveness", candidate
+            )
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            classifier = getattr(module, "classify_liveness", None)
+            if callable(classifier):
+                return classifier
+        raise ModuleNotFoundError(
+            "Vigil auth liveness classifier is missing from the installed agent tree"
+        ) from import_error
+    return classify_liveness
+
+
+def _classify_liveness(
+    status: int | None,
+    haystack: str | None,
+    liveness: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """Delegate to the assess runtime's single liveness classifier."""
+    return _load_liveness_classifier()(status, haystack, liveness)
 
 # HTTP verbs that mutate server state and therefore need a CSRF double-submit
 # header. Duplicated (not imported) from ``assess.lib.kali._STATE_CHANGING_METHODS``
@@ -120,6 +167,29 @@ def read_auth(engagement_dir: Path) -> dict[str, object]:
     return result if isinstance(result, dict) else {"identities": {}, "active_identity": DEFAULT_IDENTITY}
 
 
+def env_preflight(keys: list[str]) -> list[dict[str, object]]:
+    """Report environment credential prerequisites without exposing values."""
+    return [
+        {
+            "name": str(key),
+            "present": bool(os.environ.get(str(key))),
+            "source": "environment" if os.environ.get(str(key)) else "missing",
+        }
+        for key in keys
+    ]
+
+
+def set_alias(
+    engagement_dir: Path, alias: str, principal_id: str, scope_key: str = ""
+) -> dict[str, Any]:
+    return _api(
+        engagement_dir,
+        "PUT",
+        f"/aliases/{alias}",
+        {"principal_id": principal_id, "scope_key": scope_key},
+    )
+
+
 def _active_material(engagement_dir: Path) -> dict[str, Any]:
     resolved = _api(engagement_dir, "GET", "/resolve")
     material = resolved.get("material") if isinstance(resolved, dict) else None
@@ -170,7 +240,11 @@ def clear_auth(
 
 
 def import_auth(
-    engagement_dir: Path, source: str | None, identity: str = DEFAULT_IDENTITY
+    engagement_dir: Path,
+    source: str | None,
+    identity: str = DEFAULT_IDENTITY,
+    *,
+    mfa_factor: str = "",
 ) -> None:
     """Import identity material (cookies/headers/tokens) from a file or stdin.
 
@@ -213,6 +287,8 @@ def import_auth(
         return
     incoming.setdefault("mode", "manual")
     incoming.setdefault("use_for_requests", True)
+    if mfa_factor:
+        incoming["mfa_factor"] = mfa_factor
     incoming["updated_at"] = now
     incoming["make_active"] = True
     _api(engagement_dir, "PUT", f"/{identity}", incoming)
@@ -351,69 +427,6 @@ def export_curl_args(
     return " ".join(parts)
 
 
-def _classify_liveness(
-    status: int | None,
-    haystack: str | None,
-    liveness: dict[str, Any] | None,
-) -> tuple[str, str]:
-    """Deterministic, operator-configured session-liveness classifier.
-
-    There is exactly ONE way to decide liveness: an operator-declared signature in
-    ``material['liveness'] = {expect_status, authed_marker, dead_marker}`` (each key
-    optional), matched against ``haystack`` — the probe response's status line +
-    headers (INCLUDING ``Location``) + body text. This mirrors how a DAST scanner
-    (InsightAppSec / Burp) validates a session with logged-in / logged-out markers;
-    NO auth/login location is auto-detected. Precedence (first match wins):
-
-      1. no response captured (transport error)         -> unknown
-      2. no liveness signature configured               -> unknown (names the shape to set)
-      3. dead_marker set AND present in haystack         -> dead
-      4. authed_marker set AND absent from haystack      -> dead
-      5. expect_status set AND status != expect_status   -> dead
-      6. otherwise                                       -> live
-
-    Marker matching is case-sensitive substring against the combined haystack.
-    Returns ``(verdict, reason)`` where ``reason`` names the rule that fired. Pure
-    function: unit-tested without a network, and kept in lockstep with its mirror
-    (``vigil_cli.auth`` <-> ``assess.commands.auth_status``) — the two must classify
-    identical inputs identically.
-    """
-    if status is None:
-        return "unknown", "no response captured (transport error)"
-
-    cfg = liveness if isinstance(liveness, dict) else {}
-    raw_expect = cfg.get("expect_status")
-    expect_status = raw_expect if isinstance(raw_expect, int) and not isinstance(raw_expect, bool) else None
-    raw_authed = cfg.get("authed_marker")
-    authed_marker = raw_authed if isinstance(raw_authed, str) and raw_authed else None
-    raw_dead = cfg.get("dead_marker")
-    dead_marker = raw_dead if isinstance(raw_dead, str) and raw_dead else None
-
-    if expect_status is None and authed_marker is None and dead_marker is None:
-        return (
-            "unknown",
-            "no liveness signature configured; set "
-            "material.liveness = {expect_status, authed_marker, dead_marker}",
-        )
-
-    hay = haystack or ""
-    if dead_marker is not None and dead_marker in hay:
-        return "dead", f"dead_marker {dead_marker!r} present"
-    if authed_marker is not None and authed_marker not in hay:
-        return "dead", f"authed_marker {authed_marker!r} absent"
-    if expect_status is not None and status != expect_status:
-        return "dead", f"status {status} != expect {expect_status}"
-
-    confirmations: list[str] = []
-    if authed_marker is not None:
-        confirmations.append("authed_marker present")
-    if dead_marker is not None:
-        confirmations.append("dead_marker absent")
-    if expect_status is not None:
-        confirmations.append(f"status {status}")
-    return "live", ", ".join(confirmations)
-
-
 def _build_liveness_haystack(
     status: int,
     reason: str,
@@ -505,6 +518,7 @@ def probe_liveness(
     identity: str | None = None,
     *,
     timeout: int = 15,
+    scope_key: str = "",
 ) -> dict[str, Any]:
     """Send a lightweight authed GET with the active identity's material and
     classify session liveness against the identity's operator-configured
@@ -516,11 +530,25 @@ def probe_liveness(
     ``{"liveness", "reason", "http_status", "error"}``; any transport error yields
     ``liveness="unknown"`` with a populated ``error`` (never a false verdict).
     """
-    material = (
-        _active_material(engagement_dir)
-        if identity is None
-        else _api(engagement_dir, "GET", f"/{identity}")
-    )
+    resolved_name: str | None = None
+    if identity is None:
+        material = _active_material(engagement_dir)
+    else:
+        query = urlencode({"identity": identity, "scope": scope_key})
+        resolved = _api(engagement_dir, "GET", f"/resolve?{query}")
+        raw_material = resolved.get("material") if isinstance(resolved, dict) else None
+        material = raw_material if isinstance(raw_material, dict) else {}
+        resolved_identity = resolved.get("identity_name") if isinstance(resolved, dict) else None
+        resolved_name = str(resolved_identity) if resolved_identity else None
+    if not isinstance(material, dict) or not material:
+        requested = f"identity {identity!r}" if identity else "active identity"
+        return {
+            "liveness": "unknown",
+            "reason": f"{requested} did not resolve to credential material",
+            "http_status": None,
+            "error": f"missing {requested}",
+            "identity_name": resolved_name,
+        }
     liveness_cfg = material.get("liveness") if isinstance(material, dict) else None
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -529,6 +557,7 @@ def probe_liveness(
             "reason": "invalid probe URL",
             "http_status": None,
             "error": f"invalid probe URL {url!r} (expected an absolute http(s) URL)",
+            "identity_name": resolved_name,
         }
     headers = _authed_request_headers(engagement_dir, material, parsed.hostname)
     conn_cls = (
@@ -554,6 +583,7 @@ def probe_liveness(
             "reason": f"probe request failed: {exc}",
             "http_status": None,
             "error": f"probe request failed: {exc}",
+            "identity_name": resolved_name,
         }
     finally:
         conn.close()
@@ -564,6 +594,7 @@ def probe_liveness(
         "reason": reason,
         "http_status": status,
         "error": None,
+        "identity_name": resolved_name,
     }
 
 
@@ -572,6 +603,11 @@ def persist_liveness(
     identity: str,
     verdict: str,
     probed_at: str | None = None,
+    *,
+    scope_key: str = "",
+    ttl_seconds: int = 900,
+    source: str = "auth-status",
+    reason: str = "",
 ) -> dict[str, Any]:
     """Persist an LLM/operator-owned per-session liveness verdict (WS4).
 
@@ -586,7 +622,14 @@ def persist_liveness(
         probed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     result = _api(
         engagement_dir, "POST", f"/{identity}/liveness",
-        {"verdict": verdict, "probed_at": probed_at},
+        {
+            "verdict": verdict,
+            "probed_at": probed_at,
+            "scope_key": scope_key,
+            "ttl_seconds": ttl_seconds,
+            "source": source,
+            "reason": reason,
+        },
     )
     return result if isinstance(result, dict) else {}
 
@@ -683,7 +726,12 @@ def _resolve_caps(
             continue  # anchor-less junk row — no declared session-anchor cookie
         if any(v.strip().lower() == "deleted" for v in present.values()):
             continue  # captured logout -> skip
-        anchor_key = tuple(sorted(present.items()))
+        principal_id = str(info.get("principal_id") or "").strip()
+        anchor_key = (
+            (("principal_id", principal_id),)
+            if principal_id
+            else tuple(sorted(present.items()))
+        )
         rows.append((str(info.get("updated_at") or ""), str(name), anchor_key))
     # Newest ``updated_at`` first; name is a deterministic tie-break.
     rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
@@ -733,30 +781,22 @@ def _classify_probe(
     parsed: dict[str, Any],
     raw: str,
     liveness_cfg: dict[str, Any] | None,
-) -> tuple[bool, str]:
-    """Decide LIVE vs DEAD for one probe from its parsed blob.
+) -> tuple[str, str]:
+    """Return the shared ``live|dead|unknown`` verdict for one probe blob.
 
     Precedence:
       1. a RESPONSE-side teardown (``<anchor>=deleted`` Set-Cookie) is a hard DEAD
          override — the server is killing the session no matter the status code;
-      2. else, when the identity declares a ``material.liveness`` signature, defer to
-         the shared ``_classify_liveness`` classifier (kept in lockstep with
-         ``assess.commands.auth_status``);
-      3. else the reference default: HTTP 200 with no ``sessionExpired`` marker.
-
-    Returns ``(is_live, reason)``.
+      2. every other result goes through the same typed classifier used by
+         ``auth status --probe`` and identity resolution. No target-specific
+         signature means unknown, never a guessed live/dead verdict.
     """
     if parsed.get("deleted"):
-        return False, "response set <anchor>=deleted (server logout teardown)"
+        return "dead", "response set <anchor>=deleted (server logout teardown)"
     status = parsed.get("status")
     status_int = status if isinstance(status, int) else None
-    if isinstance(liveness_cfg, dict) and liveness_cfg:
-        verdict, reason = _classify_liveness(status_int, raw or "", liveness_cfg)
-        return verdict == "live", f"{verdict}: {reason}"
-    expired = "sessionExpired" in (raw or "")
-    if status_int == 200 and not expired:
-        return True, "HTTP 200, no sessionExpired marker"
-    return False, f"{parsed.get('status_line', '?')}, sessionExpired={expired}"
+    verdict, reason = _classify_liveness(status_int, raw or "", liveness_cfg)
+    return verdict, f"{verdict}: {reason}"
 
 
 def _vigil_assess_argv(
@@ -820,6 +860,9 @@ def _keepalive_cycle(
     probe_url: str,
     emit,
     iteration: int,
+    *,
+    scope_key: str,
+    ttl_seconds: int,
 ) -> None:
     """One keepalive cycle: (re-)resolve caps, probe each, tee a verdict line.
 
@@ -844,12 +887,26 @@ def _keepalive_cycle(
         liveness_cfg = material.get("liveness")
         raw = _keepalive_probe(engagement_dir, cap, probe_url)
         parsed = _parse_probe_blob(raw, anchor_cookies=anchor_cookies)
-        live, reason = _classify_probe(
+        verdict, reason = _classify_probe(
             parsed, raw, liveness_cfg if isinstance(liveness_cfg, dict) else None
         )
+        try:
+            persist_liveness(
+                engagement_dir,
+                cap,
+                verdict,
+                scope_key=scope_key,
+                ttl_seconds=ttl_seconds,
+                source="auth-keepalive",
+                reason=reason,
+            )
+        except (OSError, RuntimeError, SystemExit) as exc:
+            emit(
+                f"{_ka_ts()}  iter={iteration}  {cap}  PERSIST-WARN  {exc}"
+            )
         emit(
             f"{_ka_ts()}  iter={iteration}  {cap}  "
-            f"{'LIVE' if live else 'DEAD'}  {parsed['status_line']}  "
+            f"{verdict.upper()}  {parsed['status_line']}  "
             f"userId={parsed['user_id']}  deleted={parsed['deleted']}  ({reason})"
         )
         time.sleep(1)  # <=2 req/s deconfliction pacing between caps
@@ -936,6 +993,8 @@ def keepalive(
     probe_url: str | None = None,
     log_path: str | Path | None = None,
     detach: bool = False,
+    scope_key: str = "",
+    liveness_ttl: int = 900,
 ) -> None:
     """Keep long-lived (enterprise SSO / reverse-proxy) sessions live across a long
     engagement.
@@ -958,6 +1017,20 @@ def keepalive(
             "keepalive requires --probe-url <url> (an authed endpoint that returns "
             "logged-in content; cookie presence alone is not proof of liveness)"
         )
+    parsed_probe = urlparse(probe_url)
+    resolved_scope = (scope_key or "").strip()
+    if not resolved_scope:
+        port = parsed_probe.port
+        default_port = (
+            (parsed_probe.scheme == "https" and port == 443)
+            or (parsed_probe.scheme == "http" and port == 80)
+        )
+        resolved_scope = (
+            f"{parsed_probe.scheme}://{parsed_probe.hostname}"
+            f"{'' if not port or default_port else f':{port}'}"
+        )
+    if liveness_ttl < 1:
+        raise SystemExit("keepalive --liveness-ttl must be at least 1 second")
     anchors = tuple(a.strip() for a in (anchor_cookies or []) if a and a.strip())
     if not anchors:
         raise SystemExit(
@@ -1011,7 +1084,15 @@ def keepalive(
     try:
         for i in range(1, max(iters, 0) + 1):
             _keepalive_cycle(
-                engagement_dir, explicit, caps, anchors, probe_url, emit, i
+                engagement_dir,
+                explicit,
+                caps,
+                anchors,
+                probe_url,
+                emit,
+                i,
+                scope_key=resolved_scope,
+                ttl_seconds=liveness_ttl,
             )
             if i < iters:
                 time.sleep(interval)

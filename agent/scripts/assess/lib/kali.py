@@ -37,6 +37,7 @@ import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 from . import scope as scope_lib
 from . import vuln_taxonomy
@@ -86,6 +87,7 @@ from .kali_output import (
     _REQUIRED_HEADER_INJECTABLE,
     _REQUIRED_HEADER_SKIP,
     KaliResult,
+    _apply_identity_headers,
     _apply_required_headers,
     _auth_context,
     _engagement_type,
@@ -210,8 +212,6 @@ def _emit_probe_run(
             file=sys.stderr,
         )
 
-
-_IDENTITY_INJECTABLE_TOOLS = frozenset({"curl", "httpx", "nuclei", "ffuf", "sqlmap", "katana"})
 
 # HTTP verbs that mutate server state. A CSRF double-submit token is only
 # meaningful on these — a GET/HEAD is read-only and never needs it (and a
@@ -397,6 +397,75 @@ def _identity_bearer_token(material: dict) -> str:
     return ""
 
 
+def _identity_material_replayable(material: dict) -> bool:
+    """Honor the credential store's explicit replay and lifecycle controls."""
+    if material.get("use_for_requests") is False:
+        return False
+    state = str(material.get("state") or "").strip().lower()
+    return not state or state == "available"
+
+
+def prepare_browser_identity_material(
+    engagement_dir: str | Path,
+    identity_name: str | None,
+    target_url: str,
+    *,
+    scope_key: str = "",
+    external_state_applied: bool = False,
+) -> tuple[str, dict[str, object]]:
+    """Resolve one identity into Playwright-ready browser material.
+
+    The returned auth context stays ``anonymous`` unless at least one header,
+    cookie, or explicitly loaded storage-state artifact can actually be handed
+    to the browser. Credential records never supply Playwright storage state.
+    """
+    empty: dict[str, object] = {
+        "headers": {},
+        "cookies": [],
+        "storage_state": None,
+    }
+    if not identity_name:
+        return "anonymous", empty
+    resolved_name, material = (
+        resolve_identity(engagement_dir, identity_name, scope_key=scope_key)
+        if scope_key
+        else resolve_identity(engagement_dir, identity_name)
+    )
+    if not isinstance(material, dict) or not material:
+        return "anonymous", empty
+    if not _identity_material_replayable(material):
+        return "anonymous", empty
+    try:
+        host = (urlsplit(target_url).hostname or "").lower()
+    except ValueError:
+        host = ""
+    headers = {
+        str(name): str(value)
+        for name, value in (material.get("headers") or {}).items()
+        if str(name).strip()
+    } if isinstance(material.get("headers"), dict) else {}
+    token = _identity_bearer_token(material)
+    if token and not any(name.lower() == "authorization" for name in headers):
+        headers["Authorization"] = f"Bearer {token}"
+    cookie_map = host_cookies_for(material, host)
+    if not cookie_map and not host_cookie_hosts(material):
+        raw_cookies = material.get("cookies")
+        if isinstance(raw_cookies, dict):
+            cookie_map = {str(name): str(value) for name, value in raw_cookies.items()}
+    cookies = [
+        {"name": name, "value": value, "domain": host, "path": "/"}
+        for name, value in cookie_map.items()
+        if host
+    ]
+    prepared: dict[str, object] = {
+        "headers": headers,
+        "cookies": cookies,
+        "storage_state": None,
+    }
+    applied = bool(headers or cookies or external_state_applied)
+    return (resolved_name or identity_name, prepared) if applied else ("anonymous", prepared)
+
+
 def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> bool:
     """Inject a named identity's auth headers/cookies into an HTTP command argv so
     the request actually runs AS that identity.
@@ -409,8 +478,7 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
     """
     if not isinstance(material, dict):
         return False
-    exe = os.path.basename(str(cmd[0])).lower() if cmd else ""
-    if exe not in _IDENTITY_INJECTABLE_TOOLS:
+    if not _identity_material_replayable(material):
         return False
     request_host = kali_resolve.target_host_port(tool_name, cmd)[0]
     state_changing = _request_is_state_changing(cmd)
@@ -437,9 +505,7 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
         )
     if not pairs:
         return False
-    for name, value in pairs:
-        cmd.extend(["-H", f"{name}: {value}"])
-    return True
+    return _apply_identity_headers(cmd, tool_name, dict(pairs)) == "injected"
 
 
 def _nuclei_stages_disable_callbacks(cmd: list[str], *, depth: int = 0) -> bool:
@@ -508,7 +574,9 @@ def prepare_execution_command(
     tool_name: str,
     engagement_dir: Path,
     identity: str | None = None,
+    identity_scope: str = "",
     nuclei_oob_explicit: bool = False,
+    prepared_auth_context: str | None = None,
 ) -> tuple[str, str]:
     """Apply shared identity, attribution, and OOB preparation for sync/jobs.
 
@@ -516,24 +584,8 @@ def prepare_execution_command(
     surfaced, but must refuse before audit/spawn when the second value is set.
     """
     _apply_nuclei_oob_safety(cmd, explicit_oob=nuclei_oob_explicit)
-    auth_context = "anonymous"
-    if identity is not None:
-        identity_name, material = resolve_identity(engagement_dir, identity)
-        if not material:
-            print(
-                f"warning: --identity '{identity}' not found in the credential store "
-                "or temporarily unavailable; auth material was NOT applied.",
-                file=sys.stderr,
-            )
-        elif _apply_identity_material(cmd, tool_name, material):
-            auth_context = identity_name or auth_context
-        else:
-            print(
-                f"warning: --identity '{identity}': auth material was NOT applied "
-                f"to tool '{tool_name}'. Leaving auth_context anonymous.",
-                file=sys.stderr,
-            )
-
+    prepared = str(prepared_auth_context or "").strip()
+    auth_context = prepared if prepared and prepared != "anonymous" else "anonymous"
     required = _required_headers(engagement_dir)
     if required:
         status = _apply_required_headers(cmd, tool_name, required)
@@ -543,6 +595,26 @@ def prepare_execution_command(
                 f"injected into tool '{tool_name}'.",
                 file=sys.stderr,
             )
+    if identity is not None:
+        identity_name, material = (
+            resolve_identity(engagement_dir, identity, scope_key=identity_scope)
+            if identity_scope
+            else resolve_identity(engagement_dir, identity)
+        )
+        if not material:
+            raise scope_lib.ScopePolicyError(
+                f"requested identity '{identity}' was not found or is unavailable; "
+                "refusing to run anonymously"
+            )
+        elif _apply_identity_material(cmd, tool_name, material):
+            auth_context = identity_name or auth_context
+        else:
+            raise scope_lib.ScopePolicyError(
+                f"requested identity '{identity}' could not be applied to tool "
+                f"'{tool_name}'; refusing to run anonymously"
+            )
+
+    if required:
         gap = required_header_attribution_gap(
             cmd, tool_name, required, _in_scope_allow_entries(engagement_dir)
         )
@@ -660,9 +732,11 @@ def kali_exec(
     config: Config | None = None,
     tool_name: str | None = None,
     identity: str | None = None,
+    identity_scope: str = "",
     rate_override_reason: str = "",
     destinations: tuple[scope_lib.ExecutionDestination, ...] = (),
     nuclei_oob_explicit: bool = False,
+    prepared_auth_context: str | None = None,
 ) -> KaliResult:
     """Run `cmd` inside the runtime container with full audit recording.
 
@@ -738,7 +812,9 @@ def kali_exec(
             tool_name=derived_tool_name,
             engagement_dir=eng_dir,
             identity=identity,
+            identity_scope=identity_scope,
             nuclei_oob_explicit=nuclei_oob_explicit,
+            prepared_auth_context=prepared_auth_context,
         )
         execution_policy = scope_lib.enforce_execution_policy(
             cmd,

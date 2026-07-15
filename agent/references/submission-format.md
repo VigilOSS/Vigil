@@ -20,7 +20,7 @@ three targets; each finding is a standalone submission.
 | HackerOne | `agent/skills/report-generation/templates/hackerone.md` | CWE weakness | `agent/references/reporting/hackerone-weaknesses.md` (leaf table in `hackerone-weaknesses.tsv`) |
 | Direct (company / vendor) | `agent/skills/report-generation/templates/direct.md` | none (VRT / H1 fields dropped) | n/a |
 
-For a vendor/CERT disclosure *email* rather than a platform submission, use `agent/references/disclosure-email-format.md` instead.
+For a vendor/CERT disclosure *email* rather than a platform submission, use `agent/references/disclosure-email-format.md` instead. For a REPLY to a program/company on an already-submitted finding (a Bugcrowd comment, a HackerOne activity reply, a direct follow-up), use `agent/references/reply-format.md` and `vigil assess export-reply`/`record-reply` instead — a reply is not a resubmission and does not follow the structure below.
 
 ## Finding is the source of truth
 
@@ -78,6 +78,16 @@ The first `---` separator exists so the operator can select the entire body bloc
 it is an attachment the operator adds in the platform form (see "PoC block"); the renderer emits no
 PoC line into the body, and a hand-inserted one is wiped on the next `--overwrite`.
 
+The operational header (`Asset` / `POC` / `Run` / `Pass if` / `Deconfliction`, below) is likewise
+rendered FROM the finding, not hand-typed, so a re-render/`--overwrite` reproduces it instead of
+wiping an operator's hand-applied overlay. Sourcing: **Asset** ← finding `canonical_location`;
+**POC** ← PoC refs (`poc_code` / staged `poc.<ext>` filenames — same field the "PoC block" below
+describes); **Run** ← `details.run`; **Pass if** ← `details.pass_if`; **Deconfliction** ← the
+engagement's required attribution header (`scope.json:required_headers`) — this is the header value
+itself (e.g. `X-HackerOne: <id>`), distinct from the 3-line researcher/IP/window Deconfliction block
+in "Section budgets" below. Omit any line with no backing data — an empty field renders as nothing,
+not a placeholder.
+
 ```
 **Title:** [Bug Class] in [exact component] allows [attacker role] to [impact]
 
@@ -86,6 +96,16 @@ PoC line into the body, and a hand-inserted one is wiped on the next `--overwrit
 **Severity:** [P1-P4]
 
 **CVSS:** CVSS:3.1/[vector] ([score])
+
+**Asset:** [finding canonical_location]
+
+**POC:** [poc_code / staged poc filename(s)]
+
+**Run:** [details.run]
+
+**Pass if:** [details.pass_if]
+
+**Deconfliction:** [required attribution header, e.g. X-HackerOne, if the program requires one]
 
 ---
 
@@ -102,14 +122,18 @@ proof and linked command runs plus a targeted `vigil assess list-command-runs --
 <finding's url/param/header/uri>` for reproducing runs the linked set missed. Annotate the critical
 lines with <-- proof markers.
 Truncated to only the lines that matter. No full tool dumps.
-Real customer PII must be redacted — see "PII redaction" below.
+Genuine third-party PII must be partial-masked; self-owned/synthetic data is shown in full — see "PII redaction" below.
 This is stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
 
 ### Attack Scenario
-[2-3 sentences. Concrete attacker persona + action + outcome. No theory.]
+[2-3 sentences. Realistic adversary class + the access they start with + the action, ending at the
+moment of compromise. Stops there — no scope counts or blast-radius quantification (those are Impact).
+No theory.]
 
 ### Impact
-[1-2 sentences. Proven impact only. Quantify by shape/count without exposing raw PII.]
+[1-2 sentences. The consequence + how far it reaches (blast radius), quantified by shape/count without
+exposing raw PII. Never re-describes the actor or the reproduction steps — this is the severity/CVSS
+justification, not a retelling of the scenario.]
 
 ### Remediation
 [1-3 items. Primary fix first. One defense-in-depth item at most. No "validate the fix" step.]
@@ -123,6 +147,43 @@ internal-identifier hygiene warnings to strip, the structured proof (`poc_*` / `
 mask and author Evidence from, and every linked command run. The pasteable body is everything from
 `### Summary` down to this second `---`.]
 ```
+
+## Steps to Reproduce vs Evidence — keep them non-overlapping
+
+These also read as near-duplicates when written loosely — the easy failure mode is retyping the same
+request twice, once as a step and once inside Evidence — so give each section a distinct job:
+
+- **Steps to Reproduce** is the bare action script: what was sent, in what order, one action per
+  step, no output. A triager replays it verbatim to reproduce the bug themselves.
+- **Evidence** is the annotated proof pulled from those exact actions: the response bytes that show
+  the result, truncated to the lines that matter and marked with `<-- proof`. A triager who never
+  runs anything still sees the outcome here.
+
+When a step's request and Evidence's request are identical, don't retype it — reference the step
+("the response to step 3's request") and show only the response/outcome that step produced. Evidence
+exists to carry the *result*, not to restate the *action*; the action already lives in Steps to
+Reproduce. Cutting that overlap keeps every sentence load-bearing (reporting.md Rule 15) and avoids
+re-proving the same fact twice (reporting.md Rule 21).
+
+## Attack Scenario vs Impact — keep them non-overlapping
+
+These two sections read as near-duplicates when written loosely, but they answer different questions
+and defend against different triager objections, so each must carry load the other doesn't:
+
+- **Attack Scenario** is the *plausibility* argument — a realistic adversary class, the access they
+  start with, and the action, ending at the moment of compromise. It answers "who realistically
+  reaches this, and how does it play out?" (the exploitability / privileges-required side a triager
+  weighs). It never quantifies scope.
+- **Impact** is the *severity* argument — the consequence and how far it reaches (blast radius),
+  quantified by shape/count. It answers "so what, and how bad?" (the CVSS impact metrics). It never
+  re-describes the actor or the reproduction steps.
+
+Attack Scenario is optional — drop it when Steps to Reproduce plus Impact already make reachability
+obvious, and include it only when a triager might doubt *who can realistically reach this*. Impact is
+mandatory. When both are present, the scope / "how many" sentence lives ONLY in Impact: a scenario
+that ends "…pulls every other tenant's data in one pass" has leaked Impact's job into itself, and an
+Impact that opens "any authenticated tenant reads…" has pulled the actor back out of the scenario.
+Cutting that overlap is also what keeps every sentence load-bearing (reporting.md Rule 15).
 
 ## PoC block
 
@@ -232,6 +293,7 @@ These are hard ceilings. A section that exceeds its budget needs to be cut, not 
 | Title | 12 words, single clause |
 | Summary | 4 sentences |
 | Steps to Reproduce | One sentence per step, no narrative between steps |
+| Evidence | 5-15 lines per request/response pair; annotate the proof line, don't retype a request already shown in Steps to Reproduce |
 | Attack Scenario | 3 sentences |
 | Impact | 2 sentences |
 | Remediation | 3 items |
@@ -251,12 +313,16 @@ All writing rules from `agent/rules/reporting.md` apply (banned language, active
 
 ### PII redaction
 
-A bug bounty submission creates a second copy of the evidence on the platform's infrastructure. Pasting real customer PII exposes those customers a second time without their consent. GDPR/CCPA exposure is non-trivial for the target organization even if the platform is "trusted". Redact before submitting.
+**Precedence gate — decide this before masking anything:**
+- Self-owned or synthetic — your own test tenant/account, a seeded demo, data in an org you control? **Show it in full.** Do not mask self-owned or synthetic test data; masking it buys zero privacy and destroys the proof.
+- Genuine third-party customer PII? **Partial-mask only**, at the character level (`v****@real-domain.com`) — never substitute a generic placeholder (`example.org`, `respondent@example.org`); a placeholder proves nothing and fails blind triage. The identifying structure must survive: distinct IDs, timestamps, real domains, the actual output line.
 
-- **Never paste raw customer PII** into the submission body, evidence blocks, or screenshots. This covers: full email addresses, phone numbers, case/account/order numbers tied to real users, full names, government IDs, SSNs, addresses, DOBs, payment details, session tokens belonging to real users.
-- **Partial masking** is acceptable when shape alone is not convincing: `j***@example.com`, `+1-555-***-4421`, `CASE-12******`. Show enough structure to prove the data is real, not enough to re-identify the customer.
-- **Prefer synthetic data.** If the target has a staging tenant, test accounts, or a seed/demo dataset, reproduce the finding against those and use the synthetic PII directly. A clean PoC against a test account beats a redacted PoC against a real account.
-- **Internal report vs external submission.** The internal `report.md` may include unredacted evidence under the engagement's authorized scope. External bug bounty submissions must be redacted, because the platform is a third party and the customers whose data is leaked are not parties to the engagement.
+A bug bounty submission creates a second copy of the evidence on the platform's infrastructure. Pasting genuine third-party customer PII exposes those customers a second time without their consent. GDPR/CCPA exposure is non-trivial for the target organization even if the platform is "trusted". Partial-mask third-party PII before submitting; self-owned and synthetic data needs no redaction.
+
+- **Never paste unmasked genuine third-party PII** into the submission body, evidence blocks, or screenshots. This covers: full email addresses, phone numbers, case/account/order numbers tied to real (non-test) users, full names, government IDs, SSNs, addresses, DOBs, payment details, session tokens belonging to real users.
+- **Partial masking**, character-level, is the only acceptable treatment for third-party PII: `j***@example.com`, `+1-555-***-4421`, `CASE-12******`. Show enough structure to prove the data is real, not enough to re-identify the customer.
+- **Prefer synthetic data.** If the target has a staging tenant, test accounts, or a seed/demo dataset, reproduce the finding against those and show the synthetic PII in full — a clean PoC against a test account beats a masked PoC against a real one.
+- **Internal report vs external submission.** The internal `report.md` may include unredacted evidence under the engagement's authorized scope. External bug bounty submissions must partial-mask genuine third-party PII only — self-owned and synthetic data is shown in full in both.
 
 ### No internal identifiers
 
@@ -295,7 +361,7 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 
 ### Structure & mandatory fields
 
-- [ ] **[both]** `Title:` is a single line, ≤12 words, one clause, follows the title formula (`[bug class] in [exact component] allows [attacker role] to [impact]`); no markdown/backticks, no finding-IDs, no parenthetical product aliases, and no severity label inside the title (reporting.md Rules 8, 16)
+- [ ] **[both]** `Title:` is a single line, ≤12 words, one clause, follows the title formula (`[bug class] in [exact component] allows [attacker role] to [impact]`); no markdown/backticks, no finding-IDs, no parenthetical product aliases, and no severity label inside the title — count the words before checking this box; over 12 fails this row outright, no exceptions (reporting.md Rules 8, 16)
 - [ ] **[submission]** Platform taxonomy field is populated with a specific path — Bugcrowd `VRT:` (most specific leaf) or HackerOne `Weakness:` CWE; never blank, "TBD", or "N/A"; omitted only for `direct`
 - [ ] **[both]** `Severity:` and CVSS vector match the proved impact — if write operations were rejected by application-layer validation with nothing mutated, `I` is not `H` (reporting.md Rules 3, 20)
 - [ ] **[submission]** First `---` separator is present so the operator can paste `Title:`/`VRT:`/`Severity:` plus the body in one block; a second `---` closes the body with `## OPERATOR DETAILS — NOT FOR SUBMISSION` beneath it (never pasted)
@@ -311,18 +377,23 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 ### Proof & evidence
 
 - [ ] **[both]** Evidence is authored, annotated proof — not a raw tool dump; each request/response is truncated to the 5-15 lines that prove the finding, with the critical line bolded or `<-- proof`-annotated so a reviewer finds it in seconds (reporting.md Rule 13)
+- [ ] **[submission]** Evidence does not retype a request Steps to Reproduce already shows — it references the step and carries only the response/outcome ("Steps to Reproduce vs Evidence" above; reporting.md Rule 21)
+- [ ] **[both]** Title and summary claim no reach, read, or impact beyond what the Evidence block literally shows — read them once as a blind triager would before publish, pre-empting the blind-triage lens rather than waiting for it to catch overclaim
+- [ ] **[both]** A reachable-but-not-fully-exploited finding separates a Demonstrated CVSS (what the proof shows) from a Potential CVSS (the further reach a defender should still fix); the potential vector never appears in the title or summary
 - [ ] **[submission]** PoC form matches the reproduction: inline-only → no attachment; a script → staged `poc.<ext>` with the correct extension, its run command, and a one-line pass criterion; multi-file → every file staged and attached
 - [ ] **[submission]** The attached PoC is agent-independent by inspection (de-harness rules above) and its clean-environment reproduction was established at exploit time — the report-writer does not re-run it here
 - [ ] **[submission]** The PoC script is minimal — no line that does not contribute to the decisive observable; a reviewer unfamiliar with the finding could read it end to end in under a minute
 - [ ] **[submission]** No ANSI colors, banner/box-drawing output, or `hdr()`/`pass()`/`fail()`-style status-helper functions in the PoC script
 - [ ] **[submission]** No docstring-style header block restating the vulnerability class, CWE, or Summary at the top of the PoC script
 - [ ] **[submission]** No code in the PoC inspects, unsets, or branches on agent-identifying environment variables (`CLAUDECODE`, `CURSOR_AGENT`, `GEMINI_CLI`, `CODEX_SANDBOX`, `COPILOT_*`, or equivalent), and nothing references the harness/agent that produced it (reporting.md Rule 20)
+- [ ] **[submission]** If the program requires a deconfliction/attribution header (e.g. `X-HackerOne`), every attached PoC script sends it UNCONDITIONALLY on every request — not behind an env var, flag, or conditional — so the documented `**Run:**` command cannot violate program ROE
 - [ ] **[submission]** The submission is one script by default; a second file exists only if the exploit requires a second running component, never to hold instructions or narrative
 - [ ] **[submission]** Safety framing ("offline", "FAKE token", "localhost-only") appears once, in the setup, kept separate from any sentence explaining the vulnerability's mechanism (reporting.md Rule 20)
+- [ ] **[submission]** If evidence, PoC, or claimed severity changed after the finding's last recorded blind-triage verdict, that verdict is STALE — re-run blind triage (`agent/skills/blind-triage/SKILL.md` Pass 2) before publish; do not ship on an outdated `Accept`
 
 ### PII & internal identifiers
 
-- [ ] **[submission]** Evidence contains no raw customer PII (emails, phone numbers, case/account/SSN values, real names, real session tokens); exposure is proved by shape and count, with partial masking where shape alone is unconvincing. (The internal `report.md` may keep unredacted evidence under the engagement's authorized scope — this row is submission-only)
+- [ ] **[submission]** Self-owned/synthetic data (own test tenant/account, seeded demo, data in an org you control) is shown in full, unmasked; genuine third-party PII (emails, phone numbers, case/account/SSN values, real names, real session tokens) is partial-masked at the character level with structure intact (distinct IDs, timestamps, real domains) — never a generic placeholder. (The internal `report.md` may keep unredacted evidence under the engagement's authorized scope — this row is submission-only)
 - [ ] **[both]** No internal identifiers anywhere in the body — finding slugs (`VA-003`), engagement keys/paths (`$ENGAGEMENT_DIR`, `$DIR/`), backend URLs, tool/command run IDs, `vigil assess` breadcrumbs, `cases.db` references, or "also available at…" alternate-reproducer pointers (reporting.md Rule 17)
 
 ### Human voice / AI-tell elimination
@@ -343,6 +414,9 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[submission]** No em-dash appears more than once per paragraph; replace surplus em-dashes with a period, comma, or parentheses (reporting.md Rule 20)
 - [ ] **[submission]** Contractions appear where natural (doesn't, it's, I've, won't) — the prose is not uniformly formal (reporting.md Rule 20)
 - [ ] **[submission]** At least one sentence carries a first-person observation or hunch ("I traced the failure to…") — not uniform third-person narration. External submissions only; the internal `report.md` stays impersonal (reporting.md Rule 20)
+- [ ] **[both]** No load-bearing fact (the actor's access level, the auth-bypass claim, a specific field value) is stated or proven more than once across Summary, a step preamble, Attack Scenario, and Evidence — each fact has exactly one home, and every other mention references it instead of re-asserting it (reporting.md Rule 21)
+- [ ] **[submission]** Actions the operator personally performed are narrated in first person ("I submitted…", "I filed…"), not third-person/passive ("a human filed…", "it was observed…") (reporting.md Rule 20)
+- [ ] **[submission]** A genuine gap or unresolved edge case, if one exists, is named plainly in the operator's own voice rather than omitted or hedged into a fully-solved matrix — and stays accurate about what still holds (reporting.md Rule 20)
 
 ## Examples
 

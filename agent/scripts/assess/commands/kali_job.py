@@ -103,6 +103,12 @@ def register(subparsers) -> None:
         default=None,
         help="Named engagement identity whose material is injected before the job starts.",
     )
+    start.add_argument(
+        "--identity-scope",
+        dest="identity_scope",
+        default="",
+        help="Logical liveness scope used to resolve a scoped identity alias.",
+    )
     start.add_argument("--container-name", dest="container_name", default=default_runtime_container())
     start.add_argument(
         "--parent-command-run-id",
@@ -208,6 +214,8 @@ def _run_start(args) -> None:
             tool_name=derived_tool_name,
             engagement_dir=engagement_dir,
             identity=getattr(args, "identity", None),
+            identity_scope=getattr(args, "identity_scope", "") or "",
+            prepared_auth_context=getattr(args, "prepared_auth_context", None),
         )
         if attribution_gap:
             raise scope_lib.ScopePolicyError(attribution_gap)

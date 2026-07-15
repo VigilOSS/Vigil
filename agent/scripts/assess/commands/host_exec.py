@@ -25,6 +25,7 @@ from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib import scope as scope_lib
 from assess.lib import host_processes
+from assess.lib.kali import prepare_execution_command
 from assess.lib.rate_leases import aggregate_rate_reservation, target_rate_lease
 
 
@@ -159,6 +160,17 @@ def register(subparsers) -> None:
             "id at audit time; a bad ref WARNs and records the run unlinked."
         ),
     )
+    p.add_argument(
+        "--identity",
+        default=None,
+        help="Named credential identity to inject into supported HTTP tools.",
+    )
+    p.add_argument(
+        "--identity-scope",
+        dest="identity_scope",
+        default="",
+        help="Logical liveness scope used to resolve a scoped identity alias.",
+    )
     p.set_defaults(func=run)
 
 
@@ -231,6 +243,8 @@ def _merge_from_json(args: argparse.Namespace, doc: dict) -> None:
         "rate_override_reason": "rate_override_reason",
         "finding": "finding",
         "finding_id": "finding",
+        "identity": "identity",
+        "identity_scope": "identity_scope",
     }
     for json_key, attr in field_map.items():
         if json_key in doc and doc[json_key] is not None:
@@ -512,7 +526,17 @@ def run(args) -> None:
     started_at = _utcnow_iso()
     started_monotonic = time.monotonic()
 
+    auth_context = "anonymous"
     try:
+        auth_context, attribution_gap = prepare_execution_command(
+            argv,
+            tool_name=args.tool.strip(),
+            engagement_dir=Path(cfg.engagement_dir),
+            identity=getattr(args, "identity", None),
+            identity_scope=getattr(args, "identity_scope", "") or "",
+        )
+        if attribution_gap:
+            raise scope_lib.ScopePolicyError(attribution_gap)
         execution_policy = scope_lib.enforce_execution_policy(
             argv,
             tool_name=args.tool.strip(),
@@ -557,6 +581,7 @@ def run(args) -> None:
             "timeout_seconds_requested": timeout_seconds,
             "run_uuid": run_uuid,
             "status": "failed",
+            "auth_context": auth_context,
         }
         try:
             with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -600,6 +625,7 @@ def run(args) -> None:
         "timeout_seconds_requested": timeout_seconds,
         "run_uuid": run_uuid,
         "status": "running",
+        "auth_context": auth_context,
     }
 
     record_run_id: int | str = ""

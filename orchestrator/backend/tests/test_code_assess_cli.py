@@ -1387,6 +1387,74 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
     assert excinfo.value.code == 1
 
 
+def test_code_dispatch_fetch_posts_atomic_lane_filters(monkeypatch, tmp_path):
+    module = _load_code_dispatch_module()
+    ids_path = tmp_path / "queue-ids.json"
+    ids_path.write_text(json.dumps([9, 4, 9]), encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "write_json_snapshot",
+        lambda *args, **kwargs: tmp_path / "fetch.json",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(
+        SimpleNamespace(
+            action="fetch",
+            extra=[
+                "5",
+                "lane-agent",
+                "--repo-id",
+                "12",
+                "--classification",
+                "high",
+                "--batch-theme",
+                "auth-boundary",
+                "--ids-file",
+                str(ids_path),
+            ],
+            engagement_dir=tmp_path,
+        )
+    )
+
+    assert captured == {
+        "endpoint": "code/analysis-queue/fetch",
+        "payload": {
+            "limit": 5,
+            "agent_name": "lane-agent",
+            "repo_id": 12,
+            "classification": "high",
+            "batch_theme": "auth-boundary",
+            "item_ids": [4, 9],
+        },
+    }
+
+
 def test_code_dispatch_resolve_triggers_posts_terminal_resolution(monkeypatch, tmp_path):
     module = _load_code_dispatch_module()
 

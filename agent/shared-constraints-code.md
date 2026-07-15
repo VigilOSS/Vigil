@@ -312,8 +312,13 @@ For code findings, put code-specific proof fields under finding `details`: `cwe_
 `agent_name`, and `lease_token`;
 the backend derives `file_id` from that queue item and rejects mismatches when `file_id` is
 supplied as an optional consistency check. Renew long-running claims with
-`vigil assess code-dispatch heartbeat <item-id> <agent-name> <lease-token>`; results and closeouts
-using a reclaimed lease are rejected.
+`vigil assess code-dispatch heartbeat <item-id> <agent-name> <lease-token>` at least twice inside
+the operator's stale-reset window (the standard 10-minute window means heartbeat every 5 minutes
+or less); results and closeouts using a reclaimed lease are rejected.
+For `finding` and `suspicious`, record inline `evidence` or an engagement-owned `evidence_ref` on
+the current same-disposition result before closeout. A `clean` closeout carries non-empty family
+coverage and review notes. These disposition-specific gates preserve evidence-backed queue state
+while allowing proof to live inline or in a durable artifact.
 
 **Report-readiness mandate:** `check-phase-readiness --phase report` blocks the final report if any
 verified finding is missing `cvss_score`, `cvss_vector`, `steps_to_reproduce`,
@@ -363,3 +368,6 @@ CWE coverage claims are cross-referenced against analysis-result rows at queue c
    analysis.
 4. Not-applicable entries (`disposition: "not_applicable"`) are exempt from backing
    requirements.
+5. Use `analysis_effort` in per-file coverage detail as the trustworthy effort projection: it is
+   derived from current nonsuperseded result rows, evidenced rows, distinct function names, and
+   the structural-index function total rather than the submitted effort number alone.

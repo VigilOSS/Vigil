@@ -4,9 +4,12 @@ The operator and specialists used to scan the full contract table (or the
 kali-exec verb menu) just to answer "which command do I run in phase N". This
 command is the commands analogue of `list-skills` / `list-references`: a compact,
 grouped-by-phase index sourced from `assess.lib.contracts` (the CommandContract
-registry + the kali verb table via `contracts.all_command_contracts()`), so it
-never drifts from the real CLI — a new command with a `phase` tag is picked up
-automatically.
+registry via `contracts.all_command_contracts()`), so it never drifts from the
+real CLI — a new command with a `phase` tag is picked up automatically. The
+`kali` dispatcher renders as ONE catalog row (its 27 tool wrappers are NOT
+flattened into the default view — that expansion is what made the surface read
+as "too many commands"); `--kali-only` expands it into the per-tool `kali <verb>`
+rows via `contracts.kali_verb_contracts()`.
 
 Each row points at `vigil assess contract <verb>` for the FULL schema (author-
 supplied fields, helper defaults, allowed fields, examples). This command is
@@ -18,7 +21,8 @@ Filters:
                 `consume-test` is accepted).
   --goal <g>    show only commands tagged with a cross-cutting intent goal
                 (contracts.COMMAND_GOALS); AND-composes with --phase.
-  --kali-only   restrict to `kali <verb>` runtime-tool wrappers.
+  --kali-only   expand the collapsed `kali` row into its per-tool `kali <verb>`
+                runtime-tool wrappers.
   --grep <s>    substring filter on command name or summary.
   --json        emit the structured rows (the downstream contract) instead of
                 the grouped human table.
@@ -43,6 +47,17 @@ _PHASE_CHOICES = (*contracts.CATALOG_PHASES, "consume", "consume_test")
 # `goals` tags are a subset of this). Sourced from contracts so a new goal is
 # auto-covered as a valid filter value.
 _GOAL_CHOICES = contracts.COMMAND_GOALS
+
+
+# The `kali` dispatcher renders as ONE catalog row. Its catalog summary points
+# at the two drill-down paths so the tool wrappers stay discoverable without
+# inflating the default view. The count is derived from the contract registry
+# (KALI_VERBS) so it can never drift. This hint is applied only at the catalog
+# render layer — `vigil assess contract kali` keeps its descriptive summary.
+_KALI_ROOT_HINT = (
+    f"{len(contracts.KALI_VERBS)} Kali tool wrappers — `--kali-only` to list, "
+    "`contract kali <tool>` to expand"
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -101,9 +116,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 def run(args: argparse.Namespace) -> None:
     phase_filter = contracts.canonical_phase(args.phase) if args.phase else None
 
-    rows = _collect_rows()
-    if args.kali_only:
-        rows = [r for r in rows if r["kali"]]
+    rows = _collect_rows(kali_only=args.kali_only)
     if args.grep:
         term = args.grep.lower().strip()
         rows = [r for r in rows if term in f"{r['name']} {r['summary']}".lower()]
@@ -123,20 +136,31 @@ def run(args: argparse.Namespace) -> None:
     _print_grouped(rows, phase_filter=phase_filter)
 
 
-def _collect_rows() -> list[dict]:
-    rows: list[dict] = []
-    for contract in contracts.all_command_contracts():
-        rows.append(
-            {
-                "name": contract.name,
-                "summary": contract.summary,
-                "phases": list(contract.phase),
-                "goals": list(contract.goals),
-                "kali": contract.name.startswith("kali "),
-                "contract": f"vigil assess contract {contract.name}",
-            }
-        )
-    return sorted(rows, key=lambda r: r["name"])
+def _row(contract: contracts.CommandContract) -> dict:
+    # The collapsed `kali` root row shows the drill-down hint (not the contract's
+    # own summary); every other row shows its real summary. `kali` is True for
+    # both the collapsed root and the per-verb rows so JSON consumers can key on it.
+    is_kali_root = contract.name == "kali"
+    return {
+        "name": contract.name,
+        "summary": _KALI_ROOT_HINT if is_kali_root else contract.summary,
+        "phases": list(contract.phase),
+        "goals": list(contract.goals),
+        "kali": is_kali_root or contract.name.startswith("kali "),
+        "contract": f"vigil assess contract {contract.name}",
+    }
+
+
+def _collect_rows(*, kali_only: bool = False) -> list[dict]:
+    # Default catalog renders `kali` as ONE dispatcher row; --kali-only expands
+    # it into the individual `kali <verb>` tool wrappers. Both sources come from
+    # the contract registry so the catalog never drifts from the real CLI.
+    source = (
+        contracts.kali_verb_contracts()
+        if kali_only
+        else contracts.all_command_contracts()
+    )
+    return sorted((_row(contract) for contract in source), key=lambda r: r["name"])
 
 
 def _print_grouped(rows: list[dict], *, phase_filter: str | None) -> None:

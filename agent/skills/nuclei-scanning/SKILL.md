@@ -395,12 +395,13 @@ testing.
   before the first sweep, or give the first sweep a generous `--timeout`. This is a
   one-time, per-runtime cost.
 - **OOB infra must be up before blind-class testing.** Templates that rely on
-  out-of-band callbacks (blind-class probes via `-interactsh-url`) produce false
-  negatives if the shared interactsh infrastructure is not ready. Confirm
-  `vigil oob status --json` shows `server=true` and `frpc=true` **before** running
-  any blind/OOB nuclei templates — see `nuclei.md` "OOB Callbacks". When OOB is
-  unavailable, pass `-no-interactsh` and defer blind-class testing rather than
-  recording a clean OOB template as a true negative.
+  out-of-band callbacks produce false negatives if the shared interactsh
+  infrastructure or persisted tenant route is not ready. Confirm `vigil oob status
+  --json` shows `server=true`, `frpc=true`, and `route_matches=true` **before** running
+  blind/OOB templates, then use the typed wrapper's `--oob-mode vigil` — see
+  `nuclei.md` "OOB Callbacks". When OOB is unavailable, keep the default
+  `--oob-mode none` and defer blind-class testing rather than recording a clean OOB
+  template as a true negative.
 - **gf candidate tags are leads, not verdicts.** gf buckets (and any `gf:<bucket>`
   priority signal) are **high false-positive** — treat a gf hit as a *lead* that
   points a template/probe at a candidate, never as a confirmed match. Downstream

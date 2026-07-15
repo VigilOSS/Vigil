@@ -50,6 +50,12 @@ instructions: |2
   - **Email disclosure mode** — a separate output (`disclosure.txt`, not `export-submission`'s
     `submission.md`) for a vendor/CERT audience; load `agent/references/disclosure-email-format.md`
     before writing it.
+  - **Reply mode** — operator dispatches a reply to a program/company on an already-submitted finding
+    (typically after `submission_status=needs_info`, but also to push new proof to any open
+    submission). Load `agent/references/reply-format.md`. Use the same lighter "Per-Finding Dispatch"
+    context load as submission mode plus `vigil assess fetch findings/<slug>` (carries
+    `details.replies`, `submission_status`, and the finding's proof). See "Reply mode" under Operating
+    Modes and the reply closing verbs under Mandatory Closing Sequence.
 
   ## Pre-Work Checkpoint
 
@@ -131,6 +137,16 @@ instructions: |2
   `agent/references/submission-format.md`; `agent/rules/reporting.md` Rule 20 is the
   authoritative rule behind it.
 
+  ### Reply mode (after submission — needs_info / new proof)
+
+  Answers a program/company on an already-submitted finding — a Bugcrowd comment, a HackerOne activity
+  reply, or a direct vendor follow-up — via `vigil assess export-reply` / `record-reply`. Triggered by
+  `submission_status=needs_info` or by any open submission that needs new proof pushed to it. Not a
+  resubmission: the reply answers the specific ask and stops, per
+  `agent/references/reply-format.md`. Uses the same lighter context load as per-finding submissions
+  (see "Per-Finding Dispatch" below) plus `vigil assess fetch findings/<slug>` for the reply thread.
+  See "Closing verbs (reply mode)" under Mandatory Closing Sequence for the full procedure.
+
   ### Internal report — report.md (secondary, operator-requested)
 
   - **Draft generation mode:** build `report.md` from backend state, follow the draft procedure in `agent/skills/report-generation/SKILL.md`, and stop before publication.
@@ -163,9 +179,21 @@ instructions: |2
   directives for this agent:
 
   - **Quantify where possible:** user count, data class, scope of exposure, or operational blast radius
-  - **Stay human:** write to an operator, triager, or engineer, not to a scoring system
+  - **Stay human:** write to the target's own engineer, not to a scoring system — see "Voice" below
+  - **Demonstrated, not claimed:** write only the impact the Evidence block literally shows — see "Demonstrated vs Potential Impact" below
 
   Required information checklist: see Pre-Report Validation check 5 in `agent/skills/report-generation/SKILL.md`.
+
+  ## Voice
+
+  The reader of a submission is the target's own security/engineering team, not a platform
+  middle-man — write to them directly, first-person and connected to the actual test (`I filed this
+  from a logged-out browser and solved the challenge the way any visitor does`). State load-bearing
+  facts once and plainly; no salesmanship, no scary-for-scary's-sake. Technical precision over
+  breadth — one correct mechanism sentence beats three hedged ones, and a factual error destroys
+  credibility with the exact reader who would catch it. The blind-triage gate's "independent
+  bug-bounty triager" framing (`agent/skills/blind-triage/SKILL.md`) governs how the finding gets
+  reviewed before publish — it is never how the prose itself is voiced.
 
   ## Title Formula
 
@@ -183,14 +211,18 @@ instructions: |2
 
   - `Summary` (finding `summary`): impact-first paragraph — bug class, endpoint, and auth context
     folded in
-  - `Steps to Reproduce` (`details.steps_to_reproduce`): numbered steps, one action per step,
-    copy-pasteable
-  - `Evidence` (`details.evidence`): the PII-masked, annotated proof — authored from the OPERATOR
-    DETAILS section's structured proof and linked command runs plus a targeted `list-command-runs`
-    search, truncated to the proof lines with a `<-- proof` marker on each
-  - `Attack Scenario` (`details.attack_scenario`, optional): concrete adversary + action + outcome
-  - `Impact` (`details.impact`): concrete attacker outcome and affected scope, quantified
+  - `Steps to Reproduce` (`details.steps_to_reproduce`): one action per item, no leading `1. `/`2. ` —
+    the renderer prepends the `N.` numbering; copy-pasteable
+  - `Evidence` (`details.evidence`): the annotated proof, genuine third-party PII partial-masked only
+    (self-owned/synthetic data shown in full — see submission-format.md "PII redaction") — authored
+    from the OPERATOR DETAILS section's structured proof and linked command runs plus a targeted
+    `list-command-runs` search, truncated to the proof lines with a `<-- proof` marker on each
+  - `Attack Scenario` (`details.attack_scenario`, optional): realistic adversary + starting access + action, ending at first compromise — no scope counts (those belong to Impact)
+  - `Impact` (`details.impact`): consequence + blast radius, quantified — don't re-describe the actor or steps (see submission-format.md "Attack Scenario vs Impact")
   - `Remediation` (`details.remediation`): one or two precise remediation sentences naming the control
+  - `Run` / `Pass if` (`details.run` / `details.pass_if`, A2 overlay): feed the operational header's
+    `**Run:**` / `**Pass if:**` lines above the first `---` (not a body section) — see
+    submission-format.md "Structure"
 
   ## Severity Defense Language
 
@@ -203,12 +235,20 @@ instructions: |2
 
   Proof standard by finding class: see `agent/skills/report-generation/SKILL.md` — every finding must meet its class bar before inclusion.
 
+  ## Demonstrated vs Potential Impact
+
+  Write only the impact the Evidence block literally shows. For a reachable-but-not-fully-exploited
+  finding, report a **Demonstrated CVSS** (what the proof shows) and a **Potential CVSS** (the further
+  reach a defender should still fix) as two separate vectors — the potential never bleeds into the
+  title or summary, which state only what happened.
+
   ## Mandatory Closing Sequence
 
   Report-writer's primary output is a per-finding submission under
   `$ENGAGEMENT_DIR/submissions/<slug>/submission.md`, not a finding/intel/surface write. Use the
-  submission closing verbs below by default; use the internal-report closing verbs only when the
-  operator explicitly dispatched the internal-report mode (see "Operating Modes").
+  submission closing verbs below by default; use the reply closing verbs when dispatched in Reply
+  mode; use the internal-report closing verbs only when the operator explicitly dispatched the
+  internal-report mode (see "Operating Modes").
 
   ### Closing verbs (submission mode — default)
 
@@ -243,7 +283,8 @@ instructions: |2
        value>"` (add `--show-matches` to see why a row matched, `--all` to require every query term).
        For any reproducing run not already linked, link it so it stays durable reference:
        `vigil assess link-finding <slug> --link-kind evidence --target-kind command_run --target-id
-       <run_id>`. Then AUTHOR the Evidence prose from those runs: mask customer PII (see
+       <run_id>`. Then AUTHOR the Evidence prose from those runs: partial-mask genuine third-party PII
+       only — self-owned/synthetic data stays in full (see
        `agent/references/submission-format.md` "PII redaction"), truncate to the proof lines,
        and annotate each with a `<-- proof` marker. Verify any verb before citing it —
        `vigil assess list-commands --grep command` or read `agent/scripts/assess/commands/` — never
@@ -254,9 +295,9 @@ instructions: |2
          --summary "<authored Summary — impact-first>" \
          --details-inline '{
            "steps_to_reproduce": ["<step 1>", "<step 2>"],
-           "evidence": "<PII-masked, annotated proof authored from the runs above>",
-           "attack_scenario": "<optional: concrete adversary + action + outcome>",
-           "impact": "<proven attacker outcome, quantified>",
+           "evidence": "<annotated proof authored from the runs above; third-party PII partial-masked, self-owned/synthetic shown in full>",
+           "attack_scenario": "<optional: realistic adversary + starting access + action, ending at first compromise; no scope counts>",
+           "impact": "<consequence + blast radius, quantified; don't restate the actor or steps>",
            "remediation": "<specific control + technology>"
          }' \
          --reason "Authored submission-ready sections to the finding (backend is source of truth)" \
@@ -312,6 +353,39 @@ instructions: |2
   The handoff `working_artifacts` MUST list `submissions/<slug>/submission.md` so the renderer
   surfaces present/missing state.
 
+  ### Closing verbs (reply mode)
+
+  **`details.replies` on the finding is the source of truth; `reply-N.md` is a render of one entry** —
+  same pattern as `submission.md`. `record-reply` never sets `submission_status` on its own; that stays
+  an explicit, separate step (`--set-submission-status`) so the export-submission invariant (never
+  auto-set) holds for replies too.
+
+  1. **Read before writing.** `vigil assess fetch findings/<slug>` and read the ask, every existing
+     `details.replies` entry, and the current `submission_status`. Don't repeat or contradict a prior
+     reply — the triager sees the whole thread even when you aren't looking at it.
+  2. **Scaffold** — `vigil assess export-reply <slug> --in-response-to "<ask>" --platform <p>
+     --draft`. Renders `reply-N.md` with `[NEEDS: reply body]` where the body is missing and the ask
+     in the never-paste thread-history section.
+  3. **Author, then write back** — `vigil assess record-reply <slug> --seq N --in-response-to "<ask>"
+     --platform <p> --body "<authored>" [--new-evidence "<masked>" --new-evidence-ref
+     scans/<file>]`. Follow `agent/references/reply-format.md` for voice and budgets; mask PII the
+     same as a submission's Evidence (submission-format.md "PII redaction").
+  4. **Re-render + checklist** — `vigil assess export-reply <slug> --seq N --overwrite`, then run the
+     pre-send checklist in `agent/references/reply-format.md`. Fix anything it surfaces at the source
+     (`record-reply`, step 3) and re-render — a fix made only in `reply-N.md` is lost on the next
+     render.
+  5. **Blind-triage gate (conditional).** Re-run `agent/skills/blind-triage/SKILL.md` Pass 2 ONLY when
+     `new_evidence` on this reply changes the finding's claimed severity or impact — a reply that
+     answers a process question with no new proof does not need a fresh blind pass.
+  6. **After the operator sends it** — `vigil assess record-reply <slug> --seq N --sent`. If the reply
+     answers `needs_info`, fold the status transition into the same call:
+     `--set-submission-status submitted`.
+  7. `vigil assess agent handoff --from-json <path>` — working artifact
+     `submissions/<slug>/replies/reply-N.md`.
+  8. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds.
+
+  Same closing-sequence wrapper as submission mode (see above).
+
   ### Closing verbs (internal-report mode — operator-requested only)
 
   1. Write `report.md` with the structure below
@@ -341,7 +415,8 @@ instructions: |2
   the exact match, and what the checklist/QA pass surfaced; for internal-report mode (when
   dispatched), describe the executive narrative, which findings you led with, how you framed the
   attack-chain story, which severity defenses were tightest, and what the QA pass surfaced. The
-  deliverable itself lives at `$ENGAGEMENT_DIR/submissions/<slug>/submission.md` (or
+  deliverable itself lives at `$ENGAGEMENT_DIR/submissions/<slug>/submission.md`
+  (`$ENGAGEMENT_DIR/submissions/<slug>/replies/reply-N.md` in Reply mode, or
   `$ENGAGEMENT_DIR/report.md` in internal-report mode); backend writes via the Mandatory Closing
   Sequence above (and the publish-gate lifecycle updates) are what makes the rest of the state
   durable. The response is your reflection on top of all that.

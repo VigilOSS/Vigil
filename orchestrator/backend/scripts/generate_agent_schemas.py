@@ -247,6 +247,71 @@ _FINDING_DETAIL_PROPERTIES = {
         "type": "string",
         "description": "Abstract pattern signature copied verbatim from the root finding during variant analysis.",
     },
+    "run": {
+        "type": "string",
+        "description": "One-line reproduction command for the operational overlay (e.g. 'bash scans/va-003-poc.sh'). Surfaced by export-submission as the **Run:** header line so a re-render/--overwrite rebuilds it from the finding instead of wiping the operator's hand-applied overlay.",
+    },
+    "pass_if": {
+        "type": "string",
+        "description": "Success criterion for the operational overlay (e.g. 'HTTP 200 returns another member's order record'). Surfaced by export-submission as the **Pass if:** header line.",
+    },
+    "replies": {
+        "type": "array",
+        "description": "Append-only thread of OUTGOING replies to the program on this submitted finding (Bugcrowd comment / HackerOne activity reply / direct follow-up). Written by `vigil assess record-reply` via read-modify-write and re-rendered by `export-reply`; never hand-edited (a shallow details merge would clobber the array).",
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "seq": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-based, monotonic reply index. export-reply/record-reply pick max(seq)+1 for a new reply.",
+                },
+                "platform": {
+                    "type": "string",
+                    "enum": ["bugcrowd", "hackerone", "direct"],
+                    "description": "Reply channel: bugcrowd (comment), hackerone (activity reply), or direct (reply email).",
+                },
+                "in_response_to": {
+                    "type": "string",
+                    "description": "Verbatim triager ask this reply answers.",
+                },
+                "reply_to_seq": {
+                    "type": ["integer", "null"],
+                    "description": "Optional threading pointer to a prior reply seq (default: the last reply).",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Authored reply prose — exactly what is sent. The ONLY pasteable block in the rendered reply.",
+                },
+                "new_evidence": {
+                    "type": "string",
+                    "description": "Optional NEW proof authored for THIS reply. Third-party PII partial-masked; self-owned/synthetic shown in full (submission-format.md PII rules).",
+                },
+                "new_evidence_ref": {
+                    "type": "string",
+                    "description": "Optional pointer to raw new-evidence (e.g. 'scans/<file>').",
+                },
+                "sent_status": {
+                    "type": "string",
+                    "enum": ["draft", "sent"],
+                    "description": "Operator-marked send state. 'sent' is set only via `record-reply --sent`, never inferred.",
+                },
+                "created_at": {
+                    "type": "string",
+                    "description": "ISO-8601 timestamp stamped when record-reply first created the entry.",
+                },
+                "sent_at": {
+                    "type": ["string", "null"],
+                    "description": "ISO-8601 timestamp stamped when `--sent` marked the reply sent; null while a draft.",
+                },
+                "author": {
+                    "type": "string",
+                    "description": "Agent/operator that authored the reply (e.g. 'report-writer').",
+                },
+            },
+        },
+    },
 }
 
 
@@ -461,12 +526,16 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     "work_item_ids": {
                         "type": "array",
                         "items": {"type": "integer", "minimum": 1},
-                        "description": "Opt-in work-buffer item ids this probe satisfies; marked 'done' atomically with the probe insert so 'remaining work' counts decrement as probes land. Unknown ids are skipped, not an error.",
+                        "description": "OVERRIDE the default work-buffer drain. A covering probe carrying coverage_item_id drains its FK-linked work-items by default; pass explicit ids to narrow the drain to exactly these (marked 'done' atomically with the probe). Unknown ids are skipped, not an error.",
                     },
                     "resolve_surface_id": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "OPT-IN: surface id to advance to 'partially-covered' as part of recording. Omit to leave surface state untouched (recording never auto-mutates it).",
+                        "description": "OVERRIDE the default surface advance. A covering probe carrying request_variant_id advances its FK-linked discovered surface(s) to 'partially-covered' by default; pass a surface id to advance exactly that one instead.",
+                    },
+                    "no_drain": {
+                        "type": "boolean",
+                        "description": "SUPPRESS the default FK-derived cascade (both the work-item drain and the surface advance). The probe is still recorded; the buffer and surfaces are left untouched.",
                     },
                 }
             },
@@ -744,6 +813,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "function_name": "parseurl",
                         "hypothesis": "Attacker-controlled URL scheme length passed to memcpy without bounds check",
                         "evidence": "In parseurl() at line 342, schemelen is derived from user-supplied URL without validation. memcpy(buf, scheme, schemelen) copies attacker-controlled bytes into fixed-size heap buffer.",
+                        "evidence_ref": "tools/analysis-state/code-evidence/parseurl-taint.txt",
                         "disposition": "finding",
                         "confidence": "high",
                         "finding_slug": "CH-001",
@@ -795,6 +865,9 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     },
                     "evidence": {
                         "description": "Evidence supporting the disposition. For findings: code snippet + taint path + guard failure. For clean: brief reasoning why no vulnerability exists.",
+                    },
+                    "evidence_ref": {
+                        "description": "Optional engagement-owned artifact path supporting the disposition. A finding or suspicious closeout requires non-empty inline evidence or this artifact reference on a current result for the active lease.",
                     },
                     "disposition": {
                         "enum": ["finding", "suspicious", "clean", "needs_context"],

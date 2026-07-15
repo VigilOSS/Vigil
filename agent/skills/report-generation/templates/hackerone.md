@@ -51,14 +51,17 @@ row above empty.
 
 ### Evidence
 [AUTHORED from the OPERATOR DETAILS section's structured proof + linked runs + a targeted
-`list-command-runs` search, PII-masked, truncated to the proof lines, annotated with <-- proof
-markers. Stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
+`list-command-runs` search, third-party PII partial-masked only (self-owned/synthetic data shown
+in full — see submission-format.md "PII redaction"), truncated to the proof lines, annotated with
+<-- proof markers. Stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
 
 ### Attack Scenario
-[2-3 sentences. Concrete adversary class + action + outcome.]
+[2-3 sentences. Realistic adversary class + starting access + action, ending at first compromise —
+no scope counts (those go in Impact). Optional: drop it when Steps + Impact already show reachability.]
 
 ### Impact
-[1-2 sentences. Proven impact only, quantified by shape/count.]
+[1-2 sentences. Consequence + blast radius, quantified by shape/count. Don't re-describe the actor or
+the steps — this is the severity justification. See "Attack Scenario vs Impact" in submission-format.md.]
 
 ### Remediation
 [≤3 items, primary fix first, ≤1 defense-in-depth.]

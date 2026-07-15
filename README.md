@@ -546,6 +546,8 @@ vigil auth status <engagement-key>
 vigil auth show <engagement-key>
 vigil auth import <engagement-key> --source cookies-and-headers.json
 vigil auth set-active <engagement-key> --identity user_a
+vigil auth alias <engagement-key> --name member --principal jwt:sub:user-42 --scope billing
+vigil auth env-check <engagement-key> --keys APP_USER APP_PASSWORD
 vigil auth clear <engagement-key>
 ```
 
@@ -554,8 +556,11 @@ liveness verdict, age, and cookie names (never raw values), with the active
 identity marked `*` — via `vigil assess auth list --host <host>
 [--include-dead] [--json]`, and prove a specific identity's liveness before
 trusting it with `vigil assess auth-status --probe --identity <name>
---probe-url <authed-url>` (operator equivalent: `vigil auth status --probe
---identity <name> --probe-url <authed-url>`).
+--probe-url <authed-url> --scope <logical-scope>` (operator equivalent: `vigil
+auth status --probe --identity <name> --probe-url <authed-url> --scope
+<logical-scope>`). Execute through a scoped alias with both `--identity <alias>`
+and `--identity-scope <logical-scope>`; Vigil does not infer logical liveness
+scope from the destination hostname.
 
 ## Optional Tool Activation
 
@@ -618,18 +623,48 @@ vigil oob test
 - **Tunnel setup, OOB callbacks, interactsh, frpc config:** `agent/references/offensive-tactics/frp-tunneling.md`
 - **Shell listeners, pwncat-vl, reverse shell payloads:** `agent/references/offensive-tactics/shell-handling.md`
 
-### OOB is single-tenant by design (post-flight conflict check)
+### Per-tenant OOB routing and upgrade behavior
 
-`vigil oob start` registers proxies on frps with hardcoded server-side resources:
-`remotePort = 53` (UDP), `remotePort = 8443` (TCP), and
-`customDomains = researcher.example`. These are globally unique on frps, so
-only one client at a time can own the OOB profile. The hostname-derived prefix
-(`<container-id>-oob-*`) only avoids proxy *name* collisions; it does not
-namespace the underlying ports/domains.
+A fresh `vigil install` creates `.runtime-data/oob/tenant-routing.json` atomically.
+The record pins a DNS-safe tenant prefix, a tenant subdomain, and a two-port FRP
+block. `vigil oob start`, client metadata, status/doctor, `vigil assess`, and
+Nuclei `--oob-mode vigil` all resolve that record; changing an ambient
+`VIGIL_OOB_DOMAIN` cannot silently redirect a persisted Vigil tenant to an
+external Interactsh service. Set `oob.tenant` before the first install when the
+install-directory name is not the desired tenant label.
+
+Allocation is serialized through `oob-allocations.json` beside the active Vigil
+config. Multi-host deployments must place the config/registry on a shared,
+locked filesystem (or distribute one centrally allocated registry) so every
+host sees the same occupied FRP blocks. `vigil oob routing --format
+all|json|caddy|dns` produces deterministic Caddy, DNS-forwarding, and JSON
+routing inputs from that persisted record; applying them to public DNS/FRP/Caddy
+remains an explicit deployment operation. Vigil does not mutate those external
+services.
+
+The emitted DNS block is a CoreDNS input, not a Route53 record: the public edge
+must accept TCP and UDP 53, select the longest matching tenant zone, and forward
+it to the tenant's private FRP UDP port. A legacy FRP listener already bound to
+public port 53 must be migrated behind that DNS edge before CoreDNS can claim the
+port. The Caddy output includes direct HTTP plus on-demand HTTPS routes for the
+apex, client-id, and real `nonce.client-id` callback depths; its HTTPS block must
+be imported under a Caddy global `on_demand_tls` permission/`ask` policy.
+
+`vigil oob status --json` performs deep DNS and two-label HTTP edge checks, while
+`vigil oob test` requires a registered client, fires the real client-bound host
+shape, rejects redirects, and confirms the interaction reached that client's log.
+These checks intentionally report degraded until the server-side route has been
+registered and applied.
+
+An install upgraded from the old single-tenant release is pinned additively to
+its existing domain and ports (`53`/`8443`). Running tmux sessions and
+`/data/oob/clients/*.session` correlation material are not renamed or restarted.
+Move that install to an allocated tenant route only as a coordinated deployment
+migration after its old clients are drained.
 
 After spawning the `frpc` tmux session, `start_oob` tails
 `/data/oob/frpc.log` for up to ~15s looking for success lines for all three
-rendered proxies (`*-oob-dns`, `*-oob`, and `*-oob-rev`) or `port already
+rendered tenant proxies (`*-oob-dns`, `*-oob`, and `*-oob-rev`) or `port already
 used` / `router config conflict` / `proxy name [...] already exists` from
 frps. If a conflict is reported, the tmux sessions are torn down and the
 command exits with the offending log lines verbatim. The check rides the
@@ -642,7 +677,9 @@ non-fatal hint pointing at `docker exec vigil tail -n 200
 actually saying. Override the wait via the `frpc_ready_timeout` argument to
 `start_oob` (pass `0` to skip the scan entirely; tests do this).
 
-> **TODO** — per-tenant OOB (multi-host concurrency) design is tracked as **R2** in [TODOv2.md](TODOv2.md#readme-extracted-todos-2026-06-02). Once it lands, the post-flight conflict scan above becomes a no-op and can be deleted.
+The post-flight conflict scan remains a final defense against a stale or
+independently allocated registry. On conflict it tears down only the attempted
+tenant sessions and names the persisted domain/port block that must be repaired.
 
 ## Command Reference
 
@@ -663,7 +700,7 @@ actually saying. Override the wait via the `frpc_ready_timeout` argument to
 | `vigil blue ...` | Blue incident-response surface (customers, tenant init, engage, dispatch, contain, closeout, report). |
 | `vigil auth status [--probe --identity <name> --probe-url <url>] \| show \| import \| edit \| clear \| export \| set-active` | Manage engagement credentials in the backend store; `status --probe` proves a specific identity's liveness. |
 | `vigil mitmproxy start \| reload \| routes` | Manage the shared MITM proxy. |
-| `vigil oob start \| status \| client \| test` | Manage shared OOB (frp + interactsh). |
+| `vigil oob start \| status \| routing \| client \| test` | Manage shared OOB (frp + interactsh) and render tenant edge-routing inputs. |
 | `vigil config get \| set` | Read/write persistent CLI config (including OOB/FRP settings). |
 | `vigil backup create \| list \| restore` | Manual orchestrator DB backup operations. |
 

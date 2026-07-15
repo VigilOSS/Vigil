@@ -497,3 +497,173 @@ def test_set_liveness_non_dead_does_not_change_state(client, isolate_settings):
 def test_set_liveness_unknown_identity_returns_none(client, isolate_settings):
     eng = _seed(client, isolate_settings)
     assert db.set_liveness(eng, "cap-nope", "live", "2026-07-03T10:00:00Z") is None
+
+
+def _put_capability(eng: int, name: str, principal: str, *, mfa_factor: str = ""):
+    return creds.upsert_material(
+        eng,
+        name,
+        {
+            "principal_id": principal,
+            "mfa_factor": mfa_factor,
+            "cookies": {"sid": name},
+        },
+    )
+
+
+def test_principal_and_mfa_factor_round_trip(client, isolate_settings):
+    eng = _seed(client, isolate_settings)
+    row = _put_capability(eng, "cap-old", "user-42", mfa_factor="totp")
+    assert row["principal_id"] == "user-42"
+    assert row["mfa_factor"] == "totp"
+
+
+def test_alias_resolves_freshest_live_capability_for_principal_and_scope(client, isolate_settings):
+    eng = _seed(client, isolate_settings)
+    _put_capability(eng, "cap-old", "user-42")
+    _put_capability(eng, "cap-new", "user-42")
+    db.set_credential_alias(eng, "member", "user-42", "billing")
+    now = datetime.now(timezone.utc)
+    db.record_credential_liveness(
+        eng, "cap-old", scope_key="billing", verdict="live",
+        observed_at=(now - timedelta(minutes=2)).isoformat(), ttl_seconds=86400, source="probe",
+    )
+    db.record_credential_liveness(
+        eng, "cap-new", scope_key="billing", verdict="live",
+        observed_at=(now - timedelta(minutes=1)).isoformat(), ttl_seconds=86400, source="keepalive",
+    )
+    name, material = creds.resolve_identity(eng, "member", scope_key="billing")
+    assert name == "cap-new"
+    assert material["principal_id"] == "user-42"
+    assert material["liveness_observations"][0]["source"] == "keepalive"
+
+
+def test_literal_identity_name_beats_alias(client, isolate_settings):
+    eng = _seed(client, isolate_settings)
+    _put_capability(eng, "member", "literal-principal")
+    _put_capability(eng, "cap-aliased", "aliased-principal")
+    db.set_credential_alias(eng, "member", "aliased-principal", "")
+    db.record_credential_liveness(
+        eng, "cap-aliased", scope_key="", verdict="live",
+        observed_at="2026-07-15T11:00:00Z", ttl_seconds=86400, source="probe",
+    )
+    name, material = creds.resolve_identity(eng, "member", scope_key="")
+    assert name == "member"
+    assert material["principal_id"] == "literal-principal"
+
+
+def test_scoped_liveness_ttl_never_crosses_scope_or_uses_expired_live(client, isolate_settings):
+    eng = _seed(client, isolate_settings)
+    _put_capability(eng, "cap-billing", "user-42")
+    db.set_credential_alias(eng, "member", "user-42", "billing")
+    db.record_credential_liveness(
+        eng, "cap-billing", scope_key="reports", verdict="live",
+        observed_at="2026-07-15T11:00:00Z", ttl_seconds=86400, source="probe",
+    )
+    assert creds.resolve_identity(eng, "member", scope_key="billing") == ("member", {})
+    db.record_credential_liveness(
+        eng, "cap-billing", scope_key="billing", verdict="live",
+        observed_at="2000-01-01T00:00:00Z", ttl_seconds=1, source="probe",
+    )
+    assert creds.resolve_identity(eng, "member", scope_key="billing") == ("member", {})
+
+
+def test_alias_and_scoped_liveness_api(client, isolate_settings):
+    _seed(client, isolate_settings)
+    put = client.put(
+        f"/engagements/{KEY}/credentials/cap-member",
+        json={"principal_id": "user-42", "mfa_factor": "webauthn", "cookies": {"sid": "abc"}},
+    )
+    assert put.status_code == 200
+    assert put.json()["mfa_factor"] == "webauthn"
+    alias = client.put(
+        f"/engagements/{KEY}/credentials/aliases/member",
+        json={"principal_id": "user-42", "scope_key": "billing"},
+    )
+    assert alias.status_code == 200
+    live = client.post(
+        f"/engagements/{KEY}/credentials/cap-member/liveness",
+        json={
+            "verdict": "live",
+            "probed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "scope_key": "billing",
+            "ttl_seconds": 300,
+            "source": "auth-status",
+        },
+    )
+    assert live.status_code == 200
+    resolved = client.get(
+        f"/engagements/{KEY}/credentials/resolve",
+        params={"identity": "member", "scope": "billing"},
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["identity_name"] == "cap-member"
+
+
+def test_credential_refresh_preserves_durable_principal_and_mfa(client, isolate_settings):
+    _seed(client, isolate_settings)
+    initial = client.put(
+        f"/engagements/{KEY}/credentials/cap-member",
+        json={
+            "principal_id": "jwt:sub:user-42",
+            "mfa_factor": "webauthn",
+            "cookies": {"sid": "old"},
+        },
+    )
+    assert initial.status_code == 200
+
+    refreshed = client.put(
+        f"/engagements/{KEY}/credentials/cap-member",
+        json={"cookies": {"sid": "refreshed"}},
+    )
+    assert refreshed.status_code == 200
+    assert refreshed.json()["principal_id"] == "jwt:sub:user-42"
+    assert refreshed.json()["mfa_factor"] == "webauthn"
+
+
+def test_older_unscoped_liveness_cannot_overwrite_newer_verdict(client, isolate_settings):
+    _seed(client, isolate_settings)
+    put = client.put(
+        f"/engagements/{KEY}/credentials/cap-member",
+        json={"principal_id": "user-42", "cookies": {"sid": "abc"}},
+    )
+    assert put.status_code == 200
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    newer = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    older = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    live = client.post(
+        f"/engagements/{KEY}/credentials/cap-member/liveness",
+        json={"verdict": "live", "probed_at": newer, "ttl_seconds": 600},
+    )
+    assert live.status_code == 200
+    delayed_dead = client.post(
+        f"/engagements/{KEY}/credentials/cap-member/liveness",
+        json={"verdict": "dead", "probed_at": older, "ttl_seconds": 600},
+    )
+    assert delayed_dead.status_code == 200
+    assert delayed_dead.json()["state"] == "available"
+    unscoped = next(
+        row
+        for row in delayed_dead.json()["liveness_observations"]
+        if row["scope_key"] == ""
+    )
+    assert unscoped["verdict"] == "live"
+    assert unscoped["observed_at"] == newer
+
+
+def test_liveness_timestamps_are_normalized_to_utc(client, isolate_settings):
+    eng = _seed(client, isolate_settings)
+    _put_capability(eng, "cap-member", "user-42")
+    db.record_credential_liveness(
+        eng,
+        "cap-member",
+        scope_key="billing",
+        verdict="live",
+        observed_at="2026-07-15T12:00:00+05:00",
+        ttl_seconds=60,
+        source="probe",
+    )
+    row = db.list_credential_liveness(eng, "cap-member")[0]
+    assert row["observed_at"] == "2026-07-15T07:00:00Z"
+    assert row["expires_at"] == "2026-07-15T07:01:00Z"

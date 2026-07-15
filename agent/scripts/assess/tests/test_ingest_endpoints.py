@@ -3,9 +3,9 @@
 These pin the content-type round-trip: a JSON endpoint line carrying a
 `content_type` must (a) drive the typer at ingest (POST + application/json
 floors to `type='api'`) AND (b) PERSIST that content_type onto the derived
-work item, so a later `classify-work --retype` pass — which re-derives `type`
-from the row's STORED content_type — reproduces the same `api` type instead of
-flipping it back to `unknown`.
+work item, so a later `work-buffer reclassify --retype` pass — which re-derives
+`type` from the row's STORED content_type — reproduces the same `api` type
+instead of flipping it back to `unknown`.
 
 The per-engagement `work_items` table was folded into the orchestrator backend
 (`assessment_work_items`, ADR 0013): `ingest-endpoints` now POSTs each in-scope
@@ -24,8 +24,8 @@ from __future__ import annotations
 import argparse
 import json
 
-from assess.commands import classify_work
 from assess.commands import ingest_endpoints
+from assess.commands.dispatch import work_items as wi
 
 from _fake_client import FakeAssessmentClient
 
@@ -56,7 +56,6 @@ def _retype_ns(engagement_dir: str, **overrides) -> argparse.Namespace:
         reclassify_all=False,
         reclassify_stale=False,
         reclaim_skipped=False,
-        only_unscored=False,
         retype=False,
         retype_all=False,
     )
@@ -109,11 +108,9 @@ def test_ingest_endpoints_persists_content_type_and_survives_retype(
     # content_type. Because the content_type was persisted, classify_type sees
     # `application/json` on a POST and reproduces `api`. Without the fix the
     # stored content_type would be "" and the row would flip api -> unknown.
-    # classify-work reads/writes the SAME backend state, so point it at the same
-    # fake client.
-    monkeypatch.setattr(classify_work, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
-    monkeypatch.setattr(classify_work, "AssessmentClient", lambda *a, **k: fake)
-    classify_work.run(_retype_ns(str(tmp_path), retype=True, retype_all=True))
+    # `work-buffer reclassify` reads/writes the SAME backend state; invoke the
+    # folded-in pass directly against the same fake client.
+    wi._reclassify(fake, _retype_ns(str(tmp_path), retype=True, retype_all=True))
     capsys.readouterr()  # drain the retype summary
 
     after = fake.row_for_url("https://h.example/submit")
@@ -445,6 +442,32 @@ def test_ingest_endpoints_scope_filter_excludes_out_of_scope_hosts(
     # or surface is created for them); only the admitted host did.
     observed_urls = {o.get("url") for o in fake.observations}
     assert observed_urls == {"https://good.example.com/api/v1/users"}
+
+
+def test_ingest_endpoints_global_bypass_admits_outside_and_denied_hosts(
+    tmp_path, monkeypatch, capsys
+):
+    (tmp_path / "scope.json").write_text(
+        json.dumps(
+            {
+                "hosts": ["target.example"],
+                "out_of_scope": ["blocked.example"],
+                "scope_enforcement": "bypass",
+            }
+        ),
+        encoding="utf-8",
+    )
+    urls = ["https://outside.example/a", "https://blocked.example/b"]
+    input_file = tmp_path / "endpoints.jsonl"
+    input_file.write_text("\n".join(urls) + "\n", encoding="utf-8")
+    fake = FakeAssessmentClient()
+    _install(monkeypatch, tmp_path, fake)
+
+    ingest_endpoints.run(_ingest_ns(str(input_file), str(tmp_path)))
+    capsys.readouterr()
+
+    assert {row["url"] for row in fake.observations} == set(urls)
+    assert all(fake.row_for_url(url)[0]["status"] == "pending" for url in urls)
 
 
 def test_ingest_endpoints_over_long_url_skipped_batch_survives(

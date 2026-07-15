@@ -49,10 +49,19 @@ def _load_script_module(name: str, relative_path: str):
 
 
 def _load_classify_module():
-    return _load_script_module(
-        "test_classify_work_module",
-        "agent/scripts/assess/commands/classify_work.py",
-    )
+    """Return the folded-in reclassify implementation.
+
+    ``classify-work`` was merged into ``work-buffer reclassify``; the pass logic
+    lives in ``assess.commands.dispatch.work_items`` (``_reclassify`` /
+    ``_reclassify_retype``). It is a package submodule (relative imports), so it
+    is imported normally rather than loaded as a standalone file.
+    """
+    scripts_root = _scripts_root()
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    from assess.commands.dispatch import work_items
+
+    return work_items
 
 
 def _load_proxy_addon_module():
@@ -180,24 +189,22 @@ def _wi(
 
 
 def _classify_env(rows: list[dict]):
-    """Return ``(module, fake)`` wired so classify_work.run() talks to a fake
-    backend seeded with ``rows``."""
+    """Return ``(module, fake)`` wired so the reclassify pass runs against a fake
+    backend seeded with ``rows``. The ``work-buffer`` wrapper builds the client
+    and hands it to the pass, so the fake is passed to ``_reclassify`` directly."""
     fake = _FakeClassifyClient(rows)
     module = _load_classify_module()
-    module.AssessmentClient = fake
-    module.load_config = lambda _flag=None: SimpleNamespace(
-        base_url="http://x", engagement_key="eng", engagement_dir="/eng"
-    )
     return module, fake
 
 
 def _run_classify(module, fake, capsys, *extra_args):
-    """Invoke the real classify_work.run once; return ``(updates, summary)`` for
-    that run — ``updates`` = the update dicts POSTed this run, ``summary`` = the
-    printed JSON summary."""
+    """Invoke the real `work-buffer reclassify` pass once; return
+    ``(updates, summary)`` — ``updates`` = the update dicts POSTed this run,
+    ``summary`` = the printed JSON summary."""
     extras = list(extra_args)
     fake.last_updates = []
-    module.run(
+    module._reclassify(
+        fake,
         SimpleNamespace(
             engagement_dir="/eng",
             batch=500,
@@ -206,7 +213,7 @@ def _run_classify(module, fake, capsys, *extra_args):
             reclaim_skipped="--reclaim-skipped" in extras,
             retype=False,
             retype_all=False,
-        )
+        ),
     )
     return fake.last_updates, json.loads(capsys.readouterr().out)
 

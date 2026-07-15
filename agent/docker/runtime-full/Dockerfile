@@ -8,7 +8,7 @@ LABEL vigil.install-versions="${INSTALL_VERSION_STAMP}"
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG APT_BASE_PACKAGES="ca-certificates curl jq sqlite3 git ripgrep bind9-dnsutils iputils-ping whois openssl netcat-openbsd procps lsof python3 python3-dev python3-pip python3-aiohttp sudo tini wget rlwrap unzip dtach libxml2-utils pipx strace build-essential"
-ARG APT_TOOL_PACKAGES="subfinder sublist3r testssl.sh golang-go chromium chromium-driver whatweb ffuf gobuster wfuzz dirb sqlmap hydra john hashcat ruby-full proxychains4 openssh-client socat tcpdump tmux nikto massdns nmap amass wafw00f"
+ARG APT_TOOL_PACKAGES="subfinder sublist3r testssl.sh golang-go chromium whatweb ffuf gobuster wfuzz dirb sqlmap hydra john hashcat ruby-full proxychains4 openssh-client socat tcpdump tmux nikto massdns nmap amass wafw00f"
 ARG APT_ANDROID_PACKAGES="apktool jadx adb aapt apksigner default-jre-headless"
 ARG CURL_RETRY_FLAGS="--retry 5 --retry-delay 2 --retry-all-errors"
 ARG PIP_VERSION=26.0.1
@@ -352,16 +352,24 @@ RUN set -eux; \
       jwt_tool --help >/dev/null; \
     fi
 
-# selenium (system python3) — drives the apt-installed chromium + chromium-driver
-# for `vigil assess kali browser`, the headless-render / JS-bot-challenge recovery
-# path. The browser driver runs as the SYSTEM `python3 -c ...` (so it can find
-# /usr/bin/chromium + /usr/bin/chromedriver), so selenium must live in the system
-# interpreter rather than a venv. Kali's system python is PEP-668 externally-
-# managed, hence --break-system-packages.
-ARG SELENIUM_VERSION=4.27.1
+# Playwright drives the apt-installed system Chromium for the audited browser
+# workflow. Keeping the Python client pinned and using the distribution browser
+# avoids an untracked browser download while removing the Selenium/chromedriver
+# compatibility seam. Kali's system Python is PEP-668 externally managed.
+ARG PLAYWRIGHT_VERSION=1.61.0
 RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
-      pip3 install --no-cache-dir --break-system-packages "selenium==${SELENIUM_VERSION}" && \
-      python3 -c "import selenium; print('selenium', selenium.__version__)"; \
+      pip3 install --no-cache-dir --break-system-packages "playwright==${PLAYWRIGHT_VERSION}" && \
+      python3 -c "import playwright.sync_api; print('playwright sync api ready')"; \
+    fi
+
+# poppler-utils (pdftotext) — read reflected/served PDF bodies during content-type
+# and injection analysis. A prior finding mis-read a FlateDecode PDF as inconclusive
+# because only `strings` was available in-container. Standalone late layer so it does
+# not invalidate the heavy tool layers above.
+RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
+      DEBIAN_FRONTEND=noninteractive apt-get update -y && \
+      apt-get install -y poppler-utils && \
+      apt-get clean && rm -rf /var/lib/apt/lists/*; \
     fi
 
 RUN mkdir -p /opt/mcp-tools /data
@@ -371,7 +379,7 @@ RUN chmod +x /usr/local/bin/start-callback
 RUN printf '%s\n' 'export PATH="/opt/Responder:/opt/offsec-venv/bin:/opt/mitmproxy-venv/bin:/opt/pwncat-venv/bin:$PATH"' > /etc/profile.d/vigil-path.sh
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD command -v dtach >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && command -v jsluice >/dev/null && command -v arjun >/dev/null && command -v xmllint >/dev/null && command -v apkeep >/dev/null && command -v apktool >/dev/null && command -v jadx >/dev/null && command -v adb >/dev/null && command -v bundletool >/dev/null && command -v apksigner >/dev/null && command -v aapt >/dev/null && command -v curl_chrome116 >/dev/null && command -v jwt_tool >/dev/null || exit 1
+  CMD command -v dtach >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && command -v jsluice >/dev/null && command -v arjun >/dev/null && command -v xmllint >/dev/null && command -v apkeep >/dev/null && command -v apktool >/dev/null && command -v jadx >/dev/null && command -v adb >/dev/null && command -v bundletool >/dev/null && command -v apksigner >/dev/null && command -v aapt >/dev/null && command -v curl_chrome116 >/dev/null && command -v jwt_tool >/dev/null && command -v pdftotext >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash", "-lc", "mkdir -p /data && exec sleep infinity"]

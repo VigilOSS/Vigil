@@ -1576,7 +1576,8 @@ def ingest_scope_filter(
     """Return ``(allow_entries, deny_entries, active)`` for an ingest-time scope gate.
 
     ``active`` is False — the gate admits every host — when scope.json cannot be
-    loaded or declares no allowlist. This is a deliberate fail-open:
+    loaded, declares no allowlist, or enables the engagement-wide global bypass.
+    The no-scope case is a deliberate fail-open:
     :func:`host_admitted` returns False for ALL hosts against an empty allowlist,
     so activating the gate with no real scope entries would reject the entire
     batch. The ``vigil assess recon`` pipeline scope-filters the resolved host set
@@ -1605,4 +1606,4 @@ def ingest_scope_filter(
             "admitting all hosts (gate inactive).",
         )
         return [], [], False
-    return allow, deny, bool(allow)
+    return allow, deny, bool(allow) and scope_enforcement(scope) != "bypass"

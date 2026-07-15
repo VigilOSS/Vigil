@@ -39,7 +39,13 @@ def _dispatch(payload: dict) -> tuple[list[str], list[str]]:
     return validate_specialist_dispatch_contract(payload)
 
 
-def _dispatch_with_engagement(payload: dict, scope_hosts: list[str]) -> tuple[list[str], list[str]]:
+def _dispatch_with_engagement(
+    payload: dict,
+    scope_hosts: list[str],
+    *,
+    scope_enforcement: str | None = None,
+    out_of_scope: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
     """Run the validator with a synthetic engagement dir + scope.json.
 
     Creates a temp directory with a minimal scope.json so the scope-gate
@@ -53,6 +59,10 @@ def _dispatch_with_engagement(payload: dict, scope_hosts: list[str]) -> tuple[li
         "description": "Eval harness synthetic scope",
         "hosts": scope_hosts,
     }
+    if scope_enforcement is not None:
+        scope_json["scope_enforcement"] = scope_enforcement
+    if out_of_scope is not None:
+        scope_json["out_of_scope"] = out_of_scope
     with tempfile.TemporaryDirectory() as tmpdir:
         scope_path = Path(tmpdir) / "scope.json"
         scope_path.write_text(json.dumps(scope_json), encoding="utf-8")
@@ -280,6 +290,27 @@ def test_scope_gated_role_in_scope_host_passes():
     in_scope_hosts = ["target.example", "api.target.example"]
     errors, warnings = _dispatch_with_engagement(payload, in_scope_hosts)
     assert errors == [], f"Unexpected errors for in-scope host: {errors}"
+
+
+def test_scope_gated_role_global_bypass_allows_outside_and_denied_host():
+    """The durable global bypass applies at specialist admission too.
+
+    A dispatch validator that still applies its private allow/deny gate chokes
+    the operator before the shared execution boundary can record the bypass.
+    """
+    payload = {
+        "role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": ["sqli-testing"],
+        "scope_host": "blocked.example",
+    }
+    errors, _warnings = _dispatch_with_engagement(
+        payload,
+        ["target.example"],
+        scope_enforcement="bypass",
+        out_of_scope=["blocked.example"],
+    )
+    assert errors == []
 
 
 # ---------------------------------------------------------------------------

@@ -211,6 +211,14 @@ class WorkItemPriorityFetchRequest(BaseModel):
     agent: str = Field(default="auto", max_length=128)
 
 
+class WorkItemUnitFetchRequest(BaseModel):
+    unit_id: int | None = Field(default=None, ge=1)
+    path: str = Field(default="", max_length=1024)
+    work_class: str = Field(default="", max_length=64)
+    limit: int | None = Field(default=None, ge=1, le=1000)
+    agent: str = Field(default="auto", max_length=128)
+
+
 class WorkItemIdsRequest(BaseModel):
     ids: list[int] = Field(default_factory=list)
 
@@ -349,16 +357,23 @@ class ProbeRunRecordRequest(BaseModel):
     # Optional attempt→finding linkage. Validated to belong to the engagement
     # (404 otherwise) and COALESCE-backfilled on a re-run of the same probe.
     finding_id: int | None = None
-    # A3: opt-in work-buffer drain. ids of assessment_work_items rows this probe
-    # satisfies — marked ``done`` in the SAME transaction as the probe insert so
-    # "remaining work" bucket counts and recorded probes can never disagree.
-    # Unknown ids are silently skipped (mirrors POST /work-items/done); an empty
-    # list leaves the buffer untouched.
+    # 1b — work-buffer drain OVERRIDE. A covering probe carrying a
+    # ``coverage_item_id`` drains its FK-linked work-items BY DEFAULT; passing an
+    # explicit id list narrows the drain to exactly these ids instead (and fires
+    # regardless of the covering gate). Marked ``done`` in the SAME transaction as
+    # the probe insert so "remaining work" bucket counts and recorded probes can
+    # never disagree. Unknown ids are silently skipped (mirrors POST
+    # /work-items/done); an empty list keeps the default derivation.
     work_item_ids: list[int] = Field(default_factory=list)
-    # A3: opt-in surface advance. When set, the surface is advanced to
-    # ``partially-covered`` via the resolve-surface path. Recording never
-    # auto-mutates surface state — this only fires on an explicit id.
+    # 1b — surface advance OVERRIDE. A covering probe carrying a
+    # ``request_variant_id`` advances its FK-linked (discovered) surface(s) to
+    # ``partially-covered`` BY DEFAULT; passing an explicit surface id advances
+    # exactly that surface instead (and fires regardless of the covering gate).
     resolve_surface_id: int | None = None
+    # 1b — suppress the whole default FK-derived cascade (both the work-item drain
+    # and the surface advance). Recording still writes the probe row; it just
+    # leaves the buffer and surfaces untouched.
+    no_drain: bool = False
 
 
 class CoverageItemRecordRequest(BaseModel):
@@ -658,6 +673,8 @@ class OobProbeRecordRequest(BaseModel):
     probe_kind: str = Field(default="", max_length=64)
     request_hash: str = Field(default="", max_length=128)
     oob_domain: str = Field(default="", max_length=256)
+    client_name: str = Field(min_length=1, max_length=128, pattern=r".*\S.*")
+    client_payload_host: str = Field(min_length=1, max_length=256, pattern=r".*\S.*")
     notes: str = Field(default="", max_length=4096)
     status: Literal["pending", "fired", "confirmed", "expired", "ignored"] = "pending"
 
@@ -678,6 +695,8 @@ class OobInteractionRecordRequest(BaseModel):
     query_type: str = Field(default="", max_length=32)
     raw_request: str = Field(default="", max_length=20000)
     observed_at: str = Field(default="", max_length=64)
+    client_name: str = Field(min_length=1, max_length=128, pattern=r".*\S.*")
+    client_payload_host: str = Field(min_length=1, max_length=256, pattern=r".*\S.*")
 
 
 class AttackChainLinkRequest(BaseModel):
@@ -1831,6 +1850,24 @@ async def fetch_work_items_by_priority_endpoint(
     )
 
 
+@router.post("/work-items/fetch-by-unit")
+async def fetch_work_items_by_unit_endpoint(
+    engagement_key: str, request: WorkItemUnitFetchRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.fetch_work_items_by_unit,
+            engagement.id,
+            unit_id=request.unit_id,
+            path=request.path,
+            work_class=request.work_class,
+            limit=request.limit,
+            agent=request.agent,
+        )
+    )
+
+
 @router.post("/work-items/done")
 async def work_items_done(engagement_key: str, request: WorkItemIdsRequest) -> dict[str, Any]:
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
@@ -2328,6 +2365,8 @@ async def create_oob_probe(engagement_key: str, request: OobProbeRecordRequest) 
             probe_kind=request.probe_kind,
             request_hash=request.request_hash,
             oob_domain=request.oob_domain,
+            client_name=request.client_name,
+            client_payload_host=request.client_payload_host,
             notes=request.notes,
             status_value=request.status,
         )
@@ -2355,6 +2394,8 @@ async def record_oob_interaction(engagement_key: str, request: OobInteractionRec
             query_type=request.query_type,
             raw_request=request.raw_request,
             observed_at=request.observed_at,
+            client_name=request.client_name,
+            client_payload_host=request.client_payload_host,
         )
     )
     if result.get("matched") and result.get("probe") and not result.get("duplicate"):
