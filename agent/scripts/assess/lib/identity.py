@@ -112,7 +112,7 @@ def host_cookie_hosts(material: dict[str, Any]) -> list[str]:
 
 
 def resolve_identity(
-    engagement_dir: str | Path, requested: str | None
+    engagement_dir: str | Path, requested: str | None, *, scope_key: str = ""
 ) -> tuple[str | None, dict[str, Any]]:
     """Resolve a ``--identity`` request against the engagement's credentials.
 
@@ -123,4 +123,8 @@ def resolve_identity(
       * UNKNOWN identity -> ``(requested, {})`` so the caller can warn while the
         requested name is still recorded as the probe's auth_context.
     """
+    if scope_key:
+        return creds_client.resolve_identity(
+            engagement_dir, requested, scope_key=scope_key
+        )
     return creds_client.resolve_identity(engagement_dir, requested)

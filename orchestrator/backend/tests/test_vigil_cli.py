@@ -1920,10 +1920,49 @@ def test_orchestrator_health_wait_fails_closed(monkeypatch: pytest.MonkeyPatch) 
         raise OSError("down")
 
     monkeypatch.setattr(orchestrator_module.urllib.request, "urlopen", fail_urlopen)
+    ticks = iter([0.0, *map(float, range(1, 31))])
+    monkeypatch.setattr(orchestrator_module.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(orchestrator_module.time, "sleep", lambda _: None)
 
     assert orchestrator_module._wait_for_health("127.0.0.1", 18000) is False
     assert attempts == ["http://127.0.0.1:18000/healthz"] * 30
+
+
+def test_orchestrator_health_wait_allows_cold_uv_environment_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vigil_cli import orchestrator as orchestrator_module
+
+    attempts = 0
+    now = 0.0
+
+    class HealthyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    def delayed_urlopen(_url: str, timeout: int):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 31:
+            raise OSError("backend environment is still building")
+        return HealthyResponse()
+
+    def monotonic() -> float:
+        nonlocal now
+        now += 0.1
+        return now
+
+    monkeypatch.setattr(orchestrator_module.urllib.request, "urlopen", delayed_urlopen)
+    monkeypatch.setattr(orchestrator_module.time, "monotonic", monotonic)
+    monkeypatch.setattr(orchestrator_module.time, "sleep", lambda _: None)
+
+    assert orchestrator_module._wait_for_health("127.0.0.1", 18000) is True
+    assert attempts == 32
 
 
 def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2712,7 +2751,9 @@ def test_oob_status_json_reports_effective_domain(
     # (so scripts/agents gate on OOB readiness). The JSON payload is still printed
     # before the exit, which is what this test verifies.
     with pytest.raises(SystemExit):
-        main_module.main(["oob", "status", "--json"])
+        main_module.main(
+            ["--root", str(tmp_path / "install"), "oob", "status", "--json"]
+        )
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["state"] == "stopped"
@@ -3265,6 +3306,214 @@ def test_oob_start_renders_config_and_starts_idempotent_sessions(tmp_path: Path)
     assert "tmux new-session -d -s frpc" in rendered
 
 
+def test_oob_test_fails_when_public_dns_probe_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, test_oob
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(9, "", "connection timed out")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(
+        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-deadbeef"
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+    )
+    with pytest.raises(SystemExit, match="public DNS probe failed"):
+        test_oob(
+            OobOptions(
+                install_root=tmp_path,
+                oob_domain="tenant.oob.example.test",
+            ),
+            runner=runner,
+        )
+
+
+def test_oob_test_reports_bounded_dns_and_http_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, test_oob
+
+    commands: list[str] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        commands.append(command)
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(0, "200", "")
+        if command.startswith("grep "):
+            return DockerResult(
+                0,
+                "[vigil-test-cafebabe.client-id.tenant.oob.example.test] "
+                "Received HTTP interaction\n",
+                "",
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(
+        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-cafebabe"
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+    )
+    test_oob(
+        OobOptions(
+            install_root=tmp_path,
+            oob_domain="tenant.oob.example.test",
+        ),
+        runner=runner,
+    )
+
+    assert capsys.readouterr().out == (
+        "oob test\tok\tdomain=tenant.oob.example.test"
+        "\tmarker=vigil-test-cafebabe\tdns=203.0.113.10\thttp=200\n"
+    )
+    assert len(commands) == 3
+    assert all(
+        "vigil-test-cafebabe.client-id.tenant.oob.example.test" in command
+        for command in commands[:2]
+    )
+    assert "vigil-test-cafebabe" in commands[2]
+    assert all("tail " not in command for command in commands)
+
+
+def test_oob_test_fails_when_public_http_probe_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, test_oob
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(28, "000", "operation timed out")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(
+        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-bad0cafe"
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+    )
+    with pytest.raises(SystemExit, match="public HTTP probe failed"):
+        test_oob(
+            OobOptions(
+                install_root=tmp_path,
+                oob_domain="tenant.oob.example.test",
+            ),
+            runner=runner,
+        )
+
+
+def test_oob_test_fails_when_callback_does_not_reach_client_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, test_oob
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(0, "200", "")
+        if command.startswith("grep "):
+            return DockerResult(1, "", "")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monotonic = iter((0.0, 0.0, 11.0))
+    monkeypatch.setattr("vigil_cli.oob.time.monotonic", lambda: next(monotonic))
+    monkeypatch.setattr("vigil_cli.oob.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-nointeraction"
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+    )
+
+    with pytest.raises(SystemExit, match="callback was not observed"):
+        test_oob(
+            OobOptions(
+                install_root=tmp_path,
+                oob_domain="tenant.oob.example.test",
+            ),
+            runner=runner,
+        )
+
+
+def test_oob_test_rejects_http_redirects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, test_oob
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(0, "308", "")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(
+        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-redirect"
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+    )
+
+    with pytest.raises(SystemExit, match="public HTTP probe failed"):
+        test_oob(
+            OobOptions(
+                install_root=tmp_path,
+                oob_domain="tenant.oob.example.test",
+            ),
+            runner=runner,
+        )
+
+
 def test_oob_start_post_flight_detects_frpc_conflict(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.oob import OobOptions, start_oob
@@ -3447,11 +3696,22 @@ def test_oob_client_start_uses_session_file_for_domain_resume(tmp_path: Path) ->
     from vigil_cli.oob import OobOptions, start_oob_client
 
     commands: list[list[str]] = []
+    runtime_route = json.dumps(
+        {
+            "version": 1,
+            "tenant_prefix": "legacy",
+            "oob_domain": "oob.example.test",
+            "dns_remote_port": 53,
+            "reverse_remote_port": 8443,
+        }
+    )
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         commands.append(argv)
         if argv[:3] == ["docker", "ps", "--format"]:
             return DockerResult(0, "vigil\n", "")
+        if argv[-1].startswith("cat ") and "active-tenant-routing.json" in argv[-1]:
+            return DockerResult(0, runtime_route, "")
         if argv[:3] == ["docker", "exec", "vigil"] and "tmux has-session -t oob-client-demo" in argv[-1] and "tmux new-session" not in argv[-1]:
             return DockerResult(1, "", "")
         return DockerResult(0, "", "")
@@ -3485,7 +3745,13 @@ def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypa
     monkeypatch.setattr(
         up_module,
         "oob_status",
-        lambda *a, **k: {"state": "partial", "server": False, "frpc": True, "clients": ["demo"]},
+        lambda *a, **k: {
+            "state": "partial",
+            "server": False,
+            "frpc": True,
+            "clients": ["demo"],
+            "route_matches": True,
+        },
     )
     monkeypatch.setattr(up_module, "start_oob", lambda *args, **kwargs: calls.append("oob"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
@@ -3924,10 +4190,10 @@ class _FakeWorkBufferClient:
 
 
 def test_resolve_surface_requires_rationale(capsys: pytest.CaptureFixture[str]) -> None:
-    """P1 #2: --rationale is required so the audit trail is never empty."""
+    """P1 #2: --rationale is required so the audit trail is never empty (merged `resolve`)."""
     assess_main = _load_assess_main()
     with pytest.raises(SystemExit):
-        assess_main(["resolve-surface", "1", "--status", "covered"])
+        assess_main(["resolve", "surface", "1", "--status", "covered"])
     err = capsys.readouterr().err
     assert "--rationale" in err
 
@@ -3935,19 +4201,19 @@ def test_resolve_surface_requires_rationale(capsys: pytest.CaptureFixture[str]) 
 def test_resolve_surface_rejects_empty_rationale(capsys: pytest.CaptureFixture[str]) -> None:
     """P1 #2: --rationale='' surfaces an early error before HTTP."""
     assess_main = _load_assess_main()
-    with pytest.raises(SystemExit) as exc:
-        assess_main(["resolve-surface", "1", "--status", "covered", "--rationale", "   "])
-    assert "--rationale must be non-empty" in (str(exc.value) or "")
-
-
-def test_resolve_surface_lowercases_status(capsys: pytest.CaptureFixture[str]) -> None:
-    """P3 #1: --status is case-insensitive and rejected by argparse choices when invalid."""
-    assess_main = _load_assess_main()
-    # Mixed-case input parses to lowercase via type=lambda.
     with pytest.raises(SystemExit):
-        assess_main(["resolve-surface", "1", "--status", "BOGUS", "--rationale", "x"])
+        assess_main(["resolve", "surface", "1", "--status", "covered", "--rationale", "   "])
+    assert "--rationale must be non-empty" in capsys.readouterr().err
+
+
+def test_resolve_surface_rejects_invalid_status(capsys: pytest.CaptureFixture[str]) -> None:
+    """P3 #1: an out-of-vocab --status is rejected in run() with a scoped error + pointer."""
+    assess_main = _load_assess_main()
+    with pytest.raises(SystemExit):
+        assess_main(["resolve", "surface", "1", "--status", "BOGUS", "--rationale", "x"])
     err = capsys.readouterr().err
-    assert "invalid choice" in err.lower() or "invalid choice" in str(err)
+    assert "invalid status" in err
+    assert "See: vigil assess contract resolve" in err
 
 
 def test_resolve_surface_partially_covered_requires_followup_condition(
@@ -3955,10 +4221,11 @@ def test_resolve_surface_partially_covered_requires_followup_condition(
 ) -> None:
     """N7 — `--status partially-covered` without `--followup-condition` exits with a clear error."""
     assess_main = _load_assess_main()
-    with pytest.raises(SystemExit) as exc:
+    with pytest.raises(SystemExit):
         assess_main(
             [
-                "resolve-surface",
+                "resolve",
+                "surface",
                 "1",
                 "--status",
                 "partially-covered",
@@ -3966,7 +4233,7 @@ def test_resolve_surface_partially_covered_requires_followup_condition(
                 "unauth path tested",
             ]
         )
-    message = str(exc.value) or ""
+    message = capsys.readouterr().err
     assert "--followup-condition" in message
     assert "partially-covered" in message
 
@@ -3974,11 +4241,11 @@ def test_resolve_surface_partially_covered_requires_followup_condition(
 def test_resolve_surface_accepts_partially_covered_with_followup_condition(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """N7 — argparse round-trip: `partially-covered` with a follow-up condition parses
-    cleanly and the payload reaches the backend client with `followup_condition`."""
+    """N7 — round-trip: `resolve surface ... partially-covered` with a follow-up
+    condition reaches the backend client with `followup_condition`."""
     module = _load_assess_module(
-        "round3_resolve_surface_module",
-        "agent/scripts/assess/commands/resolve_surface.py",
+        "round3_resolve_module",
+        "agent/scripts/assess/commands/resolve.py",
     )
 
     captured: dict[str, dict] = {}
@@ -4014,7 +4281,8 @@ def test_resolve_surface_accepts_partially_covered_with_followup_condition(
 
     module.run(
         SimpleNamespace(
-            surface_id=42,
+            target_kind="surface",
+            ids=["42"],
             status="partially-covered",
             rationale="unauth path tested",
             source_name="",
@@ -6343,6 +6611,14 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
         "_run_host_process",
         lambda *_args, **_kwargs: (events.append("process") or (0, "ok\n", "", False)),
     )
+    prepared: list[tuple[list[str], str | None]] = []
+    monkeypatch.setattr(
+        module,
+        "prepare_execution_command",
+        lambda argv, **kwargs: (
+            prepared.append((list(argv), kwargs.get("identity"))) or ("member", "")
+        ),
+    )
     (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc_info:
@@ -6361,12 +6637,15 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
                 timeout=30,
                 audit_source="argv",
                 allow_destructive=False,
+                identity="member",
             )
         )
 
     assert exc_info.value.code == 0
     assert posts[0][0] == "command-runs/host-exec"
     assert posts[0][1]["agent_name"] == "investigator"
+    assert posts[0][1]["auth_context"] == "member"
+    assert prepared == [(["echo", "ok"], "member")]
     assert posts[0][1]["status"] == "running"
     assert posts[0][1]["stdout"] == ""
     assert posts[0][1]["stdout_path"].endswith(".out")
@@ -6451,10 +6730,15 @@ def test_host_exec_keeps_registry_for_background_child_after_leader_exits(
     try:
         result = module._run_host_process(
             [
-                "/bin/sh",
+                sys.executable,
                 "-c",
-                'sleep 30 </dev/null >/dev/null 2>&1 & echo "$!" > "$1"',
-                "sh",
+                (
+                    "import subprocess, sys; "
+                    "child = subprocess.Popen([sys.executable, '-c', "
+                    "'import time; time.sleep(30)'], stdin=subprocess.DEVNULL, "
+                    "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                    "open(sys.argv[1], 'w', encoding='ascii').write(str(child.pid))"
+                ),
                 str(child_pid_path),
             ],
             cwd=str(tmp_path),
@@ -10214,14 +10498,14 @@ def test_detect_technique_cage_needs_named_bug_not_bare_recipe() -> None:
 
 
 def test_list_attempts_build_query_emits_route_param_names() -> None:
-    """Regression (blind triage): the `list-attempts` CLI must emit the EXACT
-    query-param names the GET /attempts route accepts (notably --surface ->
-    surface_id, --host -> target_host); a drift here silently returns unfiltered
-    results and no round-trip test would otherwise catch it."""
+    """Regression (blind triage): the `coverage --attempts` CLI (folded-in
+    list-attempts) must emit the EXACT query-param names the GET /attempts route
+    accepts (notably --surface -> surface_id, --host -> target_host); a drift here
+    silently returns unfiltered results and no round-trip test would catch it."""
     from types import SimpleNamespace
     from urllib.parse import parse_qs, urlparse
 
-    from assess.commands.list_attempts import _build_query
+    from assess.commands.coverage import _attempts_query as _build_query
 
     args = SimpleNamespace(
         finding="VA-1", surface="12", host="app.example.com",

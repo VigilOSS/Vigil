@@ -33,7 +33,7 @@ _RESOLVE_CACHE_TTL_SECONDS = 1.0
 # Per-process cache of load_identities() results, keyed by engagement key.
 _cache: dict[str, dict[str, Any]] = {}
 _resolve_cache: dict[
-    tuple[str, str | None],
+    tuple[str, str | None, str],
     tuple[float, tuple[str | None, dict[str, Any]]],
 ] = {}
 _warned: set[str] = set()
@@ -135,19 +135,22 @@ def load_identities(
 
 
 def resolve_identity(
-    engagement_dir: str | Path, requested: str | None
+    engagement_dir: str | Path, requested: str | None, *, scope_key: str = ""
 ) -> tuple[str | None, dict[str, Any]]:
     """Resolve a ``--identity`` request without loading every stored identity."""
     requested = requested.strip() if requested is not None else None
     key = _key_for(engagement_dir)
-    cache_key = (key, requested)
+    cache_key = (key, requested, scope_key)
     now = time.monotonic()
     cached = _resolve_cache.get(cache_key)
     if cached is not None and cached[0] > now:
         return cached[1]
     _resolve_cache.pop(cache_key, None)
     try:
-        query = urlencode({"identity": requested}, quote_via=quote) if requested else ""
+        query_args = {"scope": scope_key} if scope_key else {}
+        if requested:
+            query_args["identity"] = requested
+        query = urlencode(query_args, quote_via=quote)
         data = _client(engagement_dir).get_engagement("credentials/resolve", query=query)
     except (AssessError, OSError) as exc:
         loaded = _cache.get(key)
@@ -205,6 +208,11 @@ def persist_liveness(
     identity_name: str,
     verdict: str,
     probed_at: str | None = None,
+    *,
+    scope_key: str = "",
+    ttl_seconds: int = 900,
+    source: str = "auth-status",
+    reason: str = "",
 ) -> dict[str, Any]:
     """Persist an LLM-owned per-session liveness verdict (WS4).
 
@@ -213,7 +221,14 @@ def persist_liveness(
     unknown->state untouched). Invalidates the per-process cache so a subsequent
     read reflects the new verdict. Returns the updated material.
     """
-    payload = {"verdict": verdict, "probed_at": probed_at}
+    payload = {
+        "verdict": verdict,
+        "probed_at": probed_at,
+        "scope_key": scope_key,
+        "ttl_seconds": ttl_seconds,
+        "source": source,
+        "reason": reason,
+    }
     result = _client(engagement_dir).post_engagement(
         f"credentials/{quote(str(identity_name), safe='')}/liveness", payload
     )

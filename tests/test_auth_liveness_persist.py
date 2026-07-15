@@ -32,7 +32,14 @@ def test_persist_liveness_posts_verdict_to_route(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "_api", fake_api)
 
     result = auth.persist_liveness(eng, "cap-x", "dead", "2026-07-03T12:00:00Z")
-    assert calls == [("POST", "/cap-x/liveness", {"verdict": "dead", "probed_at": "2026-07-03T12:00:00Z"})]
+    assert calls == [("POST", "/cap-x/liveness", {
+        "verdict": "dead",
+        "probed_at": "2026-07-03T12:00:00Z",
+        "scope_key": "",
+        "ttl_seconds": 900,
+        "source": "auth-status",
+        "reason": "",
+    })]
     assert result["liveness_verdict"] == "dead"
 
 
@@ -62,6 +69,7 @@ def _status_args(identity=None):
         identity=identity,
         probe=True,
         probe_url="https://portal.example.com/home",
+        scope="",
     )
 
 
@@ -72,12 +80,16 @@ def _wire_status(monkeypatch, eng, verdict="live"):
     monkeypatch.setattr(
         main_mod.auth_module,
         "probe_liveness",
-        lambda _eng, _url, _identity: {
-            "liveness": verdict, "reason": "stubbed", "http_status": 200, "error": None
+        lambda _eng, _url, _identity, **_kwargs: {
+            "liveness": verdict,
+            "reason": "stubbed",
+            "http_status": 200,
+            "error": None,
+            "identity_name": _identity,
         },
     )
 
-    def fake_persist(_eng, identity, v, probed_at=None):
+    def fake_persist(_eng, identity, v, probed_at=None, **_kwargs):
         persisted.append((identity, v))
         return {"ok": True}
 
@@ -105,3 +117,27 @@ def test_status_probe_active_identity_does_not_persist(tmp_path, monkeypatch, ca
     assert persisted == []  # active-identity probe stays read-only
     assert "persisted=" not in out
     assert "liveness=live" in out
+
+
+def test_status_probe_missing_alias_does_not_persist_to_alias_name(
+    tmp_path, monkeypatch, capsys
+):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    persisted = _wire_status(monkeypatch, eng, verdict="unknown")
+    monkeypatch.setattr(
+        main_mod.auth_module,
+        "probe_liveness",
+        lambda *_args, **_kwargs: {
+            "liveness": "unknown",
+            "reason": "identity alias did not resolve",
+            "http_status": None,
+            "error": "missing identity",
+            "identity_name": None,
+        },
+    )
+
+    main_mod._auth(_status_args(identity="member"), tmp_path)
+
+    assert persisted == []
+    assert "persisted=False" in capsys.readouterr().out

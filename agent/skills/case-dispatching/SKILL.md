@@ -36,9 +36,9 @@ Each iteration:
 3b. Pending >= 2000 → priority-first dispatch:
 
     # Classification ran inline at ingestion, so priority_score / cluster_key
-    # are already populated. Re-run classify-work only if you intentionally
-    # changed _BUCKETS in classify_buckets.py and want to re-apply the new
-    # weights to already-ingested rows.
+    # are already populated. Re-run `work-buffer reclassify` only if you
+    # intentionally changed _BUCKETS in classify_buckets.py and want to
+    # re-apply the new weights to already-ingested rows.
 
     # Review clusters and defer low-signal ones before dispatch:
     vigil assess list-clusters
@@ -171,11 +171,11 @@ Examples that recur in real engagements:
 - Salesforce-managed vendor SaaS hosts when the brief covers the customer's app, not the vendor platform
 
 ```bash
-vigil assess resolve-surface <id> --status not_applicable \
+vigil assess resolve surface <id> --status not_applicable \
   --rationale "Out of scope per program brief: <quote the relevant exclusion>"
 ```
 
-Triage these BEFORE the dispatching pass, not during. A specialist that opens an out-of-scope candidate runs the full skill methodology before realising the scope error, then writes a handoff explaining why it stopped — the operator could have prevented all of that with one `resolve-surface` call.
+Triage these BEFORE the dispatching pass, not during. A specialist that opens an out-of-scope candidate runs the full skill methodology before realising the scope error, then writes a handoff explaining why it stopped — the operator could have prevented all of that with one `resolve surface` call.
 
 This step pairs with `agent/scripts/assess/lib/contracts.py` `validate_specialist_dispatch_contract`, which gates active-probing dispatches (vulnerability-analyst, exploit-developer) on `scope_host` membership in `scope.json` `hosts`. The validator catches mistakes at register time; this step catches them before they reach the validator.
 
@@ -184,7 +184,7 @@ This step pairs with `agent/scripts/assess/lib/contracts.py` `validate_specialis
 When a recorded surface (`vigil assess record-surface`) corresponds to a cluster of work-buffer items already ingested with a durable `request_variant_id`, link them on the backend so the surface's coverage trail points at the exact requests that back it:
 
 ```bash
-vigil assess link-surface-work-items --cluster <cluster_key> --surface-id <id> \
+vigil assess work-buffer link-surface --cluster <cluster_key> --surface-id <id> \
   --relation primary-endpoint --evidence-ref "<artifact path>"
 ```
 

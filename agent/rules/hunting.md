@@ -367,6 +367,28 @@ may have been an `http=000` transport error (c); a "clean" may have been a statu
 never read the body (a); a "gated"/"not-present" may have been a WAF challenge page never
 re-rendered in a browser (d).
 
+## 23a. Aggregate-rate discipline — a shared egress IP sees the SUM of every concurrent dispatch
+
+A WAF-fronted estate rate-limits (or hard-blocks) the shared runtime egress IP, not any single
+dispatch — four agents each issuing a "safe" 5 r/s look like one client doing 20 r/s at the
+edge, and that sum, not any one agent's rate, is what trips the rule.
+
+- **Budget the AGGREGATE request rate across ALL concurrent dispatches, not per-dispatch.**
+  Before adding another concurrent agent against a WAF-fronted estate, sum the rates already
+  in flight and confirm the total still fits the tier's ceiling
+  (`agent/references/recon/rate-calibration.md`).
+- **Do not run an inherently high-volume tool** (`arjun`, `ffuf`, a large `nuclei` sweep)
+  **concurrently with multiple deep specialist agents** on the same WAF-fronted estate over the
+  shared egress IP — serialize it, or run it alone at a low rate scoped to a few endpoints.
+- **Run long or high-volume tools as an operator-owned `kali job`, not a stretched synchronous
+  `kali exec`.** `vigil assess kali job stop` cleanly SIGTERMs the in-container PID it owns. A
+  synchronous call killed by the external agent-harness ceiling (exit 144/SIGUSR1,
+  `agent/shared-constraints.md` §2) orphans the in-container process instead — an orphaned
+  scanner keeps sending traffic to the target with nobody watching it or able to stop it.
+- **A WAF/CloudFront 403 block is PENDING, never a clean negative** — rule 23(d) above.
+  Detection signatures, the per-request-vs-estate-block disambiguation, and WAF-clean routing
+  intel: `agent/references/web/waf-bypass-and-safe-testing.md`.
+
 ## 24. OOB self-resolution caveat — confirm on a public egress source
 
 Blind SSRF is confirmed only when the callback arrives at a **publicly routable** listener
@@ -435,7 +457,10 @@ override with `vigil assess app-unit mark-deep <id> --reason ...` or `vigil
 assess app-unit clear-deep <id> --reason ...` — a manual mark always wins
 over the scorer. Treat a `deep_required` unit as a whole application: a
 dedicated dispatch across every applicable vuln class and auth context, not
-a single surface glance.
+a single surface glance. The Operator can claim its next coherent queue batch
+with `vigil assess work-buffer fetch-by-unit`; inspect `vigil assess contract
+work-buffer` for optional unit/path/class narrowing and explicit sizing before
+dispatching it.
 
 ## Attack headers are ordinary injected inputs, not special-cased
 
@@ -458,9 +483,12 @@ governs every other input applies here uniformly; headers are not special. Injec
 the ones plausible for the architecture you observed (a CDN-fronted host →
 `X-Forwarded-*`; a path-rewriting reverse proxy → `X-Original-URL`/`X-Rewrite-URL`),
 then record the attempt the same way you would a query or body probe:
-`vigil assess record-probe --input-slot header:X-Forwarded-Host ...` (covering) or
-`record-attempt --input-slot header:X-Forwarded-Host ...` (inconclusive) — full
-template in `agent/shared-constraints.md` §10. A header probe earns no special
-coverage-item; it lands in the same per-input grid cell a query or body probe
-does. For exploitation depth once a header vector shows signal, see
+`vigil assess record-probe --input-slot header:X-Forwarded-Host --result-status
+<tested|signal|attempted|blocked|no-signal|error> ...` — the verdict decides
+covering vs. touched-but-inconclusive (evidence is required only for
+`tested`/`signal`) — full template in `agent/shared-constraints.md` §10. Observed
+security-relevant routing,
+identity, and method-override names can arrive as first-class `header:<name>`
+coverage items; manual probes still land in the same per-input grid when no item
+was derived. For exploitation depth once a header vector shows signal, see
 `agent/skills/host-header-injection/SKILL.md`.

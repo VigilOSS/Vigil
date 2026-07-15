@@ -41,6 +41,7 @@ from assess.commands.dispatch.work_items import (
     _peek,
     _fetch,
     _fetch_by_priority,
+    _fetch_by_unit,
     _defer_cluster,
     _defer_items,
     _mark_manual,
@@ -49,6 +50,8 @@ from assess.commands.dispatch.work_items import (
     _reset_stale,
     _retry_errors,
     _requeue,
+    _reclassify,
+    _link_surface,
 )
 from assess.commands.dispatch.handoff_renderer import _render_handoff
 from assess.commands.dispatch.agent import (
@@ -69,6 +72,8 @@ __all__ = [
     "run",
     "_DB_ACTIONS",
     "_DBLESS_ACTIONS",
+    "_reclassify",
+    "_link_surface",
     "_record_handoff",
     "_render_handoff",
     "_record_decision",
@@ -133,6 +138,22 @@ def run(args) -> None:
                 client,
                 _safe_int_arg(extra[0], "limit"),
                 extra[1] if len(extra) > 1 else "auto",
+            )
+        elif action == "fetch-by-unit":
+            if extra:
+                print(
+                    "Usage: work-buffer fetch-by-unit [--unit-id ID] [--path PREFIX] "
+                    "[--class TYPE] [--limit N] [--agent auto|NAME]",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            _fetch_by_unit(
+                client,
+                unit_id=getattr(args, "unit_id", None),
+                path=getattr(args, "path", "") or "",
+                work_class=getattr(args, "work_class", "") or "",
+                limit=getattr(args, "unit_limit", None),
+                agent=getattr(args, "unit_agent", "auto") or "auto",
             )
         elif action == "defer-cluster":
             if not extra:
@@ -201,6 +222,10 @@ def run(args) -> None:
             _retry_errors(client, max_retries)
         elif action == "requeue":
             _requeue(client)
+        elif action == "reclassify":
+            _reclassify(client, args)
+        elif action == "link-surface":
+            _link_surface(client, args)
         else:
             print(f"Unknown action: {action}", file=sys.stderr)
             print(f"Work-buffer actions: {', '.join(_DB_ACTIONS)}", file=sys.stderr)

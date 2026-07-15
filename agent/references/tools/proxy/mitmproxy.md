@@ -14,8 +14,10 @@ vigil mitmproxy start
 
 `vigil mitmproxy start` takes **no engagement key**. One shared proxy serves
 every active engagement at once and routes each captured flow to the matching
-engagement by hostname (see "How It Works"). Capture is a per-engagement policy,
-not a launch-time selector.
+engagement by hostname (see "How It Works"). An otherwise-unclaimed host falls
+back to the `vigil use` / launcher-selected engagement only when its
+`scope.json` declares `scope_enforcement: bypass`. Capture is a per-engagement
+policy, not a launch-time selector.
 
 ## Browser Proxy Setup (FoxyProxy)
 
@@ -66,7 +68,7 @@ vigil mitmproxy start
 
 ## Login Capture Workflow
 
-1. Start the shared proxy (no engagement key): `vigil mitmproxy start` — it routes captures to whichever active engagement owns the hostname
+1. Start the shared proxy (no engagement key): `vigil mitmproxy start` — it routes captures to whichever active engagement owns the hostname; for a global-bypass engagement, select it first with `vigil use <key>` so otherwise-unclaimed hosts have an explicit owner
 2. Configure browser proxy (see above)
 3. Navigate to the target login page and authenticate
 4. Browse a few authenticated pages (admin, settings, API endpoints)
@@ -234,11 +236,14 @@ The proxy runs `mitmdump` with `proxy_addon.py`, which:
   `vigil mitmproxy start` takes no engagement key. The addon keeps a registry of
   all in-progress engagements (synced from the orchestrator, with a filesystem
   `scope.json` scan as fallback) and routes each captured flow to the
-  best-matching engagement **by hostname** — literal scope hosts beat wildcards,
-  narrower wildcards beat broader ones, and an `out_of_scope` carve-out (host,
-  URL, or CIDR) always drops the flow. A host no engagement claims is not
-  captured. This is why capture is a per-engagement **policy**, not a launch-time
-  selector.
+  best-matching engagement **by hostname** — literal scope hosts beat wildcards
+  and narrower wildcards beat broader ones. Under normal enforcement, an
+  `out_of_scope` carve-out (host, URL, or CIDR) drops the flow. When no hostname
+  pattern claims a host, the addon consults `<engagements_root>/.active` and binds
+  the flow only if that selected engagement declares `scope_enforcement: bypass`;
+  the bypass admits both allow- and deny-misses. A normal hostname owner always
+  wins over this fallback, so a selected bypass engagement cannot steal another
+  engagement's traffic.
 - **Injects program-mandated attribution headers on outbound in-scope
   requests.** For an engagement whose `scope.json` declares `required_headers`
   (e.g. a BugCrowd program that mandates `X-Bug-Bounty: <handle>`), the addon
@@ -246,11 +251,11 @@ The proxy runs `mitmdump` with `proxy_addon.py`, which:
   `required_headers` the tool-exec path injects (ADR 0010), now applied to
   browser/proxied traffic too. This makes **manual browsing and login capture
   through FoxyProxy ROE-compliant** without you setting the header per request.
-  It is gated by the same hostname scope + `out_of_scope` carve-out as capture
-  (out-of-scope hosts get nothing) and is non-destructive — a header the client
-  already set is never overwritten. Engagements without `required_headers` are
-  unaffected. Run `vigil mitmproxy routes` to see which headers each engagement
-  will inject.
+  It is gated by the same engagement binding as capture, including the selected
+  global-bypass fallback, and is non-destructive — a header the client already
+  set is never overwritten. No-fire paths remain blocked under bypass.
+  Engagements without `required_headers` are unaffected. Run `vigil mitmproxy
+  routes` to see which headers each engagement will inject.
 - Filters noise (analytics, CDNs, tracking pixels)
 - Classifies requests by type (API, form, page, JS, GraphQL, WebSocket, etc.)
 - Detects login flows and POSTs captured session material to the backend credential store, which derives the identity name from the capture's session-anchor material so distinct logins append rather than overwrite (see "Multi-Identity Capture" above)

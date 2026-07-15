@@ -118,8 +118,14 @@ class QueueItemsBulkCreateRequest(BaseModel):
 
 
 class QueueFetchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     limit: int = Field(default=10, ge=1, le=100)
     agent_name: str = Field(min_length=1, max_length=128)
+    repo_id: int | None = None
+    classification: Literal["critical", "high", "medium", "low", "skip"] | None = None
+    batch_theme: str | None = Field(default=None, max_length=256)
+    item_ids: list[int] | None = Field(default=None, min_length=1, max_length=1000)
 
 
 class QueueCompleteRequest(BaseModel):
@@ -179,6 +185,7 @@ class AnalysisResultRecord(BaseModel):
     function_name: str = Field(default="", max_length=512)
     hypothesis: str = Field(default="", max_length=20000)
     evidence: str = Field(default="", max_length=20000)
+    evidence_ref: str = Field(default="", max_length=4096)
     disposition: str = Field(min_length=1, max_length=64)
     confidence: str = Field(default="medium", max_length=32)
     finding_slug: str = Field(default="", max_length=256)
@@ -516,6 +523,10 @@ async def fetch_queue_items(engagement_key: str, request: QueueFetchRequest) -> 
             engagement.id,
             limit=request.limit,
             agent_name=request.agent_name,
+            repo_id=request.repo_id,
+            classification=request.classification,
+            batch_theme=request.batch_theme,
+            item_ids=request.item_ids,
         )
     )
     await _broadcast(engagement.key, "queue_fetch", {"count": len(records)})

@@ -55,7 +55,7 @@ Location: /dashboard                                              <-- true branc
 
 ### Attack Scenario
 
-An unauthenticated visitor to the portal's public login page submits a crafted username field instead of real credentials. The query returns the administrator's row first, so the visitor lands in the admin dashboard with no password. The same injection point supports arbitrary boolean-blind extraction, so the attacker isn't limited to whichever account the login query happens to prefer.
+An unauthenticated visitor to the portal's public login page — no account, no prior access — submits a crafted username field instead of real credentials. The query returns the administrator's row first, so the visitor lands in the admin dashboard with no password.
 
 ### Impact
 

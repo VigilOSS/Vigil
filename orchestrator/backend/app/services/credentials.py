@@ -60,7 +60,7 @@ _MODELED_KEYS = frozenset(
         "identity_name", "mode", "state", "use_for_requests", "auth_context",
         "is_active", "cookies", "headers", "tokens", "host_cookies", "notes",
         "expires_at", "created_at", "last_seen_at", "liveness_verdict",
-        "last_probed_at", "updated_at", "make_active",
+        "last_probed_at", "updated_at", "make_active", "principal_id", "mfa_factor",
     }
 )
 
@@ -90,7 +90,7 @@ def load_identities(
 
 
 def resolve_identity(
-    engagement_id: int, requested: str | None
+    engagement_id: int, requested: str | None, *, scope_key: str = ""
 ) -> tuple[str | None, dict[str, Any]]:
     """Resolve a ``--identity`` request, matching legacy semantics.
 
@@ -107,7 +107,12 @@ def resolve_identity(
         return (str(material.get("identity_name") or DEFAULT_IDENTITY), material)
     requested = requested.strip()
     material = db.get_credential(engagement_id, requested)
-    return (requested, material or {})
+    if material is not None:
+        return (requested, material)
+    aliased = db.resolve_credential_alias(engagement_id, requested, scope_key)
+    if aliased is not None:
+        return (str(aliased["identity_name"]), aliased)
+    return (requested, {})
 
 
 def upsert_material(
@@ -118,6 +123,7 @@ def upsert_material(
     make_active: bool = False,
 ) -> dict[str, Any]:
     """Insert/replace one identity's material from a full payload dict."""
+    existing = db.get_credential(engagement_id, identity_name) or {}
     cookies = _as_dict(material.get("cookies"))
     headers = _as_dict(material.get("headers"))
     tokens = _as_dict(material.get("tokens"))
@@ -132,6 +138,12 @@ def upsert_material(
     return db.upsert_credential(
         engagement_id,
         identity_name,
+        principal_id=str(
+            material.get("principal_id") or existing.get("principal_id") or ""
+        ),
+        mfa_factor=str(
+            material.get("mfa_factor") or existing.get("mfa_factor") or ""
+        ),
         mode=mode,
         state=state,
         use_for_requests=bool(material.get("use_for_requests", True)),
@@ -254,6 +266,16 @@ def _bearer_anchor_term(
         claim_name, claim_value = claim
         return (f"jwt:{claim_name}", str(claim_value))
     return ("bearer", bearer)
+
+
+def derive_capture_principal(
+    headers: dict[str, str], tokens: dict[str, str]
+) -> str | None:
+    """Return a durable JWT-claim principal, never a rotating cookie/bearer."""
+    anchor = _bearer_anchor_term(headers, tokens)
+    if anchor is None or not anchor[0].startswith("jwt:"):
+        return None
+    return f"{anchor[0]}:{anchor[1]}"
 
 
 def _principal_identity(jwt_anchor: tuple[str, str] | None) -> str | None:
@@ -439,6 +461,8 @@ def capture_material(
     return db.upsert_credential(
         engagement_id,
         identity_name,
+        principal_id=str(existing.get("principal_id") or derive_capture_principal(headers, tokens) or ""),
+        mfa_factor=str(existing.get("mfa_factor") or ""),
         mode="proxy_capture",
         state="available" if flat_cookies or merged_headers else "missing",
         use_for_requests=True,

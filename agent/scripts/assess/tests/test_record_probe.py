@@ -1,11 +1,13 @@
-"""CLI tests for `vigil assess record-probe`.
+"""CLI tests for `vigil assess record-probe` (the single probe-recording verb).
 
-The covering counterpart to record-attempt: it POSTs a COVERING probe run
-(tested|signal) to the shared ``probe-runs`` route and REQUIRES ``--evidence-ref``.
-Backend + runtime are stubbed, matching the record-attempt suite. These pin: the
-argparse covering-only choices, the mandatory-evidence guard, the FK-link
-threading (request_variant_id/service_id/coverage_item_id), the named input-slot
-round-trip, and the shared --finding slug->id resolution.
+record-probe absorbed the former record-attempt: it POSTs EVERY probe outcome to
+the shared ``probe-runs`` route — the COVERING pair (tested|signal, evidence
+required) and the NON-covering four (attempted|blocked|no-signal|error, evidence
+optional). Backend + runtime are stubbed. These pin: the full argparse status
+vocabulary, the CONDITIONAL evidence gate (required iff covering), the FK-link +
+default-cascade override/suppress flags (--work-item-ids / --resolve-surface /
+--no-drain) always being available, the named input-slot round-trip, the shared
+--finding slug->id resolution + 404, and the WARN-first out-of-vocab family.
 """
 from __future__ import annotations
 
@@ -70,6 +72,9 @@ def _install(monkeypatch, tmp_path, fake: _FakeClient) -> None:
     monkeypatch.setattr(record_probe, "AssessmentClient", lambda *a, **k: fake)
 
 
+# -- covering path -------------------------------------------------------------
+
+
 def test_record_probe_covering_roundtrip_with_links(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
@@ -103,7 +108,7 @@ def test_record_probe_covering_roundtrip_with_links(tmp_path, monkeypatch, capsy
     assert payload["coverage_item_id"] == 77
 
 
-def test_record_probe_requires_evidence(tmp_path, monkeypatch, capsys):
+def test_record_probe_covering_requires_evidence(tmp_path, monkeypatch, capsys):
     """A covering verdict with no --evidence-ref is not coverage — hard error, no post."""
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
@@ -121,16 +126,138 @@ def test_record_probe_requires_evidence(tmp_path, monkeypatch, capsys):
     assert fake.posts == []
 
 
-def test_record_probe_rejects_noncovering_status(tmp_path, monkeypatch, capsys):
-    """attempted/blocked/no-signal/error belong to record-attempt — argparse rejects them here."""
+def test_record_probe_signal_requires_evidence(tmp_path, monkeypatch, capsys):
+    """`signal` is covering too — evidence is mandatory for it as well."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "record-probe", "--result-status", "signal", "--attack-family", "ssrf",
+            "--target-host", "h", "--input-slot", "query:x", "--auth-context", "anonymous",
+        ],
+        str(tmp_path),
+    )
+    with pytest.raises(SystemExit):
+        record_probe.run(args)
+    assert "--evidence-ref is required" in capsys.readouterr().err
+    assert fake.posts == []
+
+
+# -- non-covering path (folded in from the former record-attempt) --------------
+
+
+@pytest.mark.parametrize("status", ["attempted", "blocked", "no-signal", "error"])
+def test_record_probe_noncovering_needs_no_evidence(tmp_path, monkeypatch, capsys, status):
+    """The four non-covering statuses record WITHOUT --evidence-ref (touched-but-
+    inconclusive leads are captured for the resume-brief Attempts ledger)."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "record-probe", "--result-status", status, "--attack-family", "SSRF",
+            "--lens", "tenant-boundary", "--target-host", "api.example.com",
+            "--target-path", "/fetch", "--target-port", "443",
+            "--input-slot", "query:url", "--auth-context", "member",
+            "--notes", "WAF 403 on internal hosts",
+        ],
+        str(tmp_path),
+    )
+    record_probe.run(args)
+    capsys.readouterr()
+    endpoint, payload = fake.posts[0]
+    assert endpoint == "probe-runs"
+    assert payload["result_status"] == status
+    assert payload["attack_family"] == "ssrf"  # normalized
+    assert payload["lens"] == "tenant-boundary"
+    assert payload["target_port"] == 443
+    assert payload["tool_name"] == "manual"  # helper default
+    assert "finding_id" not in payload  # no --finding given
+
+
+def test_record_probe_rejects_unknown_status(tmp_path, monkeypatch, capsys):
+    """A --result-status miss re-renders through the scoped formatter (did-you-mean,
+    no usage dump) and appends the contract pointer — on the parse ERROR path."""
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
     with pytest.raises(SystemExit):
         _parse(
-            ["record-probe", "--result-status", "blocked", "--attack-family", "ssrf", "--evidence-ref", "x"],
+            ["record-probe", "--result-status", "confirmed", "--attack-family", "ssrf",
+             "--evidence-ref", "x", "--target-host", "h", "--input-slot", "query:x",
+             "--auth-context", "anon"],
             str(tmp_path),
         )
+    err = capsys.readouterr().err
+    assert "--result-status 'confirmed' is not valid" in err
+    assert "See: vigil assess contract record-probe" in err
+    assert "usage:" not in err  # scoped: no multi-line usage dump
     assert fake.posts == []
+
+
+# -- default-cascade override/suppress flags -----------------------------------
+
+
+def test_record_probe_cascade_override_flags_plumb_through(tmp_path, monkeypatch, capsys):
+    """--work-item-ids / --resolve-surface / --no-drain thread into the payload so
+    the backend default cascade can be narrowed or suppressed (1b)."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "record-probe", "--result-status", "tested", "--attack-family", "idor",
+            "--target-host", "h", "--input-slot", "path:id", "--auth-context", "member",
+            "--evidence-ref", "e", "--work-item-ids", "3", "4", "--resolve-surface", "9",
+        ],
+        str(tmp_path),
+    )
+    record_probe.run(args)
+    capsys.readouterr()
+    payload = fake.posts[0][1]
+    assert payload["work_item_ids"] == [3, 4]
+    assert payload["resolve_surface_id"] == 9
+    assert "no_drain" not in payload  # only sent when the flag is set
+
+
+def test_record_probe_no_drain_flag(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "record-probe", "--result-status", "tested", "--attack-family", "idor",
+            "--target-host", "h", "--input-slot", "path:id", "--auth-context", "member",
+            "--evidence-ref", "e", "--coverage-item-id", "77", "--no-drain",
+        ],
+        str(tmp_path),
+    )
+    record_probe.run(args)
+    capsys.readouterr()
+    payload = fake.posts[0][1]
+    assert payload["no_drain"] is True
+    assert payload["coverage_item_id"] == 77
+
+
+def test_record_probe_default_omits_cascade_control_fields(tmp_path, monkeypatch, capsys):
+    """The default payload carries no cascade-control keys, so the BACKEND default
+    derivation stays in force (recording auto-drains/advances covering probes)."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "record-probe", "--result-status", "tested", "--attack-family", "idor",
+            "--target-host", "h", "--input-slot", "path:id", "--auth-context", "member",
+            "--evidence-ref", "e", "--coverage-item-id", "77",
+        ],
+        str(tmp_path),
+    )
+    record_probe.run(args)
+    capsys.readouterr()
+    payload = fake.posts[0][1]
+    assert "work_item_ids" not in payload
+    assert "resolve_surface_id" not in payload
+    assert "no_drain" not in payload
+    assert payload["coverage_item_id"] == 77  # link is still sent (cascade keys on it)
+
+
+# -- --finding resolution ------------------------------------------------------
 
 
 def test_record_probe_resolves_finding_slug(tmp_path, monkeypatch, capsys):
@@ -138,13 +265,9 @@ def test_record_probe_resolves_finding_slug(tmp_path, monkeypatch, capsys):
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
         [
-            "record-probe",
-            "--result-status", "signal",
-            "--attack-family", "ssrf",
-            "--target-host", "api.example.com",
-            "--input-slot", "query:url",
-            "--auth-context", "anonymous",
-            "--evidence-ref", "scans/ssrf.txt",
+            "record-probe", "--result-status", "signal", "--attack-family", "ssrf",
+            "--target-host", "api.example.com", "--input-slot", "query:url",
+            "--auth-context", "anonymous", "--evidence-ref", "scans/ssrf.txt",
             "--finding", "VA-047",
         ],
         str(tmp_path),
@@ -153,6 +276,43 @@ def test_record_probe_resolves_finding_slug(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert fake.gets == ["findings/VA-047"]
     assert fake.posts[0][1]["finding_id"] == 91
+
+
+def test_record_probe_finding_numeric_id_passthrough(tmp_path, monkeypatch, capsys):
+    """A bare integer --finding is used directly without a slug lookup (works on a
+    non-covering attempt too)."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "record-probe", "--result-status", "error", "--attack-family", "sqli",
+            "--target-host", "app.example.com", "--input-slot", "body:q",
+            "--auth-context", "anonymous", "--finding", "12",
+        ],
+        str(tmp_path),
+    )
+    record_probe.run(args)
+    capsys.readouterr()
+    assert fake.gets == []  # numeric id => no GET
+    assert fake.posts[0][1]["finding_id"] == 12
+
+
+def test_record_probe_missing_finding_slug_errors(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient(findings={})
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "record-probe", "--result-status", "attempted", "--attack-family", "ssrf",
+            "--target-host", "app.example.com", "--input-slot", "query:x",
+            "--auth-context", "anonymous", "--finding", "NOPE-1",
+        ],
+        str(tmp_path),
+    )
+    from assess.lib.client import AssessError
+
+    with pytest.raises(AssessError):
+        record_probe.run(args)
+    assert fake.posts == []  # never records when the link cannot resolve
 
 
 def test_record_probe_unknown_family_warns_but_records(tmp_path, monkeypatch, capsys):
@@ -173,6 +333,7 @@ def test_record_probe_unknown_family_warns_but_records(tmp_path, monkeypatch, ca
 
 
 # -- WS3 required-input guards (run()-time, block-not-warn) --------------------
+
 
 def _probe_argv(**overrides) -> list[str]:
     """A record-probe argv that PASSES every guard; overrides tweak one field."""
@@ -195,7 +356,6 @@ def _probe_argv(**overrides) -> list[str]:
 def test_record_probe_rejects_missing_input_slot(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
-    # Omit --input-slot entirely (default "" => the sentinel-empty rejection).
     args = _parse(_probe_argv(**{"--input-slot": None}), str(tmp_path))
     with pytest.raises(SystemExit):
         record_probe.run(args)
@@ -249,6 +409,7 @@ def test_record_probe_rejects_missing_target_anchor(tmp_path, monkeypatch, capsy
         record_probe.run(args)
     err = capsys.readouterr().err
     assert "--target-host is required" in err
+    assert "--request-variant-id" in err  # merged verb ALWAYS exposes the FK anchor
     assert fake.posts == []
 
 
@@ -265,13 +426,14 @@ def test_record_probe_target_anchor_satisfied_by_fk(tmp_path, monkeypatch, capsy
     assert fake.posts[0][1]["request_variant_id"] == 42
 
 
-def test_record_probe_bad_enum_shows_scoped_error_and_pointer(tmp_path, monkeypatch, capsys):
-    """A --result-status miss re-renders through the kali scoped formatter (did-you-mean,
-    no usage dump) and appends the contract pointer — on the parse ERROR path."""
+def test_record_probe_missing_required_flag_shows_pointer(tmp_path, monkeypatch, capsys):
+    """A missing argparse-required flag (--attack-family) surfaces the contract
+    pointer on the ERROR path (not just on --help)."""
     with pytest.raises(SystemExit):
-        _parse(_probe_argv(**{"--result-status": "blocked"}), str(tmp_path))
+        _parse(
+            ["record-probe", "--result-status", "blocked", "--target-host", "h",
+             "--input-slot", "query:x", "--auth-context", "anonymous"],
+            str(tmp_path),
+        )
     err = capsys.readouterr().err
-    assert "--result-status 'blocked' is not valid" in err
-    assert "allowed: tested, signal" in err
     assert "See: vigil assess contract record-probe" in err
-    assert "usage:" not in err  # scoped: no multi-line usage dump

@@ -310,7 +310,8 @@ def run(args) -> None:
     # scope (shared-constraints §1): refuse the whole spec. Composes with the
     # relative/empty-base refusal below — spec_host is "" for a relative base, so
     # this check is skipped and that case falls through to the existing handler.
-    # Inactive when scope.json has no allowlist (see scope.ingest_scope_filter).
+    # Inactive when scope.json has no allowlist or enables the global bypass
+    # (see scope.ingest_scope_filter).
     scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
     spec_host = (urlparse(base_url).hostname or "").rstrip(".").lower()
     if (

@@ -2,9 +2,9 @@
 
 This module is the single source of truth for the priority/cluster assignments
 that the ingest producers compute inline (into the work_item block the backend
-derives) and that `vigil assess classify-work` re-applies idempotently. Keeping the logic in one
+derives) and that `vigil assess work-buffer reclassify` re-applies idempotently. Keeping the logic in one
 place ensures the two paths cannot drift — operators forgetting to run
-`classify-work` after an ingest used to leave the work buffer unscored, which
+`work-buffer reclassify` after an ingest used to leave the work buffer unscored, which
 broke priority-mode dispatch silently.
 
 Design notes:
@@ -1218,7 +1218,7 @@ BUCKET_SKILLS: dict[str, tuple[str, ...]] = vuln_taxonomy.derive_bucket_skills()
 # - `agent/scripts/assess/lib/classify_buckets.py:classify_row()` (this file)
 #   reads it to stamp `terminal_reason='inert_type'` so `fetch-by-priority`
 #   excludes them with one predicate.
-# - `agent/scripts/assess/commands/classify_work.py` reads it to scope the
+# - `agent/scripts/assess/commands/dispatch/work_items.py` reads it to scope the
 #   `--reclassify-all` WHERE clause to the same set the inline classifier
 #   skips on insert.
 # Adding a new inert type means editing this one place — every consumer
@@ -1255,8 +1255,8 @@ _INERT_TYPES = INERT_TYPES
 # `_AUTH_KEY_SET`, `_SSO_PATH_FRAGMENTS`) are covered transitively — they cannot
 # change without `_BUCKETS` itself changing — so they are not re-listed.
 # the ingest producers stamp it inline at ingest and
-# `classify-work` re-stamps it on every re-classification, so a later
-# `classify-work --reclassify-stale` can tell rows scored under an OLD taxonomy
+# `work-buffer reclassify` re-stamps it on every re-classification, so a later
+# `work-buffer reclassify --reclassify-stale` can tell rows scored under an OLD taxonomy
 # from rows already at the current one — restamping only the stale
 # ones instead of the all-or-nothing `--reclassify-all`. A taxonomy edit to ANY
 # of the above tables bumps the digest so `--reclassify-stale` picks up the rows
@@ -1312,7 +1312,7 @@ def _canonicalize(obj: Any) -> Any:
 # NOT a real digest, so it never equals `CLASSIFIER_VERSION` and is protected
 # from `--reclassify-stale` (which excludes it explicitly). `work-buffer
 # mark-manual <id>` stamps it; `--reclassify-all` is the only path that
-# overwrites it. Single source of truth so `classify_work.py` and the
+# overwrites it. Single source of truth so `dispatch/work_items.py` and the
 # `mark-manual` verb reference the same string.
 MANUAL_CLASSIFIER_VERSION: str = "manual"
 

@@ -13,6 +13,8 @@ captured host_cookies that this run is not using.
 """
 from __future__ import annotations
 
+import pytest
+
 from assess.lib import auth, identity, kali
 
 
@@ -372,3 +374,145 @@ def test_classify_liveness_mirror_parity_with_cli() -> None:
     for status, hay, cfg in cases:
         assert cli_auth._classify_liveness(status, hay, cfg) == \
             auth_status._classify_liveness(status, hay, cfg), (status, hay, cfg)
+
+
+def test_prepare_browser_identity_material_only_stamps_when_materialized(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (
+            requested,
+            {"headers": {"X-App": "yes"}, "cookies": {"sid": "abc"}},
+        ),
+    )
+    auth_context, prepared = kali.prepare_browser_identity_material(
+        tmp_path, "member", "https://app.example.com/account"
+    )
+    assert auth_context == "member"
+    assert prepared["headers"] == {"X-App": "yes"}
+    assert prepared["cookies"] == [
+        {"name": "sid", "value": "abc", "domain": "app.example.com", "path": "/"}
+    ]
+
+    monkeypatch.setattr(kali, "resolve_identity", lambda *_args: ("empty", {}))
+    assert kali.prepare_browser_identity_material(tmp_path, "empty", "https://app.example.com") == (
+        "anonymous",
+        {"headers": {}, "cookies": [], "storage_state": None},
+    )
+
+
+def test_prepare_execution_command_refuses_missing_requested_identity(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (requested, {}),
+    )
+
+    with pytest.raises(
+        kali.scope_lib.ScopePolicyError,
+        match="requested identity 'ghost'.*refusing to run anonymously",
+    ):
+        kali.prepare_execution_command(
+            ["curl", "https://app.example.com/account"],
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="ghost",
+        )
+
+
+def test_prepare_browser_identity_stamps_replayable_external_storage_state(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (
+            requested,
+            {"state": "available", "use_for_requests": True},
+        ),
+    )
+
+    auth_context, prepared = kali.prepare_browser_identity_material(
+        tmp_path,
+        "member",
+        "https://app.example.com",
+        external_state_applied=True,
+    )
+
+    assert auth_context == "member"
+    assert prepared == {"headers": {}, "cookies": [], "storage_state": None}
+
+
+@pytest.mark.parametrize(
+    "disabled",
+    [
+        {"use_for_requests": False},
+        {"state": "dead"},
+        {"state": "stale"},
+    ],
+)
+def test_disabled_identity_material_is_never_injected_or_audit_stamped(
+    monkeypatch, tmp_path, disabled
+) -> None:
+    material = {
+        "headers": {"Authorization": "Bearer secret"},
+        "cookies": {"sid": "abc"},
+        **disabled,
+    }
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (requested, material),
+    )
+    cmd = ["curl", "https://app.example.com/account"]
+    with pytest.raises(
+        kali.scope_lib.ScopePolicyError,
+        match="requested identity 'member'.*refusing to run anonymously",
+    ):
+        kali.prepare_execution_command(
+            cmd,
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="member",
+        )
+    assert cmd == ["curl", "https://app.example.com/account"]
+    assert kali.prepare_browser_identity_material(
+        tmp_path, "member", "https://app.example.com/account"
+    ) == (
+        "anonymous",
+        {"headers": {}, "cookies": [], "storage_state": None},
+    )
+
+
+def test_scoped_alias_is_propagated_to_command_and_browser_resolution(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+
+    def resolve(_engagement, requested, *, scope_key=""):
+        calls.append((requested, scope_key))
+        return requested, {
+            "state": "available",
+            "headers": {"Authorization": "Bearer scoped"},
+        }
+
+    monkeypatch.setattr(kali, "resolve_identity", resolve)
+    cmd = ["curl", "https://app.example.com/account"]
+    auth_context, _gap = kali.prepare_execution_command(
+        cmd,
+        tool_name="curl",
+        engagement_dir=tmp_path,
+        identity="member",
+        identity_scope="billing",
+    )
+    assert auth_context == "member"
+    browser_context, _prepared = kali.prepare_browser_identity_material(
+        tmp_path,
+        "member",
+        "https://app.example.com/account",
+        scope_key="billing",
+    )
+    assert browser_context == "member"
+    assert calls == [("member", "billing"), ("member", "billing")]

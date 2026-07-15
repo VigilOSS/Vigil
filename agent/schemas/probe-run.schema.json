@@ -160,14 +160,20 @@
       },
       "title": "Work Item Ids",
       "type": "array",
-      "description": "Opt-in work-buffer item ids this probe satisfies; marked 'done' atomically with the probe insert so 'remaining work' counts decrement as probes land. Unknown ids are skipped, not an error."
+      "description": "OVERRIDE the default work-buffer drain. A covering probe carrying coverage_item_id drains its FK-linked work-items by default; pass explicit ids to narrow the drain to exactly these (marked 'done' atomically with the probe). Unknown ids are skipped, not an error."
     },
     "resolve_surface_id": {
       "type": "integer",
       "default": null,
       "title": "Resolve Surface Id",
       "minimum": 1,
-      "description": "OPT-IN: surface id to advance to 'partially-covered' as part of recording. Omit to leave surface state untouched (recording never auto-mutates it)."
+      "description": "OVERRIDE the default surface advance. A covering probe carrying request_variant_id advances its FK-linked discovered surface(s) to 'partially-covered' by default; pass a surface id to advance exactly that one instead."
+    },
+    "no_drain": {
+      "default": false,
+      "title": "No Drain",
+      "type": "boolean",
+      "description": "SUPPRESS the default FK-derived cascade (both the work-item drain and the surface advance). The probe is still recorded; the buffer and surfaces are left untouched."
     }
   },
   "required": [

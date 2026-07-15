@@ -16,6 +16,7 @@ from pathlib import Path
 # "resolve from the VIGIL_ORCHESTRATOR_WORKERS env" so callers that don't pass an
 # explicit value still pick up the knob.
 WORKERS_ENV = "VIGIL_ORCHESTRATOR_WORKERS"
+ORCHESTRATOR_START_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,16 +481,26 @@ def _check_port_available(host: str, port: int) -> None:
 
 def _wait_for_health(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None) -> bool:
     url = f"http://{host}:{port}/healthz"
-    return _wait_for_http_200(url, process=process)
+    return _wait_for_http_200(
+        url, process=process, timeout=ORCHESTRATOR_START_TIMEOUT_SECONDS
+    )
 
 
 def _wait_for_readiness(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None) -> bool:
     url = f"http://{host}:{port}/readyz"
-    return _wait_for_http_200(url, process=process)
+    return _wait_for_http_200(
+        url, process=process, timeout=ORCHESTRATOR_START_TIMEOUT_SECONDS
+    )
 
 
-def _wait_for_http_200(url: str, *, process: subprocess.Popen[bytes] | None = None) -> bool:
-    for _ in range(30):
+def _wait_for_http_200(
+    url: str,
+    *,
+    process: subprocess.Popen[bytes] | None = None,
+    timeout: float,
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
         if process is not None and process.poll() is not None:
             return False
         try:
@@ -497,5 +508,8 @@ def _wait_for_http_200(url: str, *, process: subprocess.Popen[bytes] | None = No
                 if response.status == 200:
                     return True
         except OSError:
-            time.sleep(0.2)
-    return False
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.2, remaining))

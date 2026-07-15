@@ -2977,11 +2977,13 @@ def test_kali_job_start_uses_shared_identity_header_and_oob_preparation(
             engagement_key=fake_engagement.name,
         ),
     )
-    monkeypatch.setattr(
-        kali,
-        "resolve_identity",
-        lambda *_args, **_kwargs: ("member", {"token": "session-token"}),
-    )
+    resolved_scopes = []
+
+    def resolve_identity(_engagement, _identity, *, scope_key=""):
+        resolved_scopes.append(scope_key)
+        return "member", {"token": "session-token"}
+
+    monkeypatch.setattr(kali, "resolve_identity", resolve_identity)
     captured = {}
 
     def fake_start_job(cmd, *, audit_meta, **kwargs):
@@ -3004,6 +3006,7 @@ def test_kali_job_start_uses_shared_identity_header_and_oob_preparation(
         container_name="vigil",
         parent_command_run_id=None,
         identity="member",
+        identity_scope="billing",
         rate_override_reason="",
     )
 
@@ -3018,6 +3021,7 @@ def test_kali_job_start_uses_shared_identity_header_and_oob_preparation(
     assert "Authorization: Bearer session-token" in headers
     assert "X-Attribution: researcher" in headers
     assert captured["audit_meta"]["auth_context"] == "member"
+    assert resolved_scopes == ["billing"]
 
 
 def test_kali_job_start_applies_scope_policy_before_spawning(monkeypatch, fake_engagement):
@@ -5456,7 +5460,9 @@ def test_kali_without_identity_uses_anonymous_context_without_credential_lookup(
     assert probes[0]["auth_context"] == "anonymous"
 
 
-def test_kali_unknown_identity_does_not_stamp_without_material(monkeypatch, fake_engagement, capsys):
+def test_kali_unknown_identity_refuses_anonymous_execution(
+    monkeypatch, fake_engagement
+):
     _write_multi_identity_auth(monkeypatch, fake_engagement)
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
@@ -5466,25 +5472,29 @@ def test_kali_unknown_identity_does_not_stamp_without_material(monkeypatch, fake
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
     monkeypatch.setattr(
-        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
+        kali.subprocess,
+        "Popen",
+        lambda *a, **k: pytest.fail("missing identity must not execute"),
     )
-    kali.kali_exec(
-        ["sqlmap", "-u", "https://shop.example.com/api/orders/1"],
-        technique="IDOR",
-        intent="idor probe as ghost",
-        probe_kind="payload",
-        phase="consume-test",
-        timeout=60,
-        agent_name="vulnerability-analyst",
-        engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
-        tool_name="sqlmap",
-        identity="ghost",
-    )
-    assert _probe_posts(fake_client)[0]["auth_context"] != "ghost"
-    err = capsys.readouterr().err
-    assert "not found in the credential store" in err
-    assert "NOT applied" in err
+    with pytest.raises(
+        kali.AssessError,
+        match="requested identity 'ghost'.*refusing to run anonymously",
+    ):
+        kali.kali_exec(
+            ["sqlmap", "-u", "https://shop.example.com/api/orders/1"],
+            technique="IDOR",
+            intent="idor probe as ghost",
+            probe_kind="payload",
+            phase="consume-test",
+            timeout=60,
+            agent_name="vulnerability-analyst",
+            engagement_dir=fake_engagement,
+            engagement_key=fake_engagement.name,
+            tool_name="sqlmap",
+            identity="ghost",
+        )
+    assert _probe_posts(fake_client) == []
+    assert _command_posts(fake_client)[0]["status"] == "running"
 
 
 def test_kali_identity_injects_credentials_into_http_command(monkeypatch, fake_engagement):
@@ -5553,7 +5563,9 @@ def test_kali_identity_injects_backend_access_token(monkeypatch, fake_engagement
     assert _probe_posts(fake_client)[0]["auth_context"] == "api_user"
 
 
-def test_kali_identity_non_http_tool_not_stamped(monkeypatch, fake_engagement, capsys):
+def test_kali_identity_non_http_tool_refuses_anonymous_execution(
+    monkeypatch, fake_engagement
+):
     _write_multi_identity_auth(monkeypatch, fake_engagement)
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
@@ -5562,16 +5574,23 @@ def test_kali_identity_non_http_tool_not_stamped(monkeypatch, fake_engagement, c
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
-    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
-    kali.kali_exec(
-        ["nmap", "-sV", "shop.example.com"],
-        technique="RECON", intent="scan as user_a", probe_kind="baseline",
-        phase="recon", timeout=60, agent_name="recon-specialist",
-        engagement_dir=fake_engagement, engagement_key=fake_engagement.name,
-        tool_name="nmap", identity="user_a",
+    monkeypatch.setattr(
+        kali.subprocess,
+        "Popen",
+        lambda *a, **k: pytest.fail("unapplied identity must not execute"),
     )
-    assert _command_posts(fake_client)[0]["auth_context"] != "user_a"
-    assert "NOT applied" in capsys.readouterr().err
+    with pytest.raises(
+        kali.AssessError,
+        match="requested identity 'user_a'.*refusing to run anonymously",
+    ):
+        kali.kali_exec(
+            ["nmap", "-sV", "shop.example.com"],
+            technique="RECON", intent="scan as user_a", probe_kind="baseline",
+            phase="recon", timeout=60, agent_name="recon-specialist",
+            engagement_dir=fake_engagement, engagement_key=fake_engagement.name,
+            tool_name="nmap", identity="user_a",
+        )
+    assert _probe_posts(fake_client) == []
 
 
 def test_probe_emit_red_engagement_emits(monkeypatch, fake_engagement):
@@ -5585,10 +5604,8 @@ def test_probe_emit_red_engagement_emits(monkeypatch, fake_engagement):
     assert len(_probe_posts(fake_client)) == 1
 
 
-def test_kali_identity_shell_wrapper_not_stamped(monkeypatch, fake_engagement, capsys):
-    """A shell-wrapped command (sh -c '...') can't have -H injected into the outer
-    argv (it would become shell positionals, not curl headers), so --identity must
-    NOT relabel auth_context — otherwise it fakes a cross-identity probe."""
+def test_kali_identity_shell_wrapper_injects_and_stamps(monkeypatch, fake_engagement, capsys):
+    """Identity material reaches the inner HTTP stage of a shell wrapper."""
     _write_multi_identity_auth(monkeypatch, fake_engagement)
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
@@ -5611,9 +5628,27 @@ def test_kali_identity_shell_wrapper_not_stamped(monkeypatch, fake_engagement, c
         engagement_dir=fake_engagement, engagement_key=fake_engagement.name,
         tool_name="curl", identity="user_a",
     )
-    assert _command_posts(fake_client)[0]["auth_context"] != "user_a"
-    assert "Cookie: s=a" not in " ".join(captured["argv"])
-    assert "NOT applied" in capsys.readouterr().err
+    assert _command_posts(fake_client)[0]["auth_context"] == "user_a"
+    assert "Cookie: s=a" in " ".join(captured["argv"])
+    assert "NOT applied" not in capsys.readouterr().err
+
+
+def test_prepared_auth_context_is_opt_in_and_never_accepts_anonymous(fake_engagement):
+    kali = importlib.import_module("assess.lib.kali")
+    cmd = ["node", "/opt/vigil/browser_driver.js"]
+    context, gap = kali.prepare_execution_command(
+        cmd,
+        tool_name="browser",
+        engagement_dir=fake_engagement,
+        prepared_auth_context="member",
+    )
+    assert (context, gap) == ("member", "")
+    assert kali.prepare_execution_command(
+        list(cmd),
+        tool_name="browser",
+        engagement_dir=fake_engagement,
+        prepared_auth_context="anonymous",
+    )[0] == "anonymous"
 
 
 def test_probe_emit_shell_wrapped_curl_parses_inner_url(monkeypatch, fake_engagement):

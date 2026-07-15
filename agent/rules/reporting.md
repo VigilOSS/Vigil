@@ -186,17 +186,22 @@ Write in active voice. The subject acts.
 
 Passive voice is acceptable only when the actor is genuinely unknown or irrelevant.
 
-## 13. Inline evidence formatting
+## 13. Evidence formatting — proof quality and placement
 
-Evidence lives inside the Steps to Reproduce step that produces it — not in a separate section. Format proof inline with each reproduction step.
+**Proof quality applies wherever evidence lives, regardless of format:**
 
 **Request block:** Full HTTP request in a fenced code block immediately after the step instruction. Annotate injected payloads or manipulated parameters with inline comments if the critical part is not obvious.
 
-**Response block:** Immediately below the request, truncate to the 5-15 lines that prove the finding. Bold or annotate the specific data that constitutes the proof — the leaked PII field, the unauthorized record, the injected output. 10 lines that show the proof beat 200 lines that bury it.
+**Response block:** Immediately below the request (or, for external submissions, in the Evidence section — see "Placement" below), truncate to the 5-15 lines that prove the finding. Bold or annotate the specific data that constitutes the proof — the leaked PII field, the unauthorized record, the injected output. 10 lines that show the proof beat 200 lines that bury it.
 
-**Highlighting:** Use `**bold**` or `← proof` annotations to draw the eye to the critical line in response blocks. A reviewer should find the proof in under 3 seconds.
+**Highlighting:** Use `**bold**` or `← proof` / `<-- proof` annotations to draw the eye to the critical line in response blocks. A reviewer should find the proof in under 3 seconds.
 
 **Raw tool output is not evidence.** Extract the specific proof from tool output and present it as a request/response pair or a targeted excerpt — the reader needs the proof line, not the full Nmap scan, Nuclei JSON, or sqlmap log.
+
+**Placement differs by format — do not mix them:**
+
+- **Internal `report.md` (legacy):** evidence lives inside the Steps to Reproduce step that produces it — no separate Evidence section. See "Report Structure (Legacy Internal Report)" in the report-generation skill.
+- **External submissions:** evidence lives in its own `### Evidence` section, separate from Steps to Reproduce — see `agent/references/submission-format.md` "Structure" and "Steps to Reproduce vs Evidence." Reference the producing step ("the response to step 3") rather than re-pasting its request a second time — see Rule 21.
 
 ## 14. Remediation must be specific
 
@@ -314,4 +319,20 @@ External submissions (bug bounty, disclosure email) are read by humans. The patt
 
 **Preferred phrase:** `this finding` (not `this submission`).
 
+**Write your own actions in first person.** `I submitted the form and the request was rejected`, not `a human filed one such submission` or `it was observed that the request was rejected` — third-person or passive framing of what you personally did during testing is an agent tell.
+
+**Name what you haven't established, in your own voice — but stay accurate.** `I haven't worked out the outbound beacon on Excel-for-Mac (WEBSERVICE is unsupported there), though the local cross-row read still surfaces the neighbor's email` reads human; a matrix where every cell is solved reads generated. Don't over-concede past what you actually found: if a lesser impact still holds where the primary one doesn't, say so instead of writing off the whole environment.
+
 **If flagged as AI-generated:** the correction is shorter, rougher, and more specific — never longer and more polished. Uniform polish is itself the tell.
+
+## 21. Establish each fact once — don't re-prove it every section
+
+State and prove each load-bearing fact in exactly one place, then let the rest of the finding rely on it. Re-asserting the same claim in the Summary, again in a step's preamble, and again in the Attack Scenario — or re-pasting a step's request/response verbatim under a separate Evidence heading — is one of the most recognizable agent-authored tells: the model re-establishes a claim wherever a section could carry it, where a human states it once and trusts the reader to carry it forward. Give each fact one home — usually the step whose request/response proves it — and let everything else reference that home instead of restating it.
+
+- **Sections:** don't re-paste bytes a step already showed. Evidence exists to carry the annotated proof pulled from a step's response, not to retype the request a second time (see submission-format.md "Steps to Reproduce vs Evidence") — reference the step instead of repeating it. If the Attack Scenario just re-narrates the Summary and Steps, cut it or reduce it to the one sentence that adds a new adversary or starting-access detail (submission-format.md already allows dropping Attack Scenario entirely for this reason).
+- **Qualifiers:** state each precondition once, where it's proven — don't repeat the same adjective phrase on every actor mention. `an anonymous visitor holding no account, session, or token, in a logged-out browser, clearing only Turnstile` → `an anonymous visitor` on every mention after the first.
+- **Annotations:** gloss a response line once. `login_identifier:null` — the field name carries the rest; never repeat the same gloss in a second section.
+
+**This is not a license to cut corroborating proof.** A second environment, engine, or code path that independently confirms the same conclusion through a different mechanism — e.g., an offline replay that rules out network dependence, or a second browser engine that rules out a client-side quirk — is a new primitive, not a restatement of the same fact. Cutting it trades a rebuttal-proof anchor for concision; keep it.
+
+Test: if a sentence's fact is already stated or proven earlier by the *same* mechanism, it must add something new (a different identity, endpoint, or primitive) — or it's cut.

@@ -62,6 +62,7 @@ def _seed_engagement(
     out_of_scope: list[str] | None = None,
     required_headers: dict[str, str] | None = None,
     off_limits_paths: list[str] | None = None,
+    scope_enforcement: str | None = None,
 ) -> Path:
     engagement_dir = engagements_root / key
     engagement_dir.mkdir(parents=True, exist_ok=True)
@@ -74,6 +75,8 @@ def _seed_engagement(
         scope["required_headers"] = required_headers
     if off_limits_paths is not None:
         scope["off_limits_paths"] = off_limits_paths
+    if scope_enforcement is not None:
+        scope["scope_enforcement"] = scope_enforcement
     (engagement_dir / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
     return engagement_dir
 
@@ -228,6 +231,59 @@ def test_no_match_returns_none(tmp_path: Path) -> None:
 
     assert collector._match_engagement("nope.example") is None
     assert collector._match_engagement("") is None
+
+
+def test_active_global_bypass_binds_unmatched_and_denied_hosts(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root,
+        "eng-bypass",
+        hosts=["target.example"],
+        out_of_scope=["blocked.example"],
+        scope_enforcement="bypass",
+    )
+    (root / ".active").write_text("eng-bypass\n", encoding="utf-8")
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    assert collector.registry["eng-bypass"].scope_enforcement == "bypass"
+    assert collector._match_engagement("outside.example").key == "eng-bypass"
+    assert collector._match_engagement("blocked.example").key == "eng-bypass"
+
+
+def test_active_global_bypass_never_steals_normal_hostname_owner(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root,
+        "eng-bypass",
+        hosts=["target.example"],
+        scope_enforcement="bypass",
+    )
+    _seed_engagement(root, "eng-owner", hosts=["owned.example"])
+    (root / ".active").write_text("eng-bypass\n", encoding="utf-8")
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    assert collector._match_engagement("owned.example").key == "eng-owner"
+
+
+def test_active_enforced_engagement_does_not_bind_unmatched_host(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-enforced", hosts=["target.example"])
+    (root / ".active").write_text("eng-enforced\n", encoding="utf-8")
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    assert collector._match_engagement("outside.example") is None
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +561,30 @@ def test_request_hook_respects_out_of_scope_carve_out(tmp_path: Path) -> None:
     assert "x-bug-bounty" not in blocked.headers
 
 
+def test_request_hook_global_bypass_attributes_unmatched_and_denied_hosts(
+    tmp_path: Path,
+) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root,
+        "eng-bypass",
+        hosts=["target.example"],
+        out_of_scope=["blocked.example"],
+        required_headers={"X-Bug-Bounty": "vigiloss"},
+        scope_enforcement="bypass",
+    )
+    (root / ".active").write_text("eng-bypass\n", encoding="utf-8")
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    for url in ("https://outside.example/x", "https://blocked.example/x"):
+        req = _run_request_hook(collector, url)
+        assert req.headers.get("X-Bug-Bounty") == "vigiloss"
+
+
 def test_request_hook_noop_when_engagement_has_no_required_headers(tmp_path: Path) -> None:
     module = _load_proxy_addon_module()
     root = tmp_path / "engagements"
@@ -545,6 +625,33 @@ def test_request_hook_synthesizes_block_for_no_fire_url_without_upstream_send(
     assert flow.response.status_code == 451
     assert flow.response.headers.get("X-Vigil-No-Fire") == "blocked"
     assert b"off_limits_paths" in flow.response.get_content()
+
+
+def test_request_hook_global_bypass_still_blocks_no_fire_url(tmp_path: Path) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root,
+        "eng-bypass",
+        hosts=["target.example"],
+        off_limits_paths=["/api/send-email"],
+        scope_enforcement="bypass",
+    )
+    (root / ".active").write_text("eng-bypass\n", encoding="utf-8")
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    flow = _FakeFlow(
+        _FakeRequest(url="https://outside.example/api/send-email"),
+        None,
+    )
+
+    collector.request(flow)
+
+    assert flow.response is not None
+    assert flow.response.status_code == 451
+    assert flow.response.headers.get("X-Vigil-No-Fire") == "blocked"
 
 
 def test_request_hook_no_fire_is_host_scoped_for_absolute_patterns(tmp_path: Path) -> None:
@@ -622,6 +729,7 @@ def test_backend_registry_reads_required_headers_from_scope_json(
     _seed_engagement(
         root, "eng-from-backend", hosts=["api.example.com"],
         required_headers={"X-Bug-Bounty": "vigiloss"},
+        scope_enforcement="bypass",
     )
 
     collector = module.CaseCollector()
@@ -659,6 +767,7 @@ def test_backend_registry_reads_required_headers_from_scope_json(
     entries = collector._fetch_registry_from_backend()
     assert entries is not None and len(entries) == 1
     assert entries[0].required_headers == {"X-Bug-Bounty": "vigiloss"}
+    assert entries[0].scope_enforcement == "bypass"
 
 
 def test_reload_updates_required_headers_after_scope_edit(tmp_path: Path) -> None:
@@ -1419,6 +1528,54 @@ def test_request_body_saved_when_response_is_binary(tmp_path: Path):
     assert kw["body"] == '{"k": "v"}'
     assert kw["request_content_type"] == "application/json"
     assert json.loads(kw["params"]["body_params"]) == {"k": "v"}
+
+
+def test_response_global_bypass_captures_unmatched_host_for_bound_engagement(
+    tmp_path: Path,
+) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root,
+        "eng-bypass",
+        hosts=["target.example"],
+        out_of_scope=["blocked.example"],
+        scope_enforcement="bypass",
+    )
+    (root / ".active").write_text("eng-bypass\n", encoding="utf-8")
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    auth_entries: list[str] = []
+    observations: list[tuple[str, str]] = []
+    full_flows: list[str] = []
+    collector._capture_auth = lambda entry, *_a, **_k: auth_entries.append(entry.key)
+
+    def _post_observation(*, entry, url, **_kwargs):
+        observations.append((entry.key, url))
+        return {"request_variant": {"id": 1}}
+
+    collector._post_request_observation = _post_observation
+    collector._maybe_capture_full_flow = (
+        lambda entry, *_a, **_k: full_flows.append(entry.key)
+    )
+    request = _FakeRequest(
+        url="https://blocked.example/api",
+        headers={"content-type": "application/json"},
+    )
+    response = _FakeHttpResponse(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        body=b'{"ok": true}',
+    )
+
+    collector.response(_FakeFlow(request, response))
+
+    assert auth_entries == ["eng-bypass"]
+    assert observations == [("eng-bypass", "https://blocked.example/api")]
+    assert full_flows == ["eng-bypass"]
 
 
 # ---------------------------------------------------------------------------

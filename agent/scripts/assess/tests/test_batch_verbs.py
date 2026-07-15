@@ -21,8 +21,7 @@ from assess.commands import (
     kill_finding,
     link_finding,
     reset_finding,
-    resolve_coverage_item,
-    resolve_surface,
+    resolve,
     update_finding,
     verify_finding,
 )
@@ -192,26 +191,26 @@ def test_reset_batch(tmp_path, monkeypatch, capsys):
 
 def test_resolve_surface_batch(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
-    _install(monkeypatch, resolve_surface, tmp_path, fake)
+    _install(monkeypatch, resolve, tmp_path, fake)
     args = _parse(
-        resolve_surface,
-        ["resolve-surface", "42", "99", "17", "--status", "covered", "--rationale", "same verdict"],
+        resolve,
+        ["resolve", "surface", "42", "99", "17", "--status", "covered", "--rationale", "same verdict"],
         tmp_path,
     )
-    resolve_surface.run(args)
+    resolve.run(args)
     assert [ep for ep, _ in fake.patches] == ["surfaces/42", "surfaces/99", "surfaces/17"]
     assert "resolved 3 surface(s); 0 failed" in capsys.readouterr().err
 
 
 def test_resolve_coverage_item_batch(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
-    _install(monkeypatch, resolve_coverage_item, tmp_path, fake)
+    _install(monkeypatch, resolve, tmp_path, fake)
     args = _parse(
-        resolve_coverage_item,
-        ["resolve-coverage-item", "77", "88", "--status", "covered", "--rationale", "tested both"],
+        resolve,
+        ["resolve", "coverage-item", "77", "88", "--status", "covered", "--rationale", "tested both"],
         tmp_path,
     )
-    resolve_coverage_item.run(args)
+    resolve.run(args)
     assert [ep for ep, _ in fake.patches] == ["coverage-items/77", "coverage-items/88"]
     assert "resolved 2 item(s); 0 failed" in capsys.readouterr().err
 

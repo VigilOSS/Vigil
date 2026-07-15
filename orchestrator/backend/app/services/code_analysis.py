@@ -357,6 +357,99 @@ def _require_queue_lease(
         )
 
 
+def _require_queue_generation(
+    connection, engagement_id: int, queue_rows: dict[int, dict[str, Any]], *, action: str
+) -> None:
+    """Reject agent writes after the repository snapshot behind a lease changes."""
+    if not queue_rows:
+        return
+    placeholders = ",".join("?" for _ in queue_rows)
+    current_rows = connection.execute(
+        f"""
+        SELECT queue.id, repos.active_generation
+        FROM code_analysis_queue AS queue
+        JOIN code_files AS files
+          ON files.id = queue.file_id
+         AND files.engagement_id = queue.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+        WHERE queue.engagement_id = ? AND queue.id IN ({placeholders})
+        """,
+        (engagement_id, *sorted(queue_rows)),
+    ).fetchall()
+    current_generations = {
+        int(row["id"]): int(row["active_generation"] or 0) for row in current_rows
+    }
+    stale = [
+        item_id
+        for item_id, row in queue_rows.items()
+        if int(row.get("repo_generation", 0) or 0) != current_generations.get(item_id, 0)
+    ]
+    if stale:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cannot {action}: repository generation changed for queue items "
+                f"{', '.join(str(item_id) for item_id in sorted(stale))}; refetch and retry"
+            ),
+        )
+
+
+def _reclaim_stale_generation_leases(connection, engagement_id: int) -> int:
+    """Release processing leases invalidated by a committed repository refresh.
+
+    Generation checks deliberately reject the old agent's writes as soon as a
+    refresh commits. The next atomic fetch also has to make those rows claimable;
+    otherwise they remain stuck in ``processing`` until the generic timeout reaper
+    runs even though their lease can never succeed again.
+    """
+    stale_rows = connection.execute(
+        """
+        SELECT queue.id, queue.file_id, queue.lease_token
+        FROM code_analysis_queue AS queue
+        JOIN code_files AS files
+          ON files.id = queue.file_id
+         AND files.engagement_id = queue.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+        WHERE queue.engagement_id = ?
+          AND queue.status = 'processing'
+          AND queue.repo_generation != repos.active_generation
+        """,
+        (engagement_id,),
+    ).fetchall()
+    superseded_at = _now_iso()
+    reclaimed = 0
+    for row in stale_rows:
+        cursor = connection.execute(
+            """
+            UPDATE code_analysis_queue
+            SET status = 'pending', assigned_agent = '', lease_token = '',
+                consumed_at = NULL, last_heartbeat_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ? AND status = 'processing'
+              AND lease_token = ?
+            """,
+            (engagement_id, int(row["id"]), str(row["lease_token"] or "")),
+        )
+        if cursor.rowcount != 1:
+            continue
+        reclaimed += 1
+        connection.execute(
+            """
+            UPDATE code_analysis_results SET superseded_at = ?
+            WHERE queue_item_id = ? AND lease_token = ? AND superseded_at IS NULL
+            """,
+            (superseded_at, int(row["id"]), str(row["lease_token"] or "")),
+        )
+        _sync_file_analysis_status(connection, engagement_id, int(row["file_id"]))
+        _sync_trigger_status_for_file(connection, engagement_id, int(row["file_id"]))
+    return reclaimed
+
+
 def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> None:
     queue_rows = connection.execute(
         """
@@ -1736,6 +1829,11 @@ def fetch_queue_items(
     engagement_id: int,
     limit: int,
     agent_name: str,
+    *,
+    repo_id: int | None = None,
+    classification: str | None = None,
+    batch_theme: str | None = None,
+    item_ids: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Atomically claim pending queue items for an agent.
 
@@ -1744,11 +1842,29 @@ def fetch_queue_items(
     """
     engagement = _engagement_or_404(engagement_id)
     now = _now_iso()
+    filter_clauses: list[str] = []
+    filter_params: list[Any] = []
+    if repo_id is not None:
+        filter_clauses.append("files.repo_id = ?")
+        filter_params.append(repo_id)
+    if classification is not None:
+        filter_clauses.append("files.classification = ?")
+        filter_params.append(classification)
+    if batch_theme is not None:
+        filter_clauses.append("queue.batch_theme = ?")
+        filter_params.append(batch_theme)
+    if item_ids is not None:
+        normalized_ids = sorted(set(item_ids))
+        placeholders = ",".join("?" for _ in normalized_ids)
+        filter_clauses.append(f"queue.id IN ({placeholders})")
+        filter_params.extend(normalized_ids)
+    filter_sql = "" if not filter_clauses else " AND " + " AND ".join(filter_clauses)
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        _reclaim_stale_generation_leases(connection, engagement.id)
         selected = connection.execute(
-            """
-            SELECT queue.id
+            f"""
+            SELECT queue.id, repos.active_generation AS repo_generation
             FROM code_analysis_queue AS queue
             JOIN code_files AS files
               ON files.id = queue.file_id
@@ -1757,24 +1873,34 @@ def fetch_queue_items(
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
              AND repos.active_generation > 0
-            WHERE queue.engagement_id = ? AND queue.status = 'pending'
+            WHERE queue.engagement_id = ? AND queue.status = 'pending'{filter_sql}
             ORDER BY queue.priority DESC, queue.id ASC
             LIMIT ?
             """,
-            (engagement.id, limit),
+            (engagement.id, *filter_params, limit),
         ).fetchall()
         claimed_ids: list[int] = []
         for selected_row in selected:
             item_id = int(selected_row["id"])
+            repo_generation = int(selected_row["repo_generation"])
             lease_token = str(uuid.uuid4())
             cursor = connection.execute(
                 """
                 UPDATE code_analysis_queue
                 SET status = 'processing', assigned_agent = ?, lease_token = ?,
-                    consumed_at = ?, last_heartbeat_at = ?, updated_at = CURRENT_TIMESTAMP
+                    repo_generation = ?, consumed_at = ?, last_heartbeat_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE engagement_id = ? AND id = ? AND status = 'pending'
                 """,
-                (agent_name, lease_token, now, now, engagement.id, item_id),
+                (
+                    agent_name,
+                    lease_token,
+                    repo_generation,
+                    now,
+                    now,
+                    engagement.id,
+                    item_id,
+                ),
             )
             if cursor.rowcount == 1:
                 claimed_ids.append(item_id)
@@ -2156,6 +2282,11 @@ def complete_queue_items(
                 "out-of-scope-language, vendored-dependency."
             ),
         )
+    if disposition == "clean" and not notes.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="notes are required when disposition='clean'",
+        )
     now = _now_iso()
     # Skipped items had no CWE analysis run; empty cwe_coverage is the
     # natural payload. Skip both the required-non-empty check and the
@@ -2170,10 +2301,37 @@ def complete_queue_items(
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         _require_queue_status(queue_rows, expected_status="processing", action="complete")
         _require_queue_lease(queue_rows, agent_name=agent_name, lease_token=lease_token, action="complete")
+        _require_queue_generation(connection, engagement.id, queue_rows, action="complete")
         queue_row = next(iter(queue_rows.values()))
         file_row = _get_file_rows(connection, engagement.id, {int(queue_row["file_id"])})[
             int(queue_row["file_id"])
         ]
+        if disposition in {"finding", "suspicious"}:
+            evidenced_result = connection.execute(
+                """
+                SELECT id
+                FROM code_analysis_results
+                WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
+                  AND lease_token = ? AND disposition = ? AND superseded_at IS NULL
+                  AND (trim(evidence) != '' OR trim(evidence_ref) != '')
+                LIMIT 1
+                """,
+                (
+                    engagement.id,
+                    int(queue_row["id"]),
+                    int(queue_row["file_id"]),
+                    lease_token,
+                    disposition,
+                ),
+            ).fetchone()
+            if evidenced_result is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"disposition='{disposition}' requires a current analysis result "
+                        "with evidence or evidence_ref"
+                    ),
+                )
         # Skipped items bypass the cwe-coverage completeness check — by
         # definition the analyst did not analyze the file. Other dispositions
         # still enforce the existing coverage rule.
@@ -2235,6 +2393,7 @@ def error_queue_items(
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         _require_queue_status(queue_rows, expected_status="processing", action="mark as error")
         _require_queue_lease(queue_rows, agent_name=agent_name, lease_token=lease_token, action="mark as error")
+        _require_queue_generation(connection, engagement.id, queue_rows, action="mark as error")
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
@@ -2273,6 +2432,9 @@ def needs_context_queue_items(
         _require_queue_status(queue_rows, expected_status="processing", action="mark as needs_context")
         _require_queue_lease(
             queue_rows, agent_name=agent_name, lease_token=lease_token, action="mark as needs_context"
+        )
+        _require_queue_generation(
+            connection, engagement.id, queue_rows, action="mark as needs_context"
         )
         cursor = connection.execute(
             f"""
@@ -2367,7 +2529,8 @@ def heartbeat_queue_item(
     engagement = _engagement_or_404(engagement_id)
     now = _now_iso()
     with get_connection() as connection:
-        _get_queue_rows(connection, engagement.id, {item_id})
+        queue_rows = _get_queue_rows(connection, engagement.id, {item_id})
+        _require_queue_generation(connection, engagement.id, queue_rows, action="heartbeat")
         cursor = connection.execute(
             """
             UPDATE code_analysis_queue
@@ -2536,6 +2699,12 @@ def create_analysis_result(
             lease_token=lease_token,
             action="record analysis results",
         )
+        _require_queue_generation(
+            connection,
+            engagement.id,
+            {int(queue_item_id): queue_row},
+            action="record analysis results",
+        )
         fingerprint_payload = {
             key: value
             for key, value in result.items()
@@ -2578,13 +2747,13 @@ def create_analysis_result(
             """
             INSERT INTO code_analysis_results (
                 engagement_id, queue_item_id, file_id,
-                agent_name, function_name, hypothesis, evidence,
+                agent_name, function_name, hypothesis, evidence, evidence_ref,
                 disposition, confidence, finding_slug, cwe_id,
                 slot_type, notes, audit_metadata_json,
                 cwe_coverage_json, cross_file_triggers_json,
-                lease_token, result_fingerprint
+                lease_token, repo_generation, result_fingerprint
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -2594,6 +2763,7 @@ def create_analysis_result(
                 result.get("function_name", ""),
                 result.get("hypothesis", ""),
                 result.get("evidence", ""),
+                result.get("evidence_ref", ""),
                 disposition,
                 result.get("confidence", "medium"),
                 result.get("finding_slug", ""),
@@ -2604,6 +2774,7 @@ def create_analysis_result(
                 _json_list_text(result.get("cwe_coverage")),
                 _json_list_text(normalized_cross_file_triggers),
                 lease_token,
+                int(queue_row.get("repo_generation", 0) or 0),
                 result_fingerprint,
             ),
         )
@@ -3842,6 +4013,7 @@ def code_coverage_cwe_detail(
         # Fetch all done queue items for these files to accumulate cwe_coverage
         file_ids = [int(r["file_id"]) for r in file_rows]
         cwe_by_file: dict[int, dict[str, dict[str, Any]]] = {}  # file_id -> family -> merged entry
+        result_effort_by_file: dict[int, dict[str, int]] = {}
         if file_ids:
             placeholders = ",".join("?" for _ in file_ids)
             queue_done_rows = connection.execute(
@@ -3871,6 +4043,34 @@ def code_coverage_cwe_detail(
                 cwe_cov = _json_decode(dr["cwe_coverage_json"], [])
                 _merge_cwe_coverage_entries(cwe_by_file, fid, cwe_cov)
 
+            effort_rows = connection.execute(
+                f"""
+                SELECT file_id,
+                       COUNT(*) AS current_result_rows,
+                       SUM(
+                           CASE WHEN trim(evidence) != '' OR trim(evidence_ref) != ''
+                                THEN 1 ELSE 0 END
+                       ) AS evidenced_result_rows,
+                       COUNT(DISTINCT CASE WHEN trim(function_name) != '' THEN function_name END)
+                           AS distinct_functions_with_results
+                FROM code_analysis_results
+                WHERE engagement_id = ? AND file_id IN ({placeholders})
+                  AND superseded_at IS NULL
+                GROUP BY file_id
+                """,
+                (engagement.id, *file_ids),
+            ).fetchall()
+            result_effort_by_file = {
+                int(row["file_id"]): {
+                    "current_result_rows": int(row["current_result_rows"] or 0),
+                    "evidenced_result_rows": int(row["evidenced_result_rows"] or 0),
+                    "distinct_functions_with_results": int(
+                        row["distinct_functions_with_results"] or 0
+                    ),
+                }
+                for row in effort_rows
+            }
+
         files_detail: list[dict[str, Any]] = []
         for fr in file_rows:
             fid = int(fr["file_id"])
@@ -3881,19 +4081,39 @@ def code_coverage_cwe_detail(
                 role=fr["role"] or "",
             )
             merged_entries = list(cwe_by_file.get(fid, {}).values())
+            total_functions = int(fr["total_functions"] or 0)
+            result_effort = result_effort_by_file.get(
+                fid,
+                {
+                    "current_result_rows": 0,
+                    "evidenced_result_rows": 0,
+                    "distinct_functions_with_results": 0,
+                },
+            )
+            distinct_functions = int(result_effort["distinct_functions_with_results"])
+            function_coverage_pct = (
+                min(100.0, distinct_functions / total_functions * 100.0)
+                if total_functions > 0
+                else 0.0
+            )
             files_detail.append({
                 "file_id": fid,
                 "file_path": fr["file_path"],
                 "classification": fr["classification"],
                 "analysis_status": fr["analysis_status"],
                 "loc": int(fr["loc"]),
-                "total_functions": int(fr["total_functions"] or 0),
+                "total_functions": total_functions,
                 "total_entry_points": int(fr["total_entry_points"] or 0),
                 "total_sinks": int(fr["total_sinks"] or 0),
                 "total_exports": int(fr["total_exports"] or 0),
                 "slot_types": slot_types,
                 "applicable_families": applicable,
                 "cwe_coverage": merged_entries,
+                "analysis_effort": {
+                    **result_effort,
+                    "total_functions": total_functions,
+                    "function_coverage_pct": round(function_coverage_pct, 1),
+                },
             })
 
         # Also include the standard coverage summary fields

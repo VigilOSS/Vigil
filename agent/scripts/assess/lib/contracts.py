@@ -323,6 +323,8 @@ def validate_specialist_dispatch_contract(
     operator-side mistake of dispatching active probing against a related-but-
     out-of-scope domain that recon surfaced. OSINT and recon are NOT gated
     because they legitimately reach adjacent/related domains during discovery.
+    The engagement-wide ``scope_enforcement: bypass`` disables this target
+    allow/deny gate just as it does at execution and standalone ingest.
 
     L2-2 / L3-6: when ``allow_no_skills`` is set, a missing ``skills`` list is
     downgraded from an error to a WARNING so ad-hoc roles have a real escape
@@ -433,6 +435,7 @@ def validate_specialist_dispatch_contract(
                         host_in_scope,
                         load_scope,
                         out_of_scope_entries,
+                        scope_enforcement,
                         scope_entries,
                     )
                     scope = load_scope(engagement_dir)
@@ -442,7 +445,11 @@ def validate_specialist_dispatch_contract(
                     warnings.append(f"scope_host gate skipped: {exc}")
                 else:
                     probed_host = scope_host.strip()
-                    if entries and not host_admitted(probed_host, entries, deny):
+                    if (
+                        scope_enforcement(scope) != "bypass"
+                        and entries
+                        and not host_admitted(probed_host, entries, deny)
+                    ):
                         if host_in_scope(probed_host, entries):
                             # Host IS in the allowlist but is carved out by an
                             # out_of_scope denylist entry — distinct, sharper error.
@@ -844,10 +851,11 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("include_dead", "false (probe-proven-dead sessions hidden; `stale` always shown)"),
         ),
         notes=(
-            "The store is append-only + multi-identity: logout-then-login on one host keeps BOTH sessions, so `auth list` can show two live identities for the same site — pick one with `vigil assess kali --identity <name>` (or auth-status --probe --identity) for the account you are testing as.",
+            "The store is append-only + multi-identity: logout-then-login on one host keeps BOTH sessions, so `auth list` can show two live identities for the same site — pick one with `vigil assess kali --identity <name>` (or auth-status --probe --identity) for the account you are testing as. When the name is a scoped alias, also pass `--identity-scope <logical-scope>`; Vigil never guesses logical scope from the target URL.",
             "The list view shows cookie NAMES + hosts and metadata (auth_context, state, liveness, age, last_probed) but NEVER raw cookie VALUES — session material stays out of the enumeration view.",
             "state: available | stale (8h age backstop — re-probe) | dead (probe-proven; hidden unless --include-dead) | missing. Only a failed liveness probe marks a session dead; age never does.",
-            "liveness is UNKNOWN until you actively probe: run `vigil assess auth-status --probe --identity <name> --probe-url <url>` to verify one session and persist the verdict.",
+            "liveness is UNKNOWN until you actively probe: run `vigil assess auth-status --probe --identity <name> --probe-url <url> --scope <logical-scope>` to persist a TTL-bound observation for that identity and scope.",
+            "A literal identity name always wins. Otherwise a configured alias resolves only to the freshest non-expired live capability for its durable principal_id and requested scope.",
             "The active identity is marked with a trailing `*` in the text view.",
         ),
         common_mistakes=(
@@ -891,79 +899,45 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("policy set with no fields", "pass at least one field — an empty update is rejected"),
         ),
     ),
-    "record-attempt": CommandContract(
-        name="record-attempt",
-        phase=("consume-test", "exploit"),
-        summary="Record a NON-covering probe attempt (attempted|blocked|no-signal|error) under a lens so a touched-but-inconclusive target is on the ledger without counting as coverage.",
-        schema_name="backend ProbeRunRecordRequest (POST /probe-runs)",
-        preferred_invocations=(
-            "vigil assess record-attempt --result-status blocked --attack-family ssrf --lens tenant-boundary --target-host api.example.com --target-path /fetch --input-slot query:url --auth-context anonymous --notes 'WAF 403 on every internal host' --finding VA-047",
-            "vigil assess record-attempt --result-status no-signal --attack-family idor --target-host app.example.com --target-path /orders/1001 --auth-context member --input-slot path",
-            "vigil assess record-attempt --result-status attempted --attack-family open-redirect --target-host app.example.com --target-path /login --input-slot query:next --auth-context anonymous --lens blind-oob --evidence-ref scans/redirect-probe.txt",
-        ),
-        author_supplied_fields=(
-            "--result-status (attempted|blocked|no-signal|error — non-covering only)",
-            "--attack-family (a vuln_taxonomy CLASS token — not a family heading; see agent/references/runtime-guides/vuln-taxonomy.md)",
-            "--input-slot (REQUIRED — 'slot:name' or a bare coarse slot; 'unknown'/empty rejected)",
-            "--auth-context (REQUIRED — explicit identity; no silent anonymous)",
-            "--target-host (REQUIRED — a non-covering lead is target-anchored by host/path)",
-            "--lens / --target-path / --target-port as applicable",
-            "--work-item-ids <id...> (optional — mark those work-buffer rows done atomically with the probe insert; unknown ids skipped)",
-            "--resolve-surface <id> (optional, OPT-IN — advance that surface to partially-covered; omit and surface state is untouched)",
-        ),
-        helper_defaults=(
-            ("tool_name", "manual"),
-            ("lens", '"" (part of the probe key: a different lens is a distinct attempt)'),
-        ),
-        notes=(
-            "Non-covering by design: `tested`/`signal` (covering) verdicts are NOT accepted here — record those through `record-probe`, which requires `--evidence-ref`. This verb exists so 'a non-conclusive response is a lead, not a verdict' attempts are captured for the resume-brief Attempts ledger.",
-            "The same target under a DIFFERENT --lens is a distinct attempt (lens is hashed into the probe key), not a dedup collision — use it to record the mindset the probe ran under.",
-            "Name the specific input as `--input-slot slot:name` (e.g. `header:X-Forwarded-Host`, `query:uid`) so 'which input was probed' stays queryable; a bare slot is fine for whole-slot probes.",
-            "--finding <slug> backfills the attempt→finding link (finding_id); it is COALESCE-backfilled on a re-run of the same probe, so a later record-attempt can attach the link an earlier one omitted.",
-            "An out-of-vocab --attack-family WARNs but is stored verbatim (the backend persists TEXT for forward-compatibility).",
-            "A3: --work-item-ids <id...> drains those work-buffer rows (marks them `done`) in the SAME transaction as the probe insert, so `vigil assess work-buffer stats` bucket counts actually decrement as probes land; unknown ids are skipped, not an error. --resolve-surface <id> is OPT-IN: it advances that surface to `partially-covered` via the resolve-surface path — recording never auto-mutates surface state, so omit it to leave the surface untouched.",
-            "Verdict → verb+status (there is NO `refuted` status — a runtime-refuted hypothesis is `no-signal`): confirmed vuln → `record-probe --result-status tested|signal`; the probe fired but proved nothing → `record-attempt --result-status attempted`; a WAF/auth/egress wall stopped it → `record-attempt --result-status blocked`; hypothesis disproven / nothing distinguishing the response → `record-attempt --result-status no-signal`; the probe itself errored (tool/network failure) → `record-attempt --result-status error`. Vocabulary source: coverage.py:PROBE_RESULT_STATUSES.",
-        ),
-        common_mistakes=(
-            ("--result-status tested", "covering verdicts go to `record-probe` (evidence required), not record-attempt; use attempted/blocked/no-signal/error here"),
-            ("recording a wall here instead of block-technique", "record-attempt logs a single probe attempt; a durable technique-level wall on a target belongs in `vigil assess block-technique`"),
-        ),
-    ),
     "record-probe": CommandContract(
         name="record-probe",
         phase=("consume-test", "exploit"),
-        summary="Record a COVERING probe run (tested|signal) with required evidence, so a class actually exercised to a verdict advances the coverage map.",
+        summary="Record ANY probe outcome — covering (tested|signal, evidence required) or non-covering (attempted|blocked|no-signal|error) — to the probe ledger. A covering probe carrying a coverage-item/request-variant link drains its work-items and advances its surface(s) by default.",
         schema_name="backend ProbeRunRecordRequest (POST /probe-runs)",
         preferred_invocations=(
             "vigil assess record-probe --result-status tested --attack-family idor --target-host app.example.com --target-path /orders/1001 --input-slot path:id --auth-context member --evidence-ref scans/idor-orders.txt --coverage-item-id 77",
             "vigil assess record-probe --result-status signal --attack-family ssrf --target-host api.example.com --target-path /fetch --input-slot query:url --auth-context anonymous --lens blind-oob --evidence-ref scans/ssrf-oob.txt --finding VA-047",
+            "vigil assess record-probe --result-status blocked --attack-family ssrf --lens tenant-boundary --target-host api.example.com --target-path /fetch --input-slot query:url --auth-context anonymous --notes 'WAF 403 on every internal host'",
+            "vigil assess record-probe --result-status no-signal --attack-family idor --target-host app.example.com --target-path /orders/1001 --auth-context member --input-slot path",
         ),
         author_supplied_fields=(
-            "--result-status (tested|signal — covering only)",
+            "--result-status (tested|signal — covering, evidence required — or attempted|blocked|no-signal|error — non-covering)",
             "--attack-family (a vuln_taxonomy CLASS token — not a family heading; see agent/references/runtime-guides/vuln-taxonomy.md)",
-            "--evidence-ref (REQUIRED — a covering verdict without evidence is not coverage)",
+            "--evidence-ref (REQUIRED for a covering status tested|signal; optional for the non-covering four)",
             "--input-slot (REQUIRED — 'slot:name' or a bare coarse slot; 'unknown'/empty rejected)",
             "--auth-context (REQUIRED — explicit identity; no silent anonymous)",
-            "--target-host (REQUIRED unless a --request-variant-id/--service-id anchor is passed) / --target-path as applicable",
-            "--request-variant-id / --service-id / --coverage-item-id from the fetched work-item (links the probe to the exact request/coverage item)",
-            "--work-item-ids <id...> (optional — mark those work-buffer rows done atomically with the probe insert; unknown ids skipped)",
-            "--resolve-surface <id> (optional, OPT-IN — advance that surface to partially-covered; omit and surface state is untouched)",
+            "--target-host (REQUIRED unless a --request-variant-id/--service-id anchor is passed) / --target-path / --lens as applicable",
+            "--request-variant-id / --service-id / --coverage-item-id from the fetched work-item (links the probe to the exact request/coverage item; the default cascade keys on them)",
+            "--work-item-ids <id...> (OVERRIDE — narrow the default drain to exactly these ids)",
+            "--resolve-surface <id> (OVERRIDE — advance exactly that surface instead of the FK-linked ones)",
+            "--no-drain (SUPPRESS the default cascade — leave the buffer and surfaces untouched)",
         ),
         helper_defaults=(
             ("tool_name", "manual"),
             ("lens", '"" (part of the probe key: a different lens is a distinct probe)'),
         ),
         notes=(
-            "The covering counterpart to record-attempt. Use record-attempt for a touched-but-inconclusive probe (attempted|blocked|no-signal|error); use this when the class was actually exercised to a verdict.",
-            "`--evidence-ref` is mandatory: a covering probe with no evidence is exactly the self-attested signal the doctrine forbids, and the depth ledger only counts covering probes with a real result.",
-            "Name the specific input as `--input-slot slot:name` (e.g. `header:X-Forwarded-Host`, `query:uid`) so per-input coverage stays queryable in the resume brief; a bare slot is fine for whole-slot probes.",
-            "Replaces the old raw `post probe-runs <json>` for the covering path (that raw form is now redirected here).",
-            "A3: --work-item-ids <id...> drains those work-buffer rows (marks them `done`) in the SAME transaction as the probe insert, so `vigil assess work-buffer stats` bucket counts actually decrement as probes land; unknown ids are skipped, not an error. --resolve-surface <id> is OPT-IN: it advances that surface to `partially-covered` via the resolve-surface path — recording never auto-mutates surface state, so omit it to leave the surface untouched.",
-            "Verdict → verb+status (there is NO `refuted` status — a runtime-refuted hypothesis is `no-signal`): confirmed vuln → `record-probe --result-status tested|signal`; the probe fired but proved nothing → `record-attempt --result-status attempted`; a WAF/auth/egress wall stopped it → `record-attempt --result-status blocked`; hypothesis disproven / nothing distinguishing the response → `record-attempt --result-status no-signal`; the probe itself errored (tool/network failure) → `record-attempt --result-status error`. Vocabulary source: coverage.py:PROBE_RESULT_STATUSES.",
+            "One verb for every probe outcome (it absorbed the former record-attempt). Covering (tested|signal) advances the coverage map and REQUIRES --evidence-ref; non-covering (attempted|blocked|no-signal|error) records that the target was TOUCHED under a --lens without counting as coverage, so the resume-brief Attempts ledger surfaces it and the next dispatch does not re-run a dead end (evidence optional).",
+            "`--evidence-ref` on a covering probe is mandatory: a covering verdict with no evidence is exactly the self-attested signal the doctrine forbids, and the depth ledger only counts covering probes with a real result.",
+            "1b default cascade: a COVERING probe carrying --coverage-item-id drains the work-items FK-linked to that coverage item (marked `done` in the SAME transaction), and one carrying --request-variant-id advances the discovered surface(s) FK-linked to that variant to `partially-covered` — no extra verbs, so `vigil assess work-buffer stats` and the surface ledger stop disagreeing with the probe-derived coverage. It is covering-gated (a non-covering attempt never auto-cascades), never auto-promotes coverage_items.status to `covered`, and never regresses a human surface verdict.",
+            "Override/suppress the cascade: --work-item-ids <id...> narrows the drain to explicit ids (unknown ids skipped, not an error); --resolve-surface <id> advances exactly that surface; --no-drain suppresses the whole cascade. Both overrides fire regardless of the covering gate.",
+            "The same target under a DIFFERENT --lens is a distinct probe (lens is hashed into the probe key), not a dedup collision. Name the specific input as `--input-slot slot:name` (e.g. `header:X-Forwarded-Host`, `query:uid`) so per-input coverage stays queryable; a bare slot is fine for whole-slot probes.",
+            "--finding <slug> backfills the probe→finding link (finding_id); COALESCE-backfilled on a re-run of the same probe. An out-of-vocab --attack-family WARNs but is stored verbatim. Replaces the old raw `post probe-runs <json>` (now redirected here).",
+            "Verdict → status (there is NO `refuted` status — a runtime-refuted hypothesis is `no-signal`): confirmed vuln → `tested|signal` (evidence); the probe fired but proved nothing → `attempted`; a WAF/auth/egress wall stopped it → `blocked`; hypothesis disproven / nothing distinguishing the response → `no-signal`; the probe itself errored → `error`. A durable technique-level wall on a target belongs in `vigil assess block-technique`, not a single `blocked` probe. Vocabulary source: coverage.py:PROBE_RESULT_STATUSES.",
         ),
         common_mistakes=(
-            ("--result-status blocked", "non-covering outcomes go to `record-attempt`; record-probe is for tested/signal only"),
-            ("omitting --evidence-ref", "a covering verdict requires evidence; without it, record it as a record-attempt or attach the evidence path"),
+            ("omitting --evidence-ref on tested/signal", "a covering verdict requires evidence; without it, record it with a non-covering status (attempted/blocked/no-signal/error) or attach the evidence path"),
+            ("recording a wall as a bare blocked probe when it is a durable technique wall", "a one-off `blocked` probe is a lead; a durable technique-level wall on a target belongs in `vigil assess block-technique`"),
         ),
     ),
     "list-finding-group": CommandContract(
@@ -1246,75 +1220,40 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
-    "resolve-surface": CommandContract(
-        name="resolve-surface",
-        phase=("collect", "consume-test"),
-        summary="PATCH an assessment surface by id (set status + rationale).",
-        schema_name="backend SurfaceUpdateRequest",
+    "resolve": CommandContract(
+        name="resolve",
+        phase=("collect", "consume-test", "verify"),
+        summary="PATCH a surface OR a coverage-item by id (target-kind positional + status + rationale). Post-1b (recording advances surfaces/drains work by default) this is the manual-override / negative-verdict path.",
+        schema_name="backend SurfaceUpdateRequest (surface) / CoverageItemUpdateRequest (coverage-item)",
         preferred_invocations=(
-            'vigil assess resolve-surface <id> --status covered --rationale "..."',
-            'vigil assess resolve-surface <id> --status not_applicable --rationale "..."',
-            'vigil assess resolve-surface <id> --status deferred --rationale "..."',
-            'vigil assess resolve-surface <id> --status partially-covered --rationale "..." --followup-condition "..."',
-            'vigil assess resolve-surface 42 99 17 --status covered --rationale "batch: same triage verdict"',
+            'vigil assess resolve surface <id> --status covered --rationale "..."',
+            'vigil assess resolve surface <id> --status not_applicable --rationale "..."',
+            'vigil assess resolve surface <id> --status partially-covered --rationale "..." --followup-condition "..."',
+            'vigil assess resolve surface 42 99 17 --status deferred --rationale "batch: same triage verdict"',
+            'vigil assess resolve coverage-item <id> --status covered --rationale "idor tested across two identities; user_b got 403"',
+            'vigil assess resolve coverage-item 77 88 99 --status not_applicable --rationale "batch: static render, no id-bearing param"',
         ),
         author_supplied_fields=(
-            "status",
-            "rationale",
-            "followup_condition",
+            "target-kind positional: surface | coverage-item",
+            "one or more ids (batch)",
+            "--status (surface: covered|not_applicable|deferred|partially-covered; coverage-item: pending|queued|deferred|covered|not_applicable|blocked)",
+            "--rationale (required)",
+            "--followup-condition (surface only, REQUIRED for --status partially-covered)",
         ),
         notes=(
-            "Resolve a discovered surface after triage instead of falling back to direct SQL.",
-            "Rationale is appended to existing rationale, so the audit trail accumulates context across resolutions.",
-            "--followup-condition is REQUIRED when --status=partially-covered: the one-line condition the follow-up coverage pass must satisfy.",
-            "Batch: list several surface ids positionally to resolve them all with the SAME --status/--rationale (resilient loop with a per-id failure tally).",
+            "One verb, a target-kind positional (it absorbed resolve-surface + resolve-coverage-item). Each kind keeps its OWN status vocabulary; --source-name / --evidence-ref / --followup-condition are surface-only (rejected on a coverage-item).",
+            "Batch: list several ids positionally to resolve them all with the SAME --status/--rationale (resilient loop with a per-id failure tally). --rationale is appended to the existing rationale (surface) / notes (coverage-item), so the audit trail accumulates.",
+            "surface: resolve a discovered surface after triage. `discovered` is the seed state and not a resolution; --followup-condition names what the next coverage pass must satisfy for `partially-covered`. Post-1b, recording a covering probe already advances a linked surface to `partially-covered` by default — use `resolve surface ... --status covered` to record the deliberate, rationale-bearing human `covered` verdict (never auto-attested).",
+            "coverage-item: seeded `pending` at ingest — one per implied vuln-class on a surface. Resolve every implied class, not just the cluster winner (a surface's `covered` on one class does NOT cover its siblings); the depth ledger's signal_classes_uncovered stays open otherwise. --rationale is required for EVERY status; the backend additionally rejects an empty rationale for `covered` / `not_applicable`. Coverage-item status is a HUMAN verdict — recording a probe never auto-promotes it to `covered`.",
+            "Replaces the old raw `patch coverage-items/<id> <json>` (now redirected here).",
         ),
         common_mistakes=(
-            ("status=discovered", "discovered is the seed state; resolve to covered, not_applicable, deferred, or partially-covered"),
+            ("resolve surface --status discovered", "discovered is the seed state; resolve to covered, not_applicable, deferred, or partially-covered"),
             ("reason", "use --rationale for the resolution explanation"),
-            ("status=partially-covered without --followup-condition", "the follow-up condition is mandatory for partially-covered so the audit trail names what the next pass must satisfy"),
-        ),
-        examples=(
-            {
-                "status": "covered",
-                "rationale": "vulnerability-analyst confirmed coverage on parameter q",
-            },
-            {
-                "status": "not_applicable",
-                "rationale": "static asset, no input vector",
-            },
-            {
-                "status": "partially-covered",
-                "rationale": "unauth path tested; admin path requires auth",
-                "followup_condition": "needs auth re-test once credentials are issued",
-            },
-        ),
-    ),
-    "resolve-coverage-item": CommandContract(
-        name="resolve-coverage-item",
-        phase=("consume-test", "verify"),
-        summary="PATCH a class-typed coverage item by id (advance status + rationale) — the per-(surface × vuln-class) coverage verdict.",
-        schema_name="backend CoverageItemUpdateRequest",
-        preferred_invocations=(
-            'vigil assess resolve-coverage-item <id> --status covered --rationale "idor tested across two identities; user_b got 403"',
-            'vigil assess resolve-coverage-item <id> --status not_applicable --rationale "no id-bearing param; static render"',
-            'vigil assess resolve-coverage-item <id> --status deferred --rationale "low-signal; revisit after auth is issued"',
-            'vigil assess resolve-coverage-item 77 88 99 --status covered --rationale "batch: same class verdict"',
-        ),
-        author_supplied_fields=(
-            "status (pending|queued|deferred|covered|not_applicable|blocked)",
-            "rationale",
-        ),
-        notes=(
-            "Coverage items are seeded `pending` at ingest — one per implied vuln-class on a surface (the gf-bucket bridge). Resolve each implied class, not just the cluster winner: a surface's `covered` on one class does NOT cover its sibling classes.",
-            "Batch: list several coverage-item ids positionally to resolve them all with the SAME --status/--rationale (resilient loop with a per-id failure tally).",
-            "--rationale is required for EVERY status (audit trail); the backend additionally rejects an empty rationale for `covered` / `not_applicable`. A resolved-positive verdict must state what was tested and why; a deferral must state why.",
-            "Rationale is appended to the item's existing notes, so the audit trail accumulates across resolutions.",
-            "Replaces the old raw `patch coverage-items/<id> <json>` (that raw form is now redirected here).",
-        ),
-        common_mistakes=(
-            ("--status covered with no --rationale", "covered means tested with a stated reason; the backend rejects an evidence-free covered"),
-            ("resolving only the cluster-winner class", "resolve every coverage item the surface accrued (one per implied class), or the depth ledger's signal_classes_uncovered stays open"),
+            ("resolve surface partially-covered without --followup-condition", "the follow-up condition is mandatory for partially-covered so the audit trail names what the next pass must satisfy"),
+            ("resolve coverage-item ... --status covered with no --rationale", "covered means tested with a stated reason; the backend rejects an evidence-free covered"),
+            ("resolving only the cluster-winner coverage-item class", "resolve every coverage item the surface accrued (one per implied class), or the depth ledger's signal_classes_uncovered stays open"),
+            ("--followup-condition on a coverage-item", "that flag is surface-only; a coverage-item takes only --status and --rationale"),
         ),
     ),
     "update-intel": CommandContract(
@@ -1381,6 +1320,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         schema_name="backend code-analysis queue / trigger request models",
         preferred_invocations=(
             "vigil assess code-dispatch fetch <limit> <agent-name>",
+            "vigil assess code-dispatch fetch <limit> <agent-name> --repo-id <id> --classification <tier> --batch-theme <theme>",
+            "vigil assess code-dispatch fetch <limit> <agent-name> --ids-file <queue-ids-json>",
             "vigil assess code-dispatch heartbeat <item-id> <agent-name> <lease-token>",
             "vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <cwe-coverage-json-file> [notes]",
             "vigil assess code-dispatch list-triggers [status]",
@@ -1391,6 +1332,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         author_supplied_fields=(
             "queue item id(s)",
+            "optional atomic fetch filters: repo_id, classification, batch_theme, and item_ids",
             "the fetched agent_name + lease_token for heartbeat, results, and closeouts",
             "bare JSON array for cwe_coverage when completing a queue item",
             "trigger_id/id or file_path/target_file_path when resolving triggers",
@@ -1398,6 +1340,9 @@ _CONTRACTS: dict[str, CommandContract] = {
             "resolution_note explaining why the trigger is accepted without requeue",
         ),
         notes=(
+            "Fetch filters are applied inside the same serialized SQL claim that changes pending rows to processing. The returned agent_name, lease_token, and repo_generation identify the owned analysis generation; reuse the agent and lease on heartbeat, result, and closeout writes.",
+            "A finding/suspicious closeout requires a current same-disposition result for the active lease with inline evidence or evidence_ref. A clean closeout requires non-empty family coverage and review notes; skipped retains its structured skip reason.",
+            "Analysis-result retries are idempotent within a lease. Coverage detail derives result-row, evidenced-row, and distinct-function effort from current nonsuperseded records instead of trusting the submitted effort counter alone.",
             "`resolve-triggers` records accepted terminal trigger gaps — use it when the target implementation is outside the supplied source snapshot, a source equivalent was analyzed, or the trigger family is genuinely not applicable.",
             "Do not inflate CWE effort numbers to satisfy the gate. Use `disposition=not_applicable` on the coverage entry, or `resolve-triggers` for cross-file gaps that cannot be queued.",
             "`list-triggers` defaults to pending triggers, so operators can inspect blockers before resolving or requeueing.",
@@ -1405,6 +1350,9 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`retry-needs-context` returns reviewed context gaps to pending and supersedes their old needs-context result projection.",
         ),
         common_mistakes=(
+            ("filtering a fetched batch client-side", "pass repo/classification/theme/id filters to fetch so unrelated rows are never claimed"),
+            ("closing finding/suspicious before recording evidence", "record the same-disposition result with evidence or evidence_ref under the active lease first"),
+            ("closing clean without notes", "summarize the reviewed paths and guards in non-empty closeout notes"),
             ("cwe_coverage object wrapper", "`done` requires a bare JSON array, not {'cwe_coverage': [...]}"),
             ("analysis_priority", "queue payloads use `priority`; classification payloads use `analysis_priority`. Preserve the architect's ordering by mapping analysis_priority to priority when queueing."),
             ("missing resolution_note", "accepted trigger gaps need a durable rationale"),
@@ -1420,6 +1368,35 @@ _CONTRACTS: dict[str, CommandContract] = {
             {
                 "command": "vigil assess code-dispatch retry-error 42 'transient parser crash, retrying'",
             },
+        ),
+    ),
+    "code-sourcemap-extract": CommandContract(
+        name="code-sourcemap-extract",
+        goals=("code-analysis",),
+        phase=("code-ingest",),
+        summary=(
+            "Extract embedded source-map sources into a traversal-safe immutable tree, "
+            "then print the explicit code-ingest handoff."
+        ),
+        schema_name="hash-namespaced source-map manifest (local artifact)",
+        preferred_invocations=(
+            "vigil assess code-sourcemap-extract <map-root>",
+            "vigil assess code-sourcemap-extract <map-root> --refresh",
+            "vigil assess code-sourcemap-extract <map-root> --output-root <snapshot-parent>",
+        ),
+        author_supplied_fields=(
+            "map_root containing .js.map/.css.map files",
+            "--refresh only when changed map inputs should create a new immutable snapshot",
+        ),
+        notes=(
+            "The command never calls the backend. It writes sourcesContent plus a manifest and prints a separate `code-ingest` command; that existing refresh stage/commit remains the only publication path.",
+            "Extracted files are source equivalents. Ingest the extracted tree, not the mapped minified bundle, so coverage does not count both representations.",
+            "Traversal, absolute, URL, and symlink escapes are rejected and recorded. Malformed maps and missing sourcesContent stay visible in the manifest rather than silently disappearing.",
+            "An unchanged rerun reuses the same content-addressed snapshot. Changed input requires --refresh and creates a new directory without overwriting the prior snapshot.",
+        ),
+        common_mistakes=(
+            ("expecting automatic ingest", "run the manifest's printed `code-ingest` command explicitly after reviewing extraction health"),
+            ("ingesting bundle and extracted tree", "treat extracted sources as the covering representation; mapped minified artifacts remain non-covering"),
         ),
     ),
     "code-ingest": CommandContract(
@@ -1630,7 +1607,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "lease_token",
             "function_name",
             "hypothesis",
-            "evidence",
+            "evidence and/or evidence_ref for finding/suspicious dispositions",
             "disposition",
             "confidence",
             "finding_slug when disposition=finding",
@@ -1646,11 +1623,14 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Record analysis results only for queue items fetched by code-dispatch. queue_item_id, agent_name, and lease_token are required; reclaimed leases reject stale writes.",
+            "The backend copies the claimed repository generation onto the result and makes exact retries idempotent within that lease. Refresh or requeue supersedes old-generation results so projections use current nonsuperseded rows.",
+            "For finding and suspicious dispositions, include concrete inline evidence or an engagement-owned evidence_ref before closeout; the backend verifies that evidence on the active lease.",
             "When file_id is supplied, the backend treats it as a consistency check and rejects it if it differs from the queue item's file.",
             "For a confirmed finding, run record-finding first, then put that slug in finding_slug.",
         ),
         common_mistakes=(
             ("file_id-only result", "include queue_item_id; file_id is optional and queue-derived"),
+            ("artifact path only in notes", "put an engagement-owned path in evidence_ref so evidence-aware closeout can verify it"),
             ("confidence in finding record", "confidence belongs in code-record-analysis, not record-finding"),
             ("cross_file_triggers object wrapper", "cross_file_triggers is a bare array on the analysis result"),
         ),
@@ -1894,13 +1874,15 @@ _CONTRACTS: dict[str, CommandContract] = {
     ),
     "coverage": CommandContract(
         name="coverage",
-        summary="Coverage ledger (read-only). Default: per-host route/real_app/verdict state. --by-family: per application-unit × attack-family GAP grid. --for-dispatch --host <h>: a paste-ready COVERAGE block for a dispatch prompt.",
-        schema_name="backend per-host coverage projection (+ coverage-readiness/by-family for --by-family/--for-dispatch)",
+        summary="Coverage ledger (read-only). Default: per-host route/real_app/verdict state. --by-family: per application-unit × attack-family GAP grid. --for-dispatch --host <h>: a paste-ready COVERAGE block for a dispatch prompt. --attempts: the recorded probe-attempt ledger.",
+        schema_name="backend per-host coverage projection (+ coverage-readiness/by-family for --by-family/--for-dispatch; GET /assessment/attempts for --attempts)",
         preferred_invocations=(
             "vigil assess coverage",
             "vigil assess coverage --route-threshold 6",
             "vigil assess coverage --by-family",
             "vigil assess coverage --for-dispatch --host app.example.com --path-prefix /api",
+            "vigil assess coverage --attempts --host app.example.com",
+            "vigil assess coverage --attempts --attack-family idor --result-status no-signal",
             "vigil assess coverage --json",
         ),
         author_supplied_fields=(),
@@ -1911,7 +1893,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Read-only orientation for where coverage stands per host. `--json` is the machine form for dispatch planning.",
             "--by-family renders the per application-unit × attack-family grid from `coverage-readiness/by-family`: GAP cells (missing_block/missing_warn or zero covering probes) are marked, covered cells show the verdict + covering/total probe counts, and finding-linked cells are flagged (e.g. finding#45). --json passes the raw by-family payload through.",
             "--for-dispatch --host <h> [--path-prefix <p>] reuses the SAME by-family grid (no extra backend call), filters CLIENT-SIDE to that application-unit, and emits a paste-ready COVERAGE: block listing covered vs OPEN-gap families — hand it to a specialist alongside an open objective instead of a prescriptive technique cage (which `agent start` now WARN-lints).",
-            "Scoping vocabulary: --host / --path-prefix here select application-UNITS (grid rows). This is distinct from --surface on `list-attempts`, which is a surface-ID; keep the two straight.",
+            "--attempts reads the recorded probe-attempt ledger (the read side of record-probe), grouped by lens × result_status with per-row finding linkage. Filters: --finding <slug> / --surface <id> / --host / --attack-family / --result-status / --lens, plus --limit / --offset. Use it before dispatching more probing to dedup against what a lens/family already tried on a host.",
+            "Scoping vocabulary: on the default/grid views, --host / --path-prefix select application-UNITS (grid rows). Under --attempts, --surface is a surface-ID and --host is the target-host filter — keep the two straight.",
         ),
     ),
     "list-findings": CommandContract(
@@ -1959,33 +1942,6 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Read-only audit search. `--q` is a fuzzy keyword search over command/tool/previews/metadata/finding-aliases; `--sort {relevance|recent|distant}` (distant surfaces coverage-gap candidates); filters include --agent-name / --phase / --tool-name / --tool-bin / --target-host / --technique / --route.",
             "Drill into a single row with `vigil assess get-command-run <id>`.",
-        ),
-    ),
-    "list-attempts": CommandContract(
-        name="list-attempts",
-        phase=("consume-test", "exploit"),
-        summary=(
-            "List the recorded probe-attempt ledger (the READ side of "
-            "record-probe/record-attempt), grouped by lens × result_status with "
-            "per-row finding linkage."
-        ),
-        schema_name="GET /assessment/attempts",
-        preferred_invocations=(
-            "vigil assess list-attempts --host app.example.com",
-            "vigil assess list-attempts --attack-family idor --result-status no-signal",
-            "vigil assess list-attempts --finding VA-047",
-            "vigil assess list-attempts --lens tenant-boundary --json",
-        ),
-        author_supplied_fields=(),
-        notes=(
-            "Read-only query mirror of the probe-recording verbs: record-probe writes covering probes (tested|signal), record-attempt writes non-covering attempts (attempted|blocked|no-signal|error), and this lists both back.",
-            "Rows are grouped by the free-text --lens the probe ran under × its result_status, so 'which mindset produced which verdict' reads at a glance; each row carries finding_slug + finding_severity when the probe is linked to a finding.",
-            "Filters: --finding <slug> / --surface <id> / --host / --attack-family / --result-status / --lens, plus --limit / --offset. --surface is a surface-ID, NOT a host — host filtering is --host, and the application-unit coverage view is `vigil assess coverage --host`.",
-            "Use it before dispatching more probing to dedup against what a lens/family has already tried on a host (the query-side companion to `coverage --by-family`, which shows the class-level GAPs).",
-        ),
-        common_mistakes=(
-            ("--surface <host>", "--surface is a surface-ID; pass a host to --host (or use `vigil assess coverage --host` for the app-unit coverage grid)"),
-            ("expecting a bare list", "the response is {\"attempts\": [...], \"count\": N}; --json emits it verbatim"),
         ),
     ),
     "get-command-run": CommandContract(
@@ -2036,17 +1992,17 @@ _RAW_ENDPOINT_RULES = (
         re.compile(r"^probe-runs$"),
         "record-probe",
         (
-            "Raw POST to probe-runs is disabled because the probe-recording verbs own the flag set and evidence discipline.",
-            "Covering probe (tested|signal) → record-probe (requires --evidence-ref).",
-            "Non-covering probe (attempted|blocked|no-signal|error) → record-attempt.",
+            "Raw POST to probe-runs is disabled because record-probe owns the flag set, the evidence discipline, and the default FK-derived cascade.",
+            "Covering probe (tested|signal) → record-probe --result-status tested|signal (requires --evidence-ref).",
+            "Non-covering probe (attempted|blocked|no-signal|error) → record-probe --result-status attempted|blocked|no-signal|error.",
         ),
     ),
     (
         "PATCH",
         re.compile(r"^coverage-items/[^/]+$"),
-        "resolve-coverage-item",
+        "resolve",
         (
-            "Raw PATCH to coverage-items/{id} is disabled because resolve-coverage-item owns the status vocabulary and the rationale-on-covered rule.",
+            "Raw PATCH to coverage-items/{id} is disabled because `resolve coverage-item` owns the status vocabulary and the rationale-on-covered rule.",
         ),
     ),
 )
@@ -2055,30 +2011,56 @@ _RAW_ENDPOINT_RULES = (
 def contract_names() -> list[str]:
     names = list(_CONTRACTS)
     names.extend(f"record-intel {intel_type}" for intel_type in sorted(INTEL_TYPES))
+    # `kali` is ONE dispatcher row, NOT one row per tool. The 27 per-verb
+    # `kali <verb>` contracts stay fully resolvable via `get_contract` /
+    # `contract kali <verb>` and are enumerated by `list-commands --kali-only`;
+    # they are intentionally NOT flattened into the top-level catalog — that
+    # expansion is what made the surface read as "~27 kali commands". The
+    # `agent`/`record-intel` sub-verbs remain expanded here pending their own
+    # consolidation pass (they are single rows in `all_command_contracts`).
     names.append("kali")
-    names.extend(f"kali {verb}" for verb in KALI_VERBS)
     names.append("agent")
     names.extend(f"agent {verb}" for verb in AGENT_VERBS)
     names.append("work-buffer")
+    names.extend(f"work-buffer {verb}" for verb in _WORK_BUFFER_VERBS)
     return sorted(names)
 
 
 def all_command_contracts() -> list[CommandContract]:
     """Every helper-owned command contract, for the per-phase catalog.
 
-    Composes the static ``_CONTRACTS`` registry with the per-verb kali
-    contracts (``kali <verb>``), which is the surface ``vigil assess
-    list-commands`` groups by phase. The dynamically-derived per-intel-type
+    Composes the static ``_CONTRACTS`` registry with the SINGLE collapsed
+    ``kali`` dispatcher row (``_kali_root_contract``) — the surface ``vigil
+    assess list-commands`` groups by phase. The 27 per-verb ``kali <verb>``
+    contracts are deliberately kept OUT of this default catalog so the
+    dispatcher renders as ONE row instead of flattening into ~27; they remain
+    fully resolvable via ``get_contract`` / ``contract kali <verb>`` and are
+    enumerated on demand by ``kali_verb_contracts`` (the ``list-commands
+    --kali-only`` expansion). The dynamically-derived per-intel-type
     (``record-intel <type>``) and per-agent-verb (``agent <verb>``) detail
-    contracts are intentionally excluded — they are drill-down forms of the
+    contracts are likewise excluded — they are drill-down forms of the
     ``record-intel`` / ``agent`` catalog rows, not separate commands.
     """
     contracts: list[CommandContract] = list(_CONTRACTS.values())
+    contracts.append(_kali_root_contract())
+    return contracts
+
+
+def kali_verb_contracts() -> list[CommandContract]:
+    """Every per-verb ``kali <verb>`` contract — the ``--kali-only`` expansion.
+
+    Kept OUT of :func:`all_command_contracts` (the default catalog renders
+    ``kali`` as one row); ``vigil assess list-commands --kali-only`` and
+    ``vigil assess contract kali <verb>`` use this to drill into the individual
+    tool wrappers. Preserves full discoverability of every kali tool without
+    inflating the top-level command count.
+    """
+    verbs: list[CommandContract] = []
     for verb in KALI_VERBS:
         contract = _kali_verb_contract(verb)
         if contract is not None:
-            contracts.append(contract)
-    return contracts
+            verbs.append(contract)
+    return verbs
 
 
 def commands_by_phase(phase: str) -> list[CommandContract]:
@@ -2111,6 +2093,14 @@ def get_contract(name: str) -> CommandContract | None:
         return _dispatch_verb_contract(verb)
     if name == "work-buffer":
         return _work_buffer_contract()
+    if name.startswith("work-buffer "):
+        _, _, verb = name.partition(" ")
+        return _work_buffer_verb_contract(verb)
+    if name.startswith("resolve "):
+        # `contract resolve surface` / `contract resolve coverage-item`: the single
+        # `resolve` contract documents both target-kinds — accept the two-token form
+        # so it mirrors `contract work-buffer <verb>`.
+        return _CONTRACTS.get("resolve")
     return _CONTRACTS.get(name)
 
 
@@ -2470,10 +2460,11 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Common record/filter flags are typed (-aaaa, -mx, -txt, -ns, -soa, -ptr, -asn, -cdn, -rcode, -wd). Use --extra-args only for unmodeled dnsx flags that are not guarded load/transport knobs.",
     ),
     "browser": (
-        "Headless chromium (selenium) render of one URL inside the runtime. Returns the ORIGIN HTTP status + final rendered DOM (scans/browser/<host>-<id>.html) + a screenshot (scans/browser/<host>-<id>.png) as one JSON object on stdout.",
-        "This is the trustworthy-signal recovery for a curl/httpx run that came back status='waf_challenge': a real browser executes the page JS and clears most JS bot-challenges (Cloudflare 'Just a moment', Akamai, Imperva), so you see the real origin response instead of the interstitial.",
-        "Use --wait-selector '<css>' to wait for a specific element (explicit wait, bounded by --page-timeout); otherwise it falls back to --settle seconds after load. --page-timeout defaults to 30s, --settle to 2s.",
-        "Read-only navigation — leave --destructive off unless you point it at a state-changing URL.",
+        "Playwright/system-Chromium workflow inside the runtime. Returns origin status, final DOM, screenshot, bounded console/network metadata, route candidates, and typed-step results as one JSON object.",
+        "Required attribution is installed before navigation and fails closed. --attribution-scope document-origin applies it to admitted document navigations and their same-origin requests so cross-origin SPA preflights are not poisoned; omitted cross-origin attribution origins are recorded.",
+        "Use --steps-file for at most 50 typed navigate/click/fill/wait/eval/assert actions. An assert with visible:false waits for the selector to become hidden; text is read only for contains/equals assertions. Every declared navigation is admitted before launch, while dynamic browser navigations are admitted and enrolled by the runtime scope/no-fire request router.",
+        "--har-out writes a metadata-only HAR. --capture-bodies is opt-in and stores bounded document/XHR/fetch bodies under --body-dir; --max-body-bytes caps each artifact.",
+        "Identity headers/cookies are prepared explicitly for Playwright and the audit auth_context changes only when identity material was actually applied. Storage state is never taken implicitly from a credential record; opt in with an engagement-confined --storage-state JSON artifact plus a live, replayable --identity so authenticated state is never audited as anonymous.",
     ),
     "tlsx": (
         "Bulk TLS cert harvester: opens TLS handshakes against hosts/IPs and pulls SAN/CN/subject-org/issuer fields + JARM/JA3 fingerprints. The SAN/CN harvest expands the subdomain set (private-CA certs that never hit CT logs); the org/issuer + fingerprints drive cert pivoting (siblings sharing a cert/TLS stack).",
@@ -2502,7 +2493,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     ),
     "job": (
         "Long-running probes go through `vigil assess kali job start ...`. The dtach session is parented by tini so it survives the calling shell.",
-        "Job start uses the same pre-execution preparation as synchronous Kali execution: `--identity` material, required attribution headers, nuclei OOB safety, target scope, denied tools, and rate policy are applied before audit/spawn.",
+        "Job start uses the same pre-execution preparation as synchronous Kali execution: `--identity` material (plus `--identity-scope` for a scoped alias), required attribution headers, nuclei OOB safety, target scope, denied tools, and rate policy are applied before audit/spawn.",
         "Subcommands: start | status | tail | stop | list.",
     ),
     "sweep-orphans": (
@@ -2682,9 +2673,25 @@ _KALI_VERB_PHASES: dict[str, tuple[str, ...]] = {
 }
 
 
+def _kali_root_phases() -> tuple[str, ...]:
+    """Union of every kali verb's phase tags, ordered by CATALOG_PHASES.
+
+    The collapsed ``kali`` catalog row carries this union so ``list-commands
+    --phase <p>`` still surfaces the dispatcher in every phase a kali tool runs
+    in — including ``recon-pivot`` / ``exploit-recon``, which NO static contract
+    covers (only kali verbs do). The per-verb rows stay reachable via
+    ``--kali-only``. Derived from ``_KALI_VERB_PHASES`` so it can never drift.
+    """
+    seen: set[str] = set()
+    for verb in KALI_VERBS:
+        seen.update(_KALI_VERB_PHASES.get(verb, ()))
+    return tuple(phase for phase in CATALOG_PHASES if phase in seen)
+
+
 def _kali_root_contract() -> CommandContract:
     return CommandContract(
         name="kali",
+        phase=_kali_root_phases(),
         summary="Run Kali tools inside the runtime container with audit recording.",
         schema_name="(per-verb argparse + CommandRunRecordRequest backend model)",
         preferred_invocations=(
@@ -2824,8 +2831,8 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
     # `exec` and `job` are raw-passthrough wrappers; they do not expose the
     # typed-verb `--extra-args` flag because every argument after the audit
     # metadata is already raw passthrough. `browser` drives a self-contained
-    # selenium script (its argv is a fixed `python3 -c <driver> ...` shape), so
-    # appending raw tool flags is meaningless — it has its own typed render flags.
+    # Playwright execution plan, so appending raw tool flags is meaningless — it
+    # exposes typed workflow and artifact flags instead.
     if verb not in ("exec", "job", "browser"):
         author_fields = author_fields + (
             "--extra-args \"<raw flags>\" (optional, shlex-split passthrough for long-tail flags)",
@@ -3036,8 +3043,11 @@ def _work_buffer_contract() -> CommandContract:
             "vigil assess work-buffer peek <type> [limit]",
             "vigil assess work-buffer fetch <type> <limit> <agent-name>",
             "vigil assess work-buffer fetch-by-priority <limit> auto",
+            "vigil assess work-buffer fetch-by-unit [--unit-id ID] [--path PREFIX] [--class TYPE] [--limit N] [--agent auto|NAME]",
             "vigil assess work-buffer done <id1,id2,...>",
             "vigil assess work-buffer defer-cluster <cluster_key> --reason \"...\"",
+            "vigil assess work-buffer reclassify [--reclassify-all|--reclassify-stale|--reclaim-skipped|--retype|--retype-all]",
+            "vigil assess work-buffer link-surface --surface-id <id> --cluster <key>",
         ),
         author_supplied_fields=(
             "<action>",
@@ -3048,12 +3058,66 @@ def _work_buffer_contract() -> CommandContract:
             "lifecycle rows. Use `vigil assess agent …` for backend dispatch rows, handoffs, and decisions.",
             "Mark items done only after the specialist has written durable backend state "
             "(findings, surfaces, probe runs, or coverage) for the work.",
+            "fetch-by-unit selects the highest-EV unsatisfied application unit when --unit-id is omitted. "
+            "Omitting --limit derives a deterministic batch from depth tier and recent probe saturation; an explicit limit always wins and work-item priority scores are never rewritten.",
+            "reclassify (folded-in classify-work) re-applies gf-style priority/cluster classification (default: unscored rows only); --retype/--retype-all re-derive `type` from stored fields. link-surface (folded-in link-surface-work-items) links backend surfaces to the request variants behind selected work_items. See `vigil assess contract work-buffer reclassify` / `contract work-buffer link-surface`.",
         ),
         common_mistakes=(
             ("using agent handoff syntax here", "`work-buffer` never records handoffs; use `vigil assess agent handoff`"),
             ("calling the backend work-items API directly", "use the CLI verb so classification, status transitions, and terminal_reason semantics stay consistent"),
         ),
     )
+
+
+_WORK_BUFFER_VERBS: tuple[str, ...] = ("reclassify", "link-surface")
+
+
+def _work_buffer_verb_contract(verb: str) -> CommandContract | None:
+    if verb == "reclassify":
+        return CommandContract(
+            name="work-buffer reclassify",
+            summary="Re-apply gf-style priority/cluster classification to the work buffer (folded-in classify-work).",
+            schema_name="reads GET work-items, writes POST work-items/update (ADR 0013)",
+            preferred_invocations=(
+                "vigil assess work-buffer reclassify",
+                "vigil assess work-buffer reclassify --reclassify-all",
+                "vigil assess work-buffer reclassify --reclassify-stale",
+                "vigil assess work-buffer reclassify --reclaim-skipped",
+                "vigil assess work-buffer reclassify --retype",
+                "vigil assess work-buffer reclassify --retype-all",
+            ),
+            author_supplied_fields=(
+                "one optional mode flag (default: unscored rows only)",
+                "--batch N (rows per update POST, default 500)",
+            ),
+            notes=(
+                "Classification runs inline at ingest, so this is the maintenance path: re-score after a `_BUCKETS` change (--reclassify-all), re-score only stale-version rows leaving `manual` untouched (--reclassify-stale), un-strand skipped rows the inert policy no longer excludes (--reclaim-skipped).",
+                "--retype re-derives `type` for type='unknown' rows from stored method/url_path/content_type/body then re-buckets changed rows; --retype-all widens that to every row (can overwrite a hand-set type). Idempotent.",
+            ),
+            common_mistakes=(
+                ("expecting reclassify to rewrite manual rows", "rows stamped classifier_version='manual' are protected from --reclassify-stale; mark rows manual with `work-buffer mark-manual`"),
+            ),
+        )
+    if verb == "link-surface":
+        return CommandContract(
+            name="work-buffer link-surface",
+            summary="Link backend surfaces to the request variants behind selected work_items (folded-in link-surface-work-items).",
+            schema_name="reads GET work-items, writes POST surface-request-variant-links",
+            preferred_invocations=(
+                "vigil assess work-buffer link-surface --surface-id 5 --cluster gf:cluster",
+                "vigil assess work-buffer link-surface --surface-id 9 --queue-key variant:200:api_route",
+                "vigil assess work-buffer link-surface --surface-id 1,2 --cluster gf:dup --relation primary-endpoint",
+            ),
+            author_supplied_fields=(
+                "--surface-id <id> (repeatable or comma-separated; at least one required)",
+                "--cluster <key> and/or --queue-key <key> (at least one selector required)",
+                "--relation / --link-evidence-ref (optional)",
+            ),
+            notes=(
+                "The durable cross-reference is `request_variant_id` (returned when a request observation is posted), NOT the local work_item id. A work_item that never posted to the backend has a NULL request_variant_id and is skipped with a warning rather than failing the whole run; two work_items sharing a request_variant_id produce ONE link per surface (deduped).",
+            ),
+        )
+    return None
 
 
 def _dispatch_verb_contract(verb: str) -> CommandContract | None:

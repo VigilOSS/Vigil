@@ -62,7 +62,7 @@ def run(args) -> None:
     # ingest-endpoints. A curated candidate row whose host is not admitted by
     # scope.json (e.g. carried through from a gau/wayback corpus) is recorded
     # skipped instead of admitted as probeable work. Inactive when scope.json has
-    # no allowlist (see scope.ingest_scope_filter).
+    # no allowlist or enables the global bypass (see scope.ingest_scope_filter).
     scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
     out_of_scope_count = 0
     out_of_scope_warned_hosts: set[str] = set()

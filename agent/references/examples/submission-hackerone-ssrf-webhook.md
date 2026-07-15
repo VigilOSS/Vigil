@@ -48,7 +48,7 @@ An authenticated user with permission to configure outgoing webhooks (a role man
 
 ### Impact
 
-Grants read of the EC2 instance profile's temporary AWS credentials, valid until the printed expiration and scoped to whatever policy the instance role carries. Anyone who can reach the webhook-config screen — not just tenant admins — can pull this without needing any other foothold in the AWS account.
+Read access to the EC2 instance profile's live temporary AWS credentials, valid until the printed expiration and scoped to whatever policy the instance role carries. Those credentials are usable directly against the AWS API from anywhere until they expire, so the blast radius is the full set of actions that role's policy permits, not just the app's own functionality.
 
 ### Remediation
 

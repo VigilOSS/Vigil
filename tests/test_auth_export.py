@@ -454,6 +454,53 @@ def test_probe_liveness_unknown_on_transport_error(tmp_path, monkeypatch):
     assert result["error"]
 
 
+def test_scoped_alias_transport_error_still_returns_resolved_identity(tmp_path, monkeypatch):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    monkeypatch.setattr(
+        auth,
+        "_api",
+        lambda *_args, **_kwargs: {
+            "identity_name": "cap-member-v2",
+            "material": _identity_with_liveness(authed_marker="Sign out"),
+        },
+    )
+    monkeypatch.setattr(auth.http.client, "HTTPSConnection", _FailingConn)
+    monkeypatch.setattr(auth.http.client, "HTTPConnection", _FailingConn)
+
+    result = auth.probe_liveness(
+        eng,
+        "https://portal.example.com/home",
+        "member",
+        scope_key="billing",
+    )
+
+    assert result["liveness"] == "unknown"
+    assert result["identity_name"] == "cap-member-v2"
+
+
+def test_missing_scoped_alias_is_not_probed_anonymously(tmp_path, monkeypatch):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    monkeypatch.setattr(auth, "_api", lambda *_args, **_kwargs: {})
+
+    def unexpected_connection(*_args, **_kwargs):
+        raise AssertionError("missing alias must fail before network execution")
+
+    monkeypatch.setattr(auth.http.client, "HTTPSConnection", unexpected_connection)
+
+    result = auth.probe_liveness(
+        eng,
+        "https://portal.example.com/home",
+        "member",
+        scope_key="billing",
+    )
+
+    assert result["liveness"] == "unknown"
+    assert result["identity_name"] is None
+    assert "identity" in result["error"]
+
+
 def test_probe_liveness_rejects_non_http_url_without_network(tmp_path, monkeypatch):
     eng = tmp_path / "agent" / "engagements" / "eng"
     eng.mkdir(parents=True)

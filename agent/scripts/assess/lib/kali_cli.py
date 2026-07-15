@@ -189,6 +189,16 @@ def add_required_kali_flags(parser) -> None:
             "credential injection."
         ),
     )
+    parser.add_argument(
+        "--identity-scope",
+        dest="identity_scope",
+        default="",
+        help=(
+            "Logical liveness scope used when --identity names a scoped alias. "
+            "This is never inferred from the target URL because engagement scopes "
+            "may be application- or workflow-specific."
+        ),
+    )
     # Resolve VIGIL_RUNTIME_CONTAINER once at parse time (not bound to a frozen
     # import-time constant) and reuse it for both the default and the help text,
     # so a single parse can never report a default that disagrees with itself.
@@ -287,6 +297,7 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "force": bool(getattr(args, "force", False)),
         "container_name": getattr(args, "container_name", None),
         "identity": getattr(args, "identity", None),
+        "identity_scope": getattr(args, "identity_scope", "") or "",
         "rate_override_reason": getattr(args, "rate_override_reason", "") or "",
     }
     if explicit_dir:

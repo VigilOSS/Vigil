@@ -50,7 +50,7 @@ def _complete(client, key, queue_item, cwe_coverage, disposition="clean"):
             "agent_name": queue_item["assigned_agent"],
             "lease_token": queue_item["lease_token"],
             "disposition": disposition,
-            "notes": "",
+            "notes": "completed structural coverage-gate fixture review",
             "cwe_coverage": cwe_coverage,
         },
     )

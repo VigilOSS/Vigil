@@ -138,14 +138,16 @@ stays in `scans/` (or `tools/` for code/fuzz) and is referenced, never rendered.
    *targeted* `vigil assess list-command-runs --q <the finding's url/param/header/file/function>`
    (keyed tightly to this finding, not a broad sweep) to catch reproducing runs the linked set
    missed; link any it finds (`vigil assess link-finding <slug> --link-kind evidence --target-kind
-   command_run --target-id <run_id>` — durable reference), then mask customer PII (see "PII
-   redaction" in `agent/references/submission-format.md`), truncate to the proof lines,
+   command_run --target-id <run_id>` — durable reference), then partial-mask genuine third-party PII
+   only — self-owned/synthetic data stays in full (see "PII redaction" in
+   `agent/references/submission-format.md`), truncate to the proof lines,
    and annotate each. Write the authored sections back so the finding holds exactly what would be
-   sent:
+   sent (`steps_to_reproduce` items are bare action strings — no leading `1. `/`2. `; the renderer
+   prepends the `N.` numbering):
    ```bash
    vigil assess update-finding <slug> \
      --summary "<authored Summary — impact-first>" \
-     --details-inline '{"steps_to_reproduce":["<step 1>","<step 2>"],"evidence":"<PII-masked, annotated proof>","attack_scenario":"<optional>","impact":"<proven, quantified>","remediation":"<specific control>"}' \
+     --details-inline '{"steps_to_reproduce":["<step 1>","<step 2>"],"evidence":"<annotated proof; third-party PII partial-masked, self-owned/synthetic shown in full>","attack_scenario":"<optional>","impact":"<proven, quantified>","remediation":"<specific control>"}' \
      --reason "Authored submission-ready sections to the finding (backend is source of truth)"
    ```
    `--summary` writes the top-level Summary; `--details-inline` MERGES the rest into `details`
@@ -553,7 +555,7 @@ vigil assess update-finding <slug> \
   --reason "Program: duplicate of existing report"
 ```
 
-The `needs_info` state is the trigger for a targeted reply: re-read the triager's question, update `submissions/<slug>/submission.md` with clarification, and re-submit the specific section — do not re-draft the entire submission.
+The `needs_info` state is the trigger for a targeted reply — not a `submission.md` hand-edit, which the next `export-submission --overwrite` wipes. Run the reply flow instead: `vigil assess export-reply <slug> --in-response-to "<triager's question>" --platform <p> --draft`, author the answer per `agent/references/reply-format.md`, then `vigil assess record-reply <slug> --seq N ...` to write it back durably. Once sent, `record-reply --seq N --sent --set-submission-status submitted` closes the loop in one call — `record-reply` never sets `submission_status` on its own, so `--set-submission-status` is the explicit opt-in for the `needs_info → submitted` transition. See "Reply mode" in `agent/agents/report-writer.md` for the full closing sequence.
 
 `workflow_status` is unchanged by any submission outcome. A finding that the program rejects as duplicate still carries `workflow_status=reported` in the internal engagement record — the internal report is complete regardless of program outcome.
 

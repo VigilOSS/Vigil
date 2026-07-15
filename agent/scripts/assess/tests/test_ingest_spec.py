@@ -43,9 +43,13 @@ def _write_spec(tmp_path, server_url: str):
     return spec_file
 
 
-def _setup(tmp_path, monkeypatch, fake_client):
+def _setup(tmp_path, monkeypatch, fake_client, *, scope_enforcement=None):
+    scope = {"hosts": ["*.example.com"]}
+    if scope_enforcement is not None:
+        scope["scope_enforcement"] = scope_enforcement
+        scope["out_of_scope"] = ["api.out-of-scope.org"]
     (tmp_path / "scope.json").write_text(
-        json.dumps({"hosts": ["*.example.com"]}), encoding="utf-8"
+        json.dumps(scope), encoding="utf-8"
     )
     monkeypatch.setattr(ingest_spec, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
     monkeypatch.setattr(ingest_spec, "auth_active_context", lambda *a, **k: "anonymous")
@@ -79,3 +83,18 @@ def test_ingest_spec_admits_in_scope_base_host(tmp_path, monkeypatch, capsys):
     assert len(rows) == 1, "in-scope spec operation was not ingested"
     assert rows[0]["status"] == "pending"
     assert any("api.example.com" in (o.get("url") or "") for o in fake_client.observations)
+
+
+def test_ingest_spec_global_bypass_admits_outside_and_denied_base_host(
+    tmp_path, monkeypatch, capsys
+):
+    fake_client = FakeAssessmentClient()
+    _setup(tmp_path, monkeypatch, fake_client, scope_enforcement="bypass")
+    spec_file = _write_spec(tmp_path, "https://api.out-of-scope.org")
+
+    ingest_spec.run(_spec_ns(str(spec_file), str(tmp_path)))
+    capsys.readouterr()
+
+    rows = fake_client.row_for_url("https://api.out-of-scope.org/users")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "pending"

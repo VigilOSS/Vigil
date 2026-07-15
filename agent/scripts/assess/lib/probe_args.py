@@ -1,15 +1,14 @@
-"""Shared argument + payload plumbing for the probe-recording verbs.
+"""Argument + payload plumbing for the single ``record-probe`` verb.
 
-Both ``record-attempt`` (the NON-covering path: ``attempted|blocked|no-signal|
-error``) and ``record-probe`` (the COVERING path: ``tested|signal`` with
-required evidence) POST to the same backend ``probe-runs`` route with the same
-``ProbeRunRecordRequest`` shape. Keeping the flag set, the payload assembly, and
-the ``--finding`` resolver in one place is what stops the covering and
-non-covering verbs from drifting apart as fields are added to the backend model.
+``record-probe`` records EVERY probe outcome to the backend ``probe-runs`` route
+with one ``ProbeRunRecordRequest`` shape: the COVERING pair (``tested|signal``,
+evidence-required) and the NON-covering four (``attempted|blocked|no-signal|
+error``). It was formerly split into ``record-probe`` + ``record-attempt``; the
+split was pure cognitive tax (identical payload, same route) and is now one verb.
 
-Each verb owns only its own ``--result-status`` argument (different ``choices``
-and help) and its own covering/non-covering guardrails; everything else comes
-from here.
+This module owns the shared flag set, the payload assembly, and the ``--finding``
+resolver. The verb owns only its ``--result-status`` argument and the conditional
+evidence guard (``--evidence-ref`` required iff the status is covering).
 """
 from __future__ import annotations
 
@@ -29,14 +28,14 @@ _KNOWN_SLOT_CLASSES: tuple[str, ...] = (
 )
 
 
-def add_common_probe_args(parser, *, include_links: bool) -> None:
+def add_common_probe_args(parser) -> None:
     """Add every ``ProbeRunRecordRequest`` field except ``--result-status``.
 
-    ``include_links=True`` also exposes the canonical FK links a specialist
-    carries forward from a fetched work-item (``request_variant_id`` /
-    ``service_id`` / ``coverage_item_id``). ``record-attempt`` omits them (a
-    non-covering lead is target-anchored by host/path); ``record-probe`` exposes
-    them so a covering probe attaches to the exact coverage item it satisfies.
+    Always exposes the canonical FK links a specialist carries forward from a
+    fetched work-item (``--request-variant-id`` / ``--service-id`` /
+    ``--coverage-item-id``) so a probe attaches to the exact request + coverage
+    item it satisfies, plus the default-cascade override/suppress flags
+    (``--work-item-ids`` / ``--resolve-surface`` / ``--no-drain``).
     """
     parser.add_argument(
         "--attack-family",
@@ -96,7 +95,7 @@ def add_common_probe_args(parser, *, include_links: bool) -> None:
         default=None,
         help="Observed HTTP status code (int), when the target answered.",
     )
-    parser.add_argument("--evidence-ref", dest="evidence_ref", default="", help="Engagement-relative evidence path (e.g. scans/idor.txt). record-probe requires it; record-attempt does not.")
+    parser.add_argument("--evidence-ref", dest="evidence_ref", default="", help="Engagement-relative evidence path (e.g. scans/idor.txt). REQUIRED for a covering status (tested|signal); optional for the non-covering four.")
     parser.add_argument("--notes", default="", help="Short free-text note on what was tried and what the outcome shows.")
     parser.add_argument("--agent-name", dest="agent_name", default="", help="Recording agent name (audit attribution).")
     parser.add_argument(
@@ -113,10 +112,13 @@ def add_common_probe_args(parser, *, include_links: bool) -> None:
         default=None,
         metavar="ID",
         help=(
-            "Optional work-buffer item ids this probe drains. They are marked "
-            "'done' in the SAME transaction as the probe insert, so 'remaining "
-            "work' bucket counts (vigil assess work-buffer stats) actually "
-            "decrement as probes land. Unknown ids are skipped, never an error."
+            "OVERRIDE the default work-buffer drain: narrow it to exactly these "
+            "ids. By DEFAULT a covering probe carrying --coverage-item-id drains "
+            "the work-items FK-linked to that coverage item (marked 'done' in the "
+            "SAME transaction as the probe insert, so 'vigil assess work-buffer "
+            "stats' actually decrements as probes land). Pass ids only to narrow "
+            "that; unknown ids are skipped, never an error. See --no-drain to "
+            "suppress the cascade entirely."
         ),
     )
     parser.add_argument(
@@ -126,34 +128,44 @@ def add_common_probe_args(parser, *, include_links: bool) -> None:
         default=None,
         metavar="SURFACE_ID",
         help=(
-            "OPT-IN: advance this surface id to 'partially-covered' as part of "
-            "recording. Recording never auto-mutates surface state — omit this and "
-            "the surface is left untouched. Drives the same path as "
-            "'vigil assess resolve-surface'."
+            "OVERRIDE the default surface advance: advance exactly this surface id "
+            "to 'partially-covered'. By DEFAULT a covering probe carrying "
+            "--request-variant-id advances the discovered surface(s) FK-linked to "
+            "that variant. Pass a surface id to advance one explicitly instead. "
+            "See --no-drain to suppress the cascade."
         ),
     )
-    if include_links:
-        parser.add_argument(
-            "--request-variant-id",
-            dest="request_variant_id",
-            type=int,
-            default=None,
-            help="Canonical request_variant_id from the fetched work-item (links the probe to the exact request).",
-        )
-        parser.add_argument(
-            "--service-id",
-            dest="service_id",
-            type=int,
-            default=None,
-            help="Canonical service_id from the fetched work-item.",
-        )
-        parser.add_argument(
-            "--coverage-item-id",
-            dest="coverage_item_id",
-            type=int,
-            default=None,
-            help="Canonical coverage_item_id this probe covers (from the fetched work-item).",
-        )
+    parser.add_argument(
+        "--no-drain",
+        dest="no_drain",
+        action="store_true",
+        help=(
+            "SUPPRESS the default FK-derived cascade (both the work-item drain and "
+            "the surface advance). The probe is still recorded; the work buffer and "
+            "surfaces are left untouched."
+        ),
+    )
+    parser.add_argument(
+        "--request-variant-id",
+        dest="request_variant_id",
+        type=int,
+        default=None,
+        help="Canonical request_variant_id from the fetched work-item (links the probe to the exact request; the default surface advance keys on it).",
+    )
+    parser.add_argument(
+        "--service-id",
+        dest="service_id",
+        type=int,
+        default=None,
+        help="Canonical service_id from the fetched work-item.",
+    )
+    parser.add_argument(
+        "--coverage-item-id",
+        dest="coverage_item_id",
+        type=int,
+        default=None,
+        help="Canonical coverage_item_id this probe covers (from the fetched work-item; the default work-buffer drain keys on it).",
+    )
 
 
 def normalize_attack_family(raw: str, verb: str) -> str:
@@ -228,8 +240,6 @@ def _enforce_target_anchor(args, verb: str) -> None:
         return
     if getattr(args, "service_id", None) is not None:
         return
-    # Only the covering verb (record-probe) carries the FK-link flags; name them
-    # in the message only when this verb exposes them (include_links=True).
     anchor_clause = (
         ", or the canonical --request-variant-id / --service-id from the fetched "
         "work-item"
@@ -244,7 +254,7 @@ def _enforce_target_anchor(args, verb: str) -> None:
 
 
 def enforce_required_inputs(args, verb: str) -> None:
-    """Run()-time recording-quality guards shared by record-probe/record-attempt.
+    """Run()-time recording-quality guards for record-probe.
 
     Makes three fields required-*meaningful* at the CLI verb layer: ``--input-slot``
     (reject empty/``unknown``; a typo'd slot class gets a did-you-mean),
@@ -286,13 +296,16 @@ def build_probe_payload(args, *, attack_family: str, result_status: str) -> dict
         payload["target_port"] = int(args.target_port)
     if args.observed_http_status is not None:
         payload["observed_http_status"] = int(args.observed_http_status)
-    # A3: opt-in work-buffer drain + surface advance. Both are shared across the
-    # covering/non-covering verbs (added unconditionally in add_common_probe_args),
-    # so a bare integer list / id threads straight into ProbeRunRecordRequest.
+    # 1b default-cascade controls. --work-item-ids / --resolve-surface are
+    # OVERRIDES (narrow the default drain/advance to explicit ids); --no-drain
+    # SUPPRESSES the whole cascade. Only send a key when it is set so the backend
+    # default derivation stays in force otherwise.
     if args.work_item_ids:
         payload["work_item_ids"] = [int(x) for x in args.work_item_ids]
     if args.resolve_surface_id is not None:
         payload["resolve_surface_id"] = int(args.resolve_surface_id)
+    if getattr(args, "no_drain", False):
+        payload["no_drain"] = True
     for link in ("request_variant_id", "service_id", "coverage_item_id"):
         value = getattr(args, link, None)
         if value is not None:
