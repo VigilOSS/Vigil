@@ -1,4 +1,4 @@
-"""End-to-end tests for `vigil assess ingest-endpoints`.
+"""End-to-end tests for `vigil assess ingest endpoints`.
 
 These pin the content-type round-trip: a JSON endpoint line carrying a
 `content_type` must (a) drive the typer at ingest (POST + application/json

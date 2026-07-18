@@ -1,8 +1,8 @@
 """vigil assess record-reply — durably append/update a reply on a submitted finding.
 
 Persists ONE outgoing reply into the finding's ``details.replies`` append-only thread,
-so a reply survives ``export-reply --overwrite`` (unlike hand-editing the disposable
-``reply-N.md``). The finding is the source of truth; ``export-reply`` re-renders from
+so a reply survives ``export reply --overwrite`` (unlike hand-editing the disposable
+``reply-N.md``). The finding is the source of truth; ``export reply`` re-renders from
 this durable entry.
 
 WRITE PATH — read-modify-write (array-safe). The backend ``details`` merge is a shallow
@@ -14,7 +14,7 @@ shallow merge then swaps just the ``replies`` key, preserving every other ``deta
 field (evidence / impact / cvss / …).
 
 SUBMISSION-STATUS COUPLING IS EXPLICIT. This verb NEVER auto-writes ``submission_status``
-(preserving the export-submission invariant). ``--set-submission-status <s>`` is the one
+(preserving the export submission invariant). ``--set-submission-status <s>`` is the one
 opt-in that also PATCHes it — so ``needs_info → submitted`` after answering is one command
 when the operator wants it, and silent otherwise.
 
@@ -47,7 +47,7 @@ def register(subparsers) -> None:
         "record-reply",
         help=(
             "Durably append (or update at --seq) a reply on a finding's details.replies "
-            "thread via read-modify-write. Pair with export-reply to re-render. Never "
+            "thread via read-modify-write. Pair with export reply to re-render. Never "
             "writes submission_status unless --set-submission-status is passed."
         ),
     )

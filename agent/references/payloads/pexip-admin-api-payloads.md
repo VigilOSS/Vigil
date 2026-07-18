@@ -85,7 +85,7 @@ Walk each adjacent read in the same dispatch — the chain is the high-severity 
 {"version-id": "31.1.1.62820.0", "pseudo-version": "..."}
 ```
 
-Version intel feeds CVE-match in osint-recon — record under `vigil assess record-intel tech-component` with the resolved version string.
+Version intel feeds CVE-match in osint-recon — record under `vigil assess intel record tech-component` with the resolved version string.
 
 ## Bounded-vs-systemic IDOR test
 

@@ -166,6 +166,55 @@ def test_match_drops_out_of_scope_carve_out_under_wildcard(tmp_path: Path) -> No
     assert collector._match_engagement("mobile.acme.example") is None
 
 
+def test_out_of_scope_covers_defers_unresolved_cidr() -> None:
+    module = _load_proxy_addon_module()
+    patterns = ["10.0.0.0/8"]
+    # No resolvable IP: the default is fail-closed; deferral skips the CIDR entry.
+    assert module._out_of_scope_covers(patterns, "app.example.com", None) is True
+    assert (
+        module._out_of_scope_covers(
+            patterns, "app.example.com", None, defer_unresolved_cidr=True
+        )
+        is False
+    )
+    # A resolved in-range IP still matches even when deferral is requested.
+    assert (
+        module._out_of_scope_covers(
+            patterns, "app.example.com", "10.1.2.3", defer_unresolved_cidr=True
+        )
+        is True
+    )
+
+
+def test_request_time_defers_cidr_so_required_header_injects(tmp_path: Path) -> None:
+    """A required-header engagement that ALSO carries a CIDR out_of_scope entry
+    must still match (and inject its attribution header) on in-scope browser
+    traffic at request time, when the upstream IP is not yet resolved."""
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(
+        root,
+        "eng-hdr",
+        hosts=["*.example.com"],
+        out_of_scope=["10.0.0.0/8"],
+        required_headers={"X-Bug-Bounty": "researcher"},
+    )
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    host = "app.example.com"
+    # Response path (IP unknown) fails closed on the unevaluable CIDR carve-out.
+    assert collector._match_engagement(host, resolved_ip=None) is None
+    # Request path defers that gate — the engagement matches and the header injects.
+    chosen = collector._match_engagement(
+        host, resolved_ip=None, defer_unresolved_cidr=True
+    )
+    assert chosen is not None and chosen.key == "eng-hdr"
+    assert chosen.required_headers == {"X-Bug-Bounty": "researcher"}
+
+
 def test_match_prefers_literal_over_wildcard(tmp_path: Path) -> None:
     """When engagement A holds the wildcard ``*.example.com`` and B owns the
     literal ``admin.example.com``, a request to admin must route to B even

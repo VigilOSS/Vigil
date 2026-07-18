@@ -112,10 +112,10 @@ vigil assess resume-brief --since <iso-datetime>   # what's new since the last b
 vigil assess resume-brief --max-age-hours <N>      # override per-role stale threshold
 ```
 
-Drill down only with the commands the brief points to: `get-command-run`,
-`artifact search/get`, `agent render-handoff`, `list-findings`, `list-intel`.
+Drill down only with the commands the brief points to: `command-run get`,
+`artifact search/get`, `agent render-handoff`, `finding list`, `intel list`.
 Findings, activity entries, and artifacts live in the backend;
-`vigil assess export-findings` writes a local export on demand.
+`vigil assess export findings` writes a local export on demand.
 
 For continuations, embed the resume-brief slice in the specialist dispatch
 prompt after the Runtime Identity block. Specialists use the listed
@@ -133,7 +133,7 @@ operator signals stop:
 4. **PRESENT OR PROCEED** — default to NUMBERED operator choices on decision points (verifier disagreement, WRITE-action approval, scope expansion). Continue autonomously only when the human explicitly asks.
 5. **USE SKILLS FIRST** — pick via `vigil assess list-skills` ("Use when:"); pass bare `name(s)` to `--skills`; include full path `agent/skills/<name>/SKILL.md` in the dispatch prompt with the enforcement instruction. Operator does NOT read full skill files.
 6. **DISPATCH** — orchestrate, do not pull. See "Operator Role Clarity" below.
-7. **RECORD STATE IMMEDIATELY** — findings via `vigil assess record-finding`, intel via `record-intel`, durable IR pulls via `artifact register`, activity via `log` (specialist `--actor-kind agent` or operator `log operator ...`). Backend is the sole store.
+7. **RECORD STATE IMMEDIATELY** — findings via `vigil assess finding record`, intel via `intel record`, durable IR pulls via `artifact register`, activity via `log` (specialist `--actor-kind agent` or operator `log operator ...`). Backend is the sole store.
 8. **LOOP** — back to step 1.
 
 ## Path Convention
@@ -149,10 +149,10 @@ under `vigil blue <subcommand>` and are thin wrappers over the generic assess in
 | `vigil blue show <key>` | Status + alert summary + finding table + last 10 activity entries. |
 | `vigil blue dispatch --role <role> --skills <names> [--tier L1|L2|L3|L4]` | Wraps `vigil assess agent start`; auto-injects tenant-ref paths into the dispatch prompt; writes `tier` on the dispatch row. |
 | `vigil blue tier <finding-slug> --tier L1|L2|L3|L4 [--notes ...]` | Records current tier on `details_json`. |
-| `vigil blue verify <finding-slug> --disposition verified|false_positive|downgraded|escalated` | Wraps `vigil assess verify-finding` / `kill-finding`; hard-gates on an incident-verifier dispatch referencing the finding unless `--force` records an operator-approved bypass. The operator still reviews verifier evidence/handoff quality before using the bypass because the CLI does not validate every handoff field. |
+| `vigil blue verify <finding-slug> --disposition verified|false_positive|downgraded|escalated` | Wraps `vigil assess finding verify` (including `--disposition false_positive` for a kill); hard-gates on an incident-verifier dispatch referencing the finding unless `--force` records an operator-approved bypass. The operator still reviews verifier evidence/handoff quality before using the bypass because the CLI does not validate every handoff field. |
 | `vigil blue propose-contain <finding-slug> --action <revoke_session\|disable_account\|isolate_host\|block_ioc\|rotate_credential\|sinkhole_domain> --target <id> --platform <gws\|m365\|aws\|okta\|edr\|network\|generic> --rollback "<plan>" --blast-radius <single-user\|multi-user\|multi-tenant\|cross-platform> [--note "..."]` | Writes a `containment_proposal` dispatch-decision row that `vigil blue contain` reads for approval. Prints `{decision_id, approval_hint}` JSON — pass `decision_id` to `vigil assess approve-proposal`, execute with audited `host-exec`, then record with `vigil blue contain --proposal <decision_id> --command-run-id <id>` or `--proof-artifact <path>`. |
 | `vigil blue contain <finding-slug> --proposal <id> (--command-run-id <id> \| --proof-artifact <path>)` | Records an approved containment action that the operator already executed through `vigil assess host-exec --require-audit`; writes structured containment metadata to `activity_entries` and bumps finding workflow status. |
-| `vigil blue report` | Wraps `vigil assess list-report-findings` + report-writer dispatch with blue template. |
+| `vigil blue report` | Wraps `vigil assess finding report` + report-writer dispatch with blue template. |
 | `vigil blue closeout` | Dispatch report-writer to produce `closeout.md` for false-positive, benign, no-impact, or inconclusive alert closure. |
 | `vigil blue tenant init --customer <slug> --platform <p>` | Scaffold tenant reference stub from template. Onboarding ergonomic. |
 
@@ -183,7 +183,7 @@ overrides with a stated reason.
   - [ ] Alert normalized to the schema in `agent/skills/alert-triage/SKILL.md`: actor, target, action, time window, source signal, severity hint, platform, suspected MITRE technique(s).
   - [ ] Mechanical noise auto-closed as `false_positive` only with a cited tenant-ref pattern (known-benign automation account, MDM scheduled job, vendor maintenance window). No cite → no auto-close. Auto-closed entries get `verification_state=false_positive` and an activity-log row naming the pattern.
   - [ ] Non-noise dispatched to L2 with the platform skill named (`google-workspaces` / `m365-signin-investigation` / `aws-cloudtrail-investigation` / `okta-investigation` / `edr-alert-triage` / `network-threat-hunt` — pick via `vigil assess list-skills`) and the tenant-ref path quoted in the dispatch prompt's "Load First" block.
-  - [ ] Draft finding skeleton recorded for each non-noise alert: `vigil assess record-finding alert-triage <finding-json>` with `status=draft`, `verification_state=unreviewed`, severity hint, platform, suspected MITRE techniques in `details.mitre_techniques`.
+  - [ ] Draft finding skeleton recorded for each non-noise alert: `vigil assess finding record alert-triage <finding-json>` with `status=draft`, `verification_state=unreviewed`, severity hint, platform, suspected MITRE techniques in `details.mitre_techniques`.
   - [ ] Handoff: L1 names the downstream skill and the specific evidence ladder L2 must build.
 - **Transition:** `vigil assess transition-phase investigate`
 - **Dispatch hint:** `vigil blue dispatch --role alert-triage-specialist --tier L1 --skills alert-triage` — inject every tenant-ref path from `scope.json` into the prompt's "Load First" block.
@@ -194,9 +194,9 @@ overrides with a stated reason.
 - **Dispatch mode default:** `item-iterating` for broad telemetry sweeps; `deep-manual` for single-alert deep dives
 - **Definition of Done:**
   - [ ] Evidence ladder built per finding: each step cites a command-run id (platform CLI pull) or an artifact id (raw log dump, exported timeline).
-  - [ ] Finding promoted from draft to active via `vigil assess update-finding <slug>` with full evidence, IOCs (in `details.iocs[]`), timeline, suspected MITRE techniques, and confidence label.
+  - [ ] Finding promoted from draft to active via `vigil assess finding update <slug>` with full evidence, IOCs (in `details.iocs[]`), timeline, suspected MITRE techniques, and confidence label.
   - [ ] Every durable IR pull registered: `vigil assess artifact register <path> --kind <ir_log|ir_evidence|timeline|ioc_dump|containment_proof> --finding <slug> --agent-id <id> --command-run-id <id>` (PII-bearing exports get `--sensitive`).
-  - [ ] OSINT enrichment for each IOC in `details.iocs[]` recorded via `vigil assess record-intel` to the matching `intel_*` table (`domain`, `email`, `dns-record`, `cve`, `breach-record`, `note`); IOCs linked back to the finding via `assessment_finding_links`.
+  - [ ] OSINT enrichment for each IOC in `details.iocs[]` recorded via `vigil assess intel record` to the matching `intel_*` table (`domain`, `email`, `dns-record`, `cve`, `breach-record`, `note`); IOCs linked back to the finding via `assessment_finding_links`.
   - [ ] Coverage gaps named in handoff (`runtime_issues` + `next_steps`): unavailable telemetry, un-correlated identities, out-of-retention log types.
   - [ ] `verification_state=unreviewed` on every active finding (L2 never flips it).
 - **Transition:** `vigil assess transition-phase verify`
@@ -209,7 +209,7 @@ overrides with a stated reason.
 - **Definition of Done:**
   - [ ] Every finding with `verification_state=unreviewed` has a five-check disposition recorded (see "Five-Check Verification" below).
   - [ ] Disposition vocabulary used: `verified` / `false_positive` / `downgraded` / `escalated`.
-  - [ ] Disposition reached via `vigil blue verify <slug> --disposition <...>` which wraps `vigil assess verify-finding` (verified/downgraded/escalated) or `vigil assess kill-finding` (false_positive). The CLI hard-gates on an incident-verifier dispatch referencing the finding unless `--force`; the operator reviews handoff evidence/disposition consistency before bypassing because full handoff-field validation is not a CLI contract yet.
+  - [ ] Disposition reached via `vigil blue verify <slug> --disposition <...>` which wraps `vigil assess finding verify` (verified/downgraded/escalated) or `vigil assess finding verify --disposition false_positive`. The CLI hard-gates on an incident-verifier dispatch referencing the finding unless `--force`; the operator reviews handoff evidence/disposition consistency before bypassing because full handoff-field validation is not a CLI contract yet.
   - [ ] False-positive artifacts marked scratch via `vigil assess artifact mark-scratch <id>` (never deleted) so they stay auditable without polluting resume-brief or report.
   - [ ] Verifier handoff includes the Devil's-advocate enumeration (Check 5) with the same evidence bar as the positive case.
   - [ ] Cross-platform correlation gaps named explicitly when the engagement carries multiple platforms (e.g., `gws + okta`): which platform clock is authoritative, which identity field bridges the two log sources.
@@ -236,7 +236,7 @@ overrides with a stated reason.
 - **Definition of Done:**
   - [ ] `vigil assess transition-phase report` succeeds without `--force`; this is the blue readiness gate for verifier dispositions, evidence artifacts, and containment closure.
   - [ ] For false-positive, benign, no-impact, or inconclusive closure: dispatch `vigil blue closeout` and ensure `closeout.md` is registered as `kind=ir_closeout`.
-  - [ ] For verified incidents: dispatch `vigil blue report` (wraps `vigil assess list-report-findings --mode final --json` + report-writer dispatch with `--skills report-generation` and the blue template).
+  - [ ] For verified incidents: dispatch `vigil blue report` (wraps `vigil assess finding report --mode final --json` + report-writer dispatch with `--skills report-generation` and the blue template).
   - [ ] QA-and-fix pass completed on the drafted `closeout.md` or `report.md`; returns `QA PASS` or `QA BLOCKED` with exact slugs.
   - [ ] On `QA PASS`: emit `report.generated` for reports or `closeout.generated` for closeouts, mark included findings terminal (`reported`, `false_positive`, `contained`, `eradicated`, or `recovered`), transition with `vigil assess transition-phase complete --track blue`.
 - **Transition:** `vigil assess transition-phase complete --track blue`
@@ -320,7 +320,7 @@ The wrapper writes one `assessment_command_runs` row per execution with
 audit fields (`engagement_key`, `agent_name`, `phase`, `technique`, `intent`,
 `target_host`, `audit_source`, `started_at`, `completed_at`, `duration_ms`,
 `return_code`, stdout/stderr paths, sha sums). That row is what makes the
-action visible to `vigil assess list-command-runs` and `resume-brief`.
+action visible to `vigil assess command-run list` and `resume-brief`.
 
 **Bare `bash` against tenant data is forbidden.** A GAM pull outside
 `host-exec` is invisible to the audit pipeline and uncitable by
@@ -376,7 +376,7 @@ specialist's would have been.
 - **Tenant-ref resolution** — `vigil blue customers`; missing → `vigil blue tenant init`
 - **Alert intake mechanics** — save the chat-pasted alert under `ir/alerts/` and run `vigil blue alert record --body-file <path>`
 - **Resume-brief read** — `vigil assess resume-brief` and scoped variants
-- **Backend-write helpers for specialist-produced state** — `record-finding`, `record-intel`, `link-finding`, `verify-finding`, `kill-finding`, `update-finding`, `agent decision`, `log`
+- **Backend-write helpers for specialist-produced state** — `finding record`, `intel record`, `finding link`, `finding verify` (incl. `--disposition false_positive`), `finding update`, `agent decision`, `log`
 - **Containment approval/execution** — `vigil blue propose-contain` is specialist-side; `vigil blue contain` is operator-side. Operator approves; specialist composes the underlying platform command via `host-exec`
 - **Artifact mark-scratch / mark-sensitive** — admin metadata updates after specialist registration
 
@@ -580,11 +580,11 @@ Every gate below must hold before declaring the engagement complete or dispatchi
 final report-writer. If you think you're done earlier, walk through this
 list and name which gate is satisfied before claiming completion.
 
-- [ ] **Every finding has a verifier disposition.** `vigil assess list-findings --verification-state unreviewed` returns empty.
+- [ ] **Every finding has a verifier disposition.** `vigil assess finding list --verification-state unreviewed` returns empty.
 - [ ] **Every approved containment action is in `activity_entries`.** `vigil assess fetch 'activity-entries?limit=1000'` shows one row per executed proposal, with `metadata.proposal_id` and `metadata.containment_action` matching the proposal.
 - [ ] **Every IR pull is in `assessment_artifacts`.** Run `vigil assess artifact search --finding <slug>` per finding and confirm at least the L2 evidence ladder steps are registered with `producer_command_run_id` linkage. Off-pipeline pulls are either re-run through `host-exec` or explicitly marked `--sensitive` with a noted operator decision.
 - [ ] **Resume-brief is clean.** `vigil assess resume-brief` produces no "stale dispatch" warnings, no "handoff missing" warnings, no "unlinked artifact" warnings.
-- [ ] **Severity matches MITRE technique impact.** No `critical` findings with techniques that are detection-only (e.g., T1087 Account Discovery without a downstream credential-access or impact technique). Fix mismatches via `vigil assess update-finding --inline '{"severity":"...","details":{"mitre_techniques":["..."]}}'`.
+- [ ] **Severity matches MITRE technique impact.** No `critical` findings with techniques that are detection-only (e.g., T1087 Account Discovery without a downstream credential-access or impact technique). Fix mismatches via `vigil assess finding update --inline '{"severity":"...","details":{"mitre_techniques":["..."]}}'`.
 - [ ] **Tenant ref `known-benign register` updated** for every benign pattern discovered during respond. ir-lead's final handoff lists the patterns and the tenant-ref path; operator commits the update.
 - [ ] **Cross-platform correlation gaps documented or closed.** Multi-platform engagements list any unresolved gaps in the report's "Known Limitations" section.
 - [ ] **A final closeout artifact exists.** False-positive/no-incident paths register `closeout.md` as `kind=ir_closeout`; verified incidents register `report.md` as `kind=ir_evidence`.
@@ -598,7 +598,7 @@ See `agent/references/handoff-protocols.md` for detailed agent-to-agent handoff 
 Summary for blue: L1→L2 (bring matching platform skill + tenant ref) / L2→L3 (bring
 `alert-fp-verification` + artifact ids) / L3→L4 (bring `incident-containment` + verified slug,
 gated on severity ≥ high) / L4→operator (proposal table) / operator→L4 (approval) / report←backend
-(self-service via `vigil assess list-report-findings`).
+(self-service via `vigil assess finding report`).
 
 ## Shared Constraints
 

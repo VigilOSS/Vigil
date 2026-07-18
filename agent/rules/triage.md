@@ -245,7 +245,7 @@ false-positive — it is only enough to set the disposition to `escalated`.
 
 ## 16. Severity ↔ technique alignment audit before report
 
-Before any report-writer dispatch, query `vigil assess list-findings` and verify
+Before any report-writer dispatch, query `vigil assess finding list` and verify
 each finding's `severity` matches its `details_json.mitre_techniques` and
 proved impact:
 
@@ -258,7 +258,7 @@ proved impact:
   `details_json.kill_reason` with the tenant-ref citation; severity is no longer
   the load-bearing field once disposition lands
 
-Fix mismatches via `vigil assess update-finding --inline '{"details":
+Fix mismatches via `vigil assess finding update --inline '{"details":
 {"mitre_techniques": [...], "severity_rationale": "..."}}'`. A finding whose
 severity contradicts its technique makes the report look unverified to the
 client.
@@ -274,7 +274,7 @@ text and strip phrases that contradict current state:
 - "see updated timeline below" when the timeline is now the only timeline
 
 The executable recipe lives in `agent/skills/report-generation/SKILL.md`
-Review-and-Fix QA Mode (`vigil assess list-findings --json | jq -r .[].slug` loop).
+Review-and-Fix QA Mode (`vigil assess finding list --json | jq -r .[].slug` loop).
 Stale narrative is invisible to backend status fields and ends up in the
 incident report verbatim.
 

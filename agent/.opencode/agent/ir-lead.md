@@ -249,7 +249,7 @@ violation when they appear in a proposal `note`, L4 finding update, or L4 handof
 
 - To operator (proposal approval queue): every recorded proposal surfaces in the operator CLI for per-action approval; the handoff names the proposal IDs but the surfacing is automatic via `vigil assess fetch proposals --finding <slug> --status pending_approval`
 - To `report-writer` (via operator): after every proposal in the response set has been executed or rejected, the operator transitions the finding's workflow status and dispatches report-writer; L4 does not directly hand off to report-writer
-- Back to `incident-verifier` (L3) via operator (`reset-finding` path): when post-execution evidence disproves the original verifier disposition (e.g., the containment proof reveals the actor was a legitimate delegate). L4 names the slug, the contradiction, and the new artifact in `next_steps`; the operator runs `vigil assess reset-finding` and re-dispatches L3
+- Back to `incident-verifier` (L3) via operator (`finding update --status draft` path): when post-execution evidence disproves the original verifier disposition (e.g., the containment proof reveals the actor was a legitimate delegate). L4 names the slug, the contradiction, and the new artifact in `next_steps`; the operator runs `vigil assess finding update --status draft` and re-dispatches L3
 - Back to operator (`blocked` handoff): missing tenant ref, finding disposition not `verified`, finding severity below high without an explicit response rationale, cross-tenant target in the proposal, missing pre-WRITE evidence-capture authorization, retention-expired evidence that prevents rollback planning
 
 ## Review Mode (Phase respond → report exit)
@@ -262,7 +262,7 @@ report-writer transitions.
 
 Inputs to consult:
 
-- `vigil assess list-findings --verification-disposition verified --status active --json` — every finding eligible for respond
+- `vigil assess finding list --verification-disposition verified --status active --json` — every finding eligible for respond
 - `vigil assess fetch 'dispatch-decisions?kind=containment_proposal&limit=1000'` — every recorded containment proposal
 - `vigil assess fetch 'activity-entries?limit=1000'` — executed actions; filter by `metadata.containment_action`
 - `vigil assess agent list --filter-role ir-lead --limit 20` — prior L4 dispatches

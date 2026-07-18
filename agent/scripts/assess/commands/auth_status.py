@@ -1,4 +1,4 @@
-"""vigil assess auth-status — one-shot view of the engagement's auth state.
+"""vigil assess auth status — one-shot view of the engagement's auth state.
 
 Reads the active identity from the centralized credential store (orchestrator
 backend) and surfaces:
@@ -9,7 +9,7 @@ backend) and surfaces:
 - ``expires_at`` (with a flag when it has passed or is within 5 minutes)
 - Token shapes present (Bearer header, session cookies, OAuth refresh_token)
 - Timestamp of the most recent live-credential probe via
-  ``list-command-runs --technique AUTH``
+  ``command-run list --technique AUTH``
 - Recommended refresh path per the C42 Auth-expiry recovery loop
 
 Pairs with the recovery loop in ``agent/operator-core.md`` Credential
@@ -33,9 +33,9 @@ from assess.lib.creds_client import (
 )
 
 
-def register(subparsers) -> None:
+def register_status(subparsers) -> None:
     p = subparsers.add_parser(
-        "auth-status",
+        "status",
         help="One-shot view of the engagement's auth state + refresh recommendation",
     )
     p.add_argument(
@@ -143,7 +143,7 @@ def _run_identity_probe(
         result = kali_exec(
             cmd,
             technique="AUTH",
-            intent="auth liveness probe (auth-status --probe)",
+            intent="auth liveness probe (auth status --probe)",
             probe_kind="fingerprint",
             phase="recon",
             timeout=timeout + 10,

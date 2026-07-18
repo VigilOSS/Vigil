@@ -29,13 +29,13 @@ The pattern applies to every vulnerability class: confirm the primitive exists, 
 
 When you capture credentials, tokens, or keys — **use them**. Extract the token, replay it, show what it unlocks. If replay fails, say why (expiry, IP binding, CSRF token required) and mark the finding CHAIN REQUIRED with the specific gap.
 
-A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_disposition=pending_runtime_proof` (see `agent/operator-core.md`), and review the holding area with `vigil assess list-findings --holding`. It stays out of the report until a runtime pass proves it.
+A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_disposition=pending_runtime_proof` (see `agent/operator-core.md`), and review the holding area with `vigil assess finding list --holding`. It stays out of the report until a runtime pass proves it.
 
 **Recording a finding is not grading it.** A finding at `verification_state=unreviewed` is an **open question**, not a graded N/A — the lifecycle default means "not yet judged," not "judged harmless." Do not assert "no P2 here" / "this surface is clean" while any unauth or medium-plus finding is still `unreviewed`: an unreviewed finding is exactly what a clean-bill-of-health claim is supposed to have already resolved. Drive it to a verifier disposition before you grade the surface.
 
 **ROE-blocked proof is a CANDIDATE, not a severity downgrade.** This rule demands the attacker outcome — but when you cannot safely complete the final proof step because the program's rules of engagement forbid it (touching real customer data, pivoting into production, exfiltrating a record you have already shown you can reach), that is a constraint on *you*, not a weakness in the finding. Do not lower the severity to match what you were permitted to demonstrate. Grade the **candidate at impact-if-true** — the severity it carries if the blocked step succeeds, which the surrounding evidence already makes likely — and record the single unblocking test that would convert it: set `details.roe_blocked=true` and put the exact next action in `details.required_followup`. This is distinct from the theoretical/`chain_required` park above (which needs another *bug* to land): here the primitive is proved and only the demonstration is walled off by policy. An ROE wall must never masquerade as a low-severity verdict.
 
-**Blocked-for-provisioning is a THIRD category — distinct from both `roe_blocked` and theoretical/`chain_required`.** `roe_blocked` means the primitive is proved and only the final demonstration is walled off by policy; theoretical/`chain_required` means the finding needs another *bug* to complete. A third case is neither: the attempt cannot even start because a precondition is missing — no test account in the required group, no access to the physical line/device, no additional credential or access grant — and the wall may be permanent for this engagement. Record this with `details.block_reason` (why the attempt could not proceed) and `details.unblock_requirements` (`{kind: account|line|device|credential|access, description, requested_from}` — what is missing and who/what would need to provision it); roll repeated attempts up into `details.attempts_summary` instead of scattering them across free-text notes. A `blocked` finding stays OUT of the report — unlike an `roe_blocked` candidate, it is not gradeable at impact-if-true, because the primitive itself was never reached. But the unblock path is first-class, not a dead end: when a later finding or chain lands that would satisfy the block (the missing account gets provisioned, the missing device turns up, the missing credential surfaces elsewhere), link the two — `vigil assess link-finding <blocked-finding-slug> --link-kind unblocked_by --target-kind finding --target-ref <finding-that-unblocks-it>` — so the operator, and the next engagement against this target, see the connection instead of re-discovering it from scratch.
+**Blocked-for-provisioning is a THIRD category — distinct from both `roe_blocked` and theoretical/`chain_required`.** `roe_blocked` means the primitive is proved and only the final demonstration is walled off by policy; theoretical/`chain_required` means the finding needs another *bug* to complete. A third case is neither: the attempt cannot even start because a precondition is missing — no test account in the required group, no access to the physical line/device, no additional credential or access grant — and the wall may be permanent for this engagement. Record this with `details.block_reason` (why the attempt could not proceed) and `details.unblock_requirements` (`{kind: account|line|device|credential|access, description, requested_from}` — what is missing and who/what would need to provision it); roll repeated attempts up into `details.attempts_summary` instead of scattering them across free-text notes. A `blocked` finding stays OUT of the report — unlike an `roe_blocked` candidate, it is not gradeable at impact-if-true, because the primitive itself was never reached. But the unblock path is first-class, not a dead end: when a later finding or chain lands that would satisfy the block (the missing account gets provisioned, the missing device turns up, the missing credential surfaces elsewhere), link the two — `vigil assess finding link <blocked-finding-slug> --link-kind unblocked_by --target-kind finding --target-ref <finding-that-unblocks-it>` — so the operator, and the next engagement against this target, see the connection instead of re-discovering it from scratch.
 
 ## 3. Precondition equivalence check
 
@@ -359,8 +359,8 @@ from a malformed argv is not evidence the handler was reached.
 **Re-derive un-pushed signals from RAW evidence.** A prior agent's stopping point — a
 "tested / clean / disproven" note, a `notes/PHASE-3-REMAINING-WORK.md` line, an inherited
 disposition — is a **view to re-verify, not ground truth**. Before accepting any negative
-disposition on a protected op, re-open the raw `get-command-run` rows behind that signal
-(`vigil assess get-command-run <id>`, `vigil assess list-command-runs --tool-bin <bin> --show-matches`)
+disposition on a protected op, re-open the raw `command-run get` rows behind that signal
+(`vigil assess command-run get <id>`, `vigil assess command-run list --tool-bin <bin> --show-matches`)
 and re-derive the disposition from the actual request/response bytes. A `403` recorded by a
 prior pass may have been a downstream validation error mistaken for an auth gate (b); a "patched"
 may have been an `http=000` transport error (c); a "clean" may have been a status-only probe that
@@ -385,9 +385,12 @@ edge, and that sum, not any one agent's rate, is what trips the rule.
   synchronous call killed by the external agent-harness ceiling (exit 144/SIGUSR1,
   `agent/shared-constraints.md` §2) orphans the in-container process instead — an orphaned
   scanner keeps sending traffic to the target with nobody watching it or able to stop it.
-- **A WAF/CloudFront 403 block is PENDING, never a clean negative** — rule 23(d) above.
-  Detection signatures, the per-request-vs-estate-block disambiguation, and WAF-clean routing
-  intel: `agent/references/web/waf-bypass-and-safe-testing.md`.
+- **A WAF/CloudFront 403 block is PENDING, never a clean negative.** A *challenge interstitial*
+  resolves via a browser re-render (rule 23(d) above); a *signature/fingerprint block*
+  (AWS-WAF/CloudFront) returns the same 403 to headless Chromium, so a re-render will not clear
+  it — it stays PENDING until routed WAF-clean. Detection signatures, the
+  per-request-vs-estate-block disambiguation, and WAF-clean routing intel:
+  `agent/references/web/waf-bypass-and-safe-testing.md`.
 
 ## 24. OOB self-resolution caveat — confirm on a public egress source
 

@@ -2286,18 +2286,6 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
     assert captured["env"]["VIGIL_OOB_DOMAIN"] == "configured.oob.test"
 
 
-def test_aith_mcp_subcommand_prints_deprecation_and_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
-    from vigil_cli import main as main_module
-
-    with pytest.raises(SystemExit) as excinfo:
-        main_module.main(["mcp", "install", "both"])
-
-    assert excinfo.value.code == 2
-    err = capsys.readouterr().err
-    assert "removed in the typed-CLI cutover" in err
-    assert "vigil assess kali" in err
-
-
 def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime
@@ -3738,7 +3726,7 @@ def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
-    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "proxy_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_proxy", lambda *args, **kwargs: calls.append("mitmproxy"))
@@ -3768,7 +3756,7 @@ def test_up_starts_oob_when_only_client_sessions_exist(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
-    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "proxy_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
@@ -3975,8 +3963,8 @@ def test_proxy_image_drift_true_when_container_predates_image() -> None:
         return DockerResult(0, "", "")
 
     assert image_freshness.proxy_image_drift(runner=runner) is True
-    # up.py's thin wrapper single-sources the same verdict.
-    assert up_module._proxy_image_drift(runner=runner) is True
+    # up.py imports and calls the shared function directly (no thin wrapper).
+    assert up_module.proxy_image_drift(runner=runner) is True
 
 
 def test_proxy_image_drift_false_when_ids_match() -> None:
@@ -4017,7 +4005,7 @@ def test_up_warns_when_proxy_container_predates_image(
     monkeypatch.setattr(up_module, "install_from_source", lambda *a, **k: None)
     monkeypatch.setattr(up_module, "image_outdated", lambda *a, **k: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *a, **k: False)
-    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda **k: True)
+    monkeypatch.setattr(up_module, "proxy_image_drift", lambda **k: True)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
     monkeypatch.setattr(up_module, "start_runtime", lambda *a, **k: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_proxy", lambda *a, **k: calls.append("mitmproxy"))
@@ -5555,7 +5543,7 @@ def test_blue_verify_force_bypasses_missing_verifier_dispatch(
         tmp_path,
     )
 
-    assert calls[0][:4] == ["verify-finding", "FIND-001", "--disposition", "confirmed"]
+    assert calls[0][:5] == ["finding", "verify", "FIND-001", "--disposition", "confirmed"]
 
 
 @pytest.mark.parametrize(
@@ -6444,7 +6432,7 @@ def test_blue_closeout_dispatches_report_writer_for_closure_summary(
         tmp_path,
     )
 
-    assert calls[0] == ["list-report-findings", "--mode", "final"]
+    assert calls[0] == ["finding", "report", "--mode", "final"]
     dispatch = calls[1]
     assert dispatch[:2] == ["agent", "start"]
     assert dispatch[dispatch.index("--role") + 1] == "report-writer"
@@ -6467,14 +6455,14 @@ def test_blue_report_aborts_when_final_readiness_preflight_fails(
 
     def fake_run(_install_root: Path, _eng_dir: Path, assess_args: list[str], **_kwargs: object) -> int:
         calls.append(assess_args)
-        return 1 if assess_args[:2] == ["list-report-findings", "--mode"] else 0
+        return 1 if assess_args[:2] == ["finding", "report"] else 0
 
     monkeypatch.setattr(blue_module, "_run_assess", fake_run)
 
     with pytest.raises(SystemExit):
         blue_module._cmd_report(SimpleNamespace(engagement_key=None, select=False, template=None), tmp_path)
 
-    assert calls == [["list-report-findings", "--mode", "final"]]
+    assert calls == [["finding", "report", "--mode", "final"]]
 
 
 def test_blue_closeout_aborts_when_final_readiness_preflight_fails(
@@ -6491,14 +6479,14 @@ def test_blue_closeout_aborts_when_final_readiness_preflight_fails(
 
     def fake_run(_install_root: Path, _eng_dir: Path, assess_args: list[str], **_kwargs: object) -> int:
         calls.append(assess_args)
-        return 1 if assess_args[:2] == ["list-report-findings", "--mode"] else 0
+        return 1 if assess_args[:2] == ["finding", "report"] else 0
 
     monkeypatch.setattr(blue_module, "_run_assess", fake_run)
 
     with pytest.raises(SystemExit):
         blue_module._cmd_closeout(SimpleNamespace(engagement_key=None, select=False, agent_id=None), tmp_path)
 
-    assert calls == [["list-report-findings", "--mode", "final"]]
+    assert calls == [["finding", "report", "--mode", "final"]]
 
 
 def test_link_finding_intel_preserves_details_json_related_intel_ids(
@@ -8122,57 +8110,55 @@ def test_supersede_intel_requires_natural_key_before_request(
     assert "missing required supersede natural-key field: affected_component" in err
 
 
-def test_validate_dispatch_contract_accepts_minimal_payload(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """P3 #31: the validator returns OK for a contract with every required field set."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": "auth-bypass",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+def _validate_dispatch_contract(payload: dict, *, engagement_dir=None):
+    """Call the dispatch-contract validator lib directly.
 
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    assert "OK" in capsys.readouterr().out
+    The former `vigil assess validate-dispatch-contract` CLI verb (a thin
+    wrapper over this lib) was retired in the 2026-07 CLI consolidation — its
+    validator still runs inside `agent start`. These tests exercise the lib
+    that both paths share.
+    """
+    _load_assess_main()  # ensures agent/scripts is on sys.path
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    return validate_specialist_dispatch_contract(payload, engagement_dir=engagement_dir)
 
 
-def test_validate_dispatch_contract_accepts_dispatch_register_payload(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_validate_dispatch_contract_accepts_minimal_payload() -> None:
+    """P3 #31: the validator returns no errors for a contract with every required field set."""
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "role": "vulnerability-analyst",
+            "dispatch_mode": "item-iterating",
+            "skills": "auth-bypass",
+        }
+    )
+    assert errors == []
+
+
+def test_validate_dispatch_contract_accepts_dispatch_register_payload() -> None:
     """The contract preflight accepts the same role field used by agent start."""
-    assess_main = _load_assess_main()
-    payload = {
-        "agent_id": "VA-1",
-        "agent_role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": "auth-bypass",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    assert "OK" in capsys.readouterr().out
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "agent_id": "VA-1",
+            "agent_role": "vulnerability-analyst",
+            "dispatch_mode": "item-iterating",
+            "skills": "auth-bypass",
+        }
+    )
+    assert errors == []
 
 
-def test_validate_dispatch_contract_rejects_role_mismatch(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "recon-specialist",
-        "agent_role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": "auth-bypass",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(SystemExit):
-        assess_main(["validate-dispatch-contract", str(contract_path)])
-    assert "role and agent_role must match" in capsys.readouterr().err
+def test_validate_dispatch_contract_rejects_role_mismatch() -> None:
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "role": "recon-specialist",
+            "agent_role": "vulnerability-analyst",
+            "dispatch_mode": "item-iterating",
+            "skills": "auth-bypass",
+        }
+    )
+    assert any("role and agent_role must match" in e for e in errors)
 
 
 def test_list_skills_uses_directory_names_for_dispatch_audit(
@@ -8365,115 +8351,82 @@ def test_references_index_md_is_retired() -> None:
     assert not offenders, f"docs still point at the deleted references/INDEX.md: {offenders}"
 
 
-def test_validate_dispatch_contract_accepts_list_skills_canonical_name(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    assess_main = _load_assess_main()
-    payload = {
-        "agent_role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": "google-workspaces",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    captured = capsys.readouterr()
-    assert "OK" in captured.out
-    assert "WARN skill" not in captured.err
+def test_validate_dispatch_contract_accepts_list_skills_canonical_name() -> None:
+    errors, warnings = _validate_dispatch_contract(
+        {
+            "agent_role": "vulnerability-analyst",
+            "dispatch_mode": "item-iterating",
+            "skills": "google-workspaces",
+        }
+    )
+    assert errors == []
+    assert not any("skill" in w for w in warnings)
 
 
-def test_validate_dispatch_contract_warns_on_unknown_dispatch_mode(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_validate_dispatch_contract_warns_on_unknown_dispatch_mode() -> None:
     """L2-4: an unknown dispatch_mode is ADVISORY (warn + proceed), not a hard
-    error, so a newly-coined mode is not blocked at the CLI."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "turbo-mode",
-        "skills": "auth-bypass",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    captured = capsys.readouterr()
-    assert "OK" in captured.out
-    assert "turbo-mode" in captured.err
-    assert "newly-coined mode" in captured.err
+    error, so a newly-coined mode is not blocked."""
+    errors, warnings = _validate_dispatch_contract(
+        {
+            "role": "vulnerability-analyst",
+            "dispatch_mode": "turbo-mode",
+            "skills": "auth-bypass",
+        }
+    )
+    assert errors == []
+    blob = " ".join(warnings)
+    assert "turbo-mode" in blob
+    assert "newly-coined mode" in blob
 
 
-def test_validate_dispatch_contract_requires_skills_for_specialist(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_validate_dispatch_contract_requires_skills_for_specialist() -> None:
     """Specialist dispatches must declare which skills the agent loaded."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(SystemExit):
-        assess_main(["validate-dispatch-contract", str(contract_path)])
-    err = capsys.readouterr().err
-    assert "skills is required" in err
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "role": "vulnerability-analyst",
+            "dispatch_mode": "item-iterating",
+        }
+    )
+    assert any("skills is required" in e for e in errors)
 
 
-def test_validate_dispatch_contract_operator_skills_optional(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_validate_dispatch_contract_operator_skills_optional() -> None:
     """Operator role coordinates phases; skills are not required on operator dispatches."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "operator",
-        "dispatch_mode": "deep-manual",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    assert "OK" in capsys.readouterr().out
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "role": "operator",
+            "dispatch_mode": "deep-manual",
+        }
+    )
+    assert errors == []
 
 
-def test_validate_dispatch_contract_operator_skills_optional_case_insensitive(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_validate_dispatch_contract_operator_skills_optional_case_insensitive() -> None:
     """Operator casing variants are exempt from specialist skill requirements."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "Operator",
-        "agent_role": "operator",
-        "dispatch_mode": "deep-manual",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    assert "OK" in capsys.readouterr().out
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "role": "Operator",
+            "agent_role": "operator",
+            "dispatch_mode": "deep-manual",
+        }
+    )
+    assert errors == []
 
 
 def test_actor_kind_warn_on_non_log_subcommand(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    capsys: pytest.CaptureFixture[str]
 ) -> None:
     """P3 #33: passing --actor-kind to a subcommand that doesn't consume it warns on stderr."""
     assess_main = _load_assess_main()
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "deep-manual",
-        "skills": "auth-bypass",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
 
+    # `contract` is a non-log, no-network subcommand that ignores --actor-kind.
     assess_main(
         [
             "--actor-kind",
             "operator",
-            "validate-dispatch-contract",
-            str(contract_path),
+            "contract",
+            "finding",
+            "record",
         ]
     )
     err = capsys.readouterr().err
@@ -11309,7 +11262,7 @@ def test_engagement_export_markdown_tree_writes_per_finding_dirs(
     # VA-002 has no narrative → placeholder debate.md (still git-diff-able).
     va002_debate = (out_root / "VA-002" / "debate.md").read_text(encoding="utf-8")
     assert "No verification-narrative artifact" in va002_debate
-    assert "vigil assess verify-finding VA-002" in va002_debate
+    assert "vigil assess finding verify VA-002" in va002_debate
 
 
 def test_engagement_export_markdown_tree_is_idempotent(

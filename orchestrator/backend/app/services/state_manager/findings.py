@@ -123,7 +123,7 @@ def _raise_finding_clobber_conflict(
             f"it under a different slug, and merging would silently overwrite a {existing_status} "
             f"finding. If this is a distinct sibling on the same root cause, give it a DISTINCT "
             f"root_cause_key/defect_family and attach it with "
-            f"`vigil assess link-finding <new-slug> --root-cause {existing_slug}`; to "
+            f"`vigil assess finding link <new-slug> --root-cause {existing_slug}`; to "
             f"intentionally modify '{existing_slug}', re-record with --update {existing_slug} "
             f"(or POST with slug={existing_slug!r})."
         ),
@@ -244,7 +244,7 @@ def _raise_killed_remint_conflict(
 
 
 # CR-31 (slug atomicity): the (engagement_id, slug) UNIQUE index in db.py is the
-# hard DB-level backstop against two concurrent record-finding lanes minting the
+# hard DB-level backstop against two concurrent finding record lanes minting the
 # same auto-assigned slug (e.g. both VA-012). ``BEGIN IMMEDIATE`` serializes the
 # MAX-scan + INSERT so the second lane normally sees the first's committed slug,
 # but we still treat the constraint as authoritative: an auto-generated slug that
@@ -737,7 +737,7 @@ def create_finding(
                     summary,
                     summary,
                     evidence_ref,
-                    # Default appends (record-finding/verify-finding checkpoints);
+                    # Default appends (finding record/finding verify checkpoints);
                     # notes_mode="replace" overwrites so stale text can be scrubbed.
                     notes if notes_mode == "replace" else _common._append_notes(existing["notes"], notes),
                     # CR-31: details default-merge (so checkpoints accrete keys);
@@ -1006,7 +1006,7 @@ def patch_finding(
             verification_disposition = "none"
         elif existing_verification == "disputed" and workflow_status is not None:
             # CR-31 (clear-disputed): a `disputed` verdict previously could only
-            # be cleared by the verifier re-issuing verify-finding (which lands
+            # be cleared by the verifier re-issuing finding verify (which lands
             # `verified`, not a re-queue). Let a specialist reopen via reset-finding
             # return it to `unreviewed`/`none` — re-queues for verification without
             # forcing a verdict. Only on an explicit workflow reopen, and only out

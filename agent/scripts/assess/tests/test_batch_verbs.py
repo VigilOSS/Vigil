@@ -18,9 +18,7 @@ import json
 import pytest
 
 from assess.commands import (
-    kill_finding,
     link_finding,
-    reset_finding,
     resolve,
     update_finding,
     verify_finding,
@@ -102,7 +100,7 @@ def test_verify_batch_applies_same_payload_to_each(tmp_path, monkeypatch, capsys
     _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(
         verify_finding,
-        ["verify-finding", "VA-1", "VA-2", "VA-3", "--disposition", "confirmed", "--reason", "reproduced"],
+        ["verify", "VA-1", "VA-2", "VA-3", "--disposition", "confirmed", "--reason", "reproduced"],
         tmp_path,
     )
     verify_finding.run(args)
@@ -122,7 +120,7 @@ def test_verify_partial_failure_tally_and_nonzero_exit(tmp_path, monkeypatch, ca
     _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(
         verify_finding,
-        ["verify-finding", "VA-1", "VA-2", "--disposition", "confirmed", "--reason", "r"],
+        ["verify", "VA-1", "VA-2", "--disposition", "confirmed", "--reason", "r"],
         tmp_path,
     )
     with pytest.raises(SystemExit) as exc:
@@ -140,7 +138,7 @@ def test_verify_single_slug_prints_single_json(tmp_path, monkeypatch, capsys):
     _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(
         verify_finding,
-        ["verify-finding", "VA-1", "--disposition", "confirmed", "--reason", "r"],
+        ["verify", "VA-1", "--disposition", "confirmed", "--reason", "r"],
         tmp_path,
     )
     verify_finding.run(args)
@@ -150,17 +148,29 @@ def test_verify_single_slug_prints_single_json(tmp_path, monkeypatch, capsys):
     assert parsed["endpoint"] == "findings/VA-1/verify"
 
 
-def test_kill_batch(tmp_path, monkeypatch, capsys):
+def test_verify_false_positive_batch(tmp_path, monkeypatch, capsys):
+    # kill-finding folded into `verify-finding --disposition false_positive`
+    # (2026-07 CLI consolidation): the FP kill fields ride the verify verb.
     fake = _FakeClient()
-    _install(monkeypatch, kill_finding, tmp_path, fake)
+    _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(
-        kill_finding,
-        ["kill-finding", "VA-1", "VA-2", "--reason", "r", "--kill-reason", "kr", "--kill-check", "2"],
+        verify_finding,
+        [
+            "verify", "VA-1", "VA-2",
+            "--disposition", "false_positive",
+            "--reason", "r", "--kill-reason", "kr", "--kill-check", "2",
+        ],
         tmp_path,
     )
-    kill_finding.run(args)
+    verify_finding.run(args)
     assert [ep for ep, _ in fake.posts] == ["findings/VA-1/verify", "findings/VA-2/verify"]
-    assert "killed 2 finding(s); 0 failed" in capsys.readouterr().err
+    assert all(
+        p["disposition"] == "false_positive"
+        and p["details"]["kill_reason"] == "kr"
+        and p["details"]["kill_check"] == 2
+        for _, p in fake.posts
+    )
+    assert "verified 2 finding(s); 0 failed" in capsys.readouterr().err
 
 
 def test_update_batch(tmp_path, monkeypatch, capsys):
@@ -168,7 +178,7 @@ def test_update_batch(tmp_path, monkeypatch, capsys):
     _install(monkeypatch, update_finding, tmp_path, fake)
     args = _parse(
         update_finding,
-        ["update-finding", "VA-1", "VA-2", "--status", "reported", "--reason", "published"],
+        ["update", "VA-1", "VA-2", "--status", "reported", "--reason", "published"],
         tmp_path,
     )
     update_finding.run(args)
@@ -176,17 +186,20 @@ def test_update_batch(tmp_path, monkeypatch, capsys):
     assert "updated 2 finding(s); 0 failed" in capsys.readouterr().err
 
 
-def test_reset_batch(tmp_path, monkeypatch, capsys):
+def test_reopen_draft_batch(tmp_path, monkeypatch, capsys):
+    # reset-finding folded into `update-finding --status draft` (2026-07 CLI
+    # consolidation): reopening for re-triage is a workflow_status patch.
     fake = _FakeClient()
-    _install(monkeypatch, reset_finding, tmp_path, fake)
+    _install(monkeypatch, update_finding, tmp_path, fake)
     args = _parse(
-        reset_finding,
-        ["reset-finding", "VA-1", "VA-2", "--reason", "retest"],
+        update_finding,
+        ["update", "VA-1", "VA-2", "--status", "draft", "--reason", "retest"],
         tmp_path,
     )
-    reset_finding.run(args)
+    update_finding.run(args)
     assert [ep for ep, _ in fake.patches] == ["findings/VA-1", "findings/VA-2"]
-    assert "reset 2 finding(s); 0 failed" in capsys.readouterr().err
+    assert all(p["workflow_status"] == "draft" for _, p in fake.patches)
+    assert "updated 2 finding(s); 0 failed" in capsys.readouterr().err
 
 
 def test_resolve_surface_batch(tmp_path, monkeypatch, capsys):
@@ -220,7 +233,7 @@ def test_link_finding_batch_many_siblings_one_root(tmp_path, monkeypatch, capsys
     _install(monkeypatch, link_finding, tmp_path, fake)
     args = _parse(
         link_finding,
-        ["link-finding", "VA-2", "VA-3", "VA-4", "--root-cause", "VA-1"],
+        ["link", "VA-2", "VA-3", "VA-4", "--root-cause", "VA-1"],
         tmp_path,
     )
     link_finding.run(args)
@@ -243,7 +256,7 @@ def test_verify_payload_file_flag(tmp_path, monkeypatch, capsys):
     _install(monkeypatch, verify_finding, tmp_path, fake)
     payload_path = tmp_path / "verify.json"
     payload_path.write_text(json.dumps({"disposition": "confirmed", "reason_text": "from file"}), encoding="utf-8")
-    args = _parse(verify_finding, ["verify-finding", "VA-1", "--payload-file", str(payload_path)], tmp_path)
+    args = _parse(verify_finding, ["verify", "VA-1", "--payload-file", str(payload_path)], tmp_path)
     verify_finding.run(args)
     _, payload = fake.posts[0]
     assert payload["disposition"] == "confirmed" and payload["reason_text"] == "from file"
@@ -254,7 +267,7 @@ def test_verify_inline_flag(tmp_path, monkeypatch, capsys):
     _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(
         verify_finding,
-        ["verify-finding", "VA-1", "--inline", '{"disposition":"confirmed","reason_text":"inline"}'],
+        ["verify", "VA-1", "--inline", '{"disposition":"confirmed","reason_text":"inline"}'],
         tmp_path,
     )
     verify_finding.run(args)
@@ -264,7 +277,7 @@ def test_verify_inline_flag(tmp_path, monkeypatch, capsys):
 def test_verify_rejects_positional_json_blob(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, verify_finding, tmp_path, fake)
-    args = _parse(verify_finding, ["verify-finding", "VA-1", '{"disposition":"confirmed"}'], tmp_path)
+    args = _parse(verify_finding, ["verify", "VA-1", '{"disposition":"confirmed"}'], tmp_path)
     with pytest.raises(SystemExit) as exc:
         verify_finding.run(args)
     assert exc.value.code == 1
@@ -277,7 +290,7 @@ def test_verify_rejects_positional_json_file(tmp_path, monkeypatch, capsys):
     _install(monkeypatch, verify_finding, tmp_path, fake)
     payload_path = tmp_path / "verify.json"
     payload_path.write_text("{}", encoding="utf-8")
-    args = _parse(verify_finding, ["verify-finding", "VA-1", str(payload_path)], tmp_path)
+    args = _parse(verify_finding, ["verify", "VA-1", str(payload_path)], tmp_path)
     with pytest.raises(SystemExit) as exc:
         verify_finding.run(args)
     assert exc.value.code == 1
@@ -288,7 +301,7 @@ def test_verify_rejects_positional_json_file(tmp_path, monkeypatch, capsys):
 def test_verify_disposition_as_slug_hint(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, verify_finding, tmp_path, fake)
-    args = _parse(verify_finding, ["verify-finding", "confirmed"], tmp_path)
+    args = _parse(verify_finding, ["verify", "confirmed"], tmp_path)
     with pytest.raises(SystemExit) as exc:
         verify_finding.run(args)
     assert exc.value.code == 1
@@ -296,9 +309,10 @@ def test_verify_disposition_as_slug_hint(tmp_path, monkeypatch, capsys):
     assert "looks like a disposition" in err and "--disposition confirmed" in err
 
 
-def test_kill_payload_file_flag(tmp_path, monkeypatch, capsys):
+def test_verify_false_positive_payload_file_flag(tmp_path, monkeypatch, capsys):
+    # kill-finding's payload-file flow is now verify-finding's (folded verb).
     fake = _FakeClient()
-    _install(monkeypatch, kill_finding, tmp_path, fake)
+    _install(monkeypatch, verify_finding, tmp_path, fake)
     payload_path = tmp_path / "kill.json"
     payload_path.write_text(
         json.dumps(
@@ -310,21 +324,10 @@ def test_kill_payload_file_flag(tmp_path, monkeypatch, capsys):
         ),
         encoding="utf-8",
     )
-    args = _parse(kill_finding, ["kill-finding", "VA-1", "--payload-file", str(payload_path)], tmp_path)
-    kill_finding.run(args)
+    args = _parse(verify_finding, ["verify", "VA-1", "--payload-file", str(payload_path)], tmp_path)
+    verify_finding.run(args)
     assert fake.posts[0][0] == "findings/VA-1/verify"
     assert fake.posts[0][1]["details"]["kill_reason"] == "validate_length caps input"
-
-
-def test_kill_rejects_positional_json_blob(tmp_path, monkeypatch, capsys):
-    fake = _FakeClient()
-    _install(monkeypatch, kill_finding, tmp_path, fake)
-    args = _parse(kill_finding, ["kill-finding", "VA-1", '{"disposition":"false_positive"}'], tmp_path)
-    with pytest.raises(SystemExit) as exc:
-        kill_finding.run(args)
-    assert exc.value.code == 1
-    assert "looks like a JSON payload" in capsys.readouterr().err
-    assert fake.posts == []
 
 
 def test_update_inline_flag(tmp_path, monkeypatch, capsys):
@@ -332,7 +335,7 @@ def test_update_inline_flag(tmp_path, monkeypatch, capsys):
     _install(monkeypatch, update_finding, tmp_path, fake)
     args = _parse(
         update_finding,
-        ["update-finding", "VA-1", "--inline", '{"workflow_status":"draft","reason_text":"needs evidence"}'],
+        ["update", "VA-1", "--inline", '{"workflow_status":"draft","reason_text":"needs evidence"}'],
         tmp_path,
     )
     update_finding.run(args)
@@ -343,7 +346,7 @@ def test_update_inline_flag(tmp_path, monkeypatch, capsys):
 def test_update_rejects_positional_json_file(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, update_finding, tmp_path, fake)
-    args = _parse(update_finding, ["update-finding", "VA-1", "patch.json", "--status", "reported"], tmp_path)
+    args = _parse(update_finding, ["update", "VA-1", "patch.json", "--status", "reported"], tmp_path)
     with pytest.raises(SystemExit) as exc:
         update_finding.run(args)
     assert exc.value.code == 1

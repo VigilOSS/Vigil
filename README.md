@@ -40,7 +40,7 @@ This repository contains the operator prompts, Kali runtime image, engagement sc
 - [Multi-Agent Workflow](#multi-agent-workflow)
 - [Durable Assessment State](#durable-assessment-state)
 - [Development](#development)
-- [Roadmap & TODO](#roadmap--todo)
+- [Implementation Plan](#implementation-plan)
 
 ## Documentation
 
@@ -423,9 +423,7 @@ Blue specialists use `vigil blue dispatch` for L1/L2/L3/L4 work, run tenant-faci
 
 The public red/web roster is intentionally limited to the core roles: `operator`, `recon-specialist`, `source-analyzer`, `vulnerability-analyst`, `exploit-developer`, `fuzzer`, `osint-analyst`, and `report-writer`. Blue engagements expose `alert-triage-specialist`, `investigator`, `incident-verifier`, `ir-lead`, plus shared `osint-analyst` and `report-writer`. Validator-, chain-, and ranker-style behaviors are folded into those roles instead of creating a larger visible roster.
 
-Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state. User-facing exploit review should happen through the orchestrator UI or by telling Codex/Claude which findings are approved. Direct shell invocation of approval/session scripts is an internal maintenance path, not the primary operator workflow.
-
-> **TODO** — first-class UI actions for exploit approval, session launch, and session merge are tracked as **R1** in [TODOv2.md](TODOv2.md#readme-extracted-todos-2026-06-02).
+Worker sessions write proposal files under `sessions/<session-id>/`; the coordinator merges approved proposals back into canonical backend state. User-facing exploit review happens by telling Codex/Claude which findings are approved. Direct shell invocation of approval/session scripts is an internal maintenance path, not the primary operator workflow.
 
 Methodology references:
 - [engagement-methodology.md](agent/references/runtime-guides/engagement-methodology.md)
@@ -555,7 +553,7 @@ Agents list every stored identity for a host — name, `auth_context`, `state`,
 liveness verdict, age, and cookie names (never raw values), with the active
 identity marked `*` — via `vigil assess auth list --host <host>
 [--include-dead] [--json]`, and prove a specific identity's liveness before
-trusting it with `vigil assess auth-status --probe --identity <name>
+trusting it with `vigil assess auth status --probe --identity <name>
 --probe-url <authed-url> --scope <logical-scope>` (operator equivalent: `vigil
 auth status --probe --identity <name> --probe-url <authed-url> --scope
 <logical-scope>`). Execute through a scoped alias with both `--identity <alias>`
@@ -870,9 +868,9 @@ vigil doctor    # local prerequisites and host recon tools
 vigil status    # live service state
 ```
 
-## Roadmap & TODO
+## Implementation Plan
 
-The framework backlog lives in [TODOv2.md](TODOv2.md) (canonical `C#` IDs, Done ledger, and active backlog). README-extracted design items are tracked under [README-extracted TODOs](TODOv2.md#readme-extracted-todos-2026-06-02):
-
-- **R3 — Web3-focused workflow** (deferred): evaluate an optional Web3-focused workflow and agent set only after the core web/app investigation model is stable.
-- **R4 — Rate-limit policy and aggregate enforcement**: programs commonly cap aggregate request rate (LastPass requested 5 req/s; many enterprise VDPs sit in the 5–20 range). Per-verb flags exist but nothing enforces an engagement-wide aggregate across parallel dispatches; the design space is captured in TODOv2.md.
+The verified remaining work is consolidated in
+[IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md). Historical handoffs and plan
+trees are intentionally not retained; durable decisions live in ADRs and current
+behavior lives in executable contracts and tests.

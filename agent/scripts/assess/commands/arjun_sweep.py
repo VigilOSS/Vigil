@@ -153,7 +153,7 @@ def run(args: argparse.Namespace) -> None:
         msg = "arjun-sweep: 0 targets after gating."
         if rows and not args.include_unknown:
             msg += (
-                " work_items may have no live_status — run `vigil assess ingest-httpx` "
+                " work_items may have no live_status — run `vigil assess ingest httpx` "
                 "to populate liveness, or pass --include-unknown."
             )
         print(msg, file=sys.stderr)
@@ -164,7 +164,7 @@ def run(args: argparse.Namespace) -> None:
         print(
             f"arjun-sweep: --include-unknown admitted unconfirmed-live targets ({len(targets)} "
             "total). Historic/Wayback rows (dead .nsf/.do, 301s, PDFs) make arjun burn a slow "
-            "pass for nothing — confirm liveness with `vigil assess ingest-httpx` and drop "
+            "pass for nothing — confirm liveness with `vigil assess ingest httpx` and drop "
             "--include-unknown for a trustworthy run.",
             file=sys.stderr,
         )

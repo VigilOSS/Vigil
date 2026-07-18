@@ -1,4 +1,4 @@
-"""vigil assess list-clusters — cluster manifest for operator triage.
+"""vigil assess work-buffer clusters — cluster manifest for operator triage.
 
 Groups pending work_items by `cluster_key` and emits per-cluster summaries so
 the operator can decide which clusters deserve specialist dispatch and which

@@ -73,7 +73,7 @@ operator's decision on whether to trust the summary or re-dispatch.
 
 A list of canonical slug strings (`["RE-001", "VA-004"]`).
 The renderer fetches the title + severity from the findings table per slug, so
-you don't repeat them here. If a finding wasn't recorded via `record-finding`, do
+you don't repeat them here. If a finding wasn't recorded via `finding record`, do
 not list it here — the renderer would emit "slug missing in backend" and the
 next agent has no way to consume it.
 
@@ -357,7 +357,7 @@ without reading the audit pipeline.
 {
   "agent_id": "carch_q2r4",
   "agent_role": "code-architect",
-  "phase": "code-classify",
+  "phase": "code-record classify",
   "summary": "Classified 38 modules in target repo (4 critical, 11 high, 23 medium); recorded 9 attack hypotheses as intel notes; threat model recorded.",
   "confidence": "high",
   "finding_slugs": [],

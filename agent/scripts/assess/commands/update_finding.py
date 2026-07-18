@@ -1,4 +1,4 @@
-"""vigil assess update-finding — finding-specific PATCH helper."""
+"""vigil assess finding update — finding-specific PATCH helper."""
 from __future__ import annotations
 
 import argparse
@@ -14,10 +14,10 @@ from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_js
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "update-finding",
+        "update",
         help="PATCH a finding by slug using a payload file, inline JSON, or common flags",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=render_contract_epilog("update-finding"),
+        epilog=render_contract_epilog("finding update"),
     )
     p.add_argument(
         "finding_slug",

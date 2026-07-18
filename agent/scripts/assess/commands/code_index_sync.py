@@ -1,4 +1,4 @@
-"""vigil assess code-index-sync — push structural index metadata to the backend."""
+"""vigil assess code-index sync — push structural index metadata to the backend."""
 from __future__ import annotations
 
 import json
@@ -9,9 +9,9 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
 
-def register(subparsers) -> None:
+def register_sync(subparsers) -> None:
     p = subparsers.add_parser(
-        "code-index-sync",
+        "sync",
         help="Sync structural index metadata (function/entry-point/sink/export counts) to the backend",
     )
     p.add_argument(
@@ -267,7 +267,7 @@ def run(args) -> None:
         ):
             print(
                 "Legacy structural-index manifest has no repo identity, but multiple repos "
-                "exist for this engagement. Re-run code-index-sync with --repo-id or rebuild "
+                "exist for this engagement. Re-run `code-index sync` with --repo-id or rebuild "
                 "the index with current code-index so repo_key metadata is recorded.",
                 file=sys.stderr,
             )

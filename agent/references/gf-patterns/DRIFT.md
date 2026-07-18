@@ -34,9 +34,9 @@ When adding a bucket, update `_BUCKETS`, add or update the matching `gf-patterns
 **Decision of record:** `docs/adr/0004-modern-surface-taxonomy.md` (deterministic-first taxonomy:
 type-floor + 13 buckets + normalization + precision). **Research basis:** three-corpus label study
 (cms-gov/xfinity/zendesk, ~8,000 labeled templates across multiple deep sweeps with GPT-5.5 xhigh
-correction) documented in `docs/plans/research/classify-surface-2026-06/README.md` (see its §4b
+correction) documented in `docs/research/classify-surface-2026-06/README.md` (see its §4b
 cross-corpus validation); the implementation contract is
-`docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`. Tests in
+`docs/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`. Tests in
 `orchestrator/backend/tests/test_classify_buckets_api_auth.py` and
 `orchestrator/backend/tests/test_classify_buckets_storage_deser_debug.py`.
 
@@ -201,7 +201,7 @@ Three corpora, ~8,000 labeled templates (worker labels, GPT-5.5 xhigh correction
   used qualitatively to validate `graphql` (392 rows) and `api` (1,023 rows) as dominant
   surface shapes in production SaaS
 
-Full research artifacts: `docs/plans/research/classify-surface-2026-06/` (in-repo: README +
+Full research artifacts: `docs/research/classify-surface-2026-06/` (in-repo: README +
 IMPLEMENTATION-SPEC + curated label batches) and machine-local archive at
 `~/vigil-research/classify-surface-2026-06/` (not committed, ~156M).
 Test files: `orchestrator/backend/tests/test_classify_buckets_api_auth.py`,
@@ -212,7 +212,7 @@ Test files: `orchestrator/backend/tests/test_classify_buckets_api_auth.py`,
 
 **Decision of record:** `docs/adr/0008-classification-context-and-surface-buckets.md`
 (host/source/live context-scoring + 16 generic classifications + Part 6 enrichment).
-**Plan:** `docs/plans/classify-context-and-surface-buckets-2026-06.md`. **Precedent:** this
+**Precedent:** this
 is the second wave on top of the 2026-06 surface taxonomy (ADR 0004 / the section above) and
 inherits its mechanisms (the single declaration-ordered `_BUCKETS` pass, boundary-anchored
 `fragment_in_path`, the regex-bucket mechanism, the `_TYPE_FLOOR`, and soundness override #9 —
@@ -345,7 +345,7 @@ instead of open-redirect. So the goal is delivered through THREE layers instead,
    delimiters whose inner token is full-strength, e.g. `username[$ne]`→`$ne` for `nosqli`), which keeps
    every pinned reason chain byte-identical.
 3. **Secondary cross-routing (never-miss).** On a strongly-matched row, weak buckets are recorded as
-   `secondary_buckets` and bridged to per-class coverage items by `ingest-endpoints`, WITHOUT changing
+   `secondary_buckets` and bridged to per-class coverage items by `ingest endpoints`, WITHOUT changing
    `cluster_key`/`priority_reason`/`priority_score`/`matched_buckets`. So a `?id=`+`?userCmd=` row keeps
    its `gf:sqli` cluster yet still reaches the command-injection specialist, and `sysparm_url` keeps
    `gf:servicenow` yet cross-routes its open-redirect/SSRF angle.

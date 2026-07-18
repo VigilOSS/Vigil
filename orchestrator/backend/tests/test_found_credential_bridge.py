@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import json
 
+from app import db
 from app.services import credentials as credential_store
 from app.services import state_manager
 from tests.test_engagements_api import write_engagement
@@ -121,6 +122,40 @@ def test_discovered_session_cookie_mints_identity(client, isolate_settings):
     assert _obj(findings[0]["details_json"])["discovered_credential"]["session_minted"] is True
     assert _obj(findings[0]["details_json"])["discovered_credential"]["minted_identity"] == minted
     assert _obj(record["provenance_json"])["minted_identity"] == minted
+
+
+def test_discovered_identity_is_opt_in_not_default_resolved(client, isolate_settings):
+    # A minted discovered secret is UNREVIEWED — it must not be replayed by
+    # default. It is stored not-usable-for-requests and, since nothing is active,
+    # default resolution (get_active_credential) must decline it rather than fall
+    # back to the first non-dead row. It stays selectable by explicit --identity.
+    key = "2026-07-03-000009-disc-optin"
+    eng_id = _seed(client, isolate_settings, key)
+
+    record = state_manager.record_credential(
+        eng_id,
+        credential_key="leaked-session-cookie",
+        kind="session_cookie",
+        principal="victim@target.example",
+        secret="sessionid=ABCDEF0123456789ABCDEF",
+        source_name="vulnerability-analyst",
+        status_value="discovered",
+        notes="",
+        provenance={},
+    )
+    minted = record["identity"]
+    assert minted
+
+    # Stored opt-in (not usable for requests) and never the default resolution.
+    stored = db.get_credential(eng_id, minted)
+    assert stored is not None
+    assert stored["use_for_requests"] is False
+    assert db.get_active_credential(eng_id) is None
+
+    # Explicit activation makes it the resolved identity again.
+    assert db.set_active_identity(eng_id, minted) is True
+    active = db.get_active_credential(eng_id)
+    assert active is not None and active["identity_name"] == minted
 
 
 def test_discovered_bearer_jwt_mints_identity(client, isolate_settings):

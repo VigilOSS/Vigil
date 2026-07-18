@@ -768,7 +768,11 @@ def _parse_probe_blob(
     status = int(m.group(1)) if m else None
     muid = _USER_ID_RE.search(raw)
     user_id = muid.group(1) if muid else "-"
-    deleted = any(f"{name}=deleted" in raw for name in anchor_cookies)
+    # Case-insensitive teardown check: a server may revoke a session with any
+    # casing (`MRHSession=DELETED`/`Deleted`), and a case-sensitive substring
+    # would miss it and let a 200 be logged LIVE despite a revoked anchor.
+    raw_lower = raw.lower()
+    deleted = any(f"{name.lower()}=deleted" in raw_lower for name in anchor_cookies)
     return {
         "status": status,
         "status_line": status_line,

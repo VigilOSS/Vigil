@@ -3068,15 +3068,16 @@ def _require_identity_header_write_coverage(
             ),
         )
     placeholders = ",".join("?" for _ in PROBE_RESULT_STATUSES_COVERING)
+    # Count only DURABLE principals: distinct non-empty ``principal_id`` values.
+    # Cookie-only / legacy / manual identities carry an empty principal_id; falling
+    # back to identity_name would let two sessions (or re-logins) for the SAME
+    # account count as two principals and falsely satisfy the cross-principal WRITE
+    # gate. An unanchored identity contributes nothing until a durable principal is
+    # established (JWT capture or an operator-set principal_id).
     principal_count = int(
         connection.execute(
             f"""
-            SELECT COUNT(DISTINCT CASE
-                       WHEN credentials.identity_name IS NOT NULL THEN COALESCE(
-                           NULLIF(trim(credentials.principal_id), ''),
-                           'identity:' || credentials.identity_name
-                       )
-                   END)
+            SELECT COUNT(DISTINCT NULLIF(trim(credentials.principal_id), ''))
               FROM assessment_probe_runs pr
               JOIN assessment_request_variants rv
                 ON rv.id = pr.request_variant_id

@@ -297,13 +297,13 @@ IP flagged in a previous engagement (cross-tenant `intel-note` per
 `triage.md` rule 8) is high-signal for severity.
 
 ```bash
-vigil assess list-intel dns-record --q "<ip>" --json | jq '.[]'
-vigil assess list-intel note --q "<sha256>" --json | jq '.[]'
+vigil assess intel list dns-record --q "<ip>" --json | jq '.[]'
+vigil assess intel list note --q "<sha256>" --json | jq '.[]'
 ```
 
 **Evidence** — VT verdict (`malicious_count` / `total_engines`,
 last-analysis date), AbuseIPDB confidence, prior `intel_*` rows linked
-via `link-finding`. Every reputation citation carries `last_verified_utc`.
+via `finding link`. Every reputation citation carries `last_verified_utc`.
 
 **Common FP** — low-prevalence custom internal tool: VT shows 0/91 but
 `times_submitted=1` and `first_seen=<recent>` — one-off, not malware.
@@ -464,7 +464,7 @@ schema. Required fields, EDR-specific:
   "agent_role": "edr-triage-specialist",
   "phase": "investigation",
   "handoff_status": "ready",
-  "finding_slug": "<updated by record-finding/update-finding>",
+  "finding_slug": "<updated by finding record/finding update>",
   "skill_to_load": "alert-fp-verification",
   "platform": "edr-mde | edr-cs | edr-s1",
   "alert_external_id": "<from L1>",

@@ -90,8 +90,8 @@ If any item is unchecked, STOP and load it now or return a `blocked` handoff.
 | Field | Value |
 |-------|-------|
 | Finding | `status=active`, `verification_state=unreviewed`, severity per `agent/rules/triage.md` §2, `details.timeline[]` (UTC ISO-8601 with `source_file` and `command_run_id` citations per `agent/rules/ir-evidence.md` rule 3), `details.iocs[]`, `details.mitre_techniques[]`, `details.confidence`, `details.severity_rationale` |
-| Intel rows | `vigil assess record-intel <type>` for each new IOC; `<type>` ∈ `{domain, email, dns-record, cve, breach-record, note}` |
-| Finding↔intel links | `assessment_finding_links` rows created automatically by `record-intel --finding <slug>` |
+| Intel rows | `vigil assess intel record <type>` for each new IOC; `<type>` ∈ `{domain, email, dns-record, cve, breach-record, note}` |
+| Finding↔intel links | `assessment_finding_links` rows created automatically by `intel record --finding <slug>` |
 | Artifacts | Every raw pull registered under `ir/reports/`; every derived analysis under `ir/evidence/`; PII-bearing exports marked `--sensitive` |
 | Handoff JSON | `disposition=null` (L2 NEVER sets disposition), `evidence_refs[]` (artifact IDs), `coverage_gaps[]`, `mitre_techniques[]`, `tenant_ref_paths_consulted[]`, `cross_platform_correlation_notes` when `platforms.length > 1` |
 
@@ -173,7 +173,7 @@ on the multi-platform finding.
 ## IOC Enrichment
 
 Every IOC in `details.iocs[]` (IP, domain, email, file hash, OAuth client_id,
-URL) gets an `intel_*` row via `vigil assess record-intel`. Run enrichment
+URL) gets an `intel_*` row via `vigil assess intel record`. Run enrichment
 inline for small dispatches; hand off in parallel to `osint-analyst` when:
 
 - Five or more new IOCs need enrichment
@@ -181,7 +181,7 @@ inline for small dispatches; hand off in parallel to `osint-analyst` when:
   enrichment" section)
 - Dispatch budget is tight and parallelism saves wall-clock time
 
-Linking is automatic via `record-intel --finding <slug>`; verify with
+Linking is automatic via `intel record --finding <slug>`; verify with
 `vigil assess fetch finding-links --slug <slug>`.
 
 ## Required Behavior
@@ -226,9 +226,9 @@ Before your dispatch returns, run in this order:
    vigil assess artifact mark-scratch --under notes/scratch/
    ```
 
-3. **Promote the L1 draft finding.** `vigil assess update-finding <slug> --inline '{"status":"active","details":{"timeline":[...],"iocs":[...],"mitre_techniques":[...],"confidence":"...","severity_rationale":"..."}}'`. `verification_state` stays `unreviewed` — do not include it in the inline payload.
+3. **Promote the L1 draft finding.** `vigil assess finding update <slug> --inline '{"status":"active","details":{"timeline":[...],"iocs":[...],"mitre_techniques":[...],"confidence":"...","severity_rationale":"..."}}'`. `verification_state` stays `unreviewed` — do not include it in the inline payload.
 
-4. **Record intel rows for every IOC** via `vigil assess record-intel <type> <intel-json> --finding <slug>`. The link to the finding is created automatically.
+4. **Record intel rows for every IOC** via `vigil assess intel record <type> <intel-json> --finding <slug>`. The link to the finding is created automatically.
 
 5. **Record activity entries** for state-changing events:
    ```bash

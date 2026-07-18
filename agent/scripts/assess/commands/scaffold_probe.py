@@ -195,7 +195,7 @@ Run inside the runtime container via:
 
 Output contract (see agent/skills/write-probe-script/SKILL.md): the LAST stdout
 line is a single JSON object {{"finding": bool, "summary": str, "evidence": {{...}}}}.
-When finding is true that verdict seeds a record-finding. Stdlib-only so the
+When finding is true that verdict seeds a finding record. Stdlib-only so the
 probe replays on any runtime tier; `requests` is available if you genuinely need it.
 """
 import argparse
@@ -228,7 +228,7 @@ def main() -> int:
     # ap.add_argument("--callback", default="", help="Exact minted http://<nonce>.<client-id>.oob.../ host from `vigil oob mint`.")
     args = ap.parse_args()
 
-    # ---- TODO: replace this passive baseline with the real probe logic. -------
+    # ---- IMPLEMENT: replace this passive baseline with the real probe logic. --
     status, body = fetch(args.target)
     # Example verdict logic — a real probe branches on response shape, diffs two
     # responses, times a blind callback, or chains primitives. Make `finding`

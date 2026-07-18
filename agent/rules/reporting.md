@@ -277,7 +277,7 @@ set:
      write is the *tampering* primitive) so the incremental value is explicit.
    - **Different endpoint + different object + different authority/impact axis → low dup risk.** File
      separately; a one-line cross-reference to the shared root is enough.
-4. **Record the decision** so it is not re-litigated: `link-finding <sibling> --root-cause <lead>`
+4. **Record the decision** so it is not re-litigated: `finding link <sibling> --root-cause <lead>`
    for the backend cluster, and state the lead-vs-sibling framing in each submission's dedup notes.
 
 The failure mode this prevents: filing a P3 read and a P2 write on the same broken endpoint family as

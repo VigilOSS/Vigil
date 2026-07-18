@@ -1,4 +1,4 @@
-"""vigil assess ingest-candidates — ingest metadata-rich surface candidate JSONL."""
+"""vigil assess ingest candidates — ingest metadata-rich surface candidate JSONL."""
 from __future__ import annotations
 
 import json
@@ -37,7 +37,7 @@ def _coerce_header_params(value: object) -> dict[str, str]:
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "ingest-candidates",
+        "candidates",
         help="Ingest metadata-rich surface candidate JSONL into assessment state",
     )
     p.add_argument("source", help="Source name (e.g. surface-collector-curated)")

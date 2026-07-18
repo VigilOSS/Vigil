@@ -91,7 +91,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 "detail": (
                     f"finding {slug} is parked in workflow_status='draft' and will NOT appear in "
                     f"the report or export. Disposition it: promote to active with "
-                    f"`vigil assess update-finding {slug} --workflow-status active` so it reports, "
+                    f"`vigil assess finding update {slug} --workflow-status active` so it reports, "
                     f"or kill it with `vigil assess kill-finding {slug}` if it is not real."
                 ),
             }
@@ -305,7 +305,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                                 f"but the file is missing on disk. Restore the file and re-register with "
                                 f"`vigil assess artifact register {linked_evidence_artifact.get('relative_path', '')} --finding {slug}`, "
                                 f"or repoint the finding via "
-                                f"`vigil assess update-finding {slug} --evidence-ref <relative-path>`."
+                                f"`vigil assess finding update {slug} --evidence-ref <relative-path>`."
                             ),
                         }
                     )
@@ -319,7 +319,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "title": row.get("title", ""),
                         "detail": (
                             f"active/reportable finding {slug} has no evidence_ref. "
-                            f"Fix with `vigil assess update-finding {slug} --evidence-ref <relative-path>` "
+                            f"Fix with `vigil assess finding update {slug} --evidence-ref <relative-path>` "
                             "after writing the evidence artifact to disk."
                         ),
                     }
@@ -350,7 +350,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                             f"missing on disk. Restore the file and re-register with "
                             f"`vigil assess artifact register {indexed_evidence_ref} --finding {slug}`, "
                             f"or repoint the finding via "
-                            f"`vigil assess update-finding {slug} --evidence-ref <relative-path>`."
+                            f"`vigil assess finding update {slug} --evidence-ref <relative-path>`."
                         ),
                     }
                 )
@@ -368,7 +368,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                             f"id={artifact.get('id')}, but evidence_artifact_id points to "
                             f"id={evidence_artifact_id} ({linked_evidence_artifact.get('relative_path', '')!r}). "
                             f"Refresh the finding link with "
-                            f"`vigil assess update-finding {slug} --evidence-ref {indexed_evidence_ref}`."
+                            f"`vigil assess finding update {slug} --evidence-ref {indexed_evidence_ref}`."
                         ),
                     }
                 )
@@ -521,7 +521,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     "detail": (
                         f"finding {slug} (severity={row['severity']}) is verification_state="
                         f"'unreviewed' and must be graded before the final report. Grade it with "
-                        f"`vigil assess verify-finding {slug} --disposition confirmed|downgraded|disputed "
+                        f"`vigil assess finding verify {slug} --disposition confirmed|downgraded|disputed "
                         f"--reason-text ...` (records a verification verdict)."
                     ),
                 }

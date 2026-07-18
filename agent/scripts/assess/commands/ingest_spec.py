@@ -1,4 +1,4 @@
-"""vigil assess ingest-spec — parse OpenAPI 3.x / Swagger 2.0 specs and generate coverage records."""
+"""vigil assess ingest spec — parse OpenAPI 3.x / Swagger 2.0 specs and generate coverage records."""
 from __future__ import annotations
 
 import json
@@ -20,7 +20,7 @@ _HTTP_METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "tr
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("ingest-spec", help="Ingest OpenAPI/Swagger spec into assessment state")
+    p = subparsers.add_parser("spec", help="Ingest OpenAPI/Swagger spec into assessment state")
     p.add_argument("spec_file", help="Path to local spec file (no URLs)")
     p.set_defaults(func=run)
 
@@ -337,7 +337,7 @@ def run(args) -> None:
             "resolved from scope — the backend requires ABSOLUTE request URLs, so none "
             f"of this spec's {len(paths)} path(s) can be ingested. Add a host to "
             "scope.json (or fetch the spec from a server with an absolute URL) and "
-            "re-run `vigil assess ingest-spec`."
+            "re-run `vigil assess ingest spec`."
         )
         print(
             f"[ingest] Ingested 0 endpoints from spec (version {spec_version}); "

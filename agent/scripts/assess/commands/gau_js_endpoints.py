@@ -1,4 +1,4 @@
-"""vigil assess gau-js-endpoints — recover endpoints hidden in minified JS bundles.
+"""vigil assess gau js-endpoints — recover endpoints hidden in minified JS bundles.
 
 LLMs and crawlers consistently miss routes that exist only inside JS bundles
 (`/admin/users/delete` referenced from `app.bundle.js` but never linked in
@@ -11,7 +11,7 @@ HTML). This wrapper closes that gap:
    endpoint strings.
 3. Resolve each extraction against the response's source URL so relative
    paths become absolute.
-4. Pipe the absolute URLs into `vigil assess ingest-endpoints` with
+4. Pipe the absolute URLs into `vigil assess ingest endpoints` with
    `source='js-extract'` so inline classification scores them like any
    other URL and report-writer can audit which work_items came from JS
    extraction.
@@ -48,7 +48,7 @@ from assess.lib.kali import kali_exec
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "gau-js-endpoints",
+        "js-endpoints",
         help=(
             "Extract endpoints hidden in JS bundles (LinkFinder-style "
             "regex over httpx-stored bodies) and ingest them into the "
@@ -249,7 +249,7 @@ def _fetch_js_bodies(paths, *, cfg, args) -> int:
             reason = f"cached gau run exited {meta.exit_code}"
         raise AssessError(
             f"no usable cached gau corpus at {paths.output_path}: {reason}. "
-            f"Run `vigil assess gau-endpoints {args.target}` first (with the "
+            f"Run `vigil assess gau endpoints {args.target}` first (with the "
             f"same --subs/--providers values) or pass --bodies-dir to point "
             f"at an existing bodies directory."
         )
@@ -343,7 +343,8 @@ def _ingest_extracted_urls(*, source: str, urls: list[str], engagement_dir: Path
         argv = [
             "--engagement-dir",
             str(engagement_dir),
-            "ingest-endpoints",
+            "ingest",
+            "endpoints",
             source,
             "--file",
             tmp.name,
@@ -382,7 +383,7 @@ def run(args: argparse.Namespace) -> None:
         if not args.fetch_if_missing:
             print(
                 f"gau-js-endpoints: bodies dir {bodies_dir} is empty. "
-                "Either run `vigil assess gau-secrets` first (with the same "
+                "Either run `vigil assess gau secrets` first (with the same "
                 "--subs/--providers values) to populate it, or pass "
                 "--fetch-if-missing to body-fetch the .js subset of the "
                 "cached gau corpus now.",

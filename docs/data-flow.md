@@ -37,7 +37,7 @@ decision (ADR 0001, calibrated by ADR 0012 for the decisive-unit exception).
 
 | Store | What it is | Written by | Read by |
 |---|---|---|---|
-| **Backend ledger** (SQLite via FastAPI) | Durable canonical state: targets/services/request-variants/observations, coverage-items, probes, surfaces, findings, chains, intel, host-liveness, command-runs, **and the work-buffer queue** (`assessment_work_items`) — engagement-scoped via a real `engagement_id` FK, priority-scored + gf-classified *at insert*. | Ingest verbs (via `/request-observations[/bulk]`, which carries a `work_item` derivation block the backend persists server-side in the same transaction — ADR 0013) + `ingest-arjun`/out-of-scope-skip rows via `/work-items/bulk` directly + the record/resolve CLI verbs + the machine auto-emit path. | Everything downstream: coverage, depth gate, resume-brief, phase gates, report readiness, frontend, **and** work-buffer triage (`list-clusters`, `fetch-by-priority`) → specialist dispatch routing. |
+| **Backend ledger** (SQLite via FastAPI) | Durable canonical state: targets/services/request-variants/observations, coverage-items, probes, surfaces, findings, chains, intel, host-liveness, command-runs, **and the work-buffer queue** (`assessment_work_items`) — engagement-scoped via a real `engagement_id` FK, priority-scored + gf-classified *at insert*. | Ingest verbs (via `/request-observations[/bulk]`, which carries a `work_item` derivation block the backend persists server-side in the same transaction — ADR 0013) + `ingest arjun`/out-of-scope-skip rows via `/work-items/bulk` directly + the record/resolve CLI verbs + the machine auto-emit path. | Everything downstream: coverage, depth gate, resume-brief, phase gates, report readiness, frontend, **and** work-buffer triage (`work-buffer clusters`, `fetch-by-priority`) → specialist dispatch routing. |
 
 Before ADR 0013, the work-item row lived in a separate per-engagement SQLite file (`cases.db`) written
 by a second, decoupled step after the observation POST, so its backend FKs
@@ -52,20 +52,20 @@ on disk with no exporter — that is orthogonal to the work-buffer fold.
 
 | Tool / verb | Backend endpoint | Model | Table(s) | **Headers?** |
 |---|---|---|---|---|
-| `ingest-endpoints` (bulk crawler/gau/katana/gf — highest volume) | `/request-observations/bulk` + `/coverage-items/bulk` | `RequestObservationIngestRequest`, `CoverageItemBulkRecordRequest` | request-variants/observations/coverage-items + gf class-typed coverage-items | **populated** — header names captured from the ingested rows where present (`ingest_endpoints.py:667`); left `{}` (with a one-line why-not comment) only when a given row genuinely carries no header data |
-| `ingest-candidates` (curated JSONL) | `/request-observations/bulk` + `/surface-request-variant-links` | same + `SurfaceRequestVariantLinkRequest` | same + `surface_request_variant_links` | **populated** *if the JSONL supplies `headers`* (`_coerce_header_params`) — no automated producer feeds it |
-| `ingest-spec` (OpenAPI import) | `/request-observations/bulk` | same | same | **populated** from `in: header` params (`ingest_spec.py:469-518`) |
-| `ingest-httpx` (host liveness) | `/host-liveness` | `HostLivenessUpsertRequest` | `assessment_host_liveness` | n/a (host-level, no request) |
+| `ingest endpoints` (bulk crawler/gau/katana/gf — highest volume) | `/request-observations/bulk` + `/coverage-items/bulk` | `RequestObservationIngestRequest`, `CoverageItemBulkRecordRequest` | request-variants/observations/coverage-items + gf class-typed coverage-items | **populated** — header names captured from the ingested rows where present (`ingest_endpoints.py:667`); left `{}` (with a one-line why-not comment) only when a given row genuinely carries no header data |
+| `ingest candidates` (curated JSONL) | `/request-observations/bulk` + `/surface-request-variant-links` | same + `SurfaceRequestVariantLinkRequest` | same + `surface_request_variant_links` | **populated** *if the JSONL supplies `headers`* (`_coerce_header_params`) — no automated producer feeds it |
+| `ingest spec` (OpenAPI import) | `/request-observations/bulk` | same | same | **populated** from `in: header` params (`ingest_spec.py:469-518`) |
+| `ingest httpx` (host liveness) | `/host-liveness` | `HostLivenessUpsertRequest` | `assessment_host_liveness` | n/a (host-level, no request) |
 | **mitmproxy** `proxy_addon.py` (derived observation) | `/request-observations` | `RequestObservationIngestRequest` | request-variants/observations/coverage-items + `assessment_work_items` (derived server-side, ADR 0013 — the addon no longer opens a local SQLite connection) | **populated** into `header_schema` from the `dict(req.headers)` the proxy already holds (`:1013`); full headers also still dumped into an opaque `raw_payload` blob |
 | mitmproxy (full-flow capture) | `/http-flows` | `HttpFlowIngestRequest` | `assessment_http_flows` | **full headers** — but **opt-in** (off by default) and orthogonal to coverage |
 | `dns-discovery` | — | — | local files only | n/a |
-| `web-discovery` | `/host-liveness` + delegates to `ingest-endpoints` | — | host-liveness + (delegated) | **populated** (inherits `ingest-endpoints`'s capture; katana run `-or -ob`) |
-| `gau-endpoints` / `gau-js-endpoints` | delegate to `ingest-endpoints` | — | (delegated) | **populated** (inherits `ingest-endpoints`'s capture) |
-| `ingest-arjun` | `/work-items/bulk` (direct — no observation POST) | `WorkItemBulkIngestRequest` | `assessment_work_items` | header-discovery is **dead code** (`arjun_enrich.py` hardcodes `[]`; arjun's `--headers` = auth headers, not discovery) |
-| `record-surface` / `resolve-surface` / `link-surface-work-items` | `/surfaces`, `/surface-request-variant-links` | `SurfaceRecordRequest` etc. | `assessment_surfaces`, links | n/a |
-| `record-probe` / `record-attempt` | `/probe-runs` | `ProbeRunRecordRequest` | `assessment_probe_runs` | only the free-text `input_slot="header:Name"` convention |
-| `resolve-coverage-item` | `PATCH /coverage-items/{id}` | `CoverageItemUpdateRequest` | `assessment_coverage_items` | n/a |
-| `record-finding` / `record-intel` / `record-chain` / `block-technique` / kali `command-runs` | resp. endpoints | resp. models | outcome tables | n/a (outcome writes) |
+| `web-discovery` | `/host-liveness` + delegates to `ingest endpoints` | — | host-liveness + (delegated) | **populated** (inherits `ingest endpoints`'s capture; katana run `-or -ob`) |
+| `gau endpoints` / `gau js-endpoints` | delegate to `ingest endpoints` | — | (delegated) | **populated** (inherits `ingest endpoints`'s capture) |
+| `ingest arjun` | `/work-items/bulk` (direct — no observation POST) | `WorkItemBulkIngestRequest` | `assessment_work_items` | header-discovery is **dead code** (`arjun_enrich.py` hardcodes `[]`; arjun's `--headers` = auth headers, not discovery) |
+| `record-surface` / `resolve surface` / `work-buffer link-surface` | `/surfaces`, `/surface-request-variant-links` | `SurfaceRecordRequest` etc. | `assessment_surfaces`, links | n/a |
+| `record-probe` (folds the former `record-attempt`) | `/probe-runs` | `ProbeRunRecordRequest` | `assessment_probe_runs` | only the free-text `input_slot="header:Name"` convention |
+| `resolve coverage-item` | `PATCH /coverage-items/{id}` | `CoverageItemUpdateRequest` | `assessment_coverage_items` | n/a |
+| `finding record` / `intel record` / `record-chain` / `block-technique` / kali `command-runs` | resp. endpoints | resp. models | outcome tables | n/a (outcome writes) |
 
 **Header takeaway:** capture now spans OpenAPI-spec import, hand-authored candidate JSONL, the bulk
 endpoint-ingest path, and the live proxy — the two previously-dropping, highest-volume paths now populate
@@ -189,8 +189,8 @@ only at the live `transition-phase report/complete` call. See
 ## 6. Header ingestion — current state and the gap
 
 **Populated (real per-header data in `header_schema_json`):** all four request-observation ingest paths
-now capture it — `ingest-spec` (OpenAPI `in: header`), `ingest-candidates` (only if the JSONL supplies
-`headers` — no automated producer does), **and, per ADR 0012, `ingest-endpoints`** (`:667`, header names
+now capture it — `ingest spec` (OpenAPI `in: header`), `ingest candidates` (only if the JSONL supplies
+`headers` — no automated producer does), **and, per ADR 0012, `ingest endpoints`** (`:667`, header names
 from the ingested rows where present — the highest-volume path, plus everything delegating to it:
 `web-discovery`, `gau-*`) **and the mitmproxy derived observation** (`proxy_addon.py:1013`, populated
 from the `dict(req.headers)` the proxy already holds).
@@ -279,7 +279,7 @@ section) and gate selectivity (§4/§5) are independent choices — ADR 0012 cha
 
 ```
 recon/discovery tools  ──►  classify_from_fields (inline, client-side, unchanged;
-   (ingest-endpoints/          same _BUCKETS taxonomy as before) ──► folded into the
+   (ingest endpoints/          same _BUCKETS taxonomy as before) ──► folded into the
     candidates/spec)           observation's `work_item` derivation block
         │
         ▼
@@ -287,13 +287,13 @@ recon/discovery tools  ──►  classify_from_fields (inline, client-side, unc
         │
         ├─► assessment_work_items  (derived SERVER-SIDE, SAME transaction — ADR 0013,
         │        │                  no dual write)
-        │        ├─ list-clusters / fetch-by-priority
+        │        ├─ work-buffer clusters / fetch-by-priority
         │        │     ──► specialist dispatch (advisory)
-        │        └─ classify-work (idempotent re-classify)
+        │        └─ work-buffer reclassify (idempotent re-classify)
         │
         ├─► request_variant  (query/body/path/cookie/HEADER schema_json;
         │        │            header_schema is PART of the dedup hash; now
-        │        │            populated by ingest-endpoints + proxy_addon too)
+        │        │            populated by ingest endpoints + proxy_addon too)
         │        ├─► _auto_request_coverage_candidates  (COARSE: 1 item per
         │        │       input CLASS × implied vuln-class)
         │        └─► header_schema_json ──► depth_ledger._header_has_token
@@ -303,7 +303,7 @@ recon/discovery tools  ──►  classify_from_fields (inline, client-side, unc
         └─► gf-bucket bridge ──► class-typed coverage_items (attack_family=class,
                                   input_slot ALWAYS "endpoint")
 
-   ingest-arjun / out-of-scope-skip rows ──► POST directly to /work-items/bulk (no
+   ingest arjun / out-of-scope-skip rows ──► POST directly to /work-items/bulk (no
    observation — these reuse an already-in-scope URL or record a skip) ──► assessment_work_items
                                    │
                                    ▼

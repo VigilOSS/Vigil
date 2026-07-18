@@ -1,7 +1,7 @@
 """Client for the centralized engagement credential store (replaces auth.json).
 
 Runtime consumers — kali identity injection, the auth runtime snapshot, and
-``vigil assess auth-status`` — read credentials through the orchestrator backend
+``vigil assess auth status`` — read credentials through the orchestrator backend
 instead of a per-engagement ``auth.json`` file. The ``vigil auth`` CLI uses the
 write helpers.
 

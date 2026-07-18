@@ -227,7 +227,7 @@ vigil assess kali exec --technique DISCOVERY \
 - Admin/management interfaces discovered
 - Wordlists used and filter/matcher settings
 - Whether authenticated fuzzing was performed
-- New endpoints to feed into work buffer via `vigil assess ingest-endpoints`
+- New endpoints to feed into work buffer via `vigil assess ingest endpoints`
 
 ## Extended Resources
 

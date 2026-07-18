@@ -119,7 +119,7 @@ revocation). Prove liveness explicitly before trusting a captured identity and
 before recording a "dead"/"unreachable" verdict against it:
 
 ```bash
-vigil assess auth-status --probe --identity <name> --probe-url <authed-url>
+vigil assess auth status --probe --identity <name> --probe-url <authed-url>
 ```
 
 The probe never follows redirects and returns a real verdict only once that

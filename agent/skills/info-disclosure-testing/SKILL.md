@@ -88,7 +88,7 @@ Useful for CVE matching and targeted exploitation. Worth noting but not worth a 
 
 ### Low: Verbose Errors Without Sensitive Data
 
-Generic stack traces, verbose 404 pages, "null pointer at line 42" without file paths or secrets. Not worth reporting on their own. Capture them via `vigil assess record-intel note <json-file>` for context but do not create findings.
+Generic stack traces, verbose 404 pages, "null pointer at line 42" without file paths or secrets. Not worth reporting on their own. Capture them via `vigil assess intel record note <json-file>` for context but do not create findings.
 
 ---
 

@@ -135,7 +135,7 @@ Before writing harness code, inspect each target for specific patterns that fuzz
 }
 ```
 
-If the audit finds a bug that is directly reportable without fuzzing (e.g., provably reachable integer overflow), record it immediately via `vigil assess record-finding` and continue — the harness will validate and extend the finding.
+If the audit finds a bug that is directly reportable without fuzzing (e.g., provably reachable integer overflow), record it immediately via `vigil assess finding record` and continue — the harness will validate and extend the finding.
 
 ### Stage 3: Harness Construction
 
@@ -487,7 +487,7 @@ tools/fuzz-state/
 
 True findings from Stage 6 are recorded via:
 ```bash
-vigil assess record-finding code-fuzz-engineer <finding-json>
+vigil assess finding record code-fuzz-engineer <finding-json>
 ```
 
 Finding prefix: `CF` (code-fuzz). Location format: `file:<path>:<line>`.

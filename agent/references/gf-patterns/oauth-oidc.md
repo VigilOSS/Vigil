@@ -128,7 +128,7 @@ Param-key only:
 2 `unknown_should_classify` (`.well-known/change-password`, `.well-known/openid-configuration`)
 in the initial 535-template sample. Long-tail cms-gov sweeps: 2 additional actionable templates.
 Zendesk third corpus corroborates OIDC discovery presence on modern SaaS.
-See `docs/plans/research/classify-surface-2026-06/README.md` §4b.
+See `docs/research/classify-surface-2026-06/README.md` §4b.
 
 ## Sources
 

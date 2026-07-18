@@ -1,4 +1,4 @@
-"""vigil assess ingest-arjun — fold Arjun discovery output into the work buffer.
+"""vigil assess ingest arjun — fold Arjun discovery output into the work buffer.
 
 Host-side, idempotent enrichment step (the gau->ingest split, plan §9): the
 `vigil assess kali arjun` verb produces JSON; THIS command consumes it and
@@ -46,7 +46,7 @@ from assess.lib.params import extract_url_path, generate_params_sig
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
-        "ingest-arjun",
+        "arjun",
         help="Fold Arjun hidden-parameter discovery JSON into the work buffer (idempotent).",
     )
     p.add_argument("json_file", help="Arjun -oJ JSON output file")

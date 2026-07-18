@@ -31,10 +31,24 @@ def aggregate_rate_reservation(
     aggregate_cap = scope_lib.aggregate_rate_limit(scope_doc)
     if aggregate_cap is None:
         return None
-    for index, token in enumerate(cmd[:-1]):
-        if token in ("-rate-limit", "--rate-limit", "-rl", "--rate"):
+    rate_flags = ("-rate-limit", "--rate-limit", "-rl", "--rate")
+    for index, token in enumerate(cmd):
+        if token in rate_flags and index + 1 < len(cmd):
+            # Space-separated form: `--rate-limit 500`.
             try:
                 value = float(cmd[index + 1])
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        elif token.startswith("-") and "=" in token:
+            # Attached Go/pflag form: `--rate-limit=500`, `-rl=500`. Reserving the
+            # tool default here would silently admit a run above the ROE cap.
+            flag, _, attached = token.partition("=")
+            if flag not in rate_flags:
+                continue
+            try:
+                value = float(attached)
             except (TypeError, ValueError):
                 continue
             if value > 0:

@@ -242,6 +242,15 @@ def derive_capture_identity(
     # preserved. No identifiable principal -> the opaque per-anchor fingerprint.
     principal = _principal_identity(jwt_anchor)
     if principal is not None:
+        # Same anchor claim (sub/email/...) across DIFFERENT issuers/tenants is
+        # NOT the same principal: coalescing them would share one identity row and
+        # let the globally-stored Authorization header from the second host replay
+        # against the first. Fold the issuer into the key so cross-tenant
+        # collisions separate; a real token refresh keeps its issuer so it still
+        # refreshes one row. Issuer-less JWTs keep the bare readable label.
+        issuer_scope = _bearer_issuer_scope(headers, tokens)
+        if issuer_scope:
+            return f"{principal}-iss{issuer_scope}"
         return principal
 
     key_material = "\n".join(sorted(f"{name}={value}" for name, value in anchor_pairs))
@@ -386,6 +395,36 @@ def _jwt_payload_claim(bearer: str) -> tuple[str, Any] | None:
         if value not in (None, ""):
             return (name, value)
     return None
+
+
+def _bearer_issuer_scope(
+    headers: dict[str, str], tokens: dict[str, str]
+) -> str | None:
+    """Return a short, stable hash of a bearer JWT's ``iss`` claim, or ``None``.
+
+    Used to separate two sessions whose anchor claim collides but that were minted
+    by different issuers/tenants. Only the ``iss`` claim participates — it is the
+    canonical "who minted this token" value and is stable across a token refresh,
+    so folding it in never splits a real refresh of the same login. An issuer-less
+    or non-JWT bearer returns ``None`` (no disambiguation, no regression).
+    """
+    bearer = _extract_bearer(headers or {}, tokens or {})
+    if not bearer:
+        return None
+    parts = bearer.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    issuer = claims.get("iss")
+    if issuer in (None, ""):
+        return None
+    return hashlib.sha1(f"iss={issuer}".encode("utf-8")).hexdigest()[:6]
 
 
 def capture_material(

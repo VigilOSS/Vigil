@@ -4,7 +4,8 @@ Arjun discovers *hidden* HTTP parameters an endpoint silently accepts but never
 advertises. This verb exposes the FULL Arjun v2.2.7 CLI surface as first-class
 typed flags (no capability narrowed): single-URL (`-u`) and list (`-i`) input,
 all four methods (GET/POST/JSON/XML), the passive OSINT mode (`--passive`),
-header-based auth (`--headers`), every rate/politeness/stability knob, the
+auth-aware discovery (`--identity <name>` folds a store identity's session/bearer
+into `--headers`, or paste `--headers` manually), every rate/politeness knob, the
 casing styles, and all three output formats. A `--extra-args` passthrough is
 kept as the safety net for any future Arjun flag.
 
@@ -12,7 +13,7 @@ Output policy: JSON (`-oJ`) is ALWAYS written into the engagement scan dir
 (`scans/arjun/<target>/<hash>.json`, reachable in-container at
 `/engagements/$ENGAGEMENT_KEY/...`) so every run is captured and auditable,
 even when the operator also requests `-oT`/`-oB`. The JSON file is what
-`vigil assess ingest-arjun` consumes to enrich the work buffer.
+`vigil assess ingest arjun` consumes to enrich the work buffer.
 
 Like every other kali_* verb, Arjun runs INSIDE the isolated Kali runtime
 (it sends HTTP to the target and, in passive mode, hits external OSINT

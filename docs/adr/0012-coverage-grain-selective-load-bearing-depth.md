@@ -134,7 +134,7 @@ transition gate) WHAT is still uncovered, never HOW to cover it.
   already-durable signal.
 - **Resolves an open question under ADR 0009**: coverage state (incl. per-class, per-identity) is
   operator-injectable; hypotheses are not — this ADR's gate is built from the former only.
-- Implemented by `depth_ledger.py` / `transition_phase.py` (A1) and `ingest_endpoints.py` /
-  `proxy_addon.py` (A2.1), previewed via `check_phase_readiness.py` (A1.3); see
-  `docs/plans/coverage-grain-unbundle-2026-07.md` for the full work-group breakdown and
-  `docs/data-flow.md` §4/§5/§6/§7/§8 for the updated data-flow picture.
+- Implemented by `depth_ledger.py` / `transition_phase.py` and
+  `ingest_endpoints.py` / `proxy_addon.py`, previewed via
+  `check_phase_readiness.py`; see `docs/data-flow.md` §4/§5/§6/§7/§8 for the
+  current data-flow picture.

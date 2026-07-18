@@ -52,9 +52,9 @@ class SchemaSpec:
 
 
 def _finding_record_examples() -> list[dict[str, Any]]:
-    contract = get_contract("record-finding")
+    contract = get_contract("finding record")
     if contract is None:
-        raise RuntimeError("record-finding contract is required to generate finding examples")
+        raise RuntimeError("finding record contract is required to generate finding examples")
 
     examples: list[dict[str, Any]] = []
     for example in contract.examples:
@@ -219,7 +219,7 @@ _FINDING_DETAIL_PROPERTIES = {
     },
     "unblock_requirements": {
         "type": "object",
-        "description": "What must be provisioned to lift the block so the finding can be driven to proof. When the unblocker is another finding or chain, link it with `vigil assess link-finding <slug> --link-kind unblocked_by ...`.",
+        "description": "What must be provisioned to lift the block so the finding can be driven to proof. When the unblocker is another finding or chain, link it with `vigil assess finding link <slug> --link-kind unblocked_by ...`.",
         "properties": {
             "kind": {
                 "type": "string",
@@ -249,15 +249,15 @@ _FINDING_DETAIL_PROPERTIES = {
     },
     "run": {
         "type": "string",
-        "description": "One-line reproduction command for the operational overlay (e.g. 'bash scans/va-003-poc.sh'). Surfaced by export-submission as the **Run:** header line so a re-render/--overwrite rebuilds it from the finding instead of wiping the operator's hand-applied overlay.",
+        "description": "One-line reproduction command for the operational overlay (e.g. 'bash scans/va-003-poc.sh'). Surfaced by export submission as the **Run:** header line so a re-render/--overwrite rebuilds it from the finding instead of wiping the operator's hand-applied overlay.",
     },
     "pass_if": {
         "type": "string",
-        "description": "Success criterion for the operational overlay (e.g. 'HTTP 200 returns another member's order record'). Surfaced by export-submission as the **Pass if:** header line.",
+        "description": "Success criterion for the operational overlay (e.g. 'HTTP 200 returns another member's order record'). Surfaced by export submission as the **Pass if:** header line.",
     },
     "replies": {
         "type": "array",
-        "description": "Append-only thread of OUTGOING replies to the program on this submitted finding (Bugcrowd comment / HackerOne activity reply / direct follow-up). Written by `vigil assess record-reply` via read-modify-write and re-rendered by `export-reply`; never hand-edited (a shallow details merge would clobber the array).",
+        "description": "Append-only thread of OUTGOING replies to the program on this submitted finding (Bugcrowd comment / HackerOne activity reply / direct follow-up). Written by `vigil assess record-reply` via read-modify-write and re-rendered by `export reply`; never hand-edited (a shallow details merge would clobber the array).",
         "items": {
             "type": "object",
             "additionalProperties": False,
@@ -265,7 +265,7 @@ _FINDING_DETAIL_PROPERTIES = {
                 "seq": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "1-based, monotonic reply index. export-reply/record-reply pick max(seq)+1 for a new reply.",
+                    "description": "1-based, monotonic reply index. export reply/record-reply pick max(seq)+1 for a new reply.",
                 },
                 "platform": {
                     "type": "string",
@@ -627,7 +627,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "enum": ["info", "low", "medium", "high", "critical"],
                     },
                     "workflow_status": {
-                        "description": "Lifecycle state settable at record time. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'. NOTE: the blue-team/IR states (contained, eradicated, recovered) are intentionally NOT recordable here — they are applied only via `vigil assess update-finding`, so this record-finding enum is deliberately narrower than the full WorkflowStatus vocabulary.",
+                        "description": "Lifecycle state settable at record time. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'. NOTE: the blue-team/IR states (contained, eradicated, recovered) are intentionally NOT recordable here — they are applied only via `vigil assess finding update`, so this finding record enum is deliberately narrower than the full WorkflowStatus vocabulary.",
                         "enum": ["draft", "active", "exploited", "blocked", "false_positive", "merged", "reported"],
                     },
                     "verification_state": {
@@ -635,7 +635,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "enum": ["unreviewed", "verified", "disputed"],
                     },
                     "verification_disposition": {
-                        "description": "Verifier outcome (stored field). 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'blocked': the attempt could not even start (missing provisioning); requires details.block_reason and is held OUT of the report. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable. NOTE: `vigil assess verify-finding --disposition` additionally accepts 'disputed', which is a verify ACTION that sets verification_state='disputed' and leaves this field at 'none' — 'disputed' is never persisted as a disposition, so it is intentionally absent from this stored enum.",
+                        "description": "Verifier outcome (stored field). 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'blocked': the attempt could not even start (missing provisioning); requires details.block_reason and is held OUT of the report. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable. NOTE: `vigil assess finding verify --disposition` additionally accepts 'disputed', which is a verify ACTION that sets verification_state='disputed' and leaves this field at 'none' — 'disputed' is never persisted as a disposition, so it is intentionally absent from this stored enum.",
                         "enum": list(_VERIFICATION_DISPOSITION_VALUES),
                     },
                     "defect_family": {

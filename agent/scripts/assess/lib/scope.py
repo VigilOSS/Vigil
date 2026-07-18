@@ -1269,6 +1269,25 @@ def _command_target_tokens(
     while index < len(cmd):
         token = str(cmd[index]).strip()
         previous = str(cmd[index - 1]).strip() if index else ""
+        # Attached option value (Go/pflag-style): `-u=https://x`, `--list=t.txt`,
+        # `-l=targets.txt`. These arrive as ONE token, so the space-separated
+        # `previous in <flags>` checks below never see the flag — split it here so
+        # an attached target/list value is still admitted for scope enforcement.
+        if token.startswith("-") and "=" in token:
+            flag, _, attached = token.partition("=")
+            if tool in _LIST_TARGET_TOOLS and flag in _TARGET_LIST_FLAGS:
+                path = _host_list_path(attached, engagement_dir, engagement_key)
+                if not path.is_file():
+                    raise ScopePolicyError(
+                        f"cannot inspect target list before execution: {attached}"
+                    )
+                candidates.extend(_target_tokens_from_file(path))
+                index += 1
+                continue
+            if flag in target_flags:
+                candidates.append(attached)
+                index += 1
+                continue
         if tool in _LIST_TARGET_TOOLS and previous in _TARGET_LIST_FLAGS:
             path = _host_list_path(token, engagement_dir, engagement_key)
             if not path.is_file():

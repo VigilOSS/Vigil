@@ -123,9 +123,9 @@ Return bounded facts, not a transcript dump:
 
 ### 6. Route follow-up
 
-- New requestable endpoints: ingest with `vigil assess ingest-endpoints "$DB"
+- New requestable endpoints: ingest with `vigil assess ingest endpoints "$DB"
   browser-semantic` or include them in a curated candidate JSONL for
-  `ingest-candidates`.
+  `ingest candidates`.
 - Browser-enforced vulnerability lead: dispatch `vulnerability-analyst` with the
   matching vuln-class skill and this skill as secondary context.
 - Edge or bot-management block: surface an operator decision with the exact

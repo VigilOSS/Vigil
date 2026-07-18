@@ -179,7 +179,7 @@ the four mitigation options, and the give-up-vs-escalate rule live in
 
 If a subset of representative hosts returned 100% 403, write those host
 strings into `$DIR/scans/egress_blocked_hosts.txt` so subsequent
-`vigil assess ingest-endpoints --egress-blocked-hosts <file>` invocations
+`vigil assess ingest endpoints --egress-blocked-hosts <file>` invocations
 defer URLs to those hosts with `cluster_key=deferred:egress-blocked`
 instead of polluting the work buffer.
 
@@ -514,7 +514,7 @@ vigil assess kali exec --technique RECON --intent "OpenAPI / Swagger / GraphQL e
 ## Output Contract
 
 The skill produces these structured sections in the recon-specialist's return payload.
-Backend writes (`record-finding`, `record-intel`, `record-surface`, `vigil assess agent handoff`) are
+Backend writes (`finding record`, `intel record`, `record-surface`, `vigil assess agent handoff`) are
 the durable record; this contract names what each markdown section should hold so
 downstream specialists can parse the output consistently.
 
@@ -522,9 +522,9 @@ downstream specialists can parse the output consistently.
 |---|---|
 | `#### Summary` | One-paragraph engagement-level summary of what was scanned, the WAF tier picked, and the headline take (live host count, WAF tier, vendor-SaaS hits, egress block %). |
 | `#### Live Hosts` | Confirmed live in-scope hosts with status code, title, server banner, and tech-detect output. Source for downstream phases. |
-| `#### Findings` | Decisive findings the recon pass already proved (e.g., exposed admin panel, default-creds login, public bucket). Each must also be recorded via `vigil assess record-finding`. |
+| `#### Findings` | Decisive findings the recon pass already proved (e.g., exposed admin panel, default-creds login, public bucket). Each must also be recorded via `vigil assess finding record`. |
 | `#### Surface Candidates` | Routes / endpoints / hosts evidenced by a real response or artifact, ready for `vigil assess record-surface`. |
-| `#### Intelligence` | Tech components (framework, CMS, server, WAF, CDN), TLS / SAN intel, rDNS vendor identification, version strings, vendor-template CSP / CORS placeholders, build-version constants — each row landed via `vigil assess record-intel <type>`. |
+| `#### Intelligence` | Tech components (framework, CMS, server, WAF, CDN), TLS / SAN intel, rDNS vendor identification, version strings, vendor-template CSP / CORS placeholders, build-version constants — each row landed via `vigil assess intel record <type>`. |
 | `#### Coverage Gaps` | Every mandatory step that did not complete, every conditional step that fired and why, every dispatch-mode-authorized skip with rationale, and every shared-frontend-trigger sub-procedure that was skipped because the trigger did not fire. The operator reads this section to decide whether to re-dispatch. |
 | `#### Recommended Phase 4 Ordering` | Risk-ranked surface clusters and the recommended specialist + skill for each. The handoff renderer feeds this to surface-collector and downstream specialists. |
 

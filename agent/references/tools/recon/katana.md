@@ -240,19 +240,19 @@ browser-semantic analysis, source-analysis/LinkFinder, or a targeted fuzzer pass
 
 ## Ingestion
 
-Plain Katana output feeds `ingest-endpoints`:
+Plain Katana output feeds `ingest endpoints`:
 
 ```bash
 cat /engagements/$ENGAGEMENT_KEY/scans/katana_target.txt |
-  vigil assess ingest-endpoints katana
+  vigil assess ingest endpoints katana
 ```
 
 If the crawl produced JSONL with richer metadata and a triage step promoted
-records into candidate JSONL, use `ingest-candidates` so priority and rationale
+records into candidate JSONL, use `ingest candidates` so priority and rationale
 survive:
 
 ```bash
-vigil assess ingest-candidates \
+vigil assess ingest candidates \
   surface-collector-curated \
   /engagements/$ENGAGEMENT_KEY/scans/surface-collector/candidate_records.jsonl
 ```
@@ -260,7 +260,7 @@ vigil assess ingest-candidates \
 ## Adjacent Tools
 
 - `LinkFinder` complements Katana by extracting routes from saved JavaScript
-  bundles. Prefer `vigil assess gau-js-endpoints` for corpus-scale JS body
+  bundles. Prefer `vigil assess gau js-endpoints` for corpus-scale JS body
   extraction; use direct LinkFinder only for a narrow source-analysis dispatch.
 - `curl_chrome116`, when present, is a browser-like HTTP baseline for edge/TLS/UA
   ambiguity. It does not execute JavaScript or prove browser-enforced behavior.

@@ -280,7 +280,11 @@ def _coerce_ip(value):
 
 
 def _out_of_scope_covers(
-    patterns: list[str], hostname: str, resolved_ip: str | None = None
+    patterns: list[str],
+    hostname: str,
+    resolved_ip: str | None = None,
+    *,
+    defer_unresolved_cidr: bool = False,
 ) -> bool:
     """Return True when ANY out_of_scope entry could plausibly cover ``hostname``.
 
@@ -324,8 +328,15 @@ def _out_of_scope_covers(
             if network is not None:
                 # CIDR carve-out — match against the flow's resolved server IP.
                 if host_ip is None:
-                    # CIDR present but no IP to test THIS flow — uncertain, so
-                    # fail closed on this one flow (per-flow, not engagement-wide).
+                    # CIDR present but no IP to test THIS flow. At request time the
+                    # upstream is usually not connected yet, so failing closed here
+                    # would drop in-scope traffic (and suppress required-header
+                    # injection). ``defer_unresolved_cidr`` skips this one CIDR
+                    # entry so host/URL carve-outs still apply now and the CIDR
+                    # gate is re-evaluated on the response path where the resolved
+                    # IP is available. Otherwise fail closed (per-flow).
+                    if defer_unresolved_cidr:
+                        continue
                     return True
                 if host_ip in network:
                     return True
@@ -845,7 +856,11 @@ class CaseCollector:
     # -- matching -----------------------------------------------------------
 
     def _match_engagement(
-        self, hostname: str, resolved_ip: str | None = None
+        self,
+        hostname: str,
+        resolved_ip: str | None = None,
+        *,
+        defer_unresolved_cidr: bool = False,
     ) -> EngagementEntry | None:
         if not hostname:
             return None
@@ -888,7 +903,12 @@ class CaseCollector:
         # unparseable carve-out never silently admits an out-of-scope host.
         if (
             chosen.scope_enforcement != "bypass"
-            and _out_of_scope_covers(chosen.out_of_scope_patterns, hostname, resolved_ip)
+            and _out_of_scope_covers(
+                chosen.out_of_scope_patterns,
+                hostname,
+                resolved_ip,
+                defer_unresolved_cidr=defer_unresolved_cidr,
+            )
         ):
             suppress_key = (hostname, chosen.key)
             if suppress_key not in self._routed_log_seen:
@@ -1518,9 +1538,14 @@ class CaseCollector:
             return
         # The upstream server IP may be unresolved at request time (pre-connect);
         # that is fine — _match_engagement keys on hostname and only uses the IP
-        # to tighten the out-of-scope CIDR carve-out.
+        # to tighten the out-of-scope CIDR carve-out. Defer that CIDR fail-closed
+        # to the response path (where the IP is resolved) so a required-header
+        # engagement that ALSO carries a CIDR out_of_scope entry still gets its
+        # attribution header injected on in-scope browser traffic.
         resolved_ip = self._resolved_server_ip(flow)
-        entry = self._match_engagement(hostname, resolved_ip=resolved_ip)
+        entry = self._match_engagement(
+            hostname, resolved_ip=resolved_ip, defer_unresolved_cidr=True
+        )
         if entry is None:
             return
         blocked_pattern = None

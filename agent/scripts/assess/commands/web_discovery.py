@@ -976,8 +976,7 @@ def run(args) -> None:
 
 
 def _katana_records(katana_jsonl: Path) -> list[dict]:
-    """Crawled work-item rows from a katana -jsonl file (Fix 3, resolves the old
-    TODO(typing P1)).
+    """Crawled, typed work-item rows from a katana JSONL file.
 
     Emits ``{url, content_type}`` JSON rows (plus ``response_status``/``tech``
     when the crawl stored the response) so ingest-endpoints can thread the

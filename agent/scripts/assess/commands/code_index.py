@@ -23,8 +23,26 @@ from assess.lib.treesitter_index import (
 
 
 def register(subparsers) -> None:
+    from assess.commands import code_index_sync
+
     p = subparsers.add_parser(
         "code-index",
+        help="Tree-sitter structural index for a code repository: build | sync",
+    )
+    action_sub = p.add_subparsers(dest="code_index_action")
+    _register_build(action_sub)
+    code_index_sync.register_sync(action_sub)
+
+    def _print_help(_args) -> None:
+        p.print_help()
+        sys.exit(1)
+
+    p.set_defaults(func=_print_help)
+
+
+def _register_build(subparsers) -> None:
+    p = subparsers.add_parser(
+        "build",
         help="Build a tree-sitter structural index for a code repository",
     )
     p.add_argument("repo_path", help="Path to the repository root")
@@ -341,4 +359,4 @@ def run(args) -> None:
     print(f"\nPer-file indexes: {idx_dir}", file=sys.stderr)
     print(f"Per-repo manifest: {per_repo_manifest_path}", file=sys.stderr)
     print(f"Aggregate manifest: {aggregate_path}", file=sys.stderr)
-    print("\nRun 'code-index-sync' to push structural metadata to the backend.", file=sys.stderr)
+    print("\nRun 'code-index sync' to push structural metadata to the backend.", file=sys.stderr)

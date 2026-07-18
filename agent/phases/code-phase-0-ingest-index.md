@@ -28,7 +28,7 @@ vigil assess code-ingest "$DIR/source/<repo-name>" --name <repo-name> --language
 vigil assess code-index "$DIR/source/<repo-name>"
 
 # 5. Sync structural metadata to backend
-vigil assess code-index-sync
+vigil assess code-index sync
 
 # 6. Verify ingestion and index
 vigil assess code-coverage

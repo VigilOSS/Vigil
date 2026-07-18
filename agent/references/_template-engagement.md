@@ -52,7 +52,7 @@ Scope notes (cloud regions, mobile apps, API versions, etc.):
 ```
 # List every explicit OOS carve-out. These are registered with:
 #   vigil engagement add-oos <key> <host-or-path>
-# and enforced automatically by filter-scope, dispatch scope_host gate, and proxy.
+# and enforced automatically by scope filter, dispatch scope_host gate, and proxy.
 
 appointments.example.com       # third-party scheduling SaaS
 *.cdn-vendor.net               # CDN infrastructure — not in scope
@@ -219,13 +219,13 @@ Known non-submittable classes for this program:
 
 Finding lifecycle for parked findings (there is no `parked` status — use the real
 holding-area mechanism):
-1. Record normally via `vigil assess record-finding`. For informational / not-applicable-by-policy
+1. Record normally via `vigil assess finding record`. For informational / not-applicable-by-policy
    classes, set `evidence_type=informational`; for a strong-but-unproven finding or chain primitive,
    set `evidence_type=theoretical` and `details.chain_required=true` (with `details.chain_rationale`).
 2. Move it into the holding area so it stays OUT of the report until proven, rather than leaving it
-   report-ready: `vigil assess verify-finding <slug> --disposition pending_runtime_proof --reason "parked: <why not yet submittable>"`.
+   report-ready: `vigil assess finding verify <slug> --disposition pending_runtime_proof --reason "parked: <why not yet submittable>"`.
    The park reason lives in that verification reason / `details.chain_rationale`, not a non-existent `parked_reason`.
-3. Review the holding area with `vigil assess list-findings --holding` and re-evaluate after each
+3. Review the holding area with `vigil assess finding list --holding` and re-evaluate after each
    engagement phase — a chain may promote it to submittable.
 
 ---

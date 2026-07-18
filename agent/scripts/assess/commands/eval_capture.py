@@ -1,4 +1,10 @@
-"""vigil assess eval-capture — snapshot backend findings into a golden eval fixture.
+"""eval-capture — snapshot backend findings into a golden eval fixture (maintainer/CI tool).
+
+eval-capture is intentionally NOT registered on the operator ``vigil assess``
+surface: it is a dev/CI fixture-capture tool run by maintainers, not part of an
+engagement's operator workflow. Invoke it via the standalone entrypoint::
+
+    python agent/scripts/assess/commands/eval_capture.py --engagement-dir <dir> --out <fixture>
 
 Captures a real engagement's backend findings into a committed golden fixture
 that is DROP-IN compatible with the offline eval harness (tests/eval): a flat
@@ -23,9 +29,18 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from assess.lib.client import AssessmentClient
-from assess.lib.config import load_config
-from assess.lib.schema_validation import collect_validation_errors, load_schema
+# When invoked as a standalone maintainer script
+# (``python agent/scripts/assess/commands/eval_capture.py ...``) rather than
+# imported as ``assess.commands.eval_capture``, the package root (agent/scripts)
+# is not on sys.path. Add it so the ``assess.*`` imports below resolve. The whole
+# import chain is stdlib-only, so no backend virtualenv is required.
+_SCRIPTS_ROOT = str(Path(__file__).resolve().parents[2])
+if _SCRIPTS_ROOT not in sys.path:
+    sys.path.insert(0, _SCRIPTS_ROOT)
+
+from assess.lib.client import AssessmentClient  # noqa: E402
+from assess.lib.config import load_config  # noqa: E402
+from assess.lib.schema_validation import collect_validation_errors, load_schema  # noqa: E402
 
 # Allow-listed scalar columns the fixture schema accepts at the finding-record
 # top level. Everything else on the DB row (id, engagement_id, *_json,
@@ -53,22 +68,22 @@ _MAX_FINDINGS_HEADROOM = 3
 _SCHEMA_NAME = "finding-record.schema.json"
 
 
-def register(subparsers) -> None:
-    p = subparsers.add_parser(
-        "eval-capture",
-        help="Snapshot backend findings into a golden eval fixture (zero-token replay)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  vigil assess eval-capture --engagement-dir <dir> "
-            "--out tests/eval/fixtures/golden_<name>.json\n"
-            "  vigil assess eval-capture --engagement-dir <dir> "
-            "--out tests/eval/fixtures/golden_<name>.json "
-            "--definition tests/eval/definitions/<name>.yaml\n"
-            "  vigil assess eval-capture --engagement-dir <dir> "
-            "--out tests/eval/fixtures/golden_<name>.json --check"
-        ),
-    )
+# Standalone maintainer/CI invocation (eval-capture is off the operator surface).
+_MAINTAINER_EXAMPLES = (
+    "Examples (maintainer/CI tool — invoke the module directly, not `vigil assess`):\n"
+    "  python agent/scripts/assess/commands/eval_capture.py --engagement-dir <dir> "
+    "--out tests/eval/fixtures/golden_<name>.json\n"
+    "  python agent/scripts/assess/commands/eval_capture.py --engagement-dir <dir> "
+    "--out tests/eval/fixtures/golden_<name>.json "
+    "--definition tests/eval/definitions/<name>.yaml\n"
+    "  python agent/scripts/assess/commands/eval_capture.py --engagement-dir <dir> "
+    "--out tests/eval/fixtures/golden_<name>.json --check"
+)
+
+
+def _add_capture_arguments(p) -> None:
+    """Attach the eval-capture flags. Shared by the standalone :func:`main`
+    entrypoint and the retained (currently unregistered) ``register`` hook."""
     p.add_argument("--out", required=True, help="Path to write (or, with --check, diff against) the fixture JSON")
     p.add_argument(
         "--definition",
@@ -97,6 +112,19 @@ def register(subparsers) -> None:
     p.add_argument(
         "--search", help="Case-insensitive search over slug, title, summary, location, and source name"
     )
+
+
+def register(subparsers) -> None:
+    """Retained subparser hook. NOTE: eval-capture is intentionally NOT wired into
+    the operator ``vigil assess`` CLI (see the module docstring); it is a dev/CI
+    tool invoked through the standalone :func:`main` entrypoint below."""
+    p = subparsers.add_parser(
+        "eval-capture",
+        help="Snapshot backend findings into a golden eval fixture (zero-token replay)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_MAINTAINER_EXAMPLES,
+    )
+    _add_capture_arguments(p)
     p.set_defaults(func=run)
 
 
@@ -298,7 +326,7 @@ def _scaffold_definition(records: list[dict], fixture_basename: str) -> str:
     # does not corrupt the emitted definition. YAML strips the quotes on load,
     # so ``defn["fixture"]`` round-trips to the bare basename.
     lines = [
-        f"# Eval definition scaffolded by `vigil assess eval-capture` from {fixture_basename}",
+        f"# Eval definition scaffolded by eval_capture.py from {fixture_basename}",
         "# Green-by-construction: thresholds derived from the captured snapshot.",
         f"fixture: {json.dumps(fixture_basename)}",
         "",
@@ -438,3 +466,34 @@ def run(args) -> None:
         def_path.parent.mkdir(parents=True, exist_ok=True)
         def_path.write_text(_scaffold_definition(records, out_path.name), encoding="utf-8")
         print(f"Scaffolded definition at {def_path}")
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Standalone maintainer/CI entrypoint.
+
+    eval-capture is off the operator ``vigil assess`` surface; run it directly::
+
+        python agent/scripts/assess/commands/eval_capture.py \\
+          --engagement-dir <dir> --out tests/eval/fixtures/golden_<name>.json
+
+    ``--engagement-dir`` mirrors the root ``vigil assess`` flag (default:
+    ``$ENGAGEMENT_DIR`` or cwd if it contains ``scope.json``).
+    """
+    parser = argparse.ArgumentParser(
+        prog="eval_capture.py",
+        description="Snapshot backend findings into a golden eval fixture (zero-token replay).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_MAINTAINER_EXAMPLES,
+    )
+    parser.add_argument(
+        "--engagement-dir",
+        dest="engagement_dir",
+        default=None,
+        help="Engagement directory (default: $ENGAGEMENT_DIR or cwd if it contains scope.json).",
+    )
+    _add_capture_arguments(parser)
+    run(parser.parse_args(argv))
+
+
+if __name__ == "__main__":  # pragma: no cover - maintainer CLI shim
+    main()

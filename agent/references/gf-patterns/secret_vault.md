@@ -117,8 +117,8 @@ Forward-looking coverage. Per the plan's stated goal, the zero-hit buckets (jenk
 phpmyadmin, wsdl, cloud-metadata, **vault**) size no immediate win against the validated corpus
 but provide coverage for future engagements where a credential store is exposed. No DB hits are
 recorded for this bucket; its weight (45) ensures that when a Vault / Secrets Manager / Key
-Vault surface does appear it is dispatched to a specialist ahead of every non-RCE bucket. See
-`docs/plans/classify-context-and-surface-buckets-2026-06.md` Part 3 §A.6.
+Vault surface does appear it is dispatched to a specialist ahead of every
+non-RCE bucket. See ADR 0008 and `DRIFT.md` for the accepted rationale.
 
 ## Sources
 

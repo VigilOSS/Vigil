@@ -607,7 +607,7 @@ def _start_swarm(args) -> None:
     ``item-iterating`` agent runs out of context at 30-100 items; doing it
     with one ``hypothesis-driven`` agent picks the wrong shape (there is no
     hypothesis, there is a corpus). The helper writes the audit trail up
-    front so list-command-runs / dispatch list show the full swarm
+    front so command-run list / dispatch list show the full swarm
     immediately, even if the operator dispatches the workers staggered.
     """
     role = getattr(args, "agent_role", None)

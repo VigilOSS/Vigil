@@ -178,8 +178,8 @@ instructions: |2
   ### Blocked-claim self-check (run BEFORE the handoff)
 
   Before any `handoff_status=blocked`, `runtime_issues[].severity=blocker`, or "tool
-  X could not run" claim, cross-verify against `vigil assess list-command-runs`
-  (`--tool-bin <bin> --show-matches`, then `vigil assess get-command-run <id>`). A
+  X could not run" claim, cross-verify against `vigil assess command-run list`
+  (`--tool-bin <bin> --show-matches`, then `vigil assess command-run get <id>`). A
   tool that ran — even for 30 minutes with no useful output — is `slow`/`dry`, NOT
   blocked. Reserve blocked for a tool that genuinely never executed (missing from
   the image, target unreachable, hard WAF lockout). For the recon JOB, read
@@ -192,8 +192,8 @@ instructions: |2
   command-run audit row as it runs, so coverage state is captured automatically —
   there is no separate probe-run recording step for you to run here. In order:
 
-  1. `vigil assess record-finding recon-specialist <finding-json>` per finding
-  2. `vigil assess record-intel <type> <intel-json>` per intel row
+  1. `vigil assess finding record recon-specialist <finding-json>` per finding
+  2. `vigil assess intel record <type> <intel-json>` per intel row
   3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` per surface candidate
   4. `vigil assess agent handoff --from-json <path>` — summary, the **completeness verdict** (percent + missing coverage), coverage gaps, next steps, runtime issues, working artifacts, and recon extras (`live_host_count`, `egress_block_pct`, `wildcard_subs_resolved`, the recon-job `job_id` + stage states you assessed)
   5. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch)
@@ -228,8 +228,8 @@ instructions: |2
   - `vigil assess recon-status [--job-id N]` — the recon-job per-stage state + counts
   - `vigil assess agent list --filter-role recon-specialist --limit 20` — prior recon dispatches + handoff summaries
   - `vigil assess fetch services --json` / `fetch surfaces --json` — live services + recorded surfaces per host
-  - `vigil assess list-intel tech-component --json` — tech fingerprints; check for a missing WAF tier per host
-  - `vigil assess list-command-runs --target-host <host>` — per-host coverage
+  - `vigil assess intel list tech-component --json` — tech fingerprints; check for a missing WAF tier per host
+  - `vigil assess command-run list --target-host <host>` — per-host coverage
   - `vigil assess check-phase-readiness --phase recon --by-host` — per-host gate output if available
 
   Emit one line per gap (host + missing outcome):

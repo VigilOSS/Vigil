@@ -397,7 +397,7 @@ pending_runtime_proof, state exactly which runtime proof is still owed>
 Register it on the verify call so it links to the finding:
 
 ```bash
-vigil assess verify-finding <slug> --disposition pending_runtime_proof \
+vigil assess finding verify <slug> --disposition pending_runtime_proof \
   --reason "static evidence accepted; runtime PoC outstanding" \
   --narrative notes/<slug>-debate.md
 ```
@@ -428,9 +428,9 @@ Examples:
 When you persist a false positive in structured finding state, include:
 - `details.kill_check` — integer 1-5 for the failed verification check
 - `details.kill_reason` — concise verifier rationale suitable for later query/reporting
-- Use `vigil assess kill-finding <slug> ...` when you already have the kill rationale in hand, because it enforces the required false-positive fields before the request leaves the CLI
-- Use `vigil assess verify-finding <slug> --disposition <verdict> --reason "<rationale>"` for confirm/downgrade/dispute flows, or `--payload-file <path>` when the verification payload already exists on disk, because the verification transition belongs in the audit ledger rather than a generic finding patch
-- Use `vigil assess reset-finding <slug> ...` when new evidence disproves an earlier verified or false-positive verdict, because reopening is its own lifecycle transition and should clear the prior verification state instead of patching fields by hand
+- Use `vigil assess finding verify <slug> --disposition false_positive ...` when you already have the kill rationale in hand, because it enforces the required false-positive fields before the request leaves the CLI
+- Use `vigil assess finding verify <slug> --disposition <verdict> --reason "<rationale>"` for confirm/downgrade/dispute flows, or `--payload-file <path>` when the verification payload already exists on disk, because the verification transition belongs in the audit ledger rather than a generic finding patch
+- Use `vigil assess finding update <slug> --status draft ...` when new evidence disproves an earlier verified or false-positive verdict, because reopening is its own lifecycle transition and should clear the prior verification state instead of patching fields by hand
 
 ## Output Format
 

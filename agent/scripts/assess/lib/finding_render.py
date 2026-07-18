@@ -3,7 +3,7 @@
 Single source of truth for turning one persisted finding record into the
 ``## [slug] title`` markdown block used by both finding exporters:
 
-  * ``vigil assess export-findings`` — concatenates these blocks into a single
+  * ``vigil assess export findings`` — concatenates these blocks into a single
     ``findings.md`` report document (one section per finding, with the
     root-cause grouping context inline). See
     ``agent/scripts/assess/commands/export_findings.py``.
@@ -16,7 +16,7 @@ Single source of truth for turning one persisted finding record into the
 Both callers share this module so the field selection, ordering, and PoC
 formatting never drift between the report doc and the diffable tree. The only
 behavioural knob is ``include_root_cause_group``; the trailing newline is left
-to the caller (export-findings strips and re-joins; the tree appends one).
+to the caller (export findings strips and re-joins; the tree appends one).
 
 This module lives under ``agent/scripts/assess/lib`` so the assess command
 imports it directly; the ``src`` CLI package reaches it through the same
@@ -125,10 +125,10 @@ def blocked_reason_summary(finding: dict) -> str:
     hold), and labelling that "BLOCKED" would be wrong. Returns "" otherwise, so a
     normal finding never grows a marker. The reason is read via ``detail_value``
     so it resolves whether it is a top-level projected field (resume-brief) or
-    nested in ``details_json`` (list-findings' raw record).
+    nested in ``details_json`` (finding list' raw record).
 
-    (Surfacing ``details.unblock_requirements`` — the class of the missing
-    precondition and who it was requested from — is deferred; see roadmap.md.)
+    The compact marker intentionally omits richer prerequisite metadata; callers
+    can fetch the finding detail when they need it.
     """
     disposition = str(finding.get("verification_disposition") or "").strip().lower()
     if disposition != "blocked":
@@ -154,9 +154,9 @@ def header_lines(headers: object) -> list[str]:
 
 
 def _root_cause_lines(finding: dict) -> list[str]:
-    """Render the root-cause grouping block (export-findings only).
+    """Render the root-cause grouping block (export findings only).
 
-    ``export-findings`` flattens grouping context onto each finding before
+    ``export findings`` flattens grouping context onto each finding before
     rendering (root/sibling role + effect + note); the markdown-tree draft
     omits this because each finding's ``report.md`` renders grouping from the
     report projection instead.
@@ -181,11 +181,11 @@ def render_finding(finding: dict, *, include_root_cause_group: bool = False) -> 
     """Render one finding to its markdown block (no trailing newline).
 
     ``include_root_cause_group`` adds the root/sibling grouping bullet(s) that
-    ``export-findings`` flattens onto the finding; leave it ``False`` for the
+    ``export findings`` flattens onto the finding; leave it ``False`` for the
     per-finding ``draft.md`` in the markdown-tree export.
 
     The returned string is the stripped block; callers decide whether to append
-    a trailing newline (export-findings re-joins blocks; the tree adds one).
+    a trailing newline (export findings re-joins blocks; the tree adds one).
     """
     slug = str(finding.get("slug") or "")
     title = str(finding.get("title") or "(untitled)")

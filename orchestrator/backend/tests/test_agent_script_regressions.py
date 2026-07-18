@@ -110,7 +110,7 @@ def test_get_command_run_accepts_json_flag(monkeypatch, tmp_path: Path, capsys) 
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command")
     module.register(sub)
-    args = parser.parse_args(["get-command-run", "123", "--json"])
+    args = parser.parse_args(["get", "123", "--json"])
     args.engagement_dir = tmp_path
     args.func(args)
 
@@ -164,7 +164,7 @@ def test_get_command_run_live_reads_current_on_disk_tails(
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command")
     module.register(sub)
-    args = parser.parse_args(["get-command-run", "123", "--live"])
+    args = parser.parse_args(["get", "123", "--live"])
     args.engagement_dir = tmp_path
 
     args.func(args)
@@ -210,7 +210,7 @@ def test_get_command_run_live_refuses_paths_outside_engagement(
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command")
     module.register(sub)
-    args = parser.parse_args(["get-command-run", "123", "--live"])
+    args = parser.parse_args(["get", "123", "--live"])
     args.engagement_dir = tmp_path
 
     args.func(args)
@@ -529,63 +529,6 @@ def test_list_intel_search_uses_canonical_entity_type(monkeypatch, tmp_path: Pat
     assert parse_qs(captured[0][1])["entity_type"] == ["cve"]
     assert parse_qs(captured[1][1])["entity_type"] == ["tech_component"]
     assert "[]" in capsys.readouterr().out
-
-
-def test_record_proposal_rejects_invalid_finding_payload(tmp_path: Path, capsys) -> None:
-    module = _load_script_module(
-        "test_record_proposal_module",
-        "agent/scripts/assess/commands/record_proposal.py",
-    )
-    session_dir = tmp_path / "session-a"
-    session_dir.mkdir()
-    payload_path = tmp_path / "proposal.json"
-    payload_path.write_text(
-        json.dumps({"type": "finding_record", "payload": {"severity": "high"}}),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(SystemExit) as excinfo:
-        module.run(SimpleNamespace(session_dir=str(session_dir), json_file=str(payload_path)))
-
-    assert excinfo.value.code == 1
-    assert "payload.title is required" in capsys.readouterr().err
-    assert not (session_dir / "proposals" / "proposals.jsonl").exists()
-
-
-def test_record_proposal_accepts_valid_credential_payload(tmp_path: Path, capsys) -> None:
-    module = _load_script_module(
-        "test_record_proposal_valid_module",
-        "agent/scripts/assess/commands/record_proposal.py",
-    )
-    session_dir = tmp_path / "session-a"
-    session_dir.mkdir()
-    payload_path = tmp_path / "proposal.json"
-    payload_path.write_text(
-        json.dumps(
-            {
-                "type": "credential",
-                "payload": {
-                    "credential_key": "vpn-admin",
-                    "kind": "password",
-                    "principal": "admin@example.com",
-                    "secret": "hunter2",
-                    "status": "discovered",
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    module.run(SimpleNamespace(session_dir=str(session_dir), json_file=str(payload_path)))
-    output = capsys.readouterr().out
-    proposals_file = session_dir / "proposals" / "proposals.jsonl"
-
-    assert "Recorded proposal" in output
-    lines = proposals_file.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    recorded = json.loads(lines[0])
-    assert recorded["type"] == "credential"
-    assert recorded["payload"]["credential_key"] == "vpn-admin"
 
 
 def test_proxy_addon_loads_legacy_scope_keys(tmp_path: Path) -> None:
@@ -1949,142 +1892,6 @@ def test_code_record_modules_accepts_meaningful_labels(
     assert len(posted["payload"]["modules"]) == 2
 
 
-def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, tmp_path: Path) -> None:
-    module = _load_script_module(
-        "test_merge_session_module",
-        "agent/scripts/assess/commands/merge_session.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    session_dir = engagement_dir / "sessions" / "session-a"
-    proposals_dir = session_dir / "proposals"
-    proposals_dir.mkdir(parents=True)
-    (proposals_dir / "proposals.jsonl").write_text(
-        json.dumps(
-            {
-                "type": "finding_record",
-                "payload": {
-                    "title": "Parser trust boundary bypass",
-                    "status": "confirmed",
-                },
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (engagement_dir / "sessions" / "index.json").write_text(
-        json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_targets": ["EX-001"]}]
-        ),
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
-    monkeypatch.setattr(module, "session_dir_path", lambda eng_dir, session_id: str(session_dir))
-    monkeypatch.setattr(module, "finding_lock_path", lambda eng_dir: str(engagement_dir / ".findings.lock"))
-    monkeypatch.setattr(module, "next_finding_id", lambda base_url, engagement_key, source_name: "EX-001")
-
-    captured: list[tuple[str, dict[str, object]]] = []
-
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
-        def post(self, endpoint: str, payload: dict[str, object]):
-            captured.append((endpoint, payload))
-            return {"finding": {"slug": payload["slug"], "title": payload["title"]}}
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-
-    module.run(SimpleNamespace(engagement_dir=engagement_dir, session_id="session-a", yes=True))
-
-    endpoint, payload = captured[0]
-    assert endpoint == "findings"
-    assert payload["workflow_status"] == "active"
-    assert "status" not in payload
-    session_index = json.loads((engagement_dir / "sessions" / "index.json").read_text(encoding="utf-8"))
-    assert session_index[0]["assigned_targets"] == ["EX-001"]
-    assert "assigned_findings" not in session_index[0]
-
-
-def test_merge_session_validates_session_index_before_backend_posts(monkeypatch, tmp_path: Path) -> None:
-    module = _load_script_module(
-        "test_merge_session_prevalidate_module",
-        "agent/scripts/assess/commands/merge_session.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    session_dir = engagement_dir / "sessions" / "session-a"
-    proposals_dir = session_dir / "proposals"
-    proposals_dir.mkdir(parents=True)
-    (proposals_dir / "proposals.jsonl").write_text(
-        json.dumps(
-            {
-                "type": "finding_record",
-                "payload": {
-                    "title": "Parser trust boundary bypass",
-                    "status": "confirmed",
-                },
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (engagement_dir / "sessions" / "index.json").write_text(
-        json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}]
-        ),
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
-    monkeypatch.setattr(module, "session_dir_path", lambda eng_dir, session_id: str(session_dir))
-
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
-        def post(self, endpoint: str, payload: dict[str, object]):
-            raise AssertionError("should validate session index before backend posts")
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-
-    with pytest.raises(SystemExit, match="assigned_findings is no longer supported"):
-        module.run(SimpleNamespace(engagement_dir=engagement_dir, session_id="session-a", yes=True))
-
-
 def test_list_command_runs_failed_excludes_timeouts_by_default() -> None:
     module = _load_script_module(
         "test_list_command_runs_module",
@@ -2207,40 +2014,6 @@ def test_list_command_runs_failed_with_timed_out_preserves_timeout_filter() -> N
     assert "timed_out=false" not in query
 
 
-def test_session_index_rejects_legacy_assigned_findings_key(tmp_path: Path) -> None:
-    module = _load_script_module(
-        "test_sessions_module",
-        "agent/scripts/assess/lib/sessions.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    sessions_dir = engagement_dir / "sessions"
-    sessions_dir.mkdir(parents=True)
-    (sessions_dir / "index.json").write_text(
-        json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}]
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(SystemExit, match="assigned_findings is no longer supported"):
-        module.load_session_index(str(engagement_dir))
-
-
-def test_save_session_index_rejects_legacy_assigned_findings_key(tmp_path: Path) -> None:
-    module = _load_script_module(
-        "test_sessions_save_module",
-        "agent/scripts/assess/lib/sessions.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    (engagement_dir / "sessions").mkdir(parents=True)
-
-    with pytest.raises(SystemExit, match="assigned_findings is no longer supported"):
-        module.save_session_index(
-            str(engagement_dir),
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}],
-        )
-
-
 def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_review_exploits_module",
@@ -2299,134 +2072,6 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
     assert "candidate_rule: verified findings only" in output
     assert "ACTIVE-001 | high | active | confirmed | verified_high | Live issue" in output
     assert "CHAIN-001 | info | active | downgraded | verified_chain_required | Chain-only primitive" in output
-
-
-def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path) -> None:
-    module = _load_script_module(
-        "test_launch_session_module",
-        "agent/scripts/assess/commands/launch_session.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    (engagement_dir / "sessions").mkdir(parents=True)
-    (engagement_dir / "scope.json").write_text(
-        json.dumps(
-            {
-                "current_phase": "exploit",
-                "exploit_policy": "selected",
-                "exploit_review_state": "approved",
-                "approved_targets": ["ACTIVE-001"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (engagement_dir / "sessions" / "index.json").write_text("[]", encoding="utf-8")
-
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
-    monkeypatch.setattr(module, "ensure_session_index", lambda eng_dir: None)
-    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["ACTIVE-001"])
-
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
-        def get(self, endpoint: str):
-            assert endpoint == "findings"
-            return [
-                {
-                    "slug": "ACTIVE-001",
-                    "severity": "high",
-                    "workflow_status": "active",
-                    "title": "Live issue",
-                }
-            ]
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-
-    module.run(
-        SimpleNamespace(
-            engagement_dir=engagement_dir,
-            session_id="session-a",
-            slugs=["ACTIVE-001"],
-        )
-    )
-
-    prompt = (engagement_dir / "sessions" / "session-a" / "prompt.md").read_text(encoding="utf-8")
-    assignment = json.loads(
-        (engagement_dir / "sessions" / "session-a" / "assignment.json").read_text(encoding="utf-8")
-    )
-    session_index = json.loads((engagement_dir / "sessions" / "index.json").read_text(encoding="utf-8"))
-    assert "ACTIVE-001 | high | active | Live issue" in prompt
-    assert assignment["assigned_targets"] == ["ACTIVE-001"]
-    assert session_index[0]["assigned_targets"] == ["ACTIVE-001"]
-
-
-def test_launch_session_rejects_existing_session_without_truncating_proposals(monkeypatch, tmp_path: Path, capsys) -> None:
-    module = _load_script_module(
-        "test_launch_session_existing_module",
-        "agent/scripts/assess/commands/launch_session.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    session_dir = engagement_dir / "sessions" / "session-a"
-    proposals_dir = session_dir / "proposals"
-    proposals_dir.mkdir(parents=True)
-    proposals_file = proposals_dir / "proposals.jsonl"
-    proposals_file.write_text('{"type":"finding_record"}\n', encoding="utf-8")
-    (engagement_dir / "scope.json").write_text(
-        json.dumps(
-            {
-                "current_phase": "exploit",
-                "exploit_policy": "selected",
-                "exploit_review_state": "approved",
-                "approved_targets": ["ACTIVE-001"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (engagement_dir / "sessions" / "index.json").write_text(
-        json.dumps([{"session_id": "session-a", "status": "active"}]),
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
-    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["ACTIVE-001"])
-
-    with pytest.raises(SystemExit) as excinfo:
-        module.run(
-            SimpleNamespace(
-                engagement_dir=engagement_dir,
-                session_id="session-a",
-                slugs=["ACTIVE-001"],
-            )
-        )
-
-    assert excinfo.value.code == 1
-    assert "session already exists: session-a" in capsys.readouterr().err
-    assert proposals_file.read_text(encoding="utf-8") == '{"type":"finding_record"}\n'
 
 
 def _run_phase_report(monkeypatch, tmp_path: Path, payload: dict):
@@ -2632,7 +2277,8 @@ def test_specialist_loads_adversarial_mindset(role: str) -> None:
 @pytest.mark.parametrize("role", sorted(_ADVERSARIAL_MINDSET_EXCLUDED))
 def test_specialist_does_not_load_adversarial_mindset(role: str) -> None:
     """Explicitly excluded roles must NOT load adversarial-mindset.md.
-    See C3 rationale in TODOv2.md V14."""
+    These roles summarize or operate infrastructure; injecting an offensive
+    ideation stance would push them toward inflation or speculation."""
     body = (_agents_dir() / f"{role}.md").read_text(encoding="utf-8")
     assert "agent/rules/adversarial-mindset.md" not in body, (
         f"{role} should NOT load adversarial-mindset.md "

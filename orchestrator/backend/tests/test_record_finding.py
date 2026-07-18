@@ -508,18 +508,18 @@ def test_cli_register_adds_update_flag():
     sub = parser.add_subparsers()
     rf.register(sub)
     args = parser.parse_args(
-        ["record-finding", "vulnerability-analyst", "finding.json", "--update", "VA-001"]
+        ["record", "vulnerability-analyst", "finding.json", "--update", "VA-001"]
     )
     assert args.update_slug == "VA-001"
     # Optional: defaults to no update target.
-    args_default = parser.parse_args(["record-finding", "vulnerability-analyst", "finding.json"])
+    args_default = parser.parse_args(["record", "vulnerability-analyst", "finding.json"])
     assert getattr(args_default, "update_slug", None) in (None, "")
 
 
 def test_contract_documents_update_flag():
     from assess.lib import contracts
 
-    text = contracts.render_contract("record-finding")
+    text = contracts.render_contract("finding record")
     assert "--update" in text
 
 
@@ -603,7 +603,7 @@ def test_cli_register_adds_allow_remint_flag():
     sub = parser.add_subparsers()
     rf.register(sub)
     for flag in ("--allow-remint", "--force"):
-        args = parser.parse_args(["record-finding", "vulnerability-analyst", "finding.json", flag])
+        args = parser.parse_args(["record", "vulnerability-analyst", "finding.json", flag])
         assert args.allow_remint is True
-    args_default = parser.parse_args(["record-finding", "vulnerability-analyst", "finding.json"])
+    args_default = parser.parse_args(["record", "vulnerability-analyst", "finding.json"])
     assert args_default.allow_remint is False

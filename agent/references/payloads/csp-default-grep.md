@@ -149,13 +149,13 @@ vigil assess kali exec --technique INFO-DISCLOSURE \
 
 ## Recording the result
 
-Per host with a hit, record an intel-note via `vigil assess record-intel note <json-file>` with:
+Per host with a hit, record an intel-note via `vigil assess intel record note <json-file>` with:
 
 - `title` — `CSP placeholder default surviving into production on <host>`
 - `body` — the matched directive plus the placeholder literal that triggered the match
 - `category` — `infrastructure`
 
-When the matched directive directly enables an exploitable primitive (e.g., `script-src 'unsafe-inline' 'unsafe-eval'` on a page that reflects user input), record a finding via `vigil assess record-finding` with the matched directive as evidence and a severity that follows the proved-impact rule — the placeholder by itself is intel; the primitive it enables is the finding.
+When the matched directive directly enables an exploitable primitive (e.g., `script-src 'unsafe-inline' 'unsafe-eval'` on a page that reflects user input), record a finding via `vigil assess finding record` with the matched directive as evidence and a severity that follows the proved-impact rule — the placeholder by itself is intel; the primitive it enables is the finding.
 
 ## Production-hardening checklist cross-reference
 

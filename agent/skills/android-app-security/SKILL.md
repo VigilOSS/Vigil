@@ -59,12 +59,29 @@ Record the mode in the handoff `extras` field (`{"dynamic_mode": "device"|"emula
 - **Network:** test cleartext policy, trust managers, pinning implementation, token refresh, WebSocket/MQTT channels, GraphQL/REST authorization, retries, and error leakage.
 - **IPC and links:** fuzz exported components, deep links, app links, content providers, URI grants, pending intents, custom permissions, and caller validation.
 - **WebView:** review every loaded URL, navigation override, JavaScript bridge, file access setting, mixed-content policy, injected script, and origin check.
-- **Native/JNI:** map Java-to-native entrypoints, hook JNI boundaries, inspect parser and crypto code, and triage sanitizer-suitable targets through `mobile-fuzzing`.
+- **Native/JNI:** map Java-to-native entrypoints, hook JNI boundaries, inspect parser and crypto code, and triage sanitizer-suitable targets through `agent/skills/mobile-fuzzing/SKILL.md`.
 - **Resilience:** Evaluate root/emulator/debugger/pinning checks to confirm authorized test tooling remains functional and to measure the strength of client-side resistance controls.
 
 ### 6. Evidence Standard
 
 Map each result to OWASP MASVS, affected app version, device/API level, artifact hash, account role, reproducible steps, security impact, and server-side validation. A mobile finding is reportable when it shows harm beyond local observation, such as token reuse, unauthorized data access, unintended state change, sensitive-data exposure, or a WebView-to-native privilege crossing.
+
+## Adjacent Mobile Skills
+
+Static/dynamic triage above routinely surfaces leads outside this skill's own scope — dispatch
+the matching skill directly instead of forcing the lead into this workflow:
+
+- **Third-party SDK surface** — Step 3's decompile pass inventories ad, analytics, crash, or
+  attribution SDKs → `agent/skills/sdk-supply-chain-security/SKILL.md` for SDK BOM, CVE checking,
+  malicious-SDK detection, and over-collection auditing.
+- **On-device AI/ML** — the app bundles TFLite/ONNX models, ML Kit, or integrates Gemini Nano /
+  an on-device LLM → `agent/skills/ai-ml-on-device-security/SKILL.md` for model extraction,
+  inference-leakage, and prompt-injection testing.
+- **Privacy/tracking compliance** — the app collects device identifiers, uses Privacy Sandbox, or
+  its Data Safety declaration needs verification against observed behavior →
+  `agent/skills/masvs-privacy-testing/SKILL.md`.
+- **Coverage-guided fuzzing** — a native/JNI or parser target from Step 5 warrants a campaign
+  rather than manual review → `agent/skills/mobile-fuzzing/SKILL.md`.
 
 ## A→B Chain Table
 

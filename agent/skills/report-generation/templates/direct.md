@@ -6,7 +6,7 @@ category: Disclosure & Reporting Formats
 
 # Direct Submission Template
 
-Scaffold for `vigil assess export-submission <slug> --platform direct` — a structured writeup for
+Scaffold for `vigil assess export submission <slug> --platform direct` — a structured writeup for
 a target with no Bugcrowd or HackerOne program, handed to the vendor's security contact or intake
 portal directly. This is **not** the email path: `agent/references/disclosure-email-format.md`
 stays its own plaintext format for git/OSS-style `security@` contacts. Use `direct` when the
@@ -51,7 +51,7 @@ No platform-taxonomy row — `direct` is the one platform where the strict gate 
 
 ### Evidence
 [AUTHORED from the OPERATOR DETAILS section's structured proof + linked runs + a targeted
-`list-command-runs` search, third-party PII partial-masked only (self-owned/synthetic data shown
+`command-run list` search, third-party PII partial-masked only (self-owned/synthetic data shown
 in full — see submission-format.md "PII redaction"), truncated to the proof lines, annotated with
 <-- proof markers. Stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
 
@@ -76,7 +76,7 @@ the steps — this is the severity justification. See "Attack Scenario vs Impact
   `severity` field, not Bugcrowd's P1-P4 — there's no bounty-program priority scale to map onto.
 - **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
   it as `submissions/<slug>/poc.<ext>` and hand it to the vendor alongside the writeup — see
-  `submission-format.md` "PoC block". `export-submission` emits no PoC line into the body; a
+  `submission-format.md` "PoC block". `export submission` emits no PoC line into the body; a
   hand-inserted one is wiped on the next `--overwrite`.
 - Add a contact line if the vendor's intake doesn't already capture the researcher elsewhere (the
   writeup may be attached to a portal ticket or a cover email that already carries a From:

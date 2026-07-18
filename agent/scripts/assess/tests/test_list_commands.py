@@ -137,6 +137,19 @@ def test_collapsed_kali_verbs_still_resolve_as_contracts(verb):
     assert rendered.startswith(f"Command: {verb}")
 
 
+@pytest.mark.parametrize("name", ["auth status", "auth list"])
+def test_auth_two_token_resolves_to_auth_contract(name):
+    # `auth` is one contract documenting the `list`/`status` subcommands, so the
+    # two-token form `contract auth status` / `contract auth list` must resolve to
+    # it (mirroring `contract resolve <target>`) instead of returning None ->
+    # "Unknown contract".
+    contract = contracts.get_contract(name)
+    assert contract is not None, f"contract lookup for {name!r} returned None"
+    assert contract.name == "auth"
+    rendered = contracts.render_contract(name)
+    assert rendered.startswith("Command: auth")
+
+
 def test_grep_filter_matches_name_or_summary(capsys):
     rows = _run_json(capsys, ["list-commands", "--grep", "finding", "--json"])
     assert rows
@@ -183,7 +196,7 @@ def test_catalog_lists_every_registered_contract_command(capsys):
 _PREVIOUSLY_UNLISTED_CODE_VERBS = (
     "code-coverage",
     "code-ingest",
-    "code-index-sync",
+    "code-index sync",
     "code-size-summary",
 )
 
@@ -230,15 +243,15 @@ _MUST_BE_DISCOVERABLE = (
     "transition-phase",
     # core read/query primitives
     "coverage",
-    "list-findings",
-    "list-intel",
-    "list-command-runs",
-    "get-command-run",
     "resume-brief",
     "artifact",
+    # Tier-3 subcommand groups render as ONE collapsed catalog row each (like
+    # `kali`); their per-action verbs resolve via `contract <parent> <action>`.
+    "finding",
+    "intel",
+    "export",
+    "command-run",
     # representative write/probe verbs across phases
-    "record-finding",
-    "verify-finding",
     "record-probe",
     "resolve",
     "block-technique",

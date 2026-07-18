@@ -1,4 +1,4 @@
-"""vigil assess code-record-threat-model — POST a threat model for a code repository."""
+"""vigil assess code-record threat-model — POST a threat model for a code repository."""
 from __future__ import annotations
 
 import json
@@ -10,7 +10,7 @@ from assess.lib.config import load_config
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("code-record-threat-model", help="Record a threat model for a code repository")
+    p = subparsers.add_parser("threat-model", help="Record a threat model for a code repository")
     p.add_argument("repo_id", help="Repository ID")
     p.add_argument("threat_model_json", help="Path to JSON file containing the threat model")
     p.set_defaults(func=run)

@@ -192,8 +192,8 @@ def render_intel_readiness(data: Any) -> tuple[bool, list[str]]:
             lines.append(f"  - id={row.get('id')} [{row.get('lead_status')}] {row.get('title')}")
     lines.append(
         "\nDisposition by id: "
-        "`vigil assess update-intel cve <id> --inline '{\"validation_status\": \"ruled_out\"}'` "
-        "or `update-intel note <id> --inline '{\"lead_status\": \"resolved\"}'`."
+        "`vigil assess intel update cve <id> --inline '{\"validation_status\": \"ruled_out\"}'` "
+        "or `intel update note <id> --inline '{\"lead_status\": \"resolved\"}'`."
     )
     return True, lines
 

@@ -855,9 +855,10 @@ def _both_engagements_missing_code_phase(install_root: Path) -> list[Path]:
 
     Dual-track phase tracking landed mid-flight: engagements created before
     that change only carry `current_phase` and confuse `transition-phase
-    --track code`. The migration in `migrate_legacy_both_engagements` sets
-    code_phase='ingest' for those engagements; this helper is the read-only
-    detector used by `vigil status` and the CLI summary.
+    --track code`. Setting code_phase='ingest' in scope.json clears this;
+    this helper is the read-only detector used by `vigil status` and the CLI
+    summary. (The one-shot `vigil engagement migrate-scope` command that used
+    to perform the write was retired in the 2026-07 CLI consolidation.)
     """
     affected: list[Path] = []
     root = engagements_root(install_root)
@@ -876,24 +877,6 @@ def _both_engagements_missing_code_phase(install_root: Path) -> list[Path]:
         if not scope.get("code_phase"):
             affected.append(eng_dir)
     return affected
-
-
-def migrate_legacy_both_engagements(install_root: Path, *, dry_run: bool = False) -> list[dict[str, str]]:
-    """Set code_phase='ingest' on legacy `engagement_type=both` engagements
-    that predate the dual-track phase change. Returns a list of
-    ``{"key", "from", "to"}`` dicts describing what was (or would be)
-    migrated. ``dry_run=True`` skips the write.
-    """
-    migrated: list[dict[str, str]] = []
-    for eng_dir in _both_engagements_missing_code_phase(install_root):
-        scope_path = eng_dir / "scope.json"
-        scope = _read_json(scope_path)
-        prior = str(scope.get("code_phase") or "")
-        scope["code_phase"] = "ingest"
-        migrated.append({"key": eng_dir.name, "from": prior, "to": "ingest"})
-        if not dry_run:
-            _write_json(scope_path, scope)
-    return migrated
 
 
 def resolve_engagement_path(install_root: Path, key: str | None = None, *, select: bool = False) -> Path:
@@ -1089,10 +1072,32 @@ _CHROME_PATHS = [
 ]
 
 
+_OPERATOR_DETAILS_RE = re.compile(r"^##\s+OPERATOR DETAILS\b", re.MULTILINE)
+
+
+def _strip_operator_details(markdown: str) -> str:
+    """Drop the ``## OPERATOR DETAILS — NOT FOR SUBMISSION`` reference section.
+
+    ``vigil assess export submission`` appends an internal-only section (finding
+    metadata, hygiene warnings, structured proof, linked command runs) below a
+    second ``---`` divider. It must never reach a rendered submission PDF, so
+    truncate the document at that heading and drop the divider that introduces it.
+    A document without the heading (e.g. a blue-incident ``report.md``) is
+    returned unchanged.
+    """
+    match = _OPERATOR_DETAILS_RE.search(markdown)
+    if match is None:
+        return markdown
+    head = markdown[: match.start()]
+    # Also drop the trailing horizontal-rule divider that introduces the section.
+    head = re.sub(r"\n-{3,}[ \t]*\n?\s*$", "\n", head)
+    return head.rstrip() + "\n"
+
+
 def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
     # Blue incident engagements still scaffold a report.md; render it as before.
     # Red/code/android engagements no longer seed one — their closeout is the
-    # per-finding submissions tree (`vigil assess export-submission` writes
+    # per-finding submissions tree (`vigil assess export submission` writes
     # submissions/<slug>/submission.md), so fall back to rendering that tree.
     report_md = eng_dir / "report.md"
     if report_md.exists():
@@ -1105,7 +1110,7 @@ def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
             raise SystemExit(
                 f"nothing to export in {eng_dir}: no report.md and no "
                 "submissions/<slug>/submission.md. Generate per-finding submissions "
-                "first with `vigil assess export-submission <finding-slug> "
+                "first with `vigil assess export submission <finding-slug> "
                 "--platform <bugcrowd|hackerone|direct>`."
             )
 
@@ -1121,9 +1126,19 @@ def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
         output = eng_dir / "report.pdf"
 
     html_path = eng_dir / ".report_tmp.html"
+    # Render from stripped copies so the internal-only OPERATOR DETAILS reference
+    # section in each submission.md never lands in the pasteable report.pdf.
+    stripped_dir = eng_dir / ".submission_tmp"
     try:
+        stripped_dir.mkdir(exist_ok=True)
+        render_sources: list[Path] = []
+        for idx, src in enumerate(sources):
+            stripped = _strip_operator_details(src.read_text(encoding="utf-8"))
+            tmp = stripped_dir / f"{idx:03d}-{src.parent.name}.md"
+            tmp.write_text(stripped, encoding="utf-8")
+            render_sources.append(tmp)
         subprocess.run(
-            [pandoc, *[str(src) for src in sources], "-o", str(html_path),
+            [pandoc, *[str(src) for src in render_sources], "-o", str(html_path),
              "--standalone", "--embed-resources",
              "--metadata", "title=Engagement Report"],
             check=True,
@@ -1137,6 +1152,7 @@ def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
         )
     finally:
         html_path.unlink(missing_ok=True)
+        shutil.rmtree(stripped_dir, ignore_errors=True)
 
     return output
 
@@ -1194,7 +1210,7 @@ def _finding_render():
 
     The finding->markdown block is rendered by a single shared module that
     physically lives under ``agent/scripts/assess/lib`` so the assess
-    ``export-findings`` command can import it directly. This installable ``src``
+    ``export findings`` command can import it directly. This installable ``src``
     package reaches it through the same import bridge it already uses for
     ``assess.lib.client`` (see ``paths.add_assess_import_path`` and
     ``_build_assessment_client``): the production ``vigil engagement export`` path puts
@@ -1245,8 +1261,8 @@ def _render_finding_draft(finding: dict) -> str:
 
     Uses the shared ``assess.lib.finding_render.render_finding`` so a single
     finding's draft block is identical to its section in the engagement-wide
-    ``findings.md`` (export-findings), but scoped to one finding per file. The
-    root-cause grouping bullets that export-findings includes inline are omitted
+    ``findings.md`` (export findings), but scoped to one finding per file. The
+    root-cause grouping bullets that export findings includes inline are omitted
     here because each finding's grouping context is rendered separately into its
     own ``report.md`` (see ``_render_finding_report``). The shared renderer
     returns the newline-stripped block; draft.md is newline-terminated so the
@@ -1327,7 +1343,7 @@ def _placeholder_debate(finding: dict) -> str:
         "No verification-narrative artifact (kind=\"verification-narrative\") is "
         "linked to this finding yet.\n\n"
         "Register one during verification with:\n"
-        "    vigil assess verify-finding "
+        "    vigil assess finding verify "
         f"{finding.get('slug', '<slug>')} --disposition <disposition> "
         "--reason \"...\" --narrative <path-to-debate.md>\n"
     )
@@ -1338,7 +1354,7 @@ def _fetch_debate_narrative(client: FindingReader, slug: str, finding: dict) -> 
 
     Searches the artifact index for a ``verification-narrative`` artifact
     linked to ``slug`` (Phase 3 registers these via `vigil assess
-    verify-finding --narrative`). When found, the top hit's full content is
+    finding verify --narrative`). When found, the top hit's full content is
     read back via the per-artifact GET (which inlines ``content`` for textual
     files). Any miss — no artifact, an unreadable id, or a transport hiccup —
     degrades to the placeholder so a single broken narrative never aborts the
@@ -1491,7 +1507,7 @@ def export_engagement_tree(
 def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, target: str, repos: list[dict[str, str]], date_label: str) -> None:
     # Red-family engagements (web/code/both/android, and any default/fallback
     # type) no longer seed a `report.md`: their closeout artifact is the
-    # per-finding submissions tree written by `vigil assess export-submission`
+    # per-finding submissions tree written by `vigil assess export submission`
     # and rendered to PDF by `export_pdf`. Only blue incident engagements keep a
     # scaffolded `report.md` for the report-writer to render into.
     if engagement_type != "blue":
@@ -1531,8 +1547,8 @@ def _write_issues_doc(eng_dir: Path) -> None:
     (eng_dir / "ISSUES-AND-ENHANCEMENTS.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-# Canonical program-brief section headings (PROMPT-TODO §2 / CONSOLIDATED-PLAN
-# §3.10). The stub mirrors the `agent/references/_template-engagement.md`
+# Canonical program-brief section headings. The stub mirrors the
+# `agent/references/_template-engagement.md`
 # template's shape so an engagement starts with a structured, fill-in-the-blanks
 # program brief even before an operator authors one.
 _ENGAGEMENT_BRIEF_SECTIONS: tuple[tuple[str, str], ...] = (
@@ -1865,7 +1881,7 @@ GOOSE_DISPATCH_DIRECTIVE = (
     "- Run `vigil assess kali` YOURSELF only for the Operator-executed exceptions (one login test, a\n"
     "  fingerprint/health smoke, backend-write helpers). The 'Sanctioned inline form' in AGENTS.md is\n"
     "  for OpenCode and those exceptions — on Goose, delegate the probing rather than doing it inline.\n"
-    "- **Record** findings and surfaces to the backend (`vigil assess record-finding` /\n"
+    "- **Record** findings and surfaces to the backend (`vigil assess finding record` /\n"
     "  `record-surface`) as you confirm them, even on a fast solve — backend state is the deliverable.\n"
 )
 

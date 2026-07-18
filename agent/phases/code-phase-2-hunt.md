@@ -183,10 +183,10 @@ All references are under `agent/references/code-vuln-patterns/`. Include the ful
 **On return:**
 ```bash
 # Confirm the analysis-result contract if the payload was hand-authored
-vigil assess contract code-record-analysis
+vigil assess contract code-record analysis
 
 # Record analysis results (with cwe_coverage and cross_file_triggers)
-vigil assess code-record-analysis <analysis-json>
+vigil assess code-record analysis <analysis-json>
 
 # Preview the exact completion payload before committing queue history when unsure
 vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
@@ -209,7 +209,7 @@ JSON
 vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious> /tmp/cwe_<item-id>.json ["notes"]
 
 # Record any findings
-vigil assess record-finding code-vuln-hunter <finding-json>
+vigil assess finding record code-vuln-hunter <finding-json>
 
 # Process cross-file triggers (if analysis returned any)
 vigil assess code-dispatch requeue-triggers <triggers-json>
@@ -329,7 +329,7 @@ vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|find
 vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious> <cwe-coverage-json> ["notes"]
 
 # Record any new findings
-vigil assess record-finding code-vuln-hunter <finding-json>
+vigil assess finding record code-vuln-hunter <finding-json>
 
 # Process any new cross-file triggers
 vigil assess code-dispatch requeue-triggers <triggers-json>

@@ -1,4 +1,4 @@
-"""Scope-filter tests for `vigil assess ingest-spec`.
+"""Scope-filter tests for `vigil assess ingest spec`.
 
 A spec that declares an ABSOLUTE `servers`/`host` url has that url used as-is,
 which bypasses the in-scope-only `_engagement_fallback_base` derivation. Without

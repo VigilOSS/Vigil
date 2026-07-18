@@ -600,7 +600,7 @@ def test_gau_endpoints_registers(tmp_path: Path) -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
     gau_endpoints.register(sub)
-    args = parser.parse_args(["gau-endpoints", "example.com", "--subs", "--db", "/tmp/x.db"])
+    args = parser.parse_args(["endpoints", "example.com", "--subs", "--db", "/tmp/x.db"])
     assert args.target == "example.com"
     assert args.subs is True
     assert args.db_override == "/tmp/x.db"
@@ -615,7 +615,7 @@ def test_gau_secrets_registers() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
     gau_secrets.register(sub)
-    args = parser.parse_args(["gau-secrets", "example.com"])
+    args = parser.parse_args(["secrets", "example.com"])
     assert args.target == "example.com"
     assert args.verify is False
     assert args.cap_body_bytes == 1048576
@@ -629,8 +629,8 @@ def test_gau_secrets_verify_opt_in() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
     gau_secrets.register(sub)
-    default_args = parser.parse_args(["gau-secrets", "example.com"])
-    verified_args = parser.parse_args(["gau-secrets", "example.com", "--verify"])
+    default_args = parser.parse_args(["secrets", "example.com"])
+    verified_args = parser.parse_args(["secrets", "example.com", "--verify"])
     assert default_args.verify is False
     assert verified_args.verify is True
 
@@ -643,7 +643,7 @@ def test_gau_js_endpoints_registers() -> None:
     sub = parser.add_subparsers()
     gau_js_endpoints.register(sub)
     args = parser.parse_args([
-        "gau-js-endpoints", "example.com",
+        "js-endpoints", "example.com",
         "--bodies-dir", "/tmp/bodies",
         "--max-bodies", "5",
         "--fetch-if-missing",
@@ -670,6 +670,6 @@ def test_gau_js_endpoints_does_not_expose_cache_reuse_flags() -> None:
     sub = parser.add_subparsers()
     gau_js_endpoints.register(sub)
     with pytest.raises(SystemExit):
-        parser.parse_args(["gau-js-endpoints", "example.com", "--refresh"])
+        parser.parse_args(["js-endpoints", "example.com", "--refresh"])
     with pytest.raises(SystemExit):
-        parser.parse_args(["gau-js-endpoints", "example.com", "--max-cache-age-hours", "1"])
+        parser.parse_args(["js-endpoints", "example.com", "--max-cache-age-hours", "1"])
